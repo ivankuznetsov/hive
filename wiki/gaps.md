@@ -1385,6 +1385,13 @@ prevents lower-priority leapfrogging, but a rare project-only race can leave an
 unrelated slot unused for the full-scan interval plus scan time. Keep this gap
 open until durable admission emits a typed capacity scope that the row
 scheduler can preserve directly.
+## Hive Web readable logs depend on persisted messages (2026-09-04)
+
+Durable logs deliberately omit some structured provider messages for secret
+safety. The readable log view cannot recover message text that was never
+persisted; it hides omission markers instead of presenting them as errors.
+Plain output and safely available supported message records remain readable.
+
 ## Attempt request-provenance upgrade awaits deployment (2026-09-06)
 
 The exact-schema upgrade removing the dispatch-request foreign key is tested

@@ -4,10 +4,10 @@
          aria-labelledby="publication-heading">
   <div class="workspace-panel-heading">
     <div>
-      <h2 id="publication-heading">Publication</h2>
+      <h2 id="publication-heading">Code changes</h2>
       <p class="muted">
         <span class="status-text workspace-state-label"><%= publication_state.humanize %></span>
-        · <%= publication.fetch("state").humanize %> evidence
+
       </p>
     </div>
     <% if refresh_available %>
@@ -22,15 +22,6 @@
     <p class="state-banner"><%= refresh_notice %></p>
   <% end %>
 
-  <% local = publication["local"].is_a?(Hash) ? publication["local"] : {} %>
-  <dl class="workspace-facts">
-    <div><dt>Repository</dt><dd><%= local["repository"].presence || "Unavailable" %></dd></div>
-    <div><dt>Branch</dt><dd><%= local["branch"].presence || local["expected_branch"].presence || "Unavailable" %></dd></div>
-    <div><dt>Base</dt><dd><%= local["base_branch"].presence || "Unavailable" %></dd></div>
-    <div><dt>Head</dt><dd><code><%= local["head_oid"]&.first(12) || "Unavailable" %></code></dd></div>
-    <div><dt>Push</dt><dd><%= local.dig("push", "state").to_s.humanize.presence || "Unavailable" %></dd></div>
-    <div><dt>Working tree</dt><dd><%= local["dirty"].nil? ? "Unavailable" : (local["dirty"] ? "Dirty" : "Clean") %></dd></div>
-  </dl>
 
   <% pr = publication["pull_request"].is_a?(Hash) ? publication["pull_request"] : {} %>
   <% if pr["url"].present? %>
@@ -41,17 +32,17 @@
     </p>
     <% if pr["body"].present? %>
       <details data-workspace-disclosure-key="publication-description">
-        <summary>Bounded local PR description</summary>
+        <summary>Pull request description</summary>
         <pre class="publication-body"><%= pr["body"] %></pre>
       </details>
     <% end %>
   <% else %>
-    <p class="empty-state">No validated pull request identity is available.</p>
+    <p class="empty-state">No pull request yet.</p>
   <% end %>
 
   <% remote = publication.dig("remote", "observation") %>
   <% if remote %>
-    <h3>Cached GitHub observation</h3>
+    <h3>Pull request status</h3>
     <p>
       <%= remote.fetch("state").humanize %>
       <% if publication.dig("remote", "observed_at") %>
@@ -61,7 +52,7 @@
     <% if Array(remote["checks"]).any? %>
       <div class="workspace-table-scroll" tabindex="0" role="region" aria-label="Bounded pull request checks">
         <table class="workspace-table">
-          <caption>Bounded check results</caption>
+          <caption>Checks</caption>
           <thead><tr><th scope="col">Check</th><th scope="col">Status</th><th scope="col">Conclusion</th></tr></thead>
           <tbody>
             <% Array(remote["checks"]).each do |check| %>
@@ -76,8 +67,22 @@
       </div>
     <% end %>
   <% else %>
-    <p class="muted">GitHub has not been observed for this exact repository, PR, and head.</p>
+    <p class="muted">Pull request status has not been checked.</p>
   <% end %>
+
+  <details class="task-secondary" data-workspace-disclosure-key="publication-technical">
+    <summary>Git details</summary>
+  <% local = publication["local"].is_a?(Hash) ? publication["local"] : {} %>
+  <dl class="workspace-facts">
+    <div><dt>Repository</dt><dd><%= local["repository"].presence || "Unavailable" %></dd></div>
+    <div><dt>Branch</dt><dd><%= local["branch"].presence || local["expected_branch"].presence || "Unavailable" %></dd></div>
+    <div><dt>Base</dt><dd><%= local["base_branch"].presence || "Unavailable" %></dd></div>
+    <div><dt>Head</dt><dd><code><%= local["head_oid"]&.first(12) || "Unavailable" %></code></dd></div>
+    <div><dt>Push</dt><dd><%= local.dig("push", "state").to_s.humanize.presence || "Unavailable" %></dd></div>
+    <div><dt>Working tree</dt><dd><%= local["dirty"].nil? ? "Unavailable" : (local["dirty"] ? "Dirty" : "Clean") %></dd></div>
+  </dl>
+
+  </details>
 
   <% if publication.fetch("diagnostics").any? %>
     <details class="workspace-diagnostics" data-workspace-disclosure-key="publication-diagnostics">

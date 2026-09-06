@@ -562,6 +562,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     visit "/tasks/#{@project}/#{slug}"
     frame = find("turbo-frame[data-diagnostic-log-src]", visible: :all, wait: 5)
     refute frame[:src], "the exact log must remain unloaded until disclosure"
+    find("details[data-workspace-disclosure-key='troubleshooting'] > summary").click
     find("details[data-workspace-disclosure-key='diagnostic-log'] summary").click
     pane = find("pre[data-tail-follow]", wait: 5)
     assert pane.text.include?("line 120"), "the receipt-correlated tail must show its newest line"
@@ -583,6 +584,37 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector "pre[data-tail-follow][data-following='true']", wait: 10
     assert page.evaluate_script("document.querySelector('pre[data-tail-follow]').__sameNode"),
            "an exact-log poll reload must morph the pane instead of replacing it"
+
+    select "Errors", from: "Show"
+    assert_selector "[data-task-log-target='empty']", text: "No messages match"
+    page.execute_script(<<~JS)
+      window.logFrameLoads = 0
+      document.body.dataset.logFrameLoads = "0"
+      document.querySelector("turbo-frame[id^='task-log-']").addEventListener("turbo:frame-load", () => { window.logFrameLoads++; document.body.dataset.logFrameLoads = window.logFrameLoads })
+      document.querySelector("turbo-frame[id^='task-log-']").reload()
+    JS
+    assert_selector "body[data-log-frame-loads='1']", wait: 5
+    assert page.evaluate_script("window.logFrameLoads > 0"), "the filter assertion must follow a completed reload"
+    assert_equal "errors", find_field("Show").value
+    assert_selector "[data-task-log-target='empty']", text: "No messages match"
+    select "All activity", from: "Show"
+    fill_in "Find in log", with: "line 120"
+    assert_selector ".task-log-entry:not([hidden])", count: 1
+    page.execute_script(<<~JS)
+      window.logFrameLoads = 0
+      document.body.dataset.logFrameLoads = "0"
+      document.querySelector("turbo-frame[id^='task-log-']").reload()
+    JS
+    assert_selector "body[data-log-frame-loads='1']", wait: 5
+    assert page.evaluate_script("window.logFrameLoads > 0")
+    assert_equal "line 120", find_field("Find in log").value
+    assert_selector ".task-log-entry:not([hidden])", count: 1
+
+    # Turbo retains entry nodes while replacing their text in a morph.
+    page.execute_script("document.querySelector('.task-log-message').textContent = 'Fresh retained entry'")
+    fill_in "Find in log", with: "Fresh retained entry"
+    assert_selector ".task-log-entry:not([hidden])", text: "Fresh retained entry", count: 1
+
   ensure
     Hive::TaskWorkspace::Builder.define_method(:semantic, original) if original
     writer&.close unless writer&.closed?

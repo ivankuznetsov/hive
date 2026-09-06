@@ -47,14 +47,19 @@
     </div>
   <% end %>
 
+  <% if summary["blocker_reason"].present? %>
+    <p><strong>Blocked:</strong> <%= summary["blocker_reason"].to_s.humanize %></p>
+  <% end %>
+  <details data-workspace-disclosure-key="review-details">
+    <summary>Review details</summary>
   <dl class="plan-review-summary">
     <div><dt>Review</dt><dd><code><%= summary["review_id"] || "not initialized" %></code></dd></div>
     <div><dt>Policy</dt><dd><%= summary["computed_level"] || "—" %> computed / <%= summary["effective_level"] || "—" %> effective</dd></div>
     <div><dt>Coverage</dt><dd><%= summary.dig("coverage_counts", "completed") %> complete · <%= summary.dig("coverage_counts", "failed") %> failed · <%= summary.dig("coverage_counts", "unsupported") %> unsupported · <%= summary.dig("coverage_counts", "waived") %> waived</dd></div>
     <div><dt>Findings</dt><dd><%= summary.dig("finding_counts", "total") %> total · <%= summary.dig("finding_counts", "open_gated") %> gated · <%= summary.dig("finding_counts", "open_manual") %> manual</dd></div>
-    <div><dt>Blocker</dt><dd><%= summary["blocker_owner"] %><%= ": #{summary['blocker_reason']}" if summary["blocker_reason"].present? %></dd></div>
     <div><dt>Attempts</dt><dd><%= summary["attempt_count"] %><%= " · retry #{summary['retry_at']}" if summary["retry_at"].present? %></dd></div>
   </dl>
+  </details>
 
   <% if plan_review.fetch("coverage").any? %>
     <h3>Coverage</h3>
@@ -147,7 +152,8 @@
   <% end %>
 
   <% if plan_review.fetch("routes").any? %>
-    <h3>Reviewer routes</h3>
+    <details data-workspace-disclosure-key="review-routes">
+      <summary>Reviewer details</summary>
     <div class="plan-review-table-wrap">
       <table class="plan-review-table">
         <thead><tr><th>Leg</th><th>Requested</th><th>Actual</th><th>Result</th><th>Independent</th></tr></thead>
@@ -166,6 +172,7 @@
         </tbody>
       </table>
     </div>
+    </details>
   <% end %>
 
   <% if mutations_enabled %>
@@ -212,7 +219,8 @@
   <% end %>
 
   <% if plan_review.fetch("artifacts").any? %>
-    <h3>Current audit artifacts</h3>
+    <details data-workspace-disclosure-key="review-audit">
+      <summary>Review audit documents</summary>
     <nav class="plan-review-artifact-links" aria-label="Plan review artifacts">
       <% plan_review.fetch("artifacts").each do |artifact| %>
         <%= link_to artifact.fetch("name").tr("_", " "), "#plan-review-artifact-#{artifact.fetch('name')}" %>
@@ -231,5 +239,6 @@
         </div>
       </details>
     <% end %>
+    </details>
   <% end %>
 </section>

@@ -35,6 +35,8 @@ class DailyDigestMembershipHistoryTest < Minitest::Test
       assert_equal second, history[1].dig("after", "path")
       assert_empty data.fetch("registered_projects")
       assert history.all? { |event| event.fetch("event_id").match?(/\A[0-9a-f]{64}\z/) }
+      assert_equal history.map { |event| event.fetch("event_id") }.sort,
+                   data.fetch("project_membership_event_ids").keys.sort
     end
   end
 

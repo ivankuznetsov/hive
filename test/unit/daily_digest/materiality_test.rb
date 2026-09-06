@@ -1,6 +1,5 @@
 require "test_helper"
 require "hive/daily_digest/materiality"
-require "hive/daily_digest/gap"
 require "hive/daily_digest/source_health"
 require "hive/task_journal"
 
@@ -82,7 +81,7 @@ class DailyDigestMaterialityTest < Minitest::Test
       source: "github", scope: "demo", reason_code: "offline", reason: "offline",
       observed_at: "2026-08-30T10:00:00Z", project_id: "project-1"
     }
-    gap = Hive::DailyDigest::Gap.build(**attributes)
+    gap = Hive::DailyDigest::Materiality.build_gap(**attributes)
     health = Hive::DailyDigest::SourceHealth.unavailable(**attributes)
     assert_equal gap.fetch("gap_id"), health.gap.fetch("gap_id")
     refute health.healthy?
@@ -101,6 +100,21 @@ class DailyDigestMaterialityTest < Minitest::Test
 
     assert_equal :gap, result.disposition
     assert_equal "2026-08-30T11:00:00.000000Z", result.value.fetch("observed_at")
+  end
+
+  def test_invalid_record_gap_never_raises_for_scalar_nested_values
+    malformed = activity("stage_transition", "transition" => "completed")
+    malformed["task"] = "broken"
+
+    result = Hive::DailyDigest::Materiality.classify(
+      malformed,
+      project: { "project_id" => "project-1", "name" => "demo" },
+      observed_at: "2026-08-30T11:00:00Z"
+    )
+
+    assert_equal :gap, result.disposition
+    assert_equal "malformed_activity", result.value.fetch("reason_code")
+    assert_nil result.value.fetch("task_slug")
   end
 
   def test_invalid_activity_without_any_valid_time_uses_observation_clock_fallback
@@ -129,6 +143,20 @@ class DailyDigestMaterialityTest < Minitest::Test
     assert_equal "https://github.com/acme/demo/pull/42", fact.dig("pr", "url")
     assert_equal "open", fact.dig("pr", "state")
     assert_equal "a" * 40, fact.dig("pr", "head_revision")
+  end
+
+  def test_check_activity_retains_safe_pull_request_identity
+    fact = classify(
+      "check_observed", "pr_number" => 42,
+      "pr_url" => "https://github.com/acme/demo/pull/42",
+      "pr_state" => "open", "draft" => true,
+      "head_oid" => "a" * 40, "check_state" => "passing"
+    ).value
+
+    assert_equal "https://github.com/acme/demo/pull/42", fact.dig("pr", "url")
+    assert_equal "open", fact.dig("pr", "state")
+    assert_equal true, fact.dig("pr", "draft")
+    assert_equal "passing", fact.dig("pr", "checks")
   end
 
   def test_creation_and_scalar_details_are_normalized_through_the_safe_schema
@@ -164,6 +192,12 @@ class DailyDigestMaterialityTest < Minitest::Test
 
     assert health.healthy?
     assert_nil health.gap
+  end
+
+  def test_digest_error_subtypes_expose_stable_cli_exit_codes
+    assert_equal Hive::ExitCodes::USAGE, Hive::DailyDigest::InvalidRecord.new.exit_code
+    assert_equal Hive::ExitCodes::UNAVAILABLE, Hive::DailyDigest::MissingRecord.new.exit_code
+    assert_equal Hive::ExitCodes::UNAVAILABLE, Hive::DailyDigest::PrunedRecord.new.exit_code
   end
 
   private

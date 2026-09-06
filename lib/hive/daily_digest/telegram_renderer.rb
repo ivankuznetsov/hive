@@ -4,6 +4,7 @@ require "uri"
 require "hive/bot/format"
 require "hive/daily_digest"
 require "hive/daily_digest/record"
+require "hive/daily_digest/public_view"
 
 module Hive
   module DailyDigest
@@ -27,7 +28,7 @@ module Hive
       def render(record)
         date = record.fetch("local_date")
         completeness = record["effective_completeness"] || record.fetch("completeness")
-        items = Array(record["items"])
+        items = PublicView.ordered_items(record)
         attention = Array(record["attention"]).map { |row| row.slice(*ATTENTION_KEYS) }
         gaps = Array(record["effective_gaps"] || record["gaps"])
         amendments = Array(record["amendments"])

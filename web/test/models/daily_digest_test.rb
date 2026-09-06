@@ -17,7 +17,7 @@ class DailyDigestTest < ActiveSupport::TestCase
 
     digest = DailyDigest.find(
       date: "2026-08-30", project: "alpha", reader: reader,
-      link_resolver: resolver
+      link_resolver: resolver, current_projects: view.fetch("projects")
     )
 
     assert_equal [ { date: "2026-08-30", project: "alpha" } ], calls

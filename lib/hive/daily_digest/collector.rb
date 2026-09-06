@@ -11,14 +11,16 @@ module Hive
         :projects, :facts, :attention, :gaps, :frontiers, :completeness, :content
       )
 
-      def initialize(projects:, starts_at:, ends_at:, source_factory: nil,
+      def initialize(projects:, starts_at:, ends_at:, prior_frontiers: {}, source_factory: nil,
                      observed_at: -> { Time.now.utc })
         @projects = Array(projects)
         @starts_at = starts_at
         @ends_at = ends_at
         @observed_at = observed_at
-        @source_factory = source_factory || lambda do |project:, starts_at:, ends_at:|
+        @prior_frontiers = prior_frontiers.to_h
+        @source_factory = source_factory || lambda do |project:, starts_at:, ends_at:, prior_frontier:|
           ProjectSource.new(project: project, starts_at: starts_at, ends_at: ends_at,
+                            prior_frontier: prior_frontier,
                             observed_at: @observed_at)
         end
       end
@@ -34,7 +36,8 @@ module Hive
           projects << normalized.slice("project_id", "registration_id", "name")
           begin
             result = @source_factory.call(
-              project: normalized, starts_at: @starts_at, ends_at: @ends_at
+              project: normalized, starts_at: @starts_at, ends_at: @ends_at,
+              prior_frontier: @prior_frontiers[normalized.fetch("project_id")]
             ).collect
             facts.concat(result.facts)
             attention.concat(result.attention)

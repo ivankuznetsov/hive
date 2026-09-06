@@ -12,7 +12,9 @@ module Hive
     # validated and a durable intent has been prepared. Ambiguous transport
     # outcomes become terminal `unknown` results and are never auto-retried.
     class Delivery
-      class NotClosed < DailyDigest::Error; end
+      class NotClosed < DailyDigest::Error
+        def exit_code = Hive::ExitCodes::UNAVAILABLE
+      end
       class DestinationError < Hive::ConfigError; end
       class DeliveryFailed < Hive::UnavailableError; end
       class InFlight < Hive::UnavailableError; end
@@ -117,7 +119,9 @@ module Hive
         raise DailyDigest::PrunedRecord, "digest #{record['local_date']} was pruned" if status == "pruned"
         return if record.fetch("lifecycle") == "closed"
 
-        raise NotClosed, "digest #{record.fetch('local_date')} must be closed before delivery"
+        date = record.fetch("local_date")
+        raise NotClosed,
+              "digest #{date} must be closed before delivery; run `hive digest refresh --date #{date}`"
       end
 
       def private_chat_id!(bot)
@@ -167,7 +171,8 @@ module Hive
           ) if attempt >= DeliveryLedger::MAX_AUTOMATIC_ATTEMPTS
 
           raise DeliveryFailed,
-                "Telegram rejected digest #{record.fetch('local_date')} (attempt #{attempt}); retry is bounded"
+                "Telegram rejected digest #{record.fetch('local_date')} (attempt #{attempt}); " \
+                "automatic retries are bounded to #{DeliveryLedger::MAX_AUTOMATIC_ATTEMPTS} attempts"
         end
 
         receipt = @ledger.mark_unknown(

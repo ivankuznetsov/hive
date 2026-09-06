@@ -136,7 +136,7 @@ class DailyDigestStoreTest < Minitest::Test
       path = store.base_path("2026-08-30")
       FileUtils.mkdir_p(File.dirname(path))
       File.binwrite(path, "{}")
-      existing = record("open").merge("local_date" => "2026-08-29")
+      existing = record("open").merge("interval_id" => "different-interval")
       store.define_singleton_method(:read_json) { |_path| existing }
 
       assert_raises(Hive::DailyDigest::Store::Conflict) do
@@ -170,6 +170,34 @@ class DailyDigestStoreTest < Minitest::Test
       assert_equal [ "gap:github:demo" ],
                    receipt.fetch("effective_gaps").map { |entry| entry.fetch("gap_id") }
       assert_equal 86_400, store.intervals.first.fetch("duration_seconds")
+    end
+  end
+
+  def test_interval_navigation_uses_rebuildable_metadata_without_reading_records
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      store.write_base(record("closed"))
+      base = store.base_path("2026-08-30")
+      original = store.method(:read_json)
+      store.define_singleton_method(:read_json) do |path|
+        flunk "navigation read the full base" if path == base
+
+        original.call(path)
+      end
+
+      assert_equal [ "2026-08-30" ], store.dates
+      assert_equal "a" * 64, store.intervals.first.fetch("interval_id")
+    end
+  end
+
+  def test_idempotent_closed_write_repairs_a_missing_interval_index
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      closed = store.write_base(record("closed"))
+      File.delete(File.join(store.root, "intervals.json"))
+
+      assert_equal closed, store.write_base(record("closed"))
+      assert_equal [ "2026-08-30" ], store.dates
     end
   end
 

@@ -12,6 +12,7 @@
         <time datetime="<%= item["occurred_at"] %>"><%= item["occurred_at"]&.to_time&.strftime("%H:%M") || "Time unavailable" %></time>
         <div>
           <strong><%= item["summary"].presence || item["kind"].to_s.humanize %></strong>
+          <% if (outcome = digest.outcome_label(item)) %><span class="digest-meta"><%= outcome %></span><% end %>
           <% if item["task_slug"] %><span class="digest-meta"><%= item["task_slug"] %> · <%= item["stage"] %></span><% end %>
         </div>
         <div class="digest-item-links">

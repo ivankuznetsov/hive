@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/commands/digest*.rb, lib/hive/daily_digest/, schemas/hive-digest*.json
 created: 2026-08-30
-updated: 2026-08-30
+updated: 2026-09-06
 tags: [command, digest, activity, history, json, telegram, retention]
 ---
 
@@ -44,7 +44,9 @@ navigation rule. An explicit ISO date remains a stable record identifier.
 The text view leads with local date, persisted IANA zone, lifecycle,
 completeness, content, and materialization freshness. It then shows attention,
 source gaps, project activity, late amendments, and the canonical Web URL.
-Every dynamic terminal field is control- and ANSI-sanitized.
+Every dynamic terminal field is control- and ANSI-sanitized. CLI, Web, and
+Telegram share deterministic item ordering; CLI and Web also share project
+group order and bounded stage/PR/check/review outcome labels.
 
 The `hive-digest` v1 JSON envelope is the stable agent contract. Its main
 fields are:
@@ -55,7 +57,9 @@ fields are:
   coverage information;
 - persisted projects, filtered activity, boundary attention, gaps, and
   append-only amendments;
-- native task/PR URLs and the canonical `web_url`; and
+- native task/PR URLs and the canonical `web_url`; unresolved tasks from a
+  removed or identity-replaced registration are marked historical and lose
+  their actionable task URL; and
 - persisted-sequence `previous_date` / `next_date` navigation.
 
 The ordinary reader has no coordinator, delivery service, Telegram transport,
@@ -77,11 +81,18 @@ with no known items is `unknown`, never a successful empty claim. An open
 record older than `freshness_budget_sec` is returned as stale with a virtual
 materializer gap, without mutating its bytes.
 
+A project filter recomputes completeness and content from the filtered items,
+attention, and applicable global/project gaps while retaining the global
+record identity. It cannot report `partial` with no visible gap or `non_empty`
+with no visible content.
+
 ## Explicit refresh
 
 `hive digest refresh` invokes the coordinator. It catches up feature-era
-intervals in sequence, closes elapsed records, refreshes the current record,
-and retries unresolved source gaps. `--date` selects a feature-era interval;
+intervals in sequence from the configured coverage frontier, repairs earlier
+holes even if a later record already exists, closes elapsed records, refreshes
+retained intervals for late observations, and retries unresolved source gaps.
+`--date` selects a feature-era interval;
 future and pre-coverage dates return typed errors.
 
 Refresh is also the operator remediation for a stale current projection or a
@@ -103,6 +114,11 @@ recorded sender process identity and promotes a dead owner's intent to
 typed `delivery_in_flight` outcome. After checking Telegram, the operator may use
 `--retry` to record a new explicit attempt. Later record amendments do not
 implicitly re-send a recap.
+
+Delivery errors name the exact refresh remediation for an open record and
+expose the automatic retry limit in JSON. Digest reader and delivery failure
+classes use stable non-generic exit codes so shell callers can distinguish
+invalid input, unavailable history/state, and configuration failures.
 
 ## Explicit projection pruning
 

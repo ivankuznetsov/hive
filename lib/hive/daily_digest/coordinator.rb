@@ -14,9 +14,15 @@ module Hive
     # chronological catch-up, close, late amendment, gap recovery, and pruned
     # frontier acknowledgement.
     class Coordinator
-      class Disabled < DailyDigest::Error; end
-      class NotInitialized < DailyDigest::Error; end
-      class FutureDate < DailyDigest::Error; end
+      class Disabled < DailyDigest::Error
+        def exit_code = Hive::ExitCodes::CONFIG
+      end
+      class NotInitialized < DailyDigest::Error
+        def exit_code = Hive::ExitCodes::CONFIG
+      end
+      class FutureDate < DailyDigest::Error
+        def exit_code = Hive::ExitCodes::USAGE
+      end
       MAX_CATCH_UP_INTERVALS = 10_000
 
       Batch = Data.define(:projects, :facts, :attention, :gaps, :frontiers)
@@ -42,10 +48,13 @@ module Hive
         intervals = intervals_through(config, now: now, selected_date: date)
         selected = if date
           target = Date.iso8601(date.to_s).iso8601
-          interval = intervals.find { |candidate| candidate.fetch("local_date") == target }
+          target_index = intervals.index { |candidate| candidate.fetch("local_date") == target }
+          interval = target_index && intervals[target_index]
           raise DailyDigest::MissingRecord, "digest interval #{target} does not exist" unless interval
 
-          [ interval ]
+          intervals.first(target_index + 1).select do |candidate|
+            candidate.equal?(interval) || read_optional(candidate.fetch("local_date")).nil?
+          end
         else
           intervals.select { |interval| due_for_materialization?(interval) }
         end
@@ -77,8 +86,7 @@ module Hive
 
       def intervals_through(config, now:, selected_date:)
         persisted = @store.intervals
-        intervals = persisted.empty? ? [ normalize_first_interval(config.fetch("first_interval")) ] : persisted.dup
-        intervals.sort_by! { |entry| [ entry["sequence"] || 1, entry.fetch("starts_at") ] }
+        intervals = coverage_intervals(config, persisted)
         target_date = selected_date && Date.iso8601(selected_date.to_s)
         first_date = Date.iso8601(intervals.first.fetch("local_date"))
         raise DailyDigest::MissingRecord, "digest date predates durable coverage" if target_date && target_date < first_date
@@ -107,6 +115,22 @@ module Hive
           raise FutureDate, "digest date is in the future" if utc(selected.fetch("starts_at")) > now
         end
         intervals
+      end
+
+      def coverage_intervals(config, persisted)
+        authoritative = Array(persisted).sort_by { |entry| utc(entry.fetch("starts_at")) }
+        first = normalize_first_interval(config.fetch("first_interval"))
+        return [ first ] if authoritative.empty?
+        return authoritative if utc(authoritative.first.fetch("starts_at")) <= utc(first.fetch("starts_at"))
+
+        intervals = [ first ]
+        while utc(intervals.last.fetch("ends_at")) < utc(authoritative.first.fetch("starts_at"))
+          intervals << next_interval(intervals.last, config)
+        end
+        unless utc(intervals.last.fetch("ends_at")) == utc(authoritative.first.fetch("starts_at"))
+          raise DailyDigest::InvalidRecord, "daily digest persisted coverage has a boundary hole"
+        end
+        intervals.concat(authoritative)
       end
 
       def normalize_first_interval(value)
@@ -156,6 +180,7 @@ module Hive
 
       def materialize(interval, config:, coverage:, now:, attempted_gap_ids: nil)
         date = interval.fetch("local_date")
+        existing = read_optional(date)
         membership = coverage.projects_for(
           starts_at: interval.fetch("starts_at"), ends_at: interval.fetch("ends_at")
         )
@@ -165,7 +190,8 @@ module Hive
         collected = @collector_factory.call(
           projects: membership.projects,
           starts_at: collection_start,
-          ends_at: utc(interval.fetch("ends_at"))
+          ends_at: utc(interval.fetch("ends_at")),
+          prior_frontiers: existing && existing.fetch("effective_source_frontiers", {})
         ).collect
         batch = Batch.new(
           projects: collected.projects,
@@ -174,11 +200,18 @@ module Hive
           gaps: (Array(collected.gaps) + membership.gaps).uniq { |gap| gap.fetch("gap_id") },
           frontiers: collected.frontiers
         )
-        existing = read_optional(date)
+        attempted_gap_ids ||= Array(existing && (existing["effective_gaps"] || existing["gaps"]))
+                              .map { |gap| gap.fetch("gap_id") }
+        confirmed_gap_ids = confirmed_resolutions(
+          existing, batch, attempted_gap_ids: attempted_gap_ids,
+          membership_gaps: membership.gaps,
+          membership_recovery_scopes: membership.respond_to?(:recovery_scopes) ?
+            membership.recovery_scopes : []
+        )
         if existing&.fetch("lifecycle") == "pruned"
           discarded = discard_entries(
             batch, resolved_gaps: resolved_pruned_gaps(
-              existing, batch, attempted_gap_ids: attempted_gap_ids
+              existing, batch, attempted_gap_ids: confirmed_gap_ids
             ), observed_at: now
           )
           @store.discard_pruned(
@@ -191,6 +224,7 @@ module Hive
         lifecycle = now >= utc(interval.fetch("ends_at")) ? "closed" : "open"
         projector = Projector.new(clock: -> { now })
         if existing.nil? || existing.fetch("lifecycle") == "open"
+          batch = merge_open_batch(existing, batch, confirmed_gap_ids: confirmed_gap_ids) if existing
           base = projector.base(interval: interval, batch: batch, lifecycle: lifecycle)
           begin
             written = @store.write_base(base)
@@ -201,7 +235,7 @@ module Hive
         end
 
         amendment = projector.amendment(
-          existing: existing, batch: batch, attempted_gap_ids: attempted_gap_ids
+          existing: existing, batch: batch, attempted_gap_ids: confirmed_gap_ids
         )
         if amendment
           begin
@@ -213,7 +247,7 @@ module Hive
             # when no delta remains.
             latest = @store.read(date)
             retry_amendment = projector.amendment(
-              existing: latest, batch: batch, attempted_gap_ids: attempted_gap_ids
+              existing: latest, batch: batch, attempted_gap_ids: confirmed_gap_ids
             )
             raise if retry_amendment
 
@@ -255,10 +289,83 @@ module Hive
 
       def due_for_materialization?(interval)
         existing = read_optional(interval.fetch("local_date"))
-        return true if existing.nil? || existing.fetch("lifecycle") == "open"
+        existing.nil? || %w[open closed pruned].include?(existing.fetch("lifecycle"))
+      end
 
-        existing.fetch("lifecycle") == "closed" &&
-          Array(existing["effective_gaps"] || existing["gaps"]).any?
+      def merge_open_batch(existing, batch, confirmed_gap_ids:)
+        confirmed = confirmed_gap_ids.to_h { |id| [ id, true ] }
+        current_gaps = Array(existing["effective_gaps"] || existing["gaps"])
+        retained_gaps = current_gaps.reject { |gap| confirmed[gap.fetch("gap_id")] }
+        changed_tasks = changed_task_slugs(existing.fetch("effective_source_frontiers", {}), batch.frontiers)
+        refreshed_projects = batch.frontiers.keys.to_h { |project_id| [ project_id, true ] }
+        retained_attention = Array(existing["attention"]).reject do |item|
+          refreshed_projects[item["project_id"]] && changed_tasks.include?(
+            [ item["project_id"], item["task_slug"] ]
+          )
+        end
+        Batch.new(
+          projects: batch.projects,
+          facts: (Array(existing["items"]) + Array(batch.facts)).uniq { |fact| fact.fetch("fact_id") },
+          attention: (retained_attention + Array(batch.attention)).uniq do |item|
+            item.fetch("attention_id")
+          end,
+          gaps: (retained_gaps + Array(batch.gaps)).uniq { |gap| gap.fetch("gap_id") },
+          frontiers: existing.fetch("effective_source_frontiers", {}).merge(batch.frontiers)
+        )
+      end
+
+      def changed_task_slugs(prior_frontiers, current_frontiers)
+        current_frontiers.each_with_object([]) do |(project_id, frontier), changed|
+          prior = prior_frontiers.dig(project_id, "fingerprints")
+          current = frontier["fingerprints"]
+          next unless current.is_a?(Hash)
+
+          current.each do |key, signature|
+            next if prior.is_a?(Hash) && prior[key] == signature
+
+            changed << [ project_id, fingerprint_task_slug(key) ]
+          end
+        end
+      end
+
+      def confirmed_resolutions(existing, batch, attempted_gap_ids:, membership_gaps:,
+                                membership_recovery_scopes: [])
+        return [] unless existing
+
+        attempted = Array(attempted_gap_ids).to_h { |id| [ id.to_s, true ] }
+        observed_gaps = Array(batch.gaps).to_h { |gap| [ gap.fetch("gap_id"), true ] }
+        membership_gap_ids = Array(membership_gaps).to_h { |gap| [ gap.fetch("gap_id"), true ] }
+        Array(existing["effective_gaps"] || existing["gaps"]).filter_map do |gap|
+          id = gap.fetch("gap_id")
+          next unless attempted[id] && !observed_gaps[id]
+          next unless positive_recovery_evidence?(
+            gap, batch.frontiers, membership_gap_ids, membership_recovery_scopes
+          )
+
+          id
+        end
+      end
+
+      def positive_recovery_evidence?(gap, frontiers, membership_gap_ids, membership_recovery_scopes)
+        if gap["source"] == "project_registry"
+          return !membership_gap_ids[gap.fetch("gap_id")] &&
+            Array(membership_recovery_scopes).include?(gap.fetch("scope"))
+        end
+
+        project_id = gap["project_id"]
+        frontier = project_id && frontiers[project_id]
+        return false unless frontier.is_a?(Hash)
+        return true if gap["task_slug"].to_s.empty?
+
+        fingerprints = frontier["fingerprints"]
+        fingerprints.is_a?(Hash) && fingerprints.keys.any? do |key|
+          fingerprint_task_slug(key) == gap.fetch("task_slug")
+        end
+      end
+
+      def fingerprint_task_slug(key)
+        parts = key.to_s.split("/", 3)
+        parts.length == 3 ? parts.fetch(1) : parts.fetch(0)
       end
 
       def resolved_pruned_gaps(existing, batch, attempted_gap_ids:)

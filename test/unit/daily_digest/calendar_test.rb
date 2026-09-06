@@ -53,6 +53,22 @@ class DailyDigestCalendarTest < Minitest::Test
     assert_equal 8, cutover.fetch("sequence")
   end
 
+  def test_westward_cutover_clamps_the_label_forward_and_preserves_continuity
+    previous = Hive::DailyDigest::Calendar.new(time_zone: "Pacific/Kiritimati")
+                                          .interval_for("2026-08-30", sequence: 4)
+
+    cutover = Hive::DailyDigest::Calendar.cutover_interval(
+      previous: previous,
+      time_zone: "Pacific/Honolulu",
+      requested_at: previous.fetch("ends_at")
+    )
+
+    assert_equal previous.fetch("ends_at"), cutover.fetch("starts_at")
+    assert_equal "2026-08-31", cutover.fetch("local_date")
+    assert_equal 48 * 60 * 60, cutover.fetch("duration_seconds")
+    assert_equal 5, cutover.fetch("sequence")
+  end
+
   def test_rejects_unknown_iana_zone
     error = assert_raises(Hive::DailyDigest::Calendar::InvalidTimeZone) do
       Hive::DailyDigest::Calendar.new(time_zone: "Mars/Olympus")

@@ -17,16 +17,19 @@ module Hive
     # It never calls GitHub or PRDigest and never uses mtime as activity time.
     class ProjectSource
       MAX_JOURNAL_BYTES = 16 * 1024 * 1024
+      MAX_CREATION_RECEIPT_BYTES = 64 * 1024
       Result = Data.define(:project, :facts, :attention, :gaps, :frontier, :health)
       class SourceUnavailable < DailyDigest::Error; end
 
-      def initialize(project:, starts_at:, ends_at:, known_stage_dirs: nil,
+      def initialize(project:, starts_at:, ends_at:, known_stage_dirs: nil, prior_frontier: nil,
                      observed_at: -> { Time.now.utc })
         @project = stringify(project)
         @starts_at = normalize_time(starts_at)
         @ends_at = normalize_time(ends_at)
         @known_stage_dirs = Array(known_stage_dirs || default_stage_dirs).map(&:to_s).uniq.freeze
         @observed_at = observed_at
+        @prior_fingerprints = stringify(prior_frontier || {}).fetch("fingerprints", {})
+        @prior_fingerprints = {} unless @prior_fingerprints.is_a?(Hash)
         @pr_core_cache = {}
       end
 
@@ -38,7 +41,7 @@ module Hive
         facts = []
         boundary_records = Hash.new { |hash, key| hash[key] = [] }
         gaps = unknown_stage_gaps(stages_root)
-        fingerprints = []
+        fingerprints = {}
         task_folders = task_directories(stages_root, gaps)
         task_folders.each do |task_folder|
           boundary_records[task_folder]
@@ -55,7 +58,7 @@ module Hive
           "source" => "task_journal",
           "project_id" => @project.fetch("project_id"),
           "observed_at" => iso(observation_time),
-          "fingerprints" => fingerprints.uniq.sort
+          "fingerprints" => fingerprints.sort.to_h
         }
         health = gaps.empty? ?
           SourceHealth.healthy(source: "project_state", scope: @project.fetch("name"),
@@ -171,8 +174,24 @@ module Hive
           return
         end
 
-        receipt = TaskCreationReceipt.read!(task_folder)
-        fingerprints << Digest::SHA256.file(path).hexdigest
+        stat = File.lstat(path)
+        unless stat.file? && stat.size <= MAX_CREATION_RECEIPT_BYTES
+          gaps << scoped_gap(
+            "creation_receipt_too_large", "task creation receipt exceeds the collection bound",
+            task_slug: File.basename(task_folder)
+          )
+          return
+        end
+        key = fingerprint_key(task_folder, File.basename(path))
+        signature = file_signature(stat)
+        if unchanged_fingerprint?(key, signature)
+          fingerprints[key] = @prior_fingerprints.fetch(key)
+          return
+        end
+
+        bytes = File.binread(path, MAX_CREATION_RECEIPT_BYTES + 1)
+        receipt = TaskCreationReceipt.parse!(bytes)
+        fingerprints[key] = signature.merge("sha256" => Digest::SHA256.hexdigest(bytes))
         return unless in_window?(receipt.fetch("created_at"))
 
         facts << Materiality.creation_fact(receipt)
@@ -195,20 +214,29 @@ module Hive
                              task_slug: File.basename(task_folder))
           return
         end
+        key = fingerprint_key(task_folder, File.basename(path))
+        signature = file_signature(stat)
+        if unchanged_fingerprint?(key, signature)
+          fingerprints[key] = @prior_fingerprints.fetch(key)
+          return
+        end
+
         bytes = File.binread(path, MAX_JOURNAL_BYTES + 1)
-        fingerprints << Digest::SHA256.hexdigest(bytes)
+        fingerprints[key] = signature.merge("sha256" => Digest::SHA256.hexdigest(bytes))
+        malformed = false
         bytes.each_line.with_index(1) do |line, index|
           next if line.strip.empty?
 
           record = JSON.parse(line)
           unless record.is_a?(Hash)
-            gaps << scoped_gap(
-              "malformed_journal", "task journal contains an invalid row",
-              task_slug: File.basename(task_folder), discriminator: index
-            )
+            malformed = true
             next
           end
           next unless relevant_record?(record)
+          unless valid_activity_shape?(record)
+            malformed = true
+            next
+          end
 
           boundary_records[task_folder] << record if before_boundary?(record["occurred_at"])
           record = enrich_pr_evidence(task_folder, record)
@@ -225,8 +253,13 @@ module Hive
             gaps << result.value
           end
         rescue JSON::ParserError
-          gaps << scoped_gap("malformed_journal", "task journal contains an invalid row",
-                             task_slug: File.basename(task_folder), discriminator: index)
+          malformed = true
+        end
+        if malformed
+          gaps << scoped_gap(
+            "malformed_journal", "task journal contains one or more invalid rows",
+            task_slug: File.basename(task_folder)
+          )
         end
       rescue SystemCallError, IOError
         gaps << scoped_gap("unreadable_journal", "task journal could not be read",
@@ -235,6 +268,11 @@ module Hive
 
       def relevant_record?(record)
         record.is_a?(Hash) && record["event_type"] == "activity_recorded"
+      end
+
+      def valid_activity_shape?(record)
+        record["payload"].is_a?(Hash) && record["task"].is_a?(Hash) &&
+          (record["provenance"].nil? || record["provenance"].is_a?(Hash))
       end
 
       def enrich_pr_evidence(task_folder, record)
@@ -343,14 +381,22 @@ module Hive
                  %w[recovered completed].include?(payload["outcome"].to_s)
                 active_holds.delete(key)
               else
+                active_holds.clear if payload["activity_kind"] == "hold_recorded"
                 active_holds[key] = record
               end
             when "session_finished"
-              failure = record if failed_boundary_session?(payload)
+              failure = failed_boundary_session?(payload) ? record : nil
             when "recovery_recorded"
               if %w[recovered complete completed resumed retrying].include?(payload["outcome"].to_s)
                 failure = nil
                 active_holds.clear
+              end
+            when "stage_transition"
+              if %w[completed archived].include?(payload["transition"].to_s) ||
+                 %w[9-done done].include?(payload["to_stage"].to_s) # coding-scoped: terminal archive stage
+                failure = nil
+                active_holds.clear
+                open_questions.clear
               end
             end
           end
@@ -454,6 +500,27 @@ module Hive
           source: "project_state", scope: scope, reason_code: reason_code, reason: reason,
           observed_at: observation_time, project_id: @project["project_id"], task_slug: task_slug
         )
+      end
+
+      def fingerprint_key(task_folder, basename)
+        "#{File.basename(File.dirname(task_folder))}/#{File.basename(task_folder)}/#{basename}"
+      end
+
+      def file_signature(stat)
+        {
+          "size" => stat.size,
+          "mtime_ns" => (stat.mtime.to_r * 1_000_000_000).to_i,
+          "ctime_ns" => (stat.ctime.to_r * 1_000_000_000).to_i,
+          "inode" => stat.ino
+        }
+      end
+
+      def unchanged_fingerprint?(key, signature)
+        prior = @prior_fingerprints[key]
+        prior.is_a?(Hash) && prior["size"] == signature["size"] &&
+          prior["mtime_ns"] == signature["mtime_ns"] &&
+          prior["ctime_ns"] == signature["ctime_ns"] && prior["inode"] == signature["inode"] &&
+          prior["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
       end
 
       def directory_empty?(path)

@@ -32,7 +32,7 @@
     "Error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message", "remediation", "automatic_retry_limit"],
       "properties": {
         "schema": { "const": "hive-digest-send" },
         "schema_version": { "const": 1 },
@@ -42,7 +42,9 @@
           "enum": ["usage", "missing", "pruned", "not_closed", "delivery_failed", "delivery_in_flight", "config", "digest_error", "internal"]
         },
         "exit_code": { "type": "integer" },
-        "message": { "type": "string" }
+        "message": { "type": "string" },
+        "remediation": { "type": ["string", "null"] },
+        "automatic_retry_limit": { "type": ["integer", "null"], "minimum": 1 }
       }
     }
   }

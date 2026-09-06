@@ -42,10 +42,16 @@ module Hive
 
       def read!(task_folder)
         path = File.join(File.expand_path(task_folder), FILENAME)
-        validate!(JSON.parse(File.binread(path)))
+        parse!(File.binread(path))
       rescue Error
         raise
       rescue JSON::ParserError, SystemCallError, IOError => error
+        raise InvalidReceipt, "task creation receipt is unavailable: #{error.class}: #{error.message}"
+      end
+
+      def parse!(bytes)
+        validate!(JSON.parse(bytes))
+      rescue JSON::ParserError => error
         raise InvalidReceipt, "task creation receipt is unavailable: #{error.class}: #{error.message}"
       end
 

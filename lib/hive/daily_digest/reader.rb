@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "hive/config"
 require "hive/daily_digest/materiality"
+require "hive/daily_digest/public_view"
 require "hive/daily_digest/store"
 
 module Hive
@@ -10,7 +11,9 @@ module Hive
     # Pure shared reader for CLI, Web, Telegram, and agent JSON. It only reads
     # persisted projection bytes; stale diagnostics are virtual view data.
     class Reader
-      class UnknownProject < DailyDigest::Error; end
+      class UnknownProject < DailyDigest::Error
+        def exit_code = Hive::ExitCodes::USAGE
+      end
 
       def initialize(store: Store.new,
                      config_loader: Hive::Config.method(:load_global_daily_digest),
@@ -34,6 +37,7 @@ module Hive
         end
 
         view = project ? filter_project(record, project) : deep_copy(record)
+        normalize_view_axes!(view) if project
         stale = stale?(record, config)
         if stale
           stale_gap = Materiality.build_gap(
@@ -46,10 +50,13 @@ module Hive
             Array(view["effective_gaps"] || view["gaps"]) + [ stale_gap ]
           ).uniq { |gap| gap.fetch("gap_id") }
           view["view_completeness"] = "partial"
+          view["view_content"] = "unknown" if Array(view["items"]).empty? &&
+                                               Array(view["attention"]).empty?
         else
           view["view_completeness"] = view["effective_completeness"] || view["completeness"]
         end
         navigation = navigation_for(selected_date)
+        view["items"] = PublicView.ordered_items(view)
         view.merge(
           "reader_status" => "ok", "stale" => stale,
           "selected_project" => project, **navigation
@@ -118,6 +125,22 @@ module Hive
           filtered if %w[items attention gaps resolved_gaps].any? { |key| filtered.fetch(key).any? }
         end
         copy
+      end
+
+      def normalize_view_axes!(view)
+        gaps = Array(view["effective_gaps"] || view["gaps"])
+        completeness = gaps.empty? ? "complete" : "partial"
+        content = if Array(view["items"]).any? || Array(view["attention"]).any?
+          "non_empty"
+        elsif completeness == "partial"
+          "unknown"
+        else
+          "empty"
+        end
+        view["effective_completeness"] = completeness
+        view["effective_content"] = content
+        view["view_completeness"] = completeness
+        view["view_content"] = content
       end
 
       def stale?(record, config)

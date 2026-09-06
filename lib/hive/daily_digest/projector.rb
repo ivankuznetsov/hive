@@ -53,10 +53,10 @@ module Hive
         end
         known_gap_ids = current_gaps.to_h { |gap| [ gap.fetch("gap_id"), true ] }
         new_gaps = batch_gaps.reject { |gap| known_gap_ids[gap.fetch("gap_id")] }
-        attempted = attempted_gap_ids && Array(attempted_gap_ids).to_h { |id| [ id.to_s, true ] }
+        attempted = Array(attempted_gap_ids).to_h { |id| [ id.to_s, true ] }
         resolved_gaps = current_gaps.select do |gap|
           gap_id = gap.fetch("gap_id")
-          (!attempted || attempted[gap_id]) && !batch_gap_ids[gap_id]
+          attempted[gap_id] && !batch_gap_ids[gap_id]
         end
         resolved = resolved_gaps.map { |gap| gap.fetch("gap_id") }.sort
         return nil if new_items.empty? && new_attention.empty? && new_gaps.empty? && resolved.empty?

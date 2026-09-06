@@ -23,7 +23,7 @@ class DailyDigestCoordinatorTest < Minitest::Test
       closed_bytes = File.binread(store.base_path("2026-08-30"))
 
       facts << fact("late", "2026-08-30T11:00:00Z")
-      coordinator.refresh(date: "2026-08-30")
+      coordinator.refresh
       historical = store.read("2026-08-30")
       assert_equal closed_bytes, File.binread(store.base_path("2026-08-30"))
       assert_equal [ "fact:first", "fact:late" ],
@@ -34,6 +34,108 @@ class DailyDigestCoordinatorTest < Minitest::Test
       assert_equal closed_bytes, File.binread(store.base_path("2026-08-30"))
       assert_equal 1, store.read("2026-08-30").fetch("amendments").size
     end
+  end
+
+  def test_explicit_later_date_fills_coverage_holes_chronologically
+    with_tmp_dir do |dir|
+      now = Time.iso8601("2026-09-01T12:00:00Z")
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      coordinator = build_coordinator(store, -> { now }, -> { [] })
+
+      result = coordinator.refresh(date: "2026-09-01")
+
+      assert_equal %w[2026-08-30 2026-08-31 2026-09-01],
+                   result.map { |row| row.fetch("local_date") }
+      assert_equal %w[2026-08-30 2026-08-31 2026-09-01], store.dates
+    end
+  end
+
+  def test_explicit_later_date_repairs_holes_before_an_existing_record
+    with_tmp_dir do |dir|
+      now = Time.iso8601("2026-09-01T12:00:00Z")
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      interval = Hive::DailyDigest::Calendar.new(time_zone: "UTC")
+                                              .interval_for("2026-09-01", sequence: 3)
+      projected = Hive::DailyDigest::Projector.new(clock: -> { now }).base(
+        interval: interval, batch: batch([]), lifecycle: "open"
+      )
+      store.write_base(projected)
+      coordinator = build_coordinator(store, -> { now }, -> { [] })
+
+      coordinator.refresh(date: "2026-09-01")
+
+      assert_equal %w[2026-08-30 2026-08-31 2026-09-01], store.dates
+    end
+  end
+
+  def test_open_refresh_retains_facts_and_frontiers_during_source_outage
+    with_tmp_dir do |dir|
+      now = Time.iso8601("2026-08-30T12:00:00Z")
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      healthy = batch([ fact("known", "2026-08-30T10:00:00Z") ])
+      outage_gap = {
+        "gap_id" => "gap:outage", "source" => "project_state", "scope" => "demo",
+        "reason_code" => "source_unavailable", "reason" => "unavailable",
+        "observed_at" => now.iso8601(6), "project_id" => "project-1"
+      }
+      outage = batch([], gaps: [ outage_gap ]).with(frontiers: {})
+      batches = [ healthy, outage ]
+      coordinator = Hive::DailyDigest::Coordinator.new(
+        config_loader: -> { config }, history_loader: -> { [] }, store: store,
+        collector_factory: ->(**) { FakeCollector.new(batches.shift) }, clock: -> { now }
+      )
+
+      coordinator.refresh
+      known_frontiers = store.read("2026-08-30").fetch("effective_source_frontiers")
+      coordinator.refresh
+      record = store.read("2026-08-30")
+
+      assert_equal [ "fact:known" ], record.fetch("items").map { |row| row.fetch("fact_id") }
+      assert_equal known_frontiers, record.fetch("effective_source_frontiers")
+      assert_equal [ "gap:outage" ], record.fetch("effective_gaps").map { |row| row.fetch("gap_id") }
+    end
+  end
+
+  def test_gap_requires_positive_scoped_recovery_evidence
+    coordinator = Hive::DailyDigest::Coordinator.new
+    gap = {
+      "gap_id" => "gap:missing", "source" => "project_state", "scope" => "demo:task",
+      "project_id" => "project-1", "task_slug" => "deleted-task"
+    }
+    existing = { "effective_gaps" => [ gap ] }
+    collected = batch([]).with(
+      frontiers: { "project-1" => { "fingerprints" => {} } }
+    )
+
+    resolved = coordinator.send(
+      :confirmed_resolutions, existing, collected,
+      attempted_gap_ids: [ "gap:missing" ], membership_gaps: [],
+      membership_recovery_scopes: []
+    )
+
+    assert_empty resolved
+  end
+
+  def test_registry_gap_requires_the_same_reobserved_scope
+    coordinator = Hive::DailyDigest::Coordinator.new
+    gap = {
+      "gap_id" => "gap:registry", "source" => "project_registry",
+      "scope" => "registry:4"
+    }
+    existing = { "effective_gaps" => [ gap ] }
+    collected = batch([])
+    arguments = {
+      attempted_gap_ids: [ "gap:registry" ], membership_gaps: []
+    }
+
+    assert_empty coordinator.send(
+      :confirmed_resolutions, existing, collected, **arguments,
+      membership_recovery_scopes: []
+    )
+    assert_equal [ "gap:registry" ], coordinator.send(
+      :confirmed_resolutions, existing, collected, **arguments,
+      membership_recovery_scopes: [ "registry:4" ]
+    )
   end
 
   def test_crash_before_store_commit_replays_same_fact_once
@@ -93,6 +195,10 @@ class DailyDigestCoordinatorTest < Minitest::Test
     assert_raises(Hive::DailyDigest::Coordinator::NotInitialized) do
       coordinator.send(:normalize_first_interval, Object.new)
     end
+    assert_equal Hive::ExitCodes::CONFIG, Hive::DailyDigest::Coordinator::Disabled.new.exit_code
+    assert_equal Hive::ExitCodes::CONFIG,
+                 Hive::DailyDigest::Coordinator::NotInitialized.new.exit_code
+    assert_equal Hive::ExitCodes::USAGE, Hive::DailyDigest::Coordinator::FutureDate.new.exit_code
   end
 
   def test_first_interval_defaults_are_content_identified
@@ -219,7 +325,7 @@ class DailyDigestCoordinatorTest < Minitest::Test
     assert_equal [ "gap:github" ], discards.map { |row| row.fetch("identity") }
   end
 
-  def test_automatic_refresh_skips_complete_closed_and_pruned_intervals
+  def test_automatic_refresh_rechecks_closed_and_pruned_intervals_for_late_observations
     now = Time.iso8601("2026-09-01T12:00:00Z")
     intervals = (0..2).map do |offset|
       Hive::DailyDigest::Calendar.new(time_zone: "UTC")
@@ -243,7 +349,7 @@ class DailyDigestCoordinatorTest < Minitest::Test
 
     coordinator.refresh
 
-    assert_equal [ "2026-09-01" ], materialized
+    assert_equal [ "2026-08-30", "2026-08-31", "2026-09-01" ], materialized
   end
 
   def test_pruned_gap_recovery_is_a_stable_discard_without_recreating_base
@@ -251,6 +357,7 @@ class DailyDigestCoordinatorTest < Minitest::Test
     interval = config.fetch("first_interval")
     old_gap = {
       "gap_id" => "gap:github", "source" => "github", "scope" => "demo",
+      "project_id" => "project-1",
       "reason_code" => "offline", "reason" => "offline",
       "observed_at" => "2026-08-31T00:00:00Z"
     }

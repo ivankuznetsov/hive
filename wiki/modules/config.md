@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-09-06
 tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
@@ -519,7 +519,7 @@ an IANA zone, captures the exact UTC coverage-start instant and normalized
 registered-project membership, and persists the first interval atomically. It
 preserves an existing initialized block and never flips `enabled`. Detection
 failure leaves the feature disabled with exact remediation; unrelated daemon
-automation continues.
+automation and standalone per-project `hive migrate` work continue.
 
 When `enabled: true`, all four identity fields (`time_zone`,
 `coverage_started_at`, `initial_membership`, and `first_interval`) are required.
@@ -535,6 +535,12 @@ both the parent feature and `daily_digest.telegram.enabled: true`. It uses the
 existing bot token environment and `Config.telegram_chat_id!`; the first
 positive ID in `bot.chat_id_allowlist` is the sole private recap destination.
 See [[modules/daily-digest]] and [[commands/digest]].
+
+Registered-project mutations append all membership evidence indefinitely and
+maintain a persisted `project_membership_event_ids` lookup alongside the
+history. This makes duplicate suppression constant-time without discarding
+history. Digest coverage parses and sorts that history once per refresh rather
+than once for every interval.
 
 ## Screenote config
 

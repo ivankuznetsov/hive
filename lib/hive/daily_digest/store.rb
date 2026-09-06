@@ -30,16 +30,20 @@ module Hive
 
           existing = read_json(base_path(date)) if File.file?(base_path(date))
           if existing && existing.fetch("lifecycle") == "closed"
-            return existing if existing.fetch("record_id") == prepared.fetch("record_id")
+            if existing.fetch("record_id") == prepared.fetch("record_id")
+              write_interval_index(interval_index.merge(date => interval_from(existing)))
+              return existing
+            end
 
             raise ImmutableRecord, "closed digest #{date} is immutable"
           end
           if existing && prepared.fetch("lifecycle") == "open" &&
-             existing.fetch("local_date") != prepared.fetch("local_date")
+             existing.fetch("interval_id") != prepared.fetch("interval_id")
             raise Conflict, "open digest identity changed during replacement"
           end
 
           write_json(base_path(date), prepared)
+          write_interval_index(interval_index.merge(date => interval_from(prepared)))
           prepared
         end
       end
@@ -105,6 +109,7 @@ module Hive
         synchronize do
           if tombstone_exists?(date)
             tombstone = read_json(tombstone_path(date))
+            write_interval_index(interval_index.merge(date => tombstone.fetch("interval")))
             remove_projection(date)
             return tombstone
           end
@@ -136,6 +141,7 @@ module Hive
           }
           payload["receipt_id"] = Record.content_id(payload)
           write_json(tombstone_path(date), payload)
+          write_interval_index(interval_index.merge(date => payload.fetch("interval")))
           remove_projection(date)
           payload
         end
@@ -174,29 +180,15 @@ module Hive
       end
 
       def dates
-        synchronize(shared: true) do
-          persisted = Dir.glob(File.join(records_root, "????-??-??"))
-                         .select { |path| File.directory?(path) }
-                         .map { |path| File.basename(path) }
-          pruned = Dir.glob(File.join(tombstones_root, "????-??-??.json"))
-                      .map { |path| File.basename(path, ".json") }
-          (persisted + pruned).uniq.sort.freeze
-        end
+        intervals.map { |interval| interval.fetch("local_date") }.freeze
       end
 
       def intervals
-        dates.filter_map do |date|
-          value = read(date)
-          interval = value["lifecycle"] == "pruned" ? value["interval"] : value
-          next unless interval.is_a?(Hash)
-
-          interval.slice(
-            "local_date", "sequence", "time_zone", "starts_at", "ends_at",
-            "duration_seconds", "boundary_kind", "cutover", "interval_id"
-          )
-        end.sort_by do |interval|
-          [ interval["sequence"] || Float::INFINITY, interval.fetch("starts_at") ]
-        end.freeze
+        synchronize do
+          interval_index.values.sort_by do |interval|
+            [ interval["sequence"] || Float::INFINITY, interval.fetch("starts_at") ]
+          end.freeze
+        end
       end
 
       def base_path(local_date)
@@ -212,6 +204,47 @@ module Hive
       end
 
       private
+
+      INTERVAL_KEYS = %w[
+        local_date sequence time_zone starts_at ends_at duration_seconds
+        boundary_kind cutover interval_id
+      ].freeze
+
+      def interval_from(value)
+        value.slice(*INTERVAL_KEYS)
+      end
+
+      def interval_index
+        persisted = read_json(interval_index_path)
+        return persisted if valid_interval_index?(persisted)
+
+        rebuilt = {}
+        Dir.glob(File.join(records_root, "????-??-??", "base.json")).sort.each do |path|
+          base = read_json(path)
+          rebuilt[base.fetch("local_date")] = interval_from(base)
+        end
+        Dir.glob(File.join(tombstones_root, "????-??-??.json")).sort.each do |path|
+          tombstone = read_json(path)
+          interval = tombstone["interval"]
+          rebuilt[interval.fetch("local_date")] = interval_from(interval) if interval.is_a?(Hash)
+        end
+        write_interval_index(rebuilt)
+      end
+
+      def valid_interval_index?(value)
+        value.is_a?(Hash) && value.all? do |date, interval|
+          interval.is_a?(Hash) && interval["local_date"] == date &&
+            %w[starts_at ends_at interval_id].all? { |key| !interval[key].to_s.empty? }
+        end
+      end
+
+      def write_interval_index(value)
+        write_json(interval_index_path, Record.canonical_object(value))
+      end
+
+      def interval_index_path
+        File.join(root, "intervals.json")
+      end
 
       def effective(base, amendments, frontier_overlay = nil)
         amendments = amendments.sort_by do |entry|

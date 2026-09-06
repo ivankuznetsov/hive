@@ -17,7 +17,8 @@ module Hive
       def call!
         results = @coordinator.refresh(date: @date)
         envelope = {
-          "schema" => "hive-digest-refresh", "schema_version" => 1,
+          "schema" => "hive-digest-refresh",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-digest-refresh"),
           "ok" => true, "results" => results
         }
         if @json

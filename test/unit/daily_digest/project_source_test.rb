@@ -33,7 +33,9 @@ class DailyDigestProjectSourceTest < Minitest::Test
       assert_equal %w[stage_transition task_created], result.facts.map { |fact| fact.fetch("kind") }.sort
       assert_empty result.gaps
       assert_equal "task_journal", result.frontier.fetch("source")
-      assert result.frontier.fetch("fingerprints").all? { |value| value.match?(/\A[0-9a-f]{64}\z/) }
+      assert result.frontier.fetch("fingerprints").values.all? do |value|
+        value.fetch("sha256").match?(/\A[0-9a-f]{64}\z/)
+      end
     end
   end
 
@@ -54,8 +56,55 @@ class DailyDigestProjectSourceTest < Minitest::Test
         known_stage_dirs: %w[4-execute]
       ).collect
 
-      assert_equal %w[malformed_journal malformed_journal unknown_stage],
+      assert_equal %w[malformed_journal unknown_stage],
                    result.gaps.map { |gap| gap.fetch("reason_code") }.sort
+    end
+  end
+
+  def test_structurally_malformed_activity_is_aggregated_without_aborting_collection
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "4-execute", "bad-task")
+      FileUtils.mkdir_p(task)
+      malformed = activity("stage_transition", "event-bad", "transition" => "completed")
+      malformed["payload"] = "broken"
+      File.write(File.join(task, Hive::TaskJournal::JOURNAL_BASENAME), JSON.generate(malformed) + "\n")
+
+      result = build_source(project, known_stage_dirs: %w[4-execute]).collect
+
+      assert_empty result.facts
+      assert_equal [ "malformed_journal" ], result.gaps.map { |gap| gap.fetch("reason_code") }
+    end
+  end
+
+  def test_unchanged_fingerprints_skip_receipt_and_journal_reads
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "4-execute", "task")
+      FileUtils.mkdir_p(task)
+      Hive::DailyDigest::TaskCreationReceipt.write!(
+        task_folder: task, project: { "project_id" => "project-1", "name" => "demo" },
+        task: { "id" => 42, "slug" => "task" }, workflow: "coding", stage: "1-inbox",
+        created_at: "2026-08-30T08:00:00Z"
+      )
+      journal = File.join(task, Hive::TaskJournal::JOURNAL_BASENAME)
+      File.write(journal, JSON.generate(activity("stage_transition", "event-stage",
+                                                "transition" => "completed")) + "\n")
+      first = build_source(project, known_stage_dirs: %w[4-execute]).collect
+      source = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project), starts_at: "2026-08-30T00:00:00Z",
+        ends_at: "2026-08-31T00:00:00Z", known_stage_dirs: %w[4-execute],
+        prior_frontier: first.frontier
+      )
+      evidence = [ journal, Hive::DailyDigest::TaskCreationReceipt.path(task) ]
+      original = File.method(:binread)
+
+      with_replaced_singleton_method(
+        File, :binread,
+        ->(path, *args) { evidence.include?(path) ? flunk("unchanged evidence was read") : original.call(path, *args) }
+      ) do
+        second = source.collect
+        assert_empty second.facts
+        assert_equal first.frontier.fetch("fingerprints"), second.frontier.fetch("fingerprints")
+      end
     end
   end
 
@@ -313,7 +362,10 @@ class DailyDigestProjectSourceTest < Minitest::Test
         malformed_receipt = File.join(stage, "malformed-receipt")
         journal_link = File.join(stage, "journal-link")
         oversized = File.join(stage, "oversized")
-        [ receipt_link, malformed_receipt, journal_link, oversized ].each { |path| FileUtils.mkdir_p(path) }
+        oversized_receipt = File.join(stage, "oversized-receipt")
+        [ receipt_link, malformed_receipt, journal_link, oversized, oversized_receipt ].each do |path|
+          FileUtils.mkdir_p(path)
+        end
         File.write(File.join(outside, "receipt.json"), "{}")
         File.symlink(
           File.join(outside, "receipt.json"),
@@ -328,10 +380,13 @@ class DailyDigestProjectSourceTest < Minitest::Test
         large = File.join(oversized, Hive::TaskJournal::JOURNAL_BASENAME)
         File.write(large, "")
         File.truncate(large, Hive::DailyDigest::ProjectSource::MAX_JOURNAL_BYTES + 1)
+        receipt = Hive::DailyDigest::TaskCreationReceipt.path(oversized_receipt)
+        File.write(receipt, "")
+        File.truncate(receipt, Hive::DailyDigest::ProjectSource::MAX_CREATION_RECEIPT_BYTES + 1)
 
         reasons = build_source(project, known_stage_dirs: %w[4-execute]).collect.gaps
                                                                        .map { |gap| gap.fetch("reason_code") }
-        assert_equal %w[journal_too_large malformed_creation_receipt unsafe_creation_receipt unsafe_journal],
+        assert_equal %w[creation_receipt_too_large journal_too_large malformed_creation_receipt unsafe_creation_receipt unsafe_journal],
                      reasons.sort
       end
     end
@@ -452,6 +507,14 @@ class DailyDigestProjectSourceTest < Minitest::Test
       assert_equal "blocked", blocked.fetch("state")
       assert_includes blocked.fetch("task_url"), "waiting%20task"
       refute_includes JSON.generate(attention), "question_id"
+
+      completed = rows + [
+        boundary_activity("session_finished", "11-success", { "outcome" => "completed" }),
+        boundary_activity(
+          "stage_transition", "12-done", { "transition" => "completed", "to_stage" => "9-done" }
+        )
+      ]
+      assert_empty source.send(:boundary_attention, { task => completed })
     end
   end
 

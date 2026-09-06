@@ -122,6 +122,13 @@ class DigestCommandTest < Minitest::Test
 
       payload = Hive::Commands::Digest.new(
         json: true, reader: reader, stdout: StringIO.new,
+        task_links: Hive::DailyDigest::TaskLinks.new(
+          current_projects: [ {
+            "project_id" => "project-1", "registration_id" => "registration-1",
+            "name" => "demo", "path" => project_root
+          } ],
+          resolver: ->(_project, row) { { project: "demo", slug: row.fetch("task_slug") } }
+        ),
         web_config_loader: -> { { "origin" => "https://hive.example" } }
       ).call
 

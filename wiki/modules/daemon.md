@@ -175,7 +175,9 @@ probe: non-blocking child reap plus a rotating batch of at most 64 state-file
 mtime stats from the last full status scan. A child exit identifies its exact
 tracked task; an mtime change identifies the task owning that file. The daemon
 then asks status for only those project/slug rows and applies only their
-per-task heal/dispatch path. Every refreshed row with a dependency fails closed
+per-task heal/dispatch path. A cached `ready_to_advance` Patrol Fix approval
+can still claim capacity before a fresh same-stage row; coding `ready_to_*`
+transitions are never replayed from that cache. Every refreshed row with a dependency fails closed
 until authoritative dependency admission runs, so the incremental path does not
 build or traverse a dependency graph. Pure live-agent heartbeat refreshes reuse
 the last full attempt snapshot; a row that could heal or dispatch reconciles
@@ -255,6 +257,11 @@ Fresh rows therefore preserve the pipeline WIP limit, while an old eligible
 plan, retry, or generic-stage row eventually outranks a continuous stream of
 newer later-stage work instead of starving indefinitely. Rows with missing or
 future mtimes receive no aging boost, and equal scores retain source order.
+Within an equal stage-and-age lane, a generic Patrol Fix `ready_to_advance`
+controller transition receives a half-step tie-break ahead of fresh work. The
+same score participates in the shared row/request arbitration, so this
+terminal progress does not bypass request FIFO, capacity fences, or the
+same-slug request precedence.
 
 Chronological dispatch-request consumption applies the same rule within each
 queue scan. Once an older request or a higher-priority interleaved row observes
@@ -506,6 +513,22 @@ wait context and never spawns for either hold. The coding
 `3-plan` `needs_input` auto-approval shortcut is now gated on
 `workflow == "coding"` (nil workflow remains coding for old test doubles), so a
 generic stage whose dir happens to be `3-plan` uses the normal edit/mtime path.
+
+Dispatcher priority is later-stage-first. Within one stage directory it drains
+terminal `ready_to_*` advance actions before fresh `ready_to_run` work, while
+preserving status order within each action class. This is a WIP limit for
+controller workflows such as Patrol Fix: an accepted inbox decision advances
+before another inbox investigation can consume the last project slot. A full
+tick applies that order before unrelated queued requests, admission schedulers,
+or discovery scans. A queued request for the same high-priority task still runs
+first and suppresses the snapshot row through the ordinary in-flight gate.
+
+Changed-task ticks retain the same policy without rebuilding the complete
+status graph. The authoritative full scan maintains an in-memory index of
+advance-ready rows; when a bounded refresh exposes dispatchable work, the
+dispatcher combines those cached contenders with the changed non-advance rows
+and sorts the small projections together. Heartbeat-only refreshes remain
+task-local and do not reconcile attempts or dispatch cached work.
 
 ## Plan-review automation boundary
 

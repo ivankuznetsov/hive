@@ -29,10 +29,34 @@ HIVE_TEST_SUITE_TMP_DIRS = []
 # XDG roots, agent configuration, GitHub configuration, or global Git config.
 # Set only HOME and remove the optional overrides so production defaults keep
 # following HOME when an individual test replaces it. Authenticated smoke tests
-# opt out explicitly because they exercise the operator's real agent login.
-unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
-  HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
-  HIVE_TEST_SUITE_TMP_DIRS << HIVE_TEST_USER_ROOT
+# retain the operator HOME for agent login, but still isolate Hive-owned state.
+requested_test_files = Array(Thread.current[:hive_test_requested_files])
+Thread.current[:hive_test_requested_files] = nil
+allow_real_user_env = ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
+if allow_real_user_env
+  requested_test_files.concat(ARGV.grep(/\.rb\z/))
+  test_root = File.expand_path(__dir__)
+  test_prefix = "#{test_root}#{File::SEPARATOR}"
+  program_path = File.expand_path($PROGRAM_NAME)
+  requested_test_files << program_path if program_path.start_with?(test_prefix) && program_path.end_with?(".rb")
+  requested_test_files = [ $PROGRAM_NAME ] if requested_test_files.empty?
+  smoke_root = File.expand_path("smoke", __dir__)
+  smoke_prefix = "#{smoke_root}#{File::SEPARATOR}"
+  unless requested_test_files.all? { |path| File.expand_path(path).start_with?(smoke_prefix) }
+    abort "HIVE_TEST_ALLOW_REAL_USER_ENV=1 is only supported for test/smoke files"
+  end
+end
+
+HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
+HIVE_TEST_SUITE_TMP_DIRS << HIVE_TEST_USER_ROOT
+if allow_real_user_env
+  test_hive_home = File.join(HIVE_TEST_USER_ROOT, "hive-home")
+  FileUtils.mkdir_p(test_hive_home)
+  ENV["HIVE_HOME"] = test_hive_home
+  ENV["XDG_DATA_HOME"] = File.join(HIVE_TEST_USER_ROOT, "data")
+  ENV["XDG_BIN_HOME"] = File.join(HIVE_TEST_USER_ROOT, "bin")
+  ENV.delete("HIVE_PREFIX")
+else
   test_home = File.join(HIVE_TEST_USER_ROOT, "home")
   FileUtils.mkdir_p(test_home)
   ENV["HOME"] = test_home

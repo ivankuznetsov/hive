@@ -146,7 +146,6 @@ module Hive
                      runtime_digest: Hive::RuntimeIdentity.source_digest,
                       runtime_residue_recovery: nil)
         @state_home = state_home
-        @request_queue = dispatch_repository
         @task_resolver = task_resolver || method(:resolve_task)
         @safety = safety.respond_to?(:call) ? safety : safety.method(:safe_to_retry?)
         @generation_resolver = generation_resolver || method(:resolve_generation)
@@ -157,9 +156,10 @@ module Hive
         @runtime_digest = runtime_digest.to_s
         unless @runtime_digest.match?(/\A[0-9a-f]{64}\z/)
           raise ArgumentError, "recovery runtime digest is invalid"
-         @runtime_residue_recovery = runtime_residue_recovery ||
-           Hive::Artifacts::RuntimeResidueRecovery.new.method(:recover)
-         end
+        end
+        @request_queue = dispatch_repository
+        @runtime_residue_recovery = runtime_residue_recovery ||
+          Hive::Artifacts::RuntimeResidueRecovery.new.method(:recover)
       end
 
       # The single retry ladder. Every retry in Hive is paced by this, so
@@ -330,18 +330,20 @@ module Hive
             )
           end
 
-          begin
-            @runtime_residue_recovery.call(
-              task: locked_task, marker: current,
-              intended_stage: value(row, :stage)
-            )
-          rescue Hive::Artifacts::RuntimeResidueRecovery::RecoveryError => e
-            return receipt(
-              "blocked", failure_origin: failure_origin, owner: "hive",
-              reason: "runtime_residue_recovery_failed",
-              remediation: e.message, retry_count: retry_count,
-              provider_hint: provider_hint(row)
-            )
+          if value(row, :stage) == "7-artifacts"
+            begin
+              @runtime_residue_recovery.call(
+                task: locked_task, marker: current,
+                intended_stage: value(row, :stage)
+              )
+            rescue Hive::Artifacts::RuntimeResidueRecovery::RecoveryError => e
+              return receipt(
+                "blocked", failure_origin: failure_origin, owner: "hive",
+                reason: "runtime_residue_recovery_failed",
+                remediation: e.message, retry_count: retry_count,
+                provider_hint: provider_hint(row)
+              )
+            end
           end
 
           existing = request_queue.find_recovery(
@@ -1146,6 +1148,8 @@ module Hive
 
       def retry_count_for_failure(row, attrs)
         durable = durable_retry_count(row)
+        return durable unless @request_queue
+
         previous = request_queue.latest_terminal_recovery(
           project: value(row, :project), slug: value(row, :slug),
           expected_stage: value(row, :stage), state_home: @state_home

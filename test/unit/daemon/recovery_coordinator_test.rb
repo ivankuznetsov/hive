@@ -538,6 +538,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal Hive::RuntimeIdentity.source_digest, recovery.fetch("runtime_digest")
       assert_equal 1, recovery.fetch("identical_failure_count")
       assert_equal [ "attempt-3" ], recovery.fetch("failure_attempt_history")
+    end
+  end
+
   def test_dirty_worktree_progress_starts_a_fresh_failure_series
     attrs = {
       "reason" => "dirty_worktree", "marker_id" => "marker-progress",
@@ -608,6 +611,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal %w[attempt-previous attempt-current],
                    request.recovery.fetch("failure_attempt_history")
       assert_equal fingerprint, request.recovery.fetch("failure_fingerprint")
+    end
   end
 
   # The cooldown paces Hive's own retry sweep. First failure waits the first

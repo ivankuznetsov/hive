@@ -35,7 +35,7 @@ module HiveReleaseCandidate
       packaging/live_agent_skills/workflow_creator_values.rb
       packaging/live_agent_skills/build.rb
     ].freeze
-    BUILDER_INPUTS = (LIVE_AGENT_BUILDER_INPUTS + [ "packaging/managed_web_archive.rb" ]).freeze
+    BUILDER_INPUTS = (LIVE_AGENT_BUILDER_INPUTS + [ "packaging/managed_web_archive.rb", "packaging/betterleaks.rb" ]).freeze
     BUILDER_ARCHIVE_PATHS = BUILDER_INPUTS.each_with_object({}) do |path, result|
       parts = path.split("/")
       (1...parts.length).each do |length|
@@ -259,6 +259,11 @@ module HiveReleaseCandidate
     end
 
     def build_gem(export, destination)
+      _stdout, _stderr, scanner_status = Open3.capture3(
+        "ruby", "packaging/betterleaks.rb", chdir: export
+      )
+      raise Error, "cannot bundle Betterleaks in candidate gem" unless scanner_status.success?
+
       _stdout, stderr, status = Open3.capture3(
         "gem", "build", "hive.gemspec", "--output", destination, chdir: export
       )

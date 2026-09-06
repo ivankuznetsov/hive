@@ -26,7 +26,7 @@ module Hive
 
       def write!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                  trigger: nil, request_id: nil,
-                 task_generation: nil, predecessor_attempt_id: nil,
+                 task_generation: nil,
                  inherited_outputs: [], task_id: nil, expected_stage: nil,
                  state_home: Hive::Paths.state_home, now: Time.now, repository: nil)
         repository ||= repository_for(state_home)
@@ -41,7 +41,6 @@ module Hive
           trigger: trigger,
           request_id: request_id,
           task_generation: task_generation,
-          predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs,
           task_id: task_id,
           expected_stage: expected_stage,

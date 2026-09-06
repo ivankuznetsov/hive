@@ -40,37 +40,6 @@ module Hive
           bytes += consumed
         end
 
-        predecessor_fetches = 0
-        cursor = records.dup
-        until cursor.empty?
-          record = cursor.shift
-          predecessor_id = value(record, "predecessor_attempt_id").to_s
-          next if predecessor_id.empty? || fetched.key?(predecessor_id)
-          if predecessor_fetches >= @limits.fetch(:predecessor_fetches)
-            diagnostics << diagnostic(
-              "predecessor_fetches_exhausted",
-              @limits.fetch(:predecessor_fetches), predecessor_fetches
-            )
-            truncated = true
-            break
-          end
-          predecessor_fetches += 1
-          predecessor, consumed = fetch_attempt(predecessor_id, diagnostics)
-          unless predecessor
-            diagnostics << diagnostic("predecessor_missing", predecessor_id, nil)
-            next
-          end
-          if bytes + consumed > @limits.fetch(:attempt_bytes)
-            diagnostics << diagnostic("attempt_bytes_exhausted", @limits.fetch(:attempt_bytes), bytes + consumed)
-            truncated = true
-            break
-          end
-          fetched[predecessor_id] = predecessor
-          records << predecessor
-          cursor << predecessor
-          bytes += consumed
-        end
-
         projected = records.map do |record|
           project_attempt(record, current_id: current_id)
         end.sort_by do |record|
@@ -133,7 +102,6 @@ module Hive
           "stage" => stage,
           "task_generation" => generation,
           "ownership_generation" => value(record, "ownership_generation"),
-          "predecessor_attempt_id" => value(record, "predecessor_attempt_id"),
           "state" => value(record, "state"),
           "outcome" => value(record, "outcome"),
           "accepted_at" => value(record, "accepted_at"),

@@ -1,5 +1,5 @@
 require "uri"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/workflow_package/diagnostic"
 
 module Hive
@@ -22,7 +22,6 @@ module Hive
       DIRECT_ACTION_GAP_RE = /\A\s*(?:then\s+)?#{DANGEROUS_ACTION}\b(?:[\s,]+[a-z0-9_.\/-]+){0,6}[\s,]*\z/i
       POSTFIX_PROHIBITION_RE = /\A(?:\s+[a-z0-9_.\/-]+){0,4}\s+(?:is|are)\s+(?:strictly\s+)?
                                 (?:forbidden|prohibited|disallowed|denied|not\s+(?:permitted|allowed))\b/ix
-      SECRET_ORDER = %i[anthropic_api_key openai_api_key].freeze
 
       module_function
 
@@ -37,6 +36,7 @@ module Hive
 
       def scan_text(text, path:, permissions: {})
         findings = secret_findings(text, path)
+        secret_detected = findings.any?
         exfiltration = affirmative_match(text, EXFILTRATION_RE)
         if exfiltration
           findings << behavior_diagnostic("security.exfiltration", text, path, exfiltration,
@@ -55,7 +55,7 @@ module Hive
 
         credentials = Array(fetch_permission(permissions, "credentials") || fetch_permission(permissions, "secrets"))
         credential = affirmative_match(text, CREDENTIAL_RE)
-        if credential && findings.none? { |finding| finding.rule_id.start_with?("security.") && finding.rule_id.end_with?("_token", "_key", "_assignment", "_cookie", "jwt") }
+        if credential && !secret_detected
           declared = credentials.any?
           findings << behavior_diagnostic(
             declared ? "security.declared_credentials" : "security.undeclared_credentials",
@@ -78,25 +78,12 @@ module Hive
       end
 
       def secret_findings(text, path)
-        ordered = SECRET_ORDER.filter_map do |name|
-          pattern = Hive::SecretPatterns::PATTERNS[name]
-          [ name, pattern ] if pattern
-        end
-        ordered.concat(Hive::SecretPatterns::PATTERNS.reject { |name, _| SECRET_ORDER.include?(name) }.to_a)
-        occupied = []
-        ordered.flat_map do |name, pattern|
-          text.to_enum(:scan, pattern).filter_map do
-            match = Regexp.last_match
-            range = match.begin(0)...match.end(0)
-            next if occupied.any? { |existing| existing.cover?(range.begin) || range.cover?(existing.begin) }
-
-            occupied << range
-            line, column = location(text, match.begin(0))
-            Diagnostic.new(
-              rule_id: "security.#{name}", severity: :error, path: path,
-              line: line, column: column, message: "possible secret material is not permitted in workflow packages"
-            )
-          end
+        Hive::SecretScanner.scan(text, path: path).map do |hit|
+          Diagnostic.new(
+            rule_id: "security.#{hit.fetch(:name)}", severity: :error, path: path,
+            line: hit.fetch(:line), column: hit.fetch(:column),
+            message: "possible secret material is not permitted in workflow packages"
+          )
         end
       end
 

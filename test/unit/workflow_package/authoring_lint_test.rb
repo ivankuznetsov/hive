@@ -20,11 +20,11 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
       )
     end
 
-    secret = "sk-ant-#{'x' * 30}"
+    secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     with_lint_package(File.read(fixture("malicious.md")).sub("SECRET_VALUE", secret), permissions: unbounded) do |root, manifest|
       result = Lint.verify(root, manifest: manifest)
       rules = result.findings.map(&:rule_id)
-      assert_includes rules, "secret.anthropic-key"
+      assert_includes rules, "secret.detected"
       assert_includes rules, "deny.pipe-to-shell"
       assert_includes rules, "network.undeclared-host"
       assert result.findings.any?(&:review_required)
@@ -91,7 +91,7 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
       result = Lint.verify(root, manifest: manifest)
       rules = result.findings.map(&:rule_id)
 
-      assert_equal 1, rules.count("secret.generic-assignment"),
+      assert_equal 1, rules.count("secret.detected"),
                    "only the high-entropy assignment should be classified as a secret"
       assert_includes rules, "pii.payment-card"
       assert_includes rules, "deny.download-then-execute"
@@ -205,7 +205,7 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
       assert Lint.verify!(root, manifest: manifest).valid?
     end
 
-    with_lint_package("sk-ant-#{'x' * 30}\n") do |root, manifest|
+    with_lint_package("ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n") do |root, manifest|
       error = assert_raises(Lint::LintError) { Lint.verify!(root, manifest: manifest) }
       assert_instance_of Lint::Result, error.result
     end
@@ -450,12 +450,12 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
                       "suppression.orphaned-request"
     end
 
-    secret = "sk-ant-#{'x' * 30}"
+    secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     with_lint_package(secret, data: {
       "x-security" => { "network_host_reasons" => {}, "suppressions" => [] }
     }) do |root, manifest|
       fingerprint = Lint.verify(root, manifest: manifest).findings
-                        .find { |finding| finding.rule_id == "secret.anthropic-key" }.fingerprint
+                        .find { |finding| finding.rule_id == "secret.detected" }.fingerprint
       manifest.data.fetch("x-security")["suppressions"] = [
         { "fingerprint" => fingerprint, "reason" => "Cannot suppress secrets" }
       ]

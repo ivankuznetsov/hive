@@ -128,7 +128,7 @@ idempotency_key: workflow-creator:editorial:stable
 input_fingerprint: 3f...
 ```
 
-`id` comes from the installation-scoped SQLite `task_counters` row through one
+`id` comes from the SQLite `installations.next_task_id` column through one
 immediate transaction; no counter file or counter lock remains. `display_name`
 starts nil; status surfaces use the slug until name generation succeeds.
 `depends_on` is omitted when not supplied and remains the authoritative

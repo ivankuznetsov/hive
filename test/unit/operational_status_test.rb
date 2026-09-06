@@ -970,6 +970,30 @@ class OperationalStatusTest < Minitest::Test
     end
   end
 
+  def test_terminal_recovery_history_preserves_current_workflow_state_and_reason
+    rows = [ "Escalated (parked)", "Rejected (parked)" ].map.with_index do |label, index|
+      task(action: "needs_input", slug: "writero-parked-#{index}", stage: "4-review", marker: "none").merge(
+        "workflow" => "patrol-fix", "action_label" => label, "suggested_command" => nil
+      )
+    end
+    rows << task(action: "needs_input", slug: "question", stage: "2-brainstorm",
+                 marker: "waiting", unanswered_questions: 2)
+    rows.each do |row|
+      expected = project(status_payload(row)).fetch("tasks").first
+      snapshot = scheduler_snapshot_for(row, decision: "attempt_terminal_replay", reason: "terminal")
+      snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+        "status" => "terminal", "phase" => "terminal", "request_id" => "old-request",
+        "attempt_id" => "old-attempt", "terminal_outcome" => "succeeded"
+      }
+      actual = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } },
+                       scheduler_snapshot: snapshot).fetch("tasks").first
+      %w[state blocker_owner reason].each { |key| assert_equal expected[key], actual[key], "#{row['slug']}: #{key}" }
+      assert_equal expected.fetch("reasons").first.fetch("code"), actual.fetch("reasons").first.fetch("code")
+      assert_equal "terminal", actual.dig("recovery", "status")
+      assert_equal "succeeded", actual.dig("recovery", "terminal_outcome")
+    end
+  end
+
   def test_recovery_projection_derives_running_terminal_and_provider_hint_without_a_receipt
     row = task(
       action: "error", slug: "derived-recovery", stage: "4-execute",
@@ -1578,11 +1602,9 @@ class OperationalStatusTest < Minitest::Test
         "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
         "adapter" => "codex", "model" => "model-a", "effort" => "high",
         "eligible" => true, "exclusions" => [],
-        "capacity" => { "observed" => 1, "max" => 2 }, "circuits" => []
+        "capacity" => { "observed" => 1, "max" => 2 }
       } ],
-      "exclusions" => [],
-      "circuit_generations" => [],
-      "probe_requirements" => []
+      "exclusions" => []
     }
   end
 

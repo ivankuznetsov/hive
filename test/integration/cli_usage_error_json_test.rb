@@ -177,22 +177,6 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
-  def test_circuits_pre_dispatch_usage_errors_preserve_the_json_contract
-    with_tmp_global_config do |home|
-      [
-        %w[circuits inspect extra --json],
-        %w[circuits --unknown-option --json]
-      ].each do |argv|
-        assert_pre_dispatch_error(
-          home,
-          argv,
-          schema: "hive-circuits",
-          error_kind: "usage"
-        )
-      end
-    end
-  end
-
   def test_worktree_pre_dispatch_usage_errors_preserve_the_json_contract
     with_tmp_global_config do |home|
       [

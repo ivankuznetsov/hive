@@ -63,6 +63,7 @@ class BoardTest < ActiveSupport::TestCase
 
     assert_equal "99-future", band.columns.last.stage
     assert_equal [ "future-task" ], band.columns.last.tasks.map(&:slug)
+    refute band.columns.last.folded_by_default?
   end
 
   test "renders an empty project through its configured default workflow" do
@@ -167,6 +168,9 @@ class BoardTest < ActiveSupport::TestCase
     assert_nil empty_band.error
     assert_equal [ "custom-task" ], task_band.columns.fetch(1).tasks.map(&:slug)
     assert_nil task_band.error
+    refute task_band.columns.fetch(1).folded_by_default?
+    assert task_band.columns.last.terminal
+    assert task_band.columns.last.folded_by_default?
   ensure
     Hive::Workflows::Project.reset!
   end

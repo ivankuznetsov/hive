@@ -410,7 +410,7 @@ class WebProjectCaptureProviderTest < Minitest::Test
           result.call(
             artifacts: [],
             status: "failed",
-            diagnostic: "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+            diagnostic: "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
           )
         when "cleanup"
           path = File.join(staging, "cleanup.png")

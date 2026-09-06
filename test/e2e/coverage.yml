@@ -85,20 +85,12 @@ coverage:
     code: [test/e2e/scenarios/incident_plan_only_dependency_gate.yml]
   - id: recovery.provider_limit
     title: Provider retry ownership
-    description: One trusted routed provider-account failure opens one circuit and produces one charged fallback successor under daemon recovery ownership.
+    description: One trusted routed provider-account failure produces one charged independent retry on the next configured route under daemon recovery ownership.
     maturity: required
     profiles: [release]
     constraints: { platforms: [], providers: [codex] }
     docs: [wiki/e2e.md]
     code: [test/e2e/scenarios/incident_provider_limit_retry.yml]
-  - id: routing.provider_health_durability
-    title: Provider health routing durability
-    description: The AE2-AE8 durable matrix covers restart, probes, strict pins, capacity, exhaustion, operators, corruption, and legacy no-pool isolation.
-    maturity: required
-    profiles: [release]
-    constraints: { platforms: [], providers: [codex, claude] }
-    docs: [wiki/e2e.md]
-    code: [test/e2e/scenarios/provider_routing_durable_matrix.yml]
   - id: routing.repository
     title: Repository identity routing
     description: Repository identity rejects cross-project work without mutating or attributing the wrong project.

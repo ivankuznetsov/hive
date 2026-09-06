@@ -13,6 +13,14 @@ tags: [module, workflow-package, honeycomb, registry, permissions, disclosure, m
 
 ## Managed Honeycomb boundary
 
+Package installation and publication run full security scanning. Reads of an
+already installed generation (workflow loading, manifest inspection, integrity
+verification, and configuration reconstruction) do not launch Betterleaks or
+repeat package security lint. They still check the pinned manifest digest, file
+inventory and hashes, filesystem shape, descriptor, and runtime policy. Changed
+installed bytes fail integrity verification rather than being silently rescanned
+and accepted. This keeps package admission work out of routine status scans.
+
 An unchanged `honeycomb-manifest/v1` package normalizes to a one-workflow,
 hook-free `Hive::ModulePackage` with the same immutable identity, mappings,
 inputs, and disclosure. That compatibility relationship does not make this
@@ -219,7 +227,11 @@ The canonical builder emits only `packages/NAME/VERSION/` with generated
 instructions, and declared assets. The manifest owns normalized permissions,
 the complete registry-relative hash map, and `release_sha256`; the final
 manifest byte hash is `package_digest`. The current consumer validator and
-pinned Honeycomb lint contract run before remote access. The installed gem
+pinned Honeycomb lint contract run before remote access. Both import scanning
+and authoring lint delegate credential detection to bundled Betterleaks;
+authoring lint emits the stable `secret.detected` rule without maintaining a
+second credential regex catalog or entropy classifier. Permission, network,
+and personal-data lint remain separate checks. The installed gem
 ships the pinned Markdown corpus and upstream SafeYAML parity cases as runtime
 contract data, so packaged Hive does not depend on the source checkout's test
 tree. Bounded safe-file reads treat a zero-byte regular file as empty bytes;

@@ -279,7 +279,7 @@ class AttemptsSupervisorTest < Minitest::Test
         attempt_id: attempt.attempt_id,
         recorded_at: NOW
       )
-      secret = "github" + "_pat_" + ("A" * 24)
+      secret = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
       draft = draft.merge("detail" => "\e[31magent failed #{secret}")
       worker = <<~RUBY
         diagnostic = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_DIAGNOSTIC_FD")), "w")
@@ -530,7 +530,7 @@ class AttemptsSupervisorTest < Minitest::Test
         stage: "4-review", task_generation: attempt.task_generation,
         attempt_id: attempt.attempt_id, recorded_at: NOW
       )
-      secret = "github" + "_pat_" + ("A" * 24)
+      secret = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
       draft = JSON.parse(JSON.generate(draft))
       draft.fetch("provider")["provenance"] = secret
       worker = <<~RUBY
@@ -877,7 +877,7 @@ class AttemptsSupervisorTest < Minitest::Test
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       attempt = store.create_launching(
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "demo", task_slug: "durable-task",
         intended_stage: intended_stage, task_generation: "generation-1",
         progress_token: "progress-1", provider: "codex", worker_argv: worker_argv,
@@ -901,28 +901,13 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def explicit_routing
-    account_scope = {
-      "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil
-    }
-    model_scope = {
-      "kind" => "model", "provider_account_id" => "account-a", "model" => "model-a"
-    }
     {
-      "mode" => "explicit", "policy_digest" => "a" * 64,
-      "decision" => {
-        "decision_id" => "decision-1", "policy_digest" => "a" * 64,
-        "decided_at" => Time.now.utc.iso8601(6), "exclusions" => []
-      },
+      "mode" => "explicit",
       "route" => {
         "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
         "adapter" => "codex", "launch_binding_id" => "default",
         "model" => "model-a", "effort" => "high"
-      },
-      "circuit_generations" => [
-        { "scope" => account_scope, "journal_epoch" => 0, "observed_generation" => 0 },
-        { "scope" => model_scope, "journal_epoch" => 0, "observed_generation" => 0 }
-      ],
-      "probe_bindings" => []
+      }
     }
   end
 end

@@ -280,6 +280,9 @@ module Hive
         input_binding = bound_input(row.folder, slot, bundle)
         attempt = prepare_attempt(row, cfg, slot, input_binding, now: now)
         return unless attempt
+        token.bind! do
+          request_current?(row.folder.to_s, slot, attempt.fetch("attempt_id"), input_binding)
+        end
         return if token.cancelled?
 
         runner = @runner_factory.call(cfg, Hive::Task.new(row.folder.to_s).project_root)
@@ -423,6 +426,23 @@ module Hive
         published
       end
 
+      def request_current?(task_root, slot, attempt_id, input_binding)
+        return false unless File.directory?(task_root)
+        return false unless File.basename(File.dirname(task_root)) == STAGE
+        return false unless current_unanswered_slot(task_root, slot)
+
+        document = Hive::BrainstormSuggestions::Store.new(task_root).read
+        return false if document["corrupt"]
+
+        record = document.fetch("records", []).find do |candidate|
+          candidate["question_id"] == slot.question_id
+        end
+        record && record["state"] == "loading" && record["attempt_id"] == attempt_id &&
+          record["input_binding"] == input_binding
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError
+        false
+      end
+
       def apply_result!(record, result, input_binding, attempt, cfg, now:)
         state = result.fetch("state")
         candidate_id = SecureRandom.uuid
@@ -553,9 +573,9 @@ module Hive
           create: false
         ) do
           cleanup_envelopes(state_path(task_root))
-          Hive::BrainstormSuggestions::Store.new(task_root).delete!
+          Hive::BrainstormSuggestions::Store.new(task_root).delete_for_cleanup!
         end
-      rescue Hive::ConcurrentRunError, Hive::BrainstormSuggestions::Error,
+      rescue Hive::Error, Hive::BrainstormSuggestions::Error,
              SystemCallError, IOError
         false
       end

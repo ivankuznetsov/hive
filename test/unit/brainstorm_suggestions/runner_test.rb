@@ -286,6 +286,64 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     refute File.exist?(runtime)
   end
 
+  def test_bound_cancellation_guard_stops_a_running_process_group
+    current = true
+    token = Hive::BrainstormSuggestions::Runner::Cancellation.new { current }
+    runner = Hive::BrainstormSuggestions::Runner.new(
+      profile: FakeProfile.new, timeout_sec: 5, bwrap_path: "/bin/true"
+    )
+    invalidator = Thread.new do
+      sleep 0.05
+      current = false
+    end
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    execution = runner.send(
+      :execute, launch([ "/bin/sh", "-c", "trap '' TERM; while :; do sleep 1; done" ]), token
+    )
+
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    assert execution.timed_out
+    assert_operator elapsed, :<, 2
+  ensure
+    invalidator&.join
+  end
+
+  def test_leader_exit_with_descendant_held_pipes_is_bounded
+    runner = Hive::BrainstormSuggestions::Runner.new(
+      profile: FakeProfile.new, timeout_sec: 2, bwrap_path: "/bin/true"
+    )
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    execution = Timeout.timeout(3) do
+      runner.send(
+        :execute,
+        launch([ "/bin/sh", "-c", "(trap '' TERM; sleep 30) & exit 0" ], "unread input")
+      )
+    end
+
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    assert_equal 0, execution.exit_code
+    refute execution.timed_out
+    assert_operator elapsed, :<, 2
+  end
+
+  def test_oversized_provider_output_is_a_distinct_bounded_failure
+    runner = Hive::BrainstormSuggestions::Runner.new(
+      profile: FakeProfile.new, timeout_sec: 2, bwrap_path: "/bin/true"
+    )
+    bytes = Hive::BrainstormSuggestions::Runner::MAX_OUTPUT_BYTES + 1
+
+    execution = runner.send(
+      :execute, launch([ RbConfig.ruby, "-e", "STDOUT.write('x' * #{bytes})" ])
+    )
+
+    assert execution.too_large
+    refute execution.timed_out
+    assert_equal Hive::BrainstormSuggestions::Runner::MAX_OUTPUT_BYTES,
+                 execution.stdout.bytesize
+  end
+
   def test_malformed_result_and_executable_resolution_error_fail_closed
     malformed = Hive::BrainstormSuggestions::Runner.new(
       profile: FakeProfile.new,

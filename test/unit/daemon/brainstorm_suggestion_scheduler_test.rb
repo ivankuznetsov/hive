@@ -267,6 +267,43 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
     end
   end
 
+  def test_active_worker_observes_answer_cleanup_without_waiting_for_another_tick
+    with_project do |_project, folder|
+      started = Queue.new
+      stopped = Queue.new
+      runner = Object.new
+      runner.define_singleton_method(:call) do |bundle:, cancellation:|
+        bundle
+        started << true
+        sleep 0.01 until cancellation.cancelled?
+        stopped << true
+        {
+          "state" => "fresh", "text" => "Too late", "rationale" => "Too late",
+          "provenance" => [ "request" ], "safe_reason" => nil,
+          "retryable" => true, "dismissed" => false
+        }
+      end
+      scheduler = scheduler_for(
+        runner, -> { "a" * 64 }, worker_launcher: ->(work) { Thread.new(&work) }
+      )
+
+      scheduler.tick(rows: [ row(folder) ], now: fixture_time)
+      Timeout.timeout(2) { started.pop }
+      brainstorm = File.join(folder, "brainstorm.md")
+      Hive::Lock.with_task_lock(folder, op: "operator_answer") do
+        Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
+          brainstorm_path: brainstorm, ordinal: 1, answer_text: "Operator answer"
+        )
+      end
+      Timeout.timeout(2) { stopped.pop }
+
+      refute File.exist?(File.join(folder, Hive::BrainstormSuggestions::STORE_FILENAME))
+      assert_equal "Operator answer", Hive::BrainstormParser.parse(brainstorm).first.answer
+    ensure
+      scheduler&.shutdown
+    end
+  end
+
   def test_exhausted_question_does_not_consume_the_task_launch_window
     with_project do |_project, folder|
       File.write(
@@ -599,6 +636,7 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
           folder, id: 43012, slug: File.basename(folder), display_name: "Suggestions",
           idempotency_key: "suggestions", input_fingerprint: "f" * 64
         )
+        prepare_test_task_lease_repository(folder)
         File.write(File.join(folder, "idea.md"), "Add repository-aware answer help.\n")
         File.write(
           File.join(folder, "brainstorm.md"),

@@ -22,17 +22,21 @@ module Hive
         )
         writer.close
         output = +"".b
-        reading = Thread.new do
-          while (chunk = reader.read(65_536))
-            output << chunk
-            break if output.bytesize > max_bytes
+        status = nil
+        eof = false
+        loop do
+          eof = drain(reader, output, max_bytes) || eof
+          status ||= wait_nonblock(pid)
+          if status && eof
+            terminate(pid) if process_group_alive?(pid)
+            return Result.new(output: output, status: status)
           end
-        end
-        status = wait(pid, deadline: deadline, poll_interval: poll_interval)
-        reading.join
-        raise TooLarge if output.bytesize > max_bytes
+          raise Timeout if monotonic_now >= deadline
 
-        Result.new(output: output, status: status)
+          wait_for = [ poll_interval, deadline - monotonic_now ].min
+          IO.select([ reader ], nil, nil, wait_for) if wait_for.positive? && !eof
+          IO.select(nil, nil, nil, wait_for) if wait_for.positive? && eof
+        end
       rescue Timeout, TooLarge
         terminate(pid)
         raise
@@ -41,45 +45,85 @@ module Hive
         raise SpawnFailed, error.message
       ensure
         writer&.close unless writer&.closed?
-        reading&.kill if reading&.alive?
-        reading&.join
         reader&.close unless reader&.closed?
       end
 
-      def wait(pid, deadline:, poll_interval:)
+      def drain(reader, output, max_bytes)
         loop do
-          waited = Process.waitpid2(pid, Process::WNOHANG)
-          return waited.last if waited
-          raise Timeout if monotonic_now >= deadline
-
-          IO.select(nil, nil, nil, poll_interval)
+          chunk = reader.read_nonblock(65_536, exception: false)
+          case chunk
+          when :wait_readable
+            return false
+          when nil
+            return true
+          else
+            output << chunk
+            raise TooLarge if output.bytesize > max_bytes
+          end
         end
       end
-      private_class_method :wait
+      private_class_method :drain
+
+      def wait_nonblock(pid)
+        Process.waitpid2(pid, Process::WNOHANG)&.last
+      rescue Errno::ECHILD
+        nil
+      end
+      private_class_method :wait_nonblock
 
       def terminate(pid)
         return unless pid
+        return unless process_group_alive?(pid) || process_alive?(pid)
 
-        Process.kill("TERM", -pid)
+        signal_group("TERM", pid)
         deadline = monotonic_now + TERM_GRACE_SECONDS
-        reaped = false
         loop do
-          reaped ||= !Process.waitpid2(pid, Process::WNOHANG).nil?
-          begin
-            Process.kill(0, -pid)
-          rescue Errno::ESRCH
-            return pid
-          end
+          wait_nonblock(pid)
+          return pid unless process_group_alive?(pid)
           break if monotonic_now >= deadline
 
           IO.select(nil, nil, nil, POLL_INTERVAL_SECONDS)
         end
-        Process.kill("KILL", -pid)
-        Process.waitpid(pid) unless reaped
+        signal_group("KILL", pid)
+        kill_deadline = monotonic_now + (POLL_INTERVAL_SECONDS * 5)
+        loop do
+          wait_nonblock(pid)
+          break unless process_group_alive?(pid)
+          break if monotonic_now >= kill_deadline
+
+          IO.select(nil, nil, nil, POLL_INTERVAL_SECONDS)
+        end
         pid
-      rescue Errno::ESRCH, Errno::ECHILD
+      rescue Errno::ECHILD
         nil
       end
+
+      def process_group_alive?(pid)
+        Process.kill(0, -pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
+      end
+      private_class_method :process_group_alive?
+
+      def process_alive?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
+      end
+      private_class_method :process_alive?
+
+      def signal_group(signal, pid)
+        Process.kill(signal, -pid)
+      rescue Errno::ESRCH
+        nil
+      end
+      private_class_method :signal_group
 
       def monotonic_now
         Process.clock_gettime(Process::CLOCK_MONOTONIC)

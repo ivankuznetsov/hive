@@ -5,6 +5,7 @@ require "fileutils"
 require "json"
 require "tmpdir"
 require "time"
+require "hive/brainstorm_suggestions/process_capture"
 require "hive/brainstorm_suggestions/validator"
 require "hive/stages/base"
 
@@ -21,7 +22,7 @@ module Hive
       OWNER_FILE = ".owner.json"
       SWEEP_GRACE_SEC = 300
 
-      Execution = Struct.new(:stdout, :exit_code, :timed_out, keyword_init: true)
+      Execution = Struct.new(:stdout, :exit_code, :timed_out, :too_large, keyword_init: true)
       Launch = Struct.new(
         :argv, :environment, :stdin, :runtime_root, :bundle_root,
         keyword_init: true
@@ -31,17 +32,29 @@ module Hive
       # bound request; the process loop observes it and terminates the complete
       # provider process group before returning.
       class Cancellation
-        def initialize
+        def initialize(&guard)
           @mutex = Mutex.new
           @cancelled = false
+          @guard = guard
         end
 
         def cancel!
           @mutex.synchronize { @cancelled = true }
         end
 
+        def bind!(&guard)
+          @mutex.synchronize { @guard = guard }
+          self
+        end
+
         def cancelled?
-          @mutex.synchronize { @cancelled }
+          cancelled, guard = @mutex.synchronize { [ @cancelled, @guard ] }
+          return true if cancelled
+          return false unless guard
+
+          guard.call != true
+        rescue StandardError
+          true
         end
       end
 
@@ -136,6 +149,7 @@ module Hive
         execution = invoke_executor(launch, cancellation)
         return failed_result("cancelled") if cancellation&.cancelled?
         return failed_result("timeout") if execution.timed_out
+        return failed_result("output_too_large") if execution.too_large
         return failed_result("provider_exit") unless execution.exit_code == 0
 
         Validator.call(extract_structured_output(execution.stdout), manifest: bundle.manifest)
@@ -283,69 +297,114 @@ module Hive
         input_r.close
         output_w.close
         output = +"".b
-        reader = Thread.new do
-          while (chunk = output_r.read(65_536))
-            output << chunk if output.bytesize < MAX_OUTPUT_BYTES
+        input = launch.stdin.to_s.b
+        input_offset = 0
+        input_closed = input.empty?
+        input_w.close if input_closed
+        output_eof = false
+        status = nil
+        deadline = monotonic_now + @timeout_sec
+        post_exit_deadline = nil
+        loop do
+          output_eof = drain_output(output_r, output) || output_eof
+          if output.bytesize > MAX_OUTPUT_BYTES
+            terminate(pid)
+            return execution_result(output, status: nil, too_large: true)
           end
-        end
-        writer = Thread.new do
-          input_w.write(launch.stdin)
-          input_w.close
-        rescue Errno::EPIPE, IOError
-          nil
-        end
-        status = wait_for(pid, @timeout_sec, cancellation: cancellation)
-        unless status
-          terminate(pid)
-          writer.join(KILL_GRACE_SEC)
-          writer.kill if writer.alive?
-          reader.join(KILL_GRACE_SEC)
-          reader.kill if reader.alive?
-          return Execution.new(stdout: output.byteslice(0, MAX_OUTPUT_BYTES), exit_code: nil, timed_out: true)
-        end
+          input_offset, input_closed = write_input(input_w, input, input_offset) unless input_closed
+          status ||= wait_nonblock(pid)
 
-        writer.join
-        reader.join
-        Execution.new(
-          stdout: output.byteslice(0, MAX_OUTPUT_BYTES).to_s.force_encoding(Encoding::UTF_8).scrub,
-          exit_code: status.exitstatus,
-          timed_out: false
-        )
+          if status && output_eof && input_closed
+            terminate(pid) if process_group_alive?(pid)
+            return execution_result(output, status: status)
+          end
+          if cancellation&.cancelled? || monotonic_now >= deadline
+            terminate(pid)
+            return execution_result(output, status: nil, timed_out: true)
+          end
+          if status && post_exit_deadline.nil?
+            signal_group("TERM", pid)
+            post_exit_deadline = [ deadline, monotonic_now + KILL_GRACE_SEC ].min
+          elsif post_exit_deadline && monotonic_now >= post_exit_deadline
+            terminate(pid)
+            output_eof = drain_output(output_r, output) || output_eof
+            return execution_result(output, status: status)
+          end
+
+          readers = output_eof ? [] : [ output_r ]
+          writers = input_closed ? [] : [ input_w ]
+          wait_until = [ deadline, post_exit_deadline ].compact.min
+          wait_for = [ wait_until - monotonic_now, 0.05 ].min
+          IO.select(readers, writers, nil, wait_for) if wait_for.positive?
+        end
       ensure
         input_r&.close unless input_r&.closed?
         input_w&.close unless input_w&.closed?
         output_r&.close unless output_r&.closed?
         output_w&.close unless output_w&.closed?
-        writer&.kill if writer&.alive?
-        reader&.kill if reader&.alive?
       end
 
-      def wait_for(pid, timeout, cancellation: nil)
-        deadline = monotonic_now + timeout
+      def drain_output(io, output)
         loop do
-          waited = Process.waitpid2(pid, Process::WNOHANG)
-          return waited.last if waited
-          return if cancellation&.cancelled?
-          return if monotonic_now >= deadline
-
-          IO.select(nil, nil, nil, 0.05)
+          chunk = io.read_nonblock(65_536, exception: false)
+          case chunk
+          when :wait_readable then return false
+          when nil then return true
+          else output << chunk
+          end
         end
+      rescue IOError
+        true
+      end
+
+      def write_input(io, input, offset)
+        written = io.write_nonblock(input.byteslice(offset, input.bytesize - offset), exception: false)
+        return [ offset, false ] if written == :wait_writable
+
+        offset += written
+        if offset >= input.bytesize
+          io.close
+          [ offset, true ]
+        else
+          [ offset, false ]
+        end
+      rescue Errno::EPIPE, IOError
+        io.close unless io.closed?
+        [ input.bytesize, true ]
+      end
+
+      def wait_nonblock(pid)
+        Process.waitpid2(pid, Process::WNOHANG)&.last
+      rescue Errno::ECHILD
+        nil
       end
 
       def terminate(pid)
-        Process.kill("TERM", -pid)
-        deadline = monotonic_now + KILL_GRACE_SEC
-        loop do
-          waited = Process.waitpid2(pid, Process::WNOHANG)
-          return waited.last if waited
-          break if monotonic_now >= deadline
+        Hive::BrainstormSuggestions::ProcessCapture.terminate(pid)
+      end
 
-          IO.select(nil, nil, nil, 0.05)
-        end
-        Process.kill("KILL", -pid)
-        Process.waitpid2(pid).last
-      rescue Errno::ESRCH, Errno::ECHILD
+      def process_group_alive?(pid)
+        Process.kill(0, -pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
+      end
+
+      def signal_group(signal, pid)
+        Process.kill(signal, -pid)
+      rescue Errno::ESRCH
         nil
+      end
+
+      def execution_result(output, status:, timed_out: false, too_large: false)
+        Execution.new(
+          stdout: output.byteslice(0, MAX_OUTPUT_BYTES).to_s.force_encoding(Encoding::UTF_8).scrub,
+          exit_code: status&.exitstatus,
+          timed_out: timed_out,
+          too_large: too_large
+        )
       end
 
       def resolve_executable(profile)

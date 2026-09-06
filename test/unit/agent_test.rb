@@ -13,6 +13,10 @@ class AgentTest < Minitest::Test
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
+  RuntimePolicy = Data.define(
+    :permission_mode, :allowed_tools, :disallowed_tools, :agent_add_dirs,
+    :cli_flags, :environment, :permission_flags, :executable, :command_prefix
+  )
 
   def setup
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
@@ -35,6 +39,14 @@ class AgentTest < Minitest::Test
     FileUtils.mkdir_p(folder)
     prepare_test_task_run(folder)
     Hive::Task.new(folder)
+  end
+
+  def runtime_policy_with_prefix(command_prefix)
+    RuntimePolicy.new(
+      permission_mode: nil, allowed_tools: nil, disallowed_tools: nil,
+      agent_add_dirs: [], cli_flags: [], environment: {}, permission_flags: nil,
+      executable: nil, command_prefix:
+    )
   end
 
   def test_runtime_policy_and_raw_permission_arguments_are_mutually_exclusive
@@ -1035,6 +1047,59 @@ class AgentTest < Minitest::Test
 
       refute_includes cmd, "--allowedTools"
       refute_includes cmd, "--disallowedTools"
+    end
+  end
+
+  def test_controller_command_prefix_wraps_the_compiled_agent_invocation
+    with_tmp_dir do |dir|
+      prefix = [ "/usr/bin/bwrap", "--new-session", "--" ]
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: nil,
+        timeout_sec: 5, command_prefix: prefix
+      )
+
+      assert_equal prefix, agent.send(:build_cmd).take(prefix.length)
+    end
+  end
+
+  def test_controller_prefix_wraps_empty_runtime_policy_prefix
+    with_tmp_dir do |dir|
+      controller_prefix = [ "/usr/bin/bwrap", "--new-session", "--" ]
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: nil,
+        timeout_sec: 5, command_prefix: controller_prefix,
+        runtime_policy: runtime_policy_with_prefix([])
+      )
+
+      assert_equal controller_prefix, agent.send(:build_cmd).take(controller_prefix.length)
+    end
+  end
+
+  def test_controller_prefix_wraps_nonempty_runtime_policy_prefix
+    with_tmp_dir do |dir|
+      controller_prefix = [ "/usr/bin/bwrap", "--new-session", "--" ]
+      policy_prefix = [ "/usr/bin/policy-wrapper", "--" ]
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: nil,
+        timeout_sec: 5, command_prefix: controller_prefix,
+        runtime_policy: runtime_policy_with_prefix(policy_prefix)
+      )
+
+      assert_equal controller_prefix + policy_prefix,
+                   agent.send(:build_cmd).take(controller_prefix.length + policy_prefix.length)
+    end
+  end
+
+  def test_controller_command_prefix_rejects_control_characters
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: nil,
+          timeout_sec: 5, command_prefix: [ "unsafe\nargument" ]
+        )
+      end
+
+      assert_includes error.message, "command prefix"
     end
   end
 

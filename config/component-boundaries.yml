@@ -181,6 +181,7 @@ components:
         - Hive::PatrolFix::Transition
         - Hive::PatrolFix::SuccessorMaterializer
         - Hive::PatrolFix::AttemptDiagnostic
+        - Hive::PatrolFix::AgentGitIsolation
       errors:
         - Hive::PatrolFix::AdmissionStore::Error
         - Hive::PatrolFix::SourceSnapshot::InvalidSnapshot
@@ -215,6 +216,7 @@ components:
       - lib/hive/patrol_fix/transition.rb
       - lib/hive/patrol_fix/successor_materializer.rb
       - lib/hive/patrol_fix/attempt_diagnostic.rb
+      - lib/hive/patrol_fix/agent_git_isolation.rb
       - schemas/hive-patrol-fix-decision.v1.json
       - schemas/hive-patrol-fix-task-manifest.v1.json
       - schemas/hive-patrol-fix-receipt.v1.json
@@ -240,6 +242,7 @@ components:
       - "Source snapshots and admission records are canonical, size bounded, digest bound, and reject secret-like material"
       - "Dogfood reports bind one source occurrence through ordered workflow observations to one exact publication receipt and zero-duplicate replay counts"
       - "Attempt diagnostics are append-only, receipt-bound, secret-redacted typed records with exact attempt, ownership generation, phase, and private log identity"
+      - "Managed agent Git writes use private metadata behind a mount namespace; only an exact clean descendant is adopted through the Safe Agent Git Gate"
     lock_contracts:
       - "Manifest replacement is atomic and receipts append under a task-local journal lock"
       - "Patrol-fix moves also hold a stable slug lock outside the moving task folder and journal intent before move plus committed reconciliation afterward"
@@ -286,7 +289,8 @@ components:
       - lib/hive/stages/patrol_fix/validate.rb
       - lib/hive/stages/patrol_fix/review.rb
       - lib/hive/stages/patrol_fix/publish.rb
-    mutation_authority: "Strict task-local manifest replacement, append-only decision/fix/validation/publication/reopen receipts, stable receipt-gated stage/route-transition journals, and reciprocal coding-successor relations only."
+      - lib/hive/stages/managed_agent_custody.rb
+    mutation_authority: "Strict task-local manifest replacement, append-only decision/fix/validation/publication/reopen receipts, guarded adoption of a clean private-metadata Fix commit, stable receipt-gated stage/route-transition journals, and reciprocal coding-successor relations only."
     recovery_surface: "Replays incomplete rework route actions and reconciles exactly one linked coding successor; no scheduler, adapter, issue, or remote-publication authority."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
@@ -303,6 +307,7 @@ components:
       - test/unit/patrol_fix/successor_materializer_test.rb
       - test/unit/attempts/patrol_dispatch_replay_test.rb
       - test/unit/stages/patrol_fix/publish_test.rb
+      - test/unit/patrol_fix/agent_git_isolation_test.rb
     migration_exceptions: []
 
   - id: attempts
@@ -833,6 +838,8 @@ components:
         - Hive::AgentGitGate::RemoteObservation
         - Hive::AgentGitGate::MaterializationReceipt
         - Hive::AgentGitGate::PublicationReceipt
+        - Hive::AgentGitGate::IsolatedMetadata
+        - Hive::AgentGitGate::AdoptionReceipt
       errors:
         - Hive::AgentGitGate::InvalidRequest
         - Hive::AgentGitGate::UnsupportedOperation
@@ -840,20 +847,24 @@ components:
         - Hive::AgentGitGate::RemoteConflict
         - Hive::AgentGitGate::MaterializationFailed
         - Hive::AgentGitGate::PublicationFailed
+        - Hive::AgentGitGate::IsolationFailed
     owned_paths:
       - lib/hive/agent_git_gate.rb
+      - lib/hive/agent_git_gate/isolation.rb
       - lib/hive/managed_git.rb
     state_contracts:
-      - "Repository objects, refs, worktrees, and publication receipts"
+      - "Repository objects, refs, worktrees, private agent metadata, exact adoption, and publication receipts"
     schema_contracts:
       - "Expected remote object identity and before/after publication receipt"
     lock_contracts:
-      - "Expected-OID lease is revalidated at publication"
+      - "Expected-OID leases are revalidated at private-metadata adoption and publication"
     component_dependencies: []
     allowed_hive_dependencies:
+      - hive/atomic_file
       - hive/errors
       - hive/git_ref
     internal_collaborators:
+      - Hive::AtomicFile
       - Hive::ManagedGit
     forbidden_constructions: []
     authorized_internal_constructions: []
@@ -862,6 +873,7 @@ components:
       - lib/hive/worktree.rb
       - lib/hive/stages/agent_report.rb
       - lib/hive/stages/draft_pr_handoff.rb
+      - lib/hive/patrol_fix/agent_git_isolation.rb
     mutation_authority: "Hive injects credential, transport, branch, PR, and operator-approval policy."
     recovery_surface: "Receipts preserve observed identities; publication failure remains explicit and retryable."
     wiki_page: wiki/modules/agent_git_gate.md
@@ -872,6 +884,7 @@ components:
       - test/unit/worktree_test.rb
       - test/unit/stages/agent_report_test.rb
       - test/unit/stages/draft_pr_handoff_test.rb
+      - test/unit/patrol_fix/agent_git_isolation_test.rb
     migration_exceptions: []
 
   - id: work-ledger

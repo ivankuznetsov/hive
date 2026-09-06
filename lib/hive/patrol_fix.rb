@@ -26,6 +26,7 @@ module Hive
     autoload :SuccessorMaterializer, "hive/patrol_fix/successor_materializer"
     autoload :PublicationReceipt, "hive/patrol_fix/publication_receipt"
     autoload :AttemptDiagnostic, "hive/patrol_fix/attempt_diagnostic"
+    autoload :AgentGitIsolation, "hive/patrol_fix/agent_git_isolation"
 
     module_function
 

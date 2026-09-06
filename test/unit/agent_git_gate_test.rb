@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "hive/agent_git_gate"
 
 class AgentGitGateTest < Minitest::Test
@@ -138,8 +139,8 @@ class AgentGitGateTest < Minitest::Test
       "credential.helper" => "!false",
       "url.ext::false.insteadOf" => "https://example.com/",
       "remote.origin.uploadpack" => "/tmp/agent-selected-upload-pack",
+      "uploadpack.packObjectsHook" => "/tmp/agent-selected-pack-objects",
       "core.alternateRefsCommand" => "/tmp/agent-selected-alternate-refs",
-      "core.worktree" => "/tmp/agent-selected-worktree",
       "http.sslVerify" => "false"
     }
 
@@ -678,6 +679,392 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_tracked_gitlinks_uses_the_narrow_hardened_facade
+    with_tmp_git_repo do |repo|
+      gitlink = "vendor/fixture"
+      run!(
+        "git", "-C", repo, "update-index", "--add", "--cacheinfo",
+        "160000,#{"a" * 40},#{gitlink}"
+      )
+
+      assert_equal [ gitlink ], Hive::AgentGitGate.tracked_gitlinks(repo)
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.tracked_gitlinks(repo, max_stdout_bytes: 1)
+      end
+    end
+  end
+
+  def test_isolated_metadata_preparation_rejects_an_unrelated_worktree
+    with_tmp_git_repo do |repository|
+      with_tmp_git_repo do |foreign_worktree|
+        Dir.mktmpdir("agent-git-isolated") do |root|
+          destination = File.join(root, "repository.git")
+
+          error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+            Hive::AgentGitGate.prepare_isolated_metadata(
+              repository_path: repository,
+              worktree_path: foreign_worktree,
+              destination: destination,
+              destination_root: root
+            )
+          end
+
+          assert_includes error.message, "no longer belongs"
+          refute File.exist?(destination)
+        end
+      end
+    end
+  end
+
+  def test_isolated_metadata_preparation_rejects_stale_and_unusable_inputs
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        destination = File.join(root, "repository.git")
+        FileUtils.mkdir_p(destination)
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          prepare_isolated_metadata(repo, root)
+        end
+        assert_includes error.message, "already exists"
+      end
+    end
+
+    with_tmp_git_repo do |repo|
+      run!("git", "-C", repo, "checkout", "--detach", "--quiet")
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          prepare_isolated_metadata(repo, root)
+        end
+        assert_includes error.message, "attached worktree branch"
+      end
+    end
+
+    Dir.mktmpdir("agent-git-empty") do |repo|
+      run!("git", "-C", repo, "init", "-b", "main", "--quiet")
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          prepare_isolated_metadata(repo, root)
+        end
+        assert_includes error.message, "source HEAD is unavailable"
+      end
+    end
+  end
+
+  def test_isolated_metadata_preparation_fails_closed_on_object_and_filesystem_errors
+    with_tmp_git_repo do |repo|
+      common = run!(
+        "git", "-C", repo, "rev-parse", "--path-format=absolute",
+        "--git-common-dir"
+      ).strip
+      unavailable_objects = File.join(repo, "not-an-object-directory")
+      File.write(unavailable_objects, "not a directory\n")
+      results = [ common, common, unavailable_objects ]
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        with_replaced_singleton_method(
+          Hive::AgentGitGate, :command!, ->(*) { results.shift }
+        ) do
+          error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+            prepare_isolated_metadata(repo, root)
+          end
+          assert_includes error.message, "object directory is unavailable"
+        end
+      end
+
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        with_replaced_singleton_method(
+          Hive::AtomicFile, :write, ->(*) { raise IOError, "write failed" }
+        ) do
+          error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+            prepare_isolated_metadata(repo, root)
+          end
+          assert_includes error.message, "filesystem operation failed"
+        end
+      end
+    end
+  end
+
+  def test_isolated_adoption_rejects_invalid_unchanged_dirty_and_stale_sources
+    assert_raises(Hive::AgentGitGate::InvalidRequest) do
+      Hive::AgentGitGate.adopt_isolated_metadata(Object.new)
+    end
+
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+        end
+        assert_includes error.message, "no committed change"
+
+        isolated_commit(metadata, "committed.txt", "committed\n")
+        File.write(File.join(repo, "dirty.txt"), "dirty\n")
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+        end
+        assert_includes error.message, "uncommitted changes"
+      end
+    end
+
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        run!("git", "-C", repo, "checkout", "-b", "other", "--quiet")
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+        end
+        assert_includes error.message, "branch changed"
+      end
+    end
+
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        commit_file(repo, "controller.txt", "moved\n", "controller moved")
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+        end
+        assert_includes error.message, "HEAD changed"
+      end
+    end
+  end
+
+  def test_isolated_adoption_rejects_missing_and_non_descendant_private_heads
+    with_tmp_git_repo do |repo|
+      branch = run!("git", "-C", repo, "branch", "--show-current").strip
+      base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      Dir.mktmpdir("agent-git-empty") do |git_dir|
+        run!("git", "init", "--bare", "--quiet", git_dir)
+        metadata = Hive::AgentGitGate::IsolatedMetadata.new(
+          source_repository: repo, worktree: repo, git_dir: git_dir,
+          branch: branch, base_oid: base
+        )
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+        end
+        assert_includes error.message, "HEAD is unavailable"
+      end
+
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        tree = isolated_git(metadata, "write-tree").strip
+        orphan = isolated_git(metadata, "commit-tree", tree, stdin_data: "orphan\n").strip
+        isolated_git(metadata, "update-ref", "HEAD", orphan)
+
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+        end
+        assert_includes error.message, "does not descend"
+      end
+    end
+  end
+
+  def test_isolated_adoption_rejects_changed_imports_and_restores_failed_updates
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        isolated_commit(metadata, "changed.txt", "changed\n")
+        original = Hive::AgentGitGate.method(:command!)
+        replacement = lambda do |repository, *args, **kwargs|
+          if args.first == "rev-parse" && args.last.to_s.end_with?("^{commit}")
+            "f" * 40
+          else
+            original.call(repository, *args, **kwargs)
+          end
+        end
+        with_replaced_singleton_method(Hive::AgentGitGate, :command!, replacement) do
+          error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+            Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+          end
+          assert_includes error.message, "changed during adoption"
+        end
+      end
+    end
+
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        isolated_commit(metadata, "changed.txt", "changed\n")
+        original = Hive::AgentGitGate.method(:command!)
+        replacement = lambda do |repository, *args, **kwargs|
+          if args.first == "update-ref"
+            raise Hive::AgentGitGate::IsolationFailed, "guarded update refused"
+          end
+
+          original.call(repository, *args, **kwargs)
+        end
+        with_replaced_singleton_method(Hive::AgentGitGate, :command!, replacement) do
+          error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+            Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+          end
+          assert_includes error.message, "guarded update refused"
+          assert_equal metadata.base_oid,
+                       run!("git", "-C", repo, "rev-parse", "HEAD").strip
+          assert_includes run!("git", "-C", repo, "status", "--porcelain"),
+                          "changed.txt"
+        end
+      end
+    end
+  end
+
+  def test_isolated_adoption_preserves_update_and_index_restoration_failures
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        isolated_commit(metadata, "changed.txt", "changed\n")
+        original = Hive::AgentGitGate.method(:command!)
+        read_tree_calls = 0
+        replacement = lambda do |repository, *args, **kwargs|
+          if args.first == "update-ref"
+            raise Hive::AgentGitGate::IsolationFailed, "guarded update refused"
+          end
+          if args.first == "read-tree"
+            read_tree_calls += 1
+            if read_tree_calls == 2
+              raise Hive::AgentGitGate::IsolationFailed, "index restore refused"
+            end
+          end
+
+          original.call(repository, *args, **kwargs)
+        end
+        with_replaced_singleton_method(Hive::AgentGitGate, :command!, replacement) do
+          error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+            Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+          end
+          assert_includes error.message, "guarded update refused"
+          assert_includes error.message, "index restore refused"
+        end
+      end
+    end
+  end
+
+  def test_isolated_adoption_requires_a_clean_authoritative_postcondition
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        isolated_commit(metadata, "changed.txt", "changed\n")
+        original = Hive::AgentGitGate.method(:read)
+        replacement = lambda do |repository, operation, **kwargs|
+          if repository == repo && operation == :status
+            Hive::AgentGitGate::ReadResult.new(
+              operation: :status, stdout: "dirty", stderr: "",
+              exitstatus: 0, overflow: false
+            )
+          else
+            original.call(repository, operation, **kwargs)
+          end
+        end
+        with_replaced_singleton_method(Hive::AgentGitGate, :read, replacement) do
+          error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+            Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+          end
+          assert_includes error.message, "does not match"
+          assert_equal metadata.base_oid,
+                       run!("git", "-C", repo, "rev-parse", "HEAD").strip
+          assert_includes run!("git", "-C", repo, "status", "--porcelain"),
+                          "changed.txt"
+        end
+      end
+    end
+  end
+
+  def test_isolated_adoption_reports_a_failed_branch_rollback
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        isolated_commit(metadata, "changed.txt", "changed\n")
+        original_read = Hive::AgentGitGate.method(:read)
+        original_command = Hive::AgentGitGate.method(:command!)
+        update_ref_calls = 0
+        read_replacement = lambda do |repository, operation, **kwargs|
+          if repository == repo && operation == :status
+            Hive::AgentGitGate::ReadResult.new(
+              operation: :status, stdout: "dirty", stderr: "", exitstatus: 0, overflow: false
+            )
+          else
+            original_read.call(repository, operation, **kwargs)
+          end
+        end
+        command_replacement = lambda do |repository, *args, **kwargs|
+          if args.first == "update-ref"
+            update_ref_calls += 1
+            raise Hive::AgentGitGate::IsolationFailed, "branch rollback refused" if update_ref_calls == 2
+          end
+
+          original_command.call(repository, *args, **kwargs)
+        end
+
+        with_replaced_singleton_method(Hive::AgentGitGate, :read, read_replacement) do
+          with_replaced_singleton_method(Hive::AgentGitGate, :command!, command_replacement) do
+            error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+              Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+            end
+            assert_includes error.message, "does not match"
+            assert_includes error.message, "branch rollback refused"
+          end
+        end
+      end
+    end
+  end
+
+  def test_isolated_adoption_imports_the_exact_head_without_writing_fetch_head
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        expected = isolated_commit(metadata, "changed.txt", "changed\n")
+        fetch_head = File.join(repo, ".git", "FETCH_HEAD")
+        FileUtils.rm_f(fetch_head)
+
+        receipt = Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+
+        assert_equal expected, receipt.head_oid
+        refute File.exist?(fetch_head)
+      end
+    end
+  end
+
+  def test_isolated_adoption_rechecks_authoritative_ancestry_without_replace_refs
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("agent-git-isolated") do |root|
+        metadata = prepare_isolated_metadata(repo, root)
+        tree = isolated_git(metadata, "write-tree").strip
+        orphan = isolated_git(metadata, "commit-tree", tree, stdin_data: "orphan\n").strip
+        isolated_git(metadata, "update-ref", "HEAD", orphan)
+        isolated_git(metadata, "replace", "--graft", orphan, metadata.base_oid)
+
+        error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+          Hive::AgentGitGate.adopt_isolated_metadata(metadata)
+        end
+
+        assert_includes error.message, "does not descend"
+        assert_equal metadata.base_oid,
+                     run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      end
+    end
+  end
+
+  def test_isolated_helpers_normalize_invalid_results_and_missing_bindings
+    with_tmp_git_repo do |repo|
+      with_replaced_singleton_method(
+        Hive::ManagedGit, :capture3_isolated,
+        ->(*) { raise TypeError, "invalid status" }
+      ) do
+        assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate::Isolation.send(
+            :isolated_read_result, repo, repo, :status
+          )
+        end
+      end
+    end
+
+    with_replaced_singleton_method(
+      Hive::AgentGitGate, :command!, ->(*) { "/tmp/missing-common-dir" }
+    ) do
+      error = assert_raises(Hive::AgentGitGate::IsolationFailed) do
+        Hive::AgentGitGate::Isolation.send(:assert_common_repository!, "/tmp", "/tmp")
+      end
+      assert_includes error.message, "binding is unavailable"
+    end
+  end
+
   def test_public_values_reject_invalid_shapes
     valid_read = {
       operation: :status, stdout: "", stderr: "",
@@ -741,6 +1128,35 @@ class AgentGitGateTest < Minitest::Test
     ].each do |attributes|
       assert_raises(Hive::AgentGitGate::InvalidRequest) do
         Hive::AgentGitGate::PublicationReceipt.new(**attributes)
+      end
+    end
+
+    valid_isolated_metadata = {
+      source_repository: "/tmp/source", worktree: "/tmp/worktree",
+      git_dir: "/tmp/private.git", branch: "fix/repair",
+      base_oid: "a" * 40
+    }
+    [
+      valid_isolated_metadata.merge(source_repository: "relative"),
+      valid_isolated_metadata.merge(worktree: "bad\npath"),
+      valid_isolated_metadata.merge(branch: "bad//branch"),
+      valid_isolated_metadata.merge(base_oid: "not-an-oid")
+    ].each do |attributes|
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate::IsolatedMetadata.new(**attributes)
+      end
+    end
+
+    valid_adoption = {
+      branch: "fix/repair", base_oid: "a" * 40, head_oid: "b" * 40
+    }
+    [
+      valid_adoption.merge(branch: "bad//branch"),
+      valid_adoption.merge(base_oid: "not-an-oid"),
+      valid_adoption.merge(head_oid: "a" * 40)
+    ].each do |attributes|
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate::AdoptionReceipt.new(**attributes)
       end
     end
   end
@@ -839,6 +1255,48 @@ class AgentGitGateTest < Minitest::Test
         published_oid: "c" * 40, after_oid: "c" * 40
       )
     end
+
+    source_repository = +"/tmp/source"
+    worktree = +"/tmp/worktree"
+    git_dir = +"/tmp/private.git"
+    isolated_branch = +"fix/repair"
+    base_oid = +("a" * 40)
+    isolated = Hive::AgentGitGate::IsolatedMetadata.new(
+      source_repository: source_repository, worktree: worktree,
+      git_dir: git_dir, branch: isolated_branch, base_oid: base_oid
+    )
+    source_repository.replace("/tmp/changed")
+    worktree.replace("/tmp/changed")
+    git_dir.replace("/tmp/changed.git")
+    isolated_branch.replace("other")
+    base_oid.replace("c" * 40)
+    assert_equal "/tmp/source", isolated.source_repository
+    assert_equal "/tmp/worktree", isolated.worktree
+    assert_equal "/tmp/private.git", isolated.git_dir
+    assert_equal "fix/repair", isolated.branch
+    assert_equal "a" * 40, isolated.base_oid
+    assert_predicate isolated.source_repository, :frozen?
+    assert_predicate isolated.worktree, :frozen?
+    assert_predicate isolated.git_dir, :frozen?
+    assert_predicate isolated.branch, :frozen?
+    assert_predicate isolated.base_oid, :frozen?
+
+    adoption_branch = +"fix/repair"
+    adoption_base = +("a" * 40)
+    adoption_head = +("b" * 40)
+    adoption = Hive::AgentGitGate::AdoptionReceipt.new(
+      branch: adoption_branch, base_oid: adoption_base,
+      head_oid: adoption_head
+    )
+    adoption_branch.replace("other")
+    adoption_base.replace("c" * 40)
+    adoption_head.replace("d" * 40)
+    assert_equal "fix/repair", adoption.branch
+    assert_equal "a" * 40, adoption.base_oid
+    assert_equal "b" * 40, adoption.head_oid
+    assert_predicate adoption.branch, :frozen?
+    assert_predicate adoption.base_oid, :frozen?
+    assert_predicate adoption.head_oid, :frozen?
   end
 
   def test_publication_refuses_unverifiable_local_and_remote_outcomes
@@ -887,6 +1345,40 @@ class AgentGitGateTest < Minitest::Test
   end
 
   private
+
+  def prepare_isolated_metadata(repo, root)
+    Hive::AgentGitGate.prepare_isolated_metadata(
+      repository_path: repo, worktree_path: repo,
+      destination: File.join(root, "repository.git"),
+      destination_root: root
+    )
+  end
+
+  def isolated_commit(metadata, name, content)
+    File.write(File.join(metadata.worktree, name), content)
+    isolated_git(metadata, "add", name)
+    isolated_git(metadata, "commit", "-m", "isolated change")
+    isolated_git(metadata, "rev-parse", "HEAD").strip
+  end
+
+  def isolated_git(metadata, *args, stdin_data: "")
+    env = {
+      "GIT_AUTHOR_NAME" => "Hive Test",
+      "GIT_AUTHOR_EMAIL" => "test@example.com",
+      "GIT_COMMITTER_NAME" => "Hive Test",
+      "GIT_COMMITTER_EMAIL" => "test@example.com",
+      "GIT_CONFIG_GLOBAL" => File::NULL,
+      "GIT_CONFIG_NOSYSTEM" => "1"
+    }
+    out, err, status = Open3.capture3(
+      env, "git", "--git-dir=#{metadata.git_dir}",
+      "--work-tree=#{metadata.worktree}", *args,
+      stdin_data: stdin_data
+    )
+    raise err unless status.success?
+
+    out
+  end
 
   def assert_stubbed_publication_failure(before_oid:, after_oid:, exitstatus:,
                                          error_class:, message:)

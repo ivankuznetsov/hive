@@ -3,6 +3,7 @@ require "hive/agent"
 require "hive/agent_profile"
 require "hive/agent_support/opencode"
 require "hive/task"
+require "hive/workflow_package/runtime_policy"
 
 class OpenCodeAgentLifecycleTest < Minitest::Test
   include HiveTestHelper
@@ -115,6 +116,60 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
         refute lock.key?("claude_pid")
         refute lock.key?("claude_pid_start_time")
       end
+    end
+  end
+
+  def test_controller_command_prefix_wraps_run_and_sanitized_export
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "prefixed-opencode-260827-aaaa")
+      prefix_log = File.join(fixture.fetch(:dir), "prefix.log")
+      wrapper = File.join(fixture.fetch(:dir), "prefix")
+      File.write(wrapper, <<~SH)
+        #!/bin/sh
+        printf '%s\n' "$*" >> #{Shellwords.escape(prefix_log)}
+        exec "$@"
+      SH
+      File.chmod(0o755, wrapper)
+
+      result = build_agent(task, fixture, command_prefix: [ wrapper ]).run!
+
+      assert_equal :ok, result.fetch(:status)
+      calls = File.readlines(prefix_log, chomp: true)
+      assert_equal 2, calls.length
+      assert calls.any? { |line| line.include?(" run ") }
+      assert calls.any? { |line| line.include?(" export ") }
+    end
+  end
+
+  def test_controller_prefix_wraps_empty_and_nonempty_policy_prefixes_for_run_and_export
+    with_fixture do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "policy-prefixed-opencode-260827-aaaa")
+      outer_log = File.join(fixture.fetch(:dir), "outer-prefix.log")
+      inner_log = File.join(fixture.fetch(:dir), "inner-prefix.log")
+      outer = command_wrapper(fixture.fetch(:dir), "outer-prefix", outer_log)
+      inner = command_wrapper(fixture.fetch(:dir), "inner-prefix", inner_log)
+
+      empty_policy_result = build_agent(
+        task, fixture, command_prefix: [ outer ], runtime_policy: runtime_policy_with_prefix([])
+      ).run!
+
+      assert_equal :ok, empty_policy_result.fetch(:status), empty_policy_result.inspect
+      assert_equal 2, File.readlines(outer_log, chomp: true).length
+      refute File.exist?(inner_log)
+
+      File.unlink(outer_log)
+      nonempty_policy_result = build_agent(
+        task, fixture, command_prefix: [ outer ], runtime_policy: runtime_policy_with_prefix([ inner ])
+      ).run!
+
+      assert_equal :ok, nonempty_policy_result.fetch(:status), nonempty_policy_result.inspect
+      outer_calls = File.readlines(outer_log, chomp: true)
+      inner_calls = File.readlines(inner_log, chomp: true)
+      assert_equal 2, outer_calls.length
+      assert_equal 2, inner_calls.length
+      assert outer_calls.all? { |line| line.start_with?("#{inner} ") }
+      assert inner_calls.any? { |line| line.include?(" run ") }
+      assert inner_calls.any? { |line| line.include?(" export ") }
     end
   end
 
@@ -933,6 +988,25 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     File.expand_path(
       "../../components/agent-cli-runtime/test/fixtures/opencode/v1.18.16",
       __dir__
+    )
+  end
+
+  def command_wrapper(directory, name, log)
+    path = File.join(directory, name)
+    File.write(path, <<~SH)
+      #!/bin/sh
+      printf '%s\n' "$*" >> #{Shellwords.escape(log)}
+      exec "$@"
+    SH
+    File.chmod(0o755, path)
+    path
+  end
+
+  def runtime_policy_with_prefix(command_prefix)
+    scope = Struct.new(:allowed_tools, :disallowed_tools).new(nil, nil)
+    Hive::WorkflowPackage::RuntimePolicy.portable_policy(
+      scope, task_root: "", directories: [], environment: { "HOME" => ENV.fetch("HOME") }, outputs: {},
+      runtime_root: nil, cli_flags: [], executable: nil, command_prefix:
     )
   end
 

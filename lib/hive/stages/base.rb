@@ -33,6 +33,9 @@ module Hive
         HIVE_EVIDENCE_SOURCE_ROOT HIVE_EVIDENCE_SOURCE_SHA
         HIVE_EVIDENCE_APP_PORT HIVE_EVIDENCE_BROWSER_ORIGIN
         HIVE_EVIDENCE_WEB_HIVE_HOME HIVE_EVIDENCE_CAPTURE_MAILBOX
+        GIT_AUTHOR_EMAIL GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_NAME
+        GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_CONFIG_SYSTEM
+        GIT_TERMINAL_PROMPT
       ].freeze
       module_function
 
@@ -139,6 +142,22 @@ module Hive
 
         name = explicit_agent || cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
+      end
+
+      # Resolve the durable provider route once when a caller must prepare
+      # provider-specific filesystem custody before the actual spawn. The
+      # opaque binding is carried through to #spawn_agent so a later resolver
+      # cannot select a different provider state directory.
+      def admitted_launch_context(cfg:, profile: nil)
+        context = Hive::Attempts::Context.current
+        return { profile: profile, launch_binding: nil }.freeze unless context&.explicit_routing?
+
+        resolved_profile = Hive::AgentProfiles.lookup(context.adapter, cfg: cfg)
+        binding = Hive::AgentProfiles::LaunchBindings.resolve(
+          adapter: context.adapter,
+          binding_id: context.launch_binding_id
+        )
+        { profile: resolved_profile, launch_binding: binding }.freeze
       end
 
       def format_verified_skill_invocation(profile, skill, project_root:)
@@ -960,6 +979,7 @@ module Hive
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
                       isolate_environment: false, launch_environment: nil,
+                      command_prefix: [], admitted_launch_context: nil,
                       terminate_on_parent_signal: true)
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
         unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
@@ -970,11 +990,9 @@ module Hive
         launch_binding = nil
         provider_route = nil
         if context&.explicit_routing?
-          profile = Hive::AgentProfiles.lookup(context.adapter, cfg: cfg)
-          launch_binding = Hive::AgentProfiles::LaunchBindings.resolve(
-            adapter: context.adapter,
-            binding_id: context.launch_binding_id
-          )
+          admitted_launch_context ||= self.admitted_launch_context(cfg: cfg, profile: profile)
+          profile = admitted_launch_context.fetch(:profile)
+          launch_binding = admitted_launch_context.fetch(:launch_binding)
           routing_arguments = admitted_routing_arguments(context, profile)
           routing_resolution = nil
           identity_arguments = nil
@@ -1105,6 +1123,7 @@ module Hive
               runtime_policy: runtime_policy,
               routing_arguments: routing_arguments,
               launch_environment: (launch_binding&.environment || {}).merge(launch_environment),
+              command_prefix: command_prefix,
               provider_route: provider_route,
               additional_read_roots: additional_read_roots,
               additional_write_roots: additional_write_roots,

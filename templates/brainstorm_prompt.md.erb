@@ -41,8 +41,15 @@ Behavior:
    Preserve an untouched region byte-for-byte while its answer slot remains
    unanswered.
 
+   If any existing answer is still missing after advisory regions are ignored,
+   do not append a follow-up round and do not discover or invoke a skill.
+   Preserve the unanswered round, replace Hive's transient working marker with
+   `<!-- WAITING -->`, and exit. You must write that terminal marker even when
+   no other brainstorm.md bytes need to change.
+
 3. Use the `<%= skill_invocation %>` skill for the interview
-   structure when available.
+   structure when available, except for the deterministic unanswered-round
+   preservation case above.
 
 Constraints:
 - Do not modify any file other than brainstorm.md.

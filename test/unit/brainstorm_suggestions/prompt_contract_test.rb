@@ -8,5 +8,7 @@ class HiveBrainstormSuggestionsPromptContractTest < Minitest::Test
     assert_includes prompt, "never a filled answer"
     assert_includes prompt, "must not cause `## Requirements`"
     assert_includes prompt, "must not cause `<!-- COMPLETE -->`"
+    assert_includes prompt, "do not discover or invoke a skill"
+    assert_includes prompt, "must write that terminal marker"
   end
 end

@@ -90,10 +90,11 @@ class RunBrainstormTest < Minitest::Test
     end
   end
 
-  def test_real_brainstorm_stage_keeps_an_untouched_suggestion_unanswered
+  def test_brainstorm_stage_fixture_keeps_an_untouched_suggestion_unanswered
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = make_task_at_brainstorm(dir)
+        enable_suggestions(dir)
         brainstorm_md = File.join(folder, "brainstorm.md")
         envelope = Hive::BrainstormSuggestions::Envelope.render(
           binding: "d" * 64, text: "Use the repository adapter."
@@ -106,9 +107,9 @@ class RunBrainstormTest < Minitest::Test
           <!-- WAITING -->
         MARKDOWN
         File.write(brainstorm_md, content)
-        # The provider fixture only turns Hive's transient AGENT_WORKING marker
-        # back into WAITING. It is not given the expected document bytes, so
-        # preservation of the advisory region is exercised rather than echoed.
+        # This fixture regression covers Hive's parser/writer boundary. The
+        # opt-in live smoke owns proof that an actual model interprets the
+        # reserved region as advisory rather than as a filled answer.
         ENV["HIVE_FAKE_CLAUDE_REPUBLISH_WAITING_FILE"] = brainstorm_md
         capture_io { Hive::Commands::Run.new(folder).call }
 
@@ -121,6 +122,13 @@ class RunBrainstormTest < Minitest::Test
         assert_equal "2-brainstorm", File.basename(File.dirname(folder))
       end
     end
+  end
+
+  def enable_suggestions(project_root)
+    path = File.join(project_root, ".hive-state", "config.yml")
+    config = YAML.safe_load_file(path)
+    config.dig("brainstorm", "suggestions")["enabled"] = true
+    File.write(path, config.to_yaml)
   end
 
   def test_dispatcher_rejects_invalid_path

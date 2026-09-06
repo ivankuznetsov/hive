@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
@@ -33,7 +34,25 @@ class LiveClaudeSmokeTest < Minitest::Test
   ATTACK
 
   def setup
-    skip "claude binary not on PATH" unless system("which claude > /dev/null 2>&1")
+    @previous_claude_bin = ENV["HIVE_CLAUDE_BIN"]
+    configured = ENV["HIVE_LIVE_CLAUDE_BIN"].to_s
+    mise_path, status = Open3.capture2("mise", "which", "claude") if configured.empty?
+    executable = configured.empty? && status&.success? ? mise_path.to_s.strip : configured
+    skip "real claude binary is unavailable" unless File.file?(executable) && File.executable?(executable)
+
+    ENV["HIVE_CLAUDE_BIN"] = executable
+    Hive::AgentProfile.reset_version_cache!
+  rescue Errno::ENOENT
+    skip "mise could not resolve the real claude binary"
+  end
+
+  def teardown
+    if @previous_claude_bin
+      ENV["HIVE_CLAUDE_BIN"] = @previous_claude_bin
+    else
+      ENV.delete("HIVE_CLAUDE_BIN")
+    end
+    Hive::AgentProfile.reset_version_cache!
   end
 
   def test_brainstorm_round_one_runs_against_real_claude
@@ -43,6 +62,7 @@ class LiveClaudeSmokeTest < Minitest::Test
     with_tmp_global_config(home: ENV.fetch("HOME")) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
+        set_project_claude_mode(dir, "headless")
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "add a contributing note").call }
 
@@ -71,6 +91,7 @@ class LiveClaudeSmokeTest < Minitest::Test
     with_tmp_global_config(home: ENV.fetch("HOME")) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
+        set_project_claude_mode(dir, "headless")
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "smoke injection probe").call }
 

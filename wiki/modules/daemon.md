@@ -162,6 +162,10 @@ revalidating their generation, so a queue of N requests does not build N
 fleet-wide dependency snapshots. A temporary task-history outage fences merge
 recovery for that observation. The next scan rebuilds the candidate from current
 task metadata and revalidates its generation before taking any archive action.
+When terminal delivery acknowledgements are written during a tick, promotion
+rereads the hot attempt row before checking and archiving its immutable proof;
+the acknowledgement mutation is expected and must not look like a competing
+terminal receipt.
 
 Lease-backed `attempt_lost` outcomes bypass marker recovery entirely.
 `StaleAgentHealer#heal_attempt_losses` applies

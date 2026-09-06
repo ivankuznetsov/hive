@@ -45,28 +45,11 @@ module Hive::AgentSupport::Codex::ArtifactPolicy
 
     compatible = profile.with_overrides("min_version" => MINIMUM_VERSION)
     compatible.check_version!
-    candidates = if compatible.bin.include?(File::SEPARATOR)
-      [ File.expand_path(compatible.bin) ]
-    else
-      ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |directory|
-        File.join(directory, compatible.bin) unless directory.empty?
-      end
-    end
-    native = candidates.filter_map do |candidate|
-      next unless File.file?(candidate) && File.executable?(candidate)
-
-      File.realpath(candidate)
-    rescue Errno::ENOENT, Errno::EACCES
-      nil
-    end.uniq.reject { |path| File.binread(path, 2) == "#!" }.select do |path|
-      root = File.dirname(File.dirname(path))
-      File.basename(path) == "codex" || File.directory?(File.join(root, "codex-resources"))
-    end
-    if native.empty?
-      raise Hive::ConfigError,
-            "managed capture evidence could not resolve the Codex native runtime"
-    end
-    native.map { |path| Hive::AgentSupport::Codex::Runtime.runtime_root(path) }.uniq
+    runtime = Hive::AgentSupport::Codex::Runtime
+    executable = runtime.executable(
+      host: Hive::WorkflowPackage::RuntimePolicy::ProviderHost, profile: compatible
+    )
+    [ runtime.runtime_root(executable) ]
   rescue Hive::AgentError => error
     raise Hive::ConfigError,
           "managed capture evidence requires Codex #{MINIMUM_VERSION}+: #{error.message}"

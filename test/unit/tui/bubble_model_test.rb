@@ -712,6 +712,27 @@ class HiveTuiBubbleModelTest < Minitest::Test
            "flash row must precede the prompt strip so it is visible"
   end
 
+  def test_view_renders_new_idea_project_picker_mode
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-08-30T00:00:00Z",
+      "projects" => [ { "name" => "hive", "tasks" => [] } ]
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea_project,
+        snapshot: snap,
+        new_idea_project_cursor: 0
+      ),
+      dispatch: @dispatch,
+      update_state: EmptyUpdateState.new(nudge: nil)
+    )
+
+    out = with_zero_usage { @model.view }
+
+    assert_includes out, "Choose project for new idea"
+    assert_includes out, "hive"
+  end
+
   def test_red_status_detail_view_renders_header_panels_log_artifacts_and_action_bar
     require "tmpdir"
     Dir.mktmpdir do |project_root|
@@ -1302,6 +1323,41 @@ class HiveTuiBubbleModelTest < Minitest::Test
     Hive::Tui::Subprocess.define_singleton_method(:run_quiet!, sentinel) if sentinel
   end
 
+  def new_idea_snapshot(projects)
+    Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-08-30T00:00:00Z",
+      "projects" => projects
+    )
+  end
+
+  def new_idea_submission_cases
+    [
+      {
+        state: :disappeared,
+        snapshot: new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ]),
+        name: "ghost",
+        pattern: /"ghost".*disappeared/i
+      },
+      {
+        state: :unhealthy,
+        snapshot: new_idea_snapshot([
+          { "name" => "broken", "error" => "not_initialised", "tasks" => [] }
+        ]),
+        name: "broken",
+        pattern: /"broken".*not initialised/i
+      },
+      {
+        state: :ambiguous,
+        snapshot: new_idea_snapshot([
+          { "name" => "duplicate", "tasks" => [] },
+          { "name" => "duplicate", "error" => "not_initialised", "tasks" => [] }
+        ]),
+        name: "duplicate",
+        pattern: /"duplicate".*ambiguous/i
+      }
+    ]
+  end
+
   def with_dispatch_background_stub(stub_proc)
     sentinel = Hive::Tui::Subprocess.method(:dispatch_background)
     Hive::Tui::Subprocess.define_singleton_method(:dispatch_background, &stub_proc)
@@ -1470,6 +1526,268 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal "", @model.hive_model.new_idea_buffer
   end
 
+  def test_plain_new_idea_preflight_blocks_each_submission_case_and_preserves_work
+    new_idea_submission_cases.each do |entry|
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(
+          mode: :new_idea,
+          snapshot: entry.fetch(:snapshot),
+          new_idea_project_name: entry.fetch(:name),
+          new_idea_buffer: "draft title",
+          new_idea_cursor: 5
+        ),
+        dispatch: @dispatch
+      )
+      dispatch_count = 0
+
+      with_run_quiet_stub(->(_argv) { dispatch_count += 1; [ 0, "", "" ] }) do
+        @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+      end
+
+      assert_equal 0, dispatch_count, "#{entry.fetch(:state)} must not dispatch"
+      assert_equal :new_idea_project, @model.hive_model.mode, entry.fetch(:state).to_s
+      assert_nil @model.hive_model.new_idea_project_name, entry.fetch(:state).to_s
+      assert_nil @model.hive_model.new_idea_project_cursor, entry.fetch(:state).to_s
+      assert_equal entry.fetch(:state), @model.hive_model.new_idea_project_resolution.state
+      assert_equal "draft title", @model.hive_model.new_idea_buffer, entry.fetch(:state).to_s
+      assert_equal 5, @model.hive_model.new_idea_cursor, entry.fetch(:state).to_s
+      assert_match entry.fetch(:pattern), @model.hive_model.flash.to_s
+    end
+  end
+
+  def test_rich_new_idea_preflight_blocks_each_submission_case_before_command_construction
+    new_idea_submission_cases.each do |entry|
+      with_staged_image_attachment do |staging_dir, staging_path, attachment|
+        @model = Hive::Tui::BubbleModel.new(
+          hive_model: Hive::Tui::Model.initial.with(
+            mode: :new_idea,
+            snapshot: entry.fetch(:snapshot),
+            new_idea_project_name: entry.fetch(:name),
+            new_idea_buffer: "draft [image1]",
+            new_idea_cursor: 7,
+            new_idea_attachments: [ attachment ],
+            new_idea_staging_dir: staging_dir,
+            new_idea_staging_tmp_root: File.dirname(staging_dir),
+            new_idea_attachment_counter: 1
+          ),
+          dispatch: @dispatch
+        )
+        construction_count = 0
+
+        with_singleton_method_stub(Hive::Commands::New, :new, ->(*_args, **_kwargs) {
+          construction_count += 1
+          raise "command construction must not run"
+        }) do
+          @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+        end
+
+        assert_equal 0, construction_count, "#{entry.fetch(:state)} must block before construction"
+        assert_equal :new_idea_project, @model.hive_model.mode, entry.fetch(:state).to_s
+        assert_nil @model.hive_model.new_idea_project_name, entry.fetch(:state).to_s
+        assert_nil @model.hive_model.new_idea_project_cursor, entry.fetch(:state).to_s
+        assert_equal entry.fetch(:state), @model.hive_model.new_idea_project_resolution.state
+        assert_equal "draft [image1]", @model.hive_model.new_idea_buffer, entry.fetch(:state).to_s
+        assert_equal 7, @model.hive_model.new_idea_cursor, entry.fetch(:state).to_s
+        assert_equal [ attachment ], @model.hive_model.new_idea_attachments, entry.fetch(:state).to_s
+        assert_equal staging_dir, @model.hive_model.new_idea_staging_dir, entry.fetch(:state).to_s
+        assert File.exist?(staging_path), "#{entry.fetch(:state)} must retain staged bytes"
+        assert_match entry.fetch(:pattern), @model.hive_model.flash.to_s
+      end
+    end
+  end
+
+  def test_defensive_missing_pin_revalidates_latest_snapshot_instead_of_replaying_entry_failure
+    stale_entry = Hive::Tui::Snapshot::NewIdeaResolution.new(
+      state: :invalid_scope,
+      detail: 9
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ]),
+        new_idea_project_name: nil,
+        new_idea_project_resolution: stale_entry,
+        new_idea_buffer: "draft title"
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+
+    assert_equal :new_idea_project, @model.hive_model.mode
+    assert_equal :selection_required, @model.hive_model.new_idea_project_resolution.state
+    refute_same stale_entry, @model.hive_model.new_idea_project_resolution
+  end
+
+  def test_defensive_missing_pin_with_empty_registry_reports_no_projects
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: new_idea_snapshot([]),
+        new_idea_project_name: nil,
+        new_idea_buffer: "draft title"
+      ),
+      dispatch: @dispatch
+    )
+    dispatch_count = 0
+
+    with_run_quiet_stub(->(_argv) { dispatch_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+
+    assert_equal 0, dispatch_count
+    assert_equal :new_idea_project, @model.hive_model.mode
+    assert_equal :no_projects, @model.hive_model.new_idea_project_resolution.state
+    assert_match(/no projects/i, @model.hive_model.flash.to_s)
+    assert_equal "draft title", @model.hive_model.new_idea_buffer
+  end
+
+  def test_sole_pinned_project_removal_preserves_disappearance_and_truthful_empty_recovery
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: new_idea_snapshot([]),
+        new_idea_project_name: "alpha",
+        new_idea_buffer: "draft title"
+      ),
+      dispatch: @dispatch
+    )
+    dispatch_count = 0
+
+    with_run_quiet_stub(->(_argv) { dispatch_count += 1; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+
+    assert_equal 0, dispatch_count
+    assert_equal :disappeared, @model.hive_model.new_idea_project_resolution.state
+    assert_match(/"alpha".*disappeared.*no projects.*hive init/i, @model.hive_model.flash.to_s)
+    refute_match(/choose another project/i, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_preflight_runs_before_broken_placeholder_validation
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ]),
+        new_idea_project_name: "ghost",
+        new_idea_buffer: "draft [image1]",
+        new_idea_cursor: 7
+      ),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+
+    assert_equal :new_idea_project, @model.hive_model.mode
+    assert_match(/"ghost".*disappeared/i, @model.hive_model.flash.to_s)
+    refute_match(/broken image placeholder/i, @model.hive_model.flash.to_s)
+    assert_equal [], @model.hive_model.new_idea_broken_labels
+    assert_equal "draft [image1]", @model.hive_model.new_idea_buffer
+  end
+
+  def test_blocked_plain_retry_revalidates_explicit_choice_and_dispatches_exactly_once
+    original = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+    unhealthy = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "error" => "not_initialised", "tasks" => [] }
+    ])
+    recovered = new_idea_snapshot([
+      { "name" => "beta", "tasks" => [] },
+      { "name" => "alpha", "tasks" => [] }
+    ])
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :new_idea,
+        snapshot: original,
+        new_idea_project_name: "beta",
+        new_idea_buffer: "draft title",
+        new_idea_cursor: 5
+      ),
+      dispatch: @dispatch
+    )
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: unhealthy))
+    dispatched = []
+
+    with_run_quiet_stub(->(argv) { dispatched << argv; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+      assert_empty dispatched
+      assert_equal :new_idea_project, @model.hive_model.mode
+      assert_equal "draft title", @model.hive_model.new_idea_buffer
+
+      @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: recovered))
+      @model.update(Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN)
+      @model.update(Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+      assert_equal "beta", @model.hive_model.new_idea_project_name
+
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+
+    assert_equal [ [ "hive", "new", "beta", "draft title" ] ], dispatched
+    assert_equal :grid, @model.hive_model.mode
+    assert_equal "", @model.hive_model.new_idea_buffer
+  end
+
+  # This proves the installed-snapshot guard cannot substitute the new row at
+  # the old numeric position. The later Commands::New live name lookup remains
+  # intentionally non-atomic with this preflight and is outside this contract.
+  def test_numeric_entry_reorder_dispatches_the_original_pinned_identity
+    original = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+    reordered = new_idea_snapshot([
+      { "name" => "beta", "tasks" => [] },
+      { "name" => "alpha", "tasks" => [] }
+    ])
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: original, scope: 2),
+      dispatch: @dispatch
+    )
+
+    @model.update(Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+    @model.update(Hive::Tui::Messages::NewIdeaTextInserted.new(text: "draft title"))
+    @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: reordered))
+    dispatched = []
+    with_run_quiet_stub(->(argv) { dispatched << argv; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+
+    assert_equal [ [ "hive", "new", "beta", "draft title" ] ], dispatched
+  end
+
+  def test_invalid_numeric_entry_requires_explicit_choice_before_one_dispatch
+    original = new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ])
+    refreshed = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(snapshot: original, scope: 9),
+      dispatch: @dispatch
+    )
+    dispatched = []
+
+    with_run_quiet_stub(->(argv) { dispatched << argv; [ 0, "", "" ] }) do
+      @model.update(Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
+      assert_equal :invalid_scope, @model.hive_model.new_idea_project_resolution.state
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+      assert_empty dispatched
+
+      @model.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: refreshed))
+      assert_nil @model.hive_model.new_idea_project_cursor
+      @model.update(Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN)
+      @model.update(Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+      @model.update(Hive::Tui::Messages::NewIdeaTextInserted.new(text: "draft title"))
+      @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
+    end
+
+    assert_equal [ [ "hive", "new", "alpha", "draft title" ] ], dispatched
+  end
+
   def test_new_idea_empty_paste_with_clipboard_image_stages_file_and_inserts_placeholder
     bytes = Hive::Tui::Clipboard::PNG_SIGNATURE + "payload".b
     @model = Hive::Tui::BubbleModel.new(
@@ -1496,6 +1814,24 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert File.directory?(@model.hive_model.new_idea_staging_dir)
   ensure
     Hive::Tui::ComposerStaging.cleanup!(@model&.hive_model&.new_idea_staging_dir)
+  end
+
+  def test_default_clipboard_probe_delegates_to_clipboard_authority
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(mode: :new_idea),
+      dispatch: @dispatch
+    )
+    captured = nil
+
+    with_singleton_method_stub(Hive::Tui::Clipboard, :probe, lambda { |pasted_text:|
+      captured = pasted_text
+      clipboard_none
+    }) do
+      @model.update(Hive::Tui::Messages::RawTextInput.new(text: "", paste: true))
+    end
+
+    assert_equal "", captured
+    assert_equal "", @model.hive_model.new_idea_buffer
   end
 
   def test_empty_paste_outside_new_idea_short_circuits_without_clipboard_probe
@@ -1812,7 +2148,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, new_idea_buffer: "   "
+        mode: :new_idea, snapshot: snap,
+        new_idea_project_name: "hive", new_idea_buffer: "   "
       ),
       dispatch: @dispatch
     )
@@ -1843,7 +2180,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     )
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
-        mode: :new_idea, snapshot: snap, scope: 1, new_idea_buffer: "an idea"
+        mode: :new_idea, snapshot: snap, scope: 1,
+        new_idea_project_name: "demo", new_idea_buffer: "an idea"
       ),
       dispatch: @dispatch
     )
@@ -1938,7 +2276,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   # new_idea_project_name points to a name no longer in the snapshot
   # (project was removed between picker selection and submit). Submission
-  # must flash "is not available — choose another".
+  # must report disappearance and require another explicit choice.
   def test_new_idea_submission_with_chosen_project_missing_from_snapshot_flashes_unavailable
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-06",
@@ -1958,8 +2296,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
       @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
     end
     assert_equal 0, spawn_count, "must NOT dispatch when the chosen project disappeared from snapshot"
-    assert_match(/"ghost".*not available.*choose another project/i, @model.hive_model.flash.to_s,
-                 "flash must say the chosen name is not available and steer to a new pick")
+    assert_match(/"ghost".*disappeared.*choose another project/i, @model.hive_model.flash.to_s,
+                 "flash must name the disappeared identity and steer to a new pick")
     assert_equal :new_idea_project, @model.hive_model.mode,
                  "must bounce back to the picker so operator can re-pick without retyping"
     assert_nil @model.hive_model.new_idea_project_name,
@@ -2069,6 +2407,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
         mode: :new_idea,
+        snapshot: new_idea_snapshot([ { "name" => "hive", "tasks" => [] } ]),
+        new_idea_project_name: "hive",
         new_idea_buffer: "plain text",
         new_idea_attachments: [ attachment ]
       ),
@@ -2091,6 +2431,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial.with(
         mode: :new_idea,
+        snapshot: new_idea_snapshot([ { "name" => "hive", "tasks" => [] } ]),
+        new_idea_project_name: "hive",
         new_idea_buffer: "see [image1]",
         new_idea_attachments: [ attachment ]
       ),
@@ -2131,7 +2473,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert_equal "see [image1]", @model.hive_model.new_idea_buffer
       assert_equal [ attachment ], @model.hive_model.new_idea_attachments
       assert File.exist?(staging_path), "staged image must survive the project re-pick bounce"
-      assert_match(/"ghost".*not available.*choose another project/i, @model.hive_model.flash.to_s)
+      assert_match(/"ghost".*disappeared.*choose another project/i, @model.hive_model.flash.to_s)
     end
   end
 
@@ -2146,6 +2488,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
           mode: :new_idea,
           snapshot: snap,
           scope: 1,
+          new_idea_project_name: "broken",
           new_idea_buffer: "see [image1]",
           new_idea_cursor: 12,
           new_idea_attachments: [ attachment ],
@@ -2156,7 +2499,10 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
       @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED)
 
-      assert_equal :new_idea, @model.hive_model.mode
+      assert_equal :new_idea_project, @model.hive_model.mode
+      assert_nil @model.hive_model.new_idea_project_name
+      assert_nil @model.hive_model.new_idea_project_cursor
+      assert_equal :unhealthy, @model.hive_model.new_idea_project_resolution.state
       assert_equal "see [image1]", @model.hive_model.new_idea_buffer
       assert_equal [ attachment ], @model.hive_model.new_idea_attachments
       assert File.exist?(staging_path), "staged image must survive explicit-scope project failure"
@@ -2225,7 +2571,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # Each named class in submit_rich_new_idea's rescue list deserves a
   # direct test so a future narrowing of the list lands as a regression
   # rather than a backtrace-on-submit when the user pastes images.
-  def rich_submit_with_raise(raise_proc)
+  def rich_submit_with_raise(raise_proc, staging_tmp_root: nil)
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-13",
       "projects" => [ { "name" => "hive", "tasks" => [] } ]
@@ -2246,7 +2592,8 @@ class HiveTuiBubbleModelTest < Minitest::Test
         new_idea_buffer: "title [image1]",
         new_idea_cursor: 14,
         new_idea_attachments: [ attachment ],
-        new_idea_staging_dir: staging_dir
+        new_idea_staging_dir: staging_dir,
+        new_idea_staging_tmp_root: staging_tmp_root
       ),
       dispatch: @dispatch
     )
@@ -2322,11 +2669,46 @@ class HiveTuiBubbleModelTest < Minitest::Test
   # and ENOENT on the first write. Pin the reset here so a future
   # ensure-block edit can't silently regress it.
   def test_rich_submit_programmer_error_clears_model_staging_dir
-    rich_submit_with_raise(-> { raise NoMethodError, "undefined method `foo'" })
+    rich_submit_with_raise(
+      -> { raise NoMethodError, "undefined method `foo'" },
+      staging_tmp_root: Dir.tmpdir
+    )
     assert_nil @model.hive_model.new_idea_staging_dir,
       "programmer-error path must clear the model's staging_dir " \
       "after the ensure-block cleanup removes the disk tmpdir"
     assert_match(/internal error/, @model.hive_model.flash.to_s)
+  end
+
+  def test_rich_submit_images_only_uses_default_title_feedback
+    with_staged_image_attachment do |staging_dir, _staging_path, attachment|
+      command = Struct.new(:called) do
+        def call!
+          self.called = true
+        end
+      end.new(false)
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(
+          mode: :new_idea,
+          snapshot: new_idea_snapshot([ { "name" => "hive", "tasks" => [] } ]),
+          new_idea_project_name: "hive",
+          new_idea_buffer: "[image1]",
+          new_idea_cursor: 8,
+          new_idea_attachments: [ attachment ],
+          new_idea_staging_dir: staging_dir,
+          new_idea_staging_tmp_root: Dir.tmpdir
+        ),
+        dispatch: @dispatch
+      )
+
+      with_singleton_method_stub(Hive::Commands::New, :new, ->(*_args, **_kwargs) { command }) do
+        capture_io { @model.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED) }
+      end
+
+      assert command.called
+      assert_equal :grid, @model.hive_model.mode
+      assert_match(/titled 'task'/, @model.hive_model.flash.to_s)
+      refute File.exist?(staging_dir)
+    end
   end
 
   def test_rich_submit_logs_when_staging_cleanup_fails

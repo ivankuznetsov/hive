@@ -177,6 +177,12 @@ module Hive
       # when still in bounds.
       def apply_snapshot_arrived(model, msg)
         new_model = model.with(snapshot: msg.snapshot, last_error: nil)
+        if model.mode == :new_idea_project
+          return reconcile_snapshot_cursor(
+            apply_new_idea_project_snapshot(new_model, model),
+            model
+          )
+        end
         if model.mode == :red_status_detail && model.red_status_detail_state
           return apply_red_status_detail_snapshot(new_model, model.red_status_detail_state)
         end
@@ -193,12 +199,41 @@ module Hive
           return new_model.with(implementation_identity_detail_state: state.with(row: row))
         end
 
+        reconcile_snapshot_cursor(new_model, model)
+      end
+
+      def reconcile_snapshot_cursor(new_model, prior_model)
         visible = visible_snapshot(new_model)
         return new_model if visible.nil?
 
-        prior_slug = visible_snapshot(model)&.row_at(model.cursor)&.slug
-        followed = cursor_for_slug(visible, prior_slug, model.cursor&.first)
+        prior_slug = visible_snapshot(prior_model)&.row_at(prior_model.cursor)&.slug
+        followed = cursor_for_slug(visible, prior_slug, prior_model.cursor&.first)
         new_model.with(cursor: followed || reclamp_cursor(visible, new_model.cursor))
+      end
+
+      # Picker cursors follow the highlighted project name, never the old
+      # row number. A disappeared, unhealthy, or newly ambiguous identity
+      # becomes an explicit nil highlight and remains nil across later
+      # refreshes until the operator moves. Loading/ordinary-empty states
+      # retain their row-zero seed because no prior identity was invalidated.
+      def apply_new_idea_project_snapshot(new_model, prior_model)
+        return new_model unless new_model.snapshot
+
+        prior_cursor = prior_model.new_idea_project_cursor
+        return new_model.with(new_idea_project_cursor: nil) if prior_cursor.nil?
+
+        prior_admission = prior_model.snapshot&.new_idea_admission
+        next_projects = new_model.snapshot.new_idea_admission.projects
+        if prior_admission.nil? || prior_admission.projects.empty?
+          cursor = next_projects.empty? ? prior_cursor : 0
+          return new_model.with(new_idea_project_cursor: cursor)
+        end
+
+        prior_project = prior_admission.projects[prior_cursor]
+        return new_model.with(new_idea_project_cursor: nil) unless prior_project
+
+        cursor = next_projects.index { |project| project.name == prior_project.name }
+        new_model.with(new_idea_project_cursor: cursor)
       end
 
       def apply_red_status_detail_snapshot(model, state)
@@ -516,12 +551,9 @@ module Hive
       # plus a flash payload.
 
       def apply_open_new_idea_prompt(model)
-        mode = model.scope.zero? ? :new_idea_project : :new_idea
-
-        model.with(
-          mode: mode,
+        fresh = model.with(
           new_idea_project_name: nil,
-          new_idea_project_cursor: 0,
+          new_idea_project_resolution: nil,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -530,13 +562,50 @@ module Hive
           new_idea_attachment_counter: 0,
           new_idea_broken_labels: []
         )
+
+        if model.scope.zero?
+          return fresh.with(mode: :new_idea_project, new_idea_project_cursor: 0)
+        end
+
+        unless model.snapshot
+          return fresh.with(
+            mode: :new_idea_project,
+            new_idea_project_cursor: nil,
+            flash: "waiting for snapshot — choose a project when it loads",
+            flash_set_at: Time.now
+          )
+        end
+
+        resolution = model.snapshot.resolve_new_idea_entry(scope: model.scope)
+        if resolution.available?
+          return fresh.with(
+            mode: :new_idea,
+            new_idea_project_name: resolution.name,
+            new_idea_project_cursor: 0
+          )
+        end
+
+        fresh.with(
+          mode: :new_idea_project,
+          new_idea_project_cursor: nil,
+          new_idea_project_resolution: resolution,
+          flash: new_idea_resolution_flash(
+            resolution,
+            admission: model.snapshot.new_idea_admission
+          ),
+          flash_set_at: Time.now
+        )
       end
 
       def apply_new_idea_project_cursor_down(model)
         choices = new_idea_project_choices(model)
         return model if choices.empty?
 
-        cursor = [ model.new_idea_project_cursor.to_i + 1, choices.size - 1 ].min
+        cursor = if model.new_idea_project_cursor.nil?
+          0
+        else
+          [ model.new_idea_project_cursor + 1, choices.size - 1 ].min
+        end
         model.with(new_idea_project_cursor: cursor)
       end
 
@@ -544,7 +613,11 @@ module Hive
         choices = new_idea_project_choices(model)
         return model if choices.empty?
 
-        cursor = [ model.new_idea_project_cursor.to_i - 1, 0 ].max
+        cursor = if model.new_idea_project_cursor.nil?
+          choices.size - 1
+        else
+          [ model.new_idea_project_cursor - 1, 0 ].max
+        end
         model.with(new_idea_project_cursor: cursor)
       end
 
@@ -559,16 +632,28 @@ module Hive
 
         choices = new_idea_project_choices(model)
         if choices.empty?
-          return model.with(flash: "no healthy projects — Esc cancels", flash_set_at: Time.now)
+          return model.with(
+            flash: new_idea_admission_flash(model.snapshot.new_idea_admission),
+            flash_set_at: Time.now
+          )
         end
 
-        project = choices[model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)]
-        return model if project.nil?
+        cursor = model.new_idea_project_cursor
+        unless cursor.is_a?(Integer) && cursor.between?(0, choices.size - 1)
+          return model.with(
+            flash: "choose a project first — use j/k",
+            flash_set_at: Time.now
+          )
+        end
+        project = choices[cursor]
 
         model.with(
           mode: :new_idea,
           new_idea_project_name: project.name,
-          new_idea_project_cursor: model.new_idea_project_cursor.to_i.clamp(0, choices.size - 1)
+          new_idea_project_cursor: cursor,
+          new_idea_project_resolution: nil,
+          flash: nil,
+          flash_set_at: nil
         )
       end
 
@@ -666,6 +751,7 @@ module Hive
           mode: :grid,
           new_idea_project_name: nil,
           new_idea_project_cursor: 0,
+          new_idea_project_resolution: nil,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -966,7 +1052,64 @@ end
       end
 
       def new_idea_project_choices(model)
-        Array(model.snapshot&.projects).select { |project| project.error.nil? }
+        model.snapshot&.new_idea_admission&.projects || []
+      end
+
+      def new_idea_resolution_flash(resolution, admission: nil)
+        case resolution.state
+        when :available
+          nil
+        when :unhealthy
+          error = resolution.detail.to_s.tr("_", " ")
+          if admission&.projects&.empty?
+            return "project #{resolution.name.inspect} is #{error} — " \
+              "#{new_idea_admission_flash(admission)}"
+          end
+          "project #{resolution.name.inspect} is #{error} — choose another project or re-init it"
+        when :disappeared
+          if admission&.projects&.empty?
+            return "project #{resolution.name.inspect} disappeared — " \
+              "#{new_idea_admission_flash(admission)}"
+          end
+          "project #{resolution.name.inspect} disappeared — choose another project"
+        when :ambiguous
+          "project #{resolution.name.inspect} is ambiguous — disambiguate duplicate registry entries"
+        when :invalid_scope
+          "project scope #{resolution.detail.inspect} is unavailable — choose a project"
+        when :selection_required
+          return new_idea_admission_flash(admission) if admission&.projects&.empty?
+
+          "choose a project for the new idea"
+        when :no_projects
+          "no projects — run `hive init <path>` first"
+        else
+          raise ArgumentError, "unknown new-idea resolution state: #{resolution.state.inspect}"
+        end
+      end
+
+      def new_idea_admission_flash(admission)
+        case admission.state
+        when :available
+          "choose a project for the new idea"
+        when :ambiguous
+          names = admission.ambiguous_names.map(&:inspect).join(", ")
+          "duplicate project name #{names} — disambiguate the registry or use `hive forget <name>`"
+        when :invalid_identity
+          "project registry contains entries without names — repair or remove invalid registry entries"
+        when :unhealthy
+          case admission.recovery
+          when :prune_missing
+            "no healthy projects — run `hive prune` to drop missing entries"
+          when :repair_projects
+            "no healthy projects — re-init broken projects or use `hive forget <name>`"
+          else
+            raise ArgumentError, "unknown new-idea recovery kind: #{admission.recovery.inspect}"
+          end
+        when :no_projects
+          "no projects — run `hive init <path>` first"
+        else
+          raise ArgumentError, "unknown new-idea admission state: #{admission.state.inspect}"
+        end
       end
 
       # `n == 0` clears scope (all projects). Out-of-range still flips

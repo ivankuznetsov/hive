@@ -2390,11 +2390,9 @@ module Hive
       #   so the success `puts` lines do NOT corrupt the alt-screen
       #   render.
       #
-      # Project is resolved from either the explicit chooser target
-      # (`new_idea_project_name`, set when `n` starts from ★ All
-      # projects) or from a concrete project scope. Empty title or
-      # no-projects-registered states flash an
-      # error and return to :grid without spawning a child.
+      # Project is always the exact identity pinned on composer entry or
+      # by the picker. Numeric scope is entry-only and never participates
+      # in submission revalidation.
       #
       # Staging cleanup policy: every exit path either runs
       # `cleanup_new_idea_staging` before the model resets, or
@@ -2403,9 +2401,18 @@ module Hive
       # / `submit_rich_new_idea` (rescue + ensure) call-sites for the
       # branch-by-branch contract.
       def submit_new_idea
+        # Defensive idempotency for directly delivered/replayed messages.
+        # KeyMap emits submit only in :new_idea, but a late duplicate after a
+        # successful reset must remain a no-op instead of reopening the picker.
+        return [ @hive_model, nil ] unless @hive_model.mode == :new_idea
+
+        resolution = resolve_new_idea_project
+        return blocked_new_idea_submission(resolution) unless resolution.available?
+
+        project = resolution.name
         buffer = @hive_model.new_idea_buffer.to_s
         if rich_new_idea_buffer?(buffer)
-          return submit_rich_new_idea(buffer)
+          return submit_rich_new_idea(buffer, project: project)
         end
 
         title = buffer.strip
@@ -2423,36 +2430,6 @@ module Hive
           ]
         end
         @hive_model = @hive_model.with(new_idea_broken_labels: []) unless @hive_model.new_idea_broken_labels.empty?
-
-        project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
-        if project.nil?
-          flash = new_idea_resolution_flash(@hive_model)
-          # If the operator had picked a concrete project via the picker
-          # and it later went stale (snapshot poll dropped it or marked
-          # it unhealthy), bounce back to the picker with the typed
-          # buffer preserved — the flash advises "choose another
-          # project", and Esc still cleanly discards everything. The
-          # plain "no-projects" / "no scope" cases (no chosen name in
-          # play) fall through to `reset_to_grid_with_flash` because
-          # there's nothing to re-pick.
-          chosen = @hive_model.new_idea_project_name.to_s
-          if !chosen.empty? && @hive_model.scope.zero?
-            return [
-              @hive_model.with(
-                mode: :new_idea_project,
-                new_idea_project_name: nil,
-                flash: flash,
-                flash_set_at: Time.now
-              ),
-              nil
-            ]
-          end
-          # `reset_to_grid_with_flash` clears `new_idea_staging_dir`
-          # on the model; clean the on-disk dir first so orphaned
-          # files don't leak after we drop the reference.
-          cleanup_new_idea_staging unless @hive_model.new_idea_staging_dir.to_s.empty?
-          return [ reset_to_grid_with_flash(flash), nil ]
-        end
 
         # argv[0] must be the executable name. `Subprocess.run_quiet!`
         # invokes Open3.popen3(*cmd) directly, so a missing "hive" prefix
@@ -2498,7 +2475,7 @@ module Hive
         @hive_model.new_idea_attachments.any? || extract_image_labels(buffer).any?
       end
 
-      def submit_rich_new_idea(buffer)
+      def submit_rich_new_idea(buffer, project:)
         # Staging-cleanup policy lives in this local flag so the
         # ensure-block has one source of truth: the happy path AND
         # any unexpected (programmer-error) exception both clean up;
@@ -2524,29 +2501,6 @@ module Hive
           ]
         end
         @hive_model = @hive_model.with(new_idea_broken_labels: []) unless @hive_model.new_idea_broken_labels.empty?
-
-        project = Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(@hive_model)
-        if project.nil?
-          preserve_staging = true
-          flash = new_idea_resolution_flash(@hive_model)
-          # Mirror the plain-text path: if the operator's picked project
-          # went stale mid-compose, bounce back to the picker so they
-          # can re-pick without losing the staged images. The flash
-          # tells them what happened; Esc still cleans everything.
-          chosen = @hive_model.new_idea_project_name.to_s
-          if !chosen.empty? && @hive_model.scope.zero?
-            return [
-              @hive_model.with(
-                mode: :new_idea_project,
-                new_idea_project_name: nil,
-                flash: flash,
-                flash_set_at: Time.now
-              ),
-              nil
-            ]
-          end
-          return [ @hive_model.with(flash: flash, flash_set_at: Time.now), nil ]
-        end
 
         title = derive_rich_new_idea_title(buffer)
         body = render_rich_new_idea_body(buffer)
@@ -2763,6 +2717,7 @@ module Hive
           mode: :grid,
           new_idea_project_name: nil,
           new_idea_project_cursor: 0,
+          new_idea_project_resolution: nil,
           new_idea_buffer: "",
           new_idea_cursor: 0,
           new_idea_attachments: [],
@@ -2775,52 +2730,36 @@ module Hive
         )
       end
 
-      # Build a flash for the case where new-idea resolution returned
-      # nil. Distinguishes five reasons:
-      # - no registered projects at all → "run `hive init <path>`"
-      # - chosen project (via picker) now unhealthy → name the error +
-      #   "choose another project" (caller bounces back to picker)
-      # - chosen project name no longer present in snapshot → "is not
-      #   available" + "choose another project" (caller bounces back)
-      # - explicit scope onto an unhealthy project → name the error
-      # - scope=0 (★ All) but every registered project is unhealthy
-      # so the operator sees the actual cause rather than a generic
-      # "no projects" message that doesn't match what they see in the
-      # left pane (which shows the project, just broken).
-      def new_idea_resolution_flash(model)
-        snap = model.snapshot
-        return "no projects — run `hive init <path>` first" if snap.nil? || snap.projects.empty?
+      def resolve_new_idea_project
+        snapshot = @hive_model.snapshot
+        return Hive::Tui::Snapshot::NewIdeaResolution.new(state: :no_projects) unless snapshot
 
-        chosen = model.new_idea_project_name.to_s
-        unless chosen.empty?
-          project = snap.projects.find { |p| p.name == chosen }
-          if project&.error
-            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — choose another project or re-init it"
-          end
-          return "project #{chosen.inspect} is not available — choose another project" if project.nil?
-        end
+        # A missing pin is defensive-only: operator transitions enter the
+        # composer with an exact non-empty name. Still ask the latest snapshot
+        # to classify it; never replay an older entry-time resolution.
+        snapshot.resolve_new_idea_project(name: @hive_model.new_idea_project_name)
+      end
 
-        if model.scope.between?(1, snap.projects.size)
-          project = snap.projects[model.scope - 1]
-          if project.error
-            return "project #{project.name.inspect} is #{project.error.gsub('_', ' ')} — re-init, `hive forget #{project.name}`, or `hive prune`"
-          end
-        end
+      # Shared fail-closed transition for plain and rich submission. It
+      # clears only target intent, retains every composition/staging field,
+      # and records the typed reason until an explicit picker selection.
+      def blocked_new_idea_submission(resolution)
+        [
+          @hive_model.with(
+            mode: :new_idea_project,
+            new_idea_project_name: nil,
+            new_idea_project_cursor: nil,
+            new_idea_project_resolution: resolution,
+            flash: new_idea_resolution_flash(resolution),
+            flash_set_at: Time.now
+          ),
+          nil
+        ]
+      end
 
-        # scope=0 with all-unhealthy projects, or scope out-of-range.
-        # The recovery hint depends on the actual error mix: `hive prune`
-        # only works for `missing_project_path` rows, so pointing at it
-        # when every broken project is `not_initialised` would steer the
-        # operator at a refusal. Branch on the error set so the suggested
-        # action matches what's cleanup-eligible.
-        broken = snap.projects.select(&:error)
-        return "no projects — run `hive init <path>` first" if broken.size != snap.projects.size
-
-        if broken.all? { |p| p.error == "missing_project_path" }
-          "all registered projects are unhealthy — run `hive prune` to drop missing entries"
-        else
-          "all registered projects are unhealthy — re-init the broken ones or `hive forget` per-name"
-        end
+      def new_idea_resolution_flash(resolution)
+        admission = @hive_model.snapshot&.new_idea_admission
+        Hive::Tui::Update.new_idea_resolution_flash(resolution, admission: admission)
       end
 
       def flashed(text)

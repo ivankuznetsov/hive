@@ -72,6 +72,63 @@ class TuiNewIdeaAttachmentsTest < Minitest::Test
     end
   end
 
+  def test_blocked_rich_submit_creates_no_task_then_explicit_retry_creates_one
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        initialize_project(dir)
+        project = File.basename(dir)
+        staging_dir = Dir.mktmpdir("hive-tui-composer-test-")
+        staging_path = File.join(staging_dir, "image-1.png")
+        File.binwrite(staging_path, "image".b)
+        attachment = Hive::Tui::Model::Attachment.new(
+          label: "image1",
+          staging_path: staging_path,
+          ext: "png"
+        )
+        bubble = model_for(
+          project: project,
+          buffer: "draft [image1]",
+          attachments: [ attachment ],
+          staging_dir: staging_dir
+        )
+        unhealthy = Hive::Tui::Snapshot.from_payload(
+          "generated_at" => "2026-08-30T00:00:01Z",
+          "projects" => [
+            { "name" => project, "error" => "not_initialised", "tasks" => [] }
+          ]
+        )
+        inbox = File.join(dir, ".hive-state", "stages", "1-inbox")
+
+        bubble.update(Hive::Tui::Messages::SnapshotArrived.new(snapshot: unhealthy))
+        capture_io { bubble.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED) }
+
+        assert_empty Dir[File.join(inbox, "*")].select { |path| File.directory?(path) }
+        assert_equal :new_idea_project, bubble.hive_model.mode
+        assert_equal "draft [image1]", bubble.hive_model.new_idea_buffer
+        assert_equal [ attachment ], bubble.hive_model.new_idea_attachments
+        assert_equal staging_dir, bubble.hive_model.new_idea_staging_dir
+        assert File.exist?(staging_path), "blocked preflight must retain staged bytes"
+
+        bubble.update(
+          Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_for(project))
+        )
+        assert_nil bubble.hive_model.new_idea_project_cursor
+        bubble.update(Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN)
+        bubble.update(Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
+        capture_io { bubble.update(Hive::Tui::Messages::NEW_IDEA_SUBMITTED) }
+
+        tasks = Dir[File.join(inbox, "*")].select { |path| File.directory?(path) }
+        assert_equal 1, tasks.size
+        assert_equal :grid, bubble.hive_model.mode
+        assert_equal [], bubble.hive_model.new_idea_attachments
+        assert_nil bubble.hive_model.new_idea_staging_dir
+        refute File.exist?(staging_dir), "successful retry must clean staging"
+      ensure
+        Hive::Tui::ComposerStaging.cleanup!(staging_dir) if staging_dir && File.exist?(staging_dir)
+      end
+    end
+  end
+
   def test_placeholder_only_title_falls_back_to_task_slug
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

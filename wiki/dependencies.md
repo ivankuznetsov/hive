@@ -106,6 +106,14 @@ dying in seconds rather than as a test failure.
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sequel` | `~> 5.107` (locked 5.107.0) | Sequel Core datasets, transactions, and IntegerMigrator for the machine-local runtime control-plane SQLite database. Hive uses no Sequel models, callbacks, Active Record integration, or generic backend layer. |
 | `sqlite3` | `~> 2.0` (locked 2.9.6) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.9.6 or newer to avoid GHSA-mwm8-39rw-8826. |
+
+The benchmark runner is built from an exact Hive source archive. Its sealed
+root-only control bundle builds and installs the archive's
+`components/agent-cli-runtime` gem before installing `hive-cli`, then asserts
+that provider-error extraction and the OpenCode permission compiler load. This
+prevents RubyGems from satisfying Hive's compatible `~> 0.2.0` constraint with
+an older published patch while the candidate-facing bundle remains free of
+Hive and agent-runtime source.
 | `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 

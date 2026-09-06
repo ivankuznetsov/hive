@@ -1,7 +1,7 @@
 ---
 title: Hive::Bot
 type: module
-source: lib/hive/bot/
+source: lib/hive/bot/, lib/hive/status_envelope.rb
 created: 2026-05-14
 updated: 2026-08-29
 tags: [bot, telegram, module, mobile]
@@ -138,8 +138,8 @@ Legacy stage-directory warnings are proactive as project-level notifications. `S
 
 `StatusWatcher#fetch` is forward-tolerant of a newer `hive-status`
 `schema_version` than this long-running bot was built for — the shared
-mechanism is documented under [[modules/daemon]] § *Forward-tolerant
-schema-version skew*. Bot-specific behaviour (fix-forward on #416):
+`Hive::StatusEnvelope` centralizes the bot's strict envelope validation and
+version-skew guidance. Bot-specific behaviour (fix-forward on #416):
 
 - On a `:newer` best-effort SUCCESS the `Result` carries a non-fatal
   `warning`. `Supervisor#execute_dispatch` prepends a one-line plain-text
@@ -151,7 +151,7 @@ schema-version skew*. Bot-specific behaviour (fix-forward on #416):
   `:poll_schema_skew` event (not the overloaded `:poll_failure`), so it
   isn't conflated with real fetch failures. `:poll_schema_skew` is in
   `Hive::Bot::Logger::EVENTS` and the `hive-bot-log.v3` schema enum.
-- `validate_envelope!` (shape / `ok=false`) runs OUTSIDE the best-effort
+- `Hive::StatusEnvelope#validate!` (shape / `ok=false`) runs OUTSIDE the best-effort
   extraction rescue: a `:newer` envelope that ALSO has `ok=false` surfaces
   its real `envelope ok=false: <reason>`, never the skew hint. A throw
   inside extraction on a `:newer` doc degrades to the restart message but

@@ -192,6 +192,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
     # failures. Schema-VERSION skew is handled tolerantly and is covered
     # by the dedicated skew tests below, not here.
     cases = {
+      "top-level array" => [ [], /missing schema=hive-status/ ],
       "wrong schema" => [ { "schema" => "other", "ok" => true, "schema_version" => expected_version }, /missing schema/ ],
       "not ok" => [ { "schema" => "hive-status", "ok" => false, "schema_version" => expected_version,
                        "message" => "registry unavailable" }, /envelope ok=false: registry unavailable/ ]

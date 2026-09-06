@@ -400,3 +400,5 @@ module Hive
   autoload :DiagnosticEvidence, File.expand_path("hive/diagnostic_evidence.rb", __dir__)
   autoload :DiagnosticHelpers, File.expand_path("hive/diagnostic_helpers.rb", __dir__)
 end
+
+require_relative "hive/daily_digest"

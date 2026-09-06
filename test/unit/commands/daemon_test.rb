@@ -111,12 +111,32 @@ class HiveCommandsDaemonTest < Minitest::Test
     }
   end
 
+  def default_daily_digest_config
+    {
+      "enabled" => false,
+      "time_zone" => nil,
+      "coverage_started_at" => nil,
+      "initial_membership" => nil,
+      "first_interval" => nil,
+      "materialization_interval_sec" => 300,
+      "freshness_budget_sec" => 900,
+      "telegram" => { "enabled" => false, "hour" => 9 }
+    }
+  end
+
   def with_global_start_config(config, update_config: default_update_config,
-                               answer_digest_config: default_answer_digest_config)
+                               answer_digest_config: default_answer_digest_config,
+                               daily_digest_config: default_daily_digest_config,
+                               daily_digest_loader: nil)
+    daily_digest_loader ||= -> { daily_digest_config }
     with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
       with_replaced_singleton_method(Hive::Config, :load_global_update, -> { update_config }) do
         with_replaced_singleton_method(Hive::Config, :load_global_answer_digest_block, -> { answer_digest_config }) do
-          yield
+          with_replaced_singleton_method(
+            Hive::Config, :load_global_daily_digest, daily_digest_loader
+          ) do
+            yield
+          end
         end
       end
     end
@@ -131,11 +151,13 @@ class HiveCommandsDaemonTest < Minitest::Test
 
     update_config = default_update_config
     answer_digest_config = default_answer_digest_config
+    daily_digest_config = default_daily_digest_config
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
       with_global_start_config(
         config,
         update_config: update_config,
-        answer_digest_config: answer_digest_config
+        answer_digest_config: answer_digest_config,
+        daily_digest_config: daily_digest_config
       ) do
         with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
           captured = kwargs
@@ -151,12 +173,21 @@ class HiveCommandsDaemonTest < Minitest::Test
       {
         "daemon" => config,
         "update" => update_config,
-        "answer_digest" => answer_digest_config
+        "answer_digest" => answer_digest_config,
+        "daily_digest" => daily_digest_config
       },
       captured.fetch(:config)
     )
     assert_equal true, captured.fetch(:dry_run)
     assert_instance_of Hive::Daemon::AnswerDigestScheduler, captured.fetch(:answer_digest_scheduler)
+    assert_instance_of(
+      Hive::Daemon::DailyDigestCloseScheduler,
+      captured.fetch(:daily_digest_close_scheduler)
+    )
+    assert_instance_of(
+      Hive::Daemon::DailyDigestDeliveryScheduler,
+      captured.fetch(:daily_digest_delivery_scheduler)
+    )
     attempts_api = captured.fetch(:attempt_dispatcher)
     assert_instance_of Hive::Attempts::API, attempts_api
     assert_equal(
@@ -317,6 +348,76 @@ class HiveCommandsDaemonTest < Minitest::Test
                  "answer_digest.enabled must be forwarded into the scheduler, not just instantiated"
     assert_equal 14, scheduler.instance_variable_get(:@hour),
                  "answer_digest.hour must be forwarded into the scheduler"
+  end
+
+  def test_start_daemon_forwards_daily_digest_scheduler_configuration
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+    captured = nil
+    daily = default_daily_digest_config.merge(
+      "enabled" => true,
+      "time_zone" => "Europe/London",
+      "coverage_started_at" => "2026-08-30T00:00:00Z",
+      "initial_membership" => [],
+      "first_interval" => {
+        "local_date" => "2026-08-30",
+        "time_zone" => "Europe/London",
+        "starts_at" => "2026-08-29T23:00:00Z",
+        "ends_at" => "2026-08-30T23:00:00Z",
+        "boundary_kind" => "calendar"
+      },
+      "materialization_interval_sec" => 75,
+      "telegram" => { "enabled" => true, "hour" => 14 }
+    )
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+      with_global_start_config(daemon_config, daily_digest_config: daily) do
+        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+          captured = kwargs
+          dispatcher
+        }) do
+          command.call
+        end
+      end
+    end
+
+    close = captured.fetch(:daily_digest_close_scheduler)
+    delivery = captured.fetch(:daily_digest_delivery_scheduler)
+    assert_equal true, close.instance_variable_get(:@enabled)
+    assert_equal 75, close.instance_variable_get(:@interval_sec)
+    assert_equal true, delivery.instance_variable_get(:@enabled)
+    assert_equal 14, delivery.instance_variable_get(:@hour)
+  end
+
+  def test_start_daemon_isolates_invalid_daily_digest_configuration
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+    captured = nil
+    loader = lambda do
+      raise Hive::ConfigError, "daily_digest requires an initialized coverage frontier"
+    end
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+      with_global_start_config(daemon_config, daily_digest_loader: loader) do
+        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+          captured = kwargs
+          dispatcher
+        }) do
+          command.call
+        end
+      end
+    end
+
+    assert_equal [ :run_forever ], dispatcher.calls,
+                 "digest initialization failure must not stop unrelated daemon automation"
+    assert_equal false,
+                 captured.fetch(:daily_digest_close_scheduler).instance_variable_get(:@enabled)
+    assert_equal false,
+                 captured.fetch(:daily_digest_delivery_scheduler).instance_variable_get(:@enabled)
+    events = File.readlines(daemon_config.fetch("log_file"), chomp: true).map { |line| JSON.parse(line) }
+    diagnostic = events.find { |event| event["event"] == "daily_digest_configuration_disabled" }
+    refute_nil diagnostic
+    assert_includes diagnostic.fetch("message"), "coverage frontier"
   end
 
   def test_start_daemon_invokes_reexec_when_dispatcher_signals_drift

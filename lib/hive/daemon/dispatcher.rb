@@ -21,6 +21,9 @@ require "hive/runtime_control_plane/dispatch_repository"
 
 require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
+require "hive/daemon/daily_digest_close_scheduler"
+require "hive/daemon/daily_digest_delivery_scheduler"
+require "hive/daily_digest/hold_observer"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/patrol_fix_admission_scheduler"
@@ -82,13 +85,16 @@ module Hive
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
                      patrol_scheduler: nil, refactor_patrol_scheduler: nil,
                      patrol_fix_admission_scheduler: nil,
-                     patrol_arbiter: nil, answer_digest_scheduler: nil, dry_run: false,
+                     patrol_arbiter: nil, answer_digest_scheduler: nil,
+                     daily_digest_close_scheduler: nil,
+                     daily_digest_delivery_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      dispatch_repository: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      operational_snapshot: nil, recovery_coordinator: nil,
+                     digest_hold_observer: Hive::DailyDigest::HoldObserver.new,
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
                      runtime_ready_callback: nil,
@@ -105,6 +111,9 @@ module Hive
         @patrol_fix_admission_scheduler = patrol_fix_admission_scheduler
         @patrol_arbiter = patrol_arbiter
         @answer_digest_scheduler = answer_digest_scheduler
+        @daily_digest_close_scheduler = daily_digest_close_scheduler
+        @daily_digest_delivery_scheduler = daily_digest_delivery_scheduler
+        @digest_hold_observer = digest_hold_observer
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
         @attempt_reconciler = attempt_reconciler
@@ -136,6 +145,7 @@ module Hive
 
         @daemon_cfg = config["daemon"] || {}
         @update_cfg = config["update"] || Hive::Config::DEFAULTS["update"]
+        @daily_digest_cfg = config["daily_digest"] || Hive::Config::DEFAULTS["daily_digest"]
         @update_check_enabled = @update_cfg.fetch("check", true)
         # NOTE: `update.auto` is intentionally NOT read here yet — bash
         # auto-update (U7) is the only consumer and is deferred, so every
@@ -317,6 +327,12 @@ module Hive
         # + catch-up-cap `write_state`), and an unguarded SystemCallError
         # (ENOSPC/EROFS/EACCES) would otherwise crash the whole tick and
         # trip the unit's restart-loop cap.
+        run_digest_scheduler_tick(
+          @daily_digest_close_scheduler, "daily_digest_close_scheduler.tick", now: now
+        )
+        run_digest_scheduler_tick(
+          @daily_digest_delivery_scheduler, "daily_digest_delivery_scheduler.tick", now: now
+        )
         run_digest_scheduler_tick(@answer_digest_scheduler, "answer_digest_scheduler.tick", now: now)
 
         # 2. Fetch status
@@ -990,7 +1006,8 @@ module Hive
           date: entry.slug,
           exit_code: entry.exit_code,
           envelope: entry.json_envelope,
-          now: now
+          now: now,
+          stage: entry.stage
         )
         @digest_scheduler_fatal_signatures.delete(label)
       rescue StandardError => e
@@ -1008,7 +1025,7 @@ module Hive
 
         scheduler.tick(now: now)&.each do |digest_dispatch|
           unless admission_open?
-            scheduler.cancel(date: digest_dispatch[:slug])
+            scheduler.cancel(date: digest_dispatch[:slug], stage: digest_dispatch[:stage])
             next
           end
 
@@ -1906,6 +1923,9 @@ module Hive
       end
 
       def observe_operational_disposition(row, decision:, owner:, reason:, **details)
+        @digest_hold_observer&.record(
+          row, decision: decision, owner: owner, reason: reason, **details
+        )
         return unless @operational_snapshot
 
         @operational_snapshot.observe(
@@ -2358,7 +2378,7 @@ module Hive
         action = global_digest_action(stage)
         scheduler = global_digest_scheduler(stage)
         unless admission_open?
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return :shutdown
         end
 
@@ -2366,22 +2386,25 @@ module Hive
         # holds a task slot or pushes the daemon past max_concurrent_runs,
         # and (b) can't double-dispatch the same date while a prior digest
         # child is still tracked — e.g. a restart that lost the scheduler's
-        # in-memory pending marker. Tagged `kind: :digest`, off the task
-        # caps. A gated dispatch releases the scheduler's pending marker so
-        # the next eligible tick re-evaluates it.
-        gate = digest_dispatch_gate(project: project, date: date, now: now)
+        # in-memory pending marker. Each scheduler has a distinct controller
+        # identity and runs off the task caps, so a wedged delivery cannot
+        # suppress refresh/close or the pending-answer digest. A gated
+        # dispatch releases the matching scheduler's pending marker so the
+        # next eligible tick re-evaluates it.
+        gate = digest_dispatch_gate(project: project, date: date, stage: stage, now: now)
         unless gate == :ok
           @logger.event(:blocked, project: project, slug: date,
                                   stage: stage,
                                   action: action, reason: gate.to_s)
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return
         end
         unless admission_open?
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return :shutdown
         end
 
+        capacity_identity = digest_capacity_identity(stage)
         result = dispatch_command(
           digest_dispatch[:command],
           project: project,
@@ -2391,9 +2414,9 @@ module Hive
           state_file_path: digest_dispatch[:state_file_path],
           now: now,
           trigger: action,
-          kind: :digest
+          kind: capacity_identity
         )
-        scheduler&.cancel(date: date) if result == :shutdown
+        scheduler&.cancel(date: date, stage: stage) if result == :shutdown
         result
       rescue StandardError => e
         # If dispatch_command already spawned + recorded the child before
@@ -2401,17 +2424,18 @@ module Hive
         # `complete` here too would record a SECOND failure for one logical
         # dispatch, double-incrementing the backoff count. Only complete when
         # no child is in flight for this date (spawn failed before recording).
-        if date && !@controller.running_task?(project: project, slug: date)
-          scheduler&.complete(date: date, exit_code: 1, envelope: nil, now: now)
+        identity = stage && digest_capacity_identity(stage)
+        if date && (!identity || @controller.can_dispatch_digest?(identity: identity, now: now) == :ok)
+          scheduler&.complete(
+            date: date, exit_code: 1, envelope: nil, now: now, stage: stage
+          )
         end
         @logger.event(:fatal, message: "#{action} dispatch error: #{e.class}: #{e.message}",
                               project: digest_dispatch[:project], slug: date)
       end
 
-      def digest_dispatch_gate(project:, date:, now:)
-        return :in_flight if @controller.running_task?(project: project, slug: date)
-
-        @controller.can_dispatch_digest?(now: now)
+      def digest_dispatch_gate(project:, date:, stage:, now:)
+        @controller.can_dispatch_digest?(identity: digest_capacity_identity(stage), now: now)
       end
 
       # Global-digest pseudo-stages mapped to their action label. Both
@@ -2420,7 +2444,10 @@ module Hive
       # maps a stage to the per-instance scheduler ivar, which can't live in a
       # frozen constant.
       GLOBAL_DIGEST_ACTIONS = {
-        Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE => "answer_digest"
+        Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE => "answer_digest",
+        Hive::Daemon::DailyDigestCloseScheduler::REFRESH_STAGE => "daily_digest_refresh",
+        Hive::Daemon::DailyDigestCloseScheduler::STAGE => "daily_digest_close",
+        Hive::Daemon::DailyDigestDeliveryScheduler::STAGE => "daily_digest_delivery"
       }.freeze
 
       def global_digest_stage?(stage)
@@ -2440,7 +2467,16 @@ module Hive
         case stage
         when Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
           @answer_digest_scheduler
+        when Hive::Daemon::DailyDigestCloseScheduler::REFRESH_STAGE,
+             Hive::Daemon::DailyDigestCloseScheduler::STAGE
+          @daily_digest_close_scheduler
+        when Hive::Daemon::DailyDigestDeliveryScheduler::STAGE
+          @daily_digest_delivery_scheduler
         end
+      end
+
+      def digest_capacity_identity(stage)
+        GLOBAL_DIGEST_ACTIONS.fetch(stage).to_sym
       end
 
       def global_digest_action(stage)
@@ -3978,6 +4014,15 @@ module Hive
         daemon_cfg = Hive::Config.load_global_daemon
         update_cfg = Hive::Config.load_global_update
         answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        daily_digest_cfg = begin
+          Hive::Config.load_global_daily_digest
+        rescue Hive::ConfigError => error
+          @logger.event(
+            :daily_digest_configuration_disabled,
+            error_class: error.class.name, message: error.message
+          )
+          Hive::Config::DEFAULTS.fetch("daily_digest")
+        end
         stale_agent_healer = StaleAgentHealer.new(
           controller: @controller,
           logger: @logger,
@@ -3997,10 +4042,12 @@ module Hive
         @daemon_cfg = daemon_cfg
         @update_cfg = update_cfg
         @answer_digest_cfg = answer_digest_cfg
+        @daily_digest_cfg = daily_digest_cfg
         @config = {
           "daemon" => @daemon_cfg,
           "update" => @update_cfg,
-          "answer_digest" => @answer_digest_cfg
+          "answer_digest" => @answer_digest_cfg,
+          "daily_digest" => @daily_digest_cfg
         }
         @update_check_enabled = @update_cfg.fetch("check", true)
         @controller.update_limits(
@@ -4023,6 +4070,18 @@ module Hive
             "hour", Hive::Daemon::AnswerDigestScheduler::DEFAULT_HOUR
           )
         )
+        @daily_digest_close_scheduler&.reconfigure(
+          enabled: @daily_digest_cfg.fetch("enabled", false),
+          interval_sec: @daily_digest_cfg.fetch("materialization_interval_sec", 300)
+        )
+        telegram_cfg = @daily_digest_cfg.fetch("telegram", {})
+        @daily_digest_delivery_scheduler&.reconfigure(
+          enabled: @daily_digest_cfg.fetch("enabled", false) &&
+            telegram_cfg.fetch("enabled", false),
+          hour: telegram_cfg.fetch(
+            "hour", Hive::Daemon::DailyDigestDeliveryScheduler::DEFAULT_HOUR
+          )
+        )
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
@@ -4038,6 +4097,7 @@ module Hive
             "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
           ),
           verb_timeouts: @daemon_cfg.fetch("child_verb_timeouts", {}),
+          stage_timeouts: @daemon_cfg.fetch("child_stage_timeouts", {}),
           kill_grace_sec: @daemon_cfg.fetch(
             "child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC
           )

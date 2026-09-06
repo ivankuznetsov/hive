@@ -76,7 +76,8 @@ class WorkflowFlowTest < ApplicationSystemTestCase
         }
       })()
     JS
-    assert_equal %w[Status Repos Workflows Modules Patrol Agents Telegram], metrics.fetch("links")
+    assert_equal %w[Status Digest Repos Workflows Modules Patrol Agents Telegram],
+                 metrics.fetch("links")
     assert_operator metrics.fetch("navWidth"), :<=, metrics.fetch("navViewport"),
                     "primary capabilities must not start hidden in a tiny horizontal scroller"
     assert_equal metrics.fetch("viewportWidth"), metrics.fetch("pageWidth"),

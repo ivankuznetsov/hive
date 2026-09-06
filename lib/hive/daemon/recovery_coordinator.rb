@@ -1694,13 +1694,12 @@ module Hive
         provider_limit = recovery["failure_origin"] == "limits_reached"
         return request if !provider_limit && recovery["runtime_digest"] == @runtime_digest
 
-        changes = deterministic_rearm_changes(now:)
-        changes["next_eligible_at"] = recovery["next_eligible_at"] if provider_limit
-
         transitioned = @request_queue.update_recovery!(
           request.request_id,
           expected_phase: "admitted",
-          changes: changes,
+          changes: deterministic_rearm_changes(now:).tap do |changes|
+            changes["next_eligible_at"] = recovery["next_eligible_at"] if provider_limit
+          end,
           state_home: @state_home
         )
         refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)

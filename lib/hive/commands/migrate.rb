@@ -7,6 +7,7 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/completion_time"
 require "hive/display_name/generator"
+require "hive/daily_digest/migration"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/markers"
@@ -29,6 +30,10 @@ require "hive/workflows"
 module Hive
   module Commands
     class Migrate
+      def self.migrate_global_state!
+        Hive::DailyDigest::Migration.ensure!
+      end
+
       # Each entry maps a legacy stage-directory name to its CURRENT
       # canonical name in `Hive::Stages::DIRS`. When the canonical layout
       # shifts (e.g. the 7-artifacts insertion), every entry must re-point
@@ -92,9 +97,17 @@ module Hive
         @display_name_generator = display_name_generator
         @managed_store_factory = managed_store_factory
         @config_loader = config_loader
-        @global_migration = global_migration || method(:ensure_active_control_plane!)
+        @global_migration = global_migration || method(:default_global_migration)
         @daemon_restarter = daemon_restarter
         @daemon_cutover = daemon_cutover
+      end
+
+      def default_global_migration
+        ensure_active_control_plane!
+        self.class.migrate_global_state!
+      rescue Hive::DailyDigest::Migration::InitializationError => error
+        warn("hive migrate: daily digest remains disabled: #{error.message}")
+        nil
       end
 
       def call

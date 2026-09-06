@@ -1,4 +1,5 @@
 require "hive/config"
+require "hive/commands/migrate"
 require "hive/runtime_control_plane/cutover"
 
 module Hive
@@ -7,17 +8,20 @@ module Hive
     # the cutover; no project is committed before the global activation intent.
     class MigrateAll
       def initialize(projects: nil, output: $stdout, input: $stdin, confirm: false, exclusions: [],
+                     global_migration: Hive::Commands::Migrate.method(:migrate_global_state!),
                      cutover: Hive::RuntimeControlPlane::Cutover.method(:cutover))
         @projects = projects || Hive::Config.registered_projects
         @output = output
         @input = input
         @confirm = confirm
         @exclusions = exclusions
+        @global_migration = global_migration
         @cutover = cutover
       end
 
       def call
         confirmation!
+        @global_migration.call
         @output.puts "hive: migration: irreversible fleet cutover; legacy runtime cannot be restored"
         @output.puts "hive: migration: preparing #{@projects.size} registered projects"
         result = @cutover.call(

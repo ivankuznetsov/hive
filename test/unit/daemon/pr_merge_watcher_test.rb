@@ -478,6 +478,41 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     assert_raises(ArgumentError) { build_watcher(poll_timeout_sec: 0) }
   end
 
+  def test_changed_remote_outcome_records_material_activity_and_write_failures_degrade
+    watcher = Hive::Daemon::PrMergeWatcher.allocate
+    task = Object.new
+    candidate = {
+      "remote" => { "state" => "open", "merge_oid" => nil, "merged_at" => nil },
+      "pull_request" => {
+        "number" => 42, "url" => "https://github.com/acme/app/pull/42",
+        "observed_head" => "a" * 40
+      }
+    }
+    result = {
+      remote: {
+        "state" => "merged", "merge_oid" => "b" * 40,
+        "merged_at" => "2026-07-25T12:00:00Z"
+      }
+    }
+    calls = []
+    activity = Object.new
+    activity.define_singleton_method(:record) { |**attributes| calls << attributes }
+
+    with_replaced_singleton_method(Hive::TaskActivity, :for_task, ->(*, **) { activity }) do
+      assert_equal true, watcher.send(:record_remote_activity, task, candidate, result, now: T0)
+    end
+    assert_equal "merge_observed", calls.first.fetch(:kind)
+    assert_equal 42, calls.first.dig(:payload, "pr_number")
+    assert_equal "b" * 40, calls.first.dig(:payload, "merge_oid")
+
+    activity.define_singleton_method(:record) do |**|
+      raise Hive::TaskActivity::Error, "journal unavailable"
+    end
+    with_replaced_singleton_method(Hive::TaskActivity, :for_task, ->(*, **) { activity }) do
+      assert_equal false, watcher.send(:record_remote_activity, task, candidate, result, now: T0)
+    end
+  end
+
   private
 
   def assert_unmerged_head_drift_releases_recovery(remote_state, expected_status)

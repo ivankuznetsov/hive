@@ -2094,7 +2094,7 @@ module Hive
           "source_path" => reference.fetch("path"),
           "artifact_paths" => paths,
           "generated_by" => "local",
-          "marker_signature" => Digest::SHA256.hexdigest(JSON.generate(reference)),
+          "marker_signature" => ::Digest::SHA256.hexdigest(JSON.generate(reference)),
           "suggested_next_action" => nil,
           "updated_at" => document.fetch("recorded_at"),
           "code" => document.fetch("code"),

@@ -184,12 +184,16 @@ class AgentObservationTest < Minitest::Test
       exception: RuntimeError.new("provider failed")
     )
 
-    payload = activity.records.last.fetch(:payload)
+    terminal = activity.records.find { |row| row.fetch(:kind) == "session_finished" }
+    payload = terminal.fetch(:payload)
     assert_equal "timed_out", payload.fetch("outcome")
     assert_equal false, payload.fetch("live")
     assert_equal "token_limit", payload.dig("resource_observation", "kind")
     assert_equal 105, payload.dig("resource_observation", "observed")
     refute_includes payload.to_s, "provider failed"
+    resource = activity.records.find { |row| row.fetch(:kind) == "resource_limit_observed" }
+    assert_equal "token_limit", resource.dig(:payload, "resource_kind")
+    assert_equal "active", resource.dig(:payload, "state")
   end
 
   def test_model_output_limit_remains_distinct_in_terminal_resource_evidence
@@ -205,7 +209,8 @@ class AgentObservationTest < Minitest::Test
       resource_exhaustion: { reason: "model_output_limit", observed: 8_192 }
     )
 
-    resource = activity.records.last.dig(:payload, "resource_observation")
+    terminal = activity.records.find { |row| row.fetch(:kind) == "session_finished" }
+    resource = terminal.dig(:payload, "resource_observation")
     assert_equal "model_output_limit", resource.fetch("kind")
     assert_equal "tokens", resource.fetch("unit")
     assert_nil resource.fetch("configured")

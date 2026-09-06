@@ -1,0 +1,4 @@
+<% nearest = digest.previous_date || digest.next_date %>
+<% if nearest %>
+  <p><%= link_to "Open nearest persisted day", digest_path(nearest), class: "btn btn-ghost btn-sm" %></p>
+<% end %>

@@ -4425,8 +4425,16 @@ class ConfigTest < Minitest::Test
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
       # Answer-digest ships a non-zero default cap so a wedged child cannot
       # pin the single global digest slot forever.
-      assert_equal({ "answer-digest" => 3600 },
+      assert_equal({ "answer-digest" => 3600, "digest" => 3600 },
                    cfg.dig("daemon", "child_verb_timeouts"))
+      assert_equal(
+        {
+          "daily_digest_refresh" => 900,
+          "daily_digest_close" => 3600,
+          "daily_digest_delivery" => 300
+        },
+        cfg.dig("daemon", "child_stage_timeouts")
+      )
     end
   end
 
@@ -4456,6 +4464,7 @@ class ConfigTest < Minitest::Test
       assert_equal 5400,  cfg.dig("daemon", "child_verb_timeouts", "develop")
       # A user override deep-merges with the seeded default.
       assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "answer-digest")
+      assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "digest")
     end
   end
 
@@ -4481,6 +4490,34 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/daemon.child_verb_timeouts.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_daily_digest_stage_timeouts_are_positive_and_closed_by_identity
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts:
+            daily_digest_refresh: 0
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daily_digest_refresh.*positive integer/, error.message)
+
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts: disabled
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/child_stage_timeouts.*must be a Hash/, error.message)
+
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts:
+            daily_digest_close: forever
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daily_digest_close.*integer >= 0/, error.message)
     end
   end
 
@@ -5704,6 +5741,82 @@ class ConfigTest < Minitest::Test
     )
     assert_equal 42, merged.value
     assert_equal "merged_default", merged.source
+  end
+
+  def test_daily_digest_validator_rejects_each_invalid_initialization_shape
+    path = "/tmp/config.yml"
+    base = {
+      "enabled" => false,
+      "materialization_interval_sec" => 300,
+      "freshness_budget_sec" => 900,
+      "telegram" => { "enabled" => false, "hour" => 9 }
+    }
+    invalid = [
+      "scalar",
+      base.merge("telegram" => []),
+      base.merge("telegram" => { "enabled" => false, "hour" => 24 }),
+      base.merge("initial_membership" => [ "bad" ]),
+      base.merge("time_zone" => ""),
+      base.merge("time_zone" => "Mars/Olympus"),
+      base.merge("coverage_started_at" => "not-a-time"),
+      base.merge("first_interval" => []),
+      base.merge("first_interval" => { "local_date" => "2026-08-30" })
+    ]
+
+    invalid.each do |daily|
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(:validate_daily_digest!, { "daily_digest" => daily }, path)
+      end
+    end
+
+    Hive::Config.send(:validate_daily_digest!, { "daily_digest" => base }, path)
+
+    enabled = base.merge("enabled" => true)
+    assert_raises(Hive::ConfigError) do
+      Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled }, path)
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::Config.send(
+        :validate_daily_digest!,
+        { "daily_digest" => enabled.merge("time_zone" => "UTC") }, path
+      )
+    end
+
+    initialized = enabled.merge(
+      "time_zone" => "UTC",
+      "coverage_started_at" => "2026-08-30T00:00:00Z",
+      "initial_membership" => [],
+      "first_interval" => {
+        "local_date" => "2026-08-30", "time_zone" => "UTC",
+        "starts_at" => "2026-08-30T00:00:00Z", "ends_at" => "2026-08-31T00:00:00Z"
+      }
+    )
+    %w[time_zone coverage_started_at first_interval].each do |key|
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :validate_daily_digest!,
+          { "daily_digest" => initialized.merge(key => false) }, path
+        )
+      end
+    end
+  end
+
+  def test_daily_digest_membership_helpers_preserve_arrays_and_type_time_errors
+    nested = [ { project_id: "one", paths: [ "a", "b" ] } ]
+    assert_equal [ { "project_id" => "one", "paths" => [ "a", "b" ] } ],
+                 Hive::Config.send(:canonical_membership_value, nested)
+    assert_raises(Hive::ConfigError) do
+      Hive::Config.send(:normalize_membership_time, "not-a-time")
+    end
+
+    with_tmp_global_config do
+      history = [ { "event_id" => "event-1", "kind" => "registered" } ]
+      File.write(
+        Hive::Config.global_config_path,
+        { "project_membership_history" => history }.to_yaml
+      )
+      assert_equal history, Hive::Config.load_global_project_membership_history
+    end
   end
 
   private

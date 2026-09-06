@@ -1265,6 +1265,67 @@ module Hive
       ).call
     end
 
+    desc "digest [ACTION]", "Read or explicitly manage Hive's durable daily activity digest"
+    long_desc <<~DESC, wrap: false
+      Reads today's persisted host-global activity record without refreshing it
+      or sending Telegram. Use --date and --project for a filtered historical
+      view, --json for the stable hive-digest.v1 agent contract, or --open-web
+      to explicitly open the same selected record in Hive Web.
+
+      Mutations are separate explicit actions:
+        hive digest refresh [--date DATE]
+        hive digest send --date DATE [--retry]
+        hive digest prune --before DATE (--dry-run | --yes)
+
+      `hive digest` never calls Telegram, advances delivery state, or repairs a
+      stale record. The existing `hive answer-digest` is a different, sendful
+      pending-answer command.
+    DESC
+    option :date, type: :string, desc: "persisted digest identity (YYYY-MM-DD)"
+    option :project, type: :string, desc: "filter the selected global record by historical project"
+    option :open_web, type: :boolean, default: false, desc: "open the selected digest in Hive Web"
+    option :before, type: :string, desc: "for prune: select closed records before DATE"
+    option :dry_run, type: :boolean, default: false, desc: "for prune: preview without deleting projection bytes"
+    option :yes, type: :boolean, default: false, desc: "for prune: explicitly confirm projection deletion"
+    option :retry, type: :boolean, default: false, desc: "for send: explicitly retry a failed or unknown delivery"
+    def digest(action = nil)
+      validate_digest_action_options!(action) if [ nil, "refresh", "send", "prune" ].include?(action)
+      case action
+      when nil
+        require "hive/commands/digest"
+        Hive::Commands::Digest.new(
+          date: options[:date], project: options[:project], json: options[:json],
+          open_web: options[:open_web]
+        ).call
+      when "refresh"
+        require "hive/commands/digest_refresh"
+        Hive::Commands::DigestRefresh.new(date: options[:date], json: options[:json]).call
+      when "send"
+        require "hive/commands/digest_send"
+        Hive::Commands::DigestSend.new(
+          date: options[:date], retry: options[:retry], json: options[:json]
+        ).call
+      when "prune"
+        require "hive/commands/digest_prune"
+        Hive::Commands::DigestPrune.new(
+          before: options[:before], dry_run: options[:dry_run],
+          confirm: options[:yes], json: options[:json]
+        ).call
+      else
+        error = Hive::UsageError.new(
+          "unknown digest action #{action.inspect} (expected: refresh, send, prune)"
+        )
+        if options[:json]
+          puts JSON.generate(
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: "hive-digest", error: error, error_kind: "usage"
+            )
+          )
+        end
+        raise error
+      end
+    end
+
     desc "status", "Show daemon health and currently running tasks"
     long_desc <<~DESC
       Default: prints a bounded daemon-health and currently-running-task
@@ -2150,6 +2211,38 @@ module Hive
     end
 
     no_commands do
+      def validate_digest_action_options!(action)
+        allowed = {
+          nil => %i[date project open_web],
+          "refresh" => %i[date],
+          "send" => %i[date retry],
+          "prune" => %i[before dry_run yes]
+        }.fetch(action)
+        supplied = %i[date project open_web before dry_run yes retry].select do |key|
+          value = options[key]
+          value == true || (!value.nil? && value != false && !value.to_s.empty?)
+        end
+        invalid = supplied - allowed
+        return if invalid.empty?
+
+        label = action || "read"
+        error = Hive::UsageError.new(
+          "hive digest #{label} does not accept #{invalid.map { |key| "--#{key.to_s.tr('_', '-')}" }.join(', ')}"
+        )
+        if options[:json]
+          schema = {
+            nil => "hive-digest", "refresh" => "hive-digest-refresh",
+            "send" => "hive-digest-send", "prune" => "hive-digest-prune"
+          }.fetch(action)
+          puts JSON.generate(
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: schema, error: error, error_kind: "usage"
+            )
+          )
+        end
+        raise error
+      end
+
       def closure_options?
         options[:reason] || options[:evidence] || options[:successor] || options[:attestation]
       end

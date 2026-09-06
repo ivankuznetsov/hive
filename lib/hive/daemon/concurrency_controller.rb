@@ -31,6 +31,9 @@ module Hive
       # the entry's cooldown becomes the Nth element. Past the end of
       # the schedule, the entry is quarantined.
       TRANSIENT_BACKOFF_SCHEDULE = [ 60, 120, 300 ].freeze
+      DIGEST_KINDS = %i[
+        digest answer_digest daily_digest_refresh daily_digest_close daily_digest_delivery
+      ].freeze
 
       attr_reader :max_concurrent_runs, :max_concurrent_per_project,
                   :max_runs_per_day_per_project, :max_concurrent_patrol_scans
@@ -146,11 +149,15 @@ module Hive
       # Gate for the global daily digest dispatch. Like patrol scans, the
       # digest runs on its OWN budget (tagged `kind: :digest`, excluded
       # from the task caps below) so it never holds a task slot or pushes
-      # the daemon transiently past `max_concurrent_runs`. At most one
-      # digest child runs at a time.
-      #   :ok | :digest_in_flight
-      def can_dispatch_digest?(now: Time.now)
-        return :digest_in_flight if @running.any? { |_pid, entry| entry[:kind] == :digest }
+      # the daemon transiently past `max_concurrent_runs`. Every digest
+      # identity has its own one-at-a-time lane.
+      #   :ok | :<identity>_in_flight
+      def can_dispatch_digest?(identity: :digest, now: Time.now)
+        kind = identity.to_sym
+        raise ArgumentError, "unknown digest capacity identity #{identity.inspect}" unless
+          DIGEST_KINDS.include?(kind)
+
+        return :"#{kind}_in_flight" if @running.any? { |_pid, entry| entry[:kind] == kind }
 
         :ok
       end
@@ -159,7 +166,7 @@ module Hive
       # digest excluded), optionally scoped to one project.
       def task_running_count(project: nil)
         @running.count do |_pid, entry|
-          next false if entry[:kind] == :patrol_scan || entry[:kind] == :digest
+          next false if entry[:kind] == :patrol_scan || digest_kind?(entry[:kind])
 
           project.nil? || entry[:project] == project
         end
@@ -257,7 +264,7 @@ module Hive
         # task counts, and record_completion returns before the TEMPFAIL refund
         # for both kinds. Counting either dispatch would therefore consume an
         # ordinary task slot that can never be refunded, so exempt both.
-        unless %i[digest patrol_scan].include?(kind)
+        unless kind == :patrol_scan || digest_kind?(kind)
           @daily_counts[[ project, started_at.to_date ]] += 1
         end
         if state_file_mtime
@@ -314,7 +321,7 @@ module Hive
         # cooldown/quarantine/dropped state here would either leak never-read
         # entries or, for a patrol-only CONFIG error, strand unrelated project
         # tasks. Freeing the matching capacity slot above is all they need.
-        return if %i[digest patrol_scan].include?(entry[:kind])
+        return if entry[:kind] == :patrol_scan || digest_kind?(entry[:kind])
 
         key = [ entry[:project], entry[:slug] ]
 
@@ -381,7 +388,7 @@ module Hive
       def operational_snapshot(now: Time.now)
         projects = (
           @running.values.filter_map do |entry|
-            entry[:project] unless entry[:kind] == :patrol_scan || entry[:kind] == :digest
+            entry[:project] unless entry[:kind] == :patrol_scan || digest_kind?(entry[:kind])
           end +
           @external_running_by_project.keys +
           @daily_counts.keys.map(&:first) +
@@ -434,6 +441,10 @@ module Hive
 
       private
 
+      def digest_kind?(kind)
+        DIGEST_KINDS.include?(kind&.to_sym)
+      end
+
       # Write-through the baseline map to the persisted store. The store
       # owns the entire error-handling surface: narrow IOError/SystemCallError
       # rescues + a defense-in-depth broad StandardError rescue, each surfacing
@@ -445,7 +456,7 @@ module Hive
 
       def running_count_for(project)
         @running.count do |_pid, entry|
-          entry[:project] == project && entry[:kind] != :patrol_scan && entry[:kind] != :digest
+          entry[:project] == project && entry[:kind] != :patrol_scan && !digest_kind?(entry[:kind])
         end +
           @external_running_by_project[project].to_i
       end

@@ -1,7 +1,7 @@
 require "open3"
 require "digest"
 require "set"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/stages/review/fix_guardrail/patterns"
 
 module Hive
@@ -151,6 +151,7 @@ module Hive
         # appearance in the diff.
         def scan_diff(diff, patterns)
           matches = []
+          secret_lines = Hash.new { |hash, path| hash[path] = [] }
           current_file = nil
           current_line = nil
 
@@ -250,20 +251,7 @@ module Hive
               # plain-regex arm below.
               case spec[:detector]
               when :secret_patterns
-                Hive::SecretPatterns.scan(added).each do |hit|
-                  next if Hive::SecretPatterns.runtime_password_reference?(
-                    path: current_file, line: added, hit: hit
-                  )
-
-                  matches << build_match(
-                    pattern_name: "secrets_pattern_match.#{hit[:name]}",
-                    file: current_file,
-                    line: current_line,
-                    snippet: hit[:snippet],
-                    severity: spec[:severity],
-                    match_sha256: hit.fetch(:sha256)
-                  )
-                end
+                secret_lines[current_file] << [ current_line, added, spec[:severity] ]
               when :regex
                 if spec[:regex] && spec[:regex] =~ added
                   matched = Regexp.last_match[0]
@@ -285,6 +273,16 @@ module Hive
             current_line += 1 if current_line
           end
 
+          secret_lines.each do |path, lines|
+            Hive::SecretScanner.scan(lines.map { |entry| entry[1] }.join("\n"), path: path.to_s).each do |hit|
+              source = lines.fetch(hit.fetch(:line) - 1)
+              matches << build_match(
+                pattern_name: "secrets_pattern_match.#{hit[:name]}", file: path,
+                line: source[0], snippet: hit[:snippet], severity: source[2],
+                match_sha256: hit.fetch(:sha256)
+              )
+            end
+          end
           matches
         end
 

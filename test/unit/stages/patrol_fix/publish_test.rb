@@ -215,7 +215,7 @@ class PatrolFixPublishStageTest < Minitest::Test
   end
 
   def test_secret_in_review_body_blocks_before_push_without_leaking_diagnostic
-    with_publish_task(review_rationale: "token ghp_#{'a' * 36}") do |task, worktree_root, _manifest, _review, _remote|
+    with_publish_task(review_rationale: "token ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}") do |task, worktree_root, _manifest, _review, _remote|
       git = LocalGit.new
       error = assert_raises(Hive::GithubPublication::Blocked) do
         Hive::Stages::PatrolFix::Publish.run!(

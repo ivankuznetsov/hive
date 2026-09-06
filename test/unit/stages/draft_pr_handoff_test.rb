@@ -246,10 +246,10 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
   end
 
-  def test_secret_added_then_removed_and_binary_blob_are_quarantined_before_push
+  def test_secret_added_then_removed_is_quarantined_but_clean_binary_is_allowed
     with_handoff_fixture do |fixture|
       repo = fixture.fetch(:repo)
-      token = "github_pat_#{'A' * 40}"
+      token = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       File.write(File.join(repo, "temporary-secret.txt"), token)
       run!("git", "-C", repo, "add", "temporary-secret.txt")
       run!("git", "-C", repo, "commit", "-m", "temporary evidence", "--quiet")
@@ -272,16 +272,15 @@ class StagesDraftPrHandoffTest < Minitest::Test
       refresh_head!(fixture)
 
       result = run_handoff(fixture)
-      assert_equal "draft_pr_quarantined", read_receipt(fixture).fetch("error_reason")
-      assert_equal :error, result.fetch(:status)
+      assert_equal :complete, result.fetch(:status)
     end
   end
 
-  def test_oversized_blob_is_quarantined_before_push
+  def test_large_blob_can_be_scanned_and_published
     with_handoff_fixture do |fixture|
       File.binwrite(
         File.join(fixture.fetch(:repo), "oversized.txt"),
-        "a" * (Hive::Stages::DraftPrHandoff::MAX_OBJECT_BYTES + 1)
+        "ordinary content\n" * 300_000
       )
       run!("git", "-C", fixture.fetch(:repo), "add", "oversized.txt")
       run!("git", "-C", fixture.fetch(:repo), "commit", "-m", "oversized evidence", "--quiet")
@@ -289,23 +288,10 @@ class StagesDraftPrHandoffTest < Minitest::Test
 
       result = run_handoff(fixture)
 
-      assert_equal :error, result.fetch(:status)
-      assert_equal "draft_pr_quarantined", read_receipt(fixture).fetch("error_reason")
-      assert_empty fixture.fetch(:calls).select { |call| %i[push create].include?(call.first) }
+      assert_equal :complete, result.fetch(:status)
     end
   end
 
-  def test_bounded_git_capture_stops_retaining_output_at_the_limit
-    with_handoff_fixture do |fixture|
-      error = assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
-        Hive::Stages::DraftPrHandoff.send(
-          :git_binary!, fixture.fetch(:repo), "show", "HEAD:app.rb", max_bytes: 1
-        )
-      end
-
-      assert_includes error.message, "output exceeds 1 bytes"
-    end
-  end
 
   def test_remote_drift_and_unowned_pr_block_without_mutation
     with_handoff_fixture do |fixture|
@@ -357,7 +343,7 @@ class StagesDraftPrHandoffTest < Minitest::Test
 
   def test_report_secret_is_redacted_when_handoff_is_quarantined
     with_handoff_fixture do |fixture|
-      token = "github_pat_#{'Z' * 40}"
+      token = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       source = VALID_REPORT.sub("Low; the change is limited to one mapper.", "Leaked #{token}")
       fixture[:report_source] = source
       fixture[:report] = Hive::Stages::AgentReport.parse(source)
@@ -367,14 +353,14 @@ class StagesDraftPrHandoffTest < Minitest::Test
       assert_equal :error, result.fetch(:status)
       persisted = File.read(File.join(fixture.fetch(:task).folder, "fix-report.md"))
       refute_includes persisted, token
-      assert_includes persisted, "[REDACTED:github_fine_grained_pat]"
+      assert_includes persisted, "[REDACTED:github_token]"
       assert_equal 0o600, File.stat(File.join(fixture.fetch(:task).folder, "fix-report.md")).mode & 0o777
     end
   end
 
   def test_quarantine_terminal_resume_retries_report_redaction
     with_handoff_fixture do |fixture|
-      token = "github_pat_#{'R' * 40}"
+      token = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       source = VALID_REPORT.sub("Low; the change is limited to one mapper.", "Leaked #{token}")
       fixture[:report_source] = source
       fixture[:report] = Hive::Stages::AgentReport.parse(source)
@@ -400,7 +386,7 @@ class StagesDraftPrHandoffTest < Minitest::Test
       end
       persisted = File.read(File.join(fixture.fetch(:task).folder, "fix-report.md"))
       refute_includes persisted, token
-      assert_includes persisted, "[REDACTED:github_fine_grained_pat]"
+      assert_includes persisted, "[REDACTED:github_token]"
     end
   end
 
@@ -782,31 +768,16 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
   end
 
-  def test_publication_scanner_rejects_aggregate_history_and_binary_content
+  def test_publication_scanner_fails_closed_when_betterleaks_is_unavailable
     context = Hive::Stages::AgentWorktree::Context.new(
       worktree_path: "/repo", task_branch: "fix", base_branch: "main",
       base_oid: "a" * 40, repository: "github.com/acme/widgets"
     )
     projected = Hive::Stages::DraftPrHandoff::Result.new(title: "Fix", body: "Body")
-    assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
-      Hive::Stages::DraftPrHandoff.send(
-        :scan_publication!, context, "b" * 40,
-        "x" * (Hive::Stages::DraftPrHandoff::MAX_SCAN_BYTES + 1), projected
-      )
-    end
-
-    commits = (1..(Hive::Stages::DraftPrHandoff::MAX_COMMITS + 1)).map { |i| "%040x" % i }.join("\n")
-    with_replaced_singleton_method(
-      Hive::Stages::DraftPrHandoff, :git_read_binary!, ->(*) { commits }
-    ) do
+    with_replaced_singleton_method(Hive::SecretScanner, :git_match?, ->(*) { raise Hive::SecretScanner::Unavailable, "scanner unavailable" }) do
       assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
-        Hive::Stages::DraftPrHandoff.send(
-          :scan_publication!, context, "b" * 40, VALID_REPORT, projected
-        )
+        Hive::Stages::DraftPrHandoff.send(:scan_publication!, context, "b" * 40, VALID_REPORT, projected)
       end
-    end
-    assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
-      Hive::Stages::DraftPrHandoff.send(:scan_blob!, "bad\0bytes", source: "blob")
     end
   end
 
@@ -857,34 +828,11 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
   end
 
-  def test_handoff_io_failures_are_typed_and_binary_capture_handles_esrch
+  def test_handoff_io_failures_are_typed
     task = TaskStub.new(folder: "/tmp/task", slug: "fix", project_root: "/repo")
     with_replaced_singleton_method(File, :open, ->(*) { raise Errno::EACCES, "fix-report.md" }) do
       assert_raises(Hive::StageError) do
         Hive::Stages::DraftPrHandoff.send(:redact_quarantined_report!, task)
-      end
-    end
-
-    failed = Hive::AgentGitGate::ReadResult.new(
-      operation: :status, stdout: "stdout", stderr: "", exitstatus: 1,
-      overflow: false
-    )
-    with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failed }) do
-      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
-        Hive::Stages::DraftPrHandoff.send(:git!, "/repo", "status")
-      end
-      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
-        Hive::Stages::DraftPrHandoff.send(:git_binary!, "/repo", "show")
-      end
-    end
-
-    with_handoff_fixture do |fixture|
-      with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::ESRCH }) do
-        assert_raises(Hive::Stages::DraftPrHandoff::QuarantineError) do
-          Hive::Stages::DraftPrHandoff.send(
-            :git_binary!, fixture.fetch(:repo), "show", "HEAD:app.rb", max_bytes: 1
-          )
-        end
       end
     end
   end
@@ -918,34 +866,11 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
   end
 
-  def test_hardened_read_helpers_translate_gate_and_binary_process_failures
-    with_replaced_singleton_method(
-      Hive::AgentGitGate, :read,
-      ->(*) { raise Hive::AgentGitGate::CommandFailed, "gate unavailable" }
-    ) do
+  def test_hardened_read_helpers_translate_gate_failures
+    with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { raise Hive::AgentGitGate::CommandFailed, "gate unavailable" }) do
       assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
         Hive::Stages::DraftPrHandoff.send(:git_read!, "/repo", :head_oid)
       end
-      assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
-        Hive::Stages::DraftPrHandoff.send(
-          :git_read_binary!, "/repo", :diff, max_bytes: 10,
-          base_oid: "a" * 40, head_oid: "b" * 40
-        )
-      end
-    end
-
-    failed = Hive::AgentGitGate::ReadResult.new(
-      operation: :diff, stdout: "", stderr: "\xFF".b,
-      exitstatus: 1, overflow: false
-    )
-    with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failed }) do
-      error = assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
-        Hive::Stages::DraftPrHandoff.send(
-          :git_read_binary!, "/repo", :diff, max_bytes: 10,
-          base_oid: "a" * 40, head_oid: "b" * 40
-        )
-      end
-      assert_includes error.message, "?"
     end
   end
 

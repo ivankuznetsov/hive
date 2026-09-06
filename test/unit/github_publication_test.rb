@@ -184,11 +184,14 @@ class GithubPublicationTest < Minitest::Test
       })
       github.crash_after_create = true
       controller = controller_for(repo, remote, github)
+      assert_nil controller.creation_base_oid
 
       assert_raises(Hive::GithubPublication::Blocked) do
         controller.publish!(request, revalidate: ->(_phase) { true })
       end
       assert_equal 1, github.creates
+
+      assert_equal request.creation_base_oid, controller.creation_base_oid
 
       github.crash_after_create = false
       result = controller.publish!(request, revalidate: ->(_phase) { true })
@@ -375,6 +378,31 @@ class GithubPublicationTest < Minitest::Test
       assert_equal "merged", merged.fetch("hosted_state")
       assert_equal revised_head, merged.fetch("head_oid")
       assert_equal [ :final ], phases
+    end
+  end
+
+  def test_owned_publication_reconciles_a_changed_comparison_base_without_republishing
+    with_local_remote do |repo, remote, head|
+      github = FakeGithub.new
+      git = CountingGit.new(remote)
+      controller = controller_for(repo, remote, github, git_gateway: git)
+      original = request_for(repo, head)
+      controller.publish!(original, revalidate: ->(_phase) { true })
+      original_state = File.binread(state_path(repo))
+      revised = Hive::GithubPublication::Request.new(
+        **original.to_h.merge(scan_base_oid: head, diff_digest: Digest::SHA256.hexdigest(""))
+      )
+
+      %w[OPEN MERGED].each do |state|
+        github.records.first["state"] = state
+        result = controller.publish!(revised, revalidate: ->(_phase) { true })
+        assert_equal original.publication_id, result.fetch("publication_id")
+        assert_equal revised.diff_digest, result.fetch("diff_digest")
+        assert_equal head, result.fetch("head_oid")
+      end
+      assert_equal 1, git.pushes
+      assert_equal 1, github.creates
+      assert_equal original_state, File.binread(state_path(repo))
     end
   end
 
@@ -599,13 +627,11 @@ class GithubPublicationTest < Minitest::Test
   def test_secret_scan_covers_title_body_and_exact_diff_without_persisting_bytes
     with_local_remote do |repo, remote, head|
       clean = request_for(repo, head)
-      secret = "ghp_#{'a' * 36}"
+      secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       variants = {
         "title" => clean.to_h.merge(title: "Fix #{secret}"),
         "body" => clean.to_h.merge(body: "Details #{secret}"),
-        "diff" => clean.to_h.merge(diff: "patch #{secret}").tap do |values|
-          values[:diff_digest] = Digest::SHA256.hexdigest(values.fetch(:diff))
-        end
+        "commits" => clean.to_h.merge(head_oid: commit(repo, "secret.txt", secret, "Add credential"))
       }
       variants.each do |label, values|
         request = Hive::GithubPublication::Request.new(**values)
@@ -647,18 +673,13 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
-  def test_secret_scan_blocks_literals_inside_shell_command_substitutions
+  def test_secret_scan_blocks_committed_tokens_inside_shell_command_substitutions
     with_local_remote do |repo, remote, head|
       clean = request_for(repo, head)
-      diff = <<~DIFF
-        diff --git a/.kamal/secrets b/.kamal/secrets
-        --- /dev/null
-        +++ b/.kamal/secrets
-        @@ -0,0 +1 @@
-        +ROOT_PASSWORD=$(printf %s s3cretpassphrase42)
-      DIFF
+      head = commit(repo, "secrets.sh", "ROOT_PASSWORD=$(printf %s ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"})\n", "Add credential")
+      diff = capture("git", "-C", repo, "diff", "#{clean.creation_base_oid}..#{head}")
       request = Hive::GithubPublication::Request.new(
-        **clean.to_h.merge(diff: diff, diff_digest: Digest::SHA256.hexdigest(diff))
+        **clean.to_h.merge(head_oid: head, diff: diff, diff_digest: Digest::SHA256.hexdigest(diff))
       )
 
       error = assert_raises(Hive::GithubPublication::Blocked) do
@@ -695,7 +716,7 @@ class GithubPublicationTest < Minitest::Test
     with_local_remote do |repo, _remote, head|
       valid = request_for(repo, head).to_h
       invalid = [
-        valid.merge(diff_digest: "0" * 64),
+        valid.merge(diff: "mismatched patch", diff_digest: "0" * 64),
         valid.merge(draft: "yes"),
         valid.merge(worktree_path: "bad\npath"),
         valid.merge(title: "bad\ncontrol")

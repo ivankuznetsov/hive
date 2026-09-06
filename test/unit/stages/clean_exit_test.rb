@@ -142,7 +142,7 @@ class HiveStagesCleanExitTest < Minitest::Test
   def test_out_of_scope_secret_shaped_path_is_redacted
     with_tmp_dir do |worktree|
       init_git(worktree)
-      secret = "AKIAABCDEFGHIJKLMNOP"
+      secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       FileUtils.mkdir_p(File.join(worktree, "unrelated"))
       File.write(File.join(worktree, "unrelated", "#{secret}.txt"), "ordinary content\n")
 
@@ -197,7 +197,7 @@ class HiveStagesCleanExitTest < Minitest::Test
     with_tmp_dir do |worktree|
       init_git(worktree)
       FileUtils.mkdir_p(File.join(worktree, "wiki"))
-      secret = "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP"
+      secret = "AWS_ACCESS_KEY_ID=ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       File.write(File.join(worktree, "wiki", "migration-notes.md"), "#{secret}\n")
 
       result = Hive::Stages::CleanExit.run!(
@@ -219,7 +219,7 @@ class HiveStagesCleanExitTest < Minitest::Test
       init_git(worktree)
       FileUtils.mkdir_p(File.join(worktree, "wiki"))
       path = File.join(worktree, "wiki", "detector-fixture.md")
-      File.write(path, "fake detector fixture: AKIAABCDEFGHIJKLMNOP\n")
+      File.write(path, "fake detector fixture: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       run!("git", "-C", worktree, "add", "wiki/detector-fixture.md")
       run!("git", "-C", worktree, "commit", "-m", "add detector fixture", "--quiet")
       File.write(path, "ordinary documentation update\n", mode: "a")
@@ -239,10 +239,10 @@ class HiveStagesCleanExitTest < Minitest::Test
       init_git(worktree)
       FileUtils.mkdir_p(File.join(worktree, "wiki"))
       path = File.join(worktree, "wiki", "detector-fixture.md")
-      File.write(path, "fake detector fixture: AKIAABCDEFGHIJKLMNOP\n")
+      File.write(path, "fake detector fixture: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       run!("git", "-C", worktree, "add", "wiki/detector-fixture.md")
       run!("git", "-C", worktree, "commit", "-m", "add detector fixture", "--quiet")
-      File.write(path, "replacement: AKIAQRSTUVWXYZABCDEF\n")
+      File.write(path, "replacement: ghp_#{"bC4eF7hI0kL3nO6qR9tU2wX5zA8cD1fG4iJ7"}\n")
 
       result = Hive::Stages::CleanExit.run!(
         worktree_path: worktree, stage: "6-review",
@@ -251,7 +251,7 @@ class HiveStagesCleanExitTest < Minitest::Test
 
       assert_equal :safety_violation, result[:status]
       assert_match(/secret detectors/, result[:message])
-      refute_includes result[:message], "AKIAQRSTUVWXYZABCDEF"
+      refute_includes result[:message], "ghp_#{"bC4eF7hI0kL3nO6qR9tU2wX5zA8cD1fG4iJ7"}"
     end
   end
 
@@ -270,7 +270,7 @@ class HiveStagesCleanExitTest < Minitest::Test
       )
 
       assert_equal :safety_violation, result[:status]
-      assert_match(/password_assignment/, result[:message])
+      assert_match(/generic-password/, result[:message])
       refute_empty `git -C #{worktree} status --porcelain`
     end
   end
@@ -297,7 +297,7 @@ class HiveStagesCleanExitTest < Minitest::Test
   def test_new_secret_shaped_path_is_rejected_and_redacted
     with_tmp_dir do |worktree|
       init_git(worktree)
-      secret = "AKIAABCDEFGHIJKLMNOP"
+      secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       FileUtils.mkdir_p(File.join(worktree, "wiki"))
       File.write(File.join(worktree, "wiki", "#{secret}.md"), "ordinary content\n")
 
@@ -317,7 +317,7 @@ class HiveStagesCleanExitTest < Minitest::Test
     with_tmp_dir do |worktree|
       init_git(worktree)
       FileUtils.mkdir_p(File.join(worktree, "wiki"))
-      secret = "AKIAABCDEFGHIJKLMNOP"
+      secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       File.binwrite(File.join(worktree, "wiki", "migration-key.bin"), "\x00#{secret}\x00".b)
 
       result = Hive::Stages::CleanExit.run!(
@@ -404,13 +404,13 @@ class HiveStagesCleanExitTest < Minitest::Test
     assert_includes captured_argv, "ls-tree"
   end
 
-  def test_oversized_allowed_path_returns_safety_violation_without_reading_blob
+  def test_large_allowed_path_can_be_scanned_and_committed
     with_tmp_dir do |worktree|
       init_git(worktree)
       FileUtils.mkdir_p(File.join(worktree, "wiki"))
       File.binwrite(
         File.join(worktree, "wiki", "large.bin"),
-        "x" * (Hive::Stages::AutoCommit::AUTO_COMMIT_BLOB_SCAN_MAX_BYTES + 1)
+        "ordinary content\n" * 300_000
       )
 
       result = Hive::Stages::CleanExit.run!(
@@ -418,9 +418,7 @@ class HiveStagesCleanExitTest < Minitest::Test
         task: fake_task, cfg: @default_cfg
       )
 
-      assert_equal :safety_violation, result.fetch(:status)
-      assert_equal [ "wiki/large.bin" ], result.fetch(:paths)
-      assert_match(/exceeds the .* safety scan limit/, result.fetch(:message))
+      assert_equal :auto_committed, result.fetch(:status)
       assert_empty `git -C #{worktree} diff --cached --name-only`
       assert File.exist?(File.join(worktree, "wiki", "large.bin"))
     end
@@ -513,7 +511,7 @@ class HiveStagesCleanExitTest < Minitest::Test
       FileUtils.mkdir_p(File.join(worktree, "lib"))
       File.write(File.join(worktree, "lib", "hook.rb"), "change\n")
       hook = File.join(worktree, ".git", "hooks", "pre-commit")
-      File.write(hook, "#!/bin/sh\necho AKIAABCDEFGHIJKLMNOP >&2\nexit 1\n")
+      File.write(hook, "#!/bin/sh\necho ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"} >&2\nexit 1\n")
       File.chmod(0o755, hook)
 
       result = Hive::Stages::CleanExit.run!(
@@ -523,9 +521,9 @@ class HiveStagesCleanExitTest < Minitest::Test
       attrs = Hive::Stages::CleanExit.failure_marker_attrs(result)
 
       assert_equal :git_failed, result.fetch(:status)
-      assert_includes result.fetch(:message), "AKIAABCDEFGHIJKLMNOP"
-      refute_includes attrs.fetch(:detail), "AKIAABCDEFGHIJKLMNOP"
-      assert_includes attrs.fetch(:detail), "[REDACTED:aws_access_key]"
+      assert_includes result.fetch(:message), "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
+      refute_includes attrs.fetch(:detail), "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
+      assert_includes attrs.fetch(:detail), "[REDACTED:github_token]"
     end
   end
 

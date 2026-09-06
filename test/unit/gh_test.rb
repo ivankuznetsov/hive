@@ -161,9 +161,9 @@ class GhUnitTest < Minitest::Test
   def test_scan_pr_for_secrets_detects_secret_in_state_file
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")
-      File.write(state, "key: sk-ant-#{'a' * 30}\n")
+      File.write(state, "key: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "")
-      assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key"
+      assert_includes result.hits.map { |h| h[:name].to_s }, "github-pat"
     end
   end
 
@@ -184,12 +184,12 @@ class GhUnitTest < Minitest::Test
   def test_scan_pr_for_secrets_preserves_local_hits_on_fetch_failure
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")
-      File.write(state, "key: sk-ant-#{'a' * 30}\n")
+      File.write(state, "key: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
 
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       assert result.fetch_failed
-      assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key"
+      assert_includes result.hits.map { |h| h[:name].to_s }, "github-pat"
     end
   end
 
@@ -197,11 +197,11 @@ class GhUnitTest < Minitest::Test
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")
       File.write(state, "clean local body\n")
-      ENV["HIVE_FAKE_GH_PR_BODY"] = "remote body containing sk-ant-#{'a' * 30}"
+      ENV["HIVE_FAKE_GH_PR_BODY"] = "remote body containing ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
 
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       refute result.fetch_failed
-      assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key",
+      assert_includes result.hits.map { |h| h[:name].to_s }, "github-pat",
                       "remote body must be scanned"
     end
   end
@@ -987,13 +987,13 @@ end
 def test_scan_pr_for_secrets_reports_fetch_failed_when_capture_raises
   with_tmp_dir do |dir|
     state = File.join(dir, "pr.md")
-    File.write(state, "key: sk-ant-#{'a' * 30}\n")
+    File.write(state, "key: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
 
     with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { raise Hive::GhError, "api unavailable" }) do
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       assert result.fetch_failed
       assert_equal "api unavailable", result.fetch_error
-      assert_includes result.hits.map { |hit| hit[:name].to_s }, "anthropic_api_key"
+      assert_includes result.hits.map { |hit| hit[:name].to_s }, "github-pat"
     end
   end
 end

@@ -15,6 +15,7 @@ require "hive/commands/web/capture_server"
 require "hive/config"
 require "hive/invoked_binary"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/task"
 require "hive/web/browser_bundle"
 require "hive/web/capture_runtime"
@@ -1079,7 +1080,7 @@ module Hive
       end
 
       def reject_manifest_secrets!(manifest)
-        hits = Hive::SecretPatterns.scan(JSON.generate(manifest))
+        hits = Hive::SecretScanner.scan(JSON.generate(manifest))
         return if hits.empty?
 
         names = hits.map { |hit| hit.fetch(:name) }.uniq.join(", ")

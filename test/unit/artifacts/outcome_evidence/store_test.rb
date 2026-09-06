@@ -1,4 +1,5 @@
 require "test_helper"
+require "stringio"
 require "hive/artifacts/outcome_evidence/store"
 
 class OutcomeEvidenceStoreTest < Minitest::Test
@@ -197,6 +198,31 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_diff_replay_rejects_bytes_appended_after_the_size_check
+    with_store do |store, task, _controller|
+      generation = store.open_generation!(**requirement_input).fetch("generation")
+      path = File.join(store.send(:generation_root, generation), "implementation.diff")
+      source = "x" * (16 * 1024)
+      store.send(:write_once_bytes, path, source, generation: generation)
+      original_stat = File.stat(path)
+      stream = StringIO.new(source + "appended bytes")
+      stream.define_singleton_method(:stat) { original_stat }
+      original_open = File.method(:open)
+      open_with_growth = lambda do |name, flags, *args, &block|
+        if name == path && flags == (File::RDONLY | File::NOFOLLOW)
+          block.call(stream)
+        else
+          original_open.call(name, flags, *args, &block)
+        end
+      end
+      with_replaced_singleton_method(File, :open, open_with_growth) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          store.send(:write_once_bytes, path, source, generation: generation)
+        end
+      end
+    end
+  end
+
   def test_retain_candidate_moves_producer_files_before_semantic_review
     with_store do |store, task, _controller|
       requirement = store.open_generation!(**requirement_input)
@@ -359,7 +385,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
           generation: generation, reason: "recaptures_exhausted",
           failed_targets: [ "claim-a" ],
           reviewer_reasons: [
-            "The review exposed api_key=abcdefghijklmnopqrstuvwxyz0123456789 in output."
+            "The review exposed ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"} in output."
           ],
           attempt_ids: [ attempt.fetch("attempt_id") ]
         )
@@ -1059,15 +1085,14 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_exact_diff_write_is_bounded_append_only_and_rejects_symlinks
+  def test_exact_diff_write_accepts_large_diffs_and_rejects_symlinks
     with_store do |store, _task, _controller|
       generation = store.open_generation!(**requirement_input).fetch("generation")
       root = store.send(:generation_root, generation)
-      oversized = "x" * (Hive::Artifacts::OutcomeEvidence::Store::MAX_DIFF_BYTES + 1)
-      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
-        store.send(:write_once_bytes, File.join(root, "oversized.diff"), oversized,
-                   generation: generation)
-      end
+      large = "x" * (17 * 1024 * 1024)
+      large_path = File.join(root, "large.diff")
+      store.send(:write_once_bytes, large_path, large, generation: generation)
+      assert_equal Digest::SHA256.hexdigest(large), store.send(:secure_file_digest!, large_path, "diff", max_bytes: nil)
 
       target = File.join(root, "target")
       File.write(target, "target")

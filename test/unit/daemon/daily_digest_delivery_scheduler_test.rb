@@ -78,6 +78,28 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
     end
   end
 
+  def test_reconciles_interrupted_deliveries_at_startup_and_child_completion
+    with_tmp_dir do |dir|
+      ledger = Object.new
+      calls = []
+      ledger.define_singleton_method(:reconcile_interrupted) { |now:| calls << now }
+      store = Object.new
+      store.define_singleton_method(:read) do |_date|
+        raise Hive::DailyDigest::MissingRecord, "missing"
+      end
+      first_tick = Time.iso8601("2026-08-30T09:00:00Z")
+      scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+        state_path: File.join(dir, "state.json"), enabled: false,
+        store: store, ledger: ledger, clock: -> { first_tick }
+      )
+
+      assert_empty scheduler.tick(now: first_tick)
+      scheduler.complete(date: "2026-08-29", exit_code: 1, now: first_tick + 1)
+
+      assert_equal [ first_tick, first_tick + 1 ], calls
+    end
+  end
+
   def test_reconfiguration_and_state_write_failure_are_typed
     with_tmp_dir do |dir|
       store = build_store(dir, zone: "UTC", dates: %w[2026-08-29 2026-08-30])

@@ -1,6 +1,8 @@
 require "date"
 require "fileutils"
 require "json"
+require "objspace"
+require "securerandom"
 require "time"
 require "hive/atomic_file"
 require "hive/daily_digest"
@@ -33,6 +35,7 @@ module Hive
           [ Process.pid, Hive::Lock.process_start_time(Process.pid) ]
         end
         @process_alive = process_alive || method(:matching_process_alive?)
+        @preparer_ids = ObjectSpace::WeakMap.new
       end
 
       def prepare(local_date:, record_id:, amendment_frontier:, payload_hash:,
@@ -49,6 +52,9 @@ module Hive
             end
             action = preparation_action(current, retry_requested: retry_requested)
             if action == :resume
+              unless prepared_owned?(current)
+                return Preparation.new(action: :in_flight, receipt: current) if preparer_alive?(current)
+              end
               current = refresh_prepared_unlocked(
                 current, amendment_frontier: amendment_frontier,
                 payload_hash: payload_hash, now: now
@@ -76,7 +82,7 @@ module Hive
             "updated_at" => timestamp,
             "operator_retry" => retry_requested == true,
             "reason_code" => nil
-          )
+          ).merge(preparer_fields)
           receipt["history"] = Array(receipt["history"]) + [
             history_entry(attempt: attempt, outcome: "prepared", at: timestamp,
                           operator_retry: retry_requested == true)
@@ -90,6 +96,7 @@ module Hive
         pid, process_start_time = @process_identity.call
         transition(
           local_date, attempt: attempt, from: [ "prepared" ], to: "sending", now: now,
+          required_preparer_id: preparer_id,
           additions: {
             "sender_pid" => Integer(pid),
             "sender_process_start_time" => process_start_time&.to_s
@@ -105,7 +112,8 @@ module Hive
 
       def mark_suppressed(local_date, attempt:, now:)
         transition(
-          local_date, attempt: attempt, from: [ "prepared" ], to: "suppressed_empty", now: now
+          local_date, attempt: attempt, from: [ "prepared" ], to: "suppressed_empty", now: now,
+          required_preparer_id: preparer_id
         )
       end
 
@@ -126,6 +134,20 @@ module Hive
       def read(local_date)
         date = normalize_date(local_date)
         synchronize(shared: true) { read_unlocked(date) }
+      end
+
+      def reconcile_interrupted(now:)
+        return [] unless Dir.exist?(root)
+
+        synchronize do
+          receipt_dates.filter_map do |date|
+            receipt = read_unlocked(date)
+            next unless receipt&.fetch("outcome") == "sending"
+            next if sender_alive?(receipt)
+
+            promote_sending_unlocked(receipt, now: now)
+          end
+        end
       end
 
       private
@@ -161,11 +183,12 @@ module Hive
           "payload_hash" => normalize_digest(payload_hash, "payload hash"),
           "prepared_at" => timestamp,
           "updated_at" => timestamp
-        )
+        ).merge(preparer_fields)
         write_unlocked(receipt.fetch("local_date"), updated)
       end
 
-      def transition(local_date, attempt:, from:, to:, now:, reason_code: nil, additions: {})
+      def transition(local_date, attempt:, from:, to:, now:, reason_code: nil, additions: {},
+                     required_preparer_id: nil)
         date = normalize_date(local_date)
         synchronize do
           receipt = read_unlocked(date)
@@ -173,19 +196,23 @@ module Hive
 
           transition_unlocked(
             receipt, attempt: attempt, from: from, to: to, now: now,
-            reason_code: reason_code, additions: additions
+            reason_code: reason_code, additions: additions,
+            required_preparer_id: required_preparer_id
           )
         end
       end
 
       def transition_unlocked(receipt, attempt:, from:, to:, now:, reason_code: nil,
-                              additions: {})
+                              additions: {}, required_preparer_id: nil)
         unless OUTCOMES.include?(to)
           raise InvalidTransition, "unknown digest delivery outcome #{to.inspect}"
         end
         unless receipt.fetch("attempt").to_i == Integer(attempt) && from.include?(receipt.fetch("outcome"))
           raise InvalidTransition,
                 "digest delivery transition #{receipt.fetch('outcome')} -> #{to} is stale"
+        end
+        if required_preparer_id && receipt["preparer_id"] != required_preparer_id
+          raise InvalidTransition, "digest delivery preparation ownership is stale"
         end
 
         timestamp = normalize_time(now)
@@ -210,12 +237,48 @@ module Hive
       end
 
       def sender_alive?(receipt)
-        pid = receipt["sender_pid"]
+        process_owner_alive?(receipt, "sender")
+      end
+
+      def prepared_owned?(receipt)
+        receipt["preparer_id"] == preparer_id
+      end
+
+      def preparer_alive?(receipt)
+        process_owner_alive?(receipt, "preparer")
+      end
+
+      def process_owner_alive?(receipt, role)
+        pid = receipt["#{role}_pid"]
         return false unless pid.is_a?(Integer) && pid.positive?
 
-        @process_alive.call(pid, receipt["sender_process_start_time"])
+        @process_alive.call(pid, receipt["#{role}_process_start_time"])
       rescue StandardError
         false
+      end
+
+      def preparer_fields
+        pid, process_start_time = @process_identity.call
+        {
+          "preparer_id" => preparer_id,
+          "preparer_pid" => pid.is_a?(Integer) && pid.positive? ? pid : nil,
+          "preparer_process_start_time" => process_start_time&.to_s
+        }
+      rescue StandardError
+        {
+          "preparer_id" => preparer_id,
+          "preparer_pid" => nil,
+          "preparer_process_start_time" => nil
+        }
+      end
+
+      def preparer_id
+        fiber = Fiber.current
+        identity = @preparer_ids[fiber]
+        return identity.fetch(:id) if identity&.fetch(:pid) == Process.pid
+
+        @preparer_ids[fiber] = { pid: Process.pid, id: SecureRandom.hex(16) }
+        @preparer_ids[fiber].fetch(:id)
       end
 
       def matching_process_alive?(pid, recorded_start)
@@ -287,6 +350,13 @@ module Hive
 
       def receipt_path(date)
         File.join(root, "#{normalize_date(date)}.json")
+      end
+
+      def receipt_dates
+        Dir.children(root).filter_map do |name|
+          match = /\A(\d{4}-\d{2}-\d{2})\.json\z/.match(name)
+          match[1] if match
+        end.sort
       end
 
       def normalize_date(value)

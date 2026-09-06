@@ -55,6 +55,29 @@ class TaskWorkspacePublicationActivityTest < Minitest::Test
                                                     .record(before: {}, after: merged)
   end
 
+  def test_recurring_outcomes_get_distinct_transition_identities
+    activity = Activity.new
+    observer = Hive::TaskWorkspace::PublicationActivity.new(activity: activity)
+    passing = presented_observation(
+      "checks" => [ { "name" => "ci", "status" => "COMPLETED", "conclusion" => "SUCCESS" } ]
+    )
+    failing = presented_observation(
+      "checks" => [ { "name" => "ci", "status" => "COMPLETED", "conclusion" => "FAILURE" } ]
+    ).merge("observed_at" => "2026-08-30T12:05:00Z")
+    recovered = passing.merge("observed_at" => "2026-08-30T12:10:00Z")
+
+    assert observer.record(before: presented_observation, after: passing)
+    assert observer.record(before: passing, after: failing)
+    assert observer.record(before: failing, after: recovered)
+    refute observer.record(before: recovered, after: recovered)
+
+    identities = activity.records.filter_map do |row|
+      row.fetch(:operation_id) if row.fetch(:kind) == "check_observed"
+    end
+    assert_equal 3, identities.length
+    assert_equal identities.length, identities.uniq.length
+  end
+
   def test_defensive_observation_and_check_outcomes_are_closed
     activity = Activity.new
     observer = Hive::TaskWorkspace::PublicationActivity.new(activity: activity)

@@ -190,6 +190,29 @@ class DailyDigestStoreTest < Minitest::Test
     end
   end
 
+  def test_reads_do_not_initialize_an_absent_store_or_persist_index_repairs
+    with_tmp_dir do |dir|
+      root = File.join(dir, "digest")
+      store = Hive::DailyDigest::Store.new(root: root)
+
+      assert_empty store.intervals
+      assert_raises(Hive::DailyDigest::MissingRecord) { store.read("2026-08-30") }
+      refute_path_exists root
+
+      store.write_base(record("closed"))
+      index_path = File.join(root, "intervals.json")
+      lock_path = File.join(root, ".store.lock")
+      File.delete(index_path)
+      File.chmod(0o750, root)
+      File.chmod(0o640, lock_path)
+
+      assert_equal [ "2026-08-30" ], store.dates
+      refute_path_exists index_path
+      assert_equal 0o750, File.stat(root).mode & 0o777
+      assert_equal 0o640, File.stat(lock_path).mode & 0o777
+    end
+  end
+
   def test_idempotent_closed_write_repairs_a_missing_interval_index
     with_tmp_dir do |dir|
       store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
@@ -198,6 +221,50 @@ class DailyDigestStoreTest < Minitest::Test
 
       assert_equal closed, store.write_base(record("closed"))
       assert_equal [ "2026-08-30" ], store.dates
+    end
+  end
+
+  def test_existing_base_mutation_repairs_a_valid_but_stale_interval_index
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      store.write_base(record("closed"))
+      second = Hive::DailyDigest::Record.prepare(
+        record(
+          "closed", local_date: "2026-08-31", sequence: 2, interval_id: "b" * 64,
+          starts_at: "2026-08-30T23:00:00.000000Z",
+          ends_at: "2026-08-31T23:00:00.000000Z"
+        )
+      )
+      store.send(:write_json, store.base_path("2026-08-31"), second)
+      assert_equal [ "2026-08-30" ], store.dates
+
+      store.advance_frontiers("2026-08-31", {})
+
+      assert_equal %w[2026-08-30 2026-08-31], store.dates
+    end
+  end
+
+  def test_existing_tombstone_mutation_repairs_a_valid_but_stale_interval_index
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      store.write_base(record("closed"))
+      store.write_base(
+        record(
+          "closed", local_date: "2026-08-31", sequence: 2, interval_id: "b" * 64,
+          starts_at: "2026-08-30T23:00:00.000000Z",
+          ends_at: "2026-08-31T23:00:00.000000Z"
+        )
+      )
+      store.prune("2026-08-31", pruned_at: NOW, reason: "test")
+      first_interval = store.intervals.first
+      store.send(:write_interval_index, { "2026-08-30" => first_interval })
+      assert_equal [ "2026-08-30" ], store.dates
+
+      store.discard_pruned(
+        "2026-08-31", entries: [], source_frontiers: {}, discarded_at: NOW
+      )
+
+      assert_equal %w[2026-08-30 2026-08-31], store.dates
     end
   end
 
@@ -315,16 +382,19 @@ class DailyDigestStoreTest < Minitest::Test
 
   private
 
-  def record(lifecycle, items: [], completeness: "complete", content: nil, gaps: [])
+  def record(lifecycle, items: [], completeness: "complete", content: nil, gaps: [],
+             local_date: "2026-08-30", sequence: 1, interval_id: "a" * 64,
+             starts_at: "2026-08-29T23:00:00.000000Z",
+             ends_at: "2026-08-30T23:00:00.000000Z")
     {
       "schema" => "hive-digest-record",
       "schema_version" => 1,
-      "interval_id" => "a" * 64,
-      "local_date" => "2026-08-30",
-      "sequence" => 1,
+      "interval_id" => interval_id,
+      "local_date" => local_date,
+      "sequence" => sequence,
       "time_zone" => "Europe/London",
-      "starts_at" => "2026-08-29T23:00:00.000000Z",
-      "ends_at" => "2026-08-30T23:00:00.000000Z",
+      "starts_at" => starts_at,
+      "ends_at" => ends_at,
       "duration_seconds" => 86_400,
       "boundary_kind" => "calendar_day",
       "cutover" => nil,

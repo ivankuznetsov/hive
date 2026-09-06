@@ -127,7 +127,11 @@ module Hive
         case policy
         when :noise then Result.new(disposition: :noise, value: nil)
         when :gap then Result.new(disposition: :gap, value: gap(row, payload, project))
-        else Result.new(disposition: :fact, value: fact(row, payload, kind, project))
+        else
+          Result.new(
+            disposition: :fact,
+            value: fact(row, payload, kind, project, fallback_observed_at: observed_at)
+          )
         end
       rescue JSON::GeneratorError, TypeError, ArgumentError
         Result.new(
@@ -172,9 +176,12 @@ module Hive
         }
       end
 
-      def fact(row, payload, kind, project)
+      def fact(row, payload, kind, project, fallback_observed_at: nil)
         project = stringify(project)
-        occurred_at = iso_time(row.fetch("occurred_at"))
+        event_time = row["occurred_at"]
+        event_time = row["observed_at"] || row.dig("provenance", "ingested_at") ||
+          fallback_observed_at if event_time.nil? || event_time.to_s.empty?
+        occurred_at = iso_time(event_time)
         observed_at = iso_time(row["observed_at"] || row.dig("provenance", "ingested_at") || occurred_at)
         event_id = bounded(row["event_id"], 256, fallback: payload["operation_id"] || kind)
         details = safe_details(kind, payload)

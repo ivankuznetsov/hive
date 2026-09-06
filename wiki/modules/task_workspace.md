@@ -318,6 +318,10 @@ expired, deleted, merged, and divergent observations. A failed refresh may
 retain an older successful observation with both states visible. Refresh is
 single-flight, has one ten-second total request deadline, and is limited by both
 the local interval and a later GitHub `Retry-After` deadline.
+Every changed PR, check, review, or merge outcome is journaled with the durable
+observation time in its transition identity. Recurring outcomes such as
+passing, failing, then passing therefore remain distinct while unchanged polls
+remain no-ops.
 
 Artifacts use descriptor-based no-follow reads over known workflow files, with
 per-file and aggregate limits, binary/encoding detection, redaction, and stable

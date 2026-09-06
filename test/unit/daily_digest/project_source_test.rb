@@ -108,6 +108,52 @@ class DailyDigestProjectSourceTest < Minitest::Test
     end
   end
 
+  def test_unchanged_journal_replays_cached_gaps_without_rereading_evidence
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "4-execute", "bad-task")
+      FileUtils.mkdir_p(task)
+      journal = File.join(task, Hive::TaskJournal::JOURNAL_BASENAME)
+      File.write(journal, "not-json\n")
+      first = build_source(project, known_stage_dirs: %w[4-execute]).collect
+      source = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project), starts_at: "2026-08-30T00:00:00Z",
+        ends_at: "2026-08-31T00:00:00Z", known_stage_dirs: %w[4-execute],
+        prior_frontier: first.frontier
+      )
+      original = File.method(:binread)
+
+      with_replaced_singleton_method(
+        File, :binread,
+        ->(path, *args) { path == journal ? flunk("unchanged journal was read") : original.call(path, *args) }
+      ) do
+        second = source.collect
+        assert_equal [ "malformed_journal" ], second.gaps.map { |gap| gap.fetch("reason_code") }
+        assert_equal first.gaps.map { |gap| gap.fetch("gap_id") },
+                     second.gaps.map { |gap| gap.fetch("gap_id") }
+        refute second.health.healthy?
+      end
+    end
+  end
+
+  def test_activity_without_event_time_uses_collection_observation_time
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "4-execute", "task")
+      FileUtils.mkdir_p(task)
+      row = activity("stage_transition", "event-stage", "transition" => "completed")
+      row.delete("occurred_at")
+      File.write(
+        File.join(task, Hive::TaskJournal::JOURNAL_BASENAME),
+        JSON.generate(row) + "\n"
+      )
+
+      result = build_source(project, known_stage_dirs: %w[4-execute]).collect
+
+      assert_equal [ "stage_transition" ], result.facts.map { |fact| fact.fetch("kind") }
+      assert_equal "2026-08-30T10:00:01.000000Z", result.facts.fetch(0).fetch("occurred_at")
+      assert_empty result.gaps
+    end
+  end
+
   def test_symlink_task_escape_is_rejected_without_suppressing_healthy_tasks
     with_tmp_dir do |project|
       with_tmp_dir do |outside|
@@ -449,6 +495,14 @@ class DailyDigestProjectSourceTest < Minitest::Test
       assert_equal [ "check_observed" ], result.facts.map { |fact| fact.fetch("kind") }
       assert_equal [ "pr_evidence_incomplete" ], result.gaps.map { |gap| gap.fetch("reason_code") }
       assert_equal false, source.send(:before_boundary?, "bad-time")
+
+      unchanged = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project), starts_at: "2026-08-30T00:00:00Z",
+        ends_at: "2026-08-31T00:00:00Z", known_stage_dirs: %w[5-open-pr],
+        prior_frontier: result.frontier
+      ).collect
+      assert_equal [ "pr_evidence_incomplete" ],
+                   unchanged.gaps.map { |gap| gap.fetch("reason_code") }
 
       review = activity(
         "review_observed", "event-review", "pr_number" => 42,

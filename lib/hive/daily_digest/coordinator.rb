@@ -191,7 +191,7 @@ module Hive
           projects: membership.projects,
           starts_at: collection_start,
           ends_at: utc(interval.fetch("ends_at")),
-          prior_frontiers: existing && existing.fetch("effective_source_frontiers", {})
+          prior_frontiers: source_frontiers(existing)
         ).collect
         batch = Batch.new(
           projects: collected.projects,
@@ -217,14 +217,20 @@ module Hive
           @store.discard_pruned(
             date, entries: discarded, source_frontiers: batch.frontiers,
             discarded_at: now
-          ) unless discarded.empty? && batch.frontiers.empty?
+          )
           return result_row(date, "pruned", discarded: discarded.length)
         end
 
         lifecycle = now >= utc(interval.fetch("ends_at")) ? "closed" : "open"
         projector = Projector.new(clock: -> { now })
         if existing.nil? || existing.fetch("lifecycle") == "open"
-          batch = merge_open_batch(existing, batch, confirmed_gap_ids: confirmed_gap_ids) if existing
+          if existing
+            attention_boundary = lifecycle == "closed" ? utc(interval.fetch("ends_at")) : now
+            batch = merge_open_batch(
+              existing, batch, confirmed_gap_ids: confirmed_gap_ids,
+              attention_boundary: attention_boundary
+            )
+          end
           base = projector.base(interval: interval, batch: batch, lifecycle: lifecycle)
           begin
             written = @store.write_base(base)
@@ -281,7 +287,8 @@ module Hive
         end + Array(resolved_gaps).map do |gap|
           {
             "identity" => gap.fetch("gap_id"), "kind" => "gap_resolution",
-            "source" => gap.fetch("source"), "observed_at" => timestamp(observed_at),
+            "source" => gap.fetch("source"),
+            "observed_at" => gap["observed_at"] || timestamp(observed_at),
             "reason" => "digest projection was pruned before source recovery"
           }
         end
@@ -292,7 +299,7 @@ module Hive
         existing.nil? || %w[open closed pruned].include?(existing.fetch("lifecycle"))
       end
 
-      def merge_open_batch(existing, batch, confirmed_gap_ids:)
+      def merge_open_batch(existing, batch, confirmed_gap_ids:, attention_boundary:)
         confirmed = confirmed_gap_ids.to_h { |id| [ id, true ] }
         current_gaps = Array(existing["effective_gaps"] || existing["gaps"])
         retained_gaps = current_gaps.reject { |gap| confirmed[gap.fetch("gap_id")] }
@@ -302,7 +309,7 @@ module Hive
           refreshed_projects[item["project_id"]] && changed_tasks.include?(
             [ item["project_id"], item["task_slug"] ]
           )
-        end
+        end.map { |item| attention_at_boundary(item, attention_boundary) }
         Batch.new(
           projects: batch.projects,
           facts: (Array(existing["items"]) + Array(batch.facts)).uniq { |fact| fact.fetch("fact_id") },
@@ -312,6 +319,23 @@ module Hive
           gaps: (retained_gaps + Array(batch.gaps)).uniq { |gap| gap.fetch("gap_id") },
           frontiers: existing.fetch("effective_source_frontiers", {}).merge(batch.frontiers)
         )
+      end
+
+      def attention_at_boundary(item, boundary)
+        waiting_since = item["waiting_since"]
+        waiting_since = utc(waiting_since) if waiting_since
+        age = if waiting_since && waiting_since <= boundary
+          [ (boundary - waiting_since).floor, 0 ].max
+        end
+        item.merge("waiting_age_seconds" => age)
+      rescue ArgumentError, TypeError
+        item.merge("waiting_age_seconds" => nil)
+      end
+
+      def source_frontiers(record)
+        return {} unless record
+
+        record["effective_source_frontiers"] || record["source_frontiers"] || {}
       end
 
       def changed_task_slugs(prior_frontiers, current_frontiers)

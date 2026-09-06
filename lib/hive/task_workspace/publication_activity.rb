@@ -22,18 +22,27 @@ module Hive
         prior = observation(before)
         current = observation(after)
         return false unless current
+        observed_at = observation_time(after)
 
         changed = false
         if current.fetch("state", "UNKNOWN") == "MERGED" && prior&.fetch("state", nil) != "MERGED"
-          changed = record_kind("merge_observed", current, merge_payload(current)) || changed
+          changed = record_kind(
+            "merge_observed", current, merge_payload(current), observed_at: observed_at
+          ) || changed
         elsif pr_fingerprint(prior) != pr_fingerprint(current)
-          changed = record_kind("pr_observed", current, common_payload(current)) || changed
+          changed = record_kind(
+            "pr_observed", current, common_payload(current), observed_at: observed_at
+          ) || changed
         end
         if checks_fingerprint(prior) != checks_fingerprint(current)
-          changed = record_kind("check_observed", current, check_payload(current)) || changed
+          changed = record_kind(
+            "check_observed", current, check_payload(current), observed_at: observed_at
+          ) || changed
         end
         if prior && prior["review_decision"] != current["review_decision"]
-          changed = record_kind("review_observed", current, review_payload(current)) || changed
+          changed = record_kind(
+            "review_observed", current, review_payload(current), observed_at: observed_at
+          ) || changed
         end
         changed
       rescue Hive::TaskActivity::Error, JSON::GeneratorError, TypeError, ArgumentError
@@ -50,14 +59,15 @@ module Hive
         nil
       end
 
-      def record_kind(kind, observation, payload)
-        identity = Digest::SHA256.hexdigest(JSON.generate(payload.sort.to_h))
+      def record_kind(kind, observation, payload, observed_at:)
+        transition = payload.merge("transition_observed_at" => observed_at)
+        identity = Digest::SHA256.hexdigest(JSON.generate(transition.sort.to_h))
         @activity.record(
           kind: kind, operation_id: "github:#{kind}:#{identity}",
           correlation_id: "publication:#{payload.fetch('pr_number')}",
           reason: "pull request #{kind.delete_suffix('_observed').tr('_', ' ')} outcome changed",
-          source: "github", occurred_at: event_time(kind, observation),
-          observed_at: normalize_time(@clock.call), payload: payload
+          source: "github", occurred_at: event_time(kind, observation, observed_at),
+          observed_at: observed_at, payload: payload
         )
         true
       end
@@ -125,9 +135,14 @@ module Hive
           %w[SUCCESS NEUTRAL SKIPPED].include?(row["conclusion"].to_s.upcase)
       end
 
-      def event_time(kind, row)
+      def observation_time(value)
+        row = value.to_h.transform_keys(&:to_s)
+        normalize_time(row["observed_at"] || @clock.call)
+      end
+
+      def event_time(kind, row, observed_at)
         value = kind == "merge_observed" ? row["merged_at"] : nil
-        normalize_time(value || @clock.call)
+        normalize_time(value || observed_at)
       end
 
       def normalize_time(value)

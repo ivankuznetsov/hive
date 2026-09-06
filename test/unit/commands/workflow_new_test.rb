@@ -56,6 +56,7 @@ class WorkflowNewTest < Minitest::Test
       assert_equal :agent, workflow.stages[1].kind
       assert_equal instruction_path, workflow.stages[1].instruction
       assert_nil workflow.stages[1].skill
+      assert_nil workflow.stages[1].permissions
       assert_equal "development", workflow.stages[1].mapping_role
       assert_equal "my-flow-work-v1", workflow.stages[1].mapping_contract
       assert_equal :inert, workflow.stages[2].kind
@@ -178,6 +179,7 @@ class WorkflowNewTest < Minitest::Test
       workflow.executable_slots.each do |slot|
         assert slot.actor.mapping_role
         assert slot.actor.mapping_contract
+        assert_nil slot.actor.permissions
       end
 
       # Every stage instruction is copied verbatim from the sample — real

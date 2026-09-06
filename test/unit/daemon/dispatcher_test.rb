@@ -6124,10 +6124,18 @@ end
   end
 
   def test_terminal_attempt_receipt_completes_claimed_delivery_without_wait2
+    assert_terminal_attempt_completes_delivery(chat_id: 42)
+  end
+
+  def test_terminal_attempt_is_promoted_in_same_tick_when_request_is_deleted
+    assert_terminal_attempt_completes_delivery(chat_id: nil)
+  end
+
+  def assert_terminal_attempt_completes_delivery(chat_id:)
     Dir.mktmpdir("hive-attempt-delivery") do |state_home|
       request_id = Q.write_request!(
         project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
-        chat_id: 42, request_id: "request-1", task_id: "42",
+        chat_id: chat_id, request_id: "request-1", task_id: "42",
         task_generation: "generation-1", expected_stage: "4-execute",
         state_home: state_home, now: T0
       )
@@ -6188,11 +6196,17 @@ end
       assert_empty supervisor.spawned
       assert_empty Q.claimed(state_home: state_home)
       notice = Q.pending_results(state_home: state_home).first
-      assert_equal "attempt-1", notice.attempt_id
-      assert_equal "terminal", notice.attempt_state
-      assert_equal "succeeded", notice.receipt["outcome"]
+      if chat_id
+        assert_equal "attempt-1", notice.attempt_id
+        assert_equal "terminal", notice.attempt_state
+        assert_equal "succeeded", notice.receipt["outcome"]
+      else
+        assert_nil notice
+        assert_nil Q.repository(state_home).fetch(request_id)
+      end
       assert_nil store.fetch_hot("attempt-1")
       assert_equal "terminal", store.fetch("attempt-1").state
+      assert_equal request_id, store.fetch("attempt-1")["request_id"]
     end
   end
 

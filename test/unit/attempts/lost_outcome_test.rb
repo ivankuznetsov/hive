@@ -230,6 +230,24 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
+  def test_invalid_lost_recovery_transitions_leave_the_durable_row_unchanged
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      pending = outcomes.ensure_for(lost, now: NOW)
+      [ { phase: "unknown" }, { cleanup: "unknown" } ].each do |change|
+        error = assert_raises(Hive::Attempts::RepositoryError) { outcomes.update(lost, **change) }
+        assert_equal "lost recovery transition is invalid", error.message
+        assert_equal pending, outcomes.fetch(lost.attempt_id)
+      end
+      ready = outcomes.update(lost, phase: "ready", request_id: outcomes.recovery_request_id(lost), now: NOW)
+      error = assert_raises(Hive::Attempts::RepositoryError) { outcomes.update(lost, phase: "pending") }
+      assert_equal "lost recovery transition is invalid", error.message
+      assert_equal ready, outcomes.fetch(lost.attempt_id)
+    end
+  end
+
   def test_transition_reads_and_writes_fail_closed_on_storage_errors
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)

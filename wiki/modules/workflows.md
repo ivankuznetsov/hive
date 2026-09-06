@@ -11,6 +11,11 @@ tags: [module, workflow, result, verbs, selection, human-stage, outcomes, termin
 
 ## Descriptor and registry
 
+Local blank and research scaffolds omit `permissions`, inheriting the project's
+normal execution policy. Do not add tool allowlists merely because a workflow
+is a Honeycomb. Explicit owner-requested permission scopes remain supported and
+validated; installing tools and restricting their use are separate concerns.
+
 - `Hive::Workflow` — frozen `Data` value object with `id`, ordered `stages`,
   and normalized `archive_visibility_retention_days` (`Integer` or `:never`).
   `DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS` is the single legacy default

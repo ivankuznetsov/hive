@@ -64,7 +64,7 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     assert_empty reviewer
   end
 
-  def test_unknown_slot_and_profile_drift_fail_closed
+  def test_unknown_slot_is_rejected_but_updated_agent_installations_are_accepted
     assert_raises(Hive::ConfigError) do
       build_configuration(overrides: { "stages.missing" => { "agent" => "claude" } })
     end
@@ -77,8 +77,7 @@ class WorkflowPackageConfigurationTest < Minitest::Test
       assert_match(/no executable slot "stages\.missing"/, missing_slot.message)
 
       drifted = { "agents" => { "codex" => { "bin" => "/tmp/different-codex" } } }
-      error = assert_raises(Hive::ConfigError) { configuration.apply(workflow, cfg: drifted) }
-      assert_match(/profile drifted/, error.message)
+      assert_equal "codex", configuration.apply(workflow, cfg: drifted).stage_named("draft").agent
     end
   end
 
@@ -88,10 +87,7 @@ class WorkflowPackageConfigurationTest < Minitest::Test
       drifted = { "agents" => { "codex" => { "bin" => "/tmp/different-codex" } } }
 
       configuration.verify_profile!(workflow, "stages.review", cfg: drifted)
-      error = assert_raises(Hive::ConfigError) do
-        configuration.verify_profile!(workflow, "stages.draft", cfg: drifted)
-      end
-      assert_match(/profile drifted for stages\.draft/, error.message)
+      configuration.verify_profile!(workflow, "stages.draft", cfg: drifted)
     end
   end
 

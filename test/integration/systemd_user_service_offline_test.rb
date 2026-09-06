@@ -314,12 +314,14 @@ class SystemdUserServiceOfflineTest < Minitest::Test
   end
 
   def unit_inventory(unit_name)
-    output, status = Open3.capture2(
+    output, error, status = Open3.capture3(
       "systemctl", "--user", "list-unit-files", unit_name,
       "--no-legend", "--no-pager"
     )
-    assert status.success?, "could not enumerate #{unit_name}"
-    output.lines.select { |line| line.split.first == unit_name }
+    units = output.lines.select { |line| line.split.first == unit_name }
+    return units if status.success? || (status.exitstatus == 1 && units.empty? && error.empty?)
+
+    flunk "could not enumerate #{unit_name}: #{error.strip}"
   end
 
   def provision_systemctl_shim(dir, command_log_path)

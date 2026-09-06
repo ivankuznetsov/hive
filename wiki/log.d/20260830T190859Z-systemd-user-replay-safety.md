@@ -11,8 +11,19 @@ date: 2026-08-30
 - Routed bot, web, babysitter, daemon, uninstall, migration cutover, takeover,
   and lifecycle actions through the shared owner while preserving their public
   command envelopes and unsupported-manager behavior.
+- Preserved launchd completion at its verified loaded-job boundary and kept
+  the public entrypoint clean-loadable without eager runtime-control-plane
+  dependencies. Compact running status now loads its task-lease dependency
+  explicitly instead of relying on incidental require order.
+- Hardened review-discovered recovery boundaries: uninstall and purge stop
+  before destructive cleanup on contention or ambiguity, cutover operations
+  serialize through the same owner, rollback retains its direction, and
+  activation cannot be verified by a process from an old cached definition.
+- Kept manager-unavailable replay files unchanged, treated deactivating units
+  with a live main process as not yet stopped, and carried actionable retained
+  evidence diagnostics through lifecycle command failures.
 - Added deterministic bot and babysitter retry checks plus a required real user
-  manager scenario that passed locally with 231 runs, 1,040 assertions, and no
+  manager scenario that passed locally with 232 runs, 1,060 assertions, and no
   failures, errors, or skips.
 - Verified the default Hive test-file manifest directly with 14,270 runs,
   287,166 assertions, no failures or errors, and 12 portable skips. The root

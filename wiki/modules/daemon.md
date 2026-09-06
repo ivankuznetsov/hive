@@ -685,7 +685,11 @@ advances a workflow stage directly:
    advertises a later reset or the stamp is missing/malformed. A repeated wall
    writes a fresh marker and therefore starts the next interval; successful
    usage resets, top-ups, or account switches stop producing the marker. These
-   readiness attempts use the same unbounded policy as every other error.
+   readiness attempts continue hourly indefinitely, including when identical
+   quota errors persist for days. They never enter the repeated deterministic
+   failure park. Previously parked quota requests automatically return to
+   scheduler ownership without skipping their existing cooldown. Non-provider
+   failures retain their separate backoff and deterministic-failure policy.
    Logs retain `reason=limits_reached` / `reason=reviewer_limits_reached` as
    diagnostic labels, while durable request history supplies the retry count.
 

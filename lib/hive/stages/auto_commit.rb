@@ -195,6 +195,7 @@ module Hive
                     end
           )
         end
+        return { success: true, violations: violations } unless violations.empty?
 
         secrets = staged_secret_violations(
           worktree_path, entries[:entries], head_objects[:object_ids],

@@ -827,12 +827,15 @@ brainstorms the daemon never recorded a baseline for.
 
 `Hive::Daemon::DispatchBaselines` (`lib/hive/daemon/dispatch_baselines.rb`)
 persists that map to `daemon_dispatch_baselines.json` under
-`Hive::Paths.state_home` (beside `.daemon.pid`), mirroring
-`Hive::UpdateCheck::State`'s discipline: a JSON envelope with
-`schema_version`, atomic write (tempfile + fsync + rename + dir fsync)
-behind a sibling `.lock`, and a **fail-closed** load — a torn / partial /
+`Hive::Paths.state_home` (beside `.daemon.pid`): a JSON envelope with
+`schema_version`, `Hive::AtomicFile` replacement (tempfile + fsync + rename +
+directory fsync), and a **fail-closed** load — a torn / partial /
 corrupt / newer-schema file degrades to an empty map and the daemon boots
-normally (worst case: one task is re-baselined once). The controller
+normally (worst case: one task is re-baselined once). The daemon's existing
+activation lock and live-process check own single-writer custody; there is no
+second baseline-file lock that can block advancement. Stale temporary files
+from both the former private writer and AtomicFile are swept on construction.
+The controller
 write-throughs on every baseline mutation — first-sight record, dispatch,
 terminal-attempt replay, local-child completion, durable-attempt completion,
 AND prune — so there is no batched loss window for the critical value. A terminal replay means the
@@ -877,8 +880,7 @@ every load so the operator has a positive boot-time signal that
 persistence is in use. Torn / wrong-shape files emit
 `:daemon_dispatch_baselines_corrupt`; a newer-schema file (downgrade
 protection — writes suspended) emits
-`:daemon_dispatch_baselines_newer_schema_suspended`; lock acquisition
-failures emit `:daemon_dispatch_baselines_lock_error`; write errors
+`:daemon_dispatch_baselines_newer_schema_suspended`; write errors
 (ENOSPC / EROFS / EDQUOT) emit `:daemon_dispatch_baselines_write_error`;
 orphan-tmp sweep failures emit
 `:daemon_dispatch_baselines_tmp_sweep_error`; and the store's

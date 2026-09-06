@@ -387,6 +387,7 @@ module HiveTestHelper
     project_root, state_home: nil, state_root_path: File.join(project_root, ".hive-state")
   )
     require "digest"
+    require "hive/runtime_control_plane/task_lease_repository"
     require "hive/task_counter"
     state_home ||= (@hive_test_runtime_state_home ||= tracked_tmp_dir("hive-test-runtime"))
     project_name = "test-#{Digest::SHA256.hexdigest(project_root)[0, 16]}"

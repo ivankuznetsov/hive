@@ -17,8 +17,13 @@ Retries use deterministic dispatch-request identity, not an attempt graph.
 `Hive::Attempts::API` is the public admission facade. The CLI, bot, web, daemon,
 and module-hook paths use the same dispatcher. A successful admission starts a
 detached supervisor; callers may attach or observe but do not own the worker's
-lifetime.
-The API does not own or reap child processes after handoff.
+lifetime. The API does not own or reap child processes after handoff.
+
+The private supervisor route is selected before public CLI dispatch. Its detached
+wrapper removes inherited Bundler and Ruby toolchain variables before it re-enters
+Hive, anchoring startup to the invoked Hive checkout rather than a caller bundle
+or transient test home. The capability and handshake descriptors are the only
+inherited launch authority.
 
 SQLite owns machine-local coordination only. Task Markdown and task journals
 remain workflow authority. Large logs and outputs live in the content-addressed
@@ -65,9 +70,8 @@ written; accounting and publication acknowledgements remain independent.
 
 ## Lost recovery
 
-A lost attempt never
-projects a recovery marker; its row remains the recovery authority.
-Recovery stays direct without adding an event bus.
+A lost attempt never projects a recovery marker; its row remains the recovery
+authority. Recovery stays direct without adding an event bus.
 
 A proven-lost attempt advances through a monotonic recovery phase. Recovery
 creates or finds one deterministic dispatch request. When that request admits a
@@ -112,3 +116,4 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
+

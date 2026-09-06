@@ -77,6 +77,10 @@ native child environment, and run/export interpretation while using
 one `opencode run` process with the prompt on owner-private
 file-backed stdin, captures bounded stdout and stderr, and records timeout or
 cancellation before parsing.
+Each run also carries a random invocation-custody ID. After the run exits,
+Hive terminates only same-user processes carrying that exact ID, closing a
+`setsid` escape without affecting another invocation. A custody-cleanup
+failure overrides an otherwise successful transcript.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that

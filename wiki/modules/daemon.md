@@ -371,10 +371,15 @@ daemon crash between queue preclaim and attempt-ID stamping is repaired on
 restart by looking up the immutable attempt `request_id`; the repaired claim is
 persisted before normal live/terminal/lost delivery reconciliation continues.
 
-On Linux the shipped systemd-user unit uses `KillMode=process`. Service
-restart therefore replaces only the daemon process; detached durable-attempt
-wrappers and workers remain alive for the first reconciliation pass to adopt,
-rather than being killed as cgroup children and replayed.
+On Linux with a reachable systemd user manager, each durable-attempt wrapper
+runs in its own transient `hive-attempt-<digest>.scope`. The scope is a sibling
+of `hive-daemon.service`, preserves the launcher's exact environment and
+capability/ready file descriptors, and is collected after the wrapper exits.
+An ordinary service restart still uses `KillMode=process`, while a
+systemd-oomd kill of the daemon cgroup can no longer erase every accepted
+attempt with it; only an independently selected attempt scope is affected and
+the normal lost-attempt recovery contract applies. Hosts without a usable
+systemd user bus retain the POSIX double-fork/session fallback.
 
 The answer-digest scheduler dispatches before status fetch because it is global,
 not project-row driven. The dispatcher tracks its synthetic project/stage and

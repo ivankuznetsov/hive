@@ -1,3 +1,5 @@
+require "hive/invocation_process_custody"
+
 module Hive
   module AgentSupport
     module OpenCode
@@ -13,6 +15,8 @@ module Hive
         CAPTURE_DRAIN_SECONDS = 30
 
         def run_supported
+          process_custody = Hive::InvocationProcessCustody.new
+          process_cleanup_finished = false
           launch = prepare_native_invocation
           validate_native_skills!(launch)
           command = launch.invocation.argv
@@ -20,14 +24,19 @@ module Hive
           write_spawn_log(log_file, launch, command)
           run = capture_process(
             argv: command,
-            environment: effective_native_environment(launch.environment),
+            environment: effective_native_environment(launch.environment).merge(
+              process_custody.environment
+            ),
             stdin_data: launch.invocation.stdin_data,
             stdout_limit: RUN_CAPTURE_BYTES,
             stderr_limit: self.class::FINAL_MESSAGE_TAIL_BYTES,
             record_spawn: true,
             forward_signals: @terminate_on_parent_signal,
-            drain_timeout: CAPTURE_DRAIN_SECONDS
+            drain_timeout: CAPTURE_DRAIN_SECONDS,
+            completion_probe: @completion_probe
           )
+          process_custody.cleanup!
+          process_cleanup_finished = true
           provider_error = write_capture_log(log_file, run.stdout, run.stderr)
           inspection_output, inspection_diagnostic = inspect_run(launch, run)
           captured = Hive::AgentRuntime::CapturedResult.new(
@@ -42,6 +51,22 @@ module Hive
           result = result_hash(
             run, outcome, inspection_diagnostic, log_file, provider_error
           )
+          result[:process_cleanup_completed] = true
+          result
+        rescue Hive::InvocationProcessCustody::CleanupError => error
+          result ||= { status: nil }
+          result[:process_cleanup_completed] = false
+          result[:process_cleanup_error] = AgentCliRuntime::Redactor.diagnostic(error)
+          result
+        ensure
+          if process_custody && !process_cleanup_finished
+            begin
+              process_custody.cleanup!
+            rescue Hive::InvocationProcessCustody::CleanupError => error
+              warn "[hive] OpenCode process cleanup failed: " \
+                   "#{AgentCliRuntime::Redactor.diagnostic(error)}"
+            end
+          end
         end
 
         private
@@ -264,7 +289,7 @@ module Hive
             inspection_diagnostic:,
             unknown_event_summaries: outcome.unknown_events,
             resource_exhaustion: nil,
-            output_completed: outcome.completed?,
+            output_completed: run.output_completed || outcome.completed?,
             provider_signal: nil,
             provider_error:,
             status: nil

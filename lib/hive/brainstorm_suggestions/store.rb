@@ -101,6 +101,25 @@ module Hive
         false
       end
 
+      # Terminal and downgrade cleanup must be able to remove corrupt state
+      # that no longer satisfies the canonical 0600 contract. Unlinking an
+      # owned regular file or symlink is safe because this never follows the
+      # target; directories and foreign-owned entries remain fail-closed.
+      def delete_for_cleanup!
+        validate_root!
+        return false unless File.exist?(path) || File.symlink?(path)
+
+        status = File.lstat(path)
+        raise UnsafePath, "suggestion sidecar is not removable owned state" unless
+          status.uid == Process.uid && (status.file? || status.symlink?)
+
+        File.unlink(path)
+        Hive::AtomicFile.fsync_directory(root)
+        true
+      rescue Errno::ENOENT
+        false
+      end
+
       private
 
       def empty_document

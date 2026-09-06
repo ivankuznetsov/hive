@@ -126,4 +126,25 @@ class HiveBrainstormSuggestionsStoreTest < Minitest::Test
       end
     end
   end
+
+  def test_terminal_cleanup_unlinks_owned_corrupt_state_without_following_links
+    Dir.mktmpdir do |root|
+      store = Hive::BrainstormSuggestions::Store.new(root)
+      File.write(store.path, "corrupt candidate", mode: "w", perm: 0o644)
+
+      assert store.delete_for_cleanup!
+      refute File.exist?(store.path)
+
+      target = File.join(root, "outside")
+      File.write(target, "preserve me")
+      File.symlink(target, store.path)
+      assert store.delete_for_cleanup!
+      assert_equal "preserve me", File.read(target)
+
+      Dir.mkdir(store.path)
+      assert_raises(Hive::BrainstormSuggestions::UnsafePath) do
+        store.delete_for_cleanup!
+      end
+    end
+  end
 end

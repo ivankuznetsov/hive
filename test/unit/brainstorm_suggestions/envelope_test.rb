@@ -5,6 +5,8 @@ require "hive/bot/brainstorm_answer_writer"
 require "hive/tui/brainstorm_answers"
 
 class HiveBrainstormSuggestionsEnvelopeTest < Minitest::Test
+  include HiveTestHelper
+
   BINDING = "b" * 64
 
   def test_render_rejects_an_unbound_candidate
@@ -162,12 +164,16 @@ class HiveBrainstormSuggestionsEnvelopeTest < Minitest::Test
 
   def test_tui_completeness_and_writer_treat_envelope_as_an_empty_slot
     Dir.mktmpdir do |root|
-      path = File.join(root, "brainstorm.md")
+      task_root = File.join(root, ".hive-state", "stages", "2-brainstorm", "suggestion-envelope")
+      FileUtils.mkdir_p(task_root)
+      path = File.join(task_root, "brainstorm.md")
       envelope = Hive::BrainstormSuggestions::Envelope.render(binding: BINDING, text: "Advisory only")
+      Hive::TaskMeta.write(task_root, id: 1, slug: "suggestion-envelope", display_name: nil)
+      prepare_test_task_lease_repository(task_root)
       File.write(path, "## Round 1\n### Q1. Choose?\n### A1.\n#{envelope}<!-- WAITING -->\n")
 
       assert_equal false, Hive::Tui::BrainstormAnswers.complete?(path)
-      result = Hive::Lock.with_task_lock(root, op: "test") do
+      result = Hive::Lock.with_task_lock(task_root, op: "test") do
         Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
           brainstorm_path: path, ordinal: 1, answer_text: "Operator choice"
         )

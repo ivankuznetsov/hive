@@ -22,7 +22,7 @@ module Hive
             Hive::Markers.write_atomic(path, stripped) unless stripped == body
           end
         end
-        Store.new(root).delete!
+        Store.new(root).delete_for_cleanup!
         true
       end
     end

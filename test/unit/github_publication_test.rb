@@ -650,6 +650,25 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  def test_unavailable_secret_scanner_blocks_publication_before_remote_mutation
+    with_local_remote do |repo, remote, head|
+      git = CountingGit.new(remote)
+      path = state_path(repo)
+      unavailable = ->(*) { raise Hive::SecretScanner::Unavailable, "scanner unavailable" }
+      with_replaced_singleton_method(Hive::SecretScanner, :git_match?, unavailable) do
+        error = assert_raises(Hive::GithubPublication::Blocked) do
+          Hive::GithubPublication::Controller.new(
+            state_path: path, git_gateway: git, github_gateway: FakeGithub.new
+          ).publish!(request_for(repo, head), revalidate: ->(_) { true })
+        end
+        assert_equal "secret_scan_unavailable", error.code
+        assert_includes error.message, "scanner unavailable"
+        assert_equal 0, git.pushes
+        refute File.exist?(path)
+      end
+    end
+  end
+
   def test_secret_scan_classifies_runtime_password_references_in_a_native_diff
     with_local_remote do |repo, remote, head|
       clean = request_for(repo, head)

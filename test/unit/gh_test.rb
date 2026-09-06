@@ -137,6 +137,20 @@ class GhUnitTest < Minitest::Test
 
   # --- scan_pr_for_secrets ---------------------------------------------
 
+  def test_scan_pr_for_secrets_fails_closed_when_scanner_is_unavailable
+    with_tmp_dir do |dir|
+      state = File.join(dir, "pr.md")
+      File.write(state, "clean local body\n")
+      unavailable = ->(*) { raise Hive::SecretScanner::Unavailable, "scanner unavailable" }
+      with_replaced_singleton_method(Hive::SecretScanner, :scan, unavailable) do
+        result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "")
+        assert result.fetch_failed
+        assert_equal "scanner unavailable", result.fetch_error
+        assert_empty result.hits
+      end
+    end
+  end
+
   def test_scan_pr_for_secrets_clean_when_state_file_clean_and_no_url
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")

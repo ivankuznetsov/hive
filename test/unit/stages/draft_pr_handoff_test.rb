@@ -874,6 +874,22 @@ class StagesDraftPrHandoffTest < Minitest::Test
     end
   end
 
+  def test_hardened_read_failure_preserves_bounded_stderr_or_stdout_diagnostic
+    [ [ "stderr failure", "stdout fallback", "stderr failure" ],
+      [ "", "stdout fallback", "stdout fallback" ] ].each do |stderr, stdout, expected|
+      failed = Hive::AgentGitGate::ReadResult.new(
+        operation: :head_oid, stdout: stdout, stderr: stderr,
+        exitstatus: 1, overflow: false
+      )
+      with_replaced_singleton_method(Hive::AgentGitGate, :read, ->(*) { failed }) do
+        error = assert_raises(Hive::Stages::DraftPrHandoff::IdentityError) do
+          Hive::Stages::DraftPrHandoff.send(:git_read!, "/repo", :head_oid)
+        end
+        assert_equal "hardened Git head_oid failed during handoff: #{expected}", error.message
+      end
+    end
+  end
+
   private
 
   def with_handoff_fixture(create_visible: true)

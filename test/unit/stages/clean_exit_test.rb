@@ -45,6 +45,26 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  def test_scanner_unavailability_leaves_residue_uncommitted
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "lib"))
+      path = File.join(worktree, "lib", "example.rb")
+      File.write(path, "module Example; end\n")
+      head = run!("git", "-C", worktree, "rev-parse", "HEAD")
+      unavailable = ->(*) { raise Hive::SecretScanner::Unavailable, "scanner unavailable" }
+      with_replaced_singleton_method(Hive::SecretScanner, :staged_findings, unavailable) do
+        result = Hive::Stages::CleanExit.run!(
+          worktree_path: worktree, stage: "6-review", task: fake_task, cfg: @default_cfg
+        )
+        assert_equal :git_failed, result[:status]
+        assert_includes result[:message], "scanner unavailable"
+      end
+      assert_equal head, run!("git", "-C", worktree, "rev-parse", "HEAD")
+      assert_equal "module Example; end\n", File.read(path)
+    end
+  end
+
   # Regression: babysitter dry-run runs leave a skip log + overlay-bin shims at
   # the worktree root. With those paths gitignored (see the repo `.gitignore`),
   # CleanExit's `git status --porcelain` reports nothing and the stage exits

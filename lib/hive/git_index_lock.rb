@@ -34,7 +34,9 @@ module Hive
       return false unless status.success? && errors.empty?
       return false if processes.lines.any? { |line| File.basename(line.strip).match?(/\Agit(?:\z|[- ])/) }
 
-      holders, errors, status = Open3.capture3("fuser", "--", path)
+      # rev-parse supplies an absolute path, so no option delimiter is needed.
+      # PSmisc fuser does not accept the conventional `--` delimiter.
+      holders, errors, status = Open3.capture3("fuser", path)
       status.exitstatus == 1 && holders.empty? && errors.empty?
     end
   end

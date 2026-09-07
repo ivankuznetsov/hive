@@ -81,4 +81,27 @@ class GitIndexLockTest < Minitest::Test
       assert File.exist?(path)
     end
   end
+
+  def test_real_fuser_distinguishes_an_unowned_lock_from_an_open_file
+    capture = Open3.method(:capture3)
+    available = system("fuser", "-V", out: File::NULL, err: File::NULL)
+    skip "fuser is optional on this platform" unless available
+    success = Struct.new(:success?).new(true)
+    probe = ->(tool, *args) { tool == "ps" ? [ "ruby\n", "", success ] : capture.call(tool, *args) }
+    with_tmp_git_repo do |root|
+      path = File.join(root, ".git", "index.lock")
+      File.write(path, "")
+      File.utime(Time.now - 120, Time.now - 120, path)
+      with_replaced_singleton_method(Open3, :capture3, probe) do
+        File.open(path) do
+          refute Hive::GitIndexLock.no_writers?(path)
+          Hive::GitIndexLock.recover!(root)
+          assert File.exist?(path)
+        end
+        assert Hive::GitIndexLock.no_writers?(path)
+        Hive::Lock.with_commit_lock(root) { run!("git", "-C", root, "add", "-A") }
+        refute File.exist?(path)
+      end
+    end
+  end
 end

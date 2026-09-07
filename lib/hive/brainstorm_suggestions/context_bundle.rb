@@ -18,7 +18,7 @@ module Hive
     # and already-settled operator context. It never enumerates untracked files.
     class ContextBundle
       RECIPE = "tracked-relevance"
-      RECIPE_VERSION = 2
+      RECIPE_VERSION = 3
       MAX_CAPTURE_SECONDS = 5
       MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024
       MAX_CANDIDATE_FILES = 160
@@ -127,6 +127,7 @@ module Hive
 
       def capture!
         check_deadline!
+        @secret_scan_inputs = []
         @task_request = screened_untrusted!(
           stable_read(File.join(@task_root, "idea.md"), max_bytes: MAX_REQUEST_BYTES,
                       code: "task_request_unavailable")
@@ -162,7 +163,8 @@ module Hive
         overlay_paths = tracked_overlay_paths
         repository_entries = select_repository_entries(index, tokens, overlay_paths)
         main_wiki_entries = select_main_wiki_entries(tokens)
-        @entries = fixed_context_entries + repository_entries + main_wiki_entries
+        selected_entries = screen_selected_evidence!(repository_entries + main_wiki_entries)
+        @entries = fixed_context_entries + selected_entries
         @entries = @entries.freeze
         @manifest = {
           "recipe" => RECIPE,
@@ -261,7 +263,7 @@ module Hive
           content = stable_tracked_read(path)
           next if content.nil? || content.include?("\0") || !content.dup.force_encoding(Encoding::UTF_8).valid_encoding?
           content = content.force_encoding(Encoding::UTF_8)
-          next unless safe_evidence?(content)
+          next unless structurally_safe_evidence?(content)
 
           source = path.start_with?("wiki/") ? "project_wiki" : "repository"
           relevance = path_relevance_score(path, tokens) + content_score(content, tokens)
@@ -291,7 +293,7 @@ module Hive
           content = stable_external_read(root, relative)
           next if content.nil? || content.include?("\0")
           content = content.dup.force_encoding(Encoding::UTF_8)
-          next unless content.valid_encoding? && safe_evidence?(content)
+          next unless content.valid_encoding? && structurally_safe_evidence?(content)
 
           relevance = path_relevance_score(relative, tokens) + content_score(content, tokens)
           next unless relevance.positive?
@@ -444,18 +446,51 @@ module Hive
 
       def screened_untrusted!(value, code: "unsafe_prompt_context")
         redacted = Hive::SecretPatterns.redact(value.to_s)
-        raise CaptureError.new(code) unless safe_evidence?(redacted)
+        raise CaptureError.new(code) unless structurally_safe_evidence?(redacted)
 
+        @secret_scan_inputs << { content: redacted, required_code: code }
         redacted
       end
 
-      def safe_evidence?(value)
-        !Hive::SecretScanner.match?(value) &&
-          !value.match?(Hive::BrainstormSuggestions::Safety::CONTROL_RE) &&
+      # Betterleaks is deliberately invoked once for the complete bounded
+      # selection. Spawning it once per candidate made a normal read exceed the
+      # projection deadline and turned valid generated candidates into an
+      # unavailable card. Required prompt inputs fail closed; tracked evidence
+      # containing a finding is omitted without retaining the finding or raw
+      # scanner output.
+      def screen_selected_evidence!(entries)
+        inputs = @secret_scan_inputs + entries.map { |entry| { content: entry.content, entry: entry } }
+        line = 1
+        ranges = []
+        payload = inputs.map do |input|
+          content = input.fetch(:content)
+          chunk = content.end_with?("\n") ? content : "#{content}\n"
+          line_count = [ chunk.count("\n"), 1 ].max
+          ranges << [ line...(line + line_count), input ]
+          line += line_count + 1
+          "#{chunk}\n"
+        end.join
+
+        rejected = {}
+        Hive::SecretScanner.scan(payload, path: "brainstorm-suggestion-context").each do |finding|
+          finding_line = Integer(finding[:line] || finding["line"])
+          input = ranges.find { |range, _candidate| range.cover?(finding_line) }&.last
+          raise Hive::SecretScanner::Unavailable, "unmapped scanner finding" unless input
+
+          if input[:required_code]
+            raise CaptureError.new(input.fetch(:required_code))
+          end
+          rejected[input.fetch(:entry).object_id] = true
+        end
+        entries.reject { |entry| rejected[entry.object_id] }
+      rescue Hive::SecretScanner::Unavailable, KeyError, ArgumentError, TypeError
+        raise CaptureError.new("secret_scanner_unavailable")
+      end
+
+      def structurally_safe_evidence?(value)
+        !value.match?(Hive::BrainstormSuggestions::Safety::CONTROL_RE) &&
           !value.match?(Hive::BrainstormSuggestions::Safety::BARE_CR_RE) &&
           !value.match?(Hive::BrainstormSuggestions::Safety::PROMPT_CONTROL_RE)
-      rescue Hive::SecretScanner::Unavailable
-        raise CaptureError.new("secret_scanner_unavailable")
       end
 
       def xml_attribute(value)

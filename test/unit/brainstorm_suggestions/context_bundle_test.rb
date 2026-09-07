@@ -59,12 +59,21 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
       git(root, "add", "secret-adapter.yml")
 
       with_task(root) do |task|
-        bundle = Hive::BrainstormSuggestions::ContextBundle.capture(
-          project_root: root, task_root: task, question_ordinal: 2
-        )
+        scans = 0
+        original_scan = Hive::SecretScanner.method(:scan)
+        scanner = lambda do |text, path: ""|
+          scans += 1
+          original_scan.call(text, path: path)
+        end
+        bundle = with_replaced_singleton_method(Hive::SecretScanner, :scan, scanner) do
+          Hive::BrainstormSuggestions::ContextBundle.capture(
+            project_root: root, task_root: task, question_ordinal: 2
+          )
+        end
         paths = bundle.manifest.fetch("entries").map { |entry| entry.fetch("path") }
         context = bundle.render_context
 
+        assert_equal 1, scans, "the bounded context should cross the external scanner once"
         assert_includes context, "ADAPTER = :working_tree"
         assert_includes context, "STAGED = true"
         assert_includes paths, "wiki/architecture.md"
@@ -369,7 +378,7 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
           raise Hive::SecretScanner::Unavailable, "scanner unavailable"
         end
 
-        with_replaced_singleton_method(Hive::SecretScanner, :match?, unavailable) do
+        with_replaced_singleton_method(Hive::SecretScanner, :scan, unavailable) do
           error = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
             Hive::BrainstormSuggestions::ContextBundle.capture(
               project_root: root, task_root: task, question_ordinal: 2

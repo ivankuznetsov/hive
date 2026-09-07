@@ -11,6 +11,7 @@ require "hive/task_resolver"
 require "hive/workflows"
 require "hive/context_provenance"
 require "hive/plan_review/store"
+require "hive/recovery/retry_policy"
 
 module Hive
   module Attempts
@@ -239,6 +240,22 @@ module Hive
           subject: subject || task_subject(generation), runtime_digest: @runtime_digest, now: now
         )
           return deferred_result("patrol_retry_delay")
+        end
+
+        if task && !interactive && !retry_release &&
+           "#{task.stage_index}-#{task.stage_name}" != generation.intended_stage &&
+           !CommandProgress.patrol_fix?(task)
+          previous = view.latest_terminal_attempt(
+            task_generation: generation.task_generation,
+            subject: subject || task_subject(generation)
+          )
+          if previous && %w[failed cancelled].include?(previous.outcome)
+            retry_at = Time.iso8601(previous.receipt.fetch("ended_at")) +
+              Hive::Recovery::RetryPolicy.delay_sec(previous["retry_charge"])
+            return deferred_result("transition_retry", attempt: previous, receipt: previous.receipt) if now.utc < retry_at
+
+            retry_charge = [ retry_charge, previous["retry_charge"].to_i + 1 ].max
+          end
         end
 
         launching_attributes = {

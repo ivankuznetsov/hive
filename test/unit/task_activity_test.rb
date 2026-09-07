@@ -322,7 +322,7 @@ class TaskActivityTest < Minitest::Test
     end
   end
 
-  def test_aborted_operation_keeps_history_and_retry_gets_a_distinct_identity
+  def test_aborted_operation_reuses_stable_identity_without_a_retry_budget
     with_activity do |activity, dir|
       attributes = {
         kind: "retry_requested", operation_id: "retry:task-1",
@@ -334,8 +334,12 @@ class TaskActivityTest < Minitest::Test
       second = activity.begin_operation(**attributes)
 
       assert_equal "retry:task-1", first.operation_id
-      assert_equal "retry:task-1:retry:1", second.operation_id
-      assert_equal 2, Dir[File.join(dir, Hive::TaskActivity::OPERATION_DIRECTORY, "*.json")].length
+      101.times do
+        second.abort!(reason: "not committed")
+        second = activity.begin_operation(**attributes)
+      end
+      assert_equal "retry:task-1", second.operation_id
+      assert_equal 1, Dir[File.join(dir, Hive::TaskActivity::OPERATION_DIRECTORY, "*.json")].length
       assert_equal "pending", second.receipt.fetch("state")
     end
   end
@@ -362,11 +366,11 @@ class TaskActivityTest < Minitest::Test
       duplicate = retry_activity.begin_operation(**attributes)
 
       assert_empty summary.fetch("diagnostics")
-      assert_equal "approve:3-plan:4-execute:forward:retry:1", retried.operation_id
+      assert_equal "approve:3-plan:4-execute:forward", retried.operation_id
       assert_equal retried.operation_id, duplicate.operation_id,
                    "the same successor attempt must reopen its retry receipt idempotently"
       assert_equal "attempt-2", retried.receipt.fetch("attempt_id")
-      assert_equal "aborted", first_activity_receipt(dir).fetch("state")
+      assert_equal "pending", first_activity_receipt(dir).fetch("state")
     end
   end
 

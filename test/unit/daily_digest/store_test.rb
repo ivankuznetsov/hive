@@ -181,6 +181,9 @@ class DailyDigestStoreTest < Minitest::Test
       assert_equal "a" * 64, receipt.dig("interval", "interval_id")
       assert_equal 86_400, receipt.dig("interval", "duration_seconds")
       assert_equal 0o600, File.stat(store.tombstone_path("2026-08-30")).mode & 0o777
+
+      File.delete(File.join(store.root, "intervals.json"))
+      assert_equal [ "2026-08-30" ], store.dates
     end
   end
 
@@ -234,6 +237,17 @@ class DailyDigestStoreTest < Minitest::Test
       refute_path_exists index_path
       assert_equal 0o750, File.stat(root).mode & 0o777
       assert_equal 0o640, File.stat(lock_path).mode & 0o777
+    end
+  end
+
+  def test_read_with_an_existing_root_does_not_require_a_lock_file
+    with_tmp_dir do |dir|
+      root = File.join(dir, "digest")
+      FileUtils.mkdir_p(root)
+      store = Hive::DailyDigest::Store.new(root: root)
+
+      assert_empty store.dates
+      refute_path_exists File.join(root, ".store.lock")
     end
   end
 
@@ -383,6 +397,9 @@ class DailyDigestStoreTest < Minitest::Test
       store = Hive::DailyDigest::Store.new(root: root)
 
       assert_raises(Hive::DailyDigest::Store::UnsafePath) { store.dates }
+      assert_raises(Hive::DailyDigest::Store::UnsafePath) do
+        store.write_base(record("closed"))
+      end
     end
   end
 

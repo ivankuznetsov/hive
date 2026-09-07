@@ -114,6 +114,14 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
           policy.runtime_roots(profile)
         end
       end
+      with_replaced_singleton_method(
+        runtime, :executable, ->(**) { raise Errno::ENOENT, "missing runtime" }
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          policy.runtime_roots(profile)
+        end
+        assert_match(/could not resolve the Codex native runtime/, error.message)
+      end
     end
 
     incompatible = fake_profile("codex")

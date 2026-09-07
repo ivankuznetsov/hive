@@ -197,6 +197,24 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_membership_history_rebuilds_a_missing_event_id_index
+    existing = {
+      "event_id" => "existing-event", "kind" => "registered",
+      "occurred_at" => "2026-08-30T09:00:00Z", "before" => {}, "after" => {}
+    }
+    data = { "project_membership_history" => [ existing ] }
+
+    appended = Hive::Config.send(
+      :append_membership_history!, data,
+      kind: "unregistered", occurred_at: "2026-08-30T10:00:00Z",
+      before: { "project_id" => "project-1" }, after: {}
+    )
+
+    assert_equal true, data.dig("project_membership_event_ids", "existing-event")
+    assert_equal true,
+                 data.dig("project_membership_event_ids", appended.fetch("event_id"))
+  end
+
   def test_registry_projects_are_synchronized_into_the_active_control_plane
     with_tmp_global_config do
       with_tmp_dir do |project|

@@ -63,6 +63,23 @@ class DailyDigestRecordTest < Minitest::Test
     end
     assert_match(/resolved_gaps must match resolved_gap_ids/, error.message)
 
+    invalid_resolved_attention = amendment.merge(
+      "source_frontiers" => {}, "resolved_attention_ids" => "not-an-array"
+    )
+    error = assert_raises(Hive::DailyDigest::InvalidRecord) do
+      Hive::DailyDigest::Record.prepare_amendment("2026-08-30", invalid_resolved_attention)
+    end
+    assert_match(/resolved attention fields must be arrays/, error.message)
+
+    mismatched_resolved_attention = amendment.merge(
+      "source_frontiers" => {}, "resolved_attention_ids" => [],
+      "resolved_attention" => [ { "attention_id" => "attention-1" } ]
+    )
+    error = assert_raises(Hive::DailyDigest::InvalidRecord) do
+      Hive::DailyDigest::Record.prepare_amendment("2026-08-30", mismatched_resolved_attention)
+    end
+    assert_match(/resolved_attention must match resolved_attention_ids/, error.message)
+
     error = assert_raises(Hive::DailyDigest::InvalidRecord) do
       Hive::DailyDigest::Record.prepare("bad" => Float::NAN)
     end

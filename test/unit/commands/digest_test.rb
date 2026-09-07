@@ -352,10 +352,16 @@ class DigestCommandTest < Minitest::Test
     command.send(:render_amendments, [ {
       "amended_at" => "2026-08-31T08:00:00Z", "kind" => "late_observation",
       "items" => [ { "summary" => "Late completion", "project" => "demo", "task_slug" => "task" } ],
-      "resolved_gap_ids" => [ "gap-1" ], "resolved_gaps" => []
+      "resolved_gap_ids" => [ "gap-1" ], "resolved_gaps" => [],
+      "resolved_attention_ids" => [ "attention-1" ],
+      "resolved_attention" => [ {
+        "attention_id" => "attention-1", "project" => "demo",
+        "task_slug" => "task", "kind" => "blocked"
+      } ]
     } ])
     assert_includes amendments.string, "late: Late completion · demo:task"
     assert_includes amendments.string, "recovered gap: gap-1"
+    assert_includes amendments.string, "attention resolved: demo:task · blocked"
   end
 
   def test_invalid_web_origins_and_unexpected_errors_emit_typed_json

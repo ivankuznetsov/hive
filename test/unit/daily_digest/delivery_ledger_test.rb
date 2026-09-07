@@ -253,6 +253,21 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
     end
   end
 
+  def test_process_identity_failure_keeps_a_safe_preparer_identity
+    with_tmp_dir do |dir|
+      ledger = Hive::DailyDigest::DeliveryLedger.new(
+        root: File.join(dir, "deliveries"),
+        process_identity: -> { raise IOError, "process table unavailable" }
+      )
+
+      receipt = ledger.prepare(**identity, now: NOW).receipt
+
+      assert_match(/\A[0-9a-f]{32}\z/, receipt.fetch("preparer_id"))
+      assert_nil receipt.fetch("preparer_pid")
+      assert_nil receipt.fetch("preparer_process_start_time")
+    end
+  end
+
   def test_reconciles_every_interrupted_sending_receipt
     with_tmp_dir do |dir|
       root = File.join(dir, "deliveries")

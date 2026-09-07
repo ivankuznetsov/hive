@@ -88,9 +88,11 @@ class DailyDigestPublicViewTest < Minitest::Test
   def test_outcome_labels_expose_bounded_transition_and_pr_results
     transition = { "kind" => "stage_transition", "details" => { "to_stage" => "6-review" } }
     check = { "kind" => "check_observed", "details" => { "check_state" => "passing" } }
+    review = { "kind" => "review_observed", "details" => { "review_state" => "approved" } }
 
     assert_equal "to 6-review", Hive::DailyDigest::PublicView.outcome_label(transition)
     assert_equal "passing", Hive::DailyDigest::PublicView.outcome_label(check)
+    assert_equal "approved", Hive::DailyDigest::PublicView.outcome_label(review)
   end
 
   def test_fact_keeps_only_http_pr_urls

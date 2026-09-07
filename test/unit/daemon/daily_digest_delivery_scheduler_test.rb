@@ -181,6 +181,17 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
     end
   end
 
+  def test_tick_stops_when_reconciliation_cannot_be_completed
+    scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+      enabled: false, store: Object.new
+    )
+    scheduler.instance_variable_set(:@enabled, true)
+    scheduler.define_singleton_method(:backed_off?) { |_now| false }
+    scheduler.define_singleton_method(:reconcile_delivery_ledger) { |now:| false }
+
+    assert_empty scheduler.tick(now: Time.iso8601("2026-08-30T09:00:00Z"))
+  end
+
   def test_invalid_zone_missing_record_and_record_identity_fallbacks_do_not_dispatch
     previous = Hive::DailyDigest::Calendar.new(time_zone: "UTC")
                                           .interval_for("2026-08-29", sequence: 1)

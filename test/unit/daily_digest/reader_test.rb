@@ -55,6 +55,11 @@ class DailyDigestReaderTest < Minitest::Test
         "resolved_gap_ids" => [ "one-resolved", "two-resolved" ],
         "resolved_gaps" => [
           gap("one-resolved", "one"), gap("two-resolved", "two")
+        ],
+        "resolved_attention_ids" => [ "attention:one", "attention:two" ],
+        "resolved_attention" => [
+          { "attention_id" => "attention:one", "project_id" => "one" },
+          { "attention_id" => "attention:two", "project_id" => "two" }
         ]
       } ]
     )
@@ -72,6 +77,9 @@ class DailyDigestReaderTest < Minitest::Test
     assert_equal [ "gap:one-resolved" ], amendment.fetch("resolved_gap_ids")
     assert_equal [ "one-resolved" ],
                  amendment.fetch("resolved_gaps").map { |row| row.fetch("scope") }
+    assert_equal [ "attention:one" ], amendment.fetch("resolved_attention_ids")
+    assert_equal [ "one" ],
+                 amendment.fetch("resolved_attention").map { |row| row.fetch("project_id") }
     assert_nil reader.previous_date("2026-08-30")
     assert_nil reader.next_date("2026-08-30")
 
@@ -132,6 +140,16 @@ class DailyDigestReaderTest < Minitest::Test
     assert_equal "empty", filtered.fetch("effective_content")
     assert_empty filtered.fetch("items")
     assert_empty filtered.fetch("effective_gaps")
+  end
+
+  def test_project_filter_recomputes_partial_unknown_view_axes
+    view = { "items" => [], "attention" => [], "effective_gaps" => [ gap("global", nil) ] }
+    reader = Hive::DailyDigest::Reader.new
+
+    reader.send(:normalize_view_axes!, view)
+
+    assert_equal "partial", view.fetch("view_completeness")
+    assert_equal "unknown", view.fetch("view_content")
   end
 
   def test_stale_empty_open_record_has_unknown_view_content

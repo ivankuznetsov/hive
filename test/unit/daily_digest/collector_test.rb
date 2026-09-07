@@ -99,6 +99,28 @@ class DailyDigestCollectorTest < Minitest::Test
     assert_equal %w[one:new one:old], collected.frontiers.keys.sort
   end
 
+  def test_frontier_lookup_handles_embedded_legacy_and_malformed_shapes
+    embedded = {
+      "opaque" => { "project_id" => "one", "registration_id" => "current", "cursor" => 3 }
+    }
+    assert_equal 3, Hive::DailyDigest::Collector.frontier_for(
+      embedded, project_id: "one", registration_id: "current"
+    ).fetch("cursor")
+
+    mismatched = {
+      "one" => { "project_id" => "one", "registration_id" => "old", "cursor" => 1 }
+    }
+    assert_nil Hive::DailyDigest::Collector.frontier_for(
+      mismatched, project_id: "one", registration_id: "current"
+    )
+
+    unbound_legacy = { "one" => { "project_id" => "one", "cursor" => 2 } }
+    assert_equal 2, Hive::DailyDigest::Collector.frontier_for(
+      unbound_legacy, project_id: "one", registration_id: "current"
+    ).fetch("cursor")
+    assert_nil Hive::DailyDigest::Collector.frontier_for(Object.new, project_id: "one")
+  end
+
   private
 
   def fact(id, occurred_at)

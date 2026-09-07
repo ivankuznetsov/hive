@@ -285,6 +285,36 @@ class DailyDigestCoordinatorTest < Minitest::Test
     assert_equal Hive::ExitCodes::USAGE, Hive::DailyDigest::Coordinator::FutureDate.new.exit_code
   end
 
+  def test_boundary_holes_invalid_waiting_times_and_duplicate_attention_are_bounded
+    coordinator = Hive::DailyDigest::Coordinator.new
+    persisted = [ { "starts_at" => "2026-09-01T12:00:00Z" } ]
+    assert_raises(Hive::DailyDigest::InvalidRecord) do
+      coordinator.send(:coverage_intervals, config, persisted)
+    end
+
+    invalid_waiting = {
+      "attention_id" => "attention:invalid", "project_id" => "project-1",
+      "task_slug" => "task", "waiting_since" => "not-a-time"
+    }
+    assert_nil coordinator.send(
+      :attention_at_boundary, invalid_waiting, Time.iso8601("2026-08-30T18:00:00Z")
+    ).fetch("waiting_age_seconds")
+
+    existing = {
+      "items" => [], "attention" => [], "gaps" => [],
+      "effective_source_frontiers" => {}
+    }
+    incoming = batch([]).with(attention: [ invalid_waiting, invalid_waiting ], frontiers: {})
+    merged = coordinator.send(
+      :merge_open_batch, existing, incoming, confirmed_gap_ids: [],
+      attention_boundary: Time.iso8601("2026-08-30T18:00:00Z")
+    )
+    assert_equal [ "attention:invalid" ],
+                 merged.attention.map { |item| item.fetch("attention_id") }
+    assert_equal "2026-08-30T18:00:00.000000Z",
+                 coordinator.send(:timestamp, Time.iso8601("2026-08-30T18:00:00Z"))
+  end
+
   def test_first_interval_defaults_are_content_identified
     coordinator = Hive::DailyDigest::Coordinator.new
     interval = coordinator.send(:normalize_first_interval, {

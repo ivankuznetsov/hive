@@ -98,4 +98,21 @@ class DailyDigestTaskLinksTest < Minitest::Test
     assert_equal "/tasks/demo/task?source=archive#task-questions", row.fetch("task_url")
     refute row.key?("historical")
   end
+
+  def test_resolution_failures_make_the_task_historical
+    current = { "project_id" => "project-1", "name" => "demo" }
+    row = {
+      "fact_id" => "fact:one", "project_id" => "project-1", "project" => "demo",
+      "task_slug" => "task", "task_url" => "/tasks/demo/task"
+    }
+    record = { "projects" => [ current ], "items" => [ row ], "attention" => [], "amendments" => [] }
+    links = Hive::DailyDigest::TaskLinks.new(
+      current_projects: [ current ], resolver: ->(*) { raise IOError, "unreadable task" }
+    )
+
+    links.validate_rows!(record)
+
+    assert_equal true, row.fetch("historical")
+    refute row.key?("task_url")
+  end
 end

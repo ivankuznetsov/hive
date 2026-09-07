@@ -912,6 +912,12 @@ authenticated Web, Telegram rendering, and canonical agent guidance. Project
 filters are views, not new records. Question text and answer bindings are
 excluded at serialization.
 
+The authenticated surface remains private and single-operator: this decision
+adds no team identity, team ACL, or per-project reader ACL. Agent-managed
+schedule/destination/delivery-status policy and an MCP-specific wrapper are
+deferred beyond V1; agents consume the CLI JSON contract. This feature grants
+no release, publication, deployment, or version-selection authority.
+
 The daemon owns open refresh, chronological catch-up, close, and recovery on an
 independent capacity identity. Telegram recap delivery is separately opt-in,
 uses its own scheduler and intent/outcome ledger, targets the preceding closed

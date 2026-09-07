@@ -172,13 +172,21 @@ bundle exec ruby -Itest test/unit/openclaw_skills_test.rb
 
 From `web/`, run `bundle exec ruby bin/rails test test/models/daily_digest_test.rb
 test/integration/digests_test.rb` and then `bundle exec ruby bin/rails
-test:system test/system/digest_flow_test.rb`. The system test is an allowed
+test test/system/digest_flow_test.rb`. The system test is an allowed
 CI-only proof only when no local Playwright browser is installed; the model and
 integration tests remain mandatory. Digest tests pin DST/zone-cutover interval
 identity, closed-base byte stability, amendment/gap recovery, project filtering,
 question/binding omission, terminal/Telegram escaping, read-side-effect spies,
 independent daemon capacity, ambiguous delivery, projection-only pruning, and
 post-prune replay disposal.
+
+The outcome-oriented acceptance path uses the shipped `bin/hive` entrypoint in
+`test/integration/digest_test.rb` for persisted text/JSON identity, historical
+project filtering, links, amendments, navigation, distinct reader states,
+control sanitization, and a byte-for-byte read-purity snapshot. The lifecycle
+integration separately proves explicit refresh/replay/recovery/prune mutation;
+the delivery integration proves empty suppression, partial rendering, owner-chat
+selection, interruption reconciliation, retry, and amendment deduplication.
 
 The operator-first semantic task checkpoint is:
 

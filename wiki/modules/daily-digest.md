@@ -3,7 +3,7 @@ title: Daily activity digest
 type: module
 source: lib/hive/daily_digest.rb, lib/hive/daily_digest/, lib/hive/daemon/daily_digest_*.rb, schemas/hive-digest*.json
 created: 2026-08-30
-updated: 2026-09-06
+updated: 2026-09-07
 tags: [digest, activity, projection, calendar, amendments, gaps, telegram, retention]
 ---
 
@@ -27,6 +27,13 @@ The host-global projection is read through one `DailyDigest::Reader` by CLI,
 Rails, Telegram rendering, and agents. Project filtering happens in that reader
 and preserves the selected record identity. A reader never scans projects,
 contacts GitHub or PRDigest, refreshes a record, or changes delivery state.
+
+V1 serves one authenticated Hive operator. It introduces neither team
+identities nor team/per-project reader ACLs. Agent-managed schedule changes,
+destination changes, delivery-status policy, and MCP-specific digest wrappers
+are deferred; agents use `hive digest --json`. Implementing or reading this
+projection does not authorize version selection, release, publication, or
+deployment.
 
 ## Global storage
 
@@ -82,6 +89,12 @@ registration, unregistration, stale pruning, and replacement append ordered
 membership-history changes under the existing global config lock. Unprovable
 legacy membership becomes a scoped gap.
 
+A logical `project_id` survives a same-name path replacement, but each distinct
+registered path has its own `registration_id` and `registered_at`. Facts, gaps,
+attention, and source frontiers carry that registration epoch. This prevents a
+replacement from inheriting an old path's fingerprints and lets historical
+task links fail closed without losing the stable logical project identity.
+
 ## Material collection
 
 `Collector` asks each effective registered project source for normalized facts
@@ -98,6 +111,28 @@ include task creation, durable stage/state
 changes, answers, changed holds, failures/recoveries, PR/check/review/merge
 outcomes, completion, and archive. Polls, repeated snapshots, diagnostics, log
 churn, and retries without a changed durable outcome advance bookkeeping only.
+
+### Authoritative producer map
+
+| Material observation | Durable owner | Collector input |
+|---|---|---|
+| Task creation | `Commands::New` and `TaskCreationReceipt` | Task-local receipt committed with task capture |
+| Stage/state change, question entry, completion/archive | `Stages::Base` and terminal stage owners | `TaskJournal` activity rows |
+| Answer, approval, rejection, decision | `Commands::Answer`, `Commands::Approve`, `Commands::Decide` | Outcome journal rows without prompt/answer text |
+| Failed execution and capacity observation | `AgentObservation` | Changed `session_finished` / `resource_limit_observed` outcomes |
+| Retry and recovery | `Recovery::API` | Changed retry and recovery rows |
+| Provider, authority, or scheduler hold | `DailyDigest::HoldObserver` at daemon disposition boundaries | Entry/exit `hold_recorded` rows |
+| PR opened or merged | `Stages::OpenPr` | Journal outcome plus persisted publication core |
+| Check or review outcome | `TaskWorkspace::PublicationActivity` | Changed outcome plus `pr.md` enrichment |
+| Registry membership | `Config`'s locked registry mutation owner | Ordered before/after membership history |
+| Correction and older commit/push/operator vocabulary | Explicitly declared unsupported legacy producers | Never claimed complete without new authoritative evidence |
+
+`ProjectSource` is the only per-registration adapter. It containment-checks all
+known active/done/archive stage buckets, reads bounded creation receipts and
+journals, reconstructs boundary attention, enriches the PR core from Hive-owned
+publication evidence, and returns facts plus scoped health. `Collector` keeps
+healthy registrations when a sibling fails and commits registration-scoped
+frontiers with the projection. Neither layer invokes GitHub or PRDigest.
 
 Task creation has a task-local content-derived receipt committed with capture,
 because a host-global write cannot share that transaction. PR facts prefer
@@ -144,6 +179,33 @@ observation, and amendment time. Corrections reference the corrected identity.
 Gap recovery appends recovered facts and the exact resolved gap ID. Effective
 completeness can improve, but the closed base bytes, lifecycle, and close time
 remain unchanged.
+
+Boundary attention can also be corrected without rewriting the close. When a
+changed journal fingerprint for the exact registration proves that a formerly
+reported task was not waiting at the persisted boundary, an amendment carries
+both `resolved_attention_ids` and the allowlisted prior attention rows. A
+different replacement registration is never accepted as that proof. A task or
+registry health gap keeps the prior attention visible until the corresponding
+registration-scoped evidence is complete; a changed but malformed journal is
+not treated as recovery.
+
+### Executable persisted-state trace
+
+The deterministic store/lifecycle fixtures pin these before/after outcomes:
+
+| Operation | Persisted before | Persisted after | Replay result |
+|---|---|---|---|
+| Open refresh | Replaceable base for one `interval_id` | New canonical open `record_id` with its frontier | Stable fact IDs prevent duplicate items |
+| Close | Open base | One closed base with fixed `closed_at` and byte hash | Non-identical replacement is rejected; identical close repairs only navigation metadata |
+| Late fact or source recovery | Closed base, optionally partial with a stable gap | Separate immutable amendment; effective view adds facts/removes named gaps | Same amendment ID returns the existing bytes |
+| Boundary correction | Closed base with allowlisted attention | Separate amendment names resolved attention; effective view removes it | Unchanged or replacement-registration evidence emits no resolution |
+| Prune | Closed base plus amendments/frontier | Tombstone retains record/interval identity, gaps, frontiers, and amendment IDs | Late input adds one bounded discard and advances its frontier; no base reappears |
+
+`test/unit/daily_digest/{projector,store,pruner}_test.rb` and
+`test/integration/daily_digest_lifecycle_test.rb` compare closed-base bytes,
+exercise crash replay, source recovery, concurrent close/amend, and post-prune
+discard idempotency. `test/integration/daily_digest_collection_test.rb` traces
+the producer map through persisted multi-project facts and scoped degradation.
 
 ## Degradation and recovery
 

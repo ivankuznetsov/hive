@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.5
-canonical-digest: 39268f14344a93a7f340c759688ac4272c892bdc61c13f08dea2c2e416f1e5b1
+canonical-digest: 1c7d86310ddcb28340e95e4d5101e611da9444a20ccf98b50a13e74e59a16361
 hive-version: 0.7.2
 -->
 
@@ -69,6 +69,12 @@ Do not reinterpret `idle` as “nothing is happening” without checking ownersh
 Proceed with read-only inspection and bounded watching. Proceed with an emitted routine action only when all freshness and action-policy checks above pass. Follow direct user requests for normal non-destructive workflow work through Hive’s documented verbs.
 
 Ask before destructive or administrative changes, marker clearing, force/bypass options, stopping automation, replacing installed configuration, changing destinations, publishing externally, deploying, tagging, releasing, or changing release-version metadata. Preserve task folders, worktrees, attempts, queues, locks, and recovery evidence while diagnosing.
+
+Daily-digest reads serve a single authenticated Hive operator and add no team
+or per-project reader ACL. Agents do not configure recap schedules,
+destinations, or delivery-status policy, and no MCP-specific digest wrapper
+exists in V1. Digest work does not authorize a release, version choice,
+publication, or deployment.
 
 Module lifecycle and patrol-ownership changes are human-gated. Agents may
 prepare read-only previews and diagnostics, but must not approve grants, apply a

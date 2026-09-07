@@ -230,6 +230,12 @@ delivery is a separate `daily_digest.telegram.enabled` opt-in. Complete empty
 days are recorded but not sent. See
 [wiki/commands/digest.md](wiki/commands/digest.md).
 
+V1 is deliberately a private, single-operator surface. It adds no team
+identity, team ACL, or per-project reader ACL. Agents may read the stable JSON
+contract but do not manage recap schedules, destinations, or delivery status,
+and there is no MCP-specific digest wrapper. Digest work does not grant an
+agent authority to choose a version, release, publish, or deploy Hive.
+
 [PRDigest](https://github.com/ivankuznetsov/prdigest) remains a separate tool
 for PR-only facts or prose. Hive's broader activity record has no PRDigest
 runtime dependency, never treats PRDigest as authority, and continues to reject

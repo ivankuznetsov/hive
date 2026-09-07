@@ -155,6 +155,11 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_includes policy, "Never use `hive digest --open-web` in machine mode"
     assert_includes policy, "Never use the sendful `hive answer-digest`"
     assert_includes policy, "Never create a polling loop"
+    assert_includes policy, "Agents do not configure recap schedules"
+    assert_includes policy, "No MCP-specific digest wrapper exists in V1"
+    assert_includes policy, "single authenticated Hive operator"
+    assert_includes policy, "does not add team identities, team ACLs, or per-project reader ACLs"
+    assert_includes policy, "does not authorize a release, version choice, publication, or deployment"
 
     scenario_table = policy[/\| Operator request \| Read sequence \|.*?(?=\n\n)/m]
     refute_nil scenario_table

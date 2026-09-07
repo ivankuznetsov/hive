@@ -50,6 +50,12 @@ Proceed with read-only inspection and bounded watching. Proceed with an emitted 
 
 Ask before destructive or administrative changes, marker clearing, force/bypass options, stopping automation, replacing installed configuration, changing destinations, publishing externally, deploying, tagging, releasing, or changing release-version metadata. Preserve task folders, worktrees, attempts, queues, locks, and recovery evidence while diagnosing.
 
+Daily-digest reads serve a single authenticated Hive operator and add no team
+or per-project reader ACL. Agents do not configure recap schedules,
+destinations, or delivery-status policy, and no MCP-specific digest wrapper
+exists in V1. Digest work does not authorize a release, version choice,
+publication, or deployment.
+
 Module lifecycle and patrol-ownership changes are human-gated. Agents may
 prepare read-only previews and diagnostics, but must not approve grants, apply a
 module receipt, sign a migration report, cut over mutator ownership, or request

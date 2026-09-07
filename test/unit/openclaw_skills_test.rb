@@ -97,6 +97,10 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "Never invoke `hive digest refresh`"
     assert_includes text, "Never use the sendful `hive answer-digest`"
     assert_includes text, "Do not run the current operational-status loop first"
+    assert_includes text, "Agents do not configure recap schedules"
+    assert_includes text, "No MCP-specific digest wrapper exists in V1"
+    assert_includes text, "does not add team identities, team ACLs, or per-project reader ACLs"
+    assert_includes text, "does not authorize a release, version choice, publication, or deployment"
 
     scenarios = text[/\| Operator request \| Read sequence \|.*?(?=\n\n)/m]
     refute_nil scenarios

@@ -1306,9 +1306,10 @@ reader data for an overdue open materialization and never rewrites the base.
 The open base is replaced atomically. A closed base has a non-null `closed_at`
 and is write-once; only a byte-identical identity is accepted thereafter. Each
 amendment has a stable `amendment_id`, source, known nullable event time,
-`observed_at`, `amended_at`, facts/attention/gaps, resolved gap IDs, and source
-frontiers. Effective completeness/content are derived from the frozen base plus
-ordered amendments.
+`observed_at`, `amended_at`, facts/attention/gaps, resolved gap IDs, resolved
+attention IDs with their allowlisted prior rows, and source frontiers. Effective
+attention/completeness/content are derived from the frozen base plus ordered
+amendments.
 
 ### Gaps, pruning, and delivery
 

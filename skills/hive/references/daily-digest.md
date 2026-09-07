@@ -91,3 +91,15 @@ answer from digest prose or retain a stale binding.
 - Never use the sendful `hive answer-digest` as a daily activity read.
 - Never create a polling loop. A requested ongoing current-state watch belongs
   to [status-and-watch.md](status-and-watch.md), not this historical projection.
+
+## V1 ownership and scope boundaries
+
+The daily digest is a Hive-owned record for a single authenticated Hive operator.
+It does not add team identities, team ACLs, or per-project reader ACLs.
+Agents do not configure recap schedules, destinations, or delivery-status policy;
+those remain explicit operator configuration and commands.
+No MCP-specific digest wrapper exists in V1: agents consume the stable CLI JSON contract.
+
+Reading or operating the digest does not authorize a release, version choice, publication, or deployment.
+Those actions remain outside the digest feature and require their own explicit
+operator direction.

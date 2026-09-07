@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/commands/digest*.rb, lib/hive/daily_digest/, schemas/hive-digest*.json
 created: 2026-08-30
-updated: 2026-09-06
+updated: 2026-09-07
 tags: [command, digest, activity, history, json, telegram, retention]
 ---
 
@@ -42,7 +42,7 @@ navigation rule. An explicit ISO date remains a stable record identifier.
 ## Pure reads
 
 The text view leads with local date, persisted IANA zone, lifecycle,
-completeness, content, and materialization freshness. It then shows attention,
+completeness, content, full record identity, and materialization freshness. It then shows attention,
 source gaps, project activity, late amendments, and the canonical Web URL.
 Every dynamic terminal field is control- and ANSI-sanitized. CLI, Web, and
 Telegram share deterministic item ordering; CLI and Web also share project
@@ -61,6 +61,15 @@ fields are:
   removed or identity-replaced registration are marked historical and lose
   their actionable task URL; and
 - persisted-sequence `previous_date` / `next_date` navigation.
+
+Late amendments distinguish resolved source gaps from resolved boundary
+attention. Both carry the allowlisted prior row so CLI and Web can explain the
+change without exposing question text or rewriting the closed base.
+
+Agent scope stops at the read contract. V1 does not authorize agents to alter
+the recap schedule, destination, delivery-status policy, or retries, and has no
+MCP-specific digest wrapper. Those are operator-owned follow-up capabilities,
+as are every version, release, publication, and deployment decision.
 
 The ordinary reader has no coordinator, delivery service, Telegram transport,
 or cursor dependency. `--open-web` is the only read option that invokes the

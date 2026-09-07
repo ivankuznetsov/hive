@@ -113,6 +113,9 @@ module Hive
           resolved_gaps = Array(amendment["resolved_gaps"]).select do |gap|
             gap["project_id"].nil? || gap["project_id"] == project_id
           end
+          resolved_attention = Array(amendment["resolved_attention"]).select do |item|
+            item["project_id"] == project_id
+          end
           filtered = amendment.merge(
             "items" => Array(amendment["items"]).select { |item| item["project_id"] == project_id },
             "attention" => Array(amendment["attention"]).select { |item| item["project_id"] == project_id },
@@ -120,9 +123,17 @@ module Hive
               gap["project_id"].nil? || gap["project_id"] == project_id
             end,
             "resolved_gaps" => resolved_gaps,
-            "resolved_gap_ids" => resolved_gaps.map { |gap| gap.fetch("gap_id") }
+            "resolved_gap_ids" => resolved_gaps.map { |gap| gap.fetch("gap_id") },
+            "resolved_attention" => resolved_attention,
+            "resolved_attention_ids" => resolved_attention.map do |item|
+              item.fetch("attention_id")
+            end
           )
-          filtered if %w[items attention gaps resolved_gaps].any? { |key| filtered.fetch(key).any? }
+          if %w[items attention gaps resolved_gaps resolved_attention].any? do |key|
+               filtered.fetch(key).any?
+             end
+            filtered
+          end
         end
         copy
       end

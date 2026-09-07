@@ -4,16 +4,17 @@ require "hive/daily_digest/task_links"
 class DailyDigestTaskLinksTest < Minitest::Test
   def test_replaced_project_identity_makes_persisted_task_link_historical
     current = {
-      "project_id" => "new-project", "registration_id" => "new-registration",
+      "project_id" => "stable-project", "registration_id" => "new-registration",
       "name" => "demo"
     }
     record = {
       "projects" => [ {
-        "project_id" => "old-project", "registration_id" => "old-registration",
+        "project_id" => "stable-project", "registration_id" => "old-registration",
         "name" => "demo"
       } ],
       "items" => [ {
-        "fact_id" => "fact:one", "project_id" => "old-project", "project" => "demo",
+        "fact_id" => "fact:one", "project_id" => "stable-project",
+        "registration_id" => "old-registration", "project" => "demo",
         "task_slug" => "same-slug", "task_url" => "/tasks/demo/same-slug"
       } ],
       "attention" => [], "amendments" => []
@@ -26,6 +27,36 @@ class DailyDigestTaskLinksTest < Minitest::Test
 
     assert_equal true, record.dig("items", 0, "historical")
     refute record.dig("items", 0).key?("task_url")
+  end
+
+  def test_two_registrations_with_one_project_id_are_resolved_by_row_registration
+    old = {
+      "project_id" => "stable-project", "registration_id" => "old-registration", "name" => "demo"
+    }
+    current = old.merge("registration_id" => "new-registration")
+    old_row = {
+      "fact_id" => "fact:old", "project_id" => "stable-project",
+      "registration_id" => "old-registration", "project" => "demo",
+      "task_slug" => "same-slug", "task_url" => "/tasks/demo/same-slug"
+    }
+    current_row = old_row.merge(
+      "fact_id" => "fact:new", "registration_id" => "new-registration"
+    )
+    record = {
+      "projects" => [ old, current ], "items" => [ old_row, current_row ],
+      "attention" => [], "amendments" => []
+    }
+    links = Hive::DailyDigest::TaskLinks.new(
+      current_projects: [ current ],
+      resolver: ->(_project, _row) { { project: "demo", slug: "same-slug", source: nil } }
+    )
+
+    links.validate_rows!(record)
+
+    assert_equal true, old_row.fetch("historical")
+    refute old_row.key?("task_url")
+    assert_equal "/tasks/demo/same-slug", current_row.fetch("task_url")
+    refute current_row.key?("historical")
   end
 
   def test_exact_current_project_keeps_actionable_task_link

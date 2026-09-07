@@ -39,7 +39,7 @@ module Hive
         payload = public_payload(view)
         if @open_web
           opened = @browser_opener.call(payload.fetch("web_url"))
-          raise BrowserOpenFailed, "could not open the Hive digest in a browser" if opened == false
+          raise BrowserOpenFailed, "could not open the Hive digest in a browser" unless opened == true
 
           @stdout.puts("Opened #{safe(payload.fetch('web_url'))}")
         elsif @json
@@ -174,7 +174,8 @@ module Hive
         @stdout.puts(
           "Digest #{safe(payload.fetch('local_date'))} · #{safe(payload['time_zone'])} · " \
           "#{safe(payload.fetch('lifecycle'))} · #{safe(payload.fetch('completeness'))} · " \
-          "#{safe(payload.fetch('content'))} · materialized #{safe(freshness)}#{stale}"
+          "#{safe(payload.fetch('content'))} · record #{safe(payload.fetch('record_id'))} · " \
+          "materialized #{safe(freshness)}#{stale}"
         )
         render_attention(payload.fetch("attention"))
         render_gaps(payload.fetch("gaps"))
@@ -235,7 +236,8 @@ module Hive
         rows.each do |row|
           summary = [
             "#{Array(row['items']).length} item(s)",
-            "#{Array(row['resolved_gap_ids']).length} resolved gap(s)"
+            "#{Array(row['resolved_gap_ids']).length} resolved gap(s)",
+            "#{Array(row['resolved_attention_ids']).length} resolved attention item(s)"
           ].join(", ")
           @stdout.puts("- #{safe(row['amended_at'])} · #{safe(row['kind'])} · #{summary}")
           Array(row["items"]).each do |item|
@@ -253,12 +255,17 @@ module Hive
               @stdout.puts("  - recovered gap: #{safe(gap_id)}")
             end
           end
+          Array(row["resolved_attention"]).each do |item|
+            identity = [ item["project"], item["task_slug"] ].compact.join(":")
+            @stdout.puts("  - attention resolved: #{safe(identity)} · #{safe(item['kind'])}")
+          end
         end
       end
 
       def item_link(row)
-        value = row["task_url"] || row.dig("pr", "url")
-        value.to_s.empty? ? "" : " · #{safe(value)}"
+        values = [ row["task_url"], row.dig("pr", "url") ].compact.map(&:to_s)
+                 .reject(&:empty?).uniq
+        values.empty? ? "" : " · #{values.map { |value| safe(value) }.join(' · ')}"
       end
 
       def short_time(value)

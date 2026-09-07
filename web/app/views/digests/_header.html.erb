@@ -16,6 +16,11 @@
         <% end %>
       </p>
     <% end %>
+    <% if digest.record_reference %>
+      <p class="digest-meta digest-record-reference" title="<%= digest.record_reference %>">
+        Record <code><%= digest.record_reference.first(12) %></code>
+      </p>
+    <% end %>
   </div>
 
   <nav class="digest-date-nav" aria-label="Digest date">

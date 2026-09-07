@@ -42,6 +42,7 @@ class DailyDigest
   def stale? = attributes.fetch("stale", false) == true
   def local_date = attributes["local_date"] || requested_date.presence || "today"
   def lifecycle = missing? ? "missing" : attributes.fetch("lifecycle", reader_status)
+  def record_reference = attributes["record_id"].presence
 
   def completeness
     return "unknown" if missing? || pruned?
@@ -71,14 +72,22 @@ class DailyDigest
   end
 
   def grouped_items
-    Hive::DailyDigest::PublicView.grouped_items(attributes).map do |project_id, rows|
-      [ project_for(project_id, rows.first && rows.first["project"]), rows ]
+    Hive::DailyDigest::PublicView.grouped_items(attributes).map do |identity, rows|
+      project_id, registration_id = identity
+      row = rows.first || {}
+      [ project_for(project_id, row["project"], registration_id), rows ]
     end
   end
 
-  def project_for(project_id, fallback_name = nil)
-    projects.find { |project| project["project_id"] == project_id } ||
-      { "project_id" => project_id, "name" => fallback_name.presence || "Historical project" }
+  def project_for(project_id, fallback_name = nil, registration_id = nil)
+    projects.find do |project|
+      project["project_id"] == project_id &&
+        (registration_id.to_s.empty? || project["registration_id"].to_s == registration_id.to_s)
+    end ||
+      {
+        "project_id" => project_id, "registration_id" => registration_id,
+        "name" => fallback_name.presence || "Historical project"
+      }.compact
   end
 
   def historical_project?(project)
@@ -86,11 +95,11 @@ class DailyDigest
   end
 
   def task_destination(row)
-    key = [ row["project_id"], row["task_slug"] ]
+    key = [ row["project_id"], row["registration_id"], row["task_slug"] ]
     return nil if key.last.to_s.empty?
     return @destination_cache[key] if @destination_cache.key?(key)
 
-    project = project_for(row["project_id"], row["project"])
+    project = project_for(row["project_id"], row["project"], row["registration_id"])
     @destination_cache[key] = @task_links.destination(project, row)
   rescue Hive::Error, SystemCallError, IOError
     @destination_cache[key] = nil

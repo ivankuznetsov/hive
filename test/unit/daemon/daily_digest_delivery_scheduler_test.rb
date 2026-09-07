@@ -22,7 +22,8 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
 
       scheduler.complete(
         date: "2026-08-29", exit_code: 0,
-        envelope: { "outcome" => "sent" }, now: Time.iso8601("2026-08-30T08:02:00Z")
+        envelope: send_envelope(store.read("2026-08-29"), "sent"),
+        now: Time.iso8601("2026-08-30T08:02:00Z")
       )
       restarted = Hive::Daemon::DailyDigestDeliveryScheduler.new(
         state_path: state_path, enabled: true, hour: 9, store: store
@@ -78,7 +79,7 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
     end
   end
 
-  def test_reconciles_interrupted_deliveries_at_startup_and_child_completion
+  def test_reconciles_only_while_enabled_and_on_enablement
     with_tmp_dir do |dir|
       ledger = Object.new
       calls = []
@@ -95,8 +96,11 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
 
       assert_empty scheduler.tick(now: first_tick)
       scheduler.complete(date: "2026-08-29", exit_code: 1, now: first_tick + 1)
+      assert_empty calls
 
-      assert_equal [ first_tick, first_tick + 1 ], calls
+      scheduler.reconfigure(enabled: true, hour: 9)
+
+      assert_equal [ first_tick ], calls
     end
   end
 
@@ -112,9 +116,68 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
       assert_raises(IOError) do
         scheduler.complete(
           date: "2026-08-29", exit_code: 0,
-          envelope: { "outcome" => "sent" }, now: Time.iso8601("2026-08-30T09:01:00Z")
+          envelope: send_envelope(store.read("2026-08-29"), "sent"),
+          now: Time.iso8601("2026-08-30T09:01:00Z")
         )
       end
+    end
+  end
+
+  def test_exit_zero_requires_a_matching_versioned_terminal_envelope
+    with_tmp_dir do |dir|
+      store = build_store(dir, zone: "UTC", dates: %w[2026-08-29 2026-08-30])
+      state_path = File.join(dir, "state.json")
+      now = Time.iso8601("2026-08-30T09:00:00Z")
+      scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+        state_path: state_path, enabled: true, hour: 9, store: store
+      )
+
+      assert_equal 1, scheduler.tick(now: now).length
+      scheduler.complete(date: "2026-08-29", exit_code: 0, envelope: nil, now: now)
+      refute File.exist?(state_path), "invalid success output must not advance the cursor"
+      refute scheduler.pending?("2026-08-29")
+      assert_equal 1, scheduler.tick(now: now + 60).length
+
+      wrong = send_envelope(store.read("2026-08-29"), "sent").merge("record_id" => "0" * 64)
+      scheduler.complete(date: "2026-08-29", exit_code: 0, envelope: wrong, now: now + 60)
+      refute File.exist?(state_path)
+      assert_equal 1, scheduler.tick(now: now + 360).length
+
+      scheduler.complete(
+        date: "2026-08-29", exit_code: 0,
+        envelope: send_envelope(store.read("2026-08-29"), "sent"), now: now + 360
+      )
+      assert_equal store.read("2026-08-29").fetch("record_id"),
+                   JSON.parse(File.read(state_path)).fetch("last_record_id")
+    end
+  end
+
+  def test_reconciliation_failure_isolated_and_always_releases_pending
+    with_tmp_dir do |dir|
+      store = build_store(dir, zone: "UTC", dates: %w[2026-08-29 2026-08-30])
+      ledger = Object.new
+      ledger.define_singleton_method(:reconcile_interrupted) { |now:| raise JSON::ParserError, now.to_s }
+      events = []
+      logger = Object.new
+      logger.define_singleton_method(:event) { |name, **fields| events << [ name, fields ] }
+      now = Time.iso8601("2026-08-30T09:00:00Z")
+
+      scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+        state_path: File.join(dir, "state.json"), enabled: true, hour: 9,
+        store: store, ledger: ledger, logger: logger, clock: -> { now }
+      )
+      assert_empty scheduler.tick(now: now)
+      assert_includes events.map(&:first), :daily_digest_delivery_state_unreadable
+
+      scheduler.instance_variable_set(:@reconciliation_ready, true)
+      assert_equal 1, scheduler.tick(now: now + 60).length
+      scheduler.instance_variable_set(:@reconciliation_ready, false)
+      scheduler.complete(
+        date: "2026-08-29", exit_code: 0,
+        envelope: send_envelope(store.read("2026-08-29"), "sent"), now: now + 60
+      )
+      refute scheduler.pending?("2026-08-29"),
+             "a corrupt receipt must not strand the scheduler pending marker"
     end
   end
 
@@ -175,6 +238,14 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
       "last_materialized_at" => interval.fetch("starts_at"),
       "projects" => [], "items" => [], "attention" => [], "gaps" => [],
       "source_frontiers" => {}
+    }
+  end
+
+  def send_envelope(record, outcome)
+    {
+      "schema" => "hive-digest-send", "schema_version" => 1, "ok" => true,
+      "local_date" => record.fetch("local_date"),
+      "record_id" => record.fetch("record_id"), "outcome" => outcome
     }
   end
 end

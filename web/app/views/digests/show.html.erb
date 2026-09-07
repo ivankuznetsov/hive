@@ -1,6 +1,7 @@
 <% content_for(:title, "#{web_product_name} — digest #{@digest.local_date}") %>
 
-<article class="digest-page" aria-labelledby="digest-heading">
+<article class="digest-page" aria-labelledby="digest-heading"
+         <% if @digest.record_reference %>data-record-id="<%= @digest.record_reference %>"<% end %>>
   <%= render "digests/header", digest: @digest %>
 
   <% if @digest.missing? %>

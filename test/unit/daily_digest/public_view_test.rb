@@ -16,14 +16,23 @@ class DailyDigestPublicViewTest < Minitest::Test
     }
     record = {
       schema: "hive-digest", internal: "store-only",
-      projects: [ { project_id: "project-1", name: "demo", secret: "path" } ],
+      projects: [ {
+        project_id: "project-1", registration_id: "registration-1",
+        name: "demo", secret: "path"
+      } ],
       items: [ fact ],
       attention: [ { attention_id: "attention-1", kind: "blocked", secret: "prompt" } ],
       gaps: [ gap ], effective_gaps: [ gap ],
       amendments: [ {
         amendment_id: "amendment-1", kind: "late_observation", source: "task_journal",
         items: [ fact ], attention: [], gaps: [ gap ],
-        resolved_gap_ids: [ :"gap-1" ], resolved_gaps: [ gap ], secret: "raw amendment"
+        resolved_gap_ids: [ :"gap-1" ], resolved_gaps: [ gap ],
+        resolved_attention_ids: [ :"attention-1" ],
+        resolved_attention: [ {
+          attention_id: "attention-1", kind: "blocked", project_id: "project-1",
+          registration_id: "registration-1", secret: "private question"
+        } ],
+        secret: "raw amendment"
       } ]
     }
 
@@ -33,6 +42,10 @@ class DailyDigestPublicViewTest < Minitest::Test
     assert_equal "completed", sanitized.dig("items", 0, "details", "transition")
     assert_equal 42, sanitized.dig("items", 0, "pr", "number")
     assert_equal [ "gap-1" ], sanitized.dig("amendments", 0, "resolved_gap_ids")
+    assert_equal [ "attention-1" ],
+                 sanitized.dig("amendments", 0, "resolved_attention_ids")
+    assert_equal "registration-1",
+                 sanitized.dig("amendments", 0, "resolved_attention", 0, "registration_id")
     refute_includes JSON.generate(sanitized), "secret"
     refute sanitized.dig("items", 0, "pr").key?("title")
   end
@@ -52,7 +65,23 @@ class DailyDigestPublicViewTest < Minitest::Test
 
     assert_equal %w[fact:a fact:z fact:b],
                  Hive::DailyDigest::PublicView.ordered_items(record).map { |row| row.fetch("fact_id") }
-    assert_equal %w[two one],
+    assert_equal [ [ "two", nil ], [ "one", nil ] ],
+                 Hive::DailyDigest::PublicView.grouped_items(record).map(&:first)
+  end
+
+  def test_grouping_keeps_replacement_registrations_distinct
+    record = {
+      "projects" => [
+        { "project_id" => "one", "registration_id" => "old", "name" => "Demo" },
+        { "project_id" => "one", "registration_id" => "new", "name" => "Demo" }
+      ],
+      "items" => [
+        { "fact_id" => "fact:old", "project_id" => "one", "registration_id" => "old" },
+        { "fact_id" => "fact:new", "project_id" => "one", "registration_id" => "new" }
+      ]
+    }
+
+    assert_equal [ [ "one", "old" ], [ "one", "new" ] ],
                  Hive::DailyDigest::PublicView.grouped_items(record).map(&:first)
   end
 
@@ -62,5 +91,17 @@ class DailyDigestPublicViewTest < Minitest::Test
 
     assert_equal "to 6-review", Hive::DailyDigest::PublicView.outcome_label(transition)
     assert_equal "passing", Hive::DailyDigest::PublicView.outcome_label(check)
+  end
+
+  def test_fact_keeps_only_http_pr_urls
+    unsafe = {
+      "fact_id" => "fact:unsafe", "kind" => "pr_observed",
+      "pr" => { "number" => 7, "url" => "javascript:alert(1)" }
+    }
+
+    sanitized = Hive::DailyDigest::PublicView.fact(unsafe)
+
+    assert_equal 7, sanitized.dig("pr", "number")
+    refute sanitized.fetch("pr").key?("url")
   end
 end

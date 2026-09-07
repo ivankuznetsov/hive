@@ -27,9 +27,11 @@ class DigestsTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "article.digest-page[aria-labelledby='digest-heading']"
+    assert_select "article.digest-page[data-record-id='#{stored.fetch("record_id")}']"
     assert_select "nav[aria-label='Digest date']"
     assert_select ".digest-badge", text: "Closed"
     assert_select ".digest-badge", text: "Partial"
+    assert_select ".digest-record-reference", text: /#{stored.fetch("record_id")[0, 12]}/
     assert_select ".digest-attention", text: /Needs attention/
     assert_select ".digest-activity", text: /Project activity/
     assert_operator response.body.index("Needs attention"), :<, response.body.index("Project activity")
@@ -39,6 +41,7 @@ class DigestsTest < ActionDispatch::IntegrationTest
     assert_select ".digest-amendments", text: /Late amendments/
     assert_select ".digest-amendment-details", text: /Late: Task stage changed/
     assert_select ".digest-amendment-details", text: /Recovered: Github · recovered-source/
+    assert_select ".digest-amendment-details", text: /Attention resolved: removed-project:resolved-task/
     assert_select ".digest-project-option[value='removed-project']", text: /removed-project/
     assert_select ".digest-historical", text: /Historical project/
     refute_includes response.body, "PRIVATE QUESTION TEXT"
@@ -168,6 +171,13 @@ class DigestsTest < ActionDispatch::IntegrationTest
       "resolved_gaps" => [
         gap("recovered-source").merge("gap_id" => "gap:recovered")
       ],
+      "resolved_attention_ids" => [ "attention:resolved" ],
+      "resolved_attention" => [ {
+        "attention_id" => "attention:resolved", "kind" => "failed",
+        "project_id" => "removed-id", "registration_id" => "removed-registration",
+        "project" => "removed-project", "task_slug" => "resolved-task",
+        "stage" => "4-execute", "state" => "failed"
+      } ],
       "source_frontiers" => {}, "private_payload" => "MUST NOT RENDER"
     }
   end

@@ -30,6 +30,7 @@ class DailyDigestTest < ActiveSupport::TestCase
     refute_includes digest.attributes.to_json, "private question"
     refute_includes digest.attributes.to_json, "secret binding"
     assert_equal 1, destinations.length
+    assert_equal "record-1", digest.record_reference
   end
 
   test "recursively strips non-public item gap and amendment fields" do
@@ -77,6 +78,7 @@ class DailyDigestTest < ActiveSupport::TestCase
 
     assert_equal "hive digest refresh", today.refresh_command
     assert_equal "hive digest refresh --date 2026-08-29", historical.refresh_command
+    assert_nil today.record_reference
   end
 
   test "retains historical projects but refuses unsafe PR and unresolved task links" do
@@ -100,6 +102,27 @@ class DailyDigestTest < ActiveSupport::TestCase
     assert digest.historical_project?(digest.projects.last)
     assert_nil digest.task_destination(digest.items.first)
     assert_nil digest.pr_url(digest.items.first)
+  end
+
+  test "missing persisted project metadata cannot make an old registration actionable" do
+    view = raw_view
+    view["projects"] = [
+      { "project_id" => "stable", "registration_id" => "new", "name" => "alpha" }
+    ]
+    view["items"] = [
+      view.fetch("items").first.merge(
+        "project_id" => "stable", "registration_id" => "old", "project" => "alpha"
+      )
+    ]
+    digest = DailyDigest.new(
+      view, requested_date: "2026-08-30", current_projects: view.fetch("projects")
+    )
+
+    project, = digest.grouped_items.first
+
+    assert_equal "old", project.fetch("registration_id")
+    assert digest.historical_project?(project)
+    assert_nil digest.task_destination(digest.items.first)
   end
 
   def self.raw_view

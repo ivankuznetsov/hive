@@ -16,7 +16,8 @@
           </div>
           <p>
             <%= pluralize(Array(amendment["items"]).length, "late item") %> ·
-            <%= pluralize(Array(amendment["resolved_gap_ids"]).length, "resolved gap") %>
+            <%= pluralize(Array(amendment["resolved_gap_ids"]).length, "resolved gap") %> ·
+            <%= pluralize(Array(amendment["resolved_attention_ids"]).length, "resolved attention item") %>
           </p>
           <% if Array(amendment["items"]).any? %>
             <ul class="digest-amendment-details">
@@ -41,6 +42,18 @@
             <ul class="digest-amendment-details">
               <% Array(amendment["resolved_gap_ids"]).each do |gap_id| %>
                 <li>Recovered gap: <%= gap_id %></li>
+              <% end %>
+            </ul>
+          <% end %>
+          <% resolved_attention = Array(amendment["resolved_attention"]) %>
+          <% if resolved_attention.any? %>
+            <ul class="digest-amendment-details">
+              <% resolved_attention.each do |item| %>
+                <li>
+                  Attention resolved:
+                  <%= [item["project"], item["task_slug"]].compact.join(":") %>
+                  · <%= item["kind"].to_s.humanize %>
+                </li>
               <% end %>
             </ul>
           <% end %>

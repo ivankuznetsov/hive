@@ -14,6 +14,7 @@ module Hive
       STAGE = "daily_digest_delivery".freeze
       PROJECT = "daily_digest_delivery".freeze
       DEFAULT_HOUR = 9
+      TERMINAL_OUTCOMES = %w[sent suppressed_empty unknown failed].freeze
       SCHEDULER_CONTRACT = {
         project: PROJECT,
         stage: STAGE,
@@ -36,16 +37,25 @@ module Hive
         @store = store
         @ledger = ledger
         @pending_records = {}
-        @ledger.reconcile_interrupted(now: @clock.call)
+        @reconciliation_ready = false
+        reconcile_delivery_ledger(now: @clock.call) if @enabled
       end
 
       def reconfigure(enabled:, hour:)
+        next_hour = valid_hour(hour)
+        was_enabled = @enabled
         @enabled = enabled == true
-        @hour = valid_hour(hour)
+        @hour = next_hour
+        @reconciliation_ready = false unless @enabled
+        reconcile_delivery_ledger(now: @clock.call) if @enabled && !was_enabled
       end
 
       def tick(now: @clock.call)
         return [] unless @enabled
+        unless @reconciliation_ready
+          return [] if backed_off?(now)
+          return [] unless reconcile_delivery_ledger(now: now)
+        end
         return [] if pending_any? || backed_off?(now)
 
         target = preceding_closed_record(now)
@@ -69,11 +79,15 @@ module Hive
       end
 
       def complete(date:, exit_code:, envelope: nil, now: @clock.call, stage: nil)
-        @ledger.reconcile_interrupted(now: now)
         local_date = digest_date(date)
-        record_id = @pending_records.delete(local_date) || record_id_for(local_date)
-        pending_for(stage).delete(local_date)
+        record_id = @pending_records[local_date] || record_id_for(local_date)
+        return unless @enabled
+        return unless reconcile_delivery_ledger(now: now)
         unless exit_code && exit_code.to_i.zero?
+          record_failure(now)
+          return
+        end
+        unless successful_envelope?(envelope, local_date:, record_id:)
           record_failure(now)
           return
         end
@@ -81,13 +95,16 @@ module Hive
         write_state(
           "last_fired_date" => local_date,
           "last_record_id" => record_id,
-          "last_outcome" => envelope&.fetch("outcome", nil),
+          "last_outcome" => envelope.fetch("outcome"),
           "updated_at" => now.utc.iso8601(6)
         )
         clear_stage_failure(stage)
       rescue StandardError
         record_failure(now)
         raise
+      ensure
+        @pending_records.delete(local_date) if defined?(local_date) && local_date
+        pending_for(stage).delete(local_date) if defined?(local_date) && local_date
       end
 
       private
@@ -124,6 +141,29 @@ module Hive
         nil
       rescue Hive::DailyDigest::Error
         nil
+      end
+
+      def reconcile_delivery_ledger(now:)
+        @ledger.reconcile_interrupted(now: now)
+        @reconciliation_ready = true
+      rescue StandardError => error
+        @reconciliation_ready = false
+        @logger&.event(
+          :daily_digest_delivery_state_unreadable,
+          component: "delivery_ledger", error_class: error.class.name
+        )
+        record_failure(now)
+        false
+      end
+
+      def successful_envelope?(envelope, local_date:, record_id:)
+        envelope.is_a?(Hash) &&
+          envelope["schema"] == "hive-digest-send" &&
+          envelope["schema_version"] == 1 &&
+          envelope["ok"] == true &&
+          envelope["local_date"] == local_date &&
+          envelope["record_id"] == record_id &&
+          TERMINAL_OUTCOMES.include?(envelope["outcome"])
       end
 
       def valid_hour(value)

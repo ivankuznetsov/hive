@@ -26,13 +26,19 @@ module Hive
         rows = Array(record["items"]) + Array(record["attention"])
         Array(record["amendments"]).each do |amendment|
           rows.concat(Array(amendment["items"])).concat(Array(amendment["attention"]))
+              .concat(Array(amendment["resolved_attention"]))
         end
         rows.each do |row|
           next if row["task_slug"].to_s.empty?
 
-          project = projects.find { |entry| entry["project_id"] == row["project_id"] } || {
+          project = projects.find do |entry|
+            entry["project_id"] == row["project_id"] &&
+              (row["registration_id"].to_s.empty? ||
+                entry["registration_id"].to_s == row["registration_id"].to_s)
+          end || {
             "project_id" => row["project_id"], "name" => row["project"]
           }
+          project["registration_id"] = row["registration_id"] if row.key?("registration_id")
           resolved = destination(project, row)
           if resolved
             row["task_url"] = task_url(resolved, row)

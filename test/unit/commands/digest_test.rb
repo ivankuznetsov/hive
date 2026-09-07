@@ -79,6 +79,22 @@ class DigestCommandTest < Minitest::Test
     assert_empty digest_schema.validate(payload).to_a
   end
 
+  def test_public_json_drops_renderer_active_pr_urls
+    record = digest_record
+    record["items"][0]["pr"] = { "number" => 42, "url" => "javascript:alert(1)" }
+    reader = Object.new
+    reader.define_singleton_method(:read) { |**| record }
+
+    payload = Hive::Commands::Digest.new(
+      json: true, reader: reader, stdout: StringIO.new,
+      web_config_loader: -> { { "origin" => "https://hive.example" } }
+    ).call
+
+    assert_equal 42, payload.dig("items", 0, "pr", "number")
+    refute payload.dig("items", 0, "pr").key?("url")
+    assert_empty digest_schema.validate(payload).to_a
+  end
+
   def test_real_project_source_pr_shape_reaches_the_public_task_and_pr_links
     with_tmp_dir do |project_root|
       task = File.join(project_root, ".hive-state", "stages", "5-open-pr", "pr-task")
@@ -135,6 +151,21 @@ class DigestCommandTest < Minitest::Test
       assert_equal "/tasks/demo/pr-task", payload.dig("items", 0, "task_url")
       assert_equal "https://github.com/acme/demo/pull/42", payload.dig("items", 0, "pr", "url")
       assert_empty digest_schema.validate(payload).to_a
+
+      text = StringIO.new
+      Hive::Commands::Digest.new(
+        reader: reader, stdout: text,
+        task_links: Hive::DailyDigest::TaskLinks.new(
+          current_projects: [ {
+            "project_id" => "project-1", "registration_id" => "registration-1",
+            "name" => "demo", "path" => project_root
+          } ],
+          resolver: ->(_project, row) { { project: "demo", slug: row.fetch("task_slug") } }
+        ),
+        web_config_loader: -> { { "origin" => "https://hive.example" } }
+      ).call
+      assert_includes text.string, "/tasks/demo/pr-task"
+      assert_includes text.string, "https://github.com/acme/demo/pull/42"
     end
   end
 
@@ -152,6 +183,7 @@ class DigestCommandTest < Minitest::Test
     ).call
 
     rendered = output.string
+    assert_includes rendered, "record record-1"
     assert_operator rendered.index("Needs attention"), :<, rendered.index("Project activity")
     refute_includes rendered, "\e"
     refute_includes rendered, "\a"
@@ -175,6 +207,14 @@ class DigestCommandTest < Minitest::Test
 
     assert_equal [ "https://hive.example/digests/2026-08-30" ], opened
     assert_includes output.string, opened.first
+
+    assert_raises(Hive::Commands::Digest::BrowserOpenFailed) do
+      Hive::Commands::Digest.new(
+        open_web: true, reader: reader, stdout: StringIO.new,
+        web_config_loader: -> { { "origin" => "https://hive.example" } },
+        browser_opener: ->(_url) { nil }
+      ).call
+    end
 
     error = assert_raises(Hive::UsageError) do
       Hive::Commands::Digest.new(

@@ -1,7 +1,9 @@
+<% project_identity = [project.fetch("project_id"), project["registration_id"]].compact.join("-") %>
+<% project_dom_id = stable_dom_id("digest-project", project_identity) %>
 <section class="digest-project-group" data-project="<%= project.fetch("name") %>"
-         aria-labelledby="<%= stable_dom_id("digest-project", project.fetch("project_id")) %>">
+         aria-labelledby="<%= project_dom_id %>">
   <div class="digest-project-heading">
-    <h3 id="<%= stable_dom_id("digest-project", project.fetch("project_id")) %>"><%= project.fetch("name") %></h3>
+    <h3 id="<%= project_dom_id %>"><%= project.fetch("name") %></h3>
     <% if digest.historical_project?(project) %>
       <span class="digest-historical">Historical project</span>
     <% end %>

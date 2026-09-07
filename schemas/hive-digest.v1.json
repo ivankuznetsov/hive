@@ -96,6 +96,7 @@
         "category": { "type": ["string", "null"] },
         "summary": { "type": ["string", "null"] },
         "project_id": { "type": ["string", "null"] },
+        "registration_id": { "type": ["string", "null"] },
         "project": { "type": ["string", "null"] },
         "task_id": { "type": ["string", "integer", "null"] },
         "task_slug": { "type": ["string", "null"] },
@@ -117,6 +118,7 @@
         "attention_id": { "type": ["string", "null"] },
         "kind": { "type": ["string", "null"] },
         "project_id": { "type": ["string", "null"] },
+        "registration_id": { "type": ["string", "null"] },
         "project": { "type": ["string", "null"] },
         "task_id": { "type": ["string", "integer", "null"] },
         "task_slug": { "type": ["string", "null"] },
@@ -140,6 +142,7 @@
         "observed_at": { "type": ["string", "null"] },
         "freshness_at": { "type": ["string", "null"] },
         "project_id": { "type": ["string", "null"] },
+        "registration_id": { "type": ["string", "null"] },
         "task_slug": { "type": ["string", "null"] },
         "retry_state": { "type": ["string", "null"] }
       }
@@ -147,7 +150,10 @@
     "Amendment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["items", "attention", "gaps", "resolved_gap_ids", "resolved_gaps"],
+      "required": [
+        "items", "attention", "gaps", "resolved_gap_ids", "resolved_gaps",
+        "resolved_attention_ids", "resolved_attention"
+      ],
       "properties": {
         "amendment_id": { "type": ["string", "null"] },
         "kind": { "type": ["string", "null"] },
@@ -159,7 +165,9 @@
         "attention": { "type": "array", "items": { "$ref": "#/$defs/Attention" } },
         "gaps": { "type": "array", "items": { "$ref": "#/$defs/Gap" } },
         "resolved_gap_ids": { "type": "array", "items": { "type": "string" } },
-        "resolved_gaps": { "type": "array", "items": { "$ref": "#/$defs/Gap" } }
+        "resolved_gaps": { "type": "array", "items": { "$ref": "#/$defs/Gap" } },
+        "resolved_attention_ids": { "type": "array", "items": { "type": "string" } },
+        "resolved_attention": { "type": "array", "items": { "$ref": "#/$defs/Attention" } }
       }
     },
     "FactDetails": {

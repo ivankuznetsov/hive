@@ -1,4 +1,5 @@
 require "hive/daily_digest/materiality"
+require "hive/pr"
 
 module Hive
   module DailyDigest
@@ -8,16 +9,16 @@ module Hive
     module PublicView
       PROJECT_KEYS = %w[project_id registration_id name repository_identity historical].freeze
       FACT_KEYS = %w[
-        fact_id kind category summary project_id project task_id task_slug stage state
+        fact_id kind category summary project_id registration_id project task_id task_slug stage state
         occurred_at observed_at source task_url historical
       ].freeze
       ATTENTION_KEYS = %w[
-        attention_id kind project_id project task_id task_slug stage state
+        attention_id kind project_id registration_id project task_id task_slug stage state
         waiting_since waiting_age_seconds task_url historical
       ].freeze
       GAP_KEYS = %w[
         gap_id source scope reason_code reason observed_at freshness_at
-        project_id task_slug retry_state
+        project_id registration_id task_slug retry_state
       ].freeze
       AMENDMENT_KEYS = %w[
         amendment_id kind source event_at observed_at amended_at
@@ -48,7 +49,11 @@ module Hive
         row = pick(value, FACT_KEYS)
         source = stringify(value)
         row["details"] = pick(source["details"], DETAIL_KEYS) if source["details"].is_a?(Hash)
-        row["pr"] = pick(source["pr"], PR_KEYS) if source["pr"].is_a?(Hash)
+        if source["pr"].is_a?(Hash)
+          pr = pick(source["pr"], PR_KEYS)
+          pr.delete("url") unless Hive::Pr.valid_http_url?(pr["url"])
+          row["pr"] = pr
+        end
         row
       end
 
@@ -67,7 +72,9 @@ module Hive
           "attention" => rows(source["attention"], method(:attention)),
           "gaps" => rows(source["gaps"], method(:gap)),
           "resolved_gap_ids" => Array(source["resolved_gap_ids"]).map(&:to_s),
-          "resolved_gaps" => rows(source["resolved_gaps"], method(:gap))
+          "resolved_gaps" => rows(source["resolved_gaps"], method(:gap)),
+          "resolved_attention_ids" => Array(source["resolved_attention_ids"]).map(&:to_s),
+          "resolved_attention" => rows(source["resolved_attention"], method(:attention))
         )
       end
 
@@ -90,18 +97,24 @@ module Hive
       end
 
       def ordered_items(record)
-        order = Array(record["projects"]).each_with_index.to_h do |project, index|
-          [ project["project_id"], index ]
+        order = Array(record["projects"]).each_with_index.each_with_object({}) do |(project, index), memo|
+          identity = [ project["project_id"], project["registration_id"] ]
+          memo[identity] = index
+          memo[[ project["project_id"], nil ]] ||= index
         end
         Array(record["items"]).sort_by do |row|
-          [ order.fetch(row["project_id"], order.length), row["project"].to_s,
+          identity = [ row["project_id"], row["registration_id"] ]
+          [ order.fetch(identity, order.fetch([ row["project_id"], nil ], order.length)),
+            row["project"].to_s,
             row["occurred_at"].to_s, row["fact_id"].to_s ]
         end
       end
 
       def grouped_items(record)
-        ordered_items(record).group_by { |row| row["project_id"] }.map do |project_id, rows|
-          [ project_id, rows ]
+        ordered_items(record).group_by do |row|
+          [ row["project_id"], row["registration_id"] ]
+        end.map do |identity, rows|
+          [ identity, rows ]
         end
       end
 

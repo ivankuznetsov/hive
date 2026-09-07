@@ -181,15 +181,19 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_registry_assigns_and_preserves_project_and_registration_identity
+  def test_registry_preserves_project_identity_but_rotates_registration_on_path_replacement
     with_tmp_global_config do
       first = Hive::Config.register_project(name: "sample", path: "/tmp/first")
       second = Hive::Config.register_project(name: "sample", path: "/tmp/second")
 
       assert_match(Hive::Config::PROJECT_UUID, first.fetch("project_id"))
       assert_equal first.fetch("project_id"), second.fetch("project_id")
-      assert_equal first.fetch("registration_id"), second.fetch("registration_id")
-      assert_equal first.fetch("registered_at"), second.fetch("registered_at")
+      refute_equal first.fetch("registration_id"), second.fetch("registration_id")
+      refute_equal first.fetch("registered_at"), second.fetch("registered_at")
+
+      repeated = Hive::Config.register_project(name: "sample", path: "/tmp/second")
+      assert_equal second.fetch("registration_id"), repeated.fetch("registration_id")
+      assert_equal second.fetch("registered_at"), repeated.fetch("registered_at")
     end
   end
 

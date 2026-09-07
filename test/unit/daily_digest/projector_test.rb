@@ -79,6 +79,48 @@ class DailyDigestProjectorTest < Minitest::Test
     assert_equal [ "gap:one" ], amendment.fetch("gaps").map { |row| row.fetch("gap_id") }
   end
 
+  def test_closed_attention_is_resolved_only_after_registration_scoped_task_evidence_recovers
+    projector = Hive::DailyDigest::Projector.new(clock: -> { NOW })
+    waiting = attention("waiting").merge("registration_id" => "registration-1")
+    boundary_gap = gap.merge(
+      "gap_id" => "gap:boundary", "source" => "project_state",
+      "registration_id" => "registration-1", "task_slug" => "waiting"
+    )
+    existing = projector.base(
+      interval: interval,
+      batch: batch(gaps: [ boundary_gap ], facts: [], attention: [ waiting ]),
+      lifecycle: "closed"
+    ).merge("effective_gaps" => [ boundary_gap ])
+    changed_frontier = {
+      "project-1:registration-1" => {
+        "project_id" => "project-1", "registration_id" => "registration-1",
+        "fingerprints" => { "2-brainstorm/waiting/task-journal.jsonl" => { "sha256" => "a" * 64 } }
+      }
+    }
+    still_degraded = batch(gaps: [ boundary_gap ], facts: [], attention: []).with(
+      frontiers: changed_frontier
+    )
+
+    assert_nil projector.amendment(existing: existing, batch: still_degraded)
+
+    recovered = batch(gaps: [], facts: [], attention: []).with(frontiers: changed_frontier)
+
+    amendment = projector.amendment(
+      existing: existing, batch: recovered, attempted_gap_ids: [ "gap:boundary" ]
+    )
+
+    assert_equal [ waiting.fetch("attention_id") ], amendment.fetch("resolved_attention_ids")
+
+    replacement = recovered.with(frontiers: {
+      "project-1:registration-2" => {
+        "project_id" => "project-1", "registration_id" => "registration-2",
+        "fingerprints" => { "2-brainstorm/waiting/task-journal.jsonl" => { "sha256" => "b" * 64 } }
+      }
+    })
+    unresolved = projector.amendment(existing: existing, batch: replacement)
+    assert_nil unresolved
+  end
+
   private
 
   def interval

@@ -57,9 +57,10 @@ module Hive
         frontier = {
           "source" => "task_journal",
           "project_id" => @project.fetch("project_id"),
+          "registration_id" => @project["registration_id"],
           "observed_at" => iso(observation_time),
           "fingerprints" => fingerprints.sort.to_h
-        }
+        }.compact
         health = gaps.empty? ?
           SourceHealth.healthy(source: "project_state", scope: @project.fetch("name"),
                                freshness_at: frontier.fetch("observed_at")) :
@@ -194,7 +195,9 @@ module Hive
         fingerprints[key] = signature.merge("sha256" => Digest::SHA256.hexdigest(bytes))
         return unless in_window?(receipt.fetch("created_at"))
 
-        facts << Materiality.creation_fact(receipt)
+        facts << Materiality.creation_fact(
+          receipt, registration_id: @project["registration_id"]
+        )
       rescue TaskCreationReceipt::Error, SystemCallError, IOError
         gaps << scoped_gap("malformed_creation_receipt", "task creation receipt is unreadable",
                            task_slug: File.basename(task_folder))
@@ -361,7 +364,8 @@ module Hive
           reason_code: "pr_evidence_incomplete",
           reason: "Hive-owned pull request evidence lacks a required identity or outcome field",
           observed_at: record["observed_at"] || observation_time,
-          project_id: @project["project_id"], task_slug: File.basename(task_folder)
+          project_id: @project["project_id"], registration_id: @project["registration_id"],
+          task_slug: File.basename(task_folder)
         )
       end
 
@@ -430,11 +434,14 @@ module Hive
         at = normalize_time(record.fetch("occurred_at"))
         task = stringify(record["task"] || {})
         slug = task["slug"].to_s.empty? ? File.basename(task_folder) : task["slug"].to_s
-        identity = [ kind, @project["project_id"], slug, record["event_id"] ].join("\0")
+        identity = [
+          kind, @project["project_id"], @project["registration_id"], slug, record["event_id"]
+        ].join("\0")
         item = {
           "attention_id" => "attention:#{Digest::SHA256.hexdigest(identity)}",
           "kind" => kind,
           "project_id" => @project.fetch("project_id"),
+          "registration_id" => @project["registration_id"],
           "project" => @project.fetch("name"),
           "task_id" => task["id"]&.to_s,
           "task_slug" => slug,
@@ -445,7 +452,7 @@ module Hive
           "task_url" => task_url(slug, anchor: "task-questions")
         }
         item["waiting_age_seconds"] = nil if at > attention_boundary
-        item
+        item.compact
       end
 
       def boundary_history_gaps(task_folders, attention)
@@ -512,7 +519,8 @@ module Hive
         scope = "#{scope}:#{discriminator}" if discriminator
         Materiality.build_gap(
           source: "project_state", scope: scope, reason_code: reason_code, reason: reason,
-          observed_at: observation_time, project_id: @project["project_id"], task_slug: task_slug
+          observed_at: observation_time, project_id: @project["project_id"],
+          registration_id: @project["registration_id"], task_slug: task_slug
         )
       end
 

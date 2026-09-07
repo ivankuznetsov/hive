@@ -304,11 +304,14 @@ module Hive
         current_gaps = Array(existing["effective_gaps"] || existing["gaps"])
         retained_gaps = current_gaps.reject { |gap| confirmed[gap.fetch("gap_id")] }
         changed_tasks = changed_task_slugs(existing.fetch("effective_source_frontiers", {}), batch.frontiers)
-        refreshed_projects = batch.frontiers.keys.to_h { |project_id| [ project_id, true ] }
+        refreshed_projects = batch.frontiers.map do |key, frontier|
+          frontier_identity(key, frontier)
+        end
         retained_attention = Array(existing["attention"]).reject do |item|
-          refreshed_projects[item["project_id"]] && changed_tasks.include?(
-            [ item["project_id"], item["task_slug"] ]
-          )
+          refreshed_projects.any? { |identity| same_registration?(identity, item) } &&
+            changed_tasks.include?(
+              [ item["project_id"], item["registration_id"], item["task_slug"] ]
+            ) && Collector.boundary_evidence_complete?(batch.gaps, item)
         end.map { |item| attention_at_boundary(item, attention_boundary) }
         Batch.new(
           projects: batch.projects,
@@ -339,15 +342,24 @@ module Hive
       end
 
       def changed_task_slugs(prior_frontiers, current_frontiers)
-        current_frontiers.each_with_object([]) do |(project_id, frontier), changed|
-          prior = prior_frontiers.dig(project_id, "fingerprints")
+        registration_counts = current_frontiers.each_with_object(Hash.new(0)) do |(key, frontier), counts|
+          project_id, = frontier_identity(key, frontier)
+          counts[project_id] += 1
+        end
+        current_frontiers.each_with_object([]) do |(key, frontier), changed|
+          project_id, registration_id = frontier_identity(key, frontier)
+          prior_frontier = Collector.frontier_for(
+            prior_frontiers, project_id: project_id, registration_id: registration_id,
+            allow_legacy: registration_counts[project_id] == 1
+          )
+          prior = prior_frontier && prior_frontier["fingerprints"]
           current = frontier["fingerprints"]
           next unless current.is_a?(Hash)
 
           current.each do |key, signature|
             next if prior.is_a?(Hash) && prior[key] == signature
 
-            changed << [ project_id, fingerprint_task_slug(key) ]
+            changed << [ project_id, registration_id, fingerprint_task_slug(key) ]
           end
         end
       end
@@ -377,7 +389,10 @@ module Hive
         end
 
         project_id = gap["project_id"]
-        frontier = project_id && frontiers[project_id]
+        frontier = project_id && Collector.frontier_for(
+          frontiers, project_id: project_id, registration_id: gap["registration_id"],
+          allow_legacy: gap["registration_id"].to_s.empty?
+        )
         return false unless frontier.is_a?(Hash)
         return true if gap["task_slug"].to_s.empty?
 
@@ -390,6 +405,22 @@ module Hive
       def fingerprint_task_slug(key)
         parts = key.to_s.split("/", 3)
         parts.length == 3 ? parts.fetch(1) : parts.fetch(0)
+      end
+
+      def frontier_identity(key, frontier)
+        row = frontier.is_a?(Hash) ? frontier : {}
+        parts = key.to_s.split(":", 2)
+        project_id = row["project_id"] || parts.first
+        registration_id = row["registration_id"] || (parts.fetch(1) if parts.length == 2)
+        [ project_id, registration_id ]
+      end
+
+      def same_registration?(identity, row)
+        project_id, registration_id = identity
+        return false unless project_id.to_s == row["project_id"].to_s
+
+        row["registration_id"].to_s.empty? ||
+          registration_id.to_s == row["registration_id"].to_s
       end
 
       def resolved_pruned_gaps(existing, batch, attempted_gap_ids:)

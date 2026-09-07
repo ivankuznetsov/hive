@@ -140,6 +140,46 @@ class DailyDigestCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_open_refresh_keeps_attention_when_changed_task_evidence_is_degraded
+    coordinator = Hive::DailyDigest::Coordinator.new
+    waiting = {
+      "attention_id" => "attention:waiting", "kind" => "unanswered",
+      "project_id" => "project-1", "registration_id" => "registration-1",
+      "project" => "demo", "task_slug" => "task",
+      "waiting_since" => "2026-08-30T10:00:00.000000Z", "waiting_age_seconds" => 7_200
+    }
+    frontier = {
+      "project-1:registration-1" => {
+        "project_id" => "project-1", "registration_id" => "registration-1",
+        "fingerprints" => { "2-brainstorm/task/task-journal.jsonl" => { "sha256" => "b" * 64 } }
+      }
+    }
+    existing = {
+      "items" => [], "attention" => [ waiting ], "gaps" => [],
+      "effective_source_frontiers" => {
+        "project-1:registration-1" => {
+          "project_id" => "project-1", "registration_id" => "registration-1",
+          "fingerprints" => { "2-brainstorm/task/task-journal.jsonl" => { "sha256" => "a" * 64 } }
+        }
+      }
+    }
+    degraded_gap = {
+      "gap_id" => "gap:malformed", "source" => "project_state", "scope" => "demo:task",
+      "reason_code" => "malformed_journal", "reason" => "journal is malformed",
+      "observed_at" => "2026-08-30T18:00:00.000000Z", "project_id" => "project-1",
+      "registration_id" => "registration-1", "task_slug" => "task"
+    }
+    incoming = batch([], gaps: [ degraded_gap ]).with(frontiers: frontier)
+
+    merged = coordinator.send(
+      :merge_open_batch, existing, incoming, confirmed_gap_ids: [],
+      attention_boundary: Time.iso8601("2026-08-30T18:00:00Z")
+    )
+
+    assert_equal [ "attention:waiting" ], merged.attention.map { |item| item.fetch("attention_id") }
+    assert_equal 28_800, merged.attention.first.fetch("waiting_age_seconds")
+  end
+
   def test_gap_requires_positive_scoped_recovery_evidence
     coordinator = Hive::DailyDigest::Coordinator.new
     gap = {

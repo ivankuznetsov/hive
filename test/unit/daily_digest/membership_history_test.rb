@@ -30,9 +30,11 @@ class DailyDigestMembershipHistoryTest < Minitest::Test
       assert_equal %w[registered replaced registered pruned unregistered],
                    history.map { |event| event.fetch("kind") }
       assert_equal registered.fetch("project_id"), replaced.fetch("project_id")
-      assert_equal registered.fetch("registration_id"), replaced.fetch("registration_id")
+      refute_equal registered.fetch("registration_id"), replaced.fetch("registration_id")
       assert_equal first, history[1].dig("before", "path")
       assert_equal second, history[1].dig("after", "path")
+      assert_equal registered.fetch("registration_id"), history[1].dig("before", "registration_id")
+      assert_equal replaced.fetch("registration_id"), history[1].dig("after", "registration_id")
       assert_empty data.fetch("registered_projects")
       assert history.all? { |event| event.fetch("event_id").match?(/\A[0-9a-f]{64}\z/) }
       assert_equal history.map { |event| event.fetch("event_id") }.sort,

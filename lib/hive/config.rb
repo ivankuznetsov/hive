@@ -1735,13 +1735,21 @@ module Hive
           retired&.fetch(:project_id) || SecureRandom.uuid
         end
         timestamp = normalize_membership_time(now)
+        existing_path = File.expand_path(existing.fetch("path")) if existing
+        replacing_registration = existing && existing_path != abs_path
+        retired_same_path = retired &&
+          File.expand_path(retired.fetch(:state_root_path).to_s) == File.expand_path(hive_state_path)
+        registration_id, registered_at = if existing && !replacing_registration
+          [ existing["registration_id"] || SecureRandom.uuid, existing["registered_at"] || timestamp ]
+        elsif retired_same_path
+          [ retired[:registration_id] || SecureRandom.uuid, retired[:registered_at] || timestamp ]
+        else
+          [ SecureRandom.uuid, timestamp ]
+        end
         entry = {
           "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path,
           "project_id" => project_id,
-          "registration_id" => existing&.fetch("registration_id", nil) ||
-            retired&.fetch(:registration_id) || SecureRandom.uuid,
-          "registered_at" => existing&.fetch("registered_at", nil) ||
-            retired&.fetch(:registered_at) || timestamp
+          "registration_id" => registration_id, "registered_at" => registered_at
         }
         identity = repository_identity == :detect ? Hive::RepositoryIdentity.current(abs_path) : repository_identity
         entry["repository_identity"] = identity if identity
@@ -1753,7 +1761,6 @@ module Hive
           replacing: existing
         )
         if existing
-          existing_path = File.expand_path(existing.fetch("path"))
           if !replace_existing && existing_path != abs_path
             raise ProjectRegistrationCollision.new(
               "project #{name.inspect} is already registered at #{existing.fetch('path')}",

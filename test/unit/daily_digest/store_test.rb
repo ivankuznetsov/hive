@@ -130,6 +130,30 @@ class DailyDigestStoreTest < Minitest::Test
     end
   end
 
+  def test_effective_projection_applies_append_only_attention_resolution
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      waiting = {
+        "attention_id" => "attention:one", "kind" => "blocked",
+        "project_id" => "project-1", "task_slug" => "task"
+      }
+      store.write_base(record("closed", attention: [ waiting ]))
+      base_bytes = File.binread(store.base_path("2026-08-30"))
+
+      store.append_amendment(
+        "2026-08-30",
+        amendment("resolved", resolved_attention_ids: [ waiting.fetch("attention_id") ]).merge(
+          "kind" => "attention_resolution", "resolved_attention" => [ waiting ]
+        )
+      )
+
+      effective = store.read("2026-08-30")
+      assert_empty effective.fetch("attention")
+      assert_equal "empty", effective.fetch("effective_content")
+      assert_equal base_bytes, File.binread(store.base_path("2026-08-30"))
+    end
+  end
+
   def test_conflicting_open_identity_is_rejected_defensively
     with_tmp_dir do |dir|
       store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
@@ -382,7 +406,7 @@ class DailyDigestStoreTest < Minitest::Test
 
   private
 
-  def record(lifecycle, items: [], completeness: "complete", content: nil, gaps: [],
+  def record(lifecycle, items: [], attention: [], completeness: "complete", content: nil, gaps: [],
              local_date: "2026-08-30", sequence: 1, interval_id: "a" * 64,
              starts_at: "2026-08-29T23:00:00.000000Z",
              ends_at: "2026-08-30T23:00:00.000000Z")
@@ -401,11 +425,11 @@ class DailyDigestStoreTest < Minitest::Test
       "lifecycle" => lifecycle,
       "closed_at" => lifecycle == "closed" ? "2026-08-31T00:00:00.000000Z" : nil,
       "completeness" => completeness,
-      "content" => content || (items.empty? ? "empty" : "non_empty"),
+      "content" => content || (items.empty? && attention.empty? ? "empty" : "non_empty"),
       "last_materialized_at" => NOW.iso8601(6),
       "projects" => [ { "project_id" => "project-1", "name" => "demo" } ],
       "items" => items,
-      "attention" => [],
+      "attention" => attention,
       "gaps" => gaps,
       "source_frontiers" => {}
     }
@@ -421,12 +445,14 @@ class DailyDigestStoreTest < Minitest::Test
       "reason" => "unavailable", "observed_at" => NOW.iso8601(6), "freshness_at" => nil }
   end
 
-  def amendment(id, amended_at: "2026-08-31T08:00:01Z", gaps: [], resolved_gap_ids: [])
+  def amendment(id, amended_at: "2026-08-31T08:00:01Z", gaps: [], resolved_gap_ids: [],
+                resolved_attention_ids: [])
     {
       "amendment_id" => "amendment:#{id}", "kind" => "late_observation", "source" => "test",
       "event_at" => nil, "observed_at" => "2026-08-31T08:00:00Z",
       "amended_at" => amended_at, "items" => [], "gaps" => gaps,
-      "resolved_gap_ids" => resolved_gap_ids
+      "resolved_gap_ids" => resolved_gap_ids,
+      "resolved_attention_ids" => resolved_attention_ids
     }
   end
 end

@@ -96,15 +96,27 @@ module Hive
         data["gaps"] ||= []
         data["attention"] ||= []
         data["resolved_gaps"] ||= []
+        data["resolved_attention_ids"] ||= []
+        data["resolved_attention"] ||= []
         data["source_frontiers"] ||= {}
         raise InvalidRecord, "gaps must be an array" unless data["gaps"].is_a?(Array)
         raise InvalidRecord, "attention must be an array" unless data["attention"].is_a?(Array)
         unless data["resolved_gaps"].is_a?(Array)
           raise InvalidRecord, "resolved_gaps must be an array"
         end
+        unless data["resolved_attention_ids"].is_a?(Array) &&
+               data["resolved_attention"].is_a?(Array)
+          raise InvalidRecord, "resolved attention fields must be arrays"
+        end
         resolved_ids = data["resolved_gaps"].map { |gap| gap.fetch("gap_id") }.sort
         unless (resolved_ids - data["resolved_gap_ids"].map(&:to_s)).empty?
           raise InvalidRecord, "resolved_gaps must match resolved_gap_ids"
+        end
+        resolved_attention_ids = data["resolved_attention"].map do |item|
+          item.fetch("attention_id")
+        end.sort
+        unless (resolved_attention_ids - data["resolved_attention_ids"].map(&:to_s)).empty?
+          raise InvalidRecord, "resolved_attention must match resolved_attention_ids"
         end
         unless data["source_frontiers"].is_a?(Hash)
           raise InvalidRecord, "source_frontiers must be an object"

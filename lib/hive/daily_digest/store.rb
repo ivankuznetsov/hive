@@ -296,9 +296,18 @@ module Hive
         gaps = gaps_by_id.values
         items = (base.fetch("items") + amendments.flat_map { |entry| entry.fetch("items") })
                 .uniq { |item| item.fetch("fact_id") }
-        attention = (
-          base.fetch("attention") + amendments.flat_map { |entry| entry.fetch("attention", []) }
-        ).uniq { |item| item.fetch("attention_id") }
+        attention_by_id = base.fetch("attention").to_h do |item|
+          [ item.fetch("attention_id"), item ]
+        end
+        amendments.each do |amendment|
+          amendment.fetch("resolved_attention_ids", []).each do |attention_id|
+            attention_by_id.delete(attention_id)
+          end
+          amendment.fetch("attention", []).each do |item|
+            attention_by_id[item.fetch("attention_id")] ||= item
+          end
+        end
+        attention = attention_by_id.values
         frontiers = amendments.reduce(base.fetch("source_frontiers", {})) do |memo, amendment|
           merge_frontiers(memo, amendment.fetch("source_frontiers", {}))
         end

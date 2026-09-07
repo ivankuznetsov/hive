@@ -118,8 +118,8 @@ module Hive
         if before
           removed = state.delete(membership_key(before))
           unless removed
-            # Replacement retains a registration id while changing path. Fall
-            # back to the stable project identity before declaring a gap.
+            # A path replacement rotates the registration id. Fall back to the
+            # stable logical project identity before declaring a history gap.
             key = state.keys.find { |candidate| state[candidate]["project_id"] == before["project_id"] }
             removed = state.delete(key) if key
           end

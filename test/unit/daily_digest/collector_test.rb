@@ -55,9 +55,48 @@ class DailyDigestCollectorTest < Minitest::Test
       assert_equal %w[earlier later], collected.facts.map { |row| row.fetch("fact_id") }
       assert_equal [ "attention:one" ], collected.attention.map { |row| row.fetch("attention_id") }
       assert_equal [ gap.fetch("gap_id") ], collected.gaps.map { |row| row.fetch("gap_id") }
-      assert_equal({ "one" => { "cursor" => 1 } }, collected.frontiers)
+      assert_equal(
+        {
+          "one:r1" => {
+            "cursor" => 1, "project_id" => "one", "registration_id" => "r1"
+          }
+        },
+        collected.frontiers
+      )
       assert_equal "non_empty", collected.content
     end
+  end
+
+  def test_replaced_registration_does_not_reuse_the_previous_source_frontier
+    old = { "project_id" => "one", "registration_id" => "old", "name" => "one" }
+    replacement = old.merge("registration_id" => "new")
+    seen = []
+    factory = lambda do |project:, prior_frontier:, **|
+      seen << [ project.fetch("registration_id"), prior_frontier ]
+      result = Hive::DailyDigest::ProjectSource::Result.new(
+        project: project, facts: [], attention: [], gaps: [],
+        frontier: {
+          "project_id" => project.fetch("project_id"),
+          "registration_id" => project.fetch("registration_id"),
+          "fingerprints" => {}
+        },
+        health: Hive::DailyDigest::SourceHealth.healthy(source: "project_state", scope: "one")
+      )
+      Object.new.tap { |source| source.define_singleton_method(:collect) { result } }
+    end
+
+    collected = Hive::DailyDigest::Collector.new(
+      projects: [ old, replacement ], starts_at: Time.at(0), ends_at: Time.at(1),
+      prior_frontiers: {
+        "one:old" => { "fingerprints" => { "old" => true } }
+      }, source_factory: factory
+    ).collect
+
+    assert_equal [
+      [ "old", { "fingerprints" => { "old" => true } } ],
+      [ "new", nil ]
+    ], seen
+    assert_equal %w[one:new one:old], collected.frontiers.keys.sort
   end
 
   private

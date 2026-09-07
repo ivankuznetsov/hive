@@ -141,7 +141,7 @@ module Hive
       end
 
       def build_gap(source:, scope:, reason_code:, reason:, observed_at:, freshness_at: nil,
-                    project_id: nil, task_slug: nil)
+                    project_id: nil, registration_id: nil, task_slug: nil)
         normalized = {
           "source" => bounded(source, 80, fallback: "unknown"),
           "scope" => bounded(scope, 160, fallback: "global"),
@@ -150,21 +150,25 @@ module Hive
           "observed_at" => iso_time(observed_at),
           "freshness_at" => freshness_at && iso_time(freshness_at),
           "project_id" => nullable_bounded(project_id, 160),
+          "registration_id" => nullable_bounded(registration_id, 160),
           "task_slug" => nullable_bounded(task_slug, 128)
         }
-        identity = normalized.slice("source", "scope", "reason_code", "project_id", "task_slug")
+        identity = normalized.slice(
+          "source", "scope", "reason_code", "project_id", "registration_id", "task_slug"
+        )
         normalized["gap_id"] = "gap:#{Digest::SHA256.hexdigest(canonical_json(identity))}"
         normalized
       end
 
-      def creation_fact(receipt)
-        row = stringify(receipt)
-        {
+      def creation_fact(receipt = nil, registration_id: nil, **receipt_fields)
+        row = stringify(receipt || receipt_fields)
+        fact = {
           "fact_id" => "creation:#{row.fetch('creation_id')}",
           "kind" => "task_created",
           "category" => "progress",
           "summary" => "Task created",
           "project_id" => row.fetch("project_id"),
+          "registration_id" => registration_id || row["registration_id"],
           "project" => row.fetch("project_name"),
           "task_id" => row["task_id"],
           "task_slug" => row.fetch("task_slug"),
@@ -174,6 +178,7 @@ module Hive
           "source" => "task_creation_receipt",
           "details" => { "workflow" => row.fetch("workflow") }
         }
+        fact.compact
       end
 
       def fact(row, payload, kind, project, fallback_observed_at: nil)
@@ -188,6 +193,7 @@ module Hive
         identity = {
           "event_id" => event_id, "kind" => kind,
           "project_id" => project["project_id"],
+          "registration_id" => project["registration_id"],
           "task" => row["task"], "details" => details
         }
         normalized = {
@@ -196,6 +202,7 @@ module Hive
           "category" => category(kind, payload),
           "summary" => LABELS.fetch(kind, "Task activity changed"),
           "project_id" => bounded(project["project_id"], 160, fallback: "unknown-project"),
+          "registration_id" => nullable_bounded(project["registration_id"], 160),
           "project" => bounded(project["name"], 160, fallback: "unknown"),
           "task_id" => nullable_bounded(row.dig("task", "id"), 128),
           "task_slug" => nullable_bounded(row.dig("task", "slug"), 128),
@@ -220,7 +227,8 @@ module Hive
           reason: payload["reason"] || row["reason"] || "activity evidence unavailable",
           observed_at: row["observed_at"] || row["occurred_at"],
           freshness_at: payload["freshness_at"],
-          project_id: project["project_id"], task_slug: row.dig("task", "slug")
+          project_id: project["project_id"], registration_id: project["registration_id"],
+          task_slug: row.dig("task", "slug")
         )
       end
       private_class_method :gap
@@ -233,7 +241,8 @@ module Hive
           source: "task_journal", scope: project["name"] || "project",
           reason_code: "malformed_activity", reason: "activity record could not be normalized",
           observed_at: safe_observation_time(row, observed_at),
-          project_id: project["project_id"], task_slug: task["slug"]
+          project_id: project["project_id"], registration_id: project["registration_id"],
+          task_slug: task["slug"]
         )
       end
       private_class_method :invalid_record_gap

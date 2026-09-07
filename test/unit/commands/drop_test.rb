@@ -188,6 +188,19 @@ class DropCommandTest < Minitest::Test
     end
   end
 
+  def test_dropping_ad_hoc_review_never_closes_the_borrowed_pr
+    with_drop_project do |dir, ops, project|
+      slug = "adhoc-review-pr-42"
+      folder = create_task(dir, "6-review", slug, body: "---\nsource: ad-hoc\n---\n")
+      File.write(File.join(folder, "pr.md"), "---\nsource: ad-hoc\npr_url: https://github.com/acme/app/pull/42\n---\n")
+      commit_hive_state(ops, "6-review", slug)
+      with_gh_capture_stub(->(*) { raise "borrowed PR must not be closed" }) do
+        capture_io { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+      end
+      refute Dir.exist?(folder)
+    end
+  end
+
   def test_drop_closes_pr_url_from_pr_md_best_effort
     with_drop_project do |dir, ops, project|
       slug = "drop-pr-260522-aaaa"

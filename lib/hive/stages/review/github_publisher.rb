@@ -113,6 +113,23 @@ module Hive
             return nil
           end
 
+          if task.workflow.id == :"pr-review"
+            persisted_head = frontmatter["head_oid"].to_s.downcase
+            unless persisted_head.match?(/\A[a-f0-9]{40,64}\z/)
+              warn "hive: review GitHub publish skipped; pr.md has no exact controller head identity"
+              return nil
+            end
+            metadata = Hive::Gh.pr_metadata(parsed.fetch("number"), cfg: cfg, chdir: worktree_path)
+            local_head = Hive::Worktree.run_materialize_git!(worktree_path, "rev-parse", "HEAD").strip
+            return parsed.fetch("url") if metadata.number == parsed.fetch("number") &&
+              Hive::Gh.parse_pull_request_url(metadata.url) == parsed &&
+              metadata.state.to_s.upcase == "OPEN" &&
+              metadata.head_ref_oid.to_s.downcase == persisted_head && local_head == persisted_head
+
+            warn "hive: review GitHub publish skipped; pull-request head changed"
+            return nil
+          end
+
           exact_match = Hive::Gh.lookup_prs_for_branch(
             worktree_path, branch, cfg: cfg
           ).one? do |candidate|

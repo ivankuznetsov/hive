@@ -520,7 +520,7 @@ module Hive
     # that branch checked out. Older coding pointers do not carry the strict
     # draft-PR receipt fields, so these live repository checks provide the
     # equivalent ownership proof without breaking their recovery.
-    def self.read_owned_pointer(task_folder, project_root:, slug:, expected_root:)
+    def self.read_owned_pointer(task_folder, project_root:, slug:, expected_root:, expected_branch: slug.to_s)
       pointer_path = File.join(task_folder, "worktree.yml")
       source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
         raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
@@ -545,7 +545,7 @@ module Hive
       path = validate_pointer_path(raw["path"], root)
       branch = validate_branch_name!(raw["branch"])
       raise WorktreeError, "worktree.yml path does not belong to task #{slug}" unless path == expected_path
-      raise WorktreeError, "worktree.yml branch does not belong to task #{slug}" unless branch == slug.to_s
+      raise WorktreeError, "worktree.yml branch does not belong to task #{slug}" unless branch == expected_branch
       raise WorktreeError, "worktree #{path} is missing" unless File.directory?(path)
 
       registered = run_materialize_git!(project_root, "worktree", "list", "--porcelain")

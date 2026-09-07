@@ -130,25 +130,17 @@ class WorkflowsCodingTest < Minitest::Test
     end
   end
 
-  # task_action.rb's kind_action routes :execute/:review_council/:finalize straight
-  # to the coding-hardcoded helpers (execute_action/review_action/finalize_action)
-  # with NO coding_id? guard — unlike the :agent/:inert arm, which gates on
-  # coding_id? via coding_table_action. That asymmetry is safe ONLY because no
-  # non-coding descriptor declares those runtime kinds: parse_kind rejects them for
-  # YAML descriptors (descriptor_parser_test pins the exact strings) and only
-  # Workflows::Coding declares them via Stage.new. Pin the Ruby half of that
-  # invariant across EVERY registered descriptor so a future Ruby-constructed
-  # non-coding workflow carrying a coding runtime kind fails here, not by silently
-  # misrouting to a coding helper on a live status/daemon tick.
-  def test_no_non_coding_descriptor_declares_a_coding_runtime_kind
-    coding_runtime_kinds = %i[execute review_council finalize]
-
+  # YAML descriptors cannot declare these built-in runtime kinds. PR review
+  # shares the review council only; execute and finalize remain coding-only.
+  def test_non_coding_descriptors_only_share_the_review_runtime_when_allowed
     Hive::Workflows::Registry.all.reject { |descriptor| Hive::Workflows.coding_id?(descriptor.id) }.each do |descriptor|
-      offending = descriptor.stages.select { |stage| coding_runtime_kinds.include?(stage.kind) }.map(&:name)
+      forbidden = %i[execute finalize]
+      forbidden << :review_council unless descriptor.id == :"pr-review"
+      offending = descriptor.stages.select { |stage| forbidden.include?(stage.kind) }.map(&:name)
 
       assert_empty offending,
-                   "non-coding descriptor #{descriptor.id.inspect} declares coding-only runtime kind(s) on " \
-                   "stage(s) #{offending.inspect}; kind_action would misroute them to coding-hardcoded helpers"
+                   "non-coding descriptor #{descriptor.id.inspect} declares unsupported built-in runtime kind(s) on " \
+                   "stage(s) #{offending.inspect}; kind_action would misroute them"
     end
   end
 

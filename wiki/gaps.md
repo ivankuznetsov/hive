@@ -1411,3 +1411,5 @@ Automatic recovery requires successful process and open-file probes (`ps` and
 nonempty locks deliberately leave recovery to a later retry or operator.
 This is not general recovery of interrupted Git operations; preserved lock
 files may still require inspection on platforms without these probes.
+
+- Standalone `pr-review`: local regression coverage does not establish installed dogfood rollout or live legacy-task recovery. A process crash between remote publication and local identity persistence requires explicit reconciliation; the next run refuses a stale head.

@@ -5,7 +5,10 @@ require "hive/stages/review"
 class HiveStagesReviewPreFixCleanExitTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:folder, :slug, :state_file, keyword_init: true)
+  FakeTask = Struct.new(:folder, :slug, :state_file, keyword_init: true) do
+    def stage_index = 6
+    def stage_name = "review"
+  end
 
   def fake_task
     folder = Dir.mktmpdir("hive-review-task")

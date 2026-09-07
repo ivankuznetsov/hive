@@ -134,10 +134,22 @@ module Hive
             unless remote_head == identity.fetch(:remote_head)
               raise Hive::GhError, "pull-request head changed during identity validation"
             end
+            if @task.workflow.id == :"pr-review"
+              persisted = Hive::Gh.pr_frontmatter(File.join(@task.folder, "pr.md"))["head_oid"].to_s.downcase
+              unless remote_head == persisted
+                raise Hive::GhError, "pull-request head changed since this review; refusing publication"
+              end
+            end
             @expected_checks.merge(check_keys(baseline))
             guard_publication!(local_head)
             publish_head!(identity.fetch(:branch), expected_remote_oid: remote_head)
             @published_head = local_head
+            if @task.workflow.id == :"pr-review"
+              Hive::Gh.persist_pr_identity!(
+                File.join(@task.folder, "pr.md"), pr_url: identity.fetch(:url),
+                pr_number: identity.fetch(:number), head_oid: local_head
+              )
+            end
             wait_for_settlement!(
               identity,
               local_head,
@@ -183,7 +195,13 @@ module Hive
               raise Hive::GhError, "pull-request identity is stale or unsupported"
             end
 
-            branch = pointer.fetch("branch")
+            branch = if @task.workflow.id == :"pr-review"
+              name = metadata.head_ref_name.to_s
+              raise Hive::GhError, "pull-request head branch is unavailable" if name.empty?
+              name
+            else
+              pointer.fetch("branch")
+            end
             matches = @gh.lookup_prs_for_branch(
               @ctx.worktree_path, branch, cfg: @cfg
             ).select do |candidate|
@@ -220,11 +238,18 @@ module Hive
           end
 
           def publish_head!(branch, expected_remote_oid:)
-            result = @gh.push_branch(
-              @ctx.worktree_path, branch, cfg: @cfg,
-              expected_remote_oid: expected_remote_oid,
-              set_upstream: false
-            )
+            result = if @task.workflow.id == :"pr-review"
+              @gh.push_review_head(
+                @ctx.worktree_path, branch, cfg: @cfg,
+                expected_remote_oid: expected_remote_oid
+              )
+            else
+              @gh.push_branch(
+                @ctx.worktree_path, branch, cfg: @cfg,
+                expected_remote_oid: expected_remote_oid,
+                set_upstream: false
+              )
+            end
             return if result.success?
 
             detail = result.stderr.to_s.strip

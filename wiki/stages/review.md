@@ -7,7 +7,7 @@ updated: 2026-08-31
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
-**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, Patrol Fix workflow routing can enter the same stage, or `hive review --pr <n>` creates a synthetic `6-review/adhoc-review-pr-<n>/` task for someone else's PR. `Hive::Stages::Review.run!` proves local and hosted CI on entry, loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap), settles the exact final PR head, and only then finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
+**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, Patrol Fix workflow routing can enter the same stage, or `hive review --pr <n>` creates a synthetic `1-review/adhoc-review-pr-<n>/` task for someone else's PR. `Hive::Stages::Review.run!` proves local and hosted CI on entry, loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap), settles the exact final PR head, and only then finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
 
 ## Setup
 

@@ -44,7 +44,7 @@ validated; installing tools and restricting their use are separate concerns.
   Deliberation round failures also emit typed cell/judge quota evidence. Matching quota-only missing transcripts and `final: null` verdicts use the durable `limits_reached` cooldown only when every failure emitted for the retried cell is quota-typed; unmatched, mixed, malformed, effort, and non-quota failures remain manual. Incomplete transcripts stay outside the retry skip-set until every configured judge has a numeric final.
 - `Hive::Workflows::PatrolFix::DESCRIPTOR` — controller-owned descriptor (`id: :patrol-fix`) for `inbox -> fix -> validate -> review -> publish -> done`. Its active stages declare `kind: controller` and `controller: :patrol_fix`; the resolver uses that capability to select the first-party Patrol Fix runner without matching a workflow id or stage-name list. `done` remains inert. This keeps controller-specific task rebinding and status/action behavior attached to the descriptor while ordinary `agent`, `council`, and inert stages retain the generic runners.
 - `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.
-- `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids (`:coding`, `:content`, `:bench`, plus any scoped test/runtime registrations and the active project's discovered descriptors). Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
+- `Hive::Workflows::Registry.all` / `.ids` — live enumeration of registered descriptors/ids (`:coding`, `:"pr-review"`, `:content`, `:bench`, plus any scoped test/runtime registrations and the active project's discovered descriptors). Test helpers override this at call time so runtime-registered workflows participate in status scans and slug resolution.
 - `Hive::WorkflowSelection.fetch!(name, project_root: Dir.pwd)` — CLI-facing selector validation used by [[commands/init]], [[commands/new]], and project-aware callers. Blank/nil normalizes to `coding`; unknown names raise `Hive::Workflows::UnknownWorkflow` with `valid workflows: ...` from the live registry after project descriptor discovery.
 
 ## Project-authored descriptors
@@ -345,3 +345,5 @@ There is no publish stage or executable outcome action.
 - [[modules/stages]] — the canonical stage list this module references
 - [[modules/task]] — task stage validation and state-file lookup derived from the descriptor-backed constants
 - [[modules/workflow_package]] — reviewed Honeycomb trust, storage, policy, and publication boundary
+
+`Hive::Workflows::PrReview::DESCRIPTOR` registers the standalone existing-PR workflow, `1-review` → `2-done`, sharing the built-in review council runner. See [[pr-review]].

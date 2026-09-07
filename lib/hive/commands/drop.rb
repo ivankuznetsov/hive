@@ -437,6 +437,9 @@ module Hive
       def close_draft_prs(folders)
         urls = folders.filter_map do |entry|
           frontmatter = Hive::Gh.pr_frontmatter(File.join(entry[:folder], "pr.md"))
+          next if frontmatter["source"].to_s.strip.casecmp?("ad-hoc")
+          next if Hive::TaskMeta.read(entry[:folder])[:workflow] == "pr-review"
+
           frontmatter["pr_url"].to_s.strip.empty? ? nil : frontmatter["pr_url"].to_s.strip
         end.uniq
         # No PR recorded = PR cleanup is clean. `false` strictly means "a PR

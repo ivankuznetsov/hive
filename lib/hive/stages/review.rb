@@ -137,8 +137,8 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         case marker.name
         when :review_complete
-          next_dir = Hive::Workflows.next_dir_after("6-review") # coding-scoped: coding review clears into artifacts
-          warn "hive: already complete; mv this folder to #{next_dir}/ to continue"
+          next_stage = task.workflow.next_stage_after(task.stage_name)
+          warn "hive: already complete; advance to #{next_stage.dir}/ to continue" if next_stage
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
           warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, then run " \
@@ -2484,7 +2484,7 @@ module Hive
 
         Hive::Events.emit(
           task_folder: task.folder, slug: task.slug,
-          stage: "6-review", # coding-scoped: coding review event
+          stage: "#{task.stage_index}-#{task.stage_name}",
           event_type: :round_complete,
           message: "fix guardrail released #{matches.length} exact fingerprint waiver(s)",
           data: {
@@ -2744,7 +2744,7 @@ module Hive
 
         cleanup = Hive::Stages::CleanExit.run!(
           worktree_path: worktree_path,
-          stage: "6-review", # coding-scoped: coding review stage event
+          stage: "#{task.stage_index}-#{task.stage_name}",
           task: task,
           cfg: cfg,
           reason: :pre_fix_dirty_worktree
@@ -2777,7 +2777,7 @@ module Hive
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
-          stage: "6-review", # coding-scoped: coding review stage event
+          stage: "#{task.stage_index}-#{task.stage_name}",
           event_type: :clean_exit_auto_committed,
           message: "reason=pre_fix_dirty_worktree head=#{result[:head]} paths=#{paths.join(',')[0, 200]}",
           data: Hive::Events.clean_exit_data(

@@ -221,6 +221,39 @@ class ReviewGithubPublisherTest < Minitest::Test
     end
   end
 
+  def test_standalone_review_binds_remote_and_local_heads_without_matching_branch_names
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      task.define_singleton_method(:workflow) { Hive::Workflows::Registry.fetch(:"pr-review") }
+      head = "a" * 40
+      url = "https://github.com/acme/app/pull/42"
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: #{url}\nhead_oid: #{head}\n---\n")
+      metadata = Hive::Gh::PrMetadata.new(number: 42, url: url, state: "OPEN",
+        base_ref_name: "main", head_ref_name: "authors-branch", head_ref_oid: head,
+        is_cross_repository: false)
+      local_head = head
+      with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer,
+        ->(*, **) { { "path" => dir, "branch" => task.slug } }) do
+        with_replaced_singleton_method(Hive::Gh, :repository_identity,
+          ->(*, **) { { "host" => "github.com", "repository" => "acme/app" } }) do
+          with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
+            with_replaced_singleton_method(Hive::Worktree, :run_materialize_git!, ->(*) { local_head }) do
+              assert_equal url, Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+              metadata = metadata.with(head_ref_oid: "b" * 40)
+              assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+              metadata = metadata.with(head_ref_oid: head)
+              local_head = "c" * 40
+              assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+              local_head = head
+              metadata = metadata.with(state: "CLOSED")
+              assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_skips_duplicate_header_per_comment_line_anchored
     with_tmp_dir do |dir|
       task = make_task(dir)

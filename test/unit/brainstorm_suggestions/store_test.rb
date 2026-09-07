@@ -141,6 +141,12 @@ class HiveBrainstormSuggestionsStoreTest < Minitest::Test
       assert store.delete_for_cleanup!
       assert_equal "preserve me", File.read(target)
 
+      File.write(store.path, "raced cleanup", mode: "w", perm: 0o600)
+      with_replaced_singleton_method(File, :unlink, ->(*) { raise Errno::ENOENT }) do
+        refute store.delete_for_cleanup!
+      end
+      FileUtils.rm_f(store.path)
+
       Dir.mkdir(store.path)
       assert_raises(Hive::BrainstormSuggestions::UnsafePath) do
         store.delete_for_cleanup!

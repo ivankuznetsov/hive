@@ -94,8 +94,6 @@ module Hive
           IO.select(nil, nil, nil, POLL_INTERVAL_SECONDS)
         end
         pid
-      rescue Errno::ECHILD
-        nil
       end
 
       def process_group_alive?(pid)

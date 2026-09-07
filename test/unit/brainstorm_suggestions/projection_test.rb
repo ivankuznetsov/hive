@@ -55,6 +55,20 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
     end
   end
 
+  def test_config_errors_disable_projection_without_observing
+    with_task do |root|
+      projection = build_projection(
+        root, enabled: nil, observer: ->(**) { flunk "disabled projection must not observe" }
+      )
+
+      with_replaced_singleton_method(
+        Hive::Config, :load, ->(*) { raise Hive::ConfigError, "invalid config" }
+      ) do
+        assert_empty projection.call
+      end
+    end
+  end
+
   def test_two_current_records_share_one_observation_and_expose_only_fresh_text
     with_task do |root|
       records = [ fresh_record(1), failed_record(2) ]
@@ -395,6 +409,44 @@ class HiveBrainstormSuggestionsProjectionTest < Minitest::Test
 
       File.write(File.join(wiki, "adapter.md"), "changed adapter evidence\n")
       refute_equal original, identity.call
+    end
+  end
+
+  def test_main_wiki_identity_bounds_invalid_configuration
+    with_task do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      File.write(File.join(root, ".llm-wiki", "config.json"), "{invalid")
+      projection = build_projection(root)
+
+      identity = projection.send(
+        :main_wiki_identity, Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      )
+
+      refute_nil identity.fetch("config")
+      assert_nil identity.fetch("tracked")
+    end
+  end
+
+  def test_repository_identity_maps_bounded_capture_failures
+    with_task do |root|
+      projection = build_projection(root)
+      cases = [
+        [ Hive::BrainstormSuggestions::ProcessCapture::Timeout.new, /timed out/ ],
+        [ Hive::BrainstormSuggestions::ProcessCapture::TooLarge.new, /exceeded its bound/ ],
+        [ Hive::BrainstormSuggestions::ProcessCapture::SpawnFailed.new, /observation failed/ ]
+      ]
+
+      cases.each do |failure, message|
+        replacement = ->(*, **) { raise failure }
+        with_replaced_singleton_method(
+          Hive::BrainstormSuggestions::ProcessCapture, :call, replacement
+        ) do
+          error = assert_raises(IOError) do
+            projection.send(:run_git, root, [ "status" ], Float::INFINITY)
+          end
+          assert_match message, error.message
+        end
+      end
     end
   end
 

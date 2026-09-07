@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/brainstorm_suggestions/process_capture"
 
 class HiveBrainstormSuggestionsProcessCaptureTest < Minitest::Test
+  include HiveTestHelper
+
   def test_capture_bounds_a_descendant_held_output_pipe_after_leader_exit
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
@@ -79,6 +81,28 @@ class HiveBrainstormSuggestionsProcessCaptureTest < Minitest::Test
       Process.kill("KILL", -pid) if pid
     rescue Errno::ESRCH
       nil
+    end
+  end
+
+  def test_liveness_probes_treat_permission_denied_as_alive
+    denied = ->(*) { raise Errno::EPERM, "not permitted" }
+
+    with_replaced_singleton_method(Process, :kill, denied) do
+      assert Hive::BrainstormSuggestions::ProcessCapture.send(:process_group_alive?, 123)
+      assert Hive::BrainstormSuggestions::ProcessCapture.send(:process_alive?, 123)
+    end
+  end
+
+  def test_process_probe_and_missing_group_signal_are_bounded
+    signaler = lambda do |signal, _pid|
+      raise Errno::ESRCH, "gone" unless signal == 0
+
+      1
+    end
+
+    with_replaced_singleton_method(Process, :kill, signaler) do
+      assert Hive::BrainstormSuggestions::ProcessCapture.send(:process_alive?, 123)
+      assert_nil Hive::BrainstormSuggestions::ProcessCapture.send(:signal_group, "TERM", 123)
     end
   end
 end

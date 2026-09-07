@@ -391,6 +391,26 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
     end
   end
 
+  def test_required_prompt_secret_finding_fails_with_a_bounded_reason
+    with_repository do |root|
+      with_task(root) do |task|
+        finding = { line: 1 }
+        with_replaced_singleton_method(
+          Hive::SecretScanner, :scan, ->(*, **) { [ finding ] }
+        ) do
+          error = assert_raises(Hive::BrainstormSuggestions::ContextBundle::CaptureError) do
+            Hive::BrainstormSuggestions::ContextBundle.capture(
+              project_root: root, task_root: task, question_ordinal: 2
+            )
+          end
+
+          assert_equal "unsafe_prompt_context", error.code
+          refute_includes error.message, "Choose the repository adapter safely"
+        end
+      end
+    end
+  end
+
   def test_worktree_executable_mode_is_bound_into_the_manifest
     with_repository do |root|
       File.chmod(0o755, File.join(root, "lib", "adapter.rb"))

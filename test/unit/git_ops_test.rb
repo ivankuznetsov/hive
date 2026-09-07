@@ -297,6 +297,38 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_advisory_free_staging_rejects_an_unsafe_brainstorm_source
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      relative = File.join("stages", "2-brainstorm", "unsafe-advisory")
+      task_dir = File.join(ops.hive_state_path, relative)
+      FileUtils.mkdir_p(task_dir)
+      File.symlink(File.join(dir, "outside.md"), File.join(task_dir, "brainstorm.md"))
+
+      error = assert_raises(Hive::GitError) do
+        ops.send(:stage_advisory_free_task!, relative)
+      end
+      assert_match(/commit source is unsafe/, error.message)
+    end
+  end
+
+  def test_advisory_blob_write_surfaces_hash_object_failure
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      status = Object.new
+      status.define_singleton_method(:success?) { false }
+      replacement = ->(*, **) { [ "not-an-oid", "hash failed", status ] }
+
+      with_replaced_singleton_method(Open3, :capture3, replacement) do
+        error = assert_raises(Hive::GitError) do
+          ops.send(:write_hive_blob, "safe brainstorm bytes")
+        end
+        assert_match(/hash-object failed.*hash failed/, error.message)
+      end
+    end
+  end
+
   def test_hive_commit_serializes_staging_callback_and_commit
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

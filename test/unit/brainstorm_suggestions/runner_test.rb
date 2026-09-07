@@ -269,6 +269,8 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
 
   def test_anthropic_transport_rejects_alternate_channels_and_bounds_body
     cases = [
+      response(Net::HTTPOK, "200", "{invalid"),
+      response(Net::HTTPOK, "200", "{}"),
       response(Net::HTTPOK, "200", JSON.generate(
         "content" => [ { "type" => "tool_use", "name" => "shell" } ]
       )),
@@ -300,6 +302,40 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     result = transport.call(request)
     assert result.too_large
     assert_equal Hive::BrainstormSuggestions::Runner::MAX_OUTPUT_BYTES, result.stdout.bytesize
+  end
+
+  def test_anthropic_transport_maps_timeout_and_preflight_cancellation
+    request = Hive::BrainstormSuggestions::Runner::Request.new(
+      model: "model", effort: nil, prompt: "data",
+      schema: Hive::BrainstormSuggestions::Runner::OUTPUT_SCHEMA
+    )
+    timeout_http = FakeHttp.new(nil)
+    timeout_http.define_singleton_method(:start) { raise Net::ReadTimeout, "timed out" }
+    transport = Hive::BrainstormSuggestions::Runner::AnthropicTransport.new(
+      api_key: "key", timeout_sec: 1, http_factory: ->(*) { timeout_http }
+    )
+
+    timed_out = transport.call(request)
+    assert timed_out.timed_out
+
+    token = Hive::BrainstormSuggestions::Runner::Cancellation.new
+    token.cancel!
+    cancelled = transport.call(request, token)
+    assert cancelled.timed_out
+    assert_nil cancelled.exit_code
+  end
+
+  def test_anthropic_transport_default_http_and_close_errors_are_bounded
+    transport = Hive::BrainstormSuggestions::Runner::AnthropicTransport.new(
+      api_key: "key", timeout_sec: 1
+    )
+    http = transport.send(:build_http, URI("https://api.anthropic.com"))
+    assert http.use_ssl?
+
+    broken = Object.new
+    broken.define_singleton_method(:started?) { true }
+    broken.define_singleton_method(:finish) { raise IOError, "already closed" }
+    assert_nil transport.send(:close_http, broken)
   end
 
   def test_anthropic_transport_discards_non_success_response_body
@@ -359,6 +395,36 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       assert File.directory?(active)
       assert File.directory?(unrelated)
     end
+  end
+
+  def test_startup_sweep_ignores_unreadable_owned_entries
+    Dir.mktmpdir do |root|
+      unreadable = File.join(root, "#{Hive::BrainstormSuggestions::Runner::RUNTIME_PREFIX}unreadable")
+      FileUtils.mkdir_p(unreadable)
+      original = File.method(:lstat)
+      replacement = lambda do |path|
+        raise Errno::EACCES, "denied" if path == unreadable
+
+        original.call(path)
+      end
+
+      with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_equal 0, Hive::BrainstormSuggestions::Runner.sweep_inactive!(root)
+      end
+    end
+  end
+
+  def test_profile_and_availability_errors_fail_closed
+    missing_method = Object.new
+    missing_method.define_singleton_method(:policy_capabilities) { raise NoMethodError, "missing" }
+    refute Hive::BrainstormSuggestions::Runner.profile_supported?(missing_method)
+
+    broken = Object.new
+    broken.define_singleton_method(:policy_capabilities) { raise RuntimeError, "broken" }
+    provider = Hive::BrainstormSuggestions::Runner.new(
+      profile: broken, model: "model", transport: ->(*) { flunk "transport must not run" }
+    )
+    refute provider.available?
   end
 
   def test_runtime_owned_by_an_uninspectable_process_is_live

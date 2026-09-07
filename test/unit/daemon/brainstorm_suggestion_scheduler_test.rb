@@ -600,6 +600,22 @@ class BrainstormSuggestionSchedulerTest < Minitest::Test
     end
   end
 
+  def test_request_freshness_probe_fails_closed_on_observation_errors
+    with_project do |_project, folder|
+      scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new
+      slot = scheduler.send(:inventory_slots, folder).first
+      scheduler.define_singleton_method(:current_unanswered_slot) do |*_args|
+        raise IOError, "observation failed"
+      end
+
+      refute scheduler.send(
+        :request_current?, folder, slot, "attempt", "a" * 64
+      )
+    ensure
+      scheduler&.shutdown
+    end
+  end
+
   def test_unavailable_route_hides_fresh_candidate_payload
     with_project do |_project, folder|
       scheduler = Hive::Daemon::BrainstormSuggestionScheduler.new(

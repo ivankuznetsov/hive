@@ -242,7 +242,7 @@ module Hive
           return deferred_result("patrol_retry_delay")
         end
 
-        if !interactive && !retry_release &&
+        if task && !interactive && !retry_release &&
            "#{task.stage_index}-#{task.stage_name}" != generation.intended_stage &&
            !CommandProgress.patrol_fix?(task)
           previous = view.latest_terminal_attempt(

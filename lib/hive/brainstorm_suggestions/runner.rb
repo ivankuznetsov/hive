@@ -216,8 +216,7 @@ module Hive
       }.freeze
 
       def self.profile_supported?(profile)
-        profile.respond_to?(:name) && profile.name.to_sym == :claude &&
-          profile.respond_to?(:policy_capabilities) &&
+        profile.respond_to?(:policy_capabilities) &&
           profile.policy_capabilities.include?(REQUIRED_CAPABILITY)
       rescue NoMethodError
         false

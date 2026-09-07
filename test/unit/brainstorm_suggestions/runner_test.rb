@@ -106,13 +106,13 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
     )
   end
 
-  def test_only_the_explicit_controller_transport_profile_is_supported
+  def test_only_profiles_with_the_explicit_controller_transport_capability_are_supported
     assert Hive::BrainstormSuggestions::Runner.profile_supported?(Hive::AgentProfiles.lookup(:claude))
     %i[codex pi grok opencode].each do |name|
       refute Hive::BrainstormSuggestions::Runner.profile_supported?(Hive::AgentProfiles.lookup(name)), name
     end
     refute Hive::BrainstormSuggestions::Runner.profile_supported?(FakeProfile.new(capable: false))
-    refute Hive::BrainstormSuggestions::Runner.profile_supported?(FakeProfile.new(name: :codex))
+    assert Hive::BrainstormSuggestions::Runner.profile_supported?(FakeProfile.new(name: :custom))
   end
 
   def test_transport_receives_only_a_frozen_data_request_and_runtime_is_removed
@@ -164,7 +164,7 @@ class HiveBrainstormSuggestionsRunnerTest < Minitest::Test
       profile: FakeProfile.new, model: "inherit", transport: ->(*) { flunk }
     )
     unsupported = Hive::BrainstormSuggestions::Runner.new(
-      profile: FakeProfile.new(name: :codex), model: "model", transport: ->(*) { flunk }
+      profile: FakeProfile.new(capable: false), model: "model", transport: ->(*) { flunk }
     )
 
     [ missing_auth, missing_model, unsupported ].each do |provider|

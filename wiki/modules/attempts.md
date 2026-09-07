@@ -7,6 +7,13 @@ updated: 2026-09-04
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
+Failed automatic stage transitions now use the shared recovery backoff ladder,
+including when the source stage remains `COMPLETE`. The latest same-generation
+terminal receipt supplies the failure time and retry charge; each admitted
+successor increments that charge. No extra timer table or watcher is involved.
+Explicit operator retries retain their existing bypass of automatic pacing.
+The project daily dispatch cap remains the emergency brake.
+
 **TLDR**: Hive admits task-stage work as independent durable attempts. One
 `attempts` row owns the attempt record plus fixed accounting,
 lost-recovery, and terminal-publication facts. Live rows provide capacity.

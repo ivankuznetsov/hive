@@ -55,9 +55,9 @@ module Hive
         return "provider" if marker_attrs(row)["reason"].to_s == "limits_reached" ||
                              decision.to_s == "provider_hold"
         return "capacity" if %w[attempt_capacity global_cap project_cap daily_cap].include?(decision.to_s)
-        return "authority" if owner.to_s == "operator" &&
-                              %w[task_history_invalid project_disabled legacy_layout quarantined
-                                 project_dropped folder_missing folder_missing_nil].include?(decision.to_s)
+        "authority" if owner.to_s == "operator" &&
+                       %w[task_history_invalid project_disabled legacy_layout quarantined
+                          project_dropped folder_missing folder_missing_nil].include?(decision.to_s)
       end
 
       def provider(row, details)

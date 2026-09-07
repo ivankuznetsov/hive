@@ -287,6 +287,37 @@ class HiveCommandsBrainstormSuggestionTest < Minitest::Test
     end
   end
 
+  def test_cleanup_leaves_corrupt_advisory_state_untouched_when_legacy_answers_would_change
+    Dir.mktmpdir do |root|
+      task = task_fixture(root)
+      path = File.join(task, "brainstorm.md")
+      File.write(path, <<~MARKDOWN)
+        ## Round 1
+        ### Q1. Unanswered?
+        ### A1.
+        <!-- hive-suggestion:v1 binding=#{"d" * 64} -->
+        Unclosed candidate
+        ### Q2. Answered?
+        ### A2.
+        Operator answer
+        <!-- WAITING -->
+      MARKDOWN
+      store = Hive::BrainstormSuggestions::Store.new(task)
+      store.write("records" => [])
+      before_brainstorm = File.binread(path)
+      before_sidecar = File.binread(store.path)
+
+      receipt = Hive::Commands::BrainstormSuggestion.new(
+        "cleanup", task_roots: [ task ], json: true, output: StringIO.new
+      ).call
+
+      refute receipt.fetch("safe_to_disable")
+      assert_equal "unsafe", receipt.dig("tasks", 0, "status")
+      assert_equal before_brainstorm, File.binread(path)
+      assert_equal before_sidecar, File.binread(store.path)
+    end
+  end
+
   def test_cleanup_reports_missing_task_identity_without_aborting_the_receipt
     Dir.mktmpdir do |root|
       task = File.join(root, ".hive-state", "stages", "2-brainstorm", "legacy-task")

@@ -239,12 +239,12 @@ module Hive
           stripped = Hive::BrainstormSuggestions::Envelope.strip(content)
           baseline = stripped.regions.reduce(content) { |body, region| body.sub(region.source, "") }
           before = Hive::BrainstormSuggestions::Envelope.legacy_answers(baseline)
-          result["envelopes_removed"] = stripped.regions.length
-          result["envelopes_removed"] += 1 if stripped.corrupt? && content.match?(Hive::BrainstormSuggestions::Envelope::RESERVED_RE)
-          Hive::Markers.write_atomic(state_path, stripped.text) if stripped.text != content
           after = Hive::BrainstormSuggestions::Envelope.legacy_answers(stripped.text)
           raise IOError, "brainstorm answers changed during suggestion cleanup" unless before == after
 
+          result["envelopes_removed"] = stripped.regions.length
+          result["envelopes_removed"] += 1 if stripped.corrupt? && content.match?(Hive::BrainstormSuggestions::Envelope::RESERVED_RE)
+          Hive::Markers.write_atomic(state_path, stripped.text) if stripped.text != content
           result["parser_verified"] = true
         end
       end

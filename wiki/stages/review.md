@@ -11,6 +11,13 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 
 ## Setup
 
+Operational status uses the same finding-approval reader as the stage runner.
+A `REVIEW_WAITING reason=fix_guardrail` row becomes ready for review when its
+complete finding set is approved or contains only the retired default lockfile
+rule. Active unchecked findings, missing reports, and invalid/count-mismatched
+markers remain waiting. This schedules a normal resume; it does not bypass the
+runner's HEAD, clean-worktree, or other stage checks.
+
 - **State file**: `task.md` with frontmatter written by 4-execute, Patrol Fix routing, or ad-hoc PR review. The runner derives the current pass from `reviews/<reviewer-name>-<NN>.md` filenames.
 - **Worktree pointer**: `worktree.yml` carried from the owning workflow or written by `Hive::Commands::AdhocReview`; missing → exit 1 with "6-review entered without a worktree.yml".
 - **PR pointer**: `pr.md` carried from publication or written by ad-hoc review. Missing PR metadata disables hosted-check settlement and GitHub comment mirroring; local review still runs.

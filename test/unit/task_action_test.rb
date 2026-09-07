@@ -607,6 +607,37 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive review demo-260426-aaaa --from 6-review", action.command
   end
 
+  def test_review_guardrail_readiness_tracks_the_runner_approval_contract
+    Dir.mktmpdir do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      path = File.join(reviews, "fix-guardrail-02.md")
+      waiting = marker(:review_waiting, "reason" => "fix_guardrail", "pass" => "2", "matches" => "1")
+      assert_equal "needs_input", Hive::TaskAction.for(task, waiting).key
+
+      File.write(path, "- [ ] dependency_lockfile_change: Gemfile.lock\n")
+      assert_equal "ready_for_review", Hive::TaskAction.for(task, waiting).key
+      cfg = { "review" => { "fix" => { "guardrail" => { "patterns_override" => {
+        "dependency_lockfile_change" => { "regex" => "Gemfile.lock" }
+      } } } } }
+      assert_equal "needs_input", Hive::TaskAction.for(task, waiting, config: cfg).key
+
+      File.write(path, "- [ ] ci_workflow_change: ci.yml\n")
+      assert_equal "needs_input", Hive::TaskAction.for(task, waiting).key
+      File.write(path, "- [x] ci_workflow_change: ci.yml\n")
+      assert_equal "ready_for_review", Hive::TaskAction.for(task, waiting).key
+      with_replaced_singleton_method(File, :foreach, ->(*) { raise IOError, "report unavailable" }) do
+        assert_equal "needs_input", Hive::TaskAction.for(task, waiting).key
+      end
+
+      waiting.attrs["matches"] = "2"
+      assert_equal "needs_input", Hive::TaskAction.for(task, waiting).key
+      waiting.attrs["matches"] = "bogus"
+      assert_equal "needs_input", Hive::TaskAction.for(task, waiting).key
+    end
+  end
+
   # REVIEW_WORKING is the review stage's in-flight marker. Pre-fix, it
   # fell through to :review_waiting and emitted a runnable
   # `hive review … --from 6-review` command while review was active —

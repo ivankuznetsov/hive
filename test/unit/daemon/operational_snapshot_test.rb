@@ -777,7 +777,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_provider_hold_without_stage_or_reason_still_matches_the_current_task
+  def test_provider_reset_hint_does_not_replace_the_hourly_retry_assessment
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader = build(path)
@@ -790,15 +790,22 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       )
 
       assembler.begin_tick(now: T0)
+      assembler.observe(
+        held, decision: "retry_cooldown", owner: "scheduler",
+        reason: "automatic retry is scheduled", retry_at: (T0 + 60).iso8601,
+        retry_due: false, retry_safe: true
+      )
       assembler.complete(
         rows: [ held ], controller: {}, queue: {},
         recoveries: {}, now: T0 + 1
       )
 
       task = reader.read(now: T0 + 2).fetch("tasks").first
-      assert_equal "provider_hold", task.dig("disposition", "decision")
-      assert_equal "provider", task.dig("disposition", "owner")
-      assert_includes task.dig("disposition", "reason"), "codex quota hold"
+      assert_equal "retry_cooldown", task.dig("disposition", "decision")
+      assert_equal "scheduler", task.dig("disposition", "owner")
+      assert_equal (T0 + 60).iso8601, task.dig("disposition", "retry_at")
+      assert_equal (T0 + 3_600).iso8601,
+                   reader.read(now: T0 + 2).dig("provider_holds", 0, "retry_after")
     end
   end
 

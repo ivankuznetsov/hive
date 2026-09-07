@@ -857,8 +857,10 @@ class StagesCouncilTest < Minitest::Test
       file_check = ->(path) { path == sandbox || original_file.call(path) }
       executable_check = ->(path) { path == sandbox || original_executable.call(path) }
 
-      with_replaced_singleton_method(File, :file?, file_check) do
-        with_replaced_singleton_method(File, :executable?, executable_check) { yield }
+      with_env("HIVE_GROK_BIN" => nil, "AGENT_CLI_RUNTIME_GROK_BIN" => nil) do
+        with_replaced_singleton_method(File, :file?, file_check) do
+          with_replaced_singleton_method(File, :executable?, executable_check) { yield }
+        end
       end
     end
 

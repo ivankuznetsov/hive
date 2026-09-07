@@ -1659,6 +1659,9 @@ module Hive
 
       def archive_steer(message)
         task = Hive::Task.new(message.folder)
+        # Preserve the existing missing-folder diagnostic before resolving the
+        # stable task identity required by the runtime-control-plane lease.
+        File.lstat(message.folder)
         archived_root = File.join(task.hive_state_path, "stages", "archived-manual")
         FileUtils.mkdir_p(archived_root)
         target = manual_archive_target(archived_root, task.slug)

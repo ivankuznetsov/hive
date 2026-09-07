@@ -1475,6 +1475,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       folder = File.join(stages_root, stage, slug)
       stage_name = stage.split("-", 2).last
       state_file = File.join(folder, Hive::Task::STATE_FILES.fetch(stage_name))
+      prepare_test_task_lease_repository(folder)
       worktree_path = File.join(project_root, "worktrees", slug)
       if worktree
         FileUtils.mkdir_p(worktree_path)

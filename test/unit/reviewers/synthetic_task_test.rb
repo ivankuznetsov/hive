@@ -92,4 +92,17 @@ class ReviewersSyntheticTaskTest < Minitest::Test
       Hive::Reviewers::SyntheticTask.new("folder", "state", "log", "6-review", nil)
     end
   end
+
+  def test_standalone_review_subspawns_keep_the_task_workflow_identity
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir).with(task_folder: File.join(dir, ".hive-state", "stages", "1-review", "synth-task"))
+      FileUtils.mkdir_p(ctx.task_folder)
+      Hive::TaskMeta.write(ctx.task_folder, id: 42, slug: "synth-task", display_name: nil, workflow: "pr-review")
+
+      task = Hive::Reviewers.synthetic_task_for(ctx)
+
+      assert_equal "pr-review", task.workflow
+      assert_equal "1-review", task.stage_name
+    end
+  end
 end

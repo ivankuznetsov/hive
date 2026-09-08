@@ -162,8 +162,19 @@ class TestParallelTest < Minitest::Test
       _, status = Process.waitpid2(pid)
       assert_equal 130, status.exitstatus
       descendants.each do |child|
-        # Linux can retain an orphaned zombie briefly until init reaps it.
-        stat = File.read("/proc/#{child}/stat") if File.exist?("/proc/#{child}/stat")
+        # Group KILL delivery is asynchronous. Under coverage load the runner
+        # can exit before an orphaned grandchild gets its next scheduling turn;
+        # allow that transition while still requiring absent-or-zombie state.
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+        stat = loop do
+          current = File.read("/proc/#{child}/stat") if File.exist?("/proc/#{child}/stat")
+          break current if current.nil? || current.split[2] == "Z"
+          break current if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+          sleep 0.01
+        rescue Errno::ENOENT
+          break nil
+        end
         assert stat.nil? || stat.split[2] == "Z", "child #{child} still running"
       end
     ensure

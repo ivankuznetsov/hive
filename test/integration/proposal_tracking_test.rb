@@ -308,7 +308,7 @@ class ProposalTrackingTest < Minitest::Test
       "policy" => @config.dig("proposals", "evidence")
     }
     attempt = @attempt_store.create_launching(
-      attempt_id:, request_id: "request-#{@attempt_sequence}", predecessor_attempt_id: nil,
+      attempt_id:, request_id: "request-#{@attempt_sequence}",
       task_id:, project: "hive", task_slug: slug, intended_stage: "4-execute",
       task_generation: "owner-#{@attempt_sequence}",
       ownership_generation: "owner-#{@attempt_sequence}", task_input_epoch: 1,

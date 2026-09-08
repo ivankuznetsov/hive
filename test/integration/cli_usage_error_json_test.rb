@@ -343,6 +343,118 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_launcher_resolves_once_and_reuses_the_selected_contract
+    with_tmp_global_config do |home|
+      out, err, status, probe = traced_usage(home, "success", %w[run --json])
+      assert_equal 64, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "InvalidTaskPath", payload.fetch("error_class")
+      assert_equal "invalid_task_path", payload.fetch("error_kind")
+      assert_equal 1, probe.fetch("resolutions")
+      assert_equal true, probe.fetch("classification_identity")
+      assert_equal true, probe.fetch("render_identity")
+      refute_includes err, "usage_contract_resolution_failed"
+    end
+  end
+
+  def test_one_shot_loader_and_resolver_failures_are_terminal_and_safe
+    with_tmp_global_config do |home|
+      %w[loader resolver].product([ true, false ]).each do |mode, json|
+        argv = json ? %w[run --json] : %w[run]
+        out, err, status, probe = traced_usage(home, mode, argv)
+        assert_equal 64, status.exitstatus
+        assert_empty out
+        assert_equal 1, probe.fetch("resolutions")
+        assert_equal 1, probe.fetch("loads") if mode == "loader"
+        assert_equal "Hive::UsageError", probe.fetch("error_class")
+        assert_equal true, probe.fetch("classification_identity")
+        assert_equal true, probe.fetch("render_identity")
+        klass = mode == "loader" ? "LoadError" : "ArgumentError"
+        diagnostics = err.lines.grep(/^\[hive.cli\]/)
+        assert_equal [ "[hive.cli] usage_contract_resolution_failed exception=#{klass}\n" ], diagnostics
+        assert_equal 1, err.scan(klass).length
+        assert_match(/Usage: "hive run TARGET"/, err)
+        refute_includes err, "secret-sentinel"
+        refute_includes err, "hive:"
+        refute_match(/\.rb:\d+/, err)
+      end
+    end
+  end
+
+  def test_absent_contract_has_no_resolution_failure_diagnostic
+    with_tmp_global_config do |home|
+      out, err, status, probe = traced_usage(home, "unsupported", %w[unknown-command --json])
+      assert_equal 64, status.exitstatus
+      assert_empty out
+      assert_equal 1, probe.fetch("resolutions")
+      assert_equal "Hive::UsageError", probe.fetch("error_class")
+      refute_includes err, "usage_contract_resolution_failed"
+    end
+  end
+
+  def test_successful_command_does_not_resolve_a_usage_contract
+    with_tmp_global_config do |home|
+      _out, _err, status, probe = traced_usage(home, "success", %w[--version])
+      assert status.success?
+      assert_equal 0, probe.fetch("resolutions")
+    end
+  end
+
+  def traced_usage(home, mode, argv)
+    with_tmp_dir do |dir|
+      patch = File.join(dir, "trace-usage.rb")
+      File.write(patch, <<~RUBY)
+        require "hive/cli_usage_contracts"
+        require "json"
+        $usage_probe = { "resolutions" => 0, "loads" => 0 }
+        $usage_mode = #{mode.inspect}
+        abort "run boundary is not cold" if Hive::CliUsageContracts.instance_variable_get(:@contracts).key?("run")
+        abort "run file is not cold" if $LOADED_FEATURES.any? { |path| path.end_with?("/commands/run.rb") }
+        if $usage_mode == "resolver"
+          Hive::CliUsageContracts.declare("run") { raise ArgumentError, "secret-sentinel" }
+        end
+        module UsageProbe
+          def contract(...)
+            $usage_probe["resolutions"] += 1
+            $usage_selected = super
+          end
+
+          def load_boundary_declaration!(command)
+            $usage_probe["loads"] += 1
+            if $usage_mode == "loader" && $usage_probe["loads"] == 1
+              raise LoadError, "secret-sentinel"
+            end
+            super
+          end
+
+          def usage_error(selected, message)
+            $usage_probe["classification_identity"] = selected.equal?($usage_selected)
+            error = super
+            $usage_probe["error_class"] = error.class.name
+            error
+          end
+        end
+        module UsageRenderProbe
+          def emit_json_usage_error(selected, *args)
+            $usage_probe["render_identity"] = selected.equal?($usage_selected)
+            super
+          end
+        end
+        Hive::CliUsageContracts.singleton_class.prepend(UsageProbe)
+        Object.prepend(UsageRenderProbe)
+        at_exit { warn "USAGE_PROBE=" + JSON.generate($usage_probe) }
+      RUBY
+      out, err, status = Open3.capture3(
+        { "HIVE_HOME" => home, "RUBYOPT" => [ ENV["RUBYOPT"], "-r#{patch}" ].compact.join(" ") },
+        RbConfig.ruby, "-Ilib", HIVE_BIN, *argv
+      )
+      trace = err.lines.find { |line| line.start_with?("USAGE_PROBE=") }
+      refute_nil trace, err
+      [ out, err.lines.reject { |line| line == trace }.join, status,
+       JSON.parse(trace.delete_prefix("USAGE_PROBE=")) ]
+    end
+  end
+
   def test_json_generator_failure_falls_back_to_human_usage_error
     with_tmp_global_config do |home|
       with_tmp_dir do |dir|
@@ -363,7 +475,7 @@ class CliUsageErrorJsonTest < Minitest::Test
         RUBY
 
         out, err, status = Open3.capture3(
-          { "HIVE_HOME" => home, "RUBYOPT" => [ENV["RUBYOPT"], "-r#{patch}"].compact.join(" ") },
+          { "HIVE_HOME" => home, "RUBYOPT" => [ ENV["RUBYOPT"], "-r#{patch}" ].compact.join(" ") },
           RbConfig.ruby, "-Ilib", HIVE_BIN, "connect", "--json"
         )
 

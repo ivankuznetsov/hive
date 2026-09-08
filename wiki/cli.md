@@ -227,3 +227,12 @@ A few stage runners still call `warn`/`exit N` directly for non-bug user errors 
 - [[commands/init]] · [[commands/new]] · [[commands/workflow]] · [[commands/run]] · [[commands/rebase-status]] · [[commands/status]] · [[commands/answer]] · [[commands/watch]] · [[commands/daemon]] · [[commands/refactor-patrol]] · [[commands/approve]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]] · [[commands/babysit]] · [[commands/bot]] · [[commands/pairing]] · [[commands/screenote]] · [[commands/bench-submit]]
 - [[modules/plan_review]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
+
+The usage-error rescue resolves its command contract exactly once and passes that
+same value to classification and rendering. Successful invocations do not resolve
+a usage contract. An absent contract keeps generic `UsageError`, exit 64, human
+stderr, and empty stdout even when JSON was requested. A loader/resolver failure
+has that same terminal fallback, plus one stderr diagnostic:
+`[hive.cli] usage_contract_resolution_failed exception=LoadError` (the class varies).
+Only the fixed category and bounded exception class are emitted; exception messages,
+argv, paths, and backtraces are excluded. Rendering never retries resolution.

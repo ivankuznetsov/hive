@@ -156,3 +156,19 @@ seeds 1, 3, 17 each passed 24 runs / 121 assertions. Existing launcher integrati
 plus refactor-patrol tests passed 32 runs / 689 assertions (seed 7133).
 `bin/test --changed --list` selected the broad fallback for bin/hive; explicit
 focused files were used for this incremental checkpoint. `git diff --check` passed.
+
+## U3 single-resolution evidence
+
+Before the launcher change, new real-process regressions failed: the success case
+counted 2 resolutions; the first-attempt loader failure produced JSON despite the
+expected empty stdout (2 tests, 9 assertions, 2 failures). The committed extraction
+at 93d08f1154 was the base for these red tests.
+
+The rescue now resolves once with an invocation-local class-only diagnostic
+callback. The same selected value (including nil) reaches classification and
+emission. Instrumentation wraps the resolver entry, loader, classifier, and emitter;
+cache hits cannot hide a second lookup. Loader and resolver failures are exercised
+in JSON and human modes, with secret-sentinel exception messages absent from output.
+
+U3 verification: contract and launcher integration files passed together:
+52 runs / 763 assertions, seed 63479. Changed-file RuboCop and diff checks passed.

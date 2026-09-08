@@ -56,7 +56,7 @@ module Hive
       nil
     end
 
-    def contract(argv)
+    def contract(argv, on_failure: nil)
       command_index = argv.index { |arg| !arg.b.start_with?("-") }
       return unless command_index
 
@@ -68,7 +68,7 @@ module Hive
       return source if source.is_a?(Hash)
 
       source.call(argv, command_index: command_index, option_argv: option_region(argv, command_index))
-    rescue StandardError, ScriptError
+    rescue StandardError, ScriptError => error
       # Contract resolution runs inside a launcher's pre-dispatch error
       # handler (bin/hive's `rescue Thor::Error` arm), so a boundary file
       # that fails to cold-load or a resolver that raises must never escape
@@ -76,7 +76,9 @@ module Hive
       # Degrade to "no contract": the launcher then renders the plain human
       # usage error at the generic usage exit code. ScriptError is caught
       # alongside StandardError because LoadError (and SyntaxError) are its
-      # subclasses, not StandardError's.
+      # subclasses, not StandardError's. Only the class enters the invocation's
+      # diagnostic channel; messages, argv, and backtraces stay private.
+      on_failure&.call(error.class)
       nil
     end
 

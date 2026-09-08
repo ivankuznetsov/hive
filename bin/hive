@@ -124,8 +124,7 @@ NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key].freeze
 # contract, serializes the boundary-owned payload, and delegates the human
 # error-class selection back to the module.
 
-def emit_json_usage_error(argv, error)
-  contract = Hive::CliUsageContracts.contract(argv)
+def emit_json_usage_error(contract, argv, error)
   return false unless contract && Hive::CliArgvPolicy.json_requested?(argv)
 
   puts JSON.generate(Hive::CliUsageContracts.error_payload(contract, error, argv: argv))
@@ -136,8 +135,8 @@ rescue JSON::GeneratorError
   false
 end
 
-def thor_usage_error(argv, error)
-  Hive::CliUsageContracts.usage_error(Hive::CliUsageContracts.contract(argv), error.message)
+def thor_usage_error(contract, error)
+  Hive::CliUsageContracts.usage_error(contract, error.message)
 end
 
 original_argv = ARGV.dup
@@ -152,8 +151,12 @@ begin
   ARGV.replace(Hive::CliArgvPolicy.lift_new_options(ARGV, value_options: NEW_VALUE_OPTIONS))
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
-  error = thor_usage_error(original_argv, e)
-  emitted_json = emit_json_usage_error(original_argv, error)
+  contract = Hive::CliUsageContracts.contract(original_argv, on_failure: ->(exception_class) {
+    name = exception_class.name.to_s.gsub(/[^A-Za-z0-9_:]/, "")[0, 120]
+    warn "[hive.cli] usage_contract_resolution_failed exception=#{name}"
+  })
+  error = thor_usage_error(contract, e)
+  emitted_json = emit_json_usage_error(contract, original_argv, error)
   warn(emitted_json ? "hive: #{error.message}" : error.message)
   exit(error.exit_code)
 rescue Hive::Error => e

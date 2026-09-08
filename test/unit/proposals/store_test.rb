@@ -62,11 +62,42 @@ class ProposalStoreTest < Minitest::Test
     FileUtils.mkdir_p(directory)
     File.symlink("missing.json", File.join(directory, "pse-#{'a' * 64}.json"))
     File.write(File.join(directory, "pse-#{'b' * 64}.json"), "{malformed")
+    secret = "sk-#{'c' * 32}"
+    File.write(
+      File.join(directory, "#{secret}.json"),
+      Hive::Proposals.canonical(
+        "schema" => "hive-proposal-source-status", "schema_version" => 1,
+        "state" => "quarantine", "source_event_id" => "pse-#{'d' * 64}",
+        "proposal_id" => "prp-00000000-0000-4000-8000-000000000099",
+        "reason" => { "code" => "invalid" }
+      )
+    )
 
-    codes = @store.load.diagnostics.map(&:code)
+    diagnostics = @store.load.diagnostics
+    codes = diagnostics.map(&:code)
 
     assert_includes codes, "symlink"
     assert_includes codes, "invalid_source_quarantine"
+    source = diagnostics.find { |item| item.code == "source_invalid" }
+    assert_includes source.path, "[REDACTED:openai_api_key]"
+    refute_includes source.path, secret
+  end
+
+  def test_diagnostic_paths_are_redacted_bounded_and_valid_utf8
+    records = File.join(@root, "records")
+    FileUtils.mkdir_p(records)
+    secret = "sk-#{'a' * 32}"
+    basename = "#{secret}-invalid.txt"
+    File.write(File.join(records, basename), "invalid")
+
+    diagnostic = @store.load.diagnostics.fetch(0)
+
+    refute_includes diagnostic.path, secret
+    assert_includes diagnostic.path, "[REDACTED:openai_api_key]"
+    invalid = ("x" * 511 + "\xC3").b
+    bounded = @store.send(:safe_diagnostic_path, invalid)
+    assert_operator bounded.bytesize, :<=, 512
+    assert bounded.valid_encoding?
   end
 
   def test_malformed_event_filename_reserves_its_numeric_slot
@@ -88,6 +119,58 @@ class ProposalStoreTest < Minitest::Test
     assert_equal "invalid_event_filename", snapshot.diagnostics.first.code
     assert_equal [ proposal.proposal_id ], snapshot.projections.map(&:proposal_id)
     assert_equal [ event.event_id ], snapshot.projections.first.evaluations.map { |item| item["event_id"] }
+  end
+
+  def test_later_malformed_reserved_slot_does_not_hide_valid_earlier_history
+    proposal = @store.create_record!(**record_attributes)
+    event = @store.append_event!(
+      proposal_id: proposal.proposal_id, type: "evaluation",
+      source_event_id: "pse-#{'b' * 64}", provenance: provenance,
+      occurred_at: "2026-08-30T12:01:00Z", data: evaluation_data
+    )
+    events = File.join(@root, "events", proposal.proposal_id)
+    File.write(File.join(events, "00000000000000000007-not-an-event.json"), "{}")
+
+    snapshot = @store.load
+
+    assert_equal [ proposal.proposal_id ], snapshot.projections.map(&:proposal_id)
+    assert_equal [ event.event_id ], snapshot.projections.first.evaluations.map { |item| item["event_id"] }
+    assert_includes snapshot.diagnostics.map(&:code), "invalid_event_filename"
+  end
+
+  def test_retry_requires_an_existing_distinct_matching_subject
+    predecessor = "prp-00000000-0000-4000-8000-000000000021"
+    create_record(predecessor, source: "1")
+
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      create_record("prp-00000000-0000-4000-8000-000000000022", source: "2",
+                    lineage: { "retries" => "prp-00000000-0000-4000-8000-000000000099" })
+    end
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      @store.create_record!(
+        proposal_id: "prp-00000000-0000-4000-8000-000000000023",
+        **record_attributes.merge(source_event_id: source_id("3"), subject_ref: "other",
+                                  lineage: { "retries" => predecessor })
+      )
+    end
+  end
+
+  def test_replay_quarantines_a_dangling_retry_without_hiding_its_predecessor
+    predecessor = "prp-00000000-0000-4000-8000-000000000031"
+    dangling = "prp-00000000-0000-4000-8000-000000000032"
+    create_record(predecessor, source: "1")
+    record = Hive::Proposals::Record.build(
+      proposal_id: dangling,
+      **record_attributes.merge(source_event_id: source_id("2"),
+                                lineage: { "retries" => "prp-00000000-0000-4000-8000-000000000099" })
+    )
+    @store.send(:write_record_unlocked!, record)
+
+    snapshot = @store.load
+
+    assert_equal [ predecessor ], snapshot.projections.map(&:proposal_id)
+    diagnostic = snapshot.diagnostics.find { |item| item.proposal_id == dangling }
+    assert_equal "dangling_or_mismatched_retry", diagnostic.code
   end
 
   def test_changed_source_event_payload_conflicts_without_appending
@@ -113,6 +196,55 @@ class ProposalStoreTest < Minitest::Test
       )
     end
     assert_equal 1, @store.load.events.fetch(proposal.proposal_id).length
+  end
+
+  def test_source_event_idempotency_cache_replays_the_namespace_only_once_and_refreshes
+    proposal = @store.create_record!(**record_attributes)
+    original_load = @store.method(:load_unlocked)
+    loads = 0
+    @store.define_singleton_method(:load_unlocked) do
+      loads += 1
+      original_load.call
+    end
+    @store.instance_variable_set(:@source_event_cache, nil)
+    @store.instance_variable_set(:@source_event_cache_generation, nil)
+
+    @store.create_record!(proposal_id: proposal.proposal_id, **record_attributes)
+    @store.create_record!(proposal_id: proposal.proposal_id, **record_attributes)
+
+    assert_equal 1, loads
+
+    external = Hive::Proposals::Store.new(root: @root)
+    external.append_event!(
+      proposal_id: proposal.proposal_id, type: "evaluation",
+      source_event_id: "pse-#{'b' * 64}", provenance: provenance,
+      occurred_at: "2026-08-30T12:01:00Z", data: evaluation_data,
+      event_id: "pev-00000000-0000-4000-8000-000000000099"
+    )
+    replay = @store.append_event!(
+      proposal_id: proposal.proposal_id, type: "evaluation",
+      source_event_id: "pse-#{'b' * 64}", provenance: provenance,
+      occurred_at: "2026-08-30T12:01:00Z", data: evaluation_data
+    )
+
+    assert_equal "pev-00000000-0000-4000-8000-000000000099", replay.event_id
+    assert_equal 2, loads
+  end
+
+  def test_source_event_idempotency_cache_invalidates_for_an_in_place_rewrite
+    proposal = @store.create_record!(**record_attributes)
+    @store.create_record!(proposal_id: proposal.proposal_id, **record_attributes)
+    path = @store.paths_for_record(proposal.proposal_id).first
+    changed = Hive::Proposals::Record.new(
+      proposal.to_h.merge("motivation" => "Rewritten canonical bytes")
+    )
+    File.binwrite(path, Hive::Proposals.canonical(changed.to_h))
+    future = Time.now + 1
+    File.utime(future, future, path)
+
+    assert_raises(Hive::Proposals::Conflict) do
+      @store.create_record!(proposal_id: proposal.proposal_id, **record_attributes)
+    end
   end
 
   def test_source_event_identity_is_shared_across_records_and_events
@@ -255,8 +387,14 @@ class ProposalStoreTest < Minitest::Test
 
     cycle_a = "prp-00000000-0000-4000-8000-000000000023"
     cycle_b = "prp-00000000-0000-4000-8000-000000000024"
-    create_record(cycle_a, source: "4", lineage: { "retries" => cycle_b })
-    create_record(cycle_b, source: "5", lineage: { "retries" => cycle_a })
+    [ [ cycle_a, "4", cycle_b ], [ cycle_b, "5", cycle_a ] ].each do |id, source, retry_id|
+      record = Hive::Proposals::Record.build(
+        proposal_id: id,
+        **record_attributes.merge(source_event_id: source_id(source),
+                                  lineage: { "retries" => retry_id })
+      )
+      @store.send(:write_record_unlocked!, record)
+    end
     assert_operator @store.load.diagnostics.count { |item| item.code == "lineage_cycle" }, :>=, 2
   end
 

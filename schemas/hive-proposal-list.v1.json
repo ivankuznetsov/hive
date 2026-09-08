@@ -14,7 +14,12 @@
     "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } },
     "result_digest": { "$ref": "#/$defs/Digest" },
     "error_class": { "type": "string" },
-    "error_kind": { "type": "string" },
+    "error_kind": {
+      "enum": [
+        "unauthorized", "stale", "conflict", "quota", "quarantine",
+        "source_unavailable", "config", "invalid"
+      ]
+    },
     "exit_code": { "type": "integer" },
     "message": { "type": "string" }
   },
@@ -31,7 +36,7 @@
       "type": "object",
       "required": ["proposal_id", "subject", "revision", "status", "lifecycle_head", "projection_digest"],
       "properties": {
-        "proposal_id": { "type": "string", "pattern": "^prp-[0-9a-f-]{36}$" },
+        "proposal_id": { "type": "string", "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
         "subject": { "type": "object" },
         "revision": { "type": "string" },
         "status": { "enum": ["draft", "accepted", "rejected", "superseded", "rolled_back"] },
@@ -49,7 +54,15 @@
         "path": { "type": "string" },
         "sha256": { "$ref": "#/$defs/Digest" },
         "bytes": { "type": "integer", "minimum": 0 },
-        "proposal_id": { "type": ["string", "null"] }
+        "proposal_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            { "type": "null" }
+          ]
+        }
       }
     }
   }

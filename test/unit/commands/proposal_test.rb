@@ -94,16 +94,26 @@ class ProposalCommandTest < Minitest::Test
       assert_equal ops.hive_state_head_sha, result.source_commit
       assert File.file?(File.join(output, "wiki", "proposals.json"))
       assert_equal "compiled", JSON.parse(command_output.string).fetch("outcome")
-      FileUtils.mkdir_p(File.join(dir, "wiki"))
-      FileUtils.cp(File.join(output, "wiki", "proposals.json"), File.join(dir, "wiki"))
-      FileUtils.cp(File.join(output, "wiki", "proposals.md"), File.join(dir, "wiki"))
+      refreshed = Hive::Commands::Proposal.new(
+        "refresh", dir, input: nil, stdout: StringIO.new,
+        refresh_runner: lambda do |project_root, git_ops, source_ref|
+          assert_equal dir, project_root
+          Hive::Proposals::Compiler.compile_at_ref(
+            git_ops:, source_ref:, output_root: output
+          )
+          publish_managed_wiki_pair(project_root, output, create: true)
+        end
+      ).call
+      assert_equal "queued", refreshed.fetch("outcome")
+      refute_path_exists File.join(dir, "wiki", "proposals.json")
+      refute_path_exists File.join(dir, "wiki", "proposals.md")
 
       checked = Hive::Commands::Proposal.new(
         "refresh", dir, input: nil, check: true, stdout: StringIO.new
       ).call
       assert_equal ops.hive_state_head_sha, checked.source_commit
 
-      File.write(File.join(dir, "wiki", "proposals.md"), "stale\n")
+      publish_managed_wiki_pair(dir, output, stale: true)
       assert_raises(Hive::Proposals::StaleObservation) do
         Hive::Commands::Proposal.new(
           "refresh", dir, input: nil, check: true, stdout: StringIO.new
@@ -111,6 +121,36 @@ class ProposalCommandTest < Minitest::Test
       end
       refute Dir.children(dir).any? { |name| name.start_with?("hive-proposal-refresh-check-") }
     end
+  end
+
+  def test_decision_observations_require_uuid_v4_ids_and_result_digests
+    command = Hive::Commands::Proposal.new(
+      "decide", "prp-00000000-0000-4000-8000-000000000001", input: "decision.json",
+      considered_evaluations: [ "pev-00000000-0000-4000-8000-000000000001" ]
+    )
+    error = assert_raises(Hive::Proposals::InvalidRecord) do
+      command.send(:observed_evaluations)
+    end
+    assert_match(/EVENT_ID:RESULT_DIGEST/, error.message)
+
+    command = Hive::Commands::Proposal.new(
+      "decide", "prp-00000000-0000-4000-8000-000000000001", input: "decision.json",
+      considered_evaluations: [ "pev-00000000-0000-1000-8000-000000000001:#{'a' * 64}" ]
+    )
+    assert_raises(Hive::Proposals::InvalidRecord) { command.send(:observed_evaluations) }
+
+    command = Hive::Commands::Proposal.new(
+      "decide", "prp-00000000-0000-4000-8000-000000000001", input: "decision.json",
+      considered_evaluations: [
+        "pev-00000000-0000-4000-8000-000000000001:#{'a' * 64}"
+      ]
+    )
+    assert_equal [
+      {
+        "evaluation_id" => "pev-00000000-0000-4000-8000-000000000001",
+        "result_digest" => "a" * 64
+      }
+    ], command.send(:observed_evaluations)
   end
 
   def test_refresh_without_check_enters_the_managed_publication_boundary
@@ -367,7 +407,12 @@ class ProposalCommandTest < Minitest::Test
         "decide", proposal_id, input: decision_path, json: true, stdout: mutation_output,
         project_root: dir, expected_head_version: observed.fetch("version"),
         expected_head_digest: observed.fetch("digest"),
-        considered_evaluation_ids: [ evaluation.event_id ],
+        considered_evaluations: [
+          {
+            "evaluation_id" => evaluation.event_id,
+            "result_digest" => Hive::Proposals.digest(evaluation.data.fetch("result"))
+          }
+        ],
         authority_identity: "proposal-operator", policy_fingerprint: fingerprint
       ).call
       mutation = JSON.parse(mutation_output.string)
@@ -409,7 +454,12 @@ class ProposalCommandTest < Minitest::Test
           "decide", proposal_id, input: decision_path, project_root: dir,
           expected_head_version: observed.fetch("version"),
           expected_head_digest: observed.fetch("digest"),
-          considered_evaluation_ids: [ evaluation.event_id ],
+          considered_evaluations: [
+            {
+              "evaluation_id" => evaluation.event_id,
+              "result_digest" => Hive::Proposals.digest(evaluation.data.fetch("result"))
+            }
+          ],
           authority_identity: "proposal-operator", policy_fingerprint: fingerprint
         ).call
       end
@@ -417,6 +467,27 @@ class ProposalCommandTest < Minitest::Test
   end
 
   private
+
+  def publish_managed_wiki_pair(project, compiled, create: false, stale: false)
+    managed = File.join(Dir.tmpdir, "hive-managed-wiki-#{SecureRandom.hex(4)}")
+    args = [ "worktree", "add" ]
+    args.concat([ "-b", Hive::Commands::Proposal::MANAGED_WIKI_BRANCH ]) if create
+    args.concat([ managed, Hive::Commands::Proposal::MANAGED_WIKI_BRANCH ]) unless create
+    args.concat([ managed, "HEAD" ]) if create
+    run!("git", "-C", project, *args)
+    FileUtils.mkdir_p(File.join(managed, "wiki"))
+    FileUtils.cp(File.join(compiled, "wiki", "proposals.json"), File.join(managed, "wiki"))
+    if stale
+      File.write(File.join(managed, "wiki", "proposals.md"), "stale\n")
+    else
+      FileUtils.cp(File.join(compiled, "wiki", "proposals.md"), File.join(managed, "wiki"))
+    end
+    run!("git", "-C", managed, "add", "wiki/proposals.json", "wiki/proposals.md")
+    run!("git", "-C", managed, "commit", "-m", "wiki: publish proposal pair")
+  ensure
+    run!("git", "-C", project, "worktree", "remove", "--force", managed) if
+      managed && File.directory?(managed)
+  end
 
   def proposal_provenance
     {

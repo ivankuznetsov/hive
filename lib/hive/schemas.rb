@@ -97,6 +97,8 @@ module Hive
       "hive-proposal-record" => 1,
       "hive-proposal-event" => 1,
       "hive-proposal-source-event" => 1,
+      "hive-proposal-source-index" => 1,
+      "hive-proposal-source-status" => 1,
       "hive-proposal-index" => 1,
       "hive-proposal-list" => 1,
       "hive-proposal-show" => 1,
@@ -197,6 +199,21 @@ module Hive
         end
         payload
       end
+    end
+
+    # Closed enum of `error_kind` values emitted by every proposal command.
+    # The list, show, and mutation schemas all expose this same vocabulary.
+    module ProposalErrorKind
+      UNAUTHORIZED       = "unauthorized".freeze
+      STALE              = "stale".freeze
+      CONFLICT           = "conflict".freeze
+      QUOTA              = "quota".freeze
+      QUARANTINE         = "quarantine".freeze
+      SOURCE_UNAVAILABLE = "source_unavailable".freeze
+      CONFIG             = "config".freeze
+      INVALID            = "invalid".freeze
+      ALL = constants(false).reject { |constant| constant == :ALL }
+        .map { |constant| const_get(constant) }.freeze
     end
 
     # Closed enum of `next_action.kind` values emitted by `hive run --json`.

@@ -95,7 +95,7 @@ module Hive
             else
               snapshot.restore!
               event_snapshot.restore!
-              index_snapshot.restore! rescue nil
+              index_snapshot.restore!
             end
             raise error
           end

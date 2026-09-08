@@ -122,6 +122,7 @@ module Hive
         end
         snapshot = nil
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
+          ensure_safe_task_journal!
           snapshot = Ingestor::PathSnapshot.capture(snapshot_roots(paths))
           index_snapshot = Proposals::GitIndexSnapshot.capture(@git_ops)
           begin
@@ -137,7 +138,7 @@ module Hive
             )
           rescue StandardError => error
             snapshot.restore!
-            index_snapshot.restore! rescue nil
+            index_snapshot.restore!
             raise error
           end
         end
@@ -227,6 +228,31 @@ module Hive
       def snapshot_roots(source_paths)
         journal = File.join(@activity.task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
         (source_paths + [ journal ]).uniq
+      end
+
+      def ensure_safe_task_journal!
+        task_folder = File.expand_path(@activity.task_folder)
+        relative = Proposals.hive_state_relative_path(
+          @git_ops, task_folder, label: "proposal task folder"
+        )
+        current = File.expand_path(@git_ops.hive_state_path)
+        relative.split(File::SEPARATOR).each do |segment|
+          current = File.join(current, segment)
+          status = File.lstat(current)
+          unless status.directory? && !status.symlink?
+            raise Error, "proposal task journal parent is unsafe"
+          end
+        end
+        [ Hive::TaskJournal::JOURNAL_BASENAME, Hive::TaskJournal::LOCK_BASENAME ].each do |name|
+          status = File.lstat(File.join(task_folder, name))
+          unless status.file? && !status.symlink?
+            raise Error, "proposal task journal path is unsafe"
+          end
+        rescue Errno::ENOENT
+          nil
+        end
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        raise Error, "proposal task journal parent is unsafe"
       end
     end
   end

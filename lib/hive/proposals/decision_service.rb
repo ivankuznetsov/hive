@@ -24,7 +24,7 @@ module Hive
         )
       end
 
-      def decide(proposal_id:, outcome:, considered_evaluation_ids:, rationale_category:,
+      def decide(proposal_id:, outcome:, considered_evaluations:, rationale_category:,
                  rationale:, links:, expected_head:, authority_identity:,
                  expected_policy_fingerprint:, idempotency_key:, provenance:,
                  policy_receipt: nil)
@@ -34,7 +34,7 @@ module Hive
           @store.transaction do |transaction|
             snapshot = transaction.snapshot
             projection = projection!(snapshot, proposal_id)
-            evaluations = considered_evaluations!(projection, considered_evaluation_ids)
+            evaluations = considered_evaluations!(projection, considered_evaluations)
             authority = authorize!(
               identity: authority_identity, capability: "decide",
               expected_policy_fingerprint:, receipt: policy_receipt
@@ -170,15 +170,32 @@ module Hive
         )
       end
 
-      def considered_evaluations!(projection, ids)
-        normalized = Array(ids).map { |id| Proposals.event_id!(id) }.uniq.sort
-        unless normalized.length == Array(ids).length
+      def considered_evaluations!(projection, observations)
+        normalized = Array(observations).map do |value|
+          observation = Proposals.closed_hash!(
+            value, required: %w[evaluation_id result_digest],
+            label: "considered proposal evaluation", error: InvalidEvent
+          )
+          {
+            "evaluation_id" => Proposals.event_id!(observation.fetch("evaluation_id")),
+            "result_digest" => Proposals.digest!(
+              observation.fetch("result_digest"), label: "considered evaluation result digest",
+              error: InvalidEvent
+            )
+          }
+        end.sort_by { |observation| observation.fetch("evaluation_id") }
+        ids = normalized.map { |observation| observation.fetch("evaluation_id") }
+        unless ids.uniq.length == normalized.length
           raise StaleObservation, "considered proposal evaluations must be unique"
         end
         by_id = projection.evaluations.to_h { |evaluation| [ evaluation.fetch("event_id"), evaluation ] }
-        normalized.map do |event_id|
+        normalized.map do |observation|
+          event_id = observation.fetch("evaluation_id")
           evaluation = by_id[event_id]
           raise StaleObservation, "considered proposal evaluation is missing" unless evaluation
+          unless observation.fetch("result_digest") == Proposals.digest(evaluation.fetch("result"))
+            raise StaleObservation, "considered proposal evaluation changed; refresh the observation"
+          end
           [
             event_id,
             {
@@ -224,15 +241,15 @@ module Hive
             projection.superseded_by == successor.proposal_id
         end
         raise Conflict, "proposal successor already supersedes another candidate" if duplicate
-        current = successor
-        seen = []
-        while current
-          raise Conflict, "proposal supersession would create a lineage cycle" if
-            current.proposal_id == predecessor.proposal_id
-          break if seen.include?(current.proposal_id)
-          seen << current.proposal_id
-          next_id = current.superseded_by || current.record["lineage"]["retries"]
-          current = next_id && snapshot.projections.find { |item| item.proposal_id == next_id }
+        edges = snapshot.projections.to_h do |projection|
+          [
+            projection.proposal_id,
+            projection.superseded_by || projection.record["lineage"]["retries"]
+          ]
+        end.compact
+        edges[predecessor.proposal_id] = successor.proposal_id
+        if Proposals.lineage_cycle_nodes(edges).include?(predecessor.proposal_id)
+          raise Conflict, "proposal supersession would create a lineage cycle"
         end
       end
 
@@ -271,27 +288,48 @@ module Hive
           snapshot = Ingestor::ImmutableAppendSnapshot.capture(
             File.join(@store.events_root, proposal_id)
           )
+          lifecycle_snapshot = Ingestor::PathSnapshot.capture(@source_store.paths_for_lifecycle)
           index_snapshot = @git_ops && Proposals::GitIndexSnapshot.capture(@git_ops)
-          result = yield
-          if result.applied && @git_ops
-            path = Proposals.hive_state_relative_path(
-              @git_ops, @store.path_for_event(result.event),
-              label: "proposal lifecycle path"
-            )
-            begin
-              @git_ops.hive_commit(
+          head_before = @git_ops&.hive_state_head_sha
+          begin
+            result = yield
+            if result.applied && @git_ops
+              paths = [ @store.path_for_event(result.event), *@source_store.paths_for_lifecycle ].uniq
+              expected = paths.to_h do |absolute|
+                relative = Proposals.hive_state_relative_path(
+                  @git_ops, absolute, label: "proposal lifecycle path"
+                )
+                [ relative, File.binread(absolute) ]
+              end
+              commit_result = @git_ops.hive_commit(
                 stage_name: "proposals", slug: proposal_id,
-                action: "recorded #{action}", pathspecs: [ path ]
+                action: "recorded #{action}", pathspecs: expected.keys
               )
-            rescue StandardError => error
-              snapshot.restore!
-              index_snapshot.restore! rescue nil
-              raise error
+              head = @git_ops.hive_state_head_sha
+              unless commit_result == :committed && head != head_before
+                raise SourceUnavailable, "proposal lifecycle event was not durably committed"
+              end
+              expected.each do |path, bytes|
+                committed = @git_ops.read_hive_state_blob_at(
+                  head, path, max_bytes: bytes.bytesize + 1
+                )
+                unless committed == bytes
+                  raise SourceUnavailable, "proposal lifecycle transaction was not durably committed"
+                end
+              end
             end
+            result
+          rescue StandardError => error
+            head_advanced = @git_ops && @git_ops.hive_state_head_sha != head_before
+            unless head_advanced
+              snapshot.restore!
+              lifecycle_snapshot.restore!
+              index_snapshot&.restore!
+            end
+            raise error
           end
-          result
         end
-        return runner.call unless @git_ops
+        return Proposals.with_state_lock(@store.root) { runner.call } unless @git_ops
 
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) { runner.call }
       end

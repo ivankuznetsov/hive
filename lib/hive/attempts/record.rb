@@ -17,7 +17,7 @@ module Hive
     # JSON holds only the remaining structured execution details.
     class Record
       SCHEMA = "hive-attempt"
-      SCHEMA_VERSION = 4
+      SCHEMA_VERSION = 5
       RECEIPT_VERSION = 1
       MAX_IDENTIFIER_BYTES = 128
       MAX_DETAIL_BYTES = 240

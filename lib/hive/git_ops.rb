@@ -281,7 +281,7 @@ module Hive
       paths - out.split("\n")
     end
 
-    # Scoped add. With no `pathspecs:`, stages files under
+    # Scoped add and commit. With no `pathspecs:`, commits files under
     # stages/<stage_name>/<slug>/ plus the logs/ directory so a crashed
     # prior run's leftover staging cannot cross-contaminate this commit.
     # `additional_pathspecs:` extends that normal scope with independently
@@ -300,23 +300,40 @@ module Hive
         before_stage&.call
         message = "hive: #{stage_name}/#{slug} #{action}"
         task_path = File.join("stages", stage_name, slug)
+        commit_pathspecs = []
         if pathspecs
-          Array(pathspecs).each { |pathspec| stage_hive_state_pathspec(pathspec) }
+          Array(pathspecs).each do |pathspec|
+            staged = stage_hive_state_pathspec(pathspec)
+            commit_pathspecs << staged if staged
+          end
         else
           if File.directory?(File.join(hive_state_path, task_path))
             run_git!("-C", hive_state_path, "add", task_path)
+            commit_pathspecs << task_path
           end
-          run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
-          Array(additional_pathspecs).each { |pathspec| stage_hive_state_pathspec(pathspec) }
+          if File.directory?(File.join(hive_state_path, "logs"))
+            run_git!("-C", hive_state_path, "add", "logs")
+            commit_pathspecs << "logs"
+          end
+          Array(additional_pathspecs).each do |pathspec|
+            staged = stage_hive_state_pathspec(pathspec)
+            commit_pathspecs << staged if staged
+          end
         end
+        commit_pathspecs.reject!(&:empty?)
+        commit_pathspecs.uniq!
         after_stage&.call
-        _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
+        _, _, status = Open3.capture3(
+          "git", "-C", hive_state_path, "diff", "--cached", "--quiet", "--", *commit_pathspecs
+        )
         if status.success? && !allow_empty
           :nothing_to_commit
         else
           args = [ "-C", hive_state_path, "commit", "-m", message ]
           args += [ "-m", body ] if body && !body.to_s.empty?
           args << "--allow-empty" if allow_empty
+          args += [ "--only", "--" ]
+          args += commit_pathspecs.empty? ? [ ":(exclude)**" ] : commit_pathspecs
           run_git!(*args)
           :committed
         end
@@ -375,6 +392,7 @@ module Hive
       abs = File.join(hive_state_path, rel)
       if File.exist?(abs) || hive_state_pathspec_tracked?(rel)
         run_git!("-C", hive_state_path, "add", "-A", "--", rel)
+        rel
       end
     end
 
@@ -389,6 +407,12 @@ module Hive
     def hive_state_pathspec_tracked?(pathspec)
       out, err, status = Open3.capture3("git", "-C", hive_state_path, "ls-files", "--", pathspec)
       raise GitError, "git -C #{hive_state_path} ls-files failed: #{err.strip.empty? ? out : err}" unless status.success?
+      return true unless out.strip.empty?
+
+      out, err, status = Open3.capture3(
+        "git", "-C", hive_state_path, "ls-tree", "-r", "--name-only", "HEAD", "--", pathspec
+      )
+      raise GitError, "git -C #{hive_state_path} ls-tree failed: #{err.strip.empty? ? out : err}" unless status.success?
 
       !out.strip.empty?
     end

@@ -86,16 +86,18 @@ module Hive
         unless events.all? { |event| event.proposal_id == record.proposal_id }
           raise InconsistentHistory, "proposal history contains an event for another proposal"
         end
+        event_versions = events.map(&:version)
+        last_event_version = event_versions.max || 0
         first_reserved = reserved_versions.first
-        first_expected = if first_reserved && events.none? { |event| event.version == first_reserved }
+        first_required = if first_reserved && !event_versions.include?(first_reserved)
           first_reserved
         else
           1
         end
-        contiguous = reserved_versions.each_cons(2).all? { |left, right| right == left + 1 }
-        unless (reserved_versions.empty? || reserved_versions.first == first_expected) && contiguous &&
-               events.map(&:version).uniq.length == events.length &&
-               (events.map(&:version) - reserved_versions).empty?
+        required_slots = last_event_version.positive? ? (first_required..last_event_version).to_a : []
+        unless event_versions.uniq.length == event_versions.length &&
+               (event_versions - reserved_versions).empty? &&
+               (required_slots - reserved_versions).empty?
           raise InconsistentHistory, "proposal event versions must be contiguous and unique"
         end
         EVENT_TYPES.each do |type|

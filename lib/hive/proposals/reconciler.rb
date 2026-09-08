@@ -39,8 +39,7 @@ module Hive
             @ingestor.ingest!(source_event_id, source_commit:)
             consumed += 1
           rescue *PERMANENT_ERRORS => error
-            quarantine_source!(source_event_id, error)
-            quarantined += 1
+            quarantined += 1 if quarantine_source!(source_event_id, error)
           rescue SourceUnavailable, QuotaExceeded
             next
           end
@@ -61,8 +60,21 @@ module Hive
           @git_ops.hive_state_head_sha, path,
           max_bytes: SourceEventStore::MAX_FILE_BYTES + 1
         )
+        if bytes.nil? && committed_blob_size(path).to_i > SourceEventStore::MAX_FILE_BYTES
+          raise QuarantinedSource, "committed proposal source receipt is oversize"
+        end
         raise SourceUnavailable, "committed proposal source receipt is missing" unless bytes
         commit
+      end
+
+      def committed_blob_size(path)
+        output = @git_ops.run_git!(
+          "-C", @git_ops.hive_state_path, "cat-file", "-s", "--",
+          "#{@git_ops.hive_state_head_sha}:#{path}"
+        )
+        Integer(output.to_s.strip, exception: false)
+      rescue Hive::GitError
+        nil
       end
 
       def quarantine_source!(source_event_id, error)
@@ -70,7 +82,6 @@ module Hive
           snapshot = Ingestor::PathSnapshot.capture(
             @source_store.paths_for_terminal(source_event_id, state: "quarantine")
           )
-          index_snapshot = Proposals::GitIndexSnapshot.capture(@git_ops)
           begin
             @source_store.quarantine!(
               source_event_id, code: quarantine_code(error),
@@ -82,14 +93,15 @@ module Hive
                              @git_ops, path, label: "proposal reconciliation path"
                            )
                          end
-            @git_ops.hive_commit(
+            result = @git_ops.hive_commit(
               stage_name: "proposal-reconcile", slug: source_event_id,
               action: "quarantined proposal source", pathspecs: paths
             )
-          rescue StandardError => failure
+            raise SourceUnavailable, "proposal source quarantine was not committed" unless result == :committed
+            true
+          rescue StandardError
             snapshot.restore!
-            index_snapshot.restore! rescue nil
-            raise failure
+            false
           end
         end
       end

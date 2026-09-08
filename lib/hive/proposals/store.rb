@@ -5,6 +5,7 @@ require "securerandom"
 require "tmpdir"
 require "hive/atomic_file"
 require "hive/proposals/projection"
+require "hive/secret_patterns"
 
 module Hive
   module Proposals
@@ -67,7 +68,9 @@ module Hive
             raise Conflict, "proposal source event conflicts with its immutable record"
           end
           id = proposal_id || "prp-#{@id_generator.call}"
-          write_record_unlocked!(Record.build(proposal_id: id, **attributes))
+          record = Record.build(proposal_id: id, **attributes)
+          validate_retry_predecessor!(record)
+          write_record_unlocked!(record)
         end
       end
 
@@ -166,6 +169,7 @@ module Hive
           raise Conflict, "immutable proposal record already exists with different content"
         end
         create_immutable(path, bytes)
+        cache_source_event!(record)
         record
       end
 
@@ -179,6 +183,7 @@ module Hive
           raise Conflict, "immutable proposal event path already exists with different content"
         end
         create_immutable(path, bytes)
+        cache_source_event!(event)
         event
       end
 
@@ -321,7 +326,17 @@ module Hive
         retry_edges = projections.to_h do |projection|
           [ projection.proposal_id, projection.record["lineage"]["retries"] ]
         end.compact
-        cycle_nodes = cycle_nodes(supersession_edges.merge(retry_edges))
+        retry_edges.each do |proposal_id, predecessor_id|
+          projection = valid[proposal_id]
+          predecessor = valid[predecessor_id]
+          next if projection && predecessor && proposal_id != predecessor_id &&
+                  same_subject?(projection, predecessor)
+
+          diagnostics << collection_diagnostic("dangling_or_mismatched_retry", proposal_id)
+          valid.delete(proposal_id)
+        end
+        retry_edges.select! { |proposal_id, predecessor_id| valid.key?(proposal_id) && valid.key?(predecessor_id) }
+        cycle_nodes = Proposals.lineage_cycle_nodes(supersession_edges.merge(retry_edges))
         cycle_nodes.each do |proposal_id|
           diagnostics << collection_diagnostic("lineage_cycle", proposal_id)
           valid.delete(proposal_id)
@@ -359,7 +374,7 @@ module Hive
 
           code = Proposals.label!(document.dig("reason", "code"), label: "source quarantine code")
           diagnostics << Diagnostic.new(
-            code: "source_#{code}".byteslice(0, 128), path: logical_path,
+            code: "source_#{code}".byteslice(0, 128), path: safe_diagnostic_path(logical_path),
             sha256: Digest::SHA256.hexdigest(bytes), bytes: bytes.bytesize,
             proposal_id: document.fetch("proposal_id")
           )
@@ -372,31 +387,67 @@ module Hive
         left.subject == right.subject
       end
 
-      def cycle_nodes(edges)
-        cycles = []
-        finished = {}
-        edges.each_key do |origin|
-          next if finished[origin]
+      def validate_retry_predecessor!(record)
+        predecessor_id = record["lineage"]["retries"]
+        return unless predecessor_id
+        raise InvalidRecord, "proposal retry predecessor must be distinct" if predecessor_id == record.proposal_id
 
-          path = []
-          positions = {}
-          current = origin
-          while current && !finished[current] && !positions.key?(current)
-            positions[current] = path.length
-            path << current
-            current = edges[current]
-          end
-          cycles.concat(path.drop(positions.fetch(current))) if current && positions.key?(current)
-          path.each { |proposal_id| finished[proposal_id] = true }
+        predecessor = fetch_record_unlocked(predecessor_id)
+        unless predecessor && predecessor.subject == record.subject
+          raise InvalidRecord, "proposal retry predecessor is missing or has a different subject"
         end
-        cycles.uniq.sort
       end
 
       def find_by_source_event_unlocked(source_event_id, snapshot: nil)
         id = Proposals.source_event_id!(source_event_id)
-        snapshot ||= load_unlocked
-        snapshot.records.find { |record| record.source_event_id == id } ||
-          snapshot.events.values.flatten.find { |event| event.source_event_id == id }
+        if snapshot
+          return snapshot.records.find { |record| record.source_event_id == id } ||
+            snapshot.events.values.flatten.find { |event| event.source_event_id == id }
+        end
+
+        refresh_source_event_cache_unlocked!
+        value = @source_event_cache[id]
+        raise Conflict, "proposal source event belongs to multiple canonical mutations" if value == :conflict
+        value
+      end
+
+      def refresh_source_event_cache_unlocked!
+        generation = source_event_cache_generation
+        return if @source_event_cache && @source_event_cache_generation == generation
+
+        snapshot = load_unlocked
+        cache = {}
+        (snapshot.records + snapshot.events.values.flatten).each do |item|
+          id = item.source_event_id
+          cache[id] = cache.key?(id) ? :conflict : item
+        end
+        @source_event_cache = cache
+        @source_event_cache_generation = generation
+      end
+
+      def cache_source_event!(item)
+        return unless @source_event_cache
+
+        id = item.source_event_id
+        @source_event_cache[id] = @source_event_cache.key?(id) ? :conflict : item
+        @source_event_cache_generation = source_event_cache_generation
+      end
+
+      def source_event_cache_generation
+        paths = children(records_root).map { |child| File.join(records_root, child) }
+        if safe_directory?(events_root)
+          children(events_root).each do |proposal|
+            directory = File.join(events_root, proposal)
+            paths << directory
+            paths.concat(children(directory).map { |child| File.join(directory, child) }) if safe_directory?(directory)
+          end
+        end
+        paths.sort.filter_map do |path|
+          stat = File.lstat(path)
+          [ path, stat.ftype, stat.ino, stat.size, stat.mtime.to_r.to_s, stat.ctime.to_r.to_s ]
+        rescue Errno::ENOENT, Errno::ENOTDIR
+          nil
+        end
       end
 
       def fetch_record_unlocked(proposal_id)
@@ -471,10 +522,15 @@ module Hive
       def diagnostic(code, path, bytes: nil, logical_path:, size: nil, proposal_id: nil)
         safe_bytes = bytes || bounded_file_digest_input(path)
         Diagnostic.new(
-          code:, path: logical_path.to_s.byteslice(0, 512),
+          code:, path: safe_diagnostic_path(logical_path),
           sha256: Digest::SHA256.hexdigest(safe_bytes),
           bytes: size || safe_bytes.bytesize, proposal_id:
         )
+      end
+
+      def safe_diagnostic_path(value)
+        Hive::SecretPatterns.redact(value.to_s).byteslice(0, 512).to_s
+          .force_encoding(Encoding::UTF_8).scrub("")
       end
 
       def collection_diagnostic(code, proposal_id)

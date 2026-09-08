@@ -67,7 +67,7 @@ activity, and inbox paths together.
 hive proposal decide PROPOSAL_ID --input decision.json \
   --authority ID --policy-fingerprint SHA256 \
   --expected-head-version N --expected-head-digest SHA256 \
-  --considered-evaluations EVENT_ID ...
+  --considered-evaluations EVENT_ID:RESULT_DIGEST ...
 
 hive proposal supersede PROPOSAL_ID --input supersession.json \
   --authority ID --policy-fingerprint SHA256 \
@@ -80,10 +80,12 @@ hive proposal rollback PROPOSAL_ID --input rollback.json \
 
 Read `list` or `show` immediately before mutation and pass its lifecycle head.
 Decision input supplies `outcome`, `rationale_category`, `rationale`, links, and
-an idempotency key. Supersession input supplies `successor_id` and an idempotency
-key. Rollback input supplies `reverted_revision`, `reason`, `external_revert`,
-and an idempotency key. Policy authorities additionally supply their closed
-policy receipt inside the input document.
+an idempotency key. Each considered evaluation argument binds its canonical
+event ID to the caller-observed digest of that evaluation's result; bare IDs
+fail closed. Supersession input supplies `successor_id` and an idempotency key.
+Rollback input supplies `reverted_revision`, `reason`, `external_revert`, and an
+idempotency key. Policy authorities additionally supply their closed policy
+receipt inside the input document.
 
 Successful source and lifecycle mutations use `hive-proposal-mutation.v1`.
 JSON failures retain the selected proposal schema and one of the stable kinds
@@ -101,8 +103,9 @@ Refresh enters the managed llm-wiki publication boundary. Proposal-only state
 commits invoke the pure compiler without a provider; mixed batches run the wiki
 agent first and then overwrite the generated proposal pair from the pinned
 state source. Both files publish in one wiki commit. `--check` compiles to an
-external disposable directory, compares bytes, removes the scratch output, and
-does not publish or modify a managed worktree.
+external disposable directory, compares bytes with the pair at the managed wiki
+branch, removes the scratch output, and does not publish or modify a managed
+worktree or the primary checkout.
 
 An explicit refresh enqueues the selected pinned proposal source even when the
 current state `HEAD` changes only inbox/cursor/task-state paths. Queued proposal

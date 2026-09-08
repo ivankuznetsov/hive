@@ -76,14 +76,14 @@ class ConfigTest < Minitest::Test
             version: 1
             revoked: nope
       YAML
-      reject_fragment.call(<<~YAML, /validity timestamps.*canonical/i)
+      reject_fragment.call(<<~YAML, /validity timestamp.*ISO 8601/i)
         authorities:
           bad:
             kind: operator
             capabilities: []
             version: 1
             revoked: false
-            valid_from: '2026-08-30T12:00:00.000000Z'
+            valid_from: 'not-a-time'
       YAML
       reject_fragment.call(<<~YAML, /empty validity interval/i)
         authorities:

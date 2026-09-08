@@ -62,24 +62,31 @@ workflows, or wiki prose, so existing projects are not backfilled.
 
 Admission enforces configured project/proposal event and byte ceilings plus a
 per-actor hourly source rate across the complete proposal namespace. Admission
-reserves enough space for terminal status and the canonical mutation; the index
-retains only bounded pending recovery data and rejects an oversized replacement
-before writing a receipt. Lifecycle mutations use the same aggregate and
-authority-rate ceilings. Source IDs are idempotency keys: the exact retry is a
-no-op and changed bytes under an existing ID are a conflict.
+reserves enough space for terminal status and the canonical mutation. The
+published `hive-proposal-source-index.v1` contract retains bounded pending
+recovery data, persistent project/proposal usage counters, and a pruned one-hour
+actor window; a missing legacy index performs one bounded canonical bootstrap
+scan. It rejects an oversized replacement before writing a receipt. Terminal
+receipts use `hive-proposal-source-status.v1`. Lifecycle mutations use the same
+aggregate and authority-rate ceilings. Source IDs are idempotency keys: the
+exact retry is a no-op and changed bytes under an existing ID are a conflict.
 
 ## Authority and lifecycle
 
 Named evaluators are admitted at dispatch against configured workflow, stage,
-and agent-profile bindings. That historical evaluator binding is retained in the
-attempt and source event, so later config revocation blocks new events without
-invalidating an already-admitted receipt.
+and agent-profile bindings. Each allowlist is fail-closed, including an empty
+list, and configuration loading and runtime admission share one row validator.
+That historical evaluator binding is retained in the attempt and source event,
+so later config revocation blocks new events without invalidating an
+already-admitted receipt.
 
 Decisions, supersession, and rollback use a separate configured operator or
 policy authority. Every operation compares the caller's observed lifecycle head
 version/digest. A decision additionally names the exact evaluation IDs it
-considered; unrelated evaluation appends do not stale the decision, while a
-changed lifecycle fact or missing/changed considered evaluation does. One
+considered together with each caller-observed result digest. Unrelated
+evaluation appends do not stale the decision, while a changed lifecycle fact or
+missing/changed considered evaluation does. Lifecycle success requires the
+immutable event bytes to be visible at the committed Hive-state head. One
 accepted/rejected decision wins—there is no last-writer-wins path.
 
 An empty considered set is valid only for an authority-authored rejection with
@@ -112,17 +119,21 @@ Terminal source quarantines appear as diagnostics in live queries and both
 compiled views. Pinned symlink blobs are materialized as inert bytes for logical
 diagnosis, never as live symlink targets. The managed llm-wiki hook compiles
 proposal-only batches without an LLM provider or ordinary breaker budget and
-publishes the pair in one wiki commit.
+publishes the pair in one wiki commit. Refresh checks compare scratch compiler
+output with that atomically published managed-ref pair, not files in the primary
+checkout.
 
 Automatic proposal context is available only when a durable attempt carries a
 matching typed subject. It includes closed facts—IDs, enums, timestamps, method
-kinds, evaluator IDs, outcomes, and fixed digests—ranked by exact subject and
-lineage. Free-form method labels, revision/reference text, metric keys, candidate
-prose, evidence summaries, rationale, instructions, links, and restricted bytes
-are excluded. Selection stops at the first whole item that would overflow the
-existing 4 KiB prompt-appendix ceiling, preserving a ranked prefix; provenance
-records configured/effective budget, selected IDs/digest, and truncation in task
-activity.
+kinds, evaluator IDs, outcomes, fixed-label numeric metric values, and fixed
+digests—ranked by exact subject and lineage. Arbitrary metric keys, free-form
+method labels, revision/reference text, candidate prose, evidence summaries,
+rationale, instructions, links, and restricted bytes are excluded. Selection
+stops at the first whole item that would overflow the existing 4 KiB
+prompt-appendix ceiling, preserving a ranked prefix; provenance records
+configured/effective budget, selected IDs/digest, and truncation even when the
+first ranked item cannot fit. A subject with no terminal match reports
+`no_terminal_matches`, distinct from actual `budget_exhausted` truncation.
 
 ## Configuration
 

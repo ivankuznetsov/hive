@@ -4,29 +4,6 @@ require "hive/proposals/decision_service"
 class ProposalDecisionServiceTest < Minitest::Test
   include HiveTestHelper
 
-  class FakeGitOps
-    attr_reader :hive_state_path, :commits
-
-    def initialize(hive_state_path, fail_commit: false, fail_reset: false)
-      @hive_state_path = hive_state_path
-      @fail_commit = fail_commit
-      @fail_reset = fail_reset
-      @commits = []
-    end
-
-    def hive_commit(**options)
-      commits << options
-      raise Hive::GitError, "simulated lifecycle commit failure" if @fail_commit
-      :committed
-    end
-
-    def run_git!(*arguments)
-      return "a" * 40 if arguments.include?("write-tree")
-      raise Hive::GitError, "simulated reset failure" if @fail_reset && arguments.include?("read-tree")
-      true
-    end
-  end
-
   def setup
     @tmp = Dir.mktmpdir("proposal-decisions")
     @next_id = 0
@@ -69,7 +46,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     first = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
     observation = @store.projection(proposal_id).lifecycle_head
     result = decide(
-      outcome: "accepted", considered_evaluation_ids: [ first.event_id ],
+      outcome: "accepted", considered_evaluations: observations(first),
       expected_head: observation, idempotency_key: "accept-v2"
     )
 
@@ -92,7 +69,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     append_evaluation(proposal_id, source: "c", outcome: "fail", metric: 0.5)
 
     result = decide(
-      outcome: "accepted", considered_evaluation_ids: [ first.event_id ],
+      outcome: "accepted", considered_evaluations: observations(first),
       expected_head: observation, idempotency_key: "streaming-decision"
     )
     assert result.applied
@@ -106,15 +83,45 @@ class ProposalDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_changed_considered_evaluation_digest_is_stale
+    evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
+    considered = observations(evaluation)
+    path = @store.path_for_event(evaluation)
+    rewritten = JSON.parse(File.read(path))
+    rewritten.dig("data", "result", "metrics")["recall"] = 0.5
+    File.write(path, Hive::Proposals.canonical(rewritten))
+
+    assert_raises(Hive::Proposals::StaleObservation) do
+      decide(
+        outcome: "accepted", considered_evaluations: considered,
+        expected_head: @store.projection(proposal_id).lifecycle_head,
+        idempotency_key: "rewritten-evaluation"
+      )
+    end
+  end
+
+  def test_missing_considered_evaluation_is_stale
+    missing = "pev-00000000-0000-4000-8000-000000000099"
+
+    assert_raises(Hive::Proposals::StaleObservation) do
+      decide(
+        outcome: "accepted",
+        considered_evaluations: [ { "evaluation_id" => missing, "result_digest" => "a" * 64 } ],
+        expected_head: @store.projection(proposal_id).lifecycle_head,
+        idempotency_key: "missing-evaluation"
+      )
+    end
+  end
+
   def test_terminal_retry_is_a_noop_and_conflicting_decisions_are_refused
     evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
     observation = @store.projection(proposal_id).lifecycle_head
     first = decide(
-      outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+      outcome: "accepted", considered_evaluations: observations(evaluation),
       expected_head: observation, idempotency_key: "same-source"
     )
     replay = decide(
-      outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+      outcome: "accepted", considered_evaluations: observations(evaluation),
       expected_head: observation, idempotency_key: "same-source"
     )
 
@@ -123,7 +130,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     assert_equal first.event.event_id, replay.event.event_id
     assert_raises(Hive::Proposals::Conflict) do
       decide(
-        outcome: "rejected", considered_evaluation_ids: [ evaluation.event_id ],
+        outcome: "rejected", considered_evaluations: observations(evaluation),
         expected_head: observation, idempotency_key: "other-source"
       )
     end
@@ -133,13 +140,13 @@ class ProposalDecisionServiceTest < Minitest::Test
     head = @store.projection(proposal_id).lifecycle_head
     assert_raises(Hive::Proposals::InvalidEvent) do
       decide(
-        outcome: "accepted", considered_evaluation_ids: [], expected_head: head,
+        outcome: "accepted", considered_evaluations: [], expected_head: head,
         idempotency_key: "unevaluated-accept", rationale_category: "evaluated"
       )
     end
 
     result = decide(
-      outcome: "rejected", considered_evaluation_ids: [], expected_head: head,
+      outcome: "rejected", considered_evaluations: [], expected_head: head,
       idempotency_key: "unevaluated-reject", rationale_category: "no_evaluation"
     )
     assert_equal "rejected", result.projection.status
@@ -168,7 +175,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     evaluation = append_evaluation(accepted, source: "f", outcome: "pass", metric: 0.9)
     @service.decide(
       proposal_id: accepted, outcome: "accepted",
-      considered_evaluation_ids: [ evaluation.event_id ], rationale_category: "evaluated",
+      considered_evaluations: observations(evaluation), rationale_category: "evaluated",
       rationale: "accepted", links: [], expected_head: @store.projection(accepted).lifecycle_head,
       **authority_args("accept-before-rollback")
     )
@@ -195,18 +202,18 @@ class ProposalDecisionServiceTest < Minitest::Test
     head = @store.projection(proposal_id).lifecycle_head
     assert_raises(Hive::Proposals::StaleObservation) do
       decide(
-        outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id, evaluation.event_id ],
+        outcome: "accepted", considered_evaluations: observations(evaluation, evaluation),
         expected_head: head, idempotency_key: "duplicate-evidence"
       )
     end
 
     decide(
-      outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+      outcome: "accepted", considered_evaluations: observations(evaluation),
       expected_head: head, idempotency_key: "immutable-decision"
     )
     assert_raises(Hive::Proposals::Conflict) do
       @service.decide(
-        proposal_id:, outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+        proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
         rationale_category: "evaluated", rationale: "changed rationale", links: [],
         expected_head: head, **authority_args("immutable-decision")
       )
@@ -215,7 +222,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     assert_raises(Hive::Proposals::InvalidRecord) do
       @service.decide(
         proposal_id: "prp-00000000-0000-4000-8000-000000000099", outcome: "rejected",
-        considered_evaluation_ids: [], rationale_category: "no_evaluation", rationale: "missing",
+        considered_evaluations: [], rationale_category: "no_evaluation", rationale: "missing",
         links: [], expected_head: head, **authority_args("missing-candidate")
       )
     end
@@ -233,7 +240,7 @@ class ProposalDecisionServiceTest < Minitest::Test
 
     evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
     @service.decide(
-      proposal_id:, outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+      proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
       rationale_category: "evaluated", rationale: "accepted", links: [],
       expected_head: head, **authority_args("accept-for-wrong-revision")
     )
@@ -279,7 +286,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
     assert_raises(Hive::Proposals::Unauthorized) do
       @service.decide(
-        proposal_id:, outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
+        proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
         rationale_category: "evaluated", rationale: "accept", links: [],
         expected_head: @store.projection(proposal_id).lifecycle_head,
         authority_identity: "reviewer",
@@ -298,7 +305,7 @@ class ProposalDecisionServiceTest < Minitest::Test
       Thread.new do
         gate.pop
         result = decide(
-          outcome:, considered_evaluation_ids: [ evaluation.event_id ],
+          outcome:, considered_evaluations: observations(evaluation),
           expected_head: observation, idempotency_key: "race-#{outcome}"
         )
         outcomes << result
@@ -331,42 +338,125 @@ class ProposalDecisionServiceTest < Minitest::Test
     assert_equal "draft", @store.projection(proposal_id).status
   end
 
-  def test_lifecycle_commit_is_exact_and_a_failed_commit_restores_the_event_directory
-    evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
-    observation = @store.projection(proposal_id).lifecycle_head
-    git_ops = FakeGitOps.new(@tmp)
-    service = Hive::Proposals::DecisionService.new(
-      store: @store, authority: @authority, git_ops:,
-      clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
-    )
-    result = service.decide(
-      proposal_id:, outcome: "accepted", considered_evaluation_ids: [ evaluation.event_id ],
-      rationale_category: "evaluated", rationale: "accept", links: [], expected_head: observation,
-      **authority_args("committed-lifecycle")
-    )
+  def test_lifecycle_commit_is_durable_exact_and_preserves_unrelated_staging
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      store = decision_store(root)
+      with_store(store) do
+        create_record(proposal_id)
+        evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
+        seed_proposal_history(ops, store, proposal_id, evaluation)
+        unrelated = "stages/1-inbox/unrelated/prestaged.txt"
+        FileUtils.mkdir_p(File.dirname(File.join(ops.hive_state_path, unrelated)))
+        File.write(File.join(ops.hive_state_path, unrelated), "preserve me\n")
+        run!("git", "-C", ops.hive_state_path, "add", unrelated)
+        service = durable_service(store, ops)
 
-    assert_equal [ @store.path_for_event(result.event).delete_prefix("#{@tmp}/") ],
-                 git_ops.commits.first.fetch(:pathspecs)
+        result = service.decide(
+          proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
+          rationale_category: "evaluated", rationale: "accept", links: [],
+          expected_head: store.projection(proposal_id).lifecycle_head,
+          **authority_args("committed-lifecycle")
+        )
 
-    failing_id = "prp-00000000-0000-4000-8000-000000000004"
-    create_record(failing_id)
-    failing_evaluation = append_evaluation(failing_id, source: "h", outcome: "pass", metric: 0.9)
-    failing = Hive::Proposals::DecisionService.new(
-      store: @store, authority: @authority,
-      git_ops: FakeGitOps.new(@tmp, fail_commit: true, fail_reset: true),
-      clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
-    )
-    assert_raises(Hive::GitError) do
-      failing.decide(
-        proposal_id: failing_id, outcome: "accepted",
-        considered_evaluation_ids: [ failing_evaluation.event_id ],
-        rationale_category: "evaluated", rationale: "accept", links: [],
-        expected_head: @store.projection(failing_id).lifecycle_head,
-        **authority_args("failed-lifecycle")
-      )
+        event_path = store.path_for_event(result.event).delete_prefix("#{ops.hive_state_path}/")
+        changed = run!(
+          "git", "-C", ops.hive_state_path, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"
+        ).lines.map(&:strip)
+        assert_equal [ event_path, "proposals/v1/inbox/index.json" ].sort, changed.sort
+        assert_equal "A  #{unrelated}", run!(
+          "git", "-C", ops.hive_state_path, "status", "--porcelain=v1", "--", unrelated
+        ).strip
+        assert_equal Hive::Proposals.canonical(result.event.to_h),
+                     ops.read_hive_state_blob_at(
+                       ops.hive_state_head_sha, event_path,
+                       max_bytes: Hive::Proposals::Store::MAX_FILE_BYTES + 1
+                     )
+      end
     end
-    assert_equal "draft", @store.projection(failing_id).status
-    assert_equal [ "evaluation" ], @store.projection(failing_id).events.map(&:type)
+  end
+
+  def test_lifecycle_commit_and_index_restore_failures_are_visible
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      store = decision_store(root)
+      with_store(store) do
+        create_record(proposal_id)
+        evaluation = append_evaluation(proposal_id, source: "h", outcome: "pass", metric: 0.9)
+        seed_proposal_history(ops, store, proposal_id, evaluation)
+        original_commit = ops.method(:hive_commit)
+        ops.define_singleton_method(:hive_commit) do |**options|
+          original_commit.call(
+            **options.merge(after_stage: -> { raise Hive::GitError, "simulated lifecycle commit failure" })
+          )
+        end
+        service = durable_service(store, ops)
+
+        assert_raises(Hive::GitError) do
+          service.decide(
+            proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
+            rationale_category: "evaluated", rationale: "accept", links: [],
+            expected_head: store.projection(proposal_id).lifecycle_head,
+            **authority_args("failed-lifecycle")
+          )
+        end
+        assert_equal [ "evaluation" ], store.projection(proposal_id).events.map(&:type)
+
+        unrelated = "stages/1-inbox/unrelated/prestaged.txt"
+        FileUtils.mkdir_p(File.dirname(File.join(ops.hive_state_path, unrelated)))
+        File.write(File.join(ops.hive_state_path, unrelated), "preserve me\n")
+        run!("git", "-C", ops.hive_state_path, "add", unrelated)
+        original_run_git = ops.method(:run_git!)
+        ops.define_singleton_method(:run_git!) do |*arguments|
+          if arguments.include?("read-tree")
+            raise Hive::GitError, "simulated index restore failure"
+          end
+          original_run_git.call(*arguments)
+        end
+
+        error = assert_raises(Hive::GitError) do
+          service.decide(
+            proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
+            rationale_category: "evaluated", rationale: "accept", links: [],
+            expected_head: store.projection(proposal_id).lifecycle_head,
+            **authority_args("failed-restore")
+          )
+        end
+        assert_includes error.message, "index restore failure"
+      end
+    end
+  end
+
+  def test_lifecycle_rejects_commit_results_without_a_new_durable_head
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      store = decision_store(root)
+      with_store(store) do
+        create_record(proposal_id)
+        evaluation = append_evaluation(proposal_id, source: "j", outcome: "pass", metric: 0.9)
+        seed_proposal_history(ops, store, proposal_id, evaluation)
+        service = durable_service(store, ops)
+
+        %i[nothing_to_commit committed].each do |commit_result|
+          ops.define_singleton_method(:hive_commit) { |**_options| commit_result }
+          assert_raises(Hive::Proposals::SourceUnavailable) do
+            service.decide(
+              proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
+              rationale_category: "evaluated", rationale: "accept", links: [],
+              expected_head: store.projection(proposal_id).lifecycle_head,
+              **authority_args("undurable-#{commit_result}")
+            )
+          end
+          assert_equal [ "evaluation" ], store.projection(proposal_id).events.map(&:type)
+        end
+      end
+    end
   end
 
   def test_lifecycle_mutations_obey_namespace_event_and_authority_rate_limits
@@ -377,7 +467,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     )
     assert_raises(Hive::Proposals::QuotaExceeded) do
       event_limited.decide(
-        proposal_id:, outcome: "rejected", considered_evaluation_ids: [],
+        proposal_id:, outcome: "rejected", considered_evaluations: [],
         rationale_category: "no_evaluation", rationale: "reject", links: [],
         expected_head: @store.projection(proposal_id).lifecycle_head,
         **authority_args("event-limited")
@@ -385,7 +475,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     end
 
     first = decide(
-      outcome: "rejected", considered_evaluation_ids: [],
+      outcome: "rejected", considered_evaluations: [],
       expected_head: @store.projection(proposal_id).lifecycle_head,
       idempotency_key: "first-authority-event", rationale_category: "no_evaluation"
     )
@@ -399,7 +489,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     )
     assert_raises(Hive::Proposals::QuotaExceeded) do
       rate_limited.decide(
-        proposal_id: second_id, outcome: "rejected", considered_evaluation_ids: [],
+        proposal_id: second_id, outcome: "rejected", considered_evaluations: [],
         rationale_category: "no_evaluation", rationale: "reject", links: [],
         expected_head: @store.projection(second_id).lifecycle_head,
         **authority_args("rate-limited")
@@ -410,6 +500,43 @@ class ProposalDecisionServiceTest < Minitest::Test
   private
 
   def proposal_id = "prp-00000000-0000-4000-8000-000000000001"
+
+  def decision_store(root)
+    Hive::Proposals::Store.new(
+      root:,
+      id_generator: lambda do
+        @id_mutex.synchronize do
+          @next_id += 1
+          format("00000000-0000-4000-8000-%012d", @next_id)
+        end
+      end
+    )
+  end
+
+  def with_store(store)
+    previous = @store
+    @store = store
+    yield
+  ensure
+    @store = previous
+  end
+
+  def seed_proposal_history(ops, store, id, evaluation)
+    ops.hive_commit(
+      stage_name: "proposals", slug: id, action: "seeded lifecycle history",
+      pathspecs: [
+        store.paths_for_record(id).first.delete_prefix("#{ops.hive_state_path}/"),
+        store.path_for_event(evaluation).delete_prefix("#{ops.hive_state_path}/")
+      ]
+    )
+  end
+
+  def durable_service(store, ops)
+    Hive::Proposals::DecisionService.new(
+      store:, authority: @authority, git_ops: ops,
+      clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
+    )
+  end
 
   def create_record(id, requested_supersedes: nil, subject_ref: "agent-skills/reviewer")
     @store.create_record!(
@@ -439,13 +566,22 @@ class ProposalDecisionServiceTest < Minitest::Test
     )
   end
 
-  def decide(outcome:, considered_evaluation_ids:, expected_head:, idempotency_key:,
+  def decide(outcome:, considered_evaluations:, expected_head:, idempotency_key:,
              rationale_category: "evaluated")
     @service.decide(
-      proposal_id:, outcome:, considered_evaluation_ids:, rationale_category:,
+      proposal_id:, outcome:, considered_evaluations:, rationale_category:,
       rationale: "lifecycle decision", links: [], expected_head:,
       **authority_args(idempotency_key)
     )
+  end
+
+  def observations(*evaluations)
+    evaluations.map do |evaluation|
+      {
+        "evaluation_id" => evaluation.event_id,
+        "result_digest" => Hive::Proposals.digest(evaluation.data.fetch("result"))
+      }
+    end
   end
 
   def authority_args(idempotency_key)

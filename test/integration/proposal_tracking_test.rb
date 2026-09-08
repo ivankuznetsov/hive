@@ -352,7 +352,13 @@ class ProposalTrackingTest < Minitest::Test
       stdout: StringIO.new, project_root: project,
       expected_head_version: projection.lifecycle_head.fetch("version"),
       expected_head_digest: projection.lifecycle_head.fetch("digest"),
-      considered_evaluation_ids: considered,
+      considered_evaluations: considered.map do |evaluation_id|
+        evaluation = projection.evaluations.find { |row| row.fetch("event_id") == evaluation_id }
+        {
+          "evaluation_id" => evaluation_id,
+          "result_digest" => Hive::Proposals.digest(evaluation.fetch("result"))
+        }
+      end,
       authority_identity: "proposal-operator",
       policy_fingerprint: authority.fingerprint("proposal-operator")
     ).call

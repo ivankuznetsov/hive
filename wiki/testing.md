@@ -1307,10 +1307,9 @@ and proves read-only discovery neither imports a pre-feature task journal nor
 initializes `proposals/v1`; the first new typed source event does.
 
 ```bash
-bundle exec ruby -Itest test/integration/proposal_tracking_test.rb
-bundle exec ruby -Itest test/unit/commands/proposal_test.rb
-bundle exec rake coverage:changed
-bundle exec rake test
+bin/test --changed --list
+bin/test --changed
+bin/test --all   # broad checkpoint when warranted
 ```
 
 Wiki-refresh integration separately proves pinned-source, provider-free

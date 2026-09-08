@@ -78,6 +78,16 @@ class ProposalProjectionTest < Minitest::Test
     end
   end
 
+  def test_ignores_reserved_slots_after_the_last_valid_event
+    event = build_event(1, "evaluation", evaluation_data("pass", 0.9))
+
+    projection = Hive::Proposals::Projection.new(
+      record: build_record, events: [ event ], reserved_versions: [ 1, 7 ]
+    )
+
+    assert_equal [ event.event_id ], projection.evaluations.map { |item| item["event_id"] }
+  end
+
   def test_rejects_cross_proposal_events_and_invalid_rollbacks
     record = build_record
     foreign = build_event(1, "evaluation", evaluation_data("pass", 0.9))

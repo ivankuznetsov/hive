@@ -56,6 +56,12 @@ snapshot or prevent same-tick finalization. The unique request index still
 prevents duplicate admission. Finalization retains its full-record equality
 checks; mismatches are not ignored or retried inside the tick.
 
+The immutable attempt value contract is v5. Task-stage subjects may carry a
+controller-admitted typed proposal binding; the runtime-control-plane database
+schema advances to v2 even though `subject_json` needs no column change. That
+explicit no-layout-change migration ensures older Hive processes refuse newer
+rows before trying to decode the added closed subject member.
+
 For the preceding SQLite layout only, explicit `Database#migrate!` recognizes
 the exact old schema fingerprint and atomically rebuilds the attempts table
 without that foreign key. It preserves rows, indexes and CHECK constraints,

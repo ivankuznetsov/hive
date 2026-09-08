@@ -48,6 +48,23 @@ class ProposalReconcilerTest < Minitest::Test
     end
   end
 
+  def test_terminally_quarantines_an_oversize_committed_receipt
+    with_tmp_git_repo do |dir|
+      ops, source_store, store = stores(dir)
+      event = submission
+      source_store.admit!(event)
+      path = source_store.paths_for_admission(event.source_event_id).first
+      File.binwrite(path, "x" * (Hive::Proposals::SourceEventStore::MAX_FILE_BYTES + 1))
+      commit_admission(ops, source_store, event)
+
+      result = reconciler(ops, source_store, store).reconcile!
+
+      assert_equal 1, result.quarantined
+      assert_equal "quarantine", source_store.status(event.source_event_id).fetch("state")
+      assert_empty source_store.pending_ids
+    end
+  end
+
   def test_removes_uncommitted_receipts_without_ingesting_them
     with_tmp_git_repo do |dir|
       ops, source_store, store = stores(dir)
@@ -86,7 +103,7 @@ class ProposalReconcilerTest < Minitest::Test
     end
   end
 
-  def test_failed_quarantine_commit_restores_pending_state_and_tolerates_reset_failure
+  def test_failed_quarantine_commit_restores_pending_state
     with_tmp_git_repo do |dir|
       ops, source_store, store = stores(dir)
       event = submission
@@ -96,19 +113,47 @@ class ProposalReconcilerTest < Minitest::Test
       ops.define_singleton_method(:hive_commit) do |**_options|
         raise Hive::GitError, "simulated quarantine commit failure"
       end
-      original_run_git = ops.method(:run_git!)
-      ops.define_singleton_method(:run_git!) do |*arguments|
-        raise Hive::GitError, "simulated reset failure" if arguments.include?("read-tree")
-        original_run_git.call(*arguments)
+      refute reconciler.send(
+        :quarantine_source!, event.source_event_id,
+        Hive::Proposals::InvalidRecord.new("bad receipt")
+      )
+      assert_equal "pending", source_store.status(event.source_event_id).fetch("state")
+    end
+  end
+
+  def test_failed_quarantine_commit_does_not_skip_a_valid_pending_neighbor
+    with_tmp_git_repo do |dir|
+      ops, source_store, store = stores(dir)
+      malformed = submission
+      valid = Hive::Proposals::SourceEvent.new(
+        submission.to_h.merge(
+          "source_event_id" => "pse-#{'b' * 64}",
+          "proposal_id" => "prp-00000000-0000-4000-8000-000000000002",
+          "subject" => submission.to_h.fetch("subject").merge(
+            "proposal_id" => "prp-00000000-0000-4000-8000-000000000002"
+          )
+        )
+      )
+      source_store.admit!(malformed)
+      source_store.admit!(valid)
+      File.write(source_store.paths_for_admission(malformed.source_event_id).first, "{malformed")
+      commit_admission(ops, source_store, malformed)
+      commit_admission(ops, source_store, valid)
+      original_commit = ops.method(:hive_commit)
+      ops.define_singleton_method(:hive_commit) do |**options|
+        if options.fetch(:action).include?("quarantined")
+          raise Hive::GitError, "simulated quarantine commit failure"
+        end
+        original_commit.call(**options)
       end
 
-      assert_raises(Hive::GitError) do
-        reconciler.send(
-          :quarantine_source!, event.source_event_id,
-          Hive::Proposals::InvalidRecord.new("bad receipt")
-        )
-      end
-      assert_equal "pending", source_store.status(event.source_event_id).fetch("state")
+      result = reconciler(ops, source_store, store).reconcile!
+
+      assert_equal 2, result.processed
+      assert_equal 1, result.consumed
+      assert_equal 0, result.quarantined
+      assert_equal "pending", source_store.status(malformed.source_event_id).fetch("state")
+      assert_equal "consumed", source_store.status(valid.source_event_id).fetch("state")
     end
   end
 

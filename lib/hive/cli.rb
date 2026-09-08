@@ -547,7 +547,7 @@ module Hive
     option :expected_head_digest, type: :string,
                                   desc: "observed lifecycle head digest"
     option :considered_evaluations, type: :array, default: [],
-                                     desc: "evaluation IDs considered by a decision"
+                                     desc: "observed EVENT_ID:RESULT_DIGEST pairs considered by a decision"
     option :authority, type: :string, desc: "configured lifecycle authority identity"
     option :policy_fingerprint, type: :string,
                                 desc: "observed lifecycle authority policy fingerprint"
@@ -569,7 +569,7 @@ module Hive
         include_quarantine: options[:include_quarantine],
         expected_head_version: options[:expected_head_version],
         expected_head_digest: options[:expected_head_digest],
-        considered_evaluation_ids: options[:considered_evaluations],
+        considered_evaluations: options[:considered_evaluations],
         authority_identity: options[:authority], policy_fingerprint: options[:policy_fingerprint]
       ).call
     end

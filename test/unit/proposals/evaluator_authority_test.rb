@@ -43,6 +43,21 @@ class ProposalEvaluatorAuthorityTest < Minitest::Test
     end
   end
 
+  def test_empty_admission_lists_grant_no_workflow_stage_or_profile
+    empty = config
+    empty["evaluators"]["benchmark-reviewer"] = {
+      "workflows" => [], "stages" => [], "agent_profiles" => []
+    }
+    authority = Hive::Proposals::EvaluatorAuthority.new(empty)
+
+    assert_raises(Hive::Proposals::Unauthorized) do
+      authority.bind!(
+        identity: "benchmark-reviewer", workflow: "coding",
+        stage: "4-execute", agent_profile: "codex"
+      )
+    end
+  end
+
   private
 
   def config

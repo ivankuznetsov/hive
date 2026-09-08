@@ -65,7 +65,7 @@ class AttemptsRecordTest < Minitest::Test
   def test_launching_record_exposes_unclaimed_deadline_and_immutable_identity
     record = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30)
 
-    assert_equal 4, record["schema_version"]
+    assert_equal 5, record["schema_version"]
     assert_equal "launching", record.state
     assert record.live?
     refute record.claimed?
@@ -441,15 +441,14 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
-  def test_legacy_v2_record_is_rejected_until_migrated
+  def test_legacy_v4_record_is_rejected_until_migrated
     legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
-    legacy["schema_version"] = 2
-    legacy.delete("subject")
+    legacy["schema_version"] = 4
 
     error = assert_raises(Hive::Attempts::InvalidRecord) do
       Hive::Attempts::Record.new(legacy)
     end
-    assert_includes error.message, "unsupported schema_version 2"
+    assert_includes error.message, "unsupported schema_version 4"
   end
 
   def test_task_subject_must_match_the_legacy_identity_fields

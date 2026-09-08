@@ -74,8 +74,8 @@ class ProposalAuthorityTest < Minitest::Test
     end
 
     clock = -> { Time.utc(2026, 8, 30, 12, 0, 0) }
-    not_yet = authority_with_window(valid_from: "2026-08-30T12:01:01.000000Z", clock:)
-    expired = authority_with_window(valid_until: "2026-08-30T12:00:00.000000Z", clock:)
+    not_yet = authority_with_window(valid_from: "2026-08-30T12:01:01Z", clock:)
+    expired = authority_with_window(valid_until: "2026-08-30T12:00:00Z", clock:)
 
     assert_raises(Hive::Proposals::Unauthorized) do
       not_yet.authorize!(

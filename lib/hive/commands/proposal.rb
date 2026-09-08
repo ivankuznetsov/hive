@@ -4,7 +4,9 @@ require "open3"
 require "pathname"
 require "tmpdir"
 require "hive/git_ops"
+require "hive/git_ref"
 require "hive/config"
+require "hive/schemas"
 require "hive/proposals/authority"
 require "hive/proposals/producer"
 require "hive/proposals/compiler"
@@ -21,6 +23,7 @@ module Hive
       READ_COMMANDS = %w[list show filter].freeze
       LIFECYCLE_COMMANDS = %w[decide supersede rollback].freeze
       COMMANDS = (SOURCE_COMMANDS + READ_COMMANDS + LIFECYCLE_COMMANDS + %w[refresh]).freeze
+      MANAGED_WIKI_BRANCH = "llm-wiki/refresh".freeze
 
       def initialize(subcommand, target, input:, project: nil, json: false, stdout: $stdout,
                      task_resolver: nil, producer_factory: nil, reconciler: nil,
@@ -28,7 +31,7 @@ module Hive
                      refresh_runner: nil, project_root: Dir.pwd, filters: {},
                      include_drafts: false, include_quarantine: false,
                      expected_head_version: nil, expected_head_digest: nil,
-                     considered_evaluation_ids: [], authority_identity: nil,
+                     considered_evaluations: [], authority_identity: nil,
                      policy_fingerprint: nil)
         @subcommand = subcommand.to_s
         @target = target
@@ -50,7 +53,7 @@ module Hive
         @include_quarantine = include_quarantine
         @expected_head_version = expected_head_version
         @expected_head_digest = expected_head_digest
-        @considered_evaluation_ids = considered_evaluation_ids
+        @considered_evaluations = considered_evaluations
         @authority_identity = authority_identity
         @policy_fingerprint = policy_fingerprint
       end
@@ -107,15 +110,16 @@ module Hive
       end
 
       def error_kind(error)
+        kinds = Hive::Schemas::ProposalErrorKind
         case error
-        when Hive::Proposals::Unauthorized then "unauthorized"
-        when Hive::Proposals::StaleObservation then "stale"
-        when Hive::Proposals::Conflict then "conflict"
-        when Hive::Proposals::QuotaExceeded then "quota"
-        when Hive::Proposals::QuarantinedSource then "quarantine"
-        when Hive::Proposals::SourceUnavailable then "source_unavailable"
-        when Hive::ConfigError then "config"
-        else "invalid"
+        when Hive::Proposals::Unauthorized then kinds::UNAUTHORIZED
+        when Hive::Proposals::StaleObservation then kinds::STALE
+        when Hive::Proposals::Conflict then kinds::CONFLICT
+        when Hive::Proposals::QuotaExceeded then kinds::QUOTA
+        when Hive::Proposals::QuarantinedSource then kinds::QUARANTINE
+        when Hive::Proposals::SourceUnavailable then kinds::SOURCE_UNAVAILABLE
+        when Hive::ConfigError then kinds::CONFIG
+        else kinds::INVALID
         end
       end
 
@@ -194,9 +198,14 @@ module Hive
           result = Hive::Proposals::Compiler.compile_at_ref(
             git_ops: ops, source_ref:, output_root: scratch
           )
-          matches = result.paths.all? do |generated|
-            live = File.join(ops.project_root, Pathname.new(generated).relative_path_from(Pathname.new(scratch)))
-            File.file?(live) && File.binread(live) == File.binread(generated)
+          published_commit = managed_wiki_commit(ops)
+          matches = published_commit && result.paths.all? do |generated|
+            relative = Pathname.new(generated).relative_path_from(Pathname.new(scratch)).to_s
+            expected = File.binread(generated)
+            published = ops.read_blob_at(
+              published_commit, relative, max_bytes: expected.bytesize + 1
+            )
+            published == expected
           end
         end
         unless matches
@@ -204,6 +213,21 @@ module Hive
                 "compiled proposal wiki views are stale for #{result.source_commit}"
         end
         render_refresh("current", result)
+      end
+
+      def managed_wiki_commit(ops)
+        branch = Hive::GitRef.validate_branch_name(
+          ENV.fetch("LLM_WIKI_REFRESH_BRANCH", MANAGED_WIKI_BRANCH)
+        )
+        ref = "refs/heads/#{branch}"
+        return unless ops.ref_exists?(ref)
+
+        oid = ops.run_git!(
+          "-C", ops.project_root, "rev-parse", "--verify", "#{ref}^{commit}"
+        ).strip
+        oid if oid.match?(/\A[0-9a-f]{40,64}\z/i)
+      rescue ArgumentError, Hive::GitError
+        nil
       end
 
       def run_managed_refresh(project_root, ops, source_ref = ops.hive_state_head_sha)
@@ -270,11 +294,37 @@ module Hive
         )
         service.decide(
           **common, outcome: data.fetch("outcome"),
-          considered_evaluation_ids: Array(@considered_evaluation_ids),
+          considered_evaluations: observed_evaluations,
           rationale_category: data.fetch("rationale_category"),
           rationale: data.fetch("rationale"), links: data.fetch("links", []),
           idempotency_key: data.fetch("idempotency_key")
         )
+      end
+
+      def observed_evaluations
+        Array(@considered_evaluations).map do |entry|
+          row = if entry.is_a?(Hash)
+            Proposals.closed_hash!(
+              entry, required: %w[evaluation_id result_digest],
+              label: "considered evaluation observation"
+            )
+          else
+            event_id, separator, result_digest = entry.to_s.partition(":")
+            unless separator == ":" && !result_digest.empty?
+              raise Hive::Proposals::InvalidRecord,
+                    "considered evaluations must use EVENT_ID:RESULT_DIGEST"
+            end
+            { "evaluation_id" => event_id, "result_digest" => result_digest }
+          end
+          {
+            "evaluation_id" => Proposals.event_id!(
+              row.fetch("evaluation_id"), error: Hive::Proposals::InvalidRecord
+            ),
+            "result_digest" => Proposals.digest!(
+              row.fetch("result_digest"), label: "considered evaluation result digest"
+            )
+          }
+        end
       end
 
       def supersede(service, payload, common)

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-source-status.v1.json",
+  "title": "Hive proposal source status (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "source_event_id", "proposal_id", "state",
+    "result", "reason", "recorded_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-proposal-source-status" },
+    "schema_version": { "const": 1 },
+    "source_event_id": { "$ref": "#/$defs/SourceEventId" },
+    "proposal_id": { "$ref": "#/$defs/ProposalId" },
+    "state": { "enum": ["consumed", "quarantine"] },
+    "result": { "oneOf": [{ "$ref": "#/$defs/IngestionResult" }, { "type": "null" }] },
+    "reason": { "oneOf": [{ "$ref": "#/$defs/QuarantineReason" }, { "type": "null" }] },
+    "recorded_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "consumed" } } },
+      "then": {
+        "properties": {
+          "result": { "$ref": "#/$defs/IngestionResult" },
+          "reason": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "quarantine" } } },
+      "then": {
+        "properties": {
+          "result": { "type": "null" },
+          "reason": { "$ref": "#/$defs/QuarantineReason" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "ProposalId": {
+      "type": "string",
+      "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "EventId": {
+      "type": "string",
+      "pattern": "^pev-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SourceEventId": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+    "IngestionResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "proposal_id", "event_id", "source_event_id"],
+      "properties": {
+        "kind": { "enum": ["record", "event"] },
+        "proposal_id": { "$ref": "#/$defs/ProposalId" },
+        "event_id": { "oneOf": [{ "$ref": "#/$defs/EventId" }, { "type": "null" }] },
+        "source_event_id": { "$ref": "#/$defs/SourceEventId" }
+      }
+    },
+    "QuarantineReason": {
+      "type": "object", "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    }
+  }
+}

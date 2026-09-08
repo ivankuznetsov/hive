@@ -28,6 +28,10 @@ class ProposalContextSelectorTest < Minitest::Test
     assert_equal [ @rejected, @draft ].intersection(selection.selected_ids), selection.selected_ids
     assert_includes selection.text, '"status":"rejected"'
     assert_includes selection.text, '"method_kind":"benchmark"'
+    numeric_values = selection.items.first.fetch("evaluations").flat_map do |evaluation|
+      evaluation.fetch("numeric_values")
+    end
+    assert_equal [ 0.91, 1.4 ], numeric_values
     refute_includes selection.text, "recall"
     refute_includes selection.text, "Benchmark replay"
     refute_includes selection.text, '"revision"'
@@ -37,6 +41,21 @@ class ProposalContextSelectorTest < Minitest::Test
     refute_includes selection.text, "secret"
     refute_includes selection.text, "Threshold exceeded"
     assert_equal "none", selection.items.first.fetch("retention_enforcement")
+  end
+
+  def test_reports_no_terminal_matches_without_claiming_budget_exhaustion
+    result = Struct.new(:proposals).new([ @store.projection(@draft) ])
+    query = Object.new
+    query.define_singleton_method(:list) { |**_options| result }
+
+    selection = Hive::Proposals::ContextSelector.new(query:).select(
+      context: context(@draft, revision: "v1"), max_items: 20, max_bytes: 2_048,
+      remaining_bytes: 2_048
+    )
+
+    assert selection.empty?
+    refute selection.truncated
+    assert_equal "no_terminal_matches", selection.reason
   end
 
   def test_shared_budget_truncates_whole_items_and_records_provenance
@@ -130,10 +149,20 @@ class ProposalContextSelectorTest < Minitest::Test
       with_replaced_singleton_method(
         Hive::ContextProvenance, :prompt_appendix, ->(_task, _context) { oversized_receipt }
       ) do
-        capped = Hive::ContextProvenance.decorate_prompt(
-          task:, prompt: "contract", context: prompt_context
-        )
+        recorded = []
+        recorder = ->(_task, _context, selection) { recorded << selection }
+        capped = with_replaced_singleton_method(
+          Hive::ContextProvenance, :record_proposal_context_activity, recorder
+        ) do
+          Hive::ContextProvenance.decorate_prompt(
+            task:, prompt: "contract", context: prompt_context
+          )
+        end
         assert_equal "contract\n\n#{oversized_receipt}", capped
+        assert_equal 1, recorded.length
+        assert recorded.first.truncated
+        assert_equal "budget_exhausted", recorded.first.reason
+        assert_equal 6, recorded.first.effective_budget
       end
     end
   end
@@ -144,12 +173,12 @@ class ProposalContextSelectorTest < Minitest::Test
     Hive::Proposals::ContextSelector.new(query: @query)
   end
 
-  def context(id)
+  def context(id, revision: "v2")
     Context.new(
       proposal_binding: {
         "schema_version" => 1,
         "subject" => {
-          "kind" => "workflow", "reference" => "coding", "revision" => "v2",
+          "kind" => "workflow", "reference" => "coding", "revision" => revision,
           "proposal_id" => id
         }
       }

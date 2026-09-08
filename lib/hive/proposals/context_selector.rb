@@ -47,6 +47,9 @@ module Hive
           next unless projection.terminal?
           [ rank, typed_fact(projection) ]
         end.first(max_items)
+        if candidates.empty?
+          return empty_selection(configured_budget, effective_budget, "no_terminal_matches")
+        end
         truncated = ranked.count { |_rank, projection| projection.terminal? } > candidates.length
         items = []
         lines = []
@@ -133,6 +136,7 @@ module Hive
             "evaluator_id" => evaluation.dig("evaluator", "id"),
             "method_kind" => evaluation.dig("method", "kind"),
             "outcome" => evaluation.dig("result", "outcome"),
+            "numeric_values" => numeric_values(evaluation.dig("result", "metrics")),
             "details_digest" => evaluation.dig("result", "details_digest")
           }
         end
@@ -145,6 +149,15 @@ module Hive
           "lineage_ids" => projection.lineage_ids,
           "retention_enforcement" => "none"
         }
+      end
+
+      def numeric_values(metrics)
+        return [] unless metrics.is_a?(Hash)
+
+        metrics.keys.sort.filter_map do |key|
+          value = metrics[key]
+          value if value.is_a?(Numeric) && (!value.respond_to?(:finite?) || value.finite?)
+        end
       end
 
       def empty_selection(configured_budget, effective_budget, reason)

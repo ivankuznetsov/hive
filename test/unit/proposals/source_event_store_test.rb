@@ -64,7 +64,7 @@ class ProposalSourceEventStoreTest < Minitest::Test
 
       assert_raises(Hive::Proposals::QuotaExceeded) { store.admit!(second) }
       assert_empty store.pending_ids
-      refute store.index.key?("proposal_usage")
+      assert_equal 2, store.index.dig("usage", "project_events")
     end
   end
 
@@ -231,15 +231,96 @@ class ProposalSourceEventStoreTest < Minitest::Test
 
       event_dir = File.join(dir, "events", source_event.proposal_id)
       FileUtils.mkdir_p(event_dir)
-      File.write(File.join(event_dir, "malformed.json"), "{malformed")
+      File.write(File.join(event_dir, "malformed.json"), "[]")
+      File.write(File.join(event_dir, "also-malformed.json"), "null")
       assert_equal 0, store.send(:recent_actor_events_unlocked, "alice")
 
       store.send(:write_index_unlocked, store.send(:empty_index))
       assert_equal [], store.index.fetch("pending")
+      assert_equal 3, store.index.dig("usage", "project_events")
+      assert_operator store.index.dig("usage", "project_bytes"), :>, 0
 
       assert_raises(Hive::Proposals::QuarantinedSource) do
         store.fetch(source_event.source_event_id)
       end
+    end
+  end
+
+  def test_admission_and_rate_checks_do_not_rescan_retained_history
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
+      store.admit!(source_event)
+      replacement = ->(*_arguments) { raise "retained history scan" }
+
+      with_replaced_singleton_method(Find, :find, replacement) do
+        second = Hive::Proposals::SourceEvent.new(
+          source_event.to_h.merge("source_event_id" => "pse-#{'d' * 64}")
+        )
+        store.admit!(second)
+        assert_equal 2, store.send(:recent_actor_events_unlocked, "alice")
+      end
+    end
+  end
+
+
+  def test_persisted_usage_and_rate_window_survive_restart_without_history_scans
+    with_tmp_dir do |dir|
+      now = Time.utc(2026, 8, 30, 12, 30, 0)
+      clock = -> { now }
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits, clock:)
+      store.admit!(source_event)
+      before = store.index.fetch("usage")
+      restarted = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits, clock:)
+      replacement = ->(*_arguments) { raise "retained history scan" }
+
+      with_replaced_singleton_method(Find, :find, replacement) do
+        assert_equal before, restarted.index.fetch("usage")
+        second = Hive::Proposals::SourceEvent.new(
+          source_event.to_h.merge("source_event_id" => "pse-#{'d' * 64}")
+        )
+        restarted.admit!(second)
+        assert_equal 2, restarted.send(:recent_actor_events_unlocked, "alice")
+        now += 3_601
+        assert_equal 0, restarted.send(:recent_actor_events_unlocked, "alice")
+      end
+    end
+  end
+
+  def test_absent_index_bootstraps_inbox_canonical_and_rate_accounting_with_malformed_neighbors
+    with_tmp_dir do |dir|
+      inbox = File.join(dir, "inbox")
+      quarantine = File.join(inbox, "quarantine")
+      event_dir = File.join(dir, "events", source_event.proposal_id)
+      FileUtils.mkdir_p(quarantine)
+      FileUtils.mkdir_p(event_dir)
+      receipt = Hive::Proposals.canonical(source_event.to_h)
+      status = Hive::Proposals.canonical(
+        "schema" => "hive-proposal-source-status", "schema_version" => 1,
+        "source_event_id" => source_event.source_event_id,
+        "proposal_id" => source_event.proposal_id, "state" => "quarantine",
+        "result" => nil, "reason" => { "code" => "invalid", "message" => "invalid" },
+        "recorded_at" => "2026-08-30T12:10:00.000000Z"
+      )
+      receipt_path = File.join(inbox, "#{source_event.source_event_id}.json")
+      status_path = File.join(quarantine, "#{source_event.source_event_id}.json")
+      array_path = File.join(event_dir, "00000000000000000001-array.json")
+      null_path = File.join(event_dir, "00000000000000000002-null.json")
+      File.binwrite(receipt_path, receipt)
+      File.binwrite(status_path, status)
+      File.binwrite(array_path, "[]")
+      File.binwrite(null_path, "null")
+      store = Hive::Proposals::SourceEventStore.new(
+        root: dir, limits: limits, clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
+      )
+
+      index = store.index
+
+      assert_equal 3, index.dig("usage", "project_events")
+      assert_equal [ receipt, status, "[]", "null" ].sum(&:bytesize),
+                   index.dig("usage", "project_bytes")
+      assert_equal index.dig("usage", "project_bytes"),
+                   index.dig("usage", "proposals", source_event.proposal_id, "bytes")
+      assert_equal 1, store.send(:recent_actor_events_unlocked, "alice", index)
     end
   end
 
@@ -299,6 +380,37 @@ class ProposalSourceEventStoreTest < Minitest::Test
         assert_raises(Hive::Proposals::QuarantinedSource) do
           store.send(:read_bytes, "fake", max_bytes: 16)
         end
+      end
+    end
+  end
+
+  def test_inbox_and_terminal_writes_reject_symlinked_parent_directories
+    with_tmp_dir do |dir|
+      outside = Dir.mktmpdir("proposal-source-outside")
+      begin
+        File.symlink(outside, File.join(dir, "inbox"))
+        store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
+
+        assert_raises(Hive::Proposals::Error) { store.admit!(source_event) }
+        assert_empty Dir.children(outside)
+      ensure
+        FileUtils.rm_rf(outside)
+      end
+    end
+
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
+      store.admit!(source_event)
+      outside = Dir.mktmpdir("proposal-status-outside")
+      begin
+        File.symlink(outside, File.join(store.inbox_root, "consumed"))
+
+        assert_raises(Hive::Proposals::Error) do
+          store.mark_consumed!(source_event.source_event_id, result: { "proposal_id" => source_event.proposal_id })
+        end
+        assert_empty Dir.children(outside)
+      ensure
+        FileUtils.rm_rf(outside)
       end
     end
   end

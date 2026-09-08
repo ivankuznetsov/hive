@@ -29,6 +29,26 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_v1_database_requires_and_accepts_explicit_proposal_subject_schema_migration
+    with_tmp_dir do |root|
+      path = File.join(root, "state", "runtime-control-plane.sqlite3")
+      FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+      raw = Sequel.sqlite(path)
+      Sequel::Migrator.run(raw, Hive::RuntimeControlPlane::MIGRATIONS_DIR, target: 1)
+      raw.disconnect
+      File.chmod(0o600, path)
+      database = Hive::RuntimeControlPlane::Database.new(path:)
+
+      assert_equal :older_schema, database.diagnostics.status
+      database.migrate!
+      assert_equal :ok, database.diagnostics.status
+      assert_equal 2, database.diagnostics.schema_version
+    ensure
+      raw&.disconnect
+      database&.disconnect
+    end
+  end
+
   def test_live_connections_use_the_required_sqlite_settings
     with_database do |database|
       settings = database.read do |connection|

@@ -78,6 +78,8 @@ module Hive
       )
       unless proposal_selection.empty?
         appendix = "#{appendix}\n\n#{proposal_selection.text.rstrip}"
+      end
+      if !proposal_selection.empty? || proposal_selection.truncated
         record_proposal_context_activity(task, context, proposal_selection)
       end
       raise ArgumentError, "context receipt prompt appendix exceeds byte budget" if

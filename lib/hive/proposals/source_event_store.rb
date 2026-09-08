@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "tmpdir"
 require "find"
+require "pathname"
 require "hive/atomic_file"
 require "hive/proposals/source_event"
 
@@ -46,7 +47,7 @@ module Hive
 
             raise Conflict, "proposal source event ID was reused with changed content"
           end
-          current = read_index_unlocked
+          current = prune_recent_actor_events(read_index_unlocked)
           next_index = Proposals.stringify(current)
           next_index["pending"] << event.source_event_id
           next_index["pending"].sort!
@@ -55,6 +56,14 @@ module Hive
             "bytes" => MAX_FILE_BYTES + MAX_TERMINAL_BYTES, "events" => 1
           }
           next_index["total_sources"] += 1
+          add_usage!(
+            next_index.fetch("usage"), event.proposal_id,
+            bytes: bytes.bytesize, events: 1
+          )
+          next_index["recent_actor_events"] << {
+            "actor_id" => event.to_h.dig("actor", "id"),
+            "occurred_at" => Proposals.timestamp!(@clock.call, label: "proposal rate time")
+          }
           index_bytes = encoded_index(next_index)
           enforce_source_quotas!(
             current, event, receipt_bytes: bytes.bytesize,
@@ -117,6 +126,8 @@ module Hive
         [ status_path(state.to_s, id), index_path ]
       end
 
+      def paths_for_lifecycle = [ index_path ]
+
       def enforce_lifecycle!(proposal_id:, actor_id:, event_bytes:)
         proposal_id = Proposals.proposal_id!(proposal_id)
         actor_id = Proposals.label!(actor_id, label: "proposal lifecycle authority")
@@ -124,12 +135,22 @@ module Hive
         raise InvalidRecord, "proposal lifecycle event bytes must be positive" unless bytes.positive?
 
         with_lock do
-          current = read_index_unlocked
+          current = prune_recent_actor_events(read_index_unlocked)
           usage = namespace_usage_unlocked(current)
+          next_index = Proposals.stringify(current)
+          add_usage!(next_index.fetch("usage"), proposal_id, bytes:, events: 1)
+          next_index.fetch("recent_actor_events") << {
+            "actor_id" => actor_id,
+            "occurred_at" => Proposals.timestamp!(@clock.call, label: "proposal rate time")
+          }
+          index_bytes = encoded_index(next_index)
+          index_growth = index_bytes.bytesize - file_size(index_path)
           enforce_aggregate!(
-            usage, proposal_id:, added_bytes: bytes, added_events: 1,
-            actor_id:
+            usage, proposal_id:, added_bytes: bytes + index_growth, added_events: 1,
+            actor_id:, recent_events: current.fetch("recent_actor_events"),
+            proposal_added_bytes: bytes
           )
+          write_index_bytes_unlocked(index_bytes)
         end
         true
       rescue ArgumentError, TypeError
@@ -165,6 +186,11 @@ module Hive
           next_index["pending_proposals"].delete(id)
           next_index["reservations"].delete(id)
           next_index["#{state == 'consumed' ? 'consumed' : 'quarantined'}_count"] += 1
+          canonical_bytes, canonical_events = canonical_usage_for_result(result)
+          add_usage!(
+            next_index.fetch("usage"), proposal_id,
+            bytes: bytes.bytesize + canonical_bytes, events: canonical_events
+          )
           index_bytes = encoded_index(next_index)
           create_immutable(status_path(state, id), bytes)
           write_index_bytes_unlocked(index_bytes)
@@ -183,12 +209,13 @@ module Hive
           usage, proposal_id: event.proposal_id,
           added_bytes: receipt_bytes + MAX_FILE_BYTES + MAX_TERMINAL_BYTES + index_growth,
           proposal_added_bytes: receipt_bytes + MAX_FILE_BYTES + MAX_TERMINAL_BYTES,
-          added_events: 2, actor_id: event.to_h.dig("actor", "id")
+          added_events: 2, actor_id: event.to_h.dig("actor", "id"),
+          recent_events: current.fetch("recent_actor_events")
         )
       end
 
       def enforce_aggregate!(usage, proposal_id:, added_bytes:, added_events:, actor_id:,
-                             proposal_added_bytes: added_bytes)
+                             proposal_added_bytes: added_bytes, recent_events:)
         if usage.fetch("project_events") + usage.fetch("reserved_events") + added_events >
            integer_limit("max_project_events")
           raise QuotaExceeded, "proposal project event quota exceeded"
@@ -209,7 +236,8 @@ module Hive
            integer_limit("max_proposal_bytes")
           raise QuotaExceeded, "proposal byte quota exceeded"
         end
-        if recent_actor_events_unlocked(actor_id) >= integer_limit("max_sources_per_actor_per_hour")
+        if recent_events.count { |entry| entry["actor_id"] == actor_id } >=
+           integer_limit("max_sources_per_actor_per_hour")
           raise QuotaExceeded, "proposal authority rate limit exceeded"
         end
       end
@@ -227,13 +255,14 @@ module Hive
         return empty_index unless document
         required = %w[
           schema schema_version pending consumed_count quarantined_count total_sources
-          pending_proposals reservations
+          pending_proposals reservations usage recent_actor_events
         ]
         unless document.is_a?(Hash) && document.keys.sort == required.sort &&
                document["schema"] == INDEX_SCHEMA && document["schema_version"] == 1 &&
                document["pending"].is_a?(Array) && document["pending"].uniq == document["pending"] &&
                document["pending"].all? { |id| id.to_s.match?(SOURCE_EVENT_ID) } &&
-               valid_usage_index?(document)
+               valid_usage_index?(document) && valid_persisted_usage?(document["usage"]) &&
+               valid_recent_actor_events?(document["recent_actor_events"])
           raise QuarantinedSource, "proposal source index is malformed"
         end
         %w[consumed_count quarantined_count total_sources].each do |key|
@@ -245,10 +274,12 @@ module Hive
       end
 
       def empty_index
+        usage, recent_actor_events = scan_namespace_unlocked
         {
           "schema" => INDEX_SCHEMA, "schema_version" => 1, "pending" => [],
           "consumed_count" => 0, "quarantined_count" => 0,
-          "total_sources" => 0, "pending_proposals" => {}, "reservations" => {}
+          "total_sources" => 0, "pending_proposals" => {}, "reservations" => {},
+          "usage" => usage, "recent_actor_events" => recent_actor_events
         }
       end
 
@@ -268,10 +299,14 @@ module Hive
       end
 
       def namespace_usage_unlocked(index)
-        usage = {
-          "project_bytes" => 0, "project_events" => 0,
-          "reserved_bytes" => 0, "reserved_events" => 0, "proposals" => {}
-        }
+        usage = Proposals.stringify(index.fetch("usage"))
+        usage["project_bytes"] += file_size(index_path)
+        usage["reserved_bytes"] = 0
+        usage["reserved_events"] = 0
+        usage.fetch("proposals").each_value do |proposal|
+          proposal["reserved_bytes"] = 0
+          proposal["reserved_events"] = 0
+        end
         index.fetch("reservations").each do |source_id, reservation|
           proposal_id = index.fetch("pending_proposals").fetch(source_id)
           proposal = proposal_usage(usage, proposal_id)
@@ -280,7 +315,60 @@ module Hive
           proposal["reserved_bytes"] += reservation.fetch("bytes")
           proposal["reserved_events"] += reservation.fetch("events")
         end
+        usage
+      end
+
+      def proposal_usage(usage, proposal_id)
+        usage.fetch("proposals")[proposal_id] ||= {
+          "events" => 0, "bytes" => 0, "reserved_bytes" => 0, "reserved_events" => 0
+        }
+      end
+
+      def proposal_id_for_file(relative, path, data: nil)
+        case relative
+        when %r{\Arecords/(prp-[^/]+)\.json\z}, %r{\Aevents/(prp-[^/]+)/}
+          Regexp.last_match(1).match?(PROPOSAL_ID) ? Regexp.last_match(1) : nil
+        when %r{\Ainbox/(pse-[0-9a-f]{64})\.json\z}
+          document = data || JSON.parse(File.binread(path, MAX_FILE_BYTES + 1))
+          document["proposal_id"] if document.is_a?(Hash) &&
+            document["proposal_id"].to_s.match?(PROPOSAL_ID)
+        when %r{\Ainbox/(?:consumed|quarantine)/(pse-[0-9a-f]{64})\.json\z}
+          document = data || JSON.parse(File.binread(path, MAX_FILE_BYTES + 1))
+          document["proposal_id"] if document.is_a?(Hash) &&
+            document["proposal_id"].to_s.match?(PROPOSAL_ID)
+        end
+      rescue JSON::ParserError, QuarantinedSource, SystemCallError, IOError
+        nil
+      end
+
+      def namespace_event_file?(relative)
+        relative.match?(%r{\Arecords/[^/]+\.json\z}) ||
+          relative.match?(%r{\Aevents/[^/]+/[^/]+\.json\z}) ||
+          relative.match?(%r{\Ainbox/pse-[0-9a-f]{64}\.json\z})
+      end
+
+      def recent_actor_events_unlocked(actor_id, index = read_index_unlocked)
+        prune_recent_actor_events(index).fetch("recent_actor_events")
+          .count { |entry| entry["actor_id"] == actor_id }
+      end
+
+      def prune_recent_actor_events(index)
+        cutoff = @clock.call - 3_600
+        copy = Proposals.stringify(index)
+        copy["recent_actor_events"] = copy.fetch("recent_actor_events").select do |entry|
+          Time.iso8601(entry.fetch("occurred_at")) >= cutoff
+        rescue ArgumentError
+          false
+        end
+        copy
+      end
+
+      def scan_namespace_unlocked
+        usage = { "project_bytes" => 0, "project_events" => 0, "proposals" => {} }
+        recent_actor_events = []
         paths = 0
+        return [ usage, recent_actor_events ] unless File.exist?(root) || File.symlink?(root)
+
         Find.find(root) do |path|
           next if path == root
           paths += 1
@@ -293,65 +381,103 @@ module Hive
           next unless stat.file?
 
           relative = path.delete_prefix("#{root}/")
+          next if relative == "inbox/index.json"
+
+          data = bounded_json_file(path, stat.size)
+          proposal_id = proposal_id_for_file(relative, path, data:)
           usage["project_bytes"] += stat.size
-          proposal_id = proposal_id_for_file(relative, path)
-          proposal_usage(usage, proposal_id)["bytes"] += stat.size if proposal_id
-          if namespace_event_file?(relative)
-            usage["project_events"] += 1
-            proposal_usage(usage, proposal_id)["events"] += 1 if proposal_id
+          event_file = namespace_event_file?(relative)
+          usage["project_events"] += 1 if event_file
+          if proposal_id
+            proposal = usage.fetch("proposals")[proposal_id] ||= { "bytes" => 0, "events" => 0 }
+            proposal["bytes"] += stat.size
+            proposal["events"] += 1 if event_file
           end
+          actor_event = recent_actor_event(relative, data)
+          recent_actor_events << actor_event if actor_event
         rescue Errno::ENOENT, Errno::ENOTDIR
           next
         end
-        usage
+        [ usage, recent_actor_events ]
       end
 
-      def proposal_usage(usage, proposal_id)
-        usage.fetch("proposals")[proposal_id] ||= {
-          "events" => 0, "bytes" => 0, "reserved_bytes" => 0, "reserved_events" => 0
-        }
-      end
+      def bounded_json_file(path, size)
+        return nil if size > MAX_FILE_BYTES
 
-      def proposal_id_for_file(relative, path)
-        case relative
-        when %r{\Arecords/(prp-[^/]+)\.json\z}, %r{\Aevents/(prp-[^/]+)/}
-          Regexp.last_match(1).match?(PROPOSAL_ID) ? Regexp.last_match(1) : nil
-        when %r{\Ainbox/(pse-[0-9a-f]{64})\.json\z}
-          read_event_unlocked(Regexp.last_match(1))&.proposal_id
-        when %r{\Ainbox/(?:consumed|quarantine)/(pse-[0-9a-f]{64})\.json\z}
-          JSON.parse(File.binread(path, MAX_FILE_BYTES + 1))["proposal_id"]
-        end
-      rescue JSON::ParserError, QuarantinedSource
+        data = JSON.parse(File.binread(path, MAX_FILE_BYTES + 1))
+        data if data.is_a?(Hash)
+      rescue JSON::ParserError, SystemCallError, IOError
         nil
       end
 
-      def namespace_event_file?(relative)
-        relative.match?(%r{\Arecords/[^/]+\.json\z}) ||
-          relative.match?(%r{\Aevents/[^/]+/[^/]+\.json\z}) ||
-          relative.match?(%r{\Ainbox/pse-[0-9a-f]{64}\.json\z})
+      def recent_actor_event(relative, data)
+        return unless data.is_a?(Hash)
+
+        actor_id, occurred_at = if relative.match?(%r{\Ainbox/pse-[0-9a-f]{64}\.json\z})
+          [ data.dig("actor", "id"), data["created_at"] ] if data["actor"].is_a?(Hash)
+        elsif relative.match?(%r{\Aevents/[^/]+/[^/]+\.json\z}) && data["type"] != "evaluation"
+          provenance = data["provenance"]
+          [ provenance.dig("actor", "id"), data["occurred_at"] ] if
+            provenance.is_a?(Hash) && provenance["actor"].is_a?(Hash)
+        end
+        return unless actor_id.is_a?(String) && actor_id.bytesize <= 512 && actor_id.match?(SAFE_LABEL)
+        return unless occurred_at.is_a?(String) && Time.iso8601(occurred_at) >= @clock.call - 3_600
+
+        {
+          "actor_id" => actor_id,
+          "occurred_at" => Proposals.timestamp!(occurred_at, label: "proposal rate time")
+        }
+      rescue ArgumentError, InvalidRecord
+        nil
       end
 
-      def recent_actor_events_unlocked(actor_id)
-        cutoff = @clock.call - 3_600
-        count = 0
-        Dir.glob(File.join(inbox_root, "pse-*.json")).sort.each do |path|
-          bytes = read_bytes(path, max_bytes: MAX_FILE_BYTES)
-          next unless bytes
-          event = SourceEvent.new(JSON.parse(bytes))
-          count += 1 if event.to_h.dig("actor", "id") == actor_id &&
-                        Time.iso8601(event.to_h.fetch("created_at")) >= cutoff
-        rescue JSON::ParserError, InvalidRecord, QuarantinedSource, ArgumentError
-          next
+      def add_usage!(usage, proposal_id, bytes:, events:)
+        usage["project_bytes"] += bytes
+        usage["project_events"] += events
+        proposal = usage.fetch("proposals")[proposal_id] ||= { "bytes" => 0, "events" => 0 }
+        proposal["bytes"] += bytes
+        proposal["events"] += events
+      end
+
+      def valid_persisted_usage?(usage)
+        return false unless usage.is_a?(Hash) && usage.keys.sort == %w[project_bytes project_events proposals]
+        return false unless %w[project_bytes project_events].all? do |key|
+          usage[key].is_a?(Integer) && usage[key] >= 0
         end
-        Dir.glob(File.join(root, "events", "*", "*.json")).sort.each do |path|
-          data = JSON.parse(read_bytes(path, max_bytes: MAX_FILE_BYTES).to_s)
-          next if data.dig("data", "evaluator")
-          count += 1 if data.dig("provenance", "actor", "id") == actor_id &&
-                        Time.iso8601(data.fetch("occurred_at")) >= cutoff
-        rescue JSON::ParserError, QuarantinedSource, ArgumentError, KeyError
-          next
+        proposals = usage["proposals"]
+        proposals.is_a?(Hash) && proposals.all? do |proposal_id, counters|
+          proposal_id.match?(PROPOSAL_ID) && counters.is_a?(Hash) &&
+            counters.keys.sort == %w[bytes events] &&
+            counters.values.all? { |value| value.is_a?(Integer) && value >= 0 }
         end
-        count
+      end
+
+      def valid_recent_actor_events?(entries)
+        entries.is_a?(Array) && entries.length <= MAX_NAMESPACE_PATHS &&
+          entries.all? do |entry|
+            entry.is_a?(Hash) && entry.keys.sort == %w[actor_id occurred_at] &&
+              entry["actor_id"].is_a?(String) && entry["actor_id"].bytesize <= 512 &&
+              entry["actor_id"].match?(SAFE_LABEL) &&
+              Proposals.timestamp!(entry["occurred_at"], label: "proposal rate time")
+          rescue InvalidRecord
+            false
+          end
+      end
+
+      def canonical_usage_for_result(result)
+        return [ 0, 0 ] unless result.is_a?(Hash)
+        kind = result["kind"]
+        proposal_id = Proposals.proposal_id!(result["proposal_id"])
+        path = case kind
+        when "record"
+          File.join(root, "records", "#{proposal_id}.json")
+        when "event"
+          event_id = Proposals.event_id!(result["event_id"])
+          Dir.glob(File.join(root, "events", proposal_id, "*-#{event_id}.json")).first
+        end
+        [ path ? file_size(path) : 0, path ? 1 : 0 ]
+      rescue InvalidRecord, InvalidEvent
+        [ 0, 0 ]
       end
 
       def write_index_unlocked(document)
@@ -405,14 +531,39 @@ module Hive
       end
 
       def create_immutable(path, bytes)
-        FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
+        ensure_safe_directory!(File.dirname(path))
         Hive::AtomicFile.create(path, bytes, mode: 0o600)
       end
 
       def with_lock
-        FileUtils.mkdir_p(inbox_root, mode: 0o700)
+        ensure_safe_directory!(inbox_root)
         Proposals.with_state_lock(root, timeout: @lock_timeout) { yield }
       end
+
+      def ensure_safe_directory!(path)
+        unless path == root || path.start_with?("#{root}/")
+          raise Error, "proposal source directory escapes its root"
+        end
+        FileUtils.mkdir_p(root, mode: 0o700) unless path_exists?(root)
+        ensure_one_directory!(root)
+        relative = Pathname.new(path).relative_path_from(Pathname.new(root)).each_filename.to_a
+        current = root
+        relative.each do |segment|
+          current = File.join(current, segment)
+          ensure_one_directory!(current)
+        end
+      end
+
+      def ensure_one_directory!(path)
+        FileUtils.mkdir(path, mode: 0o700) unless path_exists?(path)
+        status = File.lstat(path)
+        raise Error, "proposal source directory is unsafe" unless status.directory? && !status.symlink?
+        File.chmod(0o700, path)
+      rescue Errno::EEXIST
+        retry
+      end
+
+      def path_exists?(path) = File.exist?(path) || File.symlink?(path)
 
       def file_size(path)
         stat = File.lstat(path)

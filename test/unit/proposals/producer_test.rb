@@ -36,6 +36,10 @@ class ProposalProducerTest < Minitest::Test
       ops.hive_state_init
       activity = activity_for(ops)
       producer = producer_for(ops, activity: activity)
+      unrelated = "stages/1-inbox/unrelated/prestaged.txt"
+      FileUtils.mkdir_p(File.dirname(File.join(ops.hive_state_path, unrelated)))
+      File.write(File.join(ops.hive_state_path, unrelated), "preserve me\n")
+      run!("git", "-C", ops.hive_state_path, "add", unrelated)
 
       result = producer.submit(
         proposed_change: "Use a stricter review prompt", motivation: "Improve recall",
@@ -65,6 +69,11 @@ class ProposalProducerTest < Minitest::Test
       assert_includes source_paths, "stages/4-execute/proposal-task/task-journal.jsonl"
       assert_includes canonical_paths, "proposals/v1/records/#{proposal_id}.json"
       refute_includes source_paths, "proposals/v1/records/#{proposal_id}.json"
+      refute_includes source_paths, unrelated
+      refute_includes canonical_paths, unrelated
+      assert_equal "A  #{unrelated}", run!(
+        "git", "-C", ops.hive_state_path, "status", "--porcelain=v1", "--", unrelated
+      ).strip
     end
   end
 
@@ -126,13 +135,46 @@ class ProposalProducerTest < Minitest::Test
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)
       ops.hive_state_init
+      binding = Marshal.load(Marshal.dump(proposal_binding))
+      binding.dig("subject")["reference"] = "agent-skills/hash-bound-reviewer"
       producer = Hive::Proposals::Producer.new(
         project_root: ops.project_root, git_ops: ops, activity: activity_for(ops),
-        attempt: { "subject" => { "proposal" => proposal_binding } },
+        attempt: { "subject" => { "proposal" => binding } },
         proposal_id_generator: -> { proposal_id }
       )
 
-      assert_instance_of Hive::Proposals::Producer, producer
+      result = producer.submit(
+        proposed_change: "Use durable binding", motivation: "Reject caller spoofing",
+        evidence: [ evidence ], source_event_id: "pse-#{'9' * 64}"
+      )
+      store = Hive::Proposals::Store.new(
+        root: File.join(ops.hive_state_path, "proposals", "v1")
+      )
+
+      assert_equal proposal_id, result.proposal_id
+      assert_equal "agent-skills/hash-bound-reviewer",
+                   store.projection(proposal_id).subject.fetch("reference")
+    end
+  end
+
+  def test_rejects_an_unsafe_task_journal_before_appending_activity
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      activity = activity_for(ops)
+      outside = File.join(dir, "outside-journal.jsonl")
+      File.write(outside, "outside\n")
+      File.symlink(outside, File.join(activity.task_folder, "task-journal.jsonl"))
+      producer = producer_for(ops, activity:)
+
+      assert_raises(Hive::Proposals::Error) do
+        producer.submit(
+          proposed_change: "Change review", motivation: "Improve recall",
+          evidence: [ evidence ], source_event_id: "pse-#{'8' * 64}"
+        )
+      end
+      assert_equal "outside\n", File.read(outside)
+      assert File.symlink?(File.join(activity.task_folder, "task-journal.jsonl"))
     end
   end
 

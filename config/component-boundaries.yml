@@ -325,7 +325,7 @@ components:
       - "Explicit workers alone receive a capability-bound write-once safe-evidence descriptor; stdout and stderr cannot populate provider evidence"
       - "Terminal publication acknowledgements are monotonic fields on the attempt row and survive daemon restarts"
     schema_contracts:
-      - "hive-attempt v4 remains the immutable public value contract; the runtime repository validates every encoded row before returning it"
+      - "hive-attempt v5 remains the immutable public value contract; the runtime repository validates every encoded row before returning it"
       - "Admitted attempts retain only the selected route identity; current configuration owns provider order"
     lock_contracts:
       - "Admission and lifecycle changes use one immediate database transaction; record transitions use version, state, and digest guarded CAS"

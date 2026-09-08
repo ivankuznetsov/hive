@@ -1,5 +1,6 @@
 require "time"
 require "hive/proposals"
+require "hive/proposals/configuration_row"
 
 module Hive
   module Proposals
@@ -52,34 +53,7 @@ module Hive
         raw = @config.fetch("authorities", {}).fetch(identity, nil)
         raise Unauthorized, "proposal lifecycle authority is not configured" unless raw
 
-        row = Proposals.closed_hash!(
-          raw, required: ROW_REQUIRED, optional: ROW_OPTIONAL,
-          label: "proposal authority configuration"
-        )
-        unless KINDS.include?(row["kind"])
-          raise InvalidRecord, "proposal authority kind is invalid"
-        end
-        capabilities = row["capabilities"]
-        unless capabilities.is_a?(Array) && capabilities.uniq == capabilities &&
-               capabilities.all? { |entry| CAPABILITIES.include?(entry) }
-          raise InvalidRecord, "proposal authority capabilities are malformed"
-        end
-        version = row.fetch("version", 1)
-        unless version.is_a?(Integer) && version.positive?
-          raise InvalidRecord, "proposal authority version must be positive"
-        end
-        revoked = row.fetch("revoked", false)
-        unless [ true, false ].include?(revoked)
-          raise InvalidRecord, "proposal authority revoked must be boolean"
-        end
-        %w[valid_from valid_until].each do |key|
-          row[key] = Proposals.timestamp!(row[key], label: "proposal authority #{key}") if row[key]
-        end
-        {
-          "kind" => row.fetch("kind"), "capabilities" => capabilities.sort,
-          "version" => version, "revoked" => revoked,
-          "valid_from" => row["valid_from"], "valid_until" => row["valid_until"]
-        }
+        ConfigurationRow.authority!(raw)
       end
 
       def enforce_validity!(row)

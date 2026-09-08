@@ -1,4 +1,5 @@
 require "hive/proposals"
+require "hive/proposals/configuration_row"
 
 module Hive
   module Proposals
@@ -36,25 +37,13 @@ module Hive
       private
 
       def validate_row!(value)
-        row = Proposals.closed_hash!(
-          value, required: ROW_KEYS, label: "proposal evaluator configuration"
-        )
-        ROW_KEYS.each do |key|
-          entries = row.fetch(key)
-          unless entries.is_a?(Array) && entries.uniq == entries && entries.length <= 64
-            raise InvalidRecord, "proposal evaluator #{key} must be a bounded unique array"
-          end
-          row[key] = entries.map do |entry|
-            Proposals.label!(entry, label: "proposal evaluator #{key} entry")
-          end.sort
-        end
-        row
+        ConfigurationRow.evaluator!(value)
       end
 
       def match!(row, key, value)
         allowed = row.fetch(key)
         actual = value.to_s
-        return if allowed.empty? || allowed.include?(actual)
+        return if allowed.include?(actual)
 
         raise Unauthorized, "proposal evaluator is not admitted for #{key.tr('_', ' ')}"
       end

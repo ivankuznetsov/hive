@@ -76,6 +76,26 @@ module Hive
     def canonical(value) = Hive::CanonicalJSON.generate(value)
     def digest(value) = Hive::CanonicalJSON.digest(value)
 
+    def lineage_cycle_nodes(edges)
+      cycles = []
+      finished = {}
+      edges.keys.sort.each do |start|
+        next if finished[start]
+
+        path = []
+        positions = {}
+        current = start
+        while current && !finished[current] && !positions.key?(current)
+          positions[current] = path.length
+          path << current
+          current = edges[current]
+        end
+        cycles.concat(path.drop(positions.fetch(current))) if current && positions.key?(current)
+        path.each { |node| finished[node] = true }
+      end
+      cycles.uniq.sort
+    end
+
     def with_state_lock(root, timeout: STATE_LOCK_TIMEOUT_SEC)
       root = File.expand_path(root)
       held = (Thread.current[:hive_proposal_state_locks] ||= {})

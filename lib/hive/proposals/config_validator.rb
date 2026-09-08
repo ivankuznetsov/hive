@@ -1,5 +1,6 @@
 require "time"
 require "hive/proposals"
+require "hive/proposals/configuration_row"
 
 module Hive
   module Proposals
@@ -42,15 +43,9 @@ module Hive
           unless identity.to_s.match?(IDENTIFIER) && row.is_a?(Hash)
             raise ConfigError, "proposals.evaluators identity in #{source} is malformed"
           end
-          label = "proposals.evaluators.#{identity}"
-          closed_mapping!(row, EVALUATOR_CONFIG_KEYS, label)
-          EVALUATOR_CONFIG_KEYS.each do |key|
-            values = row[key]
-            unless values.is_a?(Array) && values.length <= 64 && values.uniq == values &&
-                   values.all? { |value| bounded_identifier?(value) }
-              raise ConfigError, "#{label}.#{key} in #{source} must be a bounded unique array"
-            end
-          end
+          ConfigurationRow.evaluator!(
+            row, label: "proposals.evaluators.#{identity} in #{source}", error: ConfigError
+          )
         end
       end
 
@@ -62,41 +57,10 @@ module Hive
           unless identity.to_s.match?(IDENTIFIER) && row.is_a?(Hash)
             raise ConfigError, "proposals.authorities identity in #{source} is malformed"
           end
-          label = "proposals.authorities.#{identity}"
-          closed_mapping!(row, AUTHORITY_KEYS, label)
-          unless AUTHORITY_KINDS.include?(row["kind"])
-            raise ConfigError, "#{label}.kind in #{source} must be operator or policy"
-          end
-          capabilities = row["capabilities"]
-          unless capabilities.is_a?(Array) && capabilities.length <= 3 &&
-                 capabilities.uniq == capabilities &&
-                 capabilities.all? { |capability| AUTHORITY_CAPABILITIES.include?(capability) }
-            raise ConfigError, "#{label}.capabilities in #{source} is malformed"
-          end
-          unless row["version"].is_a?(Integer) && row["version"].positive?
-            raise ConfigError, "#{label}.version in #{source} must be positive"
-          end
-          unless [ true, false ].include?(row["revoked"])
-            raise ConfigError, "#{label}.revoked in #{source} must be boolean"
-          end
-          authority_times!(row, label)
+          ConfigurationRow.authority!(
+            row, label: "proposals.authorities.#{identity} in #{source}", error: ConfigError
+          )
         end
-      end
-
-      def authority_times!(row, label)
-        times = %w[valid_from valid_until].to_h do |key|
-          value = row[key]
-          next [ key, nil ] if value.nil?
-          parsed = Time.iso8601(value.to_s)
-          raise ArgumentError unless value.is_a?(String) && parsed.iso8601 == value
-          [ key, parsed ]
-        end
-        return unless times["valid_from"] && times["valid_until"] &&
-                      times["valid_from"] >= times["valid_until"]
-
-        raise ConfigError, "#{label} in #{source} has an empty validity interval"
-      rescue ArgumentError
-        raise ConfigError, "#{label} validity timestamps in #{source} must be canonical ISO 8601"
       end
 
       def evidence!(evidence)
@@ -147,11 +111,6 @@ module Hive
         unknown = value.keys.map(&:to_s) - allowed
         return if unknown.empty?
         raise ConfigError, "#{label} in #{source} has unknown field(s): #{unknown.sort.join(', ')}"
-      end
-
-      def bounded_identifier?(value)
-        value.is_a?(String) && !value.empty? && value.bytesize <= 128 &&
-          !value.match?(/[\u0000-\u001f\u007f]/)
       end
 
       def source

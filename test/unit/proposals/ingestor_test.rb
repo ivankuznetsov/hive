@@ -114,6 +114,10 @@ class ProposalIngestorTest < Minitest::Test
         submission.source_event_id, source_commit:
       )
       assert_equal "consumed", source_store.status(submission.source_event_id).fetch("state")
+      unrelated = "stages/1-inbox/unrelated/prestaged.txt"
+      FileUtils.mkdir_p(File.dirname(File.join(ops.hive_state_path, unrelated)))
+      File.write(File.join(ops.hive_state_path, unrelated), "preserve me\n")
+      run!("git", "-C", ops.hive_state_path, "add", unrelated)
 
       result = Hive::Proposals::Ingestor.new(
         source_store:, store:, git_ops: ops
@@ -121,9 +125,13 @@ class ProposalIngestorTest < Minitest::Test
 
       assert_equal "record", result.kind
       assert_equal "consumed", source_store.status(submission.source_event_id).fetch("state")
-      assert_equal "", run!("git", "-C", ops.hive_state_path, "status", "--porcelain=v1")
+      assert_equal "A  #{unrelated}", run!(
+        "git", "-C", ops.hive_state_path, "status", "--porcelain=v1", "--", unrelated
+      ).strip
       assert_includes run!("git", "-C", ops.hive_state_path, "show", "--name-only", "--format=", "HEAD"),
                       "proposals/v1/records/#{proposal_id}.json"
+      refute_includes run!("git", "-C", ops.hive_state_path, "show", "--name-only", "--format=", "HEAD"),
+                      unrelated
     end
   end
 

@@ -158,10 +158,10 @@ class WorkflowsTest < Minitest::Test
     # portion most at risk of silent drift.
     expected_dirs = [
       "1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr",
-      "6-review", "7-artifacts", "8-finalize", "9-done", "1-review", "2-done",
+      "6-review", "7-artifacts", "8-finalize", "9-done",
       "2-research", "3-outline", "4-draft", "5-critique", "6-done",
       "2-extract", "3-generate", "4-judge", "5-publish",
-      "2-fix", "3-validate", "4-review"
+      "2-fix", "3-validate", "4-review", "1-review", "2-done"
     ]
     expected_names = [
       "inbox", "brainstorm", "plan", "execute", "open-pr",
@@ -198,7 +198,7 @@ class WorkflowsTest < Minitest::Test
   end
 
   def test_all_terminal_stage_dirs_defaults_to_registered_terminals
-    assert_equal [ "9-done", "2-done", "6-done" ], Hive::Workflows.all_terminal_stage_dirs
+    assert_equal [ "9-done", "6-done", "2-done" ], Hive::Workflows.all_terminal_stage_dirs
   end
 
   def test_all_terminal_stage_dirs_includes_registered_workflow_terminal

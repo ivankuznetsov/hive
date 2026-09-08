@@ -136,7 +136,7 @@ module Hive
           intended_stage = if evidence_rework || %w[run approve plan-review-run].include?(verb)
             "#{task.stage_index}-#{task.stage_name}"
           else
-            Hive::Workflows.for_verb(verb).fetch(:target)
+            Hive::Workflows.for_verb(verb, workflow: task.workflow).fetch(:target)
           end
           same_task_id = record["task_id"].nil? || task.id.to_s == record["task_id"].to_s
           unless same_task_id && task.slug == record["task_slug"] && intended_stage == record["intended_stage"]

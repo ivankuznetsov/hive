@@ -1,0 +1,1 @@
+Standalone ad-hoc PR review now uses the built-in `pr-review` workflow (`1-review` → `2-done`) with the shared review runner. Existing synthetic coding reviews migrate with preserved evidence and a replacement task identity. Publication uses the original PR branch with an exact reviewed-head fence, and dropping borrowed review tasks leaves their PRs open. See [[pr-review]].

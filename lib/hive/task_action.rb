@@ -479,16 +479,8 @@ module Hive
       return ACTIONS.fetch(:error) unless stage
 
       case stage.kind
-      # `:execute`/`:review_council`/`:finalize` route straight to the coding
-      # runtime helpers with NO `coding_id?` guard — unlike the `:agent`/`:inert`
-      # arm below, which gates on `coding_id?` via `coding_table_action`. That
-      # asymmetry is deliberate and safe: these three kinds are coding-only by
-      # construction. `DescriptorParser#parse_kind` rejects them for YAML
-      # descriptors, and only `Workflows::Coding` declares them via `Stage.new`,
-      # so no non-coding workflow can carry one. The helpers hardcode coding
-      # semantics (`finalize`/`plan`/`execute` stage names, coding markers); the
-      # guarantee that they only ever see a coding task lives in the kind space
-      # itself, not in a runtime id check here.
+      # Built-in runtime kinds are unavailable to YAML descriptors. Review is
+      # shared by coding and pr-review; execute and finalize remain coding-only.
       when :execute
         execute_action
       when :review_council
@@ -581,9 +573,10 @@ module Hive
     def review_action
       case marker.name
       when :review_complete
-        # A clean ad-hoc PR review parks at 6-review instead of advancing to
-        # artifacts (the daemon must not auto-finalize a borrowed PR). Normal
-        # tasks are unchanged.
+        # Standalone reviews advance to done. Legacy coding imports remain
+        # parked until migrated so they cannot finalize a borrowed PR.
+        return ACTIONS.fetch(:ready_to_advance) if task_workflow.id == :"pr-review"
+
         adhoc_task? ? ACTIONS.fetch(:review_complete_adhoc) : ACTIONS.fetch(:review_complete)
       when :review_stale, :review_ci_stale, :review_error
         ACTIONS.fetch(:review_stale)
@@ -598,10 +591,23 @@ module Hive
         # Enter path then kicks in for review-stage rows too.
         ACTIONS.fetch(:agent_running)
       when :review_waiting
-        ACTIONS.fetch(:review_waiting)
+        ACTIONS.fetch(review_guardrail_ready? ? :review_ready : :review_waiting)
       else
-        ACTIONS.fetch(:review_ready)
+        task_workflow.id == :"pr-review" ? ACTIONS.fetch(:generic_ready_to_run) : ACTIONS.fetch(:review_ready)
       end
+    end
+
+    def review_guardrail_ready?
+      return false unless marker.attrs["reason"] == "fix_guardrail"
+      pass = marker.attrs["pass"].to_s
+      matches = marker.attrs["matches"].to_s
+      return false unless pass.match?(/\A[1-9]\d*\z/) && matches.match?(/\A[1-9]\d*\z/)
+
+      require "hive/stages/review/fix_guardrail"
+      Hive::Stages::Review::FixGuardrail.approved?(
+        task_folder: task.folder, pass: pass.to_i,
+        expected_matches: matches.to_i, cfg: @config
+      )
     end
 
     def brainstorm_action
@@ -757,6 +763,8 @@ module Hive
         elsif recoverable_residual_evidence_contract_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_transient_coverage_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_verification_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
           ACTIONS.fetch(:plan_review_unsupported)
@@ -1115,6 +1123,16 @@ module Hive
         end
         route && !route["attempt_id"].to_s.empty? &&
           PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+      end
+    end
+
+    def recoverable_transient_verification_review?
+      route = Array(plan_review["routes"]).reverse_each.find { |entry| entry["role"] == "verification" }
+      return false unless route && !route["attempt_id"].to_s.empty?
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+
+      Array(plan_review["blockers"]).any? do |blocker|
+        blocker["reason"] == "candidate_verification_#{route['outcome']}"
       end
     end
 

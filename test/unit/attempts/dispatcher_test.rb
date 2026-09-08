@@ -10,6 +10,15 @@ class AttemptsDispatcherTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+
+  def test_standalone_review_dispatch_uses_its_own_workflow_stages
+    task = FakeTask.new(stage_index: 1, stage_name: "review",
+                        workflow: Hive::Workflows::Registry.fetch(:"pr-review"))
+    dispatcher = Hive::Attempts::Dispatcher.allocate
+    assert_equal "1-review", dispatcher.send(:intended_stage_for, [ "hive", "review", "task" ], task)
+    assert_equal "2-done", dispatcher.send(:intended_stage_for, [ "hive", "archive", "task" ], task)
+  end
+
   CLAIM_CAPABILITY = "c" * 64
   FakeTask = Struct.new(
     :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :worktree_path,
@@ -443,6 +452,61 @@ class AttemptsDispatcherTest < Minitest::Test
 
       assert_equal :terminal_replay, later.status
       assert_equal repaired.receipt, later.receipt
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
+  def test_new_request_can_retry_a_successful_process_that_left_the_stage_waiting
+    %w[WAITING EXECUTE_WAITING REVIEW_WAITING ERROR].each do |marker|
+      with_dispatcher do |dispatcher, launcher, task, store|
+        File.write(task.state_file, "# Pending work\n\n<!-- #{marker} -->\n")
+        first = dispatch(dispatcher, task, request_id: "request-one")
+        terminal = terminalize_attempt(
+          store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3
+        )
+
+        same = dispatch(dispatcher, task, request_id: "request-one", now: NOW + 4)
+        automatic = dispatch(dispatcher, task, request_id: "automatic-request", now: NOW + 4)
+        retry_result = dispatch(dispatcher, task, request_id: "request-two", interactive: true, now: NOW + 4)
+
+        assert_equal :terminal_replay, same.status, marker
+        assert_equal terminal.receipt, same.receipt, marker
+        assert_equal :terminal_replay, automatic.status, marker
+        assert_equal :accepted, retry_result.status, marker
+        assert_equal 2, launcher.launched.size, marker
+      end
+    end
+  end
+
+  def test_explicit_run_does_not_repeat_completed_or_controller_work
+    [ "<!-- COMPLETE -->", "<!-- EXECUTE_COMPLETE -->", "<!-- REVIEW_COMPLETE -->" ].each do |body|
+      with_dispatcher do |dispatcher, launcher, task, store|
+        File.write(task.state_file, body)
+        first = dispatch(dispatcher, task, request_id: "first")
+        terminalize_attempt(store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3)
+        assert_equal :terminal_replay, dispatch(dispatcher, task, request_id: "next", interactive: true).status
+        assert_equal 1, launcher.launched.size
+      end
+    end
+    with_dispatcher do |dispatcher, launcher, task, store|
+      task.workflow = Hive::Workflows::PatrolFix::DESCRIPTOR
+      first = dispatch(dispatcher, task, request_id: "first")
+      terminalize_attempt(store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3)
+      assert_equal :terminal_replay, dispatch(dispatcher, task, request_id: "next", interactive: true).status
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_explicit_run_retries_a_waiting_custom_workflow_stage
+    with_dispatcher do |dispatcher, launcher, task, store|
+      task.workflow = "writing"
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      first = dispatch(dispatcher, task, request_id: "custom-one", intended_stage: "8-image")
+      terminalize_attempt(store, launcher, first, outcome: "succeeded", exit_status: 0, now: NOW + 3)
+      retry_result = dispatch(
+        dispatcher, task, request_id: "custom-two", intended_stage: "8-image", interactive: true
+      )
+      assert_equal :accepted, retry_result.status
       assert_equal 2, launcher.launched.size
     end
   end

@@ -37,7 +37,11 @@ module Hive
     # Immutable value object (Ruby 3.4 Data.define) so `pr_metadata` stays the
     # single validated constructor and the result is tamper-proof downstream.
     # Keyword construction + field readers are unchanged for consumers.
-    PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state)
+    PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state, :head_ref_name) do
+      def initialize(head_ref_name: nil, **attributes)
+        super(**attributes, head_ref_name: head_ref_name)
+      end
+    end
 
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
     # distinguishable from a clean scan. A blanket rescue that
@@ -86,6 +90,20 @@ module Hive
       args.push(remote, branch)
       out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
+    rescue Hive::AgentGitGate::Error, Hive::GhError => e
+      PushResult.new(success: false, stdout: "", stderr: e.message)
+    end
+
+    def push_review_head(worktree_path, branch, expected_remote_oid:, cfg: nil)
+      head = Hive::AgentGitGate.read(worktree_path, :head_oid)
+      raise Hive::GhError, "review checkout HEAD is unavailable" unless head.success?
+      oid = head.stdout.strip.downcase
+      Hive::AgentGitGate.publish(
+        repository_path: worktree_path, oid: oid, branch: branch,
+        expected_remote_oid: expected_remote_oid,
+        allow_local_transport: agent_git_gate_allow_local_transport?(cfg)
+      )
+      PushResult.new(success: true, stdout: "", stderr: "")
     rescue Hive::AgentGitGate::Error, Hive::GhError => e
       PushResult.new(success: false, stdout: "", stderr: e.message)
     end
@@ -237,7 +255,7 @@ module Hive
     # run from another repo queries the right PR instead of cwd's repo.
     def pr_metadata(number, cfg: nil, chdir: nil)
       ensure_authenticated!(cfg)
-      fields = "number,url,baseRefName,headRefOid,isCrossRepository,state"
+      fields = "number,url,baseRefName,headRefOid,isCrossRepository,state,headRefName"
       out, err, status = capture3("gh", "pr", "view", number.to_s, "--json", fields, cfg: cfg, chdir: chdir)
       unless status.success?
         raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
@@ -251,6 +269,7 @@ module Hive
         url: doc["url"].to_s,
         base_ref_name: doc["baseRefName"].to_s,
         head_ref_oid: doc["headRefOid"].to_s,
+        head_ref_name: doc["headRefName"].to_s,
         is_cross_repository: doc["isCrossRepository"] == true,
         state: doc["state"].to_s
       )

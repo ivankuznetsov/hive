@@ -772,6 +772,21 @@ class GhUnitTest < Minitest::Test
 
   # --- push_branch returns PushResult, push_branch! hard-fails ---------
 
+  def test_review_push_publishes_exact_head_to_the_original_pr_branch
+    with_tmp_git_repo do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      captured = nil
+      with_replaced_singleton_method(Hive::AgentGitGate, :publish, ->(**kwargs) { captured = kwargs }) do
+        result = Hive::Gh.push_review_head(repo, "original-feature", expected_remote_oid: "a" * 40)
+        assert result.success?
+      end
+      assert_equal head, captured.fetch(:oid)
+      assert_equal "original-feature", captured.fetch(:branch)
+      assert_equal "a" * 40, captured.fetch(:expected_remote_oid)
+      refute Hive::Gh.push_review_head("/missing/review", "original-feature", expected_remote_oid: "a" * 40).success?
+    end
+  end
+
   def test_push_branch_returns_push_result_on_failure
     with_tmp_git_repo do |dir|
       # no `origin` remote configured -> push fails -> PushResult.success? == false

@@ -12,6 +12,7 @@ require "hive/workflows"
 require "hive/context_provenance"
 require "hive/plan_review/store"
 require "hive/recovery/retry_policy"
+require "hive/markers"
 
 module Hive
   module Attempts
@@ -197,7 +198,8 @@ module Hive
           replayable_terminal(
             exact, request_id, task: task, admission_view: view,
             generation: generation, subject: subject,
-            replay_semantic_terminal: replay_semantic_terminal
+            replay_semantic_terminal: replay_semantic_terminal,
+            retry_unfinished: interactive && argv[1] == "run"
           )
         end
         if terminal
@@ -391,7 +393,8 @@ module Hive
       # replay instead of spending on the same broken command forever.
       def replayable_terminal(records, request_id, task:, admission_view: nil,
                               generation: nil, subject: nil,
-                              replay_semantic_terminal: false)
+                              replay_semantic_terminal: false, retry_unfinished: false)
+        return nil if retry_unfinished && unfinished_stage?(task, generation)
         terminals = records.select { |record| record.state == "terminal" }
         semantic_terminal = nil
         if admission_view
@@ -458,6 +461,17 @@ module Hive
 
       def coding_brainstorm?(task)
         Hive::Workflows.coding_id?(task.respond_to?(:workflow) ? task.workflow : nil)
+      end
+
+      def unfinished_stage?(task, generation)
+        # Controllers (including Patrol) and coding brainstorm own their
+        # separate continuation contracts. A plain stage can exit zero after
+        # writing WAITING or ERROR without having completed its work.
+        workflow = task.workflow if task.respond_to?(:workflow)
+        return false if workflow.respond_to?(:controller) && workflow.controller
+        return false if coding_brainstorm?(task) && generation&.intended_stage == BRAINSTORM_STAGE_DIR
+
+        %i[waiting execute_waiting review_waiting error].include?(Hive::Markers.current(task.state_file).name)
       end
 
       # A lost attempt blocks ordinary admission until its independent recovery
@@ -722,7 +736,7 @@ module Hive
         verb = Array(argv)[1].to_s
         return "#{task.stage_index}-#{task.stage_name}" if %w[run plan-review-run].include?(verb)
 
-        Hive::Workflows.for_verb(verb).fetch(:target)
+        Hive::Workflows.for_verb(verb, workflow: task.workflow).fetch(:target)
       rescue KeyError, Hive::Error
         "#{task.stage_index}-#{task.stage_name}"
       end

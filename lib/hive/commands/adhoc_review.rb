@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "time"
+require "tmpdir"
 require "yaml"
 require "hive/config"
 require "hive/gh"
@@ -21,7 +22,9 @@ module Hive
       class CollisionError < Hive::Error; end
 
       SOURCE = "ad-hoc".freeze
-      REVIEW_STAGE = Hive::Workflows.for_verb("review").fetch(:target).freeze
+      LEGACY_REVIEW_STAGE = "6-review".freeze # coding-scoped: persisted import layout retained for migration
+      WORKFLOW_ID = :"pr-review"
+      REVIEW_STAGE = Hive::Workflows::Registry.fetch(WORKFLOW_ID).stages.first.dir.freeze
 
       def initialize(pr:, project: nil, json: false)
         @pr_identifier = pr
@@ -54,6 +57,7 @@ module Hive
           pr_number = parse_pr_number!
           slug = slug_for(pr_number)
 
+          migrate_legacy_review!(project_root, hive_state_path, slug, pr_number, now)
           next reuse(slug, hive_state_path, project_name) if reusable_folder?(hive_state_path, slug, pr_number)
 
           refuse_if_owned!(hive_state_path, slug, pr_number)
@@ -99,6 +103,87 @@ module Hive
         raise Hive::InvalidTaskPath, e.message
       end
 
+      def migrate_legacy_review!(project_root, hive_state_path, slug, pr_number, now)
+        legacy = File.join(hive_state_path, "stages", LEGACY_REVIEW_STAGE, slug)
+        return unless File.directory?(legacy)
+
+        destination = review_task_folder(hive_state_path, slug)
+        Hive::Lock.with_commit_lock(hive_state_path) do
+          Hive::Lock.with_task_lock(legacy, slug: slug, op: "migrate-pr-review") do
+            raise CollisionError, "PR-review destination already exists: #{destination}" if File.exist?(destination)
+            meta = Hive::TaskMeta.read_for_admission(legacy)
+            unless meta.status == :ok && Hive::Workflows.coding_id?(meta.data[:workflow])
+              raise CollisionError, "legacy ad-hoc task workflow cannot be proven"
+            end
+            validate_reusable!(legacy, slug, pr_number)
+            task_source = Hive::Gh.pr_frontmatter(File.join(legacy, "task.md"))["source"]
+            raise CollisionError, "legacy task is not an ad-hoc review" unless task_source.to_s.casecmp?(SOURCE)
+
+            original_pr = Hive::Gh.pr_frontmatter(File.join(legacy, "pr.md"))
+            reviewed_head = (original_pr["head_oid"] || original_pr["head_ref_oid"]).to_s.downcase
+            unless reviewed_head.match?(/\A[a-f0-9]{40,64}\z/)
+              raise CollisionError, "legacy review has no exact PR head identity; reconcile pr.md before migration"
+            end
+            old_branch = "hive/review/pr-#{pr_number}"
+            pointer = Hive::Worktree.read_owned_pointer(
+              legacy, project_root: project_root, slug: slug,
+              expected_root: Hive::Worktree.canonical_root(project_root), expected_branch: old_branch
+            )
+            path = pointer.fetch("path")
+            unless Hive::Worktree.run_materialize_git!(path, "status", "--porcelain").empty?
+              raise Hive::WorktreeError, "legacy review worktree has uncommitted changes; preserve them before migration"
+            end
+            if Hive::Worktree.local_branch_ref_exists?(project_root, slug)
+              raise Hive::WorktreeError, "migration target branch #{slug} already exists"
+            end
+
+            backup = Dir.mktmpdir("hive-pr-review-migration-")
+            snapshot = File.join(backup, "task")
+            FileUtils.cp_r(legacy, snapshot)
+            renamed = false
+            preserve_backup = false
+            begin
+              Hive::Worktree.run_materialize_git!(path, "branch", "-m", slug)
+              renamed = true
+              FileUtils.mkdir_p(File.join(destination, "reviews"))
+              evidence = File.join(destination, "migration", "coding")
+              FileUtils.mkdir_p(File.dirname(evidence))
+              File.rename(legacy, evidence)
+              head = Hive::Worktree.run_materialize_git!(path, "rev-parse", "HEAD").strip
+              metadata = Hive::Gh::PrMetadata.new(
+                number: pr_number, url: original_pr.fetch("pr_url"),
+                base_ref_name: original_pr["base_ref_name"].to_s,
+                head_ref_oid: reviewed_head, is_cross_repository: original_pr["is_cross_repository"] == true,
+                state: original_pr["state"] || "OPEN"
+              )
+              materialized = { path: path, branch: slug, head_sha: head }
+              write_sidecars(destination, slug, pr_number, metadata, materialized, now)
+              initialize_journal!(destination, materialized, now, reason: "ad_hoc_review_migrated")
+              legacy_pathspec = File.join("stages", LEGACY_REVIEW_STAGE, slug)
+              pathspecs = [ File.join("stages", REVIEW_STAGE, slug) ]
+              tracked_legacy = Hive::Worktree.run_materialize_git!(hive_state_path, "ls-files", "--", legacy_pathspec)
+              pathspecs << legacy_pathspec unless tracked_legacy.empty?
+              Hive::Worktree.run_materialize_git!(hive_state_path, "add", "-A", "--", *pathspecs)
+              Hive::Worktree.run_materialize_git!(hive_state_path, "commit", "--only", "-m", "hive: #{REVIEW_STAGE}/#{slug} migrate standalone PR review", "--", *pathspecs)
+            rescue StandardError => migration_error
+              begin
+                FileUtils.rm_rf(destination)
+                FileUtils.rm_rf(legacy)
+                FileUtils.cp_r(snapshot, legacy)
+                Hive::Worktree.run_materialize_git!(path, "branch", "-m", old_branch) if renamed
+                Hive::Worktree.run_materialize_git!(hive_state_path, "reset", "--", File.join("stages", LEGACY_REVIEW_STAGE, slug), File.join("stages", REVIEW_STAGE, slug))
+              rescue StandardError => rollback_error
+                preserve_backup = true
+                raise Hive::WorktreeError, "migration failed (#{migration_error.message}); rollback failed (#{rollback_error.message}); original task backup retained at #{snapshot}"
+              end
+              raise migration_error
+            ensure
+              FileUtils.rm_rf(backup) unless preserve_backup
+            end
+          end
+        end
+      end
+
       def reuse(slug, hive_state_path, project_name)
         {
           slug: slug,
@@ -112,7 +197,7 @@ module Hive
         "adhoc-review-pr-#{pr_number}"
       end
 
-      # The deterministic 6-review folder for an ad-hoc slug. One home for the
+      # The deterministic standalone review folder for an ad-hoc slug. One home for the
       # path so `reuse`, `reusable_folder?`, and `create_task!` can't drift.
       def review_task_folder(hive_state_path, slug)
         File.join(hive_state_path, "stages", REVIEW_STAGE, slug)
@@ -126,7 +211,7 @@ module Hive
         true
       end
 
-      # A 6-review folder at the deterministic ad-hoc slug is only reusable when
+      # A review folder at the deterministic ad-hoc slug is only reusable when
       # it is actually this PR's ad-hoc review. A normal task (or a wrong-PR
       # task) that happens to carry the same slug would otherwise be silently
       # adopted and re-run as the ad-hoc review; refuse it instead, mirroring
@@ -243,7 +328,7 @@ module Hive
       end
 
       def branch_for(pr_number)
-        "hive/review/pr-#{pr_number}"
+        slug_for(pr_number)
       end
 
       def create_task!(hive_state_path, project_root, slug, pr_number, metadata, now)
@@ -266,7 +351,7 @@ module Hive
         raise
       end
 
-      def initialize_journal!(task_folder, materialized, now)
+      def initialize_journal!(task_folder, materialized, now, reason: "ad_hoc_review_created")
         task = Hive::Task.new(task_folder)
         Hive::TaskJournal::Writer.new(
           task_folder: task_folder, clock: -> { now }
@@ -279,7 +364,7 @@ module Hive
           task_generation: 0,
           ownership_generation: nil,
           commit_generation: 0,
-          reason: "ad_hoc_review_created",
+          reason: reason,
           evidence: [ {
             "type" => "commit", "sha" => materialized.fetch(:head_sha),
             "branch" => materialized.fetch(:branch)
@@ -292,8 +377,8 @@ module Hive
       # Roll back a partially-created task after a create-phase failure — a
       # verify_head! head-race (benign PR re-push between metadata fetch and
       # materialize) or a sidecar write error would otherwise orphan the
-      # worktree at canonical_root/<slug> plus its `hive/review/pr-N` branch
-      # and `refs/hive/review/pr-N` ref, wedging the next `hive review --pr N`
+      # worktree at canonical_root/<slug> plus its `adhoc-review-pr-N` branch
+      # and `refs/adhoc-review-pr-N` ref, wedging the next `hive review --pr N`
       # on "already exists in the worktree list". Guarded twice over:
       #   * the whole body is wrapped so cleanup's OWN spawn/IO errors
       #     (Errno::ENOENT from a missing git, Errno::EACCES from rm_rf) can
@@ -334,7 +419,7 @@ module Hive
 
       # Artifacts that survived remove_orphan_worktree!: the stale
       # `git worktree list` entry (the actual "already exists in the worktree
-      # list" wedge) and the `hive/review/pr-N` branch. Empty in the common
+      # list" wedge) and the `adhoc-review-pr-N` branch. Empty in the common
       # case (nothing was created, or everything was removed), so the cleanup
       # warning fires only on a genuine partial-cleanup failure.
       def cleanup_residue(project_root, slug, pr_number)
@@ -390,7 +475,7 @@ module Hive
           id: Hive::TaskCounter.next_or_nil,
           slug: slug,
           display_name: "Ad-hoc review: PR ##{pr_number}",
-          workflow: Hive::Workflows::CODING_ID.to_s
+          workflow: WORKFLOW_ID.to_s
         )
       end
 
@@ -422,7 +507,7 @@ module Hive
           <<~MD
           # Ad-hoc review: PR ##{pr_number}
 
-          This task runs the standard 6-review flow against #{metadata.url}.
+          This task runs the standalone PR-review workflow against #{metadata.url}.
         MD
         )
       end
@@ -448,6 +533,7 @@ module Hive
             "source" => SOURCE,
             "base_ref_name" => metadata.base_ref_name,
             "head_ref_oid" => metadata.head_ref_oid,
+            "head_oid" => metadata.head_ref_oid,
             "is_cross_repository" => metadata.is_cross_repository,
             "state" => metadata.state
           },

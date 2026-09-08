@@ -145,8 +145,13 @@ transient planner-revision series, persists a recovery reset instead of
 terminalizing the provider outage. The daemon opens the next series after a
 deterministic five-minute exponential cooldown capped at 24 hours; exact legacy
 blocked records produced by the old exhaustion behavior enter the same recovery
-path. Standard review degradation and the verification transient bound are
-unchanged. The separate cap on successful planner-revision rounds still fences
+path. Exhausted transient verification series retry hourly, including standard
+reviews and previously blocked candidate-verification records. Before candidate
+promotion, freshness compares the canonical plan with the reviewed original;
+only cleared reviews require the promoted candidate digest. This keeps an
+unpromoted candidate from overriding a provider wait with repeated stale-review
+dispatches. Standard initial-review degradation is unchanged.
+The separate cap on successful planner-revision rounds still fences
 plans whose defects survive repeated revisions. Provider-route
 exceptions are normalized into those durable attempt outcomes rather than
 escaping before retry evidence is written. Missing retry hints receive bounded

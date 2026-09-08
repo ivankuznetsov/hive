@@ -1319,6 +1319,38 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_exhausted_verification_quota_retries_hourly_without_revising_or_hot_looping
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      calls = 0
+      accepted = finding("safe_auto", "Clarify tests")
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary"
+          successful_result(request, findings: [ accepted ])
+        elsif request.kind == "verification" && (calls += 1) <= 2
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+        else
+          successful_result(request)
+        end
+      end
+      now = Time.utc(2026, 8, 12, 12)
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { now })
+      2.times do
+        record = runner.advance!.record
+        assert_equal "retry_scheduled", record.state
+        assert_equal now + 3600, Time.iso8601(record["retry_at"])
+        before = calls
+        runner.advance!
+        assert_equal before, calls
+        now += 3600
+      end
+      assert_equal "cleared", runner.advance!.record.state
+      assert_equal 3, calls
+      assert_equal 1, revision.calls.length
+    end
+  end
+
   def test_optional_specialist_failure_is_distinct_partial_coverage
     with_task(standard_plan) do |task, cfg|
       cfg["plan_review"]["coverage"]["optional"] = [ "security" ]

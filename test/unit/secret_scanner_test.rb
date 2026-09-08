@@ -36,6 +36,11 @@ class SecretScannerTest < Minitest::Test
       run!("git", "-C", repo, "config", "user.email", "test@example.com")
       File.write(File.join(repo, "base.txt"), "base\n")
       base = commit(repo)
+      fixture = File.join(repo, "test/controllers/confirmations_controller_test.rb")
+      FileUtils.mkdir_p(File.dirname(fixture))
+      File.write(fixture, "password: \"TempPassword123!\"\n")
+      fixture_head = commit(repo)
+      refute Hive::SecretScanner.git_match?(repo, base_oid: base, head_oid: fixture_head)
       File.write(File.join(repo, "secret.txt"), "token=#{token} # betterleaks:allow\n")
       File.write(File.join(repo, ".betterleaks.toml"), "prefilter = 'true'\n")
       leaked = commit(repo)
@@ -57,7 +62,29 @@ class SecretScannerTest < Minitest::Test
     end
   end
 
+  def test_reviewed_dummy_credentials_are_exempt_only_in_their_exact_test_files
+    fixtures = {
+      "test/controllers/confirmations_controller_test.rb" => [ "password", "TempPassword123!" ],
+      "test/controllers/users_controller_test.rb" => [ "password123" ],
+      "test/unit/brainstorm_suggestions/validator_test.rb" => [ sample_token ],
+      "test/unit/brainstorm_suggestions/context_bundle_test.rb" => [ sample_token, "abcdefghijklmnopqrstuvwxyz123456" ]
+    }
+    fixtures.each do |path, values|
+      values.each do |value|
+        text = "password: \"#{value}\"\nTOKEN=#{value}\n"
+        refute Hive::SecretScanner.match?(text, path:), path
+        assert Hive::SecretScanner.match?(text, path: "config/production.yml"), path
+      end
+      assert Hive::SecretScanner.match?("TOKEN=#{token}\n", path:), path
+      assert Hive::SecretScanner.match?("TOKEN=#{token}\n", path: "#{path}.bak"), path
+    end
+  end
+
   private
+
+  def sample_token
+    "ghp_" + "R6tK9pQ2wX7cV4nM8sL1aD5fH0jB3eU6yZ9qC2xW"
+  end
 
   def token
     "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"

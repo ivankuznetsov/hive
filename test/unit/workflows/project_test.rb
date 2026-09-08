@@ -209,7 +209,7 @@ class WorkflowsProjectTest < Minitest::Test
 
       _out, err = capture_io { Hive::Workflows::Project.load!(project_root) }
 
-      assert_equal [ :coding, :content, :bench, :"patrol-fix", :"fallback-flow" ],
+      assert_equal [ :coding, :content, :bench, :"patrol-fix", :"pr-review", :"fallback-flow" ],
                    Hive::Workflows::Registry.ids,
                    "descriptors must load from the fallback dir when hive_state_path is unreadable"
       assert_match(/could not read hive_state_path/, err,

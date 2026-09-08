@@ -7,9 +7,16 @@ updated: 2026-08-31
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
-**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, Patrol Fix workflow routing can enter the same stage, or `hive review --pr <n>` creates a synthetic `6-review/adhoc-review-pr-<n>/` task for someone else's PR. `Hive::Stages::Review.run!` proves local and hosted CI on entry, loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap), settles the exact final PR head, and only then finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
+**TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, Patrol Fix workflow routing can enter the same stage, or `hive review --pr <n>` creates a synthetic `1-review/adhoc-review-pr-<n>/` task for someone else's PR. `Hive::Stages::Review.run!` proves local and hosted CI on entry, loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap), settles the exact final PR head, and only then finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
 
 ## Setup
+
+Operational status uses the same finding-approval reader as the stage runner.
+A `REVIEW_WAITING reason=fix_guardrail` row becomes ready for review when its
+complete finding set is approved or contains only the retired default lockfile
+rule. Active unchecked findings, missing reports, and invalid/count-mismatched
+markers remain waiting. This schedules a normal resume; it does not bypass the
+runner's HEAD, clean-worktree, or other stage checks.
 
 - **State file**: `task.md` with frontmatter written by 4-execute, Patrol Fix routing, or ad-hoc PR review. The runner derives the current pass from `reviews/<reviewer-name>-<NN>.md` filenames.
 - **Worktree pointer**: `worktree.yml` carried from the owning workflow or written by `Hive::Commands::AdhocReview`; missing → exit 1 with "6-review entered without a worktree.yml".

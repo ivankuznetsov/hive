@@ -226,6 +226,8 @@ module Hive
           # exact state machine. Generic task-stage rebasing must never rewrite
           # that checkout before the controller validates its own custody.
           result = Hive::Rebase::Result.skipped(:controller_workflow)
+        elsif task.workflow.id == :"pr-review"
+          result = Hive::Rebase::Result.skipped(:pr_review_workflow)
         elsif task.workflow.draft_pr_handoff?
           # Managed handoff receipts pin an exact base/head pair. Rewriting the
           # task worktree before receipt reconciliation would invalidate the

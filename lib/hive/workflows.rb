@@ -89,8 +89,17 @@ module Hive
         Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(name.to_s)
     end
 
-    def for_verb(verb)
-      VERBS.fetch(verb)
+    def for_verb(verb, workflow: nil)
+      return VERBS.fetch(verb) unless workflow&.id == :"pr-review"
+
+      case verb
+      when "review"
+        { source: workflow.stages.first.dir, target: workflow.stages.first.dir }
+      when "archive"
+        { source: workflow.stages.first.dir, target: workflow.stages.last.dir }
+      else
+        raise Hive::InvalidTaskPath, "#{verb} is not part of the PR-review workflow"
+      end
     end
 
     def verb_advancing_from(stage_dir)

@@ -10,6 +10,15 @@ class AttemptsDispatcherTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+
+  def test_standalone_review_dispatch_uses_its_own_workflow_stages
+    task = FakeTask.new(stage_index: 1, stage_name: "review",
+                        workflow: Hive::Workflows::Registry.fetch(:"pr-review"))
+    dispatcher = Hive::Attempts::Dispatcher.allocate
+    assert_equal "1-review", dispatcher.send(:intended_stage_for, [ "hive", "review", "task" ], task)
+    assert_equal "2-done", dispatcher.send(:intended_stage_for, [ "hive", "archive", "task" ], task)
+  end
+
   CLAIM_CAPABILITY = "c" * 64
   FakeTask = Struct.new(
     :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :worktree_path,

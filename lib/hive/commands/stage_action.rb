@@ -77,16 +77,7 @@ module Hive
       end
 
       def verb_config(task)
-        return Hive::Workflows.for_verb(@verb) unless task.workflow.id == :"pr-review"
-
-        case @verb
-        when "review"
-          { source: task.workflow.stages.first.dir, target: task.workflow.stages.first.dir }
-        when "archive"
-          { source: task.workflow.stages.first.dir, target: task.workflow.stages.last.dir }
-        else
-          raise Hive::InvalidTaskPath, "#{@verb} is not part of the PR-review workflow"
-        end
+        Hive::Workflows.for_verb(@verb, workflow: task.workflow)
       end
 
       def durable_worker_argv(task)

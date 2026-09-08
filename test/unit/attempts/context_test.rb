@@ -10,7 +10,7 @@ class AttemptsContextTest < Minitest::Test
 
   CLAIM_CAPABILITY = "c" * 64
   WORKER_ARGV = [ "hive", "run", "/project/.hive-state/stages/4-execute/task" ].freeze
-  FakeTask = Struct.new(:id, :slug, :stage_index, :stage_name, keyword_init: true)
+  FakeTask = Struct.new(:id, :slug, :stage_index, :stage_name, :workflow, keyword_init: true)
 
   def teardown
     Hive::Attempts::Context.reset!
@@ -310,6 +310,22 @@ class AttemptsContextTest < Minitest::Test
 
     assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::Context.send(:read_inherited, "not-an-fd", limit: 1)
+    end
+  end
+
+  def test_standalone_review_workers_bind_to_their_own_workflow_stages
+    task = FakeTask.new(id: 42, slug: "task", stage_index: 1, stage_name: "review",
+                        workflow: Hive::Workflows::Registry.fetch(:"pr-review"))
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*, **) { resolver }) do
+      { "review" => "1-review", "archive" => "2-done" }.each do |verb, stage|
+        record = { "project" => "demo", "task_id" => "42", "task_slug" => "task", "intended_stage" => stage }
+        assert_nil Hive::Attempts::Context.send(:validate_task_binding!, record, [ "hive", verb, "task" ])
+        record["intended_stage"] = "6-review"
+        assert_raises(Hive::Attempts::RepositoryError) do
+          Hive::Attempts::Context.send(:validate_task_binding!, record, [ "hive", verb, "task" ])
+        end
+      end
     end
   end
 

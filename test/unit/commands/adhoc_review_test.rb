@@ -217,6 +217,20 @@ class AdhocReviewCommandTest < Minitest::Test
     end
   end
 
+  def test_legacy_migration_preserves_an_untracked_task
+    with_legacy_review do |_repo, hive_state, legacy, _path, old_pr, slug|
+      run!("git", "-C", hive_state, "rm", "-r", "--cached", "--", "stages/6-review/#{slug}")
+      run!("git", "-C", hive_state, "commit", "-m", "leave legacy review untracked")
+
+      result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
+
+      assert_equal old_pr, File.binread(File.join(result.fetch(:task_folder), "migration", "coding", "pr.md"))
+      refute Dir.exist?(legacy)
+      assert_equal :"pr-review", Hive::Task.new(result.fetch(:task_folder)).workflow.id
+      assert_empty run!("git", "-C", hive_state, "status", "--porcelain")
+    end
+  end
+
   def test_legacy_migration_preserves_remote_identity_when_local_fixes_are_ahead
     with_legacy_review do |_repo, _state, legacy, path, _old_pr, _slug|
       remote_head = frontmatter(File.join(legacy, "pr.md")).fetch("head_ref_oid")

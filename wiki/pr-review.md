@@ -10,4 +10,6 @@ Review comments require an open PR in the task repository with matching remote, 
 
 Re-running `hive review --pr N` migrates a legacy coding task at `6-review/adhoc-review-pr-N` under project and task locks. Migration requires proven ownership of its legacy `hive/review/pr-N` worktree, a clean checkout and an absent replacement branch/destination. It preserves the entire old task under `migration/coding`, assigns a new stable task ID (workflow identity is immutable), creates a fresh review journal and commits the move in the resolved state repository. The old task identity and history remain evidence. A failed state commit restores the old task and branch; a failed rollback retains the recovery backup and reports its path.
 
+Legacy task folders need not already be tracked in the state repository. Migration commits the preserved evidence at its new location and includes a deletion path only when the original folder was tracked.
+
 Sources: `lib/hive/workflows/pr_review.rb`, `lib/hive/commands/adhoc_review.rb`, `lib/hive/commands/stage_action.rb`, `lib/hive/stages/review/{remote_ci,github_publisher}.rb`, and their focused unit tests.

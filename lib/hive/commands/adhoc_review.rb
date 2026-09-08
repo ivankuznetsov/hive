@@ -159,7 +159,10 @@ module Hive
               materialized = { path: path, branch: slug, head_sha: head }
               write_sidecars(destination, slug, pr_number, metadata, materialized, now)
               initialize_journal!(destination, materialized, now, reason: "ad_hoc_review_migrated")
-              pathspecs = [ File.join("stages", LEGACY_REVIEW_STAGE, slug), File.join("stages", REVIEW_STAGE, slug) ]
+              legacy_pathspec = File.join("stages", LEGACY_REVIEW_STAGE, slug)
+              pathspecs = [ File.join("stages", REVIEW_STAGE, slug) ]
+              tracked_legacy = Hive::Worktree.run_materialize_git!(hive_state_path, "ls-files", "--", legacy_pathspec)
+              pathspecs << legacy_pathspec unless tracked_legacy.empty?
               Hive::Worktree.run_materialize_git!(hive_state_path, "add", "-A", "--", *pathspecs)
               Hive::Worktree.run_materialize_git!(hive_state_path, "commit", "--only", "-m", "hive: #{REVIEW_STAGE}/#{slug} migrate standalone PR review", "--", *pathspecs)
             rescue StandardError => migration_error

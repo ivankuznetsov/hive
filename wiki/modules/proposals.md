@@ -15,6 +15,10 @@ publishes, activates, removes, or reverts an active skill or workflow.
 
 ## Canonical state
 
+Producer failure rollback preserves the task journal and proposal source files.
+It does not read or restore the removed task projection snapshots/checkpoints.
+Durable attempt bindings come from the SQLite attempt repository.
+
 The canonical namespace is the project `hive/state` worktree:
 
 ```text

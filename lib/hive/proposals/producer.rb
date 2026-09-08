@@ -6,7 +6,6 @@ require "hive/git_ops"
 require "hive/proposals/ingestor"
 require "hive/task_activity"
 require "hive/task_journal"
-require "hive/task_projection/store"
 
 module Hive
   module Proposals
@@ -200,12 +199,8 @@ module Hive
       end
 
       def snapshot_roots(source_paths)
-        projection_files = [
-          Hive::TaskJournal::JOURNAL_BASENAME,
-          Hive::TaskProjection::Store::SNAPSHOT_BASENAME,
-          Hive::TaskProjection::Store::CHECKPOINT_BASENAME
-        ].map { |basename| File.join(@activity.task_folder, basename) }
-        (source_paths + projection_files).uniq
+        journal = File.join(@activity.task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
+        (source_paths + [ journal ]).uniq
       end
     end
   end

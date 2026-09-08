@@ -1,6 +1,6 @@
 require "test_helper"
 require "hive/attempts/capability"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/commands/proposal"
 require "hive/proposals/compiler"
 require "hive/proposals/context_selector"
@@ -24,13 +24,12 @@ class ProposalTrackingTest < Minitest::Test
       ops.hive_state_init
       configure_proposals(ops)
       @config = Hive::Config.load(project)
-      @attempt_store = Hive::Attempts::Store.new(
-        root: tracked_tmp_dir("hive-test-proposal-attempts")
-      )
+      state_home = tracked_tmp_dir("hive-test-proposal-attempts")
+      @attempt_store = Hive::Attempts::Repository.new(root: state_home, migrate: true)
       @attempt_sequence = 0
       @input_sequence = 0
 
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => @attempt_store.root) do
+      with_env("HIVE_HOME" => state_home) do
         accepted, accepted_evaluation = accepted_candidate(project, ops)
         assert_equal "accepted", live_store(ops).projection(accepted).status
         assert_active_stores_unchanged(project, active_before)
@@ -147,12 +146,11 @@ class ProposalTrackingTest < Minitest::Test
 
       configure_proposals(ops)
       @config = Hive::Config.load(project)
-      @attempt_store = Hive::Attempts::Store.new(
-        root: tracked_tmp_dir("hive-test-proposal-lazy-attempts")
-      )
+      state_home = tracked_tmp_dir("hive-test-proposal-lazy-attempts")
+      @attempt_store = Hive::Attempts::Repository.new(root: state_home, migrate: true)
       @attempt_sequence = 0
       @input_sequence = 0
-      with_env("HIVE_ATTEMPT_STORE_ROOT" => @attempt_store.root) do
+      with_env("HIVE_HOME" => state_home) do
         task, = admitted_task(
           ops, slug: "first-new-proposal", subject: proposal_subject(
             kind: "skill", reference: "agent-skills/reviewer", revision: "v2"

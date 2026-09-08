@@ -12,4 +12,6 @@ Re-running `hive review --pr N` migrates a legacy coding task at `6-review/adhoc
 
 Legacy task folders need not already be tracked in the state repository. Migration commits the preserved evidence at its new location and includes a deletion path only when the original folder was tracked.
 
+Command admission, durable worker validation and queued dispatch all resolve review/archive stages through workflow-aware `Workflows.for_verb`; standalone workers must not validate against coding stage numbers.
+
 Sources: `lib/hive/workflows/pr_review.rb`, `lib/hive/commands/adhoc_review.rb`, `lib/hive/commands/stage_action.rb`, `lib/hive/stages/review/{remote_ci,github_publisher}.rb`, and their focused unit tests.

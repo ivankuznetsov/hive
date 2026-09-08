@@ -143,6 +143,14 @@ built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
 all three managed provenance fields.
 
 Honeycomb v2 permission summaries are disclosure data, not executable policy.
+Owner-trusted actors declare `permissions: yolo`. They run directly with the
+ordinary agent environment plus explicit package input bindings, without a
+Hive Bubblewrap wrapper, tool allowlists, private agent home, or JSON-to-file
+adapter. Agents write their stage outputs normally. Package provenance, task
+locks, recovery, and completion validation remain unchanged. Restricted actors
+still use their declared scoped policy; installing from Honeycomb alone is not
+a reason to restrict an explicitly trusted actor.
+
 Managed execution uses each stage/reviewer/reviser descriptor's exact
 `permissions:` block. Install reports explicit `yolo`, scoped shell, and
 unqualified scoped file-write actors without adding a second approval gate; a v2

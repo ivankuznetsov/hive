@@ -327,6 +327,7 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     AgentCliRuntime.compile(
       AgentCliRuntime::Request.new(
         profile: AgentCliRuntime::Profiles.fetch(provider),
+        executable: provider.to_s,
         prompt: "hello",
         **options
       )

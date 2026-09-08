@@ -1419,5 +1419,7 @@ existing pre-dispatch `error_kind: usage` envelopes. Publish has a separate clos
 usage arm, preserving its handler error arms' retryability and recovery fields.
 Output fields, error kinds, exit statuses, and schema versions are unchanged.
 The original mismatch is recorded in
-`docs/implementation/cli-usage-contracts-baseline.md`; fresh hosted CI remains
-pending after the local fix.
+`docs/implementation/cli-usage-contracts-baseline.md`. Review pass 01 completed
+U4 locally: exact 100% coverage across all 29 changed library files and a passing
+838-file `bin/test --all` checkpoint (four workers). Fresh hosted CI remains
+pending.

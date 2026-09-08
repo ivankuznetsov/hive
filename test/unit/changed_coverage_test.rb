@@ -3,10 +3,19 @@ require_relative "../support/changed_coverage"
 
 module TestChangedCoverage
   class MappingTest < Minitest::Test
-    def test_mirrored_convention_maps_source_to_its_test_files
-      files = HiveChangedCoverage.test_files_for("lib/hive/commands/run.rb")
+    def test_mirrored_tests_and_exact_require_consumers_are_both_selected
+      Dir.mktmpdir do |directory|
+        Dir.chdir(directory) do
+          FileUtils.mkdir_p("test/unit/commands")
+          FileUtils.mkdir_p("test/integration")
+          File.write("test/unit/commands/run_test.rb", 'require "hive/commands/run"')
+          File.write("test/integration/run_error_test.rb", 'require "hive/commands/run"')
+          File.write("test/unit/unrelated_test.rb", 'require "hive/commands/other"')
 
-      assert_equal [ "test/unit/commands/run_test.rb" ], files
+          assert_equal %w[test/integration/run_error_test.rb test/unit/commands/run_test.rb],
+                       HiveChangedCoverage.test_files_for("lib/hive/commands/run.rb")
+        end
+      end
     end
 
     def test_basename_only_match_is_rejected_without_an_owner

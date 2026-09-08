@@ -585,6 +585,6 @@ require "hive/cli_usage_contracts"
 
 Hive::CliUsageContracts.declare(
   "setup",
-  schema: "hive-setup", error_kind: "usage",
-  payload: ->(error, argv: []) { Hive::Commands::Setup.usage_error_payload(error, argv: argv) }
+  { schema: "hive-setup", error_kind: "usage",
+    payload: ->(error, argv: []) { Hive::Commands::Setup.usage_error_payload(error, argv: argv) } }
 )

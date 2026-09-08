@@ -58,12 +58,12 @@ module HiveChangedCoverage
     direct = TEST_ROOTS.product(stems).flat_map do |root, candidate|
       [ File.join(root, "#{candidate}_test.rb"), *Dir.glob(File.join(root, candidate, "**/*_test.rb")) ]
     end.select { |path| File.file?(path) && !CI_GATE_FILES.include?(path) }
-    return direct.uniq.sort unless direct.empty?
 
     # Exact require paths are evidence of ownership; basename matches are not.
     index = reference_index ? reference_index.call : require_index
     references = (index.fetch(stem, []) + index.fetch(File.expand_path(source), [])).uniq.sort
-    return references unless references.empty?
+    owned = (direct + references).uniq.sort
+    return owned unless owned.empty?
 
     # A nested implementation can be covered by the nearest owning facade.
     parents = stems.map { |candidate| File.dirname(candidate) }.reject { |candidate| candidate == "." }

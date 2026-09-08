@@ -272,10 +272,10 @@ require "hive/cli_usage_contracts"
 %w[brainstorm plan develop open-pr review artifacts finalize archive].each do |verb|
   Hive::CliUsageContracts.declare(
     verb,
-    schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => verb }
+    { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => verb } }
   )
 end
 Hive::CliUsageContracts.declare(
   "pr",
-  schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "open-pr" }
+  { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "open-pr" } }
 )

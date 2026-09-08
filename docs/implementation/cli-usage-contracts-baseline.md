@@ -173,10 +173,12 @@ in JSON and human modes, with secret-sentinel exception messages absent from out
 U3 verification: contract and launcher integration files passed together:
 52 runs / 763 assertions, seed 63479. Changed-file RuboCop and diff checks passed.
 
-## U4 blocked: baseline requirements conflict
+## U4 initial blocked attempt (historical)
 
-Implementation stops without the execute-complete trailer. U1-U3 are committed;
-U4 regression tests and this evidence remain uncommitted for plan repair.
+The initial execution stopped without the execute-complete trailer. U1-U3 were
+committed; U4 regression tests and this evidence awaited plan repair. The later
+schema compatibility fix in `25d5fc0f81` accepts the existing workflow usage
+envelopes without changing their fields, versions, or exit statuses.
 
 The expanded independent inventory test fails against preserved current-main
 workflow-install output: 30 runs, 1221 assertions, 1 failure, seed 17. A separate
@@ -214,4 +216,64 @@ before the final added variant cases. Those final cases were included in the
 second coverage test run; no complete checkpoint is claimed for U4.
 
 Local raw logs are retained under `tmp/cli-usage-execution/`. All generated probe
-files were removed. U4 remains explicitly incomplete and uncommitted.
+files were removed. U4 was incomplete at that checkpoint; the review fix-pass
+results below supersede that status.
+
+## U4 review fix pass 01
+
+The changed-source selector previously stopped at a mirrored test file and
+omitted other tests that explicitly require the same source. It now combines
+both sets, retains deduplication and the existing CI-only exclusions, and keeps
+the exact full-file coverage gate unchanged. The first expanded run passed
+2,173 tests / 14,037 assertions and covered 6,034 of 6,039 executable lines
+(99.92%). The remaining five lines identified the Answer programmatic entry
+points and Module JSON error handling; new tests exercise their observable
+results, target-slot isolation, silent programmatic output, and matching JSON
+error/exit semantics.
+
+A separate regression reproduced the registration leak from
+`NewIdempotencyTest`'s authored-workflow fixtures. Its temporary-project helper
+now resets the project registry on entry and in `ensure`, covering every fixture
+using that helper. The combined New/Decide run passed at the previously failing
+seed 59136: 53 tests / 323 assertions. Mapping/enforcement tests passed (11 tests /
+25 assertions), as did the Answer/Module files (39 tests / 272 assertions).
+
+The host installs gems beneath the user's home. Tests that replace `HOME` can
+hide those gems from Ruby subprocesses inheriting Bundler/coverage startup.
+Validation pins the existing gem search path before those fixtures run:
+
+```sh
+export GEM_PATH="$(ruby -e 'puts Gem.path.join(File::PATH_SEPARATOR)')"
+bundle exec rake coverage:changed
+HIVE_TEST_WORKERS=4 bin/test --all
+```
+
+The comparison base is `794edfb489fc620f526a71bc7e5c62f6f2cca856` (the branch's
+merge base with `origin/main`). Final checkpoint results are recorded below.
+
+- `bundle exec rake coverage:changed`: PASS, 2,177 tests / 14,076 assertions,
+  zero failures/errors/skips, seed 38818, 544.10 seconds. All 29 changed library
+  sources have exact 100% line coverage. Report:
+  `coverage/changed-3611435-539f5762.json`; raw log:
+  `tmp/cli-usage-coverage-review-final.log`.
+- Changed Ruby-file RuboCop: PASS, 8 files, zero offenses.
+
+The two-worker broad run exposed a component test inheriting the host's configured
+Grok executable while asserting default prompt-transport argv. The shared
+`AgentCliRuntimeRuntimeTest#compile` fixture now supplies an explicit executable
+for every provider. That component file passed with the host override still present (16 tests / 115
+assertions), and its RuboCop check passed. The final broad rerun uses the
+repository-supported four-worker setting; the changed-library sources are
+unchanged from the passing coverage run above.
+
+- `HIVE_TEST_WORKERS=4 bin/test --all`: PASS, 838 files across four root
+  partitions plus the component suite; 14,172 tests / 287,669 assertions,
+  zero failures/errors, 14 skips, 788.66 seconds. Worker seeds: 42266, 34167,
+  43525, 41548, 45138.
+  Raw log: `tmp/cli-usage-broad-review-complete.log`; worker summaries and
+  receipts: `tmp/test-parallel-20260908-4177286-fkr9f/`.
+
+U4 is complete: changed-library coverage and the broad checkpoint both passed
+on the final code and tests. `git diff --check` also passed. The historical
+schema conflict and incomplete attempts above are retained as provenance, not
+as the current completion status.

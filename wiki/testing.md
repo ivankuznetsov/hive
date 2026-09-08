@@ -61,10 +61,11 @@ authorized run on the unchanged exact head can produce authenticated evidence.
 Use `bin/test --changed --list` to inspect selection, then `bin/test --changed`
 for the implementation loop. Selection includes branch changes against the merge
 base, staged/unstaged edits, untracked files, and deletions. Changed test files
-run directly. Ruby sources use mirrored tests, exact require references, or
-nearest owning facade tests; unmapped sources fall back visibly to the root
-suite. Shared infrastructure selects the offline root, component, and Rails
-suites. Documentation-only changes select no tests. Rails and component tests
+run directly. Ruby sources combine mirrored tests with exact require consumers,
+so a mirrored file cannot hide additional command coverage. If neither exists,
+selection uses the nearest owning facade tests; unmapped sources fall back
+visibly to the root suite. Shared infrastructure selects the offline root,
+component, and Rails suites. Documentation-only changes select no tests. Rails and component tests
 run in separate processes with their own loaders; Rails uses its own bundle.
 This is focused feedback, not proof of complete transitive dependency coverage.
 The full CI gate remains mandatory.

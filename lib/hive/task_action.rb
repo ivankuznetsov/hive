@@ -771,6 +771,8 @@ module Hive
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_transient_coverage_review?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_verification_review?
+          ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
           ACTIONS.fetch(:plan_review_unsupported)
         else
@@ -1128,6 +1130,16 @@ module Hive
         end
         route && !route["attempt_id"].to_s.empty? &&
           PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+      end
+    end
+
+    def recoverable_transient_verification_review?
+      route = Array(plan_review["routes"]).reverse_each.find { |entry| entry["role"] == "verification" }
+      return false unless route && !route["attempt_id"].to_s.empty?
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+
+      Array(plan_review["blockers"]).any? do |blocker|
+        blocker["reason"] == "candidate_verification_#{route['outcome']}"
       end
     end
 

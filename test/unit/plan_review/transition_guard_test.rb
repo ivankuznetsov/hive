@@ -117,6 +117,24 @@ class PlanReviewTransitionGuardTest < Minitest::Test
     end
   end
 
+  def test_unpromoted_candidate_does_not_make_a_waiting_review_stale
+    with_task do |task, cfg|
+      projection = publish_projection(
+        task, cfg, state: "retry_scheduled",
+        candidate_digest: Digest::SHA256.hexdigest("# candidate awaiting verification\n")
+      )
+      freshness = Hive::PlanReview::TransitionGuard.freshness(task:, projection:, config: cfg)
+      assert_equal "current", freshness.fetch("status")
+      assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.prepare_existing!(task:, destination: "4-execute", config: cfg)
+      end
+      File.write(File.join(task.folder, "plan.md"), "# unrelated edit\n")
+      assert_equal "stale", Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection:, config: cfg
+      ).fetch("status")
+    end
+  end
+
   def test_non_coding_and_non_boundary_moves_are_not_applicable
     with_task(workflow_id: "custom") do |task, cfg|
       assert_nil Hive::PlanReview::TransitionGuard.prepare!(

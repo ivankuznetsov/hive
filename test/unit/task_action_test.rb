@@ -2263,6 +2263,20 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive plan-review-run demo-260426-aaaa", exhausted.command
   end
 
+  def test_plan_review_recovers_only_attempted_transient_candidate_verification
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    review = {
+      "state" => "blocked", "effective_level" => "standard",
+      "blockers" => [ { "reason" => "candidate_verification_provider_limit" } ],
+      "routes" => [ { "role" => "verification", "outcome" => "provider_limit", "attempt_id" => "pra-old" } ]
+    }
+    assert_equal "plan_reviewing", Hive::TaskAction.for(task, marker(:waiting), plan_review: review).key
+    review["routes"].first.delete("attempt_id")
+    assert_equal "plan_review_blocked", Hive::TaskAction.for(task, marker(:waiting), plan_review: review).key
+    review["routes"].first.merge!("attempt_id" => "pra-old", "outcome" => "terminal_failure")
+    assert_equal "plan_review_blocked", Hive::TaskAction.for(task, marker(:waiting), plan_review: review).key
+  end
+
   def test_plan_review_recovers_a_legacy_success_with_a_now_attestable_grok_identity
     task = fake_task(stage_name: "plan", stage_index: 3)
     routes = [

@@ -16,6 +16,7 @@ module Hive
       module_function
 
       def call(argv, environment: {}, deadline:, max_bytes:, poll_interval: 0.02)
+        cleanup_complete = false
         reader, writer = IO.pipe
         pid = Process.spawn(
           environment, *argv, pgroup: true, in: File::NULL, out: writer, err: writer
@@ -29,6 +30,7 @@ module Hive
           status ||= wait_nonblock(pid)
           if status && eof
             terminate(pid) if process_group_alive?(pid)
+            cleanup_complete = true
             return Result.new(output: output, status: status)
           end
           raise Timeout if monotonic_now >= deadline
@@ -38,12 +40,11 @@ module Hive
           IO.select(nil, nil, nil, wait_for) if wait_for.positive? && eof
         end
       rescue Timeout, TooLarge
-        terminate(pid)
         raise
       rescue SystemCallError, IOError => error
-        terminate(pid)
         raise SpawnFailed, error.message
       ensure
+        terminate(pid) if pid && !cleanup_complete
         writer&.close unless writer&.closed?
         reader&.close unless reader&.closed?
       end

@@ -36,6 +36,48 @@ class HiveBrainstormSuggestionsProcessCaptureTest < Minitest::Test
     assert_operator elapsed, :<, 1.0
   end
 
+  def test_capture_terminates_process_group_when_calling_thread_is_cancelled
+    spawned = Queue.new
+    selecting = Queue.new
+    original_spawn = Process.method(:spawn)
+    original_select = IO.method(:select)
+    pid = nil
+    worker = nil
+
+    spawn = lambda do |*args, **kwargs|
+      child_pid = original_spawn.call(*args, **kwargs)
+      spawned << child_pid
+      child_pid
+    end
+    select = lambda do |*args|
+      selecting << true
+      original_select.call(*args)
+    end
+
+    with_replaced_singleton_method(Process, :spawn, spawn) do
+      with_replaced_singleton_method(IO, :select, select) do
+        worker = Thread.new do
+          Hive::BrainstormSuggestions::ProcessCapture.call(
+            [ "/bin/sh", "-c", "sleep 10 & wait" ],
+            deadline: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30,
+            max_bytes: 1_024
+          )
+        end
+        pid = Timeout.timeout(1) { spawned.pop }
+        Timeout.timeout(1) { selecting.pop }
+
+        worker.kill
+        assert worker.join(2), "capture thread did not stop after cancellation"
+      end
+    end
+
+    assert_raises(Errno::ESRCH) { Process.kill(0, -pid) }
+  ensure
+    worker&.kill
+    worker&.join(1)
+    Hive::BrainstormSuggestions::ProcessCapture.terminate(pid) if pid
+  end
+
   def test_capture_returns_bounded_output_and_status
     result = Hive::BrainstormSuggestions::ProcessCapture.call(
       [ "/bin/sh", "-c", "printf success" ],

@@ -842,14 +842,26 @@ the ordinary answer fields and **Send answers** button remain usable.
 
 Approve copies the candidate into that question's editable textarea and Undo
 restores its prior draft. Decline hides the card and Restore reveals it. These
-four controls live only in the bounded Stimulus presentation-state map keyed by
-`suggestion_binding`; Turbo morphs/reloads cannot carry them onto a replacement
-candidate. They do not post to Hive or change canonical answer state. The
+four controls live only in bounded Stimulus maps keyed by
+`suggestion_binding`. Up to 24 states/drafts are mirrored into session storage;
+invalid or oversized entries are ignored, storage failures are inert, and a
+hard reload restores the exact current binding without carrying approval or a
+draft onto a replacement candidate. They do not post to Hive or change
+canonical answer state. The
 binding-checked Retry route is the sole advisory mutation: it asks
 `Hive::Commands::BrainstormSuggestion` for a replacement and writes no answer,
 marker, attempt, dispatch, or stage transition. **Send answers** remains the
 only Web action that invokes the existing answer writer, so approved candidate
 bytes stay editable and non-authoritative until the operator submits them.
+
+`web/test/fixtures/brainstorm_suggestion_flow.yml` is the supplied candidate
+inventory and ordered storyboard for escaping, exact-body approval,
+reload/Undo, replacement-binding, Decline/Restore, and sole-write proof. Run
+`npm ci` first so the Ruby and Node Playwright protocols match, then set
+`HIVE_RECORD_BRAINSTORM_SUGGESTION_FLOW=1` on the focused task-workspace system
+test to write the actual browser recording to
+`web/tmp/evidence/brainstorm-suggestion-flow.webm` (an ignored local evidence
+artifact).
 
 ## Plan-review task detail and actions
 

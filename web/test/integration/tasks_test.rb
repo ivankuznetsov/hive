@@ -1294,6 +1294,11 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal "stale", record.fetch("state")
     assert_nil record.fetch("text")
     assert_nil record.fetch("suggestion_binding")
+  ensure
+    # This example intentionally keeps a retryable record long enough to
+    # inspect it. The Web suite reuses one project, so remove that fixture
+    # before the next example exercises the feature-disable guard.
+    FileUtils.rm_f(folder&.join(Hive::BrainstormSuggestions::Store::FILENAME))
   end
 
   test "submitted answers land under the right question headers" do

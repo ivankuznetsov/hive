@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-30
+updated: 2026-09-11
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest, brainstorm, suggestions]
 ---
 
@@ -861,7 +861,7 @@ For one eligible task, reconciliation follows this order:
    enforce request due/attempt/coalescing policy, and compare-and-swap one
    loading attempt. An exhausted slot is terminalized before the task launch
    window is reserved, so it cannot starve a later question.
-4. Run the profile-gated worker with a cancellation token. On completion,
+4. Run the profile-gated controller transport with a cancellation token. On completion,
    recheck task/stage/question/attempt/input identity under the lock before
    accepting the validated result, then observe the selected manifest again.
    Drift discards/hides the candidate and schedules bounded regeneration.
@@ -874,9 +874,13 @@ input binding is also its input
 epoch: a new selected manifest or settled-answer generation resets the
 automatic attempt budget; same-epoch failures use minimum-delay plus bounded
 exponential jitter. Restarted `loading` records are reconciled rather than
-trusted as live processes. Missing isolation or routing is recorded as
-`unavailable`; timeout, provider exit, malformed structured output, and spawn
-failure are `failed`; safe suppression is `no_safe_suggestion`.
+trusted as live requests. Missing capability, concrete model, API key, or
+transport is recorded as `unavailable`; timeout, non-success HTTP response,
+oversized/malformed structured output, and transport failure are `failed`;
+safe suppression is `no_safe_suggestion`. The transport is fixed to the
+Anthropic Messages endpoint and creates no provider process, tool surface, or
+live filesystem/auth mount. Cancellation closes the in-flight connection, and
+the controller always removes the private materialized bundle runtime.
 Inventory conversion and per-row reconciliation are both failure-isolated: a
 malformed observation is logged through the scheduler's closed event enum and
 returns no launches instead of escaping the daemon tick.

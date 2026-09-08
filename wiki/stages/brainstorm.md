@@ -4,7 +4,7 @@ type: stage
 source: lib/hive/stages/brainstorm.rb, lib/hive/brainstorm_suggestions/, lib/hive/daemon/brainstorm_suggestion_scheduler.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, lib/hive/tmux_runner.rb, templates/{brainstorm,brainstorm_suggestion}_prompt.md.erb
 created: 2026-04-25
 updated: 2026-09-11
-tags: [stage, brainstorm, qa, tmux, suggestions, advisory, sandbox]
+tags: [stage, brainstorm, qa, tmux, suggestions, advisory, isolation]
 ---
 
 **TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Only after those questions are published, the daemon may generate one repository-aware advisory suggestion for each unanswered slot; suggestions never count as answers or block manual input. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Process exit and attempt receipts are not completion evidence by themselves: WAITING must contain a numbered Round, COMPLETE must contain non-empty Requirements, and a failed spawn cannot reuse an unchanged stale artifact. When the resolved `brainstorm.agent` is Claude, launch shape comes from project-global `claude.mode`: `tmux` runs Claude inside a managed attachable tmux session via `Hive::ClaudeLauncher`, while `headless` uses the normal non-interactive profile path. `brainstorm.runtime` is unsupported and rejected during config loading; use `claude.mode`.
@@ -66,6 +66,16 @@ diagnostic metadata and is deliberately absent from freshness. A
 `suggestion_binding` adds immutable attempt/candidate identity. Any binding
 change hides the old candidate synchronously.
 
+Read-side caching does not weaken that rule. Before reusing a successful
+observation, Hive hashes the bounded task inputs, the exact Git index plus
+tracked worktree diff, and the validated main-wiki Git identity. It repeats
+that identity after context capture and compares the sidecar lifecycle again
+before returning text. Any tracked repository/wiki edit therefore forces a
+new observation; when the selected manifest changes, the old candidate is
+suppressed on that same JSON/Web/TUI projection even though the sidecar has not
+changed. Untracked files and a commit that changes only `HEAD` do not create a
+new input epoch.
+
 Capture runs outside the task lock. The scheduler briefly reacquires the exact
 task lock to re-resolve stage/question/answer identity and compare-and-swap the
 request or result, then re-observes the selected manifest after publication.
@@ -74,7 +84,7 @@ survive an operator answer.
 
 ### Eligible evidence and admission
 
-The current `tracked-relevance` recipe (version 2) admits:
+The current `tracked-relevance` recipe (version 3) admits:
 
 - the task request;
 - bounded text files already in Git's index, read from the working tree so
@@ -95,17 +105,22 @@ Every excerpt is labelled as untrusted data.
 
 The configured provider is launchable only when its profile proves the
 `brainstorm_suggestion_data_only` capability. The shipped implementation
-currently admits Claude only. Hive constructs a controller-owned Bubblewrap
-runtime with no live project/task mount, an immutable `/bundle`, empty
-settings/MCP configuration, disabled shell/network tools and slash commands,
-and one schema-constrained stdout result channel. The sandbox retains network
-transport only for the controller-owned Claude CLI to reach its provider API;
-the model receives no network tool. Unsupported profiles,
-missing Bubblewrap, missing binaries, or unavailable isolation become
-`unavailable` and are not launched. Runtime roots and directories are `0700`;
-bundle/auth files are `0400`; every success, failure, timeout, TERM/KILL, and
-spawn-error path removes the runtime. Daemon startup sweeps inactive
-owner-matching runtime roots.
+currently admits Claude only. It does not spawn a provider CLI. A
+controller-owned transport sends one bounded data message to the fixed
+Anthropic Messages endpoint with a strict JSON output schema and no tool
+declarations. The provider receives no path, live repository/task mount,
+shell, MCP server, browser, network tool, settings directory, or authentication
+file. `ANTHROPIC_API_KEY` is used only as the outbound header, never copied into
+the request body, context bundle, result, log, or sidecar; this route is API
+billed rather than Claude subscription/CLI billed.
+
+The route requires the Claude capability, a resolved concrete model, and a
+nonempty API key. Unsupported profiles or a missing model/key become
+`unavailable` before transport. Runtime roots and bundle directories remain
+controller-owned `0700`, with owner/context files `0400`; every success,
+failure, oversized response, timeout, cancellation, or HTTP error removes the
+runtime, and cancellation closes the in-flight request. Daemon startup sweeps
+inactive owner-matching runtime roots.
 
 Admission accepts at most 1,000 UTF-8 characters and 12 lines of safe plain
 text plus a short rationale. Fences, structural Markdown/HTML, controls,
@@ -130,7 +145,9 @@ the budget, while unrelated commits and Hive marker commits do not.
 uses an exact `hive-suggestion:v1` comment envelope under the answer heading;
 the parser, completeness check, first-pass prompt, and writer strip that whole
 region before deciding whether a slot is answered. Web Approve/Undo and
-Decline/Restore are browser-only presentation state. Retry/Restore/dismissal,
+Decline/Restore are browser-only presentation state, bounded to 24
+binding-keyed entries in session storage so a hard reload can recover the
+operator draft without applying it to a replacement binding. Retry/Restore/dismissal,
 projection, persistence, and generation cannot write an answer, completion
 marker, attempt, dispatch, or stage transition. Only the operator's saved TUI
 adoption or Web **Send answers** submission reaches the existing answer
@@ -167,8 +184,17 @@ remains, making this cleanup a mandatory compatibility fence for older parsers.
    ### A2.
    ```
    End with `<!-- WAITING -->`.
-2. If `brainstorm.md` already has rounds, parse the most recent `## Round N`. If all answers are filled in, append `## Requirements` (actor / flow / acceptance examples) and end with `<!-- COMPLETE -->`. Otherwise append `## Round N+1` with follow-ups and end with `<!-- WAITING -->`.
-3. Use `/ce-brainstorm` skill where available. Legacy `compound-engineering:ce-*` config values are normalized before rendering.
+2. If `brainstorm.md` already has rounds, parse the most recent `## Round N`
+   after ignoring complete suggestion envelopes. If any answer is still empty,
+   preserve that round and write `<!-- WAITING -->`; do not invoke a skill,
+   append follow-ups, Requirements, or COMPLETE. If all answers are filled in,
+   append `## Requirements` (actor / flow / acceptance examples) and end with
+   `<!-- COMPLETE -->`. The Codex preservation prompt also requires complete
+   shell commands and explicit interpreter/editor invocation so bare source
+   cannot strand the round in an agent-working state.
+3. Use `/ce-brainstorm` skill where available for new-round interview work.
+   Legacy `compound-engineering:ce-*` config values are normalized before
+   rendering.
 
 Agent must not modify any file other than `brainstorm.md` and must not run shell or network tools.
 
@@ -185,7 +211,13 @@ The runner returns `{commit: action, status: marker.name}` so `Commands::Run` wr
 
 ## Tests
 
-- `test/integration/run_brainstorm_test.rb` exercises the prompt shape and marker transitions using the fake-claude fixture.
+- `test/integration/run_brainstorm_test.rb` exercises the prompt shape, marker
+  transitions, and deterministic envelope preservation using the fake-Claude
+  fixture; it is not provider interpretation proof.
+- `test/smoke/live_brainstorm_suggestion_inertness_smoke_test.rb` is the opt-in
+  real-provider proof that an untouched envelope remains unanswered and emits
+  neither Requirements nor COMPLETE. See [[testing]] for its explicit
+  credential-preserving invocation.
 - `test/integration/run_brainstorm_tmux_test.rb` exercises the tmux launcher path.
 - `test/unit/stages/brainstorm_runtime_test.rb` pins headless/tmux failure reconciliation, structural artifact validation, changed-artifact precedence, and stale-artifact rejection.
 - `test/unit/attempts/dispatcher_test.rb` pins one repair admission for a successful Brainstorm receipt whose required artifact is absent.

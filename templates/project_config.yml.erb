@@ -114,9 +114,10 @@ brainstorm:
   # the project-global claude.mode setting above.
   suggestions:
     # Advisory generation is asynchronous and never writes an answer. Claude
-    # is the only shipped profile currently able to prove the required
-    # tool-less, settings-isolated worker contract; other profiles surface an
-    # unavailable card and are never launched.
+    # is the only shipped profile admitted to the fixed-endpoint, schema-only
+    # Anthropic Messages transport. It requires ANTHROPIC_API_KEY and a
+    # concrete routed/default model; no provider CLI or live filesystem is
+    # exposed. Missing prerequisites surface an unavailable card.
     enabled: false
     agent: claude
     capture_timeout_sec: 5

@@ -3,7 +3,7 @@ title: Hive::ModelRouting
 type: module
 source: lib/hive/model_routing.rb
 created: 2026-07-25
-updated: 2026-08-30
+updated: 2026-09-07
 tags: [config, models, routing, validation, brainstorm, suggestions]
 ---
 
@@ -107,7 +107,9 @@ coarse `brainstorm` model/effort while the selected
 `brainstorm.suggestions.agent` remains fixed. Routing capability validation is
 conditional on `brainstorm.suggestions.enabled`; disabling the feature does not
 make an otherwise unreachable suggestion route a launch requirement. Provider
-selection and the data-only sandbox gate remain outside this module.
+selection and the fixed-endpoint data-only transport gate remain outside this
+module. The suggestion runner requires the resolved value to be a concrete
+Claude model before it can use the controller-owned Messages request.
 
 ## OpenCode nested routes
 

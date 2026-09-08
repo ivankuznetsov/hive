@@ -171,11 +171,12 @@ proves the data-only worker capability.
 The scheduler coalesces launches across the whole task, admits only one active
 request per question/input binding, applies the configured minimum retry
 interval and bounded per-epoch attempt count, and cancels removed/answered or
-stage-exited work. `unavailable` is distinct from a provider/spawn `failed`
-attempt. Shutdown cooperatively cancels each worker and then owns its bounded
-process-group cleanup; no suggestion child is adopted as a workflow-stage
-attempt. Candidate completion can update only the exact still-current sidecar
-record and cannot create an answer, queue request, marker, or stage move.
+stage-exited work. `unavailable` (no enforceable transport, concrete model, or
+API key) is distinct from an HTTP/provider/malformed `failed` attempt. Shutdown
+cooperatively cancels each request and closes its controller-owned connection;
+no provider child exists or is adopted as a workflow-stage attempt. Candidate
+completion can update only the exact still-current sidecar record and cannot
+create an answer, queue request, marker, or stage move.
 
 The controls live under `brainstorm.suggestions` (`enabled`, `agent`,
 `capture_timeout_sec`, `timeout_sec`, `coalesce_window_sec`,
@@ -183,7 +184,7 @@ The controls live under `brainstorm.suggestions` (`enabled`, `agent`,
 while any sidecar or reserved envelope remains; run
 `hive brainstorm-suggestion cleanup --json` and require
 `safe_to_disable: true` first. See [[stages/brainstorm]] for the context,
-sandbox, binding, surface, and downgrade contracts.
+transport-isolation, binding, surface, and downgrade contracts.
 
 ## Architecture-patrol dispatch
 

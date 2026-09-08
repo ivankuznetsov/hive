@@ -3,7 +3,7 @@ title: hive answer
 type: command
 source: lib/hive/commands/answer.rb, lib/hive/brainstorm_parser.rb, lib/hive/brainstorm_suggestions/projection.rb, lib/hive/bot/brainstorm_answer_writer.rb, schemas/hive-answer.v1.json
 created: 2026-08-10
-updated: 2026-08-31
+updated: 2026-09-07
 tags: [command, brainstorm, answers, bindings, concurrency, json, agents, suggestions]
 ---
 
@@ -65,13 +65,17 @@ Only a freshness-verified `fresh` record exposes text; stale, failed,
 unavailable, no-safe, corrupt, or unobservable state returns null text.
 
 Projection performs at most one deadline-bounded context observation for the
-task, shared across all unanswered slots. Its process-local cache is keyed by
-the canonical sidecar/candidate lifecycle identity; repository and wiki
-capture runs only on a cache miss, not before every read-side lookup. Failed
-observations are not retained, so a later same-input read can expose a newly
-verifiable candidate. The cache never stores raw context or provider output.
-Observation failure fails closed without affecting the slot's normal
-`binding` or manual submission path.
+task, shared across all unanswered slots. Its process-local cache key combines
+the canonical sidecar lifecycle with bounded identities for `idea.md`,
+`brainstorm.md`, the Git index plus tracked worktree diff, the selection
+recipe, task/answer generation, and a validated main wiki. Hive checks that
+external identity both before and after capture. A tracked edit cannot reuse a
+previously successful cache entry, and a change to the newly selected manifest
+immediately returns null stale text. Untracked files and HEAD-only commits do
+not invalidate selected-input freshness. Failed observations are not retained,
+and the cache never stores raw context or provider output. Observation failure
+fails closed without affecting the slot's normal `binding` or manual
+submission path.
 
 The nested suggestion contract is read-only. No suggestion state, candidate
 binding, Retry, Restore, or client-side approval is accepted by the answer

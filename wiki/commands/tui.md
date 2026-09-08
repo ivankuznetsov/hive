@@ -250,6 +250,9 @@ On editor exit Hive compares the saved file with that lease:
 - deleting the complete envelope dismisses the current candidate without
   filling the slot;
 - preserving the exact envelope leaves both answer and candidate untouched;
+- changing bytes inside the still-delimited leased envelope dismisses the
+  candidate and removes the complete advisory region rather than preserving
+  edited model text as an answer; and
 - a changed question/binding or a newer worker result strips the leased text
   instead of inserting new bytes into the operator's old buffer.
 

@@ -3,7 +3,7 @@ title: Secret detection and diagnostic redaction
 type: module
 source: lib/hive/secret_scanner.rb, lib/hive/secret_patterns.rb, lib/hive/betterleaks.rb
 created: 2026-04-26
-updated: 2026-09-06
+updated: 2026-09-07
 tags: [security, secrets, betterleaks, secret-scan, redact, brainstorm, suggestions]
 ---
 
@@ -50,15 +50,16 @@ reading them still checks their contents with the current Betterleaks detector.
 - `Hive::BrainstormSuggestions::ContextBundle` — excludes selected
   repository/wiki entries containing a match and redacts the task request plus
   settled operator answers before rendering them as untrusted evidence.
-- `Hive::BrainstormSuggestions::Safety` — applies `match?` again to candidate
+- `Hive::BrainstormSuggestions::Safety` — applies `SecretScanner.match?` again to candidate
   text and rationale at provider admission and sidecar-read validation, so raw
   secret material cannot become actionable through either a worker result or a
   hand-edited persisted store. Rejected material is replaced by a bounded
   static reason and is never copied into logs/state.
 
-Integration gap: these suggestion callers still use the removed
-`SecretPatterns.match?` API and need migration to `SecretScanner.match?`
-to enforce the filtering described above with the current detector.
+Scanner unavailability fails closed in both callers: context capture raises a
+typed capture error, while candidate/read validation returns only the bounded
+non-actionable safety reason. No caller falls back to diagnostic redaction as
+an admission decision.
 
 ## Distribution and tests
 

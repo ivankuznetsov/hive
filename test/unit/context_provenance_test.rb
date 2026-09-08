@@ -359,6 +359,22 @@ class ContextProvenanceTest < Minitest::Test
     assert_nil Hive::ContextProvenance.record_proposal_context_activity(
       Object.new, Object.new, selection
     )
+
+    recorded = []
+    activity = Object.new
+    activity.define_singleton_method(:record) { |**attributes| recorded << attributes; :recorded }
+    context = Struct.new(:attempt_id).new("attempt-1")
+    with_replaced_singleton_method(
+      Hive::TaskActivity, :for_context,
+      ->(*, clock:, **) { clock.call; activity }
+    ) do
+      assert_equal :recorded, Hive::ContextProvenance.record_proposal_context_activity(
+        Object.new, context, selection
+      )
+    end
+    assert_equal "proposal_context_supplied", recorded.one? && recorded.first.fetch(:kind)
+    assert_equal "proposal-context:attempt-1:#{selection.digest}",
+                 recorded.first.fetch(:operation_id)
   end
 
   private

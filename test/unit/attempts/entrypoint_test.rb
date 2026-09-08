@@ -22,7 +22,7 @@ class AttemptsEntrypointTest < Minitest::Test
         "evaluators" => {
           "benchmark-reviewer" => {
             "workflows" => [ "coding" ], "stages" => [ "4-execute" ],
-            "agent_profiles" => [ "codex" ]
+            "agent_profiles" => [ "claude" ]
           }
         }
       }
@@ -33,7 +33,7 @@ class AttemptsEntrypointTest < Minitest::Test
       config_loader: ->(_root) { config }
     ).dispatch(
       task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ],
-      provider: "codex", interactive: false,
+      interactive: false,
       proposal_admission: {
         "subject" => {
           "kind" => "skill", "reference" => "agent-skills/reviewer",
@@ -41,13 +41,14 @@ class AttemptsEntrypointTest < Minitest::Test
         },
         "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:skills" },
         "evaluator_identity" => "benchmark-reviewer",
-        "agent_profile" => "codex"
+        "agent_profile" => nil
       }
     )
 
     proposal = calls.one? && calls.first.dig(:subject, "proposal")
     assert_equal "agent-skills/reviewer", proposal.dig("subject", "reference")
     assert_equal "benchmark-reviewer", proposal.dig("evaluator", "id")
+    assert_equal [ "claude" ], proposal.dig("evaluator", "admission", "agent_profiles")
     assert_match(/\A[0-9a-f]{64}\z/, proposal.fetch("configuration_fingerprint"))
     assert_equal "restricted", proposal.dig("policy", "visibility")
   end

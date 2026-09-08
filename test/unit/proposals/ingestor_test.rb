@@ -192,6 +192,10 @@ class ProposalIngestorTest < Minitest::Test
 
       assert_equal "original", File.read(File.join(nested, "record.json"))
       refute File.exist?(File.join(root, "replacement.json"))
+
+      FileUtils.rm_rf(root)
+      snapshot.restore!
+      assert_equal "original", File.read(File.join(nested, "record.json"))
     end
   end
 

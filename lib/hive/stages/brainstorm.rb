@@ -222,6 +222,7 @@ module Hive
             idea_text: idea_text,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
             preserve_unanswered_round: preserve_unanswered_round,
+            agent_name: profile.name.to_s,
             skill_invocation: skill_invocation
           )
         )

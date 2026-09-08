@@ -30,6 +30,13 @@ question. This invocation has exactly one job:
 
 Do not discover or invoke a skill in preservation mode. Do not list skills,
 resources, or templates. Do not perform interview or requirements work.
+<% if agent_name == "codex" %>
+
+Codex command-tool note: submit a complete shell command for every command
+execution. Read the file with `sed -n '1,240p' brainstorm.md`. When editing,
+invoke the interpreter or editor explicitly. Do not submit bare Ruby or Python
+source as a command.
+<% end %>
 <% else %>
 Behavior:
 

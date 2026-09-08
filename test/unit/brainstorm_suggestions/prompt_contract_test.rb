@@ -43,6 +43,30 @@ class HiveBrainstormSuggestionsPromptContractTest < Minitest::Test
     end
   end
 
+  def test_codex_preservation_prompt_requires_complete_shell_commands
+    Dir.mktmpdir do |root|
+      task = Task.new(folder: root, project_root: root)
+      File.write(File.join(root, "idea.md"), "Choose an adapter.\n")
+      File.write(
+        File.join(root, "brainstorm.md"),
+        "## Round 1\n### Q1. Which adapter?\n### A1.\n" \
+        "<!-- hive-suggestion:v1 binding=#{"d" * 64} -->\nCandidate\n" \
+        "<!-- /hive-suggestion:v1 -->\n<!-- WAITING -->\n"
+      )
+
+      prompt = Hive::Stages::Brainstorm.render_prompt(
+        task,
+        { "brainstorm" => { "skill" => "/ce-brainstorm" } },
+        profile: Profile.new(name: :codex)
+      )
+
+      assert_includes prompt, "complete shell command"
+      assert_includes prompt, "sed -n '1,240p' brainstorm.md"
+      assert_includes prompt, "Do not submit bare Ruby or Python"
+      assert_includes prompt, "source as a command"
+    end
+  end
+
   def test_answered_round_keeps_the_interview_skill_instruction
     Dir.mktmpdir do |root|
       task = Task.new(folder: root, project_root: root)

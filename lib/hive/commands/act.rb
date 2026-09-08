@@ -89,3 +89,19 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary preserves the
+# action identity argv named, so Thor rejections that never reach the handler
+# still carry the attempted action/target (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("act") do |argv, command_index:, option_argv:|
+  action_id, target = Hive::CliUsageContracts.positionals(
+    argv, command_index, value_options: %w[--observation]
+  ).first(2)
+  {
+    schema: "hive-act",
+    error_kind: "usage",
+    extras: { "action_id" => action_id.to_s, "target" => target.to_s }
+  }
+end

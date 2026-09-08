@@ -134,3 +134,25 @@ in 28.309490 seconds. Existing integration coverage therefore confirms baseline
 envelopes and fallback before production changes. `git diff --check` passed.
 The trigger inventory is source-derived; U4 must execute the extended cases,
 not treat source transcription as a substitute for subprocess validation.
+
+## U2 candidate and isolation evidence
+
+Narrow historical adaptation on U1 commit e8ff235b13: command declaration patches,
+resolver, and launcher helpers only; no circuits or historical schema changes.
+Before correction, `bin/test test/unit/cli_usage_contracts_test.rb --seed 1`
+passed (23 runs, 109 assertions); seed 3 failed (23 runs, 107 assertions) because
+bot was cached. A real-launcher RUBYOPT probe with a first-attempt LoadError
+observed 2 resolver entries and 2 loader attempts, exit 64, and a hive-run v2
+invalid_task_path document classified UsageError. These reproduce both historical
+candidate defects. The probe was removed after use.
+
+Cold-load tests now assert fresh declaration and loaded-feature state in children,
+and preserve inherited RUBYOPT coverage instrumentation. No production cache reset
+or argv-result caching change was necessary. Classification accepts a selected
+contract; U3 will remove the remaining separate launcher resolutions.
+
+U2 verification (absolute GEM_HOME/GEM_PATH pinned as above): focused contract
+seeds 1, 3, 17 each passed 24 runs / 121 assertions. Existing launcher integration
+plus refactor-patrol tests passed 32 runs / 689 assertions (seed 7133).
+`bin/test --changed --list` selected the broad fallback for bin/hive; explicit
+focused files were used for this incremental checkpoint. `git diff --check` passed.

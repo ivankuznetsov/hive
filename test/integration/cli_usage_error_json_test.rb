@@ -363,7 +363,7 @@ class CliUsageErrorJsonTest < Minitest::Test
         RUBY
 
         out, err, status = Open3.capture3(
-          { "HIVE_HOME" => home, "RUBYOPT" => "-r#{patch}" },
+          { "HIVE_HOME" => home, "RUBYOPT" => [ENV["RUBYOPT"], "-r#{patch}"].compact.join(" ") },
           RbConfig.ruby, "-Ilib", HIVE_BIN, "connect", "--json"
         )
 

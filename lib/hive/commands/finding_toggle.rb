@@ -260,3 +260,17 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contracts for the finding-toggle command
+# boundary: Thor rejections that never reach the handler still ride the
+# hive-findings envelope (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare(
+  "accept-finding",
+  schema: "hive-findings", error_kind: "invalid_task_path", extras: { "operation" => "accept" }
+)
+Hive::CliUsageContracts.declare(
+  "reject-finding",
+  schema: "hive-findings", error_kind: "invalid_task_path", extras: { "operation" => "reject" }
+)

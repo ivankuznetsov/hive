@@ -57,6 +57,18 @@ class ProposalStoreTest < Minitest::Test
     end
   end
 
+  def test_source_quarantine_loader_isolates_unsafe_and_malformed_neighbors
+    directory = File.join(@root, "inbox", "quarantine")
+    FileUtils.mkdir_p(directory)
+    File.symlink("missing.json", File.join(directory, "pse-#{'a' * 64}.json"))
+    File.write(File.join(directory, "pse-#{'b' * 64}.json"), "{malformed")
+
+    codes = @store.load.diagnostics.map(&:code)
+
+    assert_includes codes, "symlink"
+    assert_includes codes, "invalid_source_quarantine"
+  end
+
   def test_malformed_event_filename_reserves_its_numeric_slot
     proposal = @store.create_record!(**record_attributes)
     events = File.join(@root, "events", proposal.proposal_id)

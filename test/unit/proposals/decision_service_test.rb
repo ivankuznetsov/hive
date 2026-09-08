@@ -20,8 +20,9 @@ class ProposalDecisionServiceTest < Minitest::Test
       :committed
     end
 
-    def run_git!(*_arguments)
-      raise Hive::GitError, "simulated reset failure" if @fail_reset
+    def run_git!(*arguments)
+      return "a" * 40 if arguments.include?("write-tree")
+      raise Hive::GitError, "simulated reset failure" if @fail_reset && arguments.include?("read-tree")
       true
     end
   end

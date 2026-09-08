@@ -147,6 +147,12 @@ class ProposalSourceEventStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
 
+      assert_raises(Hive::Proposals::InvalidRecord) do
+        store.enforce_lifecycle!(
+          proposal_id: source_event.proposal_id, actor_id: "operator", event_bytes: "many"
+        )
+      end
+
       invalid_limit = Hive::Proposals::SourceEventStore.new(
         root: dir, limits: limits.merge("max_project_events" => "many")
       )
@@ -164,6 +170,76 @@ class ProposalSourceEventStoreTest < Minitest::Test
 
       File.write(File.join(store.inbox_root, "index.json"), "{not json")
       assert_raises(Hive::Proposals::QuarantinedSource) { store.index }
+    end
+  end
+
+  def test_terminal_status_cannot_exceed_its_reservation
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
+      store.admit!(source_event)
+
+      assert_raises(Hive::Proposals::Error) do
+        store.mark_consumed!(
+          source_event.source_event_id,
+          result: { "details" => "x" * Hive::Proposals::SourceEventStore::MAX_TERMINAL_BYTES }
+        )
+      end
+      assert_equal "pending", store.status(source_event.source_event_id).fetch("state")
+    end
+  end
+
+  def test_namespace_usage_tolerates_symlinks_and_disappearing_paths
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
+      FileUtils.mkdir_p(File.join(dir, "records"))
+      symlink = File.join(dir, "records", "linked.json")
+      File.symlink("missing.json", symlink)
+      store.send(:namespace_usage_unlocked, store.send(:empty_index))
+
+      original_lstat = File.method(:lstat)
+      directory_symlink = Struct.new(:symlink?, :directory?).new(true, true)
+      replacement = lambda do |path|
+        path == symlink ? directory_symlink : original_lstat.call(path)
+      end
+      with_replaced_singleton_method(File, :lstat, replacement) do
+        store.send(:namespace_usage_unlocked, store.send(:empty_index))
+      end
+
+      vanishing = File.join(dir, "records", "vanishing.json")
+      File.write(vanishing, "{}")
+      replacement = lambda do |path|
+        raise Errno::ENOENT if path == vanishing
+        original_lstat.call(path)
+      end
+      usage = with_replaced_singleton_method(File, :lstat, replacement) do
+        store.send(:namespace_usage_unlocked, store.send(:empty_index))
+      end
+      assert_equal 0, usage.fetch("project_events")
+    end
+  end
+
+  def test_malformed_namespace_entries_are_ignored_by_quota_accounting
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
+      FileUtils.mkdir_p(store.inbox_root)
+      receipt_path = File.join(store.inbox_root, "#{source_event.source_event_id}.json")
+      File.write(receipt_path, "{malformed")
+
+      assert_nil store.send(
+        :proposal_id_for_file, "inbox/#{source_event.source_event_id}.json", receipt_path
+      )
+
+      event_dir = File.join(dir, "events", source_event.proposal_id)
+      FileUtils.mkdir_p(event_dir)
+      File.write(File.join(event_dir, "malformed.json"), "{malformed")
+      assert_equal 0, store.send(:recent_actor_events_unlocked, "alice")
+
+      store.send(:write_index_unlocked, store.send(:empty_index))
+      assert_equal [], store.index.fetch("pending")
+
+      assert_raises(Hive::Proposals::QuarantinedSource) do
+        store.fetch(source_event.source_event_id)
+      end
     end
   end
 

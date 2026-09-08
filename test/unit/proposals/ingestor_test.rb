@@ -153,6 +153,127 @@ class ProposalIngestorTest < Minitest::Test
     end
   end
 
+  def test_reported_commit_without_durable_files_restores_the_target
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      source_store = Hive::Proposals::SourceEventStore.new(root: root)
+      store = Hive::Proposals::Store.new(root: root, id_generator: id_sequence)
+      source_store.admit!(submission)
+      paths = source_store.paths_for_admission(submission.source_event_id).map do |path|
+        path.delete_prefix("#{ops.hive_state_path}/")
+      end
+      ops.hive_commit(
+        stage_name: "4-execute", slug: "proposal-task", action: "source only", pathspecs: paths
+      )
+      source_commit = ops.hive_state_head_sha
+      ops.define_singleton_method(:hive_commit) { |**_options| :committed }
+      ingestor = Hive::Proposals::Ingestor.new(source_store:, store:, git_ops: ops)
+
+      assert_raises(Hive::Proposals::SourceUnavailable) do
+        ingestor.ingest!(submission.source_event_id, source_commit:)
+      end
+      assert_nil store.projection(proposal_id)
+      assert_equal "pending", source_store.status(submission.source_event_id).fetch("state")
+    end
+  end
+
+  def test_committed_terminal_quarantine_is_final
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      source_store = Hive::Proposals::SourceEventStore.new(root: root)
+      store = Hive::Proposals::Store.new(root: root, id_generator: id_sequence)
+      source_store.admit!(submission)
+      admission_paths = source_store.paths_for_admission(submission.source_event_id).map do |path|
+        path.delete_prefix("#{ops.hive_state_path}/")
+      end
+      ops.hive_commit(
+        stage_name: "4-execute", slug: "proposal-task", action: "source only",
+        pathspecs: admission_paths
+      )
+      source_commit = ops.hive_state_head_sha
+      source_store.quarantine!(submission.source_event_id, code: "invalid", reason: "invalid")
+      terminal_paths = source_store.paths_for_terminal(
+        submission.source_event_id, state: "quarantine"
+      ).map { |path| path.delete_prefix("#{ops.hive_state_path}/") }
+      ops.hive_commit(
+        stage_name: "proposal-reconcile", slug: "proposal-task", action: "quarantined source",
+        pathspecs: terminal_paths
+      )
+
+      assert_raises(Hive::Proposals::QuarantinedSource) do
+        Hive::Proposals::Ingestor.new(
+          source_store:, store:, git_ops: ops
+        ).ingest!(submission.source_event_id, source_commit:)
+      end
+    end
+  end
+
+  def test_committed_terminal_verification_rejects_inconsistent_results
+    with_tmp_dir do |dir|
+      source_store, store, plain_ingestor = stores(dir)
+      source_store.admit!(submission)
+      result = plain_ingestor.ingest!(submission.source_event_id, source_commit: "a" * 40)
+      terminal = source_store.status(submission.source_event_id)
+      git_ops = Object.new
+      git_ops.define_singleton_method(:hive_state_path) { dir }
+      git_ops.define_singleton_method(:hive_state_head_sha) { "a" * 40 }
+      blobs = {}
+      git_ops.define_singleton_method(:read_hive_state_blob_at) do |_commit, path, **_options|
+        blobs[path]
+      end
+      ingestor = Hive::Proposals::Ingestor.new(source_store:, store:, git_ops:)
+
+      assert_raises(Hive::Proposals::SourceUnavailable) do
+        ingestor.send(:verify_committed_terminal!, nil, result)
+      end
+
+      mismatched = Hive::Proposals::IngestionResult.new(
+        kind: "record", proposal_id:, event_id: nil, source_event_id: "pse-#{'b' * 64}"
+      )
+      mismatched_terminal = terminal.merge(
+        "source_event_id" => mismatched.source_event_id, "result" => mismatched.to_h
+      )
+      mismatched_status_path = source_store.paths_for_terminal(
+        mismatched.source_event_id, state: "consumed"
+      ).first.delete_prefix("#{dir}/")
+      blobs[mismatched_status_path] = Hive::Proposals.canonical(mismatched_terminal)
+      assert_raises(Hive::Proposals::QuarantinedSource) do
+        ingestor.send(:verify_committed_terminal!, mismatched_terminal, mismatched)
+      end
+
+      status_path = source_store.paths_for_terminal(
+        result.source_event_id, state: "consumed"
+      ).first.delete_prefix("#{dir}/")
+      blobs[status_path] = Hive::Proposals.canonical(terminal)
+      assert_raises(Hive::Proposals::SourceUnavailable) do
+        ingestor.send(:verify_committed_terminal!, terminal, result)
+      end
+    end
+  end
+
+  def test_committed_target_cleanup_removes_files_directories_and_missing_paths
+    with_tmp_dir do |dir|
+      ingestor = Hive::Proposals::Ingestor.new(source_store: Object.new, store: Object.new)
+      directory = File.join(dir, "directory")
+      file = File.join(dir, "file")
+      missing = File.join(dir, "missing")
+      FileUtils.mkdir_p(directory)
+      File.write(File.join(directory, "nested"), "data")
+      File.write(file, "data")
+
+      ingestor.send(:remove_path, directory)
+      ingestor.send(:remove_path, file)
+
+      refute File.exist?(directory)
+      refute File.exist?(file)
+      assert_nil ingestor.send(:remove_path, missing)
+    end
+  end
+
   def test_evaluation_subject_must_match_the_immutable_candidate
     with_tmp_dir do |dir|
       source_store, store, ingestor = stores(dir)

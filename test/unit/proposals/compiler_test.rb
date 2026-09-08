@@ -119,6 +119,27 @@ class ProposalCompilerTest < Minitest::Test
     end
   end
 
+  def test_pinned_compilation_quarantines_unreadable_blobs
+    with_tmp_dir do |dir|
+      git_ops = Object.new
+      git_ops.define_singleton_method(:read_hive_state_blob_at) do |*_arguments, **_options|
+        raise Hive::GitError, "simulated unreadable blob"
+      end
+      source = Hive::Proposals::Compiler::PinnedSource.new(
+        git_ops:, source_ref: "HEAD"
+      )
+      relative = "records/#{draft_id}.json"
+      entry = "100644 blob #{'b' * 40}\tproposals/v1/#{relative}"
+      root = File.join(dir, "proposals", "v1")
+      unsafe_paths = {}
+
+      source.send(:materialize_entry, root, "a" * 40, entry, unsafe_paths)
+
+      assert_equal({ "code" => "unreadable_file" }, unsafe_paths.fetch(relative))
+      assert_equal "", File.binread(File.join(root, relative))
+    end
+  end
+
   def test_compilation_exposes_terminal_source_quarantine_diagnostics
     path = File.join(
       @store.root, "inbox", "quarantine", "pse-#{'f' * 64}.json"

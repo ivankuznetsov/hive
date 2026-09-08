@@ -3750,6 +3750,12 @@ class ConfigTest < Minitest::Test
     # Direct unit test of the helper:
     msg = Hive::Config.send(:describe_source, "/no/such/file.yml")
     assert_match %r{/no/such/file\.yml \(defaults; no file present\)}, msg
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Proposals::ConfigValidator.validate!(
+        { "unexpected" => true }, source_path: "/no/such/proposals.yml"
+      )
+    end
+    assert_match %r{/no/such/proposals\.yml \(defaults; no file present\)}, error.message
     # When the file does exist, no annotation:
     Tempfile.create([ "config", ".yml" ]) do |f|
       f.write("---\n")

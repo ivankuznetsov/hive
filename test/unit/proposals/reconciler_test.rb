@@ -96,8 +96,10 @@ class ProposalReconcilerTest < Minitest::Test
       ops.define_singleton_method(:hive_commit) do |**_options|
         raise Hive::GitError, "simulated quarantine commit failure"
       end
-      ops.define_singleton_method(:run_git!) do |*_arguments|
-        raise Hive::GitError, "simulated reset failure"
+      original_run_git = ops.method(:run_git!)
+      ops.define_singleton_method(:run_git!) do |*arguments|
+        raise Hive::GitError, "simulated reset failure" if arguments.include?("read-tree")
+        original_run_git.call(*arguments)
       end
 
       assert_raises(Hive::GitError) do

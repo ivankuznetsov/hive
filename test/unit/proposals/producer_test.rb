@@ -203,6 +203,35 @@ class ProposalProducerTest < Minitest::Test
     end
   end
 
+  def test_changed_evaluator_identity_fails_closed
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      binding = Marshal.load(Marshal.dump(proposal_binding))
+      binding["evaluator"] = {
+        "id" => "benchmark-reviewer", "fingerprint" => "d" * 64,
+        "configuration_fingerprint" => "c" * 64,
+        "admission" => {
+          "workflows" => [ "coding" ], "stages" => [ "4-execute" ],
+          "agent_profiles" => [ "codex" ]
+        }
+      }
+      producer = Hive::Proposals::Producer.new(
+        project_root: dir, git_ops: ops, activity: activity_for(ops),
+        attempt: FakeAttempt.new(binding, "codex")
+      )
+      authority = Object.new
+      authority.define_singleton_method(:bind!) { |**_attributes| { "id" => "replacement" } }
+      replacement = ->(*_arguments, **_options) { authority }
+
+      with_replaced_singleton_method(Hive::Proposals::EvaluatorAuthority, :new, replacement) do
+        assert_raises(Hive::Proposals::Unauthorized) do
+          producer.send(:ensure_evaluator_currently_authorized!)
+        end
+      end
+    end
+  end
+
   private
 
   def producer_for(ops, activity:)

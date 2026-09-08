@@ -1411,3 +1411,12 @@ Automatic recovery requires successful process and open-file probes (`ps` and
 nonempty locks deliberately leave recovery to a later retry or operator.
 This is not general recovery of interrupted Git operations; preserved lock
 files may still require inspection on platforms without these probes.
+
+## Pre-dispatch workflow usage envelopes versus published schemas
+
+Verified on main 794edfb489 (2026-09-08): workflow install/list/remove/update
+usage errors emit `error_kind: usage`, excluded from their published error enums.
+Workflow publish's generic usage envelope also lacks required `retryable` and does
+not match its specialized error arms. Preserving those baseline envelopes and
+requiring schema validation conflict. Public compatibility treatment remains
+undecided; see `docs/implementation/cli-usage-contracts-baseline.md` (U4 blocker).

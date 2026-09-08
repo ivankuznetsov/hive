@@ -328,6 +328,110 @@ class CliUsageContractsTest < Minitest::Test
     assert_equal "Hive::InvalidTaskPath", out.strip
   end
 
+  def test_resolution_diagnostics_are_local_and_process_control_exceptions_escape
+    diagnostics = []
+    callback = ->(klass) { diagnostics << klass }
+    %w[unit-syntax unit-interrupt unit-exit].zip([ SyntaxError, Interrupt, SystemExit ]).each do |command, klass|
+      Hive::CliUsageContracts.declare(command) { raise klass, "private message" }
+    end
+    assert_nil Hive::CliUsageContracts.contract(%w[unit-syntax], on_failure: callback)
+    assert_equal [ SyntaxError ], diagnostics
+    assert_raises(Interrupt) { Hive::CliUsageContracts.contract(%w[unit-interrupt], on_failure: callback) }
+    assert_raises(SystemExit) { Hive::CliUsageContracts.contract(%w[unit-exit], on_failure: callback) }
+    assert_nil Hive::CliUsageContracts.contract(%w[unknown-command], on_failure: callback)
+    assert_equal [ SyntaxError ], diagnostics
+  ensure
+    contracts = Hive::CliUsageContracts.instance_variable_get(:@contracts)
+    %w[unit-syntax unit-interrupt unit-exit].each { |command| contracts.delete(command) }
+  end
+
+  def test_declaration_requires_a_contract_or_resolver
+    assert_raises(ArgumentError) { Hive::CliUsageContracts.declare("missing") }
+  end
+
+  def test_invalid_command_and_unsupported_boundaries_have_no_contract
+    [ [], %w[--json], [ "bad\xFF" ], %w[../run], %w[not-a-command], %w[version] ].each do |argv|
+      assert_nil Hive::CliUsageContracts.contract(argv), argv.inspect
+    end
+  end
+
+  def test_region_helpers_keep_values_and_delimited_positionals_separate
+    policy = Hive::CliUsageContracts
+    assert_equal [ "--operational" ], policy.option_region(%w[status --operational -- --diagnose], 0)
+    assert_nil policy.subcommand(%w[web --bind host --json], 0, value_options: %w[--bind])
+    assert_nil policy.subcommand([ "web", "bad\xFF" ], 0)
+    assert_equal "--status", policy.subcommand(%w[web -- --status], 0)
+    assert_equal [ "x", "--json" ], policy.positionals(
+      [ "act", "--observation", "value", "--observation=other", "--json", "bad\xFF", "x", "--", "--json" ],
+      0, value_options: %w[--observation]
+    )
+  end
+
+  def test_legacy_schema_versions_and_non_hive_error_exit_fallback
+    error = RuntimeError.new("boom")
+    payload = Hive::CliUsageContracts.generic_payload(
+      { schema: "legacy", schema_version: false, error_kind: "usage" }, error
+    )
+    refute payload.key?("schema_version")
+    assert_equal 1, payload.fetch("exit_code")
+    assert_equal "RuntimeError", payload.fetch("error_class")
+    payload = Hive::CliUsageContracts.generic_payload({ schema: "legacy", error_kind: "usage" }, error)
+    assert_equal 1, payload.fetch("schema_version")
+  end
+
+  def test_payload_builder_errors_are_not_resolution_failures
+    contract = { payload: ->(*) { raise ArgumentError, "builder failed" } }
+    error = assert_raises(ArgumentError) { Hive::CliUsageContracts.error_payload(contract, Hive::UsageError.new("boom")) }
+    assert_equal "builder failed", error.message
+  end
+
+  def test_setup_modes_and_refactor_job_boolean_variants
+    %w[--no-service --no-bootstrap].zip(%w[service_opt_out diagnose_only]).each do |flag, mode|
+      argv = [ "setup", flag ]
+      contract = Hive::CliUsageContracts.contract(argv)
+      payload = Hive::CliUsageContracts.error_payload(contract, Hive::UsageError.new("boom"), argv: argv)
+      assert_equal mode, payload.fetch("mode")
+    end
+    {
+      %w[--archive=x --list] => "show", %w[--show=x] => "show",
+      %w[--list=true] => "list", %w[--list --no-list] => nil,
+      %w[--full] => nil, %w[--full=true] => nil,
+      %w[--full --no-full --list] => "list"
+    }.each do |flags, action|
+      contract = Hive::CliUsageContracts.contract([ "refactor-patrol", *flags ])
+      if flags == %w[--list --no-list]
+        assert_respond_to contract.fetch(:payload), :call
+      else
+        assert_equal "hive-refactor-patrol-jobs", contract.fetch(:schema)
+        action.nil? ? assert_nil(contract.fetch(:extras).fetch("action")) : assert_equal(action, contract.fetch(:extras).fetch("action"))
+      end
+    end
+  end
+
+  def test_remaining_inventory_variants_resolve_without_leaking_previous_values
+    %w[install list remove update publish].each do |subcommand|
+      selected = Hive::CliUsageContracts.contract([ "workflow", subcommand ])
+      assert_equal "hive-workflow-#{subcommand}", selected.fetch(:schema)
+      assert_equal "usage", selected.fetch(:error_kind)
+      assert_empty selected.fetch(:extras)
+    end
+    { "inspect" => "status", "status" => "status", "doctor" => "doctor", "dry-run" => "dry-run" }.each do |subcommand, schema|
+      assert_equal({ schema: "hive-module-#{schema}", error_kind: "usage" },
+        Hive::CliUsageContracts.contract([ "module", subcommand ]))
+    end
+    payload = Hive::CliUsageContracts.error_payload(
+      Hive::CliUsageContracts.contract(%w[web install]), Hive::InvalidTaskPath.new("boom")
+    )
+    assert_equal "hive-web-install", payload.fetch("schema")
+    refute payload.key?("runtime")
+    assert_equal "managed_service", payload.fetch("mode")
+    %w[pr brainstorm plan develop open-pr review artifacts finalize archive].each do |verb|
+      selected = Hive::CliUsageContracts.contract([ verb ])
+      assert_equal({ "verb" => verb == "pr" ? "open-pr" : verb }, selected.fetch(:extras))
+      assert_equal "invalid_task_path", selected.fetch(:error_kind)
+    end
+  end
+
   private
 
   def cold_ruby(code)

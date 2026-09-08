@@ -9,3 +9,6 @@ Cold-load regressions run in fresh Ruby processes with inherited coverage boot.
 The launcher now resolves once per rejected invocation and shares the identical
 value with classification and emission. Resolution failures retain the neutral
 human fallback and report only a bounded exception class on stderr, without retry.
+
+U4 compatibility validation exposed existing workflow schema mismatches; execution
+stopped without completion. See the implementation baseline evidence and wiki gaps.

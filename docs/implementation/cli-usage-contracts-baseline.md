@@ -172,3 +172,46 @@ in JSON and human modes, with secret-sentinel exception messages absent from out
 
 U3 verification: contract and launcher integration files passed together:
 52 runs / 763 assertions, seed 63479. Changed-file RuboCop and diff checks passed.
+
+## U4 blocked: baseline requirements conflict
+
+Implementation stops without the execute-complete trailer. U1-U3 are committed;
+U4 regression tests and this evidence remain uncommitted for plan repair.
+
+The expanded independent inventory test fails against preserved current-main
+workflow-install output: 30 runs, 1221 assertions, 1 failure, seed 17. A separate
+read-only probe evaluated the helper definitions from `git show 794edfb489:bin/hive`
+and validated their output against the unchanged schemas. It confirms:
+
+- workflow install v2, list v2, remove v1, update v2 emit `error_kind: usage`,
+  which each existing error enum excludes.
+- workflow publish v2 emits the same generic usage arm, while its schema requires
+  `retryable` and specialized error kinds/exit statuses.
+
+Thus preserving all baseline envelopes and requiring all of them to validate is
+not simultaneously possible as specified. No schema, version, or output semantics
+were changed to hide this. The regression remains failing rather than suppressing
+validation. Plan repair must decide the public compatibility treatment for these
+existing workflow usage errors before execution can complete.
+
+The first `bundle exec rake coverage:changed` ran 1235 tests / 6441 assertions
+successfully (seed 60924), but the exact full-file gate failed: 93.97% across 29
+sources, 364 uncovered lines. It includes pre-existing implementation branches
+in approve, run, status, web, stage_action, bot and others, beyond the newly moved
+usage-contract code. The added U4 unit cases address the extraction's generic,
+variant, callback, and custom-builder lines; no coverage machinery was changed.
+
+`bin/test --all` was started once with its normal two workers, then interrupted
+through the runner's signal cleanup after the plan conflict was confirmed. It is
+not a passing broad checkpoint. No review, CI, release, or publication was run.
+
+A second changed-coverage run (seed 59136) reached 1243 runs / 6441 assertions,
+then failed with 10 DecideTest errors: `workflow :editorial collides with registered
+workflow :editorial`. This run did not produce a successful coverage report;
+the registration-order failure was not investigated after the schema plan blocker.
+The latest standalone contract file passed 31 runs / 160 assertions, seed 3,
+before the final added variant cases. Those final cases were included in the
+second coverage test run; no complete checkpoint is claimed for U4.
+
+Local raw logs are retained under `tmp/cli-usage-execution/`. All generated probe
+files were removed. U4 remains explicitly incomplete and uncommitted.

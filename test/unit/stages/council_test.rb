@@ -620,6 +620,45 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_reviewer_timeout_without_error_message_preserves_status_and_log_locator
+    with_tmp_dir do |project|
+      task = task_for(project)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      failure = { status: :timeout, exit_code: nil,
+                  log_file: File.join(task.log_dir, "review-constraints.log") }
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*, **) { failure }) do
+        Hive::Stages::Council.run!(task, {})
+      end
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "council_failed", marker.attrs.fetch("reason")
+      assert_includes marker.attrs.fetch("message"), "status=timeout"
+      assert_includes marker.attrs.fetch("message"), "exit_code=none"
+      assert_equal failure[:log_file], marker.attrs.fetch("log")
+    end
+  end
+
+  def test_revise_failure_retains_exit_status_and_full_log_path_despite_long_error
+    with_tmp_dir do |project|
+      task = task_for(project, workflow: council_workflow(exit_rule: :consensus, max_rounds: 2, revise: true))
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      log_file = File.join(task.log_dir, "review-revise.log")
+      spawn = lambda do |*, **kwargs|
+        if kwargs.fetch(:log_label).end_with?("-revise")
+          { status: :error, exit_code: 1, error_message: "provider unavailable " * 30, log_file: log_file }
+        else
+          File.write(kwargs.fetch(:expected_output), "Verdict: changes_requested\n")
+          { status: :ok }
+        end
+      end
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        Hive::Stages::Council.run!(task, {})
+      end
+      marker = Hive::Markers.current(task.state_file)
+      assert_includes marker.attrs.fetch("message"), "status=error exit_code=1"
+      assert_equal log_file, marker.attrs.fetch("log")
+    end
+  end
+
   def test_missing_reviewer_instruction_marks_council_io_error
     with_tmp_dir do |project|
       missing = File.join(project, "missing-reviewer.md")

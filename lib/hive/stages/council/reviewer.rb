@@ -106,8 +106,7 @@ module Hive
           )
           return if result[:status] == :ok
 
-          raise Hive::StageError,
-                "council reviewer #{@reviewer.name} failed: #{result[:error_message].to_s[0, 200]}"
+          raise Council::AgentFailure.new("council reviewer #{@reviewer.name}", result)
         end
 
         def launch_identity

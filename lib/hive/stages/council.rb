@@ -9,6 +9,16 @@ require "hive/stages/council/triage"
 module Hive
   module Stages
     module Council
+      class AgentFailure < Hive::StageError
+        attr_reader :log_file
+
+        def initialize(label, result)
+          @log_file = result[:log_file]
+          detail = result[:error_message].to_s.strip[0, 80]
+          super("#{label} failed: #{detail} status=#{result[:status]} exit_code=#{result[:exit_code] || "none"}")
+        end
+      end
+
       module_function
 
       def run!(task, cfg)
@@ -111,7 +121,9 @@ module Hive
           pending_revision = triage.path
         end
       rescue Hive::StageError => e
-        Hive::Markers.set(output_path || task.state_file, :error, reason: "council_failed", message: e.message.to_s[0, 200])
+        diagnostic = { reason: "council_failed", message: e.message.to_s[0, 200] }
+        diagnostic[:log] = e.log_file if e.is_a?(AgentFailure) && e.log_file
+        Hive::Markers.set(output_path || task.state_file, :error, **diagnostic)
         marker = Hive::Markers.current(output_path || task.state_file)
         { commit: action_for(marker.name), status: marker.name }
       rescue SystemCallError => e

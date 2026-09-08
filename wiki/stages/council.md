@@ -15,6 +15,11 @@ aggregates a triage artifact, and marks the stage `COMPLETE` on quorum or
 
 ## Runtime Contract
 
+Agent reviewer and revision failures include the returned status and exit code
+in the error message, even when the provider supplies no error text. The full
+agent log path is preserved separately in the error marker's `log` attribute so
+message truncation does not hide the diagnostic locator.
+
 1. Resolve the current descriptor stage from `task.workflow`.
 2. Pre-flight resume on the current marker: a `COMPLETE` council short-circuits
    to done without re-spawning reviewers; a `WAITING` council resumes by

@@ -2525,27 +2525,10 @@ module Hive
       # helper itself does not check the marker — it is a pure file
       # inspector. The orchestrator guards the call site.
       def fix_guardrail_approved?(ctx, expected_matches: nil, cfg: {})
-        path = File.join(
-          ctx.task_folder,
-          "reviews",
-          "fix-guardrail-#{format('%02d', ctx.pass)}.md"
+        FixGuardrail.approved?(
+          task_folder: ctx.task_folder, pass: ctx.pass,
+          expected_matches: expected_matches, cfg: cfg
         )
-        return false unless File.exist?(path)
-
-        checkbox_re = /^\s*-\s+\[([ xX])\]\s+/
-        checked_count = 0
-        lockfile_rule = FixGuardrail.resolve_patterns(cfg).key?(:dependency_lockfile_change)
-        File.foreach(path) do |line|
-          next unless (m = line.match(checkbox_re))
-          retired_lockfile = !lockfile_rule && line[m.end(0)..].start_with?("dependency_lockfile_change:")
-          return false if m[1] == " " && !retired_lockfile
-
-          checked_count += 1
-        end
-        return false if checked_count.zero?
-        return false if expected_matches && checked_count != expected_matches
-
-        true
       end
 
       # Write the per-pass fix-success sentinel. Called from the two

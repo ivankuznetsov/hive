@@ -7,6 +7,12 @@ updated: 2026-09-06
 tags: [security, secrets, betterleaks, redact]
 ---
 
+Reviewed synthetic credentials are filtered by Betterleaks's native expression
+configuration only for their exact test paths and exact values. The trusted
+configuration is shipped with Hive; repository ignore files cannot expand it.
+Production paths and other values in test files remain scanned. The policy
+version includes this fixture-policy revision so cached validation is invalidated.
+
 **TLDR**: Betterleaks is the sole credential detector. Hive selects exact inputs
 and maps findings into workflow decisions; it does not maintain detection regexes
 or its former Ruby password-reference classifier. `SecretPatterns` now exposes

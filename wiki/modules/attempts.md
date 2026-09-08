@@ -14,6 +14,14 @@ successor increments that charge. No extra timer table or watcher is involved.
 Explicit operator retries retain their existing bypass of automatic pacing.
 The project daily dispatch cap remains the emergency brake.
 
+An explicit `hive run` with a new request can retry a plain stage whose prior
+process exited successfully but left `WAITING`, `EXECUTE_WAITING`,
+`REVIEW_WAITING`, or `ERROR`. Process success is not stage completion.
+Exact-request idempotency and automatic semantic replay remain unchanged;
+completed stages, controller workflows such as Patrol, and coding brainstorm
+retain their existing continuation contracts. This does not approve a finding
+or clear a gate: the stage runner rechecks its normal conditions.
+
 **TLDR**: Hive admits task-stage work as independent durable attempts. One
 `attempts` row owns the attempt record plus fixed accounting,
 lost-recovery, and terminal-publication facts. Live rows provide capacity.

@@ -1149,12 +1149,11 @@ module Hive
       # Mandatory initial coverage is a liveness requirement, not an operator
       # waiver prompt. The per-series max still bounds one invocation, while a
       # persisted recovery reset lets later daemon ticks try again after a
-      # widening cooldown. Standard reviews retain their degraded fallback;
-      # verification retries and successful planner-revision rounds retain
-      # their separate caps.
+      # widening cooldown. Standard initial reviews retain their degraded
+      # fallback; required candidate verification must remain retryable too.
       def automatic_transient_series_recovery?(record, role, route)
-        record.effective_level == "mandatory" &&
-          %w[primary adversarial].include?(role) &&
+        (role == "verification" ||
+          (record.effective_level == "mandatory" && %w[primary adversarial].include?(role))) &&
           TRANSIENT_OUTCOMES.include?(route["outcome"]) &&
           !route["attempt_id"].to_s.empty?
       end
@@ -1200,6 +1199,8 @@ module Hive
       end
 
       def transient_series_retry_at(record, role, route, series)
+        return (@clock.call + 3600).utc.iso8601(6) if role == "verification"
+
         exponent = [ series - 1, 9 ].min
         delay = [ TRANSIENT_SERIES_RETRY_BASE_SEC * (2**exponent),
                   TRANSIENT_SERIES_RETRY_CAP_SEC ].min

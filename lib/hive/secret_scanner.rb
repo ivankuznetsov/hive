@@ -13,7 +13,28 @@ module Hive
     class Unavailable < Hive::Error; end
 
     FINDINGS_EXIT = 42
-    POLICY_VERSION = "betterleaks-#{Hive::Betterleaks::VERSION}".freeze
+    POLICY_VERSION = "betterleaks-#{Hive::Betterleaks::VERSION}-reviewed-fixtures-v1".freeze
+    # Exact synthetic values in reviewed fixtures, never a blanket test exemption.
+    CONFIG = <<~TOML.freeze
+      prefilter = 'false'
+      filter = '''
+        (get(attributes, "path", "") == "test/controllers/confirmations_controller_test.rb" &&
+          finding["secret"] in ["password", "TempPassword123!"]) ||
+        (get(attributes, "path", "") == "test/controllers/users_controller_test.rb" &&
+          finding["secret"] == "password123") ||
+        (get(attributes, "path", "") in [
+          "test/unit/brainstorm_suggestions/validator_test.rb",
+          "test/unit/brainstorm_suggestions/context_bundle_test.rb"
+        ] && finding["secret"] in [
+          "ghp_" + "R6tK9pQ2wX7cV4nM8sL1aD5fH0jB3eU6yZ9q",
+          "ghp_" + "R6tK9pQ2wX7cV4nM8sL1aD5fH0jB3eU6yZ9qC2xW"
+        ]) ||
+        (get(attributes, "path", "") == "test/unit/brainstorm_suggestions/context_bundle_test.rb" &&
+          finding["secret"] == "abcdefghijklmnopqrstuvwxyz123456")
+      '''
+      [extend]
+      useDefault = true
+    TOML
     FLAGS = %w[
       --no-banner --no-color --log-level=fatal --report-format=json --report-path=-
       --ignore-gitleaks-allow --validation=false --max-target-megabytes=0
@@ -70,7 +91,7 @@ module Hive
     def run(directory, *arguments, input: "")
       env = Hive::AgentGitGate.read_environment.merge(
         "PATH" => ENV.fetch("PATH"), "HOME" => directory,
-        "BETTERLEAKS_CONFIG_TOML" => "prefilter = 'false'\n[extend]\nuseDefault = true\n"
+        "BETTERLEAKS_CONFIG_TOML" => CONFIG
       )
       output, _error, status = Open3.capture3(
         env, Hive::Betterleaks.executable, *arguments, *FLAGS, "--exit-code=#{FINDINGS_EXIT}",

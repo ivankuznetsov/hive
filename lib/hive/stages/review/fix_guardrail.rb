@@ -26,6 +26,30 @@ module Hive
         WAIVER_SHA256 = /\A[0-9a-f]{64}\z/.freeze
         module_function
 
+        # Shared by scheduling and stage execution. Readiness is not approval
+        # of new changes: the runner still checks HEAD and worktree cleanliness.
+        def approved?(task_folder:, pass:, expected_matches: nil, cfg: {})
+          path = File.join(task_folder, "reviews", "fix-guardrail-#{format('%02d', pass)}.md")
+          return false unless File.file?(path)
+
+          checkbox_re = /^\s*-\s+\[([ xX])\]\s+/
+          checked_count = 0
+          lockfile_rule = resolve_patterns(cfg).key?(:dependency_lockfile_change)
+          File.foreach(path) do |line|
+            next unless (m = line.match(checkbox_re))
+            retired_lockfile = !lockfile_rule && line[m.end(0)..].start_with?("dependency_lockfile_change:")
+            return false if m[1] == " " && !retired_lockfile
+
+            checked_count += 1
+          end
+          return false if checked_count.zero?
+          return false if expected_matches && checked_count != expected_matches
+
+          true
+        rescue SystemCallError, IOError
+          false
+        end
+
         def run!(cfg:, ctx:, base_sha:, head_sha:)
           enabled = cfg.dig("review", "fix", "guardrail", "enabled")
           return Result.new(status: :skipped, matches: [], waived_matches: []) if enabled == false

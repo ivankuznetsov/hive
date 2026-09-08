@@ -591,10 +591,23 @@ module Hive
         # Enter path then kicks in for review-stage rows too.
         ACTIONS.fetch(:agent_running)
       when :review_waiting
-        ACTIONS.fetch(:review_waiting)
+        ACTIONS.fetch(review_guardrail_ready? ? :review_ready : :review_waiting)
       else
         task_workflow.id == :"pr-review" ? ACTIONS.fetch(:generic_ready_to_run) : ACTIONS.fetch(:review_ready)
       end
+    end
+
+    def review_guardrail_ready?
+      return false unless marker.attrs["reason"] == "fix_guardrail"
+      pass = marker.attrs["pass"].to_s
+      matches = marker.attrs["matches"].to_s
+      return false unless pass.match?(/\A[1-9]\d*\z/) && matches.match?(/\A[1-9]\d*\z/)
+
+      require "hive/stages/review/fix_guardrail"
+      Hive::Stages::Review::FixGuardrail.approved?(
+        task_folder: task.folder, pass: pass.to_i,
+        expected_matches: matches.to_i, cfg: @config
+      )
     end
 
     def brainstorm_action
@@ -750,6 +763,8 @@ module Hive
         elsif recoverable_residual_evidence_contract_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_transient_coverage_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_verification_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif unsupported_review?
           ACTIONS.fetch(:plan_review_unsupported)
@@ -1108,6 +1123,16 @@ module Hive
         end
         route && !route["attempt_id"].to_s.empty? &&
           PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+      end
+    end
+
+    def recoverable_transient_verification_review?
+      route = Array(plan_review["routes"]).reverse_each.find { |entry| entry["role"] == "verification" }
+      return false unless route && !route["attempt_id"].to_s.empty?
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+
+      Array(plan_review["blockers"]).any? do |blocker|
+        blocker["reason"] == "candidate_verification_#{route['outcome']}"
       end
     end
 

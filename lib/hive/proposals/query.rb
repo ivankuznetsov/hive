@@ -87,7 +87,7 @@ module Hive
           when "subject" then projection.subject.fetch("reference") == expected
           when "revision" then projection.revision == expected
           when "status" then projection.status == expected
-          when "relation" then relations(projection).include?(expected)
+          when "relation" then projection.lineage_ids.include?(expected)
           when "evaluator"
             projection.evaluations.any? { |evaluation| evaluation.dig("evaluator", "id") == expected }
           when "method"
@@ -97,12 +97,6 @@ module Hive
             end
           end
         end
-      end
-
-      def relations(projection)
-        lineage = projection.to_h.fetch("lineage")
-        [ lineage["retries"], lineage["requested_supersedes"], lineage["superseded_by"],
-          *lineage.fetch("supersedes") ].compact.uniq
       end
     end
   end

@@ -55,7 +55,7 @@ module Hive
           line = "- #{JSON.generate(item)}\n"
           if bytes + line.bytesize > effective_budget
             truncated = true
-            next
+            break
           end
           items << item
           lines << line
@@ -100,11 +100,12 @@ module Hive
 
       def ranked_candidates(projections, subject)
         exact = projections.find { |projection| exact?(projection, subject) }
-        related_ids = exact ? relation_ids(exact) : []
+        related_ids = exact ? exact.lineage_ids : []
         projections.filter_map do |projection|
           rank = if exact?(projection, subject)
             0
-          elsif related_ids.include?(projection.proposal_id) || relation_ids(projection).include?(subject["proposal_id"])
+          elsif related_ids.include?(projection.proposal_id) ||
+                projection.lineage_ids.include?(subject["proposal_id"])
             1
           elsif same_subject?(projection, subject)
             2
@@ -124,12 +125,6 @@ module Hive
         projection.subject == { "kind" => subject["kind"], "reference" => subject["reference"] }
       end
 
-      def relation_ids(projection)
-        lineage = projection.to_h.fetch("lineage")
-        [ lineage["retries"], lineage["requested_supersedes"], lineage["superseded_by"],
-          *lineage.fetch("supersedes") ].compact
-      end
-
       def typed_fact(projection)
         evaluation_facts = projection.evaluations.map do |evaluation|
           {
@@ -137,20 +132,17 @@ module Hive
             "occurred_at" => evaluation.fetch("occurred_at"),
             "evaluator_id" => evaluation.dig("evaluator", "id"),
             "method_kind" => evaluation.dig("method", "kind"),
-            "method_label" => evaluation.dig("method", "label"),
             "outcome" => evaluation.dig("result", "outcome"),
-            "metrics" => evaluation.dig("result", "metrics")
+            "details_digest" => evaluation.dig("result", "details_digest")
           }
         end
         {
           "proposal_id" => projection.proposal_id,
           "subject_kind" => projection.subject.fetch("kind"),
-          "subject_reference" => projection.subject.fetch("reference"),
-          "revision" => projection.revision,
           "status" => projection.status,
           "created_at" => projection.record["created_at"],
           "evaluations" => evaluation_facts,
-          "lineage_ids" => relation_ids(projection).sort,
+          "lineage_ids" => projection.lineage_ids,
           "retention_enforcement" => "none"
         }
       end

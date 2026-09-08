@@ -62,19 +62,21 @@ module Hive
           if kind == "evaluation_recorded" && admitted["evaluator"].nil?
             raise Unauthorized, "proposal evaluation requires an admitted evaluator binding"
           end
-          new(
+          new({
             "schema" => SOURCE_EVENT_SCHEMA, "schema_version" => SCHEMA_VERSION,
             "source_event_id" => Proposals.source_event_id!(source_event_id),
             "kind" => kind, "proposal_id" => proposal_id,
             "subject" => admitted.fetch("subject"),
             "binding" => normalize_task_binding(task_binding),
             "actor" => admitted.fetch("actor"), "evaluator" => admitted["evaluator"],
-            "payload" => normalize_payload(kind, payload, policy: admitted.fetch("policy")),
+            "payload" => normalize_payload(
+              kind, payload, policy: admitted.fetch("policy"), admission: true
+            ),
             "artifact" => normalize_artifact(artifact, policy: admitted.fetch("policy")),
             "configuration_fingerprint" => admitted.fetch("configuration_fingerprint"),
             "policy" => admitted.fetch("policy"),
             "created_at" => Proposals.timestamp!(created_at, label: "source event created_at")
-          )
+          }, admission: true)
         end
 
         def normalize_proposal_binding(value)
@@ -144,7 +146,7 @@ module Hive
           evaluator
         end
 
-        def normalize_payload(kind, value, policy:)
+        def normalize_payload(kind, value, policy:, admission: false)
           case kind
           when "candidate_submitted"
             payload = Proposals.closed_hash!(value, required: SUBMISSION_KEYS, label: "proposal submission")
@@ -158,20 +160,21 @@ module Hive
             payload.merge(
               "proposed_change" => Proposals.text!(payload["proposed_change"], label: "proposed_change"),
               "motivation" => Proposals.text!(payload["motivation"], label: "motivation"),
-              "evidence" => Proposals.evidence!(payload["evidence"], policy:),
+              "evidence" => Proposals.evidence!(payload["evidence"], policy:, admission:),
               "lineage" => { "retries" => lineage["retries"],
                              "requested_supersedes" => lineage["requested_supersedes"] }
             )
           when "evaluation_recorded"
-            normalize_evaluation_payload(value, policy:)
+            normalize_evaluation_payload(value, policy:, admission:)
           else
             raise InvalidRecord, "unknown proposal source event kind #{kind.inspect}"
           end
         end
 
-        def normalize_evaluation_payload(value, policy:)
+        def normalize_evaluation_payload(value, policy:, admission:)
           Proposals.evaluation_facts!(
-            value, policy:, error: InvalidRecord, label: "proposal evaluation source"
+            value, policy:, error: InvalidRecord, label: "proposal evaluation source",
+            admission:
           )
         end
 
@@ -199,8 +202,9 @@ module Hive
         end
       end
 
-      def initialize(attributes)
+      def initialize(attributes, admission: false)
         @data = Proposals.stringify(attributes)
+        @admission = admission
         validate!
         @data = Proposals.deep_copy_freeze(@data)
         freeze
@@ -264,7 +268,7 @@ module Hive
           raise Unauthorized, "proposal evaluation requires an admitted evaluator binding"
         end
         data["payload"] = self.class.normalize_payload(
-          data["kind"], data["payload"], policy: persisted_policy
+          data["kind"], data["payload"], policy: persisted_policy, admission: @admission
         )
         data["artifact"] = self.class.normalize_artifact(data["artifact"], policy: persisted_policy)
         data["configuration_fingerprint"] = Proposals.digest!(

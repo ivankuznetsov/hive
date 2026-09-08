@@ -3,7 +3,7 @@ title: hive proposal
 type: command
 source: lib/hive/commands/proposal.rb, lib/hive/cli.rb, lib/hive/proposals/
 created: 2026-08-30
-updated: 2026-08-30
+updated: 2026-09-08
 tags: [command, proposals, skills, workflows, evidence]
 ---
 
@@ -32,6 +32,8 @@ fresh lifecycle head, and safe diagnostics. These commands read live canonical
 state, not the potentially lagging wiki branch. On a pre-feature project they
 return an empty result without creating `proposals/v1` or scanning historical
 task journals; only a newly admitted typed source event initializes the ledger.
+`--include-quarantine` also exposes safe terminal diagnostics for source receipts
+that could not be admitted into canonical history.
 
 JSON discovery uses `hive-proposal-list.v1` and `hive-proposal-show.v1`.
 Terminal rendering escapes control syntax; JSON and Markdown use their own
@@ -102,9 +104,16 @@ state source. Both files publish in one wiki commit. `--check` compiles to an
 external disposable directory, compares bytes, removes the scratch output, and
 does not publish or modify a managed worktree.
 
-Inbox/index/cursor-only commits and commits touching only the generated pair do
-not queue another refresh. The hidden `--compile-only --source-ref --output-root`
-surface is reserved for the managed hook.
+An explicit refresh enqueues the selected pinned proposal source even when the
+current state `HEAD` changes only inbox/cursor/task-state paths. Queued proposal
+sources are selected by commit ancestry, so equal timestamps cannot choose an
+older ancestor. Ordinary wiki batches restore the generated pair before staging,
+preventing agent edits from fabricating proposal facts or publishing a torn pair.
+
+Automatic inbox/index/cursor-only commits and commits touching only the generated
+pair do not queue another refresh. The hidden
+`--compile-only --source-ref --output-root` surface is reserved for the managed
+hook.
 
 ## Tracking-only guarantee
 

@@ -27,7 +27,7 @@ module Hive
           "revision" => revision.to_s,
           "proposed_change" => Proposals.text!(proposed_change, label: "proposed_change"),
           "motivation" => Proposals.text!(motivation, label: "motivation"),
-          "evidence" => Proposals.evidence!(evidence, policy: normalized_policy),
+          "evidence" => Proposals.evidence!(evidence, policy: normalized_policy, admission: true),
           "author" => Proposals.author!(author), "lineage" => normalized_lineage,
           "provenance" => Proposals.provenance!(provenance),
           "source_event_id" => Proposals.source_event_id!(source_event_id),

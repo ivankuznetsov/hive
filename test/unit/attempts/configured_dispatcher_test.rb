@@ -35,6 +35,39 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal "request-1", calls.fetch(0).fetch(:request_id)
   end
 
+  def test_dispatch_reconciles_proposal_receipts_on_the_ordinary_launch_path
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      FileUtils.mkdir_p(File.join(ops.hive_state_path, "proposals", "v1"))
+      task = FakeTask.new(slug: "task", project_root: dir)
+      downstream = Object.new
+      downstream.define_singleton_method(:dispatch) { |**_attributes| :accepted }
+      dispatcher_class = Class.new
+      dispatcher_class.define_singleton_method(:new) { |**_options| downstream }
+      reconciliations = 0
+      fake_reconciler = Object.new
+      fake_reconciler.define_singleton_method(:reconcile!) { reconciliations += 1 }
+      adapter = Hive::Attempts::ConfiguredDispatcher.new(
+        store: :store, config_loader: ->(_root) { Hive::Config.merge_defaults({}) },
+        daemon_config_loader: -> { Hive::Config::DEFAULTS.fetch("daemon") },
+        launcher_class: Class.new { def self.new(**) = :launcher },
+        dispatcher_class:
+      )
+
+      with_replaced_singleton_method(
+        Hive::Proposals::Reconciler, :new, ->(**_options) { fake_reconciler }
+      ) do
+        assert_equal :accepted, adapter.dispatch(
+          task:, project: "demo", intended_stage: "4-execute",
+          argv: %w[hive run task], request_id: "request-1"
+        )
+      end
+
+      assert_equal 1, reconciliations
+    end
+  end
+
   def test_dispatch_request_uses_the_resolved_projects_attempt_timers
     task = FakeTask.new(slug: "task", project_root: "/projects/demo")
     resolver = Struct.new(:task) { def resolve = task }.new(task)

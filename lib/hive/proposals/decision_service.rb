@@ -3,6 +3,7 @@ require "hive/lock"
 require "hive/proposals/authority"
 require "hive/proposals/ingestor"
 require "hive/proposals/store"
+require "hive/proposals/source_event_store"
 
 module Hive
   module Proposals
@@ -12,12 +13,15 @@ module Hive
 
     class DecisionService
       def initialize(store:, authority:, git_ops: nil, policy: DEFAULT_POLICY,
-                     clock: -> { Time.now.utc })
+                     clock: -> { Time.now.utc }, limits: {}, source_store: nil)
         @store = store
         @authority = authority
         @git_ops = git_ops
         @policy = Proposals.policy!(policy)
         @clock = clock
+        @source_store = source_store || SourceEventStore.new(
+          root: @store.root, limits:, clock:
+        )
       end
 
       def decide(proposal_id:, outcome:, considered_evaluation_ids:, rationale_category:,
@@ -51,11 +55,15 @@ module Hive
             event = transaction.append_event!(
               proposal_id:, type: "decision", data: normalized, source_event_id:,
               provenance: lifecycle_provenance(provenance, authority, "decide"),
-              occurred_at: @clock.call, event_id: nil, policy: @policy
+              occurred_at: @clock.call, event_id: nil, policy: @policy,
+              before_write: lifecycle_quota(authority)
             )
             LifecycleResult.new(
               applied: true, event:,
-              projection: Projection.new(record: projection.record, events: projection.events + [ event ])
+              projection: Projection.new(
+                record: projection.record, events: projection.events + [ event ],
+                reserved_versions: projection.reserved_versions + [ event.version ]
+              )
             )
           end
         end
@@ -91,13 +99,15 @@ module Hive
             event = transaction.append_event!(
               proposal_id:, type: "supersession", data: normalized, source_event_id:,
               provenance: lifecycle_provenance(provenance, authority, "supersede"),
-              occurred_at: @clock.call, event_id: nil, policy: @policy
+              occurred_at: @clock.call, event_id: nil, policy: @policy,
+              before_write: lifecycle_quota(authority)
             )
             LifecycleResult.new(
               applied: true, event:,
               projection: Projection.new(
                 record: projection.record, events: projection.events + [ event ],
-                supersedes: projection.supersedes
+                supersedes: projection.supersedes,
+                reserved_versions: projection.reserved_versions + [ event.version ]
               )
             )
           end
@@ -138,11 +148,15 @@ module Hive
             event = transaction.append_event!(
               proposal_id:, type: "rollback", data: normalized, source_event_id:,
               provenance: lifecycle_provenance(provenance, authority, "rollback"),
-              occurred_at: @clock.call, event_id: nil, policy: @policy
+              occurred_at: @clock.call, event_id: nil, policy: @policy,
+              before_write: lifecycle_quota(authority)
             )
             LifecycleResult.new(
               applied: true, event:,
-              projection: Projection.new(record: projection.record, events: projection.events + [ event ])
+              projection: Projection.new(
+                record: projection.record, events: projection.events + [ event ],
+                reserved_versions: projection.reserved_versions + [ event.version ]
+              )
             )
           end
         end
@@ -243,11 +257,21 @@ module Hive
         "pse-#{Digest::SHA256.hexdigest("hive-proposal-#{kind}-v1\0#{key}")}"
       end
 
+      def lifecycle_quota(authority)
+        lambda do |event, bytes|
+          @source_store.enforce_lifecycle!(
+            proposal_id: event.proposal_id,
+            actor_id: authority.fetch("id"), event_bytes: bytes.bytesize
+          )
+        end
+      end
+
       def with_lifecycle_commit(proposal_id, action)
         runner = lambda do
           snapshot = Ingestor::ImmutableAppendSnapshot.capture(
             File.join(@store.events_root, proposal_id)
           )
+          index_snapshot = @git_ops && Proposals::GitIndexSnapshot.capture(@git_ops)
           result = yield
           if result.applied && @git_ops
             path = Proposals.hive_state_relative_path(
@@ -259,10 +283,10 @@ module Hive
                 stage_name: "proposals", slug: proposal_id,
                 action: "recorded #{action}", pathspecs: [ path ]
               )
-            rescue StandardError
+            rescue StandardError => error
               snapshot.restore!
-              Proposals.unstage_hive_state_paths(@git_ops, [ path ])
-              raise
+              index_snapshot.restore! rescue nil
+              raise error
             end
           end
           result

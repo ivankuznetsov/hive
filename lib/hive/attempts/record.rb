@@ -6,7 +6,7 @@ require "hive/output_reference"
 require "hive/billing_evidence"
 require "hive/stringify_keys"
 require "hive/runtime_control_plane/codec"
-require "hive/proposals"
+require "hive/proposals/source_event"
 
 module Hive
   module Attempts
@@ -53,11 +53,6 @@ module Hive
         source_reference
       ].freeze
       SUBJECT_KINDS = %w[task_stage module_hook].freeze
-      PROPOSAL_SUBJECT_KINDS = Hive::Proposals::SUBJECT_KINDS
-      PROPOSAL_VISIBILITIES = Hive::Proposals::VISIBILITIES
-      PROPOSAL_RETENTIONS = Hive::Proposals::RETENTIONS
-      PROPOSAL_ID_PATTERN = Hive::Proposals::PROPOSAL_ID
-      PROPOSAL_SAFE_REFERENCE = Hive::Proposals::SAFE_SUBJECT
       STATES = %w[launching running terminal lost].freeze
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
       FINAL_STATES = %w[terminal lost].freeze
@@ -430,87 +425,9 @@ module Hive
       end
 
       def validate_proposal_binding!(value)
-        self.class.validate_exact_keys!(
-          value,
-          %w[schema_version subject actor evaluator configuration_fingerprint policy],
-          "attempt proposal binding", InvalidRecord
-        )
-        unless value["schema_version"] == 1
-          raise InvalidRecord, "attempt proposal binding has an unsupported version"
-        end
-        validate_proposal_subject!(value["subject"])
-        validate_proposal_actor!(value["actor"])
-        validate_proposal_evaluator!(value["evaluator"]) if value["evaluator"]
-        self.class.validate_sha256!(
-          value["configuration_fingerprint"], "attempt proposal configuration fingerprint", InvalidRecord
-        )
-        validate_proposal_policy!(value["policy"])
-      end
-
-      def validate_proposal_subject!(value)
-        self.class.validate_exact_keys!(
-          value, %w[kind reference revision proposal_id], "attempt proposal subject", InvalidRecord
-        )
-        unless PROPOSAL_SUBJECT_KINDS.include?(value["kind"]) &&
-               value["reference"].to_s.match?(PROPOSAL_SAFE_REFERENCE) &&
-               value["reference"].to_s.split("/").none? { |part| part == ".." }
-          raise InvalidRecord, "attempt proposal subject is malformed"
-        end
-        self.class.validate_identifier!(value["revision"], "attempt proposal revision", InvalidRecord)
-        if value["proposal_id"] && !value["proposal_id"].to_s.match?(PROPOSAL_ID_PATTERN)
-          raise InvalidRecord, "attempt proposal ID is malformed"
-        end
-      end
-
-      def validate_proposal_actor!(value)
-        self.class.validate_exact_keys!(
-          value, %w[id kind binding], "attempt proposal actor", InvalidRecord
-        )
-        %w[id kind binding].each do |key|
-          self.class.validate_identifier!(value[key], "attempt proposal actor #{key}", InvalidRecord)
-        end
-      end
-
-      def validate_proposal_evaluator!(value)
-        self.class.validate_exact_keys!(
-          value, %w[id fingerprint configuration_fingerprint admission],
-          "attempt proposal evaluator", InvalidRecord
-        )
-        self.class.validate_identifier!(value["id"], "attempt proposal evaluator", InvalidRecord)
-        %w[fingerprint configuration_fingerprint].each do |key|
-          self.class.validate_sha256!(value[key], "attempt proposal evaluator #{key}", InvalidRecord)
-        end
-        admission = value["admission"]
-        self.class.validate_exact_keys!(
-          admission, %w[workflows stages agent_profiles],
-          "attempt proposal evaluator admission", InvalidRecord
-        )
-        admission.each do |key, entries|
-          unless entries.is_a?(Array) && entries.length <= 64 && entries.uniq == entries
-            raise InvalidRecord, "attempt proposal evaluator admission #{key} is malformed"
-          end
-          entries.each do |entry|
-            self.class.validate_identifier!(
-              entry, "attempt proposal evaluator admission #{key}", InvalidRecord
-            )
-          end
-        end
-      end
-
-      def validate_proposal_policy!(value)
-        self.class.validate_exact_keys!(
-          value, %w[visibility retention allowed_link_schemes],
-          "attempt proposal policy", InvalidRecord
-        )
-        unless PROPOSAL_VISIBILITIES.include?(value["visibility"]) &&
-               PROPOSAL_RETENTIONS.include?(value["retention"])
-          raise InvalidRecord, "attempt proposal policy classification is malformed"
-        end
-        schemes = value["allowed_link_schemes"]
-        unless schemes.is_a?(Array) && schemes.uniq == schemes && schemes.length <= 16 &&
-               schemes.all? { |scheme| scheme.to_s.match?(/\A[a-z][a-z0-9+.-]*\z/) }
-          raise InvalidRecord, "attempt proposal policy link schemes are malformed"
-        end
+        Hive::Proposals::SourceEvent.normalize_proposal_binding(value)
+      rescue Hive::Proposals::Error => error
+        raise InvalidRecord, "attempt proposal binding is invalid: #{error.message}"
       end
 
       class << self

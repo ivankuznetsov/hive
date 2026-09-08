@@ -3,7 +3,7 @@ title: Skill and workflow proposal tracking
 type: module
 source: lib/hive/proposals.rb, lib/hive/proposals/, schemas/hive-proposal-*.v1.json
 created: 2026-08-30
-updated: 2026-08-30
+updated: 2026-09-08
 tags: [proposals, skills, workflows, evidence, lifecycle, history]
 ---
 
@@ -41,7 +41,8 @@ authority-approved `supersedes` facts express lineage.
 Invalid JSON, unsafe files, unknown versions, duplicate identity, broken event
 versions, and inconsistent histories become safe logical quarantine diagnostics;
 valid neighbors remain queryable and compilable. Malformed event filenames
-reserve their numeric version so recovery never overwrites unknown bytes.
+reserve their numeric version so recovery never overwrites unknown bytes. Both
+the canonical store and source inbox use bounded lock acquisition.
 
 ## Durable source admission
 
@@ -55,12 +56,17 @@ inbox paths, and only then starts canonical ingestion in a second commit.
 Committed `hive/state` blobs are authoritative. `Reconciler` ignores or restores
 worktree-only remnants, scans only the bounded unconsumed index, replays a
 committed receipt idempotently, and records permanent failures in a committed
-terminal quarantine fact. It never scans old task journals, benchmarks, skills,
+terminal quarantine fact. Transient source/blob failures remain pending, and
+each receipt takes the commit lock only for its own mutation. It never scans old task journals, benchmarks, skills,
 workflows, or wiki prose, so existing projects are not backfilled.
 
 Admission enforces configured project/proposal event and byte ceilings plus a
-per-actor hourly source rate. Source IDs are idempotency keys: the exact retry is
-a no-op and changed bytes under an existing ID are a conflict.
+per-actor hourly source rate across the complete proposal namespace. Admission
+reserves enough space for terminal status and the canonical mutation; the index
+retains only bounded pending recovery data and rejects an oversized replacement
+before writing a receipt. Lifecycle mutations use the same aggregate and
+authority-rate ceilings. Source IDs are idempotency keys: the exact retry is a
+no-op and changed bytes under an existing ID are a conflict.
 
 ## Authority and lifecycle
 
@@ -101,16 +107,22 @@ declarative retention, and safe source references. Retention always reports
 `Compiler` reads an exact pinned state commit and deterministically emits
 `wiki/proposals.json` plus `wiki/proposals.md`. JSON includes valid drafts; the
 human summary omits drafts but retains rejected, superseded, and rolled-back
-lessons. The managed llm-wiki hook compiles proposal-only batches without an LLM
-provider or ordinary breaker budget and publishes the pair in one wiki commit.
+lessons, evaluation evidence digests, and safe method/decision/task/commit links.
+Terminal source quarantines appear as diagnostics in live queries and both
+compiled views. Pinned symlink blobs are materialized as inert bytes for logical
+diagnosis, never as live symlink targets. The managed llm-wiki hook compiles
+proposal-only batches without an LLM provider or ordinary breaker budget and
+publishes the pair in one wiki commit.
 
 Automatic proposal context is available only when a durable attempt carries a
 matching typed subject. It includes closed facts—IDs, enums, timestamps, method
-labels, evaluator IDs, and numeric/boolean/null metrics—ranked by exact subject
-and lineage. Candidate prose, evidence summaries, rationale, instructions,
-links, and restricted bytes are excluded. Whole items share the existing 4 KiB
-prompt-appendix ceiling, and selection provenance records configured/effective
-budget, selected IDs/digest, and truncation in task activity.
+kinds, evaluator IDs, outcomes, and fixed digests—ranked by exact subject and
+lineage. Free-form method labels, revision/reference text, metric keys, candidate
+prose, evidence summaries, rationale, instructions, links, and restricted bytes
+are excluded. Selection stops at the first whole item that would overflow the
+existing 4 KiB prompt-appendix ceiling, preserving a ranked prefix; provenance
+records configured/effective budget, selected IDs/digest, and truncation in task
+activity.
 
 ## Configuration
 

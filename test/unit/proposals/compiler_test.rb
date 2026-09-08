@@ -95,7 +95,7 @@ class ProposalCompilerTest < Minitest::Test
     end
   end
 
-  def test_pinned_compilation_materializes_symlinks_for_logical_quarantine
+  def test_pinned_compilation_materializes_symlink_blobs_as_inert_quarantine_inputs
     with_tmp_git_repo do |project|
       ops = Hive::GitOps.new(project)
       ops.hive_state_init
@@ -117,6 +117,83 @@ class ProposalCompilerTest < Minitest::Test
       assert_equal 0, result.projection_count
       assert_equal [ "symlink" ], result.index.fetch("diagnostics").map { |item| item.fetch("code") }
     end
+  end
+
+  def test_compilation_exposes_terminal_source_quarantine_diagnostics
+    path = File.join(
+      @store.root, "inbox", "quarantine", "pse-#{'f' * 64}.json"
+    )
+    FileUtils.mkdir_p(File.dirname(path))
+    File.binwrite(
+      path,
+      Hive::Proposals.canonical(
+        "schema" => "hive-proposal-source-status", "schema_version" => 1,
+        "source_event_id" => "pse-#{'f' * 64}", "proposal_id" => rejected_id,
+        "state" => "quarantine", "result" => nil,
+        "reason" => { "code" => "invalid_event", "message" => "unsafe details omitted" },
+        "recorded_at" => "2026-08-30T12:10:00.000000Z"
+      )
+    )
+
+    result = Hive::Proposals::Compiler.new(store: @store).compile(
+      output_root: File.join(@tmp, "quarantine"), source_commit: "a" * 40
+    )
+
+    diagnostic = result.index.fetch("diagnostics").first
+    assert_equal "source_invalid_event", diagnostic.fetch("code")
+    assert_equal rejected_id, diagnostic.fetch("proposal_id")
+    assert_includes result.markdown, "source\\_invalid\\_event"
+    refute_includes result.markdown, "unsafe details omitted"
+  end
+
+  def test_markdown_includes_safe_evaluation_evidence_and_source_links
+    create_record(rejected_id)
+    projection = @store.projection(rejected_id)
+    evaluation = @store.append_event!(
+      proposal_id: rejected_id, type: "evaluation", source_event_id: source_id("evaluation"),
+      provenance: provenance.merge(
+        "artifact_reference" => "artifacts/run.json", "artifact_digest" => "e" * 64
+      ),
+      occurred_at: "2026-08-30T12:05:00Z", policy: policy,
+      data: {
+        "evaluator" => { "id" => "reviewer", "binding_fingerprint" => "c" * 64 },
+        "method" => {
+          "kind" => "benchmark", "label" => "held-out",
+          "reference" => "https://example.test/method"
+        },
+        "result" => { "outcome" => "fail", "metrics" => {}, "details_digest" => "d" * 64 },
+        "rationale" => "Regression found",
+        "evidence" => [ evidence.merge("source_ref" => "https://example.test/run") ],
+        "links" => [ { "kind" => "task", "reference" => "https://example.test/tasks/43059" } ]
+      }
+    )
+    @store.append_event!(
+      proposal_id: rejected_id, type: "decision", source_event_id: source_id("decision"),
+      provenance:, occurred_at: "2026-08-30T12:10:00Z", policy: policy,
+      data: {
+        "outcome" => "rejected", "considered_evaluation_ids" => [ evaluation.event_id ],
+        "considered_evaluations" => [ {
+          "evaluation_id" => evaluation.event_id, "evaluator_id" => "reviewer",
+          "method" => "held-out", "outcome" => "fail", "result_digest" => "f" * 64
+        } ],
+        "rationale_category" => "evaluated", "rationale" => "Do not retain",
+        "authority" => authority,
+        "links" => [ { "kind" => "decision", "reference" => "https://example.test/decisions/1" } ],
+        "observed_head" => projection.lifecycle_head
+      }
+    )
+
+    markdown = Hive::Proposals::Compiler.new(store: @store).compile(
+      output_root: File.join(@tmp, "linked"), source_commit: "a" * 40
+    ).markdown
+
+    assert_includes markdown, "https://example\\.test/method"
+    assert_includes markdown, "sha256 #{'d' * 64}"
+    assert_includes markdown, "https://example\\.test/run"
+    assert_includes markdown, "task 43059"
+    assert_includes markdown, "commit #{'a' * 40}"
+    assert_includes markdown, "artifacts/run\\.json"
+    assert_includes markdown, "https://example\\.test/decisions/1"
   end
 
   private

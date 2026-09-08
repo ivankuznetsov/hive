@@ -48,7 +48,7 @@ class ProposalSourceEventStoreTest < Minitest::Test
   def test_enforces_the_per_proposal_event_ceiling_after_consumption
     with_tmp_dir do |dir|
       store = Hive::Proposals::SourceEventStore.new(
-        root: dir, limits: limits.merge("max_proposal_events" => 1)
+        root: dir, limits: limits.merge("max_proposal_events" => 2)
       )
       store.admit!(source_event)
       store.mark_consumed!(
@@ -64,7 +64,7 @@ class ProposalSourceEventStoreTest < Minitest::Test
 
       assert_raises(Hive::Proposals::QuotaExceeded) { store.admit!(second) }
       assert_empty store.pending_ids
-      assert_equal 1, store.index.dig("proposal_usage", source_event.proposal_id, "sources")
+      refute store.index.key?("proposal_usage")
     end
   end
 
@@ -83,67 +83,69 @@ class ProposalSourceEventStoreTest < Minitest::Test
     end
   end
 
-  def test_all_admission_and_terminal_quota_dimensions_fail_closed
-    quota_cases = [
-      [ { "max_project_events" => 1 }, ->(index) { index["total_sources"] = 1 },
-        /project event quota/ ],
-      [ { "max_project_bytes" => 1 }, ->(index) { index["total_bytes"] = 1 },
-        /project byte quota/ ],
-      [ { "max_proposal_bytes" => 1 },
-        ->(index) { index["proposal_usage"][source_event.proposal_id] = { "sources" => 0, "bytes" => 1 } },
-        /proposal byte quota/ ],
-      [ { "max_sources_per_actor_per_hour" => 1 }, ->(_index) { }, /rate limit/ ]
-    ]
-    quota_cases.each do |overrides, mutate, message|
-      store = Hive::Proposals::SourceEventStore.new(
-        root: Dir.mktmpdir("proposal-source-quota"), limits: limits.merge(overrides),
-        clock: -> { Time.utc(2026, 8, 30, 12, 0, 0) }
+  def test_admission_reserves_terminal_and_canonical_capacity_at_the_byte_ceiling
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
+      store.admit!(source_event)
+      usage = store.send(:namespace_usage_unlocked, store.index)
+      store.instance_variable_get(:@limits)["max_project_bytes"] =
+        usage.fetch("project_bytes") + usage.fetch("reserved_bytes")
+
+      status = store.mark_consumed!(
+        source_event.source_event_id,
+        result: { "kind" => "record", "proposal_id" => source_event.proposal_id,
+                  "event_id" => nil, "source_event_id" => source_event.source_event_id }
       )
-      index = store.send(:empty_index)
-      mutate.call(index)
-      recent = message == /rate limit/ ?
-        [ { "actor_id" => "alice", "at" => "2026-08-30T12:00:00Z" } ] : []
-      error = assert_raises(Hive::Proposals::QuotaExceeded) do
-        store.send(:enforce_quotas!, index, source_event, 2, recent_admissions: recent)
-      end
-      assert_match(message, error.message)
-    ensure
-      FileUtils.rm_rf(store&.root)
-    end
 
-    store = Hive::Proposals::SourceEventStore.new(
-      root: Dir.mktmpdir("proposal-terminal-quota"),
-      limits: limits.merge("max_project_bytes" => 1)
-    )
-    index = store.send(:empty_index).merge("total_bytes" => 1)
-    assert_raises(Hive::Proposals::QuotaExceeded) do
-      store.send(:enforce_terminal_bytes!, index, nil, 1)
+      assert_equal "consumed", status.fetch("state")
+      assert_empty store.pending_ids
     end
-    FileUtils.rm_rf(store.root)
-
-    store = Hive::Proposals::SourceEventStore.new(
-      root: Dir.mktmpdir("proposal-terminal-quota"),
-      limits: limits.merge("max_proposal_bytes" => 1)
-    )
-    index = store.send(:empty_index)
-    index["proposal_usage"][source_event.proposal_id] = { "sources" => 1, "bytes" => 1 }
-    assert_raises(Hive::Proposals::QuotaExceeded) do
-      store.send(:enforce_terminal_bytes!, index, source_event.proposal_id, 1)
-    end
-  ensure
-    FileUtils.rm_rf(store&.root)
   end
 
-  def test_invalid_rate_history_limits_and_indexes_are_quarantined
+  def test_aggregate_quotas_cover_sources_canonical_files_and_lifecycle_authorities
+    quota_cases = [
+      [ { "max_project_events" => 1 }, /project event quota/ ],
+      [ { "max_project_bytes" => 1 }, /project byte quota/ ],
+      [ { "max_proposal_bytes" => 1 }, /proposal byte quota/ ]
+    ]
+    quota_cases.each do |overrides, message|
+      with_tmp_dir do |dir|
+        store = Hive::Proposals::SourceEventStore.new(
+          root: dir, limits: limits.merge(overrides)
+        )
+        error = assert_raises(Hive::Proposals::QuotaExceeded) { store.admit!(source_event) }
+        assert_match message, error.message
+      end
+    end
+
     with_tmp_dir do |dir|
-      clock = -> { Time.utc(2026, 8, 30, 12, 0, 0) }
-      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits, clock:)
-      retained = store.send(
-        :retained_admissions,
-        { "recent_admissions" => [ { "at" => "invalid" }, {},
-                                    { "at" => "2026-08-30T12:00:00Z" } ] }
+      store = Hive::Proposals::SourceEventStore.new(
+        root: dir, limits: limits.merge("max_sources_per_actor_per_hour" => 1),
+        clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
       )
-      assert_equal [ { "at" => "2026-08-30T12:00:00Z" } ], retained
+      store.admit!(source_event)
+      error = assert_raises(Hive::Proposals::QuotaExceeded) do
+        store.enforce_lifecycle!(proposal_id: source_event.proposal_id, actor_id: "alice", event_bytes: 1)
+      end
+      assert_match(/rate limit/, error.message)
+    end
+
+    with_tmp_dir do |dir|
+      record_dir = File.join(dir, "records")
+      FileUtils.mkdir_p(record_dir)
+      File.binwrite(File.join(record_dir, "#{source_event.proposal_id}.json"), "{}")
+      store = Hive::Proposals::SourceEventStore.new(
+        root: dir, limits: limits.merge("max_project_events" => 1)
+      )
+      assert_raises(Hive::Proposals::QuotaExceeded) do
+        store.enforce_lifecycle!(proposal_id: source_event.proposal_id, actor_id: "operator", event_bytes: 1)
+      end
+    end
+  end
+
+  def test_invalid_limits_and_indexes_are_quarantined
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits)
 
       invalid_limit = Hive::Proposals::SourceEventStore.new(
         root: dir, limits: limits.merge("max_project_events" => "many")
@@ -162,6 +164,33 @@ class ProposalSourceEventStoreTest < Minitest::Test
 
       File.write(File.join(store.inbox_root, "index.json"), "{not json")
       assert_raises(Hive::Proposals::QuarantinedSource) { store.index }
+    end
+  end
+
+  def test_oversize_index_is_rejected_before_the_new_receipt_is_written
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(
+        root: dir, limits: limits.merge("max_pending_sources" => 10_000)
+      )
+      index = store.send(:empty_index)
+      sequence = 0
+      loop do
+        sequence += 1
+        id = "pse-#{Digest::SHA256.hexdigest(sequence.to_s)}"
+        candidate = Hive::Proposals.stringify(index)
+        candidate["pending"] << id
+        candidate["pending_proposals"][id] = source_event.proposal_id
+        candidate["reservations"][id] = { "bytes" => 1, "events" => 1 }
+        candidate["total_sources"] += 1
+        break if Hive::Proposals.canonical(candidate).bytesize >
+                 Hive::Proposals::SourceEventStore::MAX_FILE_BYTES
+        index = candidate
+      end
+      FileUtils.mkdir_p(store.inbox_root)
+      File.binwrite(File.join(store.inbox_root, "index.json"), Hive::Proposals.canonical(index))
+
+      assert_raises(Hive::Proposals::QuotaExceeded) { store.admit!(source_event) }
+      refute File.exist?(File.join(store.inbox_root, "#{source_event.source_event_id}.json"))
     end
   end
 
@@ -185,6 +214,11 @@ class ProposalSourceEventStoreTest < Minitest::Test
         def read(_limit) = bytes
       end.new(stat, "x" * 16)
       replacement = ->(*_arguments, **_options, &block) { block.call(fake) }
+      with_replaced_singleton_method(File, :open, replacement) do
+        assert_equal "x" * 16, store.send(:read_bytes, "fake", max_bytes: 16)
+      end
+
+      fake.bytes = "x" * 17
       with_replaced_singleton_method(File, :open, replacement) do
         assert_raises(Hive::Proposals::QuarantinedSource) do
           store.send(:read_bytes, "fake", max_bytes: 16)

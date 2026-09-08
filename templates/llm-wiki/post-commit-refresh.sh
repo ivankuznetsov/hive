@@ -14,9 +14,10 @@ set -euo pipefail
 project_override=""
 retry_selector=""
 drain_mode=0
+proposal_source=""
 
 usage() {
-  printf 'Usage: %s [--project <path>] [--drain | --retry-failed <sha|all>]\n' "$0"
+  printf 'Usage: %s [--project <path>] [--proposal-source <sha>] [--drain | --retry-failed <sha|all>]\n' "$0"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -32,6 +33,14 @@ while [ "$#" -gt 0 ]; do
     --drain)
       drain_mode=1
       shift
+      ;;
+    --proposal-source)
+      [ "$#" -ge 2 ] || {
+        usage >&2
+        exit 2
+      }
+      proposal_source="$2"
+      shift 2
       ;;
     --retry-failed)
       [ "$#" -ge 2 ] || {
@@ -49,6 +58,14 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$drain_mode" -eq 1 ] && [ -n "$retry_selector" ]; then
   printf 'llm-wiki: --drain and --retry-failed are mutually exclusive\n' >&2
+  exit 2
+fi
+if [ -n "$proposal_source" ] && { [ "$drain_mode" -eq 1 ] || [ -n "$retry_selector" ]; }; then
+  printf 'llm-wiki: --proposal-source cannot be combined with drain or retry mode\n' >&2
+  exit 2
+fi
+if [ -n "$proposal_source" ] && [[ ! "$proposal_source" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+  printf 'llm-wiki: proposal source must be a full source SHA\n' >&2
   exit 2
 fi
 if [ "$retry_selector" != all ] && [ -n "$retry_selector" ] && \
@@ -190,7 +207,16 @@ run_qmd() {
 sha="$(git rev-parse HEAD 2>/dev/null || true)"
 [ -n "$sha" ] || exit 0
 if [ "$drain_mode" -eq 0 ] && [ -z "$retry_selector" ]; then
-  changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"
+  if [ -n "$proposal_source" ]; then
+    sha="$(git rev-parse --verify "${proposal_source}^{commit}" 2>/dev/null || true)"
+    [ -n "$sha" ] || {
+      printf 'llm-wiki: proposal source commit is unavailable\n' >&2
+      exit 2
+    }
+    changed_files="proposals/v1/records/.explicit-refresh"
+  else
+    changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"
+  fi
   [ -n "$changed_files" ] || exit 0
 
   # Compiled projections contain no new source for either compiler. A commit
@@ -878,7 +904,7 @@ queue_batch_proposal_only() {
 }
 
 latest_proposal_source() {
-  local file queued_sha queued_branch path saw_canonical rows=""
+  local file queued_sha queued_branch path saw_canonical selected="" selected_row candidate_row
   for file in "${QUEUE_FILES[@]}"; do
     IFS=$'\t' read -r queued_sha queued_branch <"$file"
     saw_canonical=0
@@ -888,10 +914,32 @@ latest_proposal_source() {
       esac
     done < <(sed -n '2,$p' "$file")
     if [ "$saw_canonical" -eq 1 ]; then
-      rows+="$(git show -s --format='%ct %H' "$queued_sha")"$'\n'
+      if [ -z "$selected" ] || git merge-base --is-ancestor "$selected" "$queued_sha"; then
+        selected="$queued_sha"
+      elif git merge-base --is-ancestor "$queued_sha" "$selected"; then
+        :
+      else
+        selected_row="$(git show -s --format='%ct %H' "$selected")"
+        candidate_row="$(git show -s --format='%ct %H' "$queued_sha")"
+        if [ "$(printf '%s\n%s\n' "$selected_row" "$candidate_row" | LC_ALL=C sort | tail -n 1)" = "$candidate_row" ]; then
+          selected="$queued_sha"
+        fi
+      fi
     fi
   done
-  printf '%s' "$rows" | LC_ALL=C sort -k1,1n -k2,2 | tail -n 1 | awk '{print $2}'
+  printf '%s\n' "$selected"
+}
+
+protect_generated_proposals() {
+  local path
+  for path in wiki/proposals.json wiki/proposals.md; do
+    if git -C "$refresh_root" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+      git -C "$refresh_root" restore --source=HEAD --staged --worktree -- "$path" \
+        >>"$log_file" 2>&1 || return 1
+    else
+      rm -f -- "$refresh_root/$path"
+    fi
+  done
 }
 
 compile_proposals() {
@@ -1136,6 +1184,10 @@ PROMPT
   else
     log_line "WARN: compile-log.sh missing; leaving wiki/log.md unchanged"
   fi
+  protect_generated_proposals || {
+    log_line "ERROR: generated proposal files could not be restored; queue retained"
+    return 1
+  }
   compile_proposals "$proposal_source" || return 1
   wiki_only_changes || return 1
 

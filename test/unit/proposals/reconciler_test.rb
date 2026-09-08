@@ -63,6 +63,29 @@ class ProposalReconcilerTest < Minitest::Test
     end
   end
 
+  def test_transient_source_unavailability_remains_pending_for_replay
+    with_tmp_git_repo do |dir|
+      ops, source_store, store = stores(dir)
+      event = submission
+      source_store.admit!(event)
+      commit_admission(ops, source_store, event)
+      unavailable = Object.new
+      unavailable.define_singleton_method(:ingest!) do |*_arguments, **_options|
+        raise Hive::Proposals::SourceUnavailable, "temporary missing blob"
+      end
+      reconciler = Hive::Proposals::Reconciler.new(
+        git_ops: ops, source_store:, store:, ingestor: unavailable, max_batch: 8
+      )
+
+      result = reconciler.reconcile!
+
+      assert_equal 1, result.processed
+      assert_equal 0, result.quarantined
+      assert_equal 1, result.pending
+      assert_equal "pending", source_store.status(event.source_event_id).fetch("state")
+    end
+  end
+
   def test_failed_quarantine_commit_restores_pending_state_and_tolerates_reset_failure
     with_tmp_git_repo do |dir|
       ops, source_store, store = stores(dir)

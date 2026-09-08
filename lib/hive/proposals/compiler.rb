@@ -13,7 +13,9 @@ module Hive
       INDEX_SCHEMA = "hive-proposal-index".freeze
       JSON_PATH = "wiki/proposals.json".freeze
       MARKDOWN_PATH = "wiki/proposals.md".freeze
-      PINNED_PREFIXES = %w[proposals/v1/records/ proposals/v1/events/].freeze
+      PINNED_PREFIXES = %w[
+        proposals/v1/records/ proposals/v1/events/ proposals/v1/inbox/quarantine/
+      ].freeze
 
       def self.compile_at_ref(git_ops:, source_ref:, output_root:)
         PinnedSource.new(git_ops:, source_ref:).with_store do |store, source_commit|
@@ -134,9 +136,31 @@ module Hive
           metrics = Proposals.canonical(evaluation.dig("result", "metrics"))
           lines << "- #{markdown(evaluation.fetch('occurred_at'))}: " \
                    "#{markdown(evaluation.dig('evaluator', 'id'))} via " \
+                   "#{markdown(evaluation.dig('method', 'kind'))} " \
                    "#{markdown(evaluation.dig('method', 'label'))} — " \
                    "#{markdown(evaluation.dig('result', 'outcome'))}; metrics #{markdown(metrics)}"
+          if evaluation.dig("method", "reference")
+            lines << "  Method reference: #{markdown(evaluation.dig('method', 'reference'))}"
+          end
+          if evaluation.dig("result", "details_digest")
+            lines << "  Result details: sha256 " \
+                     "#{markdown(evaluation.dig('result', 'details_digest'))}"
+          end
           lines << "  Rationale: #{markdown(evaluation.fetch('rationale'))}"
+          evaluation.fetch("evidence").each do |item|
+            source = item["source_ref"] ? "; source #{markdown(item['source_ref'])}" : ""
+            lines << "  Evidence: #{markdown(item.fetch('label'))}; " \
+                     "sha256 #{markdown(item.fetch('digest'))}#{source}"
+          end
+          render_links(lines, evaluation.fetch("links"), prefix: "  Link")
+          provenance = evaluation.fetch("provenance")
+          lines << "  Source: task #{markdown(provenance.fetch('task_id'))}; " \
+                   "attempt #{markdown(provenance.fetch('attempt_id'))}; " \
+                   "commit #{markdown(provenance.fetch('source_commit'))}"
+          if provenance["artifact_reference"]
+            lines << "  Artifact: #{markdown(provenance.fetch('artifact_reference'))}; " \
+                     "sha256 #{markdown(provenance.fetch('artifact_digest'))}"
+          end
         end
       end
 
@@ -155,6 +179,14 @@ module Hive
             "#{markdown(decision.fetch('considered_evaluation_ids').join(', '))}"
           ]
         )
+        render_links(lines, decision.fetch("links"), prefix: "- Link")
+      end
+
+      def render_links(lines, links, prefix:)
+        links.each do |link|
+          lines << "#{prefix}: #{markdown(link.fetch('kind'))} " \
+                   "#{markdown(link.fetch('reference'))}"
+        end
       end
 
       def render_lineage(lines, lineage)
@@ -210,8 +242,8 @@ module Hive
           source_commit = resolve_commit
           Dir.mktmpdir("hive-proposal-pinned-") do |directory|
             root = File.join(directory, "proposals", "v1")
-            materialize(root, source_commit)
-            yield Store.new(root:), source_commit
+            unsafe_paths = materialize(root, source_commit)
+            yield Store.new(root:, unsafe_paths:), source_commit
           end
         end
 
@@ -230,31 +262,34 @@ module Hive
         def materialize(root, source_commit)
           output = @git_ops.run_git!(
             "-C", @git_ops.hive_state_path, "ls-tree", "-rz", "--full-tree",
-            source_commit, "--", "proposals/v1/records", "proposals/v1/events"
+            source_commit, "--", "proposals/v1/records", "proposals/v1/events",
+            "proposals/v1/inbox/quarantine"
           )
           entries = output.split("\0").reject(&:empty?)
           raise QuotaExceeded, "proposal pinned tree has too many paths" if entries.length > MAX_TREE_PATHS
 
-          entries.each { |entry| materialize_entry(root, source_commit, entry) }
+          unsafe_paths = {}
+          entries.each { |entry| materialize_entry(root, source_commit, entry, unsafe_paths) }
+          unsafe_paths
         end
 
-        def materialize_entry(root, source_commit, entry)
+        def materialize_entry(root, source_commit, entry, unsafe_paths)
           metadata, path = entry.split("\t", 2)
           mode, type, = metadata.to_s.split(" ", 3)
           return unless type == "blob" && safe_tree_path?(path)
 
-          relative = PINNED_PREFIXES.filter_map { |prefix| path.delete_prefix(prefix) if path.start_with?(prefix) }
-                                    .first
-          prefix = path.start_with?(PINNED_PREFIXES.first) ? "records" : "events"
-          destination = File.join(root, prefix, relative)
+          relative = path.delete_prefix("proposals/v1/")
+          destination = File.join(root, relative)
           FileUtils.mkdir_p(File.dirname(destination), mode: 0o700)
           bytes = @git_ops.read_hive_state_blob_at(source_commit, path, max_bytes: MAX_BLOB_BYTES)
           bytes ||= "x" * MAX_BLOB_BYTES
           if mode == "120000"
-            File.symlink(bytes.byteslice(0, 2_048), destination)
-          else
-            Hive::AtomicFile.write(destination, bytes, mode: 0o600)
+            unsafe_paths[relative] = { "code" => "symlink" }
           end
+          Hive::AtomicFile.write(destination, bytes, mode: 0o600)
+        rescue Hive::GitError, SystemCallError, IOError
+          unsafe_paths[relative] = { "code" => "unreadable_file" }
+          Hive::AtomicFile.write(destination, "", mode: 0o600)
         end
 
         def safe_tree_path?(path)

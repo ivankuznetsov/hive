@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "time"
+require "tmpdir"
 require "uri"
 require "hive"
 require "hive/canonical_json"
@@ -34,6 +35,7 @@ module Hive
     FORBIDDEN_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/
     MAX_TEXT_BYTES = 16 * 1024
     MAX_EVIDENCE_ITEMS = 64
+    STATE_LOCK_TIMEOUT_SEC = 30
     DEFAULT_POLICY = {
       "visibility" => "restricted", "retention" => "task",
       "allowed_link_schemes" => [ "https" ]
@@ -73,6 +75,60 @@ module Hive
 
     def canonical(value) = Hive::CanonicalJSON.generate(value)
     def digest(value) = Hive::CanonicalJSON.digest(value)
+
+    def with_state_lock(root, timeout: STATE_LOCK_TIMEOUT_SEC)
+      root = File.expand_path(root)
+      held = (Thread.current[:hive_proposal_state_locks] ||= {})
+      if held[root] == Process.pid
+        return yield
+      end
+
+      lock_path = File.join(
+        Dir.tmpdir, "hive-proposal-#{Digest::SHA256.hexdigest(root)}.lock"
+      )
+      flags = File::RDWR | File::CREAT
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      File.open(lock_path, flags, 0o600) do |lock|
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+        until lock.flock(File::LOCK_EX | File::LOCK_NB)
+          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          unless remaining.positive?
+            raise Hive::ConcurrentRunError.new(
+              "proposal state lock at #{lock_path} held longer than #{timeout}s",
+              lock_path:
+            )
+          end
+          IO.select(nil, nil, nil, [ remaining, 0.05 ].min)
+        end
+        held[root] = Process.pid
+        begin
+          yield
+        ensure
+          held.delete(root) if held[root] == Process.pid
+          lock.flock(File::LOCK_UN)
+        end
+      end
+    rescue Errno::ELOOP
+      raise Error, "proposal state lock is unsafe"
+    end
+
+    class GitIndexSnapshot
+      def self.capture(git_ops)
+        output = git_ops.run_git!("-C", git_ops.hive_state_path, "write-tree")
+        new(git_ops, output.is_a?(String) ? output.strip : nil)
+      end
+
+      def initialize(git_ops, tree)
+        @git_ops = git_ops
+        @tree = tree
+      end
+
+      def restore!
+        return unless @tree
+
+        @git_ops.run_git!("-C", @git_ops.hive_state_path, "read-tree", @tree)
+      end
+    end
 
     def hive_state_relative_path(git_ops, path, label: "proposal path")
       prefix = "#{File.expand_path(git_ops.hive_state_path)}/"
@@ -285,7 +341,7 @@ module Hive
     end
 
     def evaluation_facts!(value, policy: DEFAULT_POLICY, error: InvalidEvent,
-                          label: "proposal evaluation")
+                          label: "proposal evaluation", admission: false)
       policy = policy!(policy)
       data = closed_hash!(value, required: EVALUATION_FACT_KEYS, label:, error:)
       method = closed_hash!(
@@ -306,7 +362,7 @@ module Hive
       data.merge(
         "method" => method, "result" => result,
         "rationale" => text!(data["rationale"], label: "#{label} rationale", error:),
-        "evidence" => evidence!(data["evidence"], policy:, error:),
+        "evidence" => evidence!(data["evidence"], policy:, error:, admission:),
         "links" => links!(
           data["links"], allowed_schemes: policy.fetch("allowed_link_schemes"), error:
         )
@@ -336,7 +392,7 @@ module Hive
       result
     end
 
-    def evidence!(items, policy: DEFAULT_POLICY, error: InvalidRecord)
+    def evidence!(items, policy: DEFAULT_POLICY, error: InvalidRecord, admission: false)
       policy = policy!(policy)
       entries = Array(items)
       raise error, "proposal evidence exceeds #{MAX_EVIDENCE_ITEMS} items" if entries.length > MAX_EVIDENCE_ITEMS
@@ -357,12 +413,23 @@ module Hive
                  VISIBILITIES.include?(data["visibility"])
             raise error, "proposal evidence persisted classification is invalid"
           end
+          visibility = data["visibility"]
+          retention_policy = retention["policy"]
+          if admission
+            visibility = effective_classification(
+              visibility, policy.fetch("visibility"), VISIBILITIES
+            )
+            retention_policy = effective_classification(
+              retention_policy, policy.fetch("retention"), RETENTIONS
+            )
+          end
           persisted = {
             "label" => label!(data["label"], label: "proposal evidence label", error:),
             "digest" => digest!(data["digest"], label: "proposal evidence digest", error:),
             "bytes" => data["bytes"],
             "media_type" => label!(data["media_type"], label: "proposal evidence media_type", error:),
-            "visibility" => data["visibility"], "retention" => retention
+            "visibility" => visibility,
+            "retention" => { "policy" => retention_policy, "enforcement" => "none" }
           }
           unless persisted["bytes"].is_a?(Integer) && persisted["bytes"] >= 0
             raise error, "proposal evidence bytes must be a non-negative integer"
@@ -372,12 +439,14 @@ module Hive
             allowed_schemes: policy.fetch("allowed_link_schemes"), error:
           ) if data["source_ref"]
           if data["summary"]
-            unless data["visibility"] == "project"
+            unless visibility == "project" || admission
               raise error, "non-project evidence cannot persist a summary"
             end
-            persisted["summary"] = text!(
-              data["summary"], label: "proposal evidence summary", error:
-            )
+            if visibility == "project"
+              persisted["summary"] = text!(
+                data["summary"], label: "proposal evidence summary", error:
+              )
+            end
           end
           next persisted
         end

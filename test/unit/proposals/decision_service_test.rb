@@ -368,6 +368,44 @@ class ProposalDecisionServiceTest < Minitest::Test
     assert_equal [ "evaluation" ], @store.projection(failing_id).events.map(&:type)
   end
 
+  def test_lifecycle_mutations_obey_namespace_event_and_authority_rate_limits
+    event_limited = Hive::Proposals::DecisionService.new(
+      store: @store, authority: @authority,
+      limits: { "max_project_events" => 1 },
+      clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
+    )
+    assert_raises(Hive::Proposals::QuotaExceeded) do
+      event_limited.decide(
+        proposal_id:, outcome: "rejected", considered_evaluation_ids: [],
+        rationale_category: "no_evaluation", rationale: "reject", links: [],
+        expected_head: @store.projection(proposal_id).lifecycle_head,
+        **authority_args("event-limited")
+      )
+    end
+
+    first = decide(
+      outcome: "rejected", considered_evaluation_ids: [],
+      expected_head: @store.projection(proposal_id).lifecycle_head,
+      idempotency_key: "first-authority-event", rationale_category: "no_evaluation"
+    )
+    refute_nil first.event
+    second_id = "prp-00000000-0000-4000-8000-000000000008"
+    create_record(second_id)
+    rate_limited = Hive::Proposals::DecisionService.new(
+      store: @store, authority: @authority,
+      limits: { "max_sources_per_actor_per_hour" => 1 },
+      clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
+    )
+    assert_raises(Hive::Proposals::QuotaExceeded) do
+      rate_limited.decide(
+        proposal_id: second_id, outcome: "rejected", considered_evaluation_ids: [],
+        rationale_category: "no_evaluation", rationale: "reject", links: [],
+        expected_head: @store.projection(second_id).lifecycle_head,
+        **authority_args("rate-limited")
+      )
+    end
+  end
+
   private
 
   def proposal_id = "prp-00000000-0000-4000-8000-000000000001"

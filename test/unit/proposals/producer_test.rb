@@ -4,7 +4,9 @@ require "hive/proposals/producer"
 class ProposalProducerTest < Minitest::Test
   include HiveTestHelper
 
-  FakeAttempt = Struct.new(:proposal_binding)
+  FakeAttempt = Struct.new(:proposal_binding, :provider) do
+    def [](key) = key.to_s == "provider" ? provider : nil
+  end
 
   class FakeActivity
     attr_reader :task_folder, :binding, :records
@@ -66,18 +68,23 @@ class ProposalProducerTest < Minitest::Test
     end
   end
 
-  def test_failed_source_commit_restores_task_and_inbox_files
+  def test_failed_source_commit_after_staging_restores_files_and_the_prior_index
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)
       ops.hive_state_init
       activity = activity_for(ops)
       producer = producer_for(ops, activity: activity)
+      unrelated = File.join(ops.hive_state_path, "stages", "1-idea", "prior.txt")
+      FileUtils.mkdir_p(File.dirname(unrelated))
+      File.write(unrelated, "staged before proposal\n")
+      run!("git", "-C", ops.hive_state_path, "add", "stages/1-idea/prior.txt")
+      leftover_log = File.join(ops.hive_state_path, "logs", "leftover.log")
+      File.write(leftover_log, "unrelated log\n")
+      original_commit = ops.method(:hive_commit)
       ops.define_singleton_method(:hive_commit) do |**options|
-        options.fetch(:before_stage).call
-        raise Hive::GitError, "simulated source commit failure"
-      end
-      ops.define_singleton_method(:run_git!) do |*_arguments|
-        raise Hive::GitError, "simulated reset failure"
+        original_commit.call(
+          **options.merge(after_stage: -> { raise Hive::GitError, "simulated source commit failure" })
+        )
       end
 
       assert_raises(Hive::GitError) do
@@ -92,6 +99,9 @@ class ProposalProducerTest < Minitest::Test
       refute File.exist?(
         File.join(ops.hive_state_path, "proposals", "v1", "inbox", "pse-#{'b' * 64}.json")
       )
+      assert_equal [ "A  stages/1-idea/prior.txt", "?? logs/leftover.log" ].sort,
+                   run!("git", "-C", ops.hive_state_path, "status", "--porcelain=v1")
+                     .lines.map(&:chomp).sort
     end
   end
 
@@ -123,6 +133,73 @@ class ProposalProducerTest < Minitest::Test
       )
 
       assert_instance_of Hive::Proposals::Producer, producer
+    end
+  end
+
+  def test_revoked_evaluator_cannot_admit_new_events_but_committed_exact_retry_survives
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      config = Hive::Config.merge_defaults(
+        "proposals" => {
+          "evaluators" => {
+            "benchmark-reviewer" => {
+              "workflows" => [ "coding" ], "stages" => [ "4-execute" ],
+              "agent_profiles" => [ "codex" ]
+            }
+          }
+        }
+      )
+      evaluator = Hive::Proposals::EvaluatorAuthority.new(config).bind!(
+        identity: "benchmark-reviewer", workflow: "coding",
+        stage: "4-execute", agent_profile: "codex"
+      )
+      binding = Marshal.load(Marshal.dump(proposal_binding))
+      binding["subject"]["proposal_id"] = proposal_id
+      binding["evaluator"] = evaluator.to_h
+      binding["configuration_fingerprint"] = evaluator.fetch("configuration_fingerprint")
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      source_store = Hive::Proposals::SourceEventStore.new(root: root)
+      store = Hive::Proposals::Store.new(root: root)
+      record = store.create_record!(
+        proposal_id:, subject_kind: "skill", subject_ref: "agent-skills/reviewer",
+        revision: "v2", proposed_change: "Change review", motivation: "Improve recall",
+        evidence: [ evidence ], author: binding.fetch("actor"), lineage: {},
+        provenance: {
+          "task_id" => "43059", "task_generation" => 1,
+          "ownership_generation" => "owner-1", "attempt_id" => "attempt-1",
+          "workflow_id" => "coding", "stage" => "4-execute",
+          "actor" => { "id" => "alice", "kind" => "proposer" },
+          "source_commit" => "a" * 40
+        },
+        source_event_id: "pse-#{'e' * 64}", created_at: "2026-08-30T12:00:00Z",
+        policy: binding.fetch("policy")
+      )
+      ops.hive_commit(
+        stage_name: "proposals", slug: "fixture", action: "recorded candidate",
+        pathspecs: [ "proposals/v1/records/#{record.proposal_id}.json" ]
+      )
+      activity = activity_for(ops)
+      attempt = FakeAttempt.new(binding, "codex")
+      build = lambda do |cfg|
+        Hive::Proposals::Producer.new(
+          project_root: dir, git_ops: ops, activity:, attempt:, config: cfg,
+          source_store:, store:
+        )
+      end
+      attributes = {
+        method: { "kind" => "benchmark", "label" => "held-out" },
+        result: { "outcome" => "pass", "metrics" => {} }, rationale: "Measured",
+        evidence: [ evidence ], source_event_id: "pse-#{'f' * 64}"
+      }
+      first = build.call(config).evaluate(**attributes)
+      revoked = Hive::Config.merge_defaults("proposals" => { "evaluators" => {} })
+
+      replay = build.call(revoked).evaluate(**attributes)
+      assert_equal first, replay
+      assert_raises(Hive::Proposals::Unauthorized) do
+        build.call(revoked).evaluate(**attributes.merge(source_event_id: "pse-#{'1' * 64}"))
+      end
     end
   end
 

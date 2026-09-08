@@ -63,7 +63,8 @@ class ProposalTrackingTest < Minitest::Test
         )
         assert_includes selection.selected_ids, rejected
         assert_includes selection.text, '"status":"rejected"'
-        assert_includes selection.text, '"cost_ratio":1.42'
+        assert_includes selection.text, '"method_kind":"benchmark"'
+        refute_includes selection.text, "cost_ratio"
         refute_includes selection.text, "cost regression outweighs"
         refute_includes selection.text, "Broaden the planning prompt"
         assert_active_stores_unchanged(project, active_before)

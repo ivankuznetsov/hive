@@ -131,7 +131,7 @@ module Hive
             query.list(
               filters:, include_drafts: @include_drafts,
               include_diagnostics: @include_quarantine
-            ), schema: @subcommand == "list" ? "hive-proposal-list" : "hive-proposal-list"
+            ), schema: "hive-proposal-list"
           )
         end
       end
@@ -142,7 +142,8 @@ module Hive
         payload, artifact = read_project_artifact(@project_root)
         service = Hive::Proposals::DecisionService.new(
           store:, authority: Hive::Proposals::Authority.new(config), git_ops: ops,
-          policy: config.dig("proposals", "evidence")
+          policy: config.dig("proposals", "evidence"),
+          limits: config.dig("proposals", "limits")
         )
         common = {
           proposal_id:, expected_head: expected_head,
@@ -182,7 +183,7 @@ module Hive
                 "proposal refresh --output-root is internal to --compile-only"
         end
 
-        @refresh_runner.call(project_root, ops)
+        @refresh_runner.call(project_root, ops, source_ref)
         render_refresh("queued", nil)
       end
 
@@ -205,14 +206,15 @@ module Hive
         render_refresh("current", result)
       end
 
-      def run_managed_refresh(project_root, ops)
+      def run_managed_refresh(project_root, ops, source_ref = ops.hive_state_head_sha)
         script = File.join(project_root, ".llm-wiki", "post-commit-refresh.sh")
         unless File.file?(script) && !File.symlink?(script)
           raise Hive::Proposals::SourceUnavailable, "managed llm-wiki refresh runner is unavailable"
         end
         stdout, stderr, status = Open3.capture3(
           { "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "" },
-          "bash", script, "--project", ops.hive_state_path
+          "bash", script, "--project", ops.hive_state_path,
+          "--proposal-source", source_ref
         )
         return if status.success?
 

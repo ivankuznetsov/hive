@@ -42,11 +42,14 @@ module Hive
         end
       end
 
-      def initialize(root:, id_generator: -> { SecureRandom.uuid })
+      def initialize(root:, id_generator: -> { SecureRandom.uuid }, unsafe_paths: {},
+                     lock_timeout: STATE_LOCK_TIMEOUT_SEC)
         @root = File.expand_path(root)
         @records_root = File.join(@root, "records")
         @events_root = File.join(@root, "events")
         @id_generator = id_generator
+        @unsafe_paths = Proposals.stringify(unsafe_paths || {})
+        @lock_timeout = lock_timeout
       end
 
       def create_record!(proposal_id: nil, **attributes)
@@ -86,12 +89,13 @@ module Hive
       end
 
       def append_event!(proposal_id:, type:, data:, source_event_id:, provenance:,
-                        occurred_at: Time.now.utc, event_id: nil, policy: DEFAULT_POLICY)
+                        occurred_at: Time.now.utc, event_id: nil, policy: DEFAULT_POLICY,
+                        before_write: nil)
         proposal_id = Proposals.proposal_id!(proposal_id, error: InvalidEvent)
         with_lock do
           append_event_unlocked!(
             proposal_id:, type:, data:, source_event_id:, provenance:,
-            occurred_at:, event_id:, policy:
+            occurred_at:, event_id:, policy:, before_write:
           )
         end
       end
@@ -125,7 +129,8 @@ module Hive
       private
 
       def append_event_unlocked!(proposal_id:, type:, data:, source_event_id:, provenance:,
-                                 occurred_at:, event_id:, policy:, snapshot: nil)
+                                 occurred_at:, event_id:, policy:, snapshot: nil,
+                                 before_write: nil)
         raise InvalidEvent, "proposal does not exist" unless fetch_record_unlocked(proposal_id)
         existing = find_by_source_event_unlocked(source_event_id, snapshot:)
         if existing
@@ -146,6 +151,7 @@ module Hive
           event_id: id, proposal_id:, version:, type:, data:, source_event_id:,
           provenance:, occurred_at:, policy:
         )
+        before_write&.call(event, Proposals.canonical(event.to_h))
         write_event_unlocked!(event)
       end
 
@@ -190,8 +196,9 @@ module Hive
       def load_unlocked
         diagnostics = []
         records = load_records(diagnostics)
-        events = load_events(diagnostics)
-        projections = build_projections(records, events, diagnostics)
+        events, reserved_versions = load_events(diagnostics)
+        load_source_quarantine(diagnostics)
+        projections = build_projections(records, events, reserved_versions, diagnostics)
         Snapshot.new(
           records: records.sort_by(&:proposal_id).freeze,
           events: events.transform_values { |items| items.sort_by(&:version).freeze }.sort.to_h.freeze,
@@ -227,9 +234,10 @@ module Hive
       end
 
       def load_events(diagnostics)
-        return {} unless safe_directory?(events_root)
+        return [ {}, {} ] unless safe_directory?(events_root)
 
         events = Hash.new { |hash, key| hash[key] = [] }
+        reserved_versions = Hash.new { |hash, key| hash[key] = [] }
         seen_ids = {}
         children(events_root).each do |proposal_basename|
           proposal_path = File.join(events_root, proposal_basename)
@@ -242,6 +250,8 @@ module Hive
           children(proposal_path).each do |basename|
             path = File.join(proposal_path, basename)
             logical_path = "events/#{proposal_basename}/#{basename}"
+            reserved = basename.match(/\A(\d+)-/)&.[](1)&.to_i
+            reserved_versions[proposal_basename] << reserved if reserved&.positive?
             match = basename.match(EVENT_FILENAME)
             unless match && match[1].to_i.positive?
               diagnostics << diagnostic(
@@ -276,13 +286,16 @@ module Hive
             )
           end
         end
-        events
+        [ events, reserved_versions ]
       end
 
-      def build_projections(records, events, diagnostics)
+      def build_projections(records, events, reserved_versions, diagnostics)
         known = records.to_h { |record| [ record.proposal_id, record ] }
         projections = records.filter_map do |record|
-          Projection.new(record:, events: events.fetch(record.proposal_id, []))
+          Projection.new(
+            record:, events: events.fetch(record.proposal_id, []),
+            reserved_versions: reserved_versions.fetch(record.proposal_id, [])
+          )
         rescue InconsistentHistory
           diagnostics << collection_diagnostic("inconsistent_history", record.proposal_id)
           nil
@@ -318,8 +331,40 @@ module Hive
         valid.values.map do |projection|
           Projection.new(
             record: projection.record, events: projection.events,
-            supersedes: reciprocal.fetch(projection.proposal_id, [])
+            supersedes: reciprocal.fetch(projection.proposal_id, []),
+            reserved_versions: projection.reserved_versions
           )
+        end
+      end
+
+      def load_source_quarantine(diagnostics)
+        directory = File.join(root, "inbox", "quarantine")
+        return unless safe_directory?(directory)
+
+        children(directory).each do |basename|
+          path = File.join(directory, basename)
+          logical_path = "inbox/quarantine/#{basename}"
+          bytes = safe_read(path, logical_path:)
+          if bytes.is_a?(Diagnostic)
+            diagnostics << bytes
+            next
+          end
+          document = JSON.parse(bytes)
+          valid = document.is_a?(Hash) && document["schema"] == "hive-proposal-source-status" &&
+            document["schema_version"] == 1 && document["state"] == "quarantine" &&
+            document["source_event_id"].to_s.match?(SOURCE_EVENT_ID) &&
+            document["proposal_id"].to_s.match?(PROPOSAL_ID) &&
+            document.dig("reason", "code").is_a?(String)
+          raise InvalidRecord unless valid
+
+          code = Proposals.label!(document.dig("reason", "code"), label: "source quarantine code")
+          diagnostics << Diagnostic.new(
+            code: "source_#{code}".byteslice(0, 128), path: logical_path,
+            sha256: Digest::SHA256.hexdigest(bytes), bytes: bytes.bytesize,
+            proposal_id: document.fetch("proposal_id")
+          )
+        rescue JSON::ParserError, InvalidRecord
+          diagnostics << diagnostic("invalid_source_quarantine", path, bytes:, logical_path:)
         end
       end
 
@@ -394,6 +439,10 @@ module Hive
       end
 
       def safe_read(path, logical_path:)
+        if (unsafe = @unsafe_paths[logical_path])
+          bytes = File.binread(path, MAX_FILE_BYTES)
+          return diagnostic(unsafe.fetch("code"), path, bytes:, logical_path:)
+        end
         status = File.lstat(path)
         return diagnostic("symlink", path, logical_path:) if status.symlink?
         return diagnostic("special_file", path, logical_path:) unless status.file?
@@ -502,19 +551,7 @@ module Hive
 
       def with_lock
         ensure_safe_directory!(root)
-        lock_path = File.join(
-          Dir.tmpdir, "hive-proposal-#{Digest::SHA256.hexdigest(root)}.lock"
-        )
-        flags = File::RDWR | File::CREAT
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-        File.open(lock_path, flags, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          yield
-        ensure
-          lock&.flock(File::LOCK_UN)
-        end
-      rescue Errno::ELOOP
-        raise Error, "proposal state lock is unsafe"
+        Proposals.with_state_lock(root, timeout: @lock_timeout) { yield }
       end
     end
   end

@@ -1,4 +1,5 @@
 require "fileutils"
+require "json"
 require "hive/atomic_file"
 require "hive/lock"
 require "hive/proposals/source_event_store"
@@ -31,6 +32,8 @@ module Hive
 
       def ingest!(source_event_id, source_commit:)
         id = Proposals.source_event_id!(source_event_id)
+        return ingest_committed!(id, source_commit:) if @git_ops
+
         terminal = @source_store.status(id)
         if terminal && terminal["state"] == "consumed"
           return IngestionResult.from_h(terminal.fetch("result"))
@@ -42,25 +45,35 @@ module Hive
         source = @source_store.fetch(id)
         raise SourceUnavailable, "proposal source receipt is unavailable" unless source
 
-        if @git_ops
-          ingest_committed!(source, source_commit:)
-        else
-          mutate!(source, source_commit:).first
-        end
+        mutate!(source, source_commit:).first
       end
 
       private
 
-      def ingest_committed!(source, source_commit:)
+      def ingest_committed!(source_event_id, source_commit:)
         result = nil
         staged_paths = []
         snapshot = nil
         event_snapshot = nil
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
+          source = committed_source!(source_event_id, source_commit)
+          restore_committed_target!(source)
+          terminal = @source_store.status(source_event_id)
+          if terminal && terminal["state"] == "consumed"
+            result = IngestionResult.from_h(terminal.fetch("result"))
+            verify_committed_terminal!(terminal, result)
+            next
+          end
+          if terminal && terminal["state"] == "quarantine"
+            raise QuarantinedSource, "proposal source receipt is terminally quarantined"
+          end
+
           snapshot = PathSnapshot.capture(snapshot_roots(source))
           event_snapshot = ImmutableAppendSnapshot.capture(
             File.join(@store.events_root, source.proposal_id)
           )
+          index_snapshot = Proposals::GitIndexSnapshot.capture(@git_ops)
+          committed = false
           begin
             result, paths = mutate!(source, source_commit:)
             staged_paths = paths.map do |path|
@@ -68,20 +81,114 @@ module Hive
                 @git_ops, path, label: "proposal transaction path"
               )
             end
-            @git_ops.hive_commit(
+            commit_result = @git_ops.hive_commit(
               stage_name: source.to_h.dig("binding", "stage"),
               slug: source.to_h.dig("binding", "task_slug"),
               action: "ingested proposal source #{source.source_event_id}",
               pathspecs: staged_paths
             )
-          rescue StandardError
-            snapshot.restore!
-            event_snapshot.restore!
-            Proposals.unstage_hive_state_paths(@git_ops, staged_paths)
-            raise
+            committed = commit_result == :committed
+            verify_committed_terminal!(@source_store.status(source_event_id), result)
+          rescue StandardError => error
+            if committed
+              restore_committed_target!(source) rescue nil
+            else
+              snapshot.restore!
+              event_snapshot.restore!
+              index_snapshot.restore! rescue nil
+            end
+            raise error
           end
         end
         result
+      end
+
+      def committed_source!(source_event_id, source_commit)
+        relative = "proposals/v1/inbox/#{source_event_id}.json"
+        bytes = @git_ops.read_hive_state_blob_at(
+          source_commit, relative, max_bytes: SourceEventStore::MAX_FILE_BYTES + 1
+        )
+        raise SourceUnavailable, "committed proposal source receipt is missing" unless bytes
+
+        SourceEvent.new(JSON.parse(bytes))
+      rescue JSON::ParserError, InvalidRecord
+        raise QuarantinedSource, "committed proposal source receipt is malformed"
+      end
+
+      def verify_committed_terminal!(terminal, result)
+        unless terminal.is_a?(Hash) && terminal["state"] == "consumed" &&
+               terminal["result"] == result.to_h
+          raise SourceUnavailable, "proposal consumed status is unavailable or inconsistent"
+        end
+        state = terminal.fetch("state")
+        status_path = Proposals.hive_state_relative_path(
+          @git_ops, @source_store.paths_for_terminal(result.source_event_id, state:).first,
+          label: "proposal terminal path"
+        )
+        status_bytes = @git_ops.read_hive_state_blob_at(
+          @git_ops.hive_state_head_sha, status_path,
+          max_bytes: SourceEventStore::MAX_FILE_BYTES + 1
+        )
+        unless status_bytes == Proposals.canonical(terminal)
+          raise SourceUnavailable, "proposal consumed status is not durably committed"
+        end
+
+        canonical = if result.kind == "record"
+          @store.fetch_record(result.proposal_id)
+        else
+          @store.fetch_event(result.event_id)
+        end
+        unless canonical && canonical.source_event_id == result.source_event_id
+          raise QuarantinedSource, "proposal consumed status has no matching canonical mutation"
+        end
+        canonical_path = canonical.is_a?(Record) ? @store.paths_for_record(canonical.proposal_id).first :
+          @store.path_for_event(canonical)
+        relative = Proposals.hive_state_relative_path(
+          @git_ops, canonical_path, label: "proposal canonical path"
+        )
+        committed = @git_ops.read_hive_state_blob_at(
+          @git_ops.hive_state_head_sha, relative, max_bytes: Store::MAX_FILE_BYTES + 1
+        )
+        unless committed == Proposals.canonical(canonical.to_h)
+          raise SourceUnavailable, "proposal canonical mutation is not durably committed"
+        end
+      end
+
+      def restore_committed_target!(source)
+        cleanup_paths = snapshot_roots(source) + [ File.join(@store.events_root, source.proposal_id) ]
+        roots = cleanup_paths.map do |path|
+          Proposals.hive_state_relative_path(
+            @git_ops, path, label: "proposal cleanup path"
+          )
+        end
+        output = @git_ops.run_git!(
+          "-C", @git_ops.hive_state_path, "status", "--porcelain=v1", "-z",
+          "--untracked-files=all", "--", *roots
+        )
+        output.split("\0").reject(&:empty?).each do |entry|
+          relative = entry[3..]
+          next unless roots.any? { |root| relative == root || relative.start_with?("#{root}/") }
+
+          if entry[0, 2] == "??"
+            remove_path(File.join(@git_ops.hive_state_path, relative))
+          else
+            @git_ops.run_git!(
+              "-C", @git_ops.hive_state_path, "restore", "--source=HEAD",
+              "--staged", "--worktree", "--", relative
+            )
+          end
+        end
+      end
+
+      def remove_path(path)
+        stat = File.lstat(path)
+        if stat.directory? && !stat.symlink?
+          FileUtils.rm_rf(path)
+        else
+          File.unlink(path)
+        end
+      rescue Errno::ENOENT
+        nil
       end
 
       def mutate!(source, source_commit:)
@@ -157,7 +264,8 @@ module Hive
       def snapshot_roots(source)
         [
           *@store.paths_for_record(source.proposal_id),
-          *@source_store.paths_for_terminal(source.source_event_id, state: "consumed")
+          *@source_store.paths_for_terminal(source.source_event_id, state: "consumed"),
+          *@source_store.paths_for_terminal(source.source_event_id, state: "quarantine")
         ].uniq
       end
 

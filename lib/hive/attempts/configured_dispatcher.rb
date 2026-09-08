@@ -28,6 +28,7 @@ module Hive
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider: nil,
                    interactive: true, now: Time.now.utc, subject: nil)
         cfg = @config_loader.call(task.project_root)
+        reconcile_proposals(task)
         dispatcher_for(task, argv: argv, cfg: cfg).dispatch(
           task: task, project: project, intended_stage: intended_stage, argv: argv,
           request_id: request_id, provider: provider || provider_for(cfg, intended_stage),

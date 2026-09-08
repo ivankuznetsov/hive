@@ -116,6 +116,35 @@ class ProposalSourceEventTest < Minitest::Test
     end
   end
 
+  def test_canonical_shaped_evidence_is_intersected_at_admission_but_preserved_on_replay
+    canonical = {
+      "label" => "benchmark", "digest" => "a" * 64, "bytes" => 12,
+      "media_type" => "text/plain", "visibility" => "project",
+      "retention" => { "policy" => "project", "enforcement" => "none" },
+      "summary" => "instruction-bearing summary"
+    }
+    event = Hive::Proposals::SourceEvent.submission(
+      source_event_id: source_id("f"), proposal_id: proposal_id,
+      proposal_binding: proposal_binding, task_binding: task_binding,
+      proposed_change: "Change review", motivation: "Improve recall",
+      evidence: [ canonical ], created_at: "2026-08-30T12:00:00Z"
+    )
+
+    stored = event.to_h.dig("payload", "evidence", 0)
+    assert_equal "restricted", stored.fetch("visibility")
+    assert_equal "task", stored.dig("retention", "policy")
+    refute stored.key?("summary")
+
+    historical = event.to_h
+    historical.dig("payload", "evidence", 0).merge!(
+      "visibility" => "project",
+      "retention" => { "policy" => "project", "enforcement" => "none" },
+      "summary" => "historical summary"
+    )
+    replay = Hive::Proposals::SourceEvent.new(historical)
+    assert_equal "historical summary", replay.to_h.dig("payload", "evidence", 0, "summary")
+  end
+
   private
 
   def source_id(character) = "pse-#{character * 64}"

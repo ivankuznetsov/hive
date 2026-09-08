@@ -4,6 +4,7 @@ require "hive/attempts/api"
 require "hive/config"
 require "hive/git_ops"
 require "hive/proposals/ingestor"
+require "hive/proposals/evaluator_authority"
 require "hive/task_activity"
 require "hive/task_journal"
 
@@ -84,6 +85,7 @@ module Hive
 
         source_event_id = resolve_source_event_id(source_event_id, idempotency_key)
         existing = @source_store.fetch(source_event_id)
+        ensure_evaluator_currently_authorized! unless existing && committed_source_event?(existing)
         event = SourceEvent.evaluation(
           source_event_id:,
           proposal_id:, proposal_binding: @proposal_binding,
@@ -118,12 +120,10 @@ module Hive
         relative_paths = paths.map do |path|
           Proposals.hive_state_relative_path(@git_ops, path, label: "proposal producer path")
         end
-        task_relative = Proposals.hive_state_relative_path(
-          @git_ops, @activity.task_folder, label: "proposal producer path"
-        )
         snapshot = nil
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
           snapshot = Ingestor::PathSnapshot.capture(snapshot_roots(paths))
+          index_snapshot = Proposals::GitIndexSnapshot.capture(@git_ops)
           begin
             @git_ops.hive_commit(
               stage_name: task_binding.fetch("stage"),
@@ -135,10 +135,10 @@ module Hive
                 record_activity!(event)
               end
             )
-          rescue StandardError
+          rescue StandardError => error
             snapshot.restore!
-            Proposals.unstage_hive_state_paths(@git_ops, [ task_relative, *relative_paths ])
-            raise
+            index_snapshot.restore! rescue nil
+            raise error
           end
         end
       end
@@ -196,6 +196,32 @@ module Hive
           source_commit, receipt_path, max_bytes: SourceEventStore::MAX_FILE_BYTES + 1
         )
         bytes == Proposals.canonical(event.to_h)
+      end
+
+      def committed_source_event?(event)
+        receipt_path = Proposals.hive_state_relative_path(
+          @git_ops, @source_store.paths_for_admission(event.source_event_id).first,
+          label: "proposal producer path"
+        )
+        commit = @git_ops.hive_state_commit_for_path(receipt_path)
+        commit && committed_receipt_matches?(event, commit, receipt_path)
+      end
+
+      def ensure_evaluator_currently_authorized!
+        evaluator = @proposal_binding.fetch("evaluator")
+        raise Unauthorized, "proposal evaluation requires an admitted evaluator binding" unless evaluator
+
+        current = EvaluatorAuthority.new(@config).bind!(
+          identity: evaluator.fetch("id"), workflow: task_binding.fetch("workflow_id"),
+          stage: task_binding.fetch("stage"), agent_profile: attempt_provider
+        )
+        return if current.fetch("id") == evaluator.fetch("id")
+
+        raise Unauthorized, "proposal evaluator is no longer configured"
+      end
+
+      def attempt_provider
+        @attempt["provider"] if @attempt.respond_to?(:[])
       end
 
       def snapshot_roots(source_paths)

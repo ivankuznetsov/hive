@@ -7,16 +7,18 @@ module Hive
       LIFECYCLE_TYPES = %w[decision supersession rollback].freeze
 
       attr_reader :record, :events, :evaluations, :decision, :superseded_by, :rollback,
-                  :status, :lifecycle_head, :supersedes
+                  :status, :lifecycle_head, :supersedes, :reserved_versions
 
       def self.empty_head_digest(proposal_id)
         Proposals.digest("proposal_id" => proposal_id, "lifecycle_events" => [])
       end
 
-      def initialize(record:, events:, supersedes: [])
+      def initialize(record:, events:, supersedes: [], reserved_versions: nil)
         @record = record.is_a?(Record) ? record : Record.new(record)
         @events = Array(events).map { |event| event.is_a?(Event) ? event : Event.new(event) }
                               .sort_by(&:version).freeze
+        @reserved_versions = Array(reserved_versions || @events.map(&:version)).map { |version| Integer(version) }
+                                                                          .sort.freeze
         @supersedes = Array(supersedes).map { |id| Proposals.proposal_id!(id) }.uniq.sort.freeze
         validate_history!
         @evaluations = @events.select { |event| event.type == "evaluation" }.map do |event|
@@ -42,6 +44,11 @@ module Hive
       def revision = record.revision
       def draft? = status == "draft"
       def terminal? = !draft?
+
+      def lineage_ids
+        [ record["lineage"]["retries"], record["lineage"]["requested_supersedes"],
+          superseded_by, *supersedes ].compact.uniq.sort
+      end
 
       def to_h
         result = {
@@ -79,8 +86,16 @@ module Hive
         unless events.all? { |event| event.proposal_id == record.proposal_id }
           raise InconsistentHistory, "proposal history contains an event for another proposal"
         end
-        expected_versions = (1..events.length).to_a
-        unless events.map(&:version) == expected_versions
+        first_reserved = reserved_versions.first
+        first_expected = if first_reserved && events.none? { |event| event.version == first_reserved }
+          first_reserved
+        else
+          1
+        end
+        contiguous = reserved_versions.each_cons(2).all? { |left, right| right == left + 1 }
+        unless (reserved_versions.empty? || reserved_versions.first == first_expected) && contiguous &&
+               events.map(&:version).uniq.length == events.length &&
+               (events.map(&:version) - reserved_versions).empty?
           raise InconsistentHistory, "proposal event versions must be contiguous and unique"
         end
         EVENT_TYPES.each do |type|

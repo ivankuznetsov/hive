@@ -27,7 +27,11 @@ class ProposalContextSelectorTest < Minitest::Test
     refute selection.empty?
     assert_equal [ @rejected, @draft ].intersection(selection.selected_ids), selection.selected_ids
     assert_includes selection.text, '"status":"rejected"'
-    assert_includes selection.text, '"recall":0.91'
+    assert_includes selection.text, '"method_kind":"benchmark"'
+    refute_includes selection.text, "recall"
+    refute_includes selection.text, "Benchmark replay"
+    refute_includes selection.text, '"revision"'
+    refute_includes selection.text, '"subject_reference"'
     refute_includes selection.text, "Untrusted change"
     refute_includes selection.text, "Never include this instruction"
     refute_includes selection.text, "secret"
@@ -48,6 +52,26 @@ class ProposalContextSelectorTest < Minitest::Test
                  selection.provenance.fetch("effective_budget")
     assert_empty selection.selected_ids
     assert_equal "", selection.text
+  end
+
+  def test_overflow_stops_at_the_ranked_prefix_instead_of_selecting_a_smaller_later_item
+    subject = selector.send(:normalized_subject, context(@rejected).proposal_binding)
+    ranked = selector.send(
+      :ranked_candidates, @query.list(include_drafts: true).proposals, subject
+    )
+    first_bytes = selector.send(:typed_fact, ranked.first.last).then do |item|
+      "- #{Hive::Proposals.canonical(item)}\n".bytesize
+    end
+    budget = Hive::Proposals::ContextSelector::HEADER.bytesize + first_bytes - 1
+
+    selection = selector.select(
+      context: context(@rejected), max_items: 20, max_bytes: budget,
+      remaining_bytes: budget
+    )
+
+    assert selection.empty?
+    assert selection.truncated
+    assert_equal "budget_exhausted", selection.reason
   end
 
   def test_absent_malformed_and_stale_durable_bindings_fail_closed

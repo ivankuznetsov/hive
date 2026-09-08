@@ -11,7 +11,7 @@ module Hive
     class Reconciler
       PERMANENT_ERRORS = [
         InvalidRecord, InvalidEvent, Conflict, InconsistentHistory,
-        QuarantinedSource, SourceUnavailable, Unauthorized
+        QuarantinedSource, Unauthorized
       ].freeze
 
       def initialize(git_ops:, source_store: nil, store: nil, ingestor: nil, max_batch: 64)
@@ -30,17 +30,19 @@ module Hive
         processed = consumed = quarantined = cleaned = 0
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
           cleaned = clean_uncommitted_state!
-          pending = @source_store.pending_ids.first(@max_batch)
-          pending.each do |source_event_id|
-            processed += 1
-            begin
-              source_commit = committed_source_commit!(source_event_id)
-              @ingestor.ingest!(source_event_id, source_commit:)
-              consumed += 1
-            rescue *PERMANENT_ERRORS => error
-              quarantine_source!(source_event_id, error)
-              quarantined += 1
-            end
+        end
+        pending = @source_store.pending_ids.first(@max_batch)
+        pending.each do |source_event_id|
+          processed += 1
+          begin
+            source_commit = committed_source_commit!(source_event_id)
+            @ingestor.ingest!(source_event_id, source_commit:)
+            consumed += 1
+          rescue *PERMANENT_ERRORS => error
+            quarantine_source!(source_event_id, error)
+            quarantined += 1
+          rescue SourceUnavailable, QuotaExceeded
+            next
           end
         end
         ReconciliationResult.new(
@@ -64,29 +66,31 @@ module Hive
       end
 
       def quarantine_source!(source_event_id, error)
-        snapshot = Ingestor::PathSnapshot.capture(
-          @source_store.paths_for_terminal(source_event_id, state: "quarantine")
-        )
-        paths = nil
-        begin
-          @source_store.quarantine!(
-            source_event_id, code: quarantine_code(error),
-            reason: "committed proposal source failed permanent validation"
+        Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
+          snapshot = Ingestor::PathSnapshot.capture(
+            @source_store.paths_for_terminal(source_event_id, state: "quarantine")
           )
-          paths = @source_store.paths_for_terminal(source_event_id, state: "quarantine")
-                       .map do |path|
-                         Proposals.hive_state_relative_path(
-                           @git_ops, path, label: "proposal reconciliation path"
-                         )
-                       end
-          @git_ops.hive_commit(
-            stage_name: "proposal-reconcile", slug: source_event_id,
-            action: "quarantined proposal source", pathspecs: paths
-          )
-        rescue StandardError
-          snapshot.restore!
-          Proposals.unstage_hive_state_paths(@git_ops, paths || [])
-          raise
+          index_snapshot = Proposals::GitIndexSnapshot.capture(@git_ops)
+          begin
+            @source_store.quarantine!(
+              source_event_id, code: quarantine_code(error),
+              reason: "committed proposal source failed permanent validation"
+            )
+            paths = @source_store.paths_for_terminal(source_event_id, state: "quarantine")
+                         .map do |path|
+                           Proposals.hive_state_relative_path(
+                             @git_ops, path, label: "proposal reconciliation path"
+                           )
+                         end
+            @git_ops.hive_commit(
+              stage_name: "proposal-reconcile", slug: source_event_id,
+              action: "quarantined proposal source", pathspecs: paths
+            )
+          rescue StandardError => failure
+            snapshot.restore!
+            index_snapshot.restore! rescue nil
+            raise failure
+          end
         end
       end
 

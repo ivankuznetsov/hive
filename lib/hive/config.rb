@@ -17,7 +17,7 @@ require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 require "hive/warnings"
-require "hive/proposals"
+require "hive/proposals/config_validator"
 
 module Hive
   module Config
@@ -3960,163 +3960,10 @@ module Hive
             ">= #{min}; got #{value.inspect} (#{value.class})"
     end
 
-    PROPOSAL_KEYS = %w[evaluators authorities evidence limits context].freeze
-    PROPOSAL_EVALUATOR_KEYS = Hive::Proposals::EVALUATOR_CONFIG_KEYS
-    PROPOSAL_AUTHORITY_KEYS = (
-      Hive::Proposals::AUTHORITY_REQUIRED_KEYS + Hive::Proposals::AUTHORITY_OPTIONAL_KEYS
-    ).freeze
-    PROPOSAL_AUTHORITY_KINDS = Hive::Proposals::AUTHORITY_KINDS
-    PROPOSAL_AUTHORITY_CAPABILITIES = Hive::Proposals::AUTHORITY_CAPABILITIES
-    PROPOSAL_EVIDENCE_KEYS = %w[visibility retention allowed_link_schemes].freeze
-    PROPOSAL_LIMIT_KEYS = %w[
-      max_pending_sources max_project_events max_proposal_events max_project_bytes
-      max_proposal_bytes max_sources_per_actor_per_hour
-    ].freeze
-    PROPOSAL_CONTEXT_KEYS = %w[max_items max_bytes].freeze
-    PROPOSAL_IDENTIFIER = /\A[a-z][a-z0-9_.-]{0,127}\z/
-
     def validate_proposals!(cfg, source_path)
-      proposals = cfg.fetch("proposals")
-      validate_closed_mapping!(proposals, PROPOSAL_KEYS, "proposals", source_path)
-      validate_proposal_evaluators!(proposals.fetch("evaluators"), source_path)
-      validate_proposal_authorities!(proposals.fetch("authorities"), source_path)
-      validate_proposal_evidence!(proposals.fetch("evidence"), source_path)
-      validate_proposal_limits!(proposals.fetch("limits"), source_path)
-      validate_proposal_context!(proposals.fetch("context"), source_path)
-    end
-
-    def validate_proposal_evaluators!(evaluators, source_path)
-      unless evaluators.is_a?(Hash) && evaluators.length <= 256
-        raise ConfigError, "proposals.evaluators in #{describe_source(source_path)} must be a bounded Hash"
-      end
-      evaluators.each do |identity, row|
-        unless identity.to_s.match?(PROPOSAL_IDENTIFIER) && row.is_a?(Hash)
-          raise ConfigError,
-                "proposals.evaluators identity in #{describe_source(source_path)} is malformed"
-        end
-        label = "proposals.evaluators.#{identity}"
-        validate_closed_mapping!(row, PROPOSAL_EVALUATOR_KEYS, label, source_path)
-        PROPOSAL_EVALUATOR_KEYS.each do |key|
-          values = row[key]
-          unless values.is_a?(Array) && values.length <= 64 && values.uniq == values &&
-                 values.all? { |value| bounded_proposal_identifier?(value) }
-            raise ConfigError,
-                  "#{label}.#{key} in #{describe_source(source_path)} must be a bounded unique array"
-          end
-        end
-      end
-    end
-
-    def validate_proposal_authorities!(authorities, source_path)
-      unless authorities.is_a?(Hash) && authorities.length <= 256
-        raise ConfigError, "proposals.authorities in #{describe_source(source_path)} must be a bounded Hash"
-      end
-      authorities.each do |identity, row|
-        unless identity.to_s.match?(PROPOSAL_IDENTIFIER) && row.is_a?(Hash)
-          raise ConfigError,
-                "proposals.authorities identity in #{describe_source(source_path)} is malformed"
-        end
-        label = "proposals.authorities.#{identity}"
-        validate_closed_mapping!(row, PROPOSAL_AUTHORITY_KEYS, label, source_path)
-        unless PROPOSAL_AUTHORITY_KINDS.include?(row["kind"])
-          raise ConfigError,
-                "#{label}.kind in #{describe_source(source_path)} must be operator or policy"
-        end
-        capabilities = row["capabilities"]
-        unless capabilities.is_a?(Array) && capabilities.length <= 3 &&
-               capabilities.uniq == capabilities &&
-               capabilities.all? { |capability| PROPOSAL_AUTHORITY_CAPABILITIES.include?(capability) }
-          raise ConfigError,
-                "#{label}.capabilities in #{describe_source(source_path)} is malformed"
-        end
-        unless row["version"].is_a?(Integer) && row["version"].positive?
-          raise ConfigError, "#{label}.version in #{describe_source(source_path)} must be positive"
-        end
-        unless [ true, false ].include?(row["revoked"])
-          raise ConfigError, "#{label}.revoked in #{describe_source(source_path)} must be boolean"
-        end
-        validate_proposal_authority_times!(row, label, source_path)
-      end
-    end
-
-    def validate_proposal_authority_times!(row, label, source_path)
-      times = %w[valid_from valid_until].to_h do |key|
-        value = row[key]
-        next [ key, nil ] if value.nil?
-
-        parsed = Time.iso8601(value.to_s)
-        unless value.is_a?(String) && parsed.iso8601 == value
-          raise ArgumentError
-        end
-        [ key, parsed ]
-      end
-      return unless times["valid_from"] && times["valid_until"] &&
-                    times["valid_from"] >= times["valid_until"]
-
-      raise ConfigError,
-            "#{label} in #{describe_source(source_path)} has an empty validity interval"
-    rescue ArgumentError
-      raise ConfigError,
-            "#{label} validity timestamps in #{describe_source(source_path)} must be canonical ISO 8601"
-    end
-
-    def validate_proposal_evidence!(evidence, source_path)
-      unless evidence.is_a?(Hash)
-        raise ConfigError, "proposals.evidence in #{describe_source(source_path)} must be a Hash"
-      end
-      validate_closed_mapping!(evidence, PROPOSAL_EVIDENCE_KEYS, "proposals.evidence", source_path)
-      unless %w[restricted private project].include?(evidence["visibility"])
-        raise ConfigError,
-              "proposals.evidence.visibility in #{describe_source(source_path)} must be restricted, private, or project"
-      end
-      unless %w[ephemeral task project indefinite].include?(evidence["retention"])
-        raise ConfigError,
-              "proposals.evidence.retention in #{describe_source(source_path)} is invalid"
-      end
-      schemes = evidence["allowed_link_schemes"]
-      unless schemes.is_a?(Array) && schemes.length <= 16 && schemes.uniq == schemes &&
-             schemes.all? { |scheme| scheme.to_s.match?(/\A[a-z][a-z0-9+.-]*\z/) }
-        raise ConfigError,
-              "proposals.evidence.allowed_link_schemes in #{describe_source(source_path)} is malformed"
-      end
-    end
-
-    def validate_proposal_limits!(limits, source_path)
-      unless limits.is_a?(Hash)
-        raise ConfigError, "proposals.limits in #{describe_source(source_path)} must be a Hash"
-      end
-      validate_closed_mapping!(limits, PROPOSAL_LIMIT_KEYS, "proposals.limits", source_path)
-      PROPOSAL_LIMIT_KEYS.each do |key|
-        value = limits[key]
-        unless value.is_a?(Integer) && value.positive?
-          raise ConfigError,
-                "proposals.limits.#{key} in #{describe_source(source_path)} must be a positive integer"
-        end
-      end
-      if limits["max_proposal_events"] > limits["max_project_events"] ||
-         limits["max_proposal_bytes"] > limits["max_project_bytes"]
-        raise ConfigError,
-              "proposal-level limits in #{describe_source(source_path)} cannot exceed project limits"
-      end
-    end
-
-    def validate_proposal_context!(context, source_path)
-      unless context.is_a?(Hash)
-        raise ConfigError, "proposals.context in #{describe_source(source_path)} must be a Hash"
-      end
-      validate_closed_mapping!(context, PROPOSAL_CONTEXT_KEYS, "proposals.context", source_path)
-      PROPOSAL_CONTEXT_KEYS.each do |key|
-        value = context[key]
-        unless value.is_a?(Integer) && value.positive?
-          raise ConfigError,
-                "proposals.context.#{key} in #{describe_source(source_path)} must be a positive integer"
-        end
-      end
-    end
-
-    def bounded_proposal_identifier?(value)
-      value.is_a?(String) && !value.empty? && value.bytesize <= 128 &&
-        !value.match?(/[\u0000-\u001f\u007f]/)
+      Hive::Proposals::ConfigValidator.validate!(
+        cfg.fetch("proposals"), source_path:
+      )
     end
 
     def validate_removed_digest!(cfg, source_path)

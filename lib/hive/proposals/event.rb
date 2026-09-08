@@ -22,7 +22,7 @@ module Hive
       def self.build(event_id:, proposal_id:, version:, type:, data:, source_event_id:, provenance:,
                      occurred_at: Time.now.utc, policy: DEFAULT_POLICY)
         normalized_policy = Proposals.policy!(policy)
-        event_data = normalize_data(type.to_s, data, policy: normalized_policy)
+        event_data = normalize_data(type.to_s, data, policy: normalized_policy, admission: true)
         new(
           "schema" => EVENT_SCHEMA, "schema_version" => SCHEMA_VERSION,
           "event_id" => Proposals.event_id!(event_id),
@@ -37,7 +37,7 @@ module Hive
         raise InvalidEvent, "proposal event version must be a positive integer"
       end
 
-      def self.normalize_data(type, value, policy: DEFAULT_POLICY)
+      def self.normalize_data(type, value, policy: DEFAULT_POLICY, admission: false)
         required = DATA_KEYS[type]
         raise InvalidEvent, "unknown proposal event type #{type.inspect}" unless required
 
@@ -45,14 +45,14 @@ module Hive
           value, required:, label: "proposal #{type} data", error: InvalidEvent
         )
         case type
-        when "evaluation" then normalize_evaluation(data, policy:)
+        when "evaluation" then normalize_evaluation(data, policy:, admission:)
         when "decision" then normalize_decision(data, policy:)
         when "supersession" then normalize_supersession(data)
         when "rollback" then normalize_rollback(data, policy:)
         end
       end
 
-      def self.normalize_evaluation(data, policy:)
+      def self.normalize_evaluation(data, policy:, admission:)
         evaluator = Proposals.closed_hash!(
           data["evaluator"], required: %w[id binding_fingerprint],
           optional: %w[configuration_fingerprint], label: "proposal evaluator", error: InvalidEvent
@@ -64,7 +64,7 @@ module Hive
           ) if evaluator[key]
         end
         facts = Proposals.evaluation_facts!(
-          data.slice(*EVALUATION_FACT_KEYS), policy:, error: InvalidEvent
+          data.slice(*EVALUATION_FACT_KEYS), policy:, error: InvalidEvent, admission:
         )
         data.merge(facts).merge("evaluator" => evaluator)
       end

@@ -121,6 +121,22 @@ class ProposalsTest < Minitest::Test
           "media_type" => "text/plain" }
       ])
     end
+
+    admitted = Hive::Proposals.evidence!(
+      [ persisted.merge("summary" => "must not escape") ],
+      policy: {
+        "visibility" => "restricted", "retention" => "task",
+        "allowed_link_schemes" => [ "https" ]
+      },
+      admission: true
+    ).first
+    assert_equal "restricted", admitted.fetch("visibility")
+    assert_equal "task", admitted.dig("retention", "policy")
+    refute admitted.key?("summary")
+
+    historical = Hive::Proposals.evidence!([ persisted.merge("summary" => "historical") ]).first
+    assert_equal "project", historical.fetch("visibility")
+    assert_equal "historical", historical.fetch("summary")
   end
 
   private

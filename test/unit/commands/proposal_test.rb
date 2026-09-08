@@ -120,11 +120,13 @@ class ProposalCommandTest < Minitest::Test
       calls = []
       result = Hive::Commands::Proposal.new(
         "refresh", dir, input: nil, stdout: StringIO.new,
-        refresh_runner: ->(project_root, git_ops) { calls << [ project_root, git_ops.hive_state_path ] }
+        refresh_runner: lambda do |project_root, git_ops, source_ref|
+          calls << [ project_root, git_ops.hive_state_path, source_ref ]
+        end
       ).call
 
       assert_equal "queued", result.fetch("outcome")
-      assert_equal [ [ dir, ops.hive_state_path ] ], calls
+      assert_equal [ [ dir, ops.hive_state_path, ops.hive_state_head_sha ] ], calls
     end
   end
 

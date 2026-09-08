@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/proposals/store"
+require "hive/proposals/source_event_store"
 
 class ProposalStoreTest < Minitest::Test
   include HiveTestHelper
@@ -71,7 +72,10 @@ class ProposalStoreTest < Minitest::Test
 
     assert_equal 8, event.version
     assert File.file?(File.join(events, "00000000000000000008-#{event.event_id}.json"))
-    assert_equal "invalid_event_filename", @store.load.diagnostics.first.code
+    snapshot = @store.load
+    assert_equal "invalid_event_filename", snapshot.diagnostics.first.code
+    assert_equal [ proposal.proposal_id ], snapshot.projections.map(&:proposal_id)
+    assert_equal [ event.event_id ], snapshot.projections.first.evaluations.map { |item| item["event_id"] }
   end
 
   def test_changed_source_event_payload_conflicts_without_appending
@@ -326,6 +330,37 @@ class ProposalStoreTest < Minitest::Test
     assert_raises(Hive::Proposals::Error) { @store.send(:with_lock) { flunk } }
   ensure
     File.unlink(lock_path) if lock_path && (File.exist?(lock_path) || File.symlink?(lock_path))
+  end
+
+  def test_store_and_source_locks_have_a_bounded_deadline
+    @store.send(:ensure_safe_directory!, @root)
+    lock_path = File.join(Dir.tmpdir, "hive-proposal-#{Digest::SHA256.hexdigest(@root)}.lock")
+    ready_read, ready_write = IO.pipe
+    release_read, release_write = IO.pipe
+    child = fork do
+      ready_read.close
+      release_write.close
+      File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+        lock.flock(File::LOCK_EX)
+        ready_write.write("1")
+        ready_write.close
+        release_read.read(1)
+      end
+      exit! 0
+    end
+    ready_write.close
+    release_read.close
+    ready_read.read(1)
+
+    bounded_store = Hive::Proposals::Store.new(root: @root, lock_timeout: 0.01)
+    source_store = Hive::Proposals::SourceEventStore.new(root: @root, lock_timeout: 0.01)
+    assert_raises(Hive::ConcurrentRunError) { bounded_store.send(:with_lock) { flunk } }
+    assert_raises(Hive::ConcurrentRunError) { source_store.pending_ids }
+  ensure
+    release_write&.write("1") rescue nil
+    release_write&.close rescue nil
+    ready_read&.close rescue nil
+    Process.wait(child) if child
   end
 
   private

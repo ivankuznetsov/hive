@@ -4,22 +4,6 @@ require "hive/proposals/ingestor"
 class ProposalIngestorTest < Minitest::Test
   include HiveTestHelper
 
-  class FailingGitOps
-    attr_reader :hive_state_path
-
-    def initialize(hive_state_path)
-      @hive_state_path = hive_state_path
-    end
-
-    def hive_commit(**)
-      raise Hive::GitError, "simulated canonical commit failure"
-    end
-
-    def run_git!(*_arguments)
-      raise Hive::GitError, "simulated reset failure"
-    end
-  end
-
   def test_ingests_a_submission_once_and_marks_the_source_consumed
     with_tmp_dir do |dir|
       source_store, store, ingestor = stores(dir)
@@ -78,18 +62,91 @@ class ProposalIngestorTest < Minitest::Test
     end
   end
 
-  def test_failed_canonical_commit_restores_record_status_and_staging
-    with_tmp_dir do |dir|
-      root = File.join(dir, "proposals", "v1")
+  def test_failed_canonical_commit_after_staging_restores_record_status_and_index
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
       source_store = Hive::Proposals::SourceEventStore.new(root: root)
       store = Hive::Proposals::Store.new(root: root, id_generator: id_sequence)
       source_store.admit!(submission)
+      source_paths = source_store.paths_for_admission(submission.source_event_id).map do |path|
+        path.delete_prefix("#{ops.hive_state_path}/")
+      end
+      ops.hive_commit(
+        stage_name: "4-execute", slug: "proposal-task", action: "source only",
+        pathspecs: source_paths
+      )
+      source_commit = ops.hive_state_head_sha
+      original_commit = ops.method(:hive_commit)
+      ops.define_singleton_method(:hive_commit) do |**options|
+        original_commit.call(**options.merge(after_stage: -> { raise Hive::GitError, "after staging" }))
+      end
       ingestor = Hive::Proposals::Ingestor.new(
-        source_store:, store:, git_ops: FailingGitOps.new(dir)
+        source_store:, store:, git_ops: ops
       )
 
       assert_raises(Hive::GitError) do
-        ingestor.ingest!(submission.source_event_id, source_commit: "a" * 40)
+        ingestor.ingest!(submission.source_event_id, source_commit:)
+      end
+      assert_nil store.projection(proposal_id)
+      assert_equal "pending", source_store.status(submission.source_event_id).fetch("state")
+      assert_equal "", run!("git", "-C", ops.hive_state_path, "status", "--porcelain=v1")
+    end
+  end
+
+  def test_uncommitted_consumed_marker_is_cleaned_and_reingested_before_success
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      source_store = Hive::Proposals::SourceEventStore.new(root: root)
+      store = Hive::Proposals::Store.new(root: root, id_generator: id_sequence)
+      source_store.admit!(submission)
+      paths = source_store.paths_for_admission(submission.source_event_id).map do |path|
+        path.delete_prefix("#{ops.hive_state_path}/")
+      end
+      ops.hive_commit(
+        stage_name: "4-execute", slug: "proposal-task", action: "source only", pathspecs: paths
+      )
+      source_commit = ops.hive_state_head_sha
+      Hive::Proposals::Ingestor.new(source_store:, store:).ingest!(
+        submission.source_event_id, source_commit:
+      )
+      assert_equal "consumed", source_store.status(submission.source_event_id).fetch("state")
+
+      result = Hive::Proposals::Ingestor.new(
+        source_store:, store:, git_ops: ops
+      ).ingest!(submission.source_event_id, source_commit:)
+
+      assert_equal "record", result.kind
+      assert_equal "consumed", source_store.status(submission.source_event_id).fetch("state")
+      assert_equal "", run!("git", "-C", ops.hive_state_path, "status", "--porcelain=v1")
+      assert_includes run!("git", "-C", ops.hive_state_path, "show", "--name-only", "--format=", "HEAD"),
+                      "proposals/v1/records/#{proposal_id}.json"
+    end
+  end
+
+  def test_nothing_to_commit_cannot_report_success_for_uncommitted_terminal_files
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      source_store = Hive::Proposals::SourceEventStore.new(root: root)
+      store = Hive::Proposals::Store.new(root: root, id_generator: id_sequence)
+      source_store.admit!(submission)
+      paths = source_store.paths_for_admission(submission.source_event_id).map do |path|
+        path.delete_prefix("#{ops.hive_state_path}/")
+      end
+      ops.hive_commit(
+        stage_name: "4-execute", slug: "proposal-task", action: "source only", pathspecs: paths
+      )
+      source_commit = ops.hive_state_head_sha
+      ops.define_singleton_method(:hive_commit) { |**_options| :nothing_to_commit }
+      ingestor = Hive::Proposals::Ingestor.new(source_store:, store:, git_ops: ops)
+
+      assert_raises(Hive::Proposals::SourceUnavailable) do
+        ingestor.ingest!(submission.source_event_id, source_commit:)
       end
       assert_nil store.projection(proposal_id)
       assert_equal "pending", source_store.status(submission.source_event_id).fetch("state")

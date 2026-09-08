@@ -1414,9 +1414,10 @@ files may still require inspection on platforms without these probes.
 
 ## Pre-dispatch workflow usage envelopes versus published schemas
 
-Verified on main 794edfb489 (2026-09-08): workflow install/list/remove/update
-usage errors emit `error_kind: usage`, excluded from their published error enums.
-Workflow publish's generic usage envelope also lacks required `retryable` and does
-not match its specialized error arms. Preserving those baseline envelopes and
-requiring schema validation conflict. Public compatibility treatment remains
-undecided; see `docs/implementation/cli-usage-contracts-baseline.md` (U4 blocker).
+Resolved in the 2026-09-08 CI fix: the current lifecycle schemas now accept the
+existing pre-dispatch `error_kind: usage` envelopes. Publish has a separate closed
+usage arm, preserving its handler error arms' retryability and recovery fields.
+Output fields, error kinds, exit statuses, and schema versions are unchanged.
+The original mismatch is recorded in
+`docs/implementation/cli-usage-contracts-baseline.md`; fresh hosted CI remains
+pending after the local fix.

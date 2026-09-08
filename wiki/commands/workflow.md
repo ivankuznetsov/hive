@@ -145,6 +145,13 @@ containing `ok`, `id`, `descriptor_path`, `instruction_path`, and `next`. Typed
 usage/config/git errors emit a `hive-workflow-new` (schema_version 1) JSON error
 document with `ok: false`, `error_class`, `exit_code`, and `message`.
 
+Pre-dispatch argument errors for `install`, `list`, `remove`, `update`, and
+`publish` use the selected lifecycle schema with `error_kind: usage` and exit
+64. The published schemas accept this existing wrapper envelope. Publish has
+a separate closed usage arm without `retryable` or publication recovery fields,
+because its handler has not started; its specialized handler error arms retain
+their retryability and recovery requirements.
+
 A bare or unknown workflow subcommand is a USAGE error (exit 64). Human output
 lists the closed `new, install, list, update, remove, publish` verb set. With
 `--json`, those subcommand-shape errors carry a structured `expected` array

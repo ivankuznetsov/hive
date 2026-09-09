@@ -151,7 +151,7 @@ module Hive
         temporary = "#{overlay}.prepare-#{Process.pid}-#{Thread.current.object_id}"
         FileUtils.mkdir_p(temporary, mode: 0o700)
         entries = Dir.children(source).map { |entry| File.join(source, entry) }
-        FileUtils.cp_r(entries, temporary, preserve: true) unless entries.empty?
+        FileUtils.cp_r(entries, temporary, preserve: true, dereference_root: false) unless entries.empty?
         File.rename(temporary, overlay)
         clear_seeded_process_state!(relative, overlay)
       rescue Errno::EEXIST, Errno::ENOTEMPTY

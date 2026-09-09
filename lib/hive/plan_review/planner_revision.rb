@@ -87,14 +87,13 @@ module Hive
           # A complete custody-validated candidate is durable evidence even when
           # the provider's terminal status is lost. `read_candidate!` repeats
           # the marker validation before accepting the candidate.
-          artifact_override = result[:status] != :ok && complete_candidate
-          unless (result[:status] == :ok && complete_candidate) || artifact_override
+          unless complete_candidate
             return { "status" => "retryable_failure", "diagnostic" => result[:error_message] }
           end
 
           diagnostic = if result[:timed_out]
                          "salvaged complete candidate after planner timeout"
-          elsif artifact_override
+          elsif result[:status] != :ok
                          "salvaged complete candidate after planner telemetry failure"
           end
 

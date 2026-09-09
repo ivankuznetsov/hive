@@ -126,13 +126,13 @@ class ArtifactsBrowserGatewayTest < Minitest::Test
       gateway = Hive::Artifacts::BrowserGateway.new(
         environment: {}, argv_prefix: [ "agent-browser" ], writable_root: root,
         origin: "http://capture.invalid",
-        runner: ->(_environment, argv) { calls << argv; [ "", "", 0 ] },
-        recording_deadline_seconds: 0.05
+        runner: ->(_environment, argv) { calls << argv; [ "", "", 0 ] }
       ).start!
 
       assert gateway.call(%w[record start closing.webm]).fetch("ok")
+      timer = gateway.instance_variable_get(:@recording_timer)
       assert gateway.close
-      sleep 0.1
+      refute_nil timer.join(1), "closing must stop the pending recording timer"
       assert_equal 0, calls.count { |argv| argv.last(2) == %w[record stop] }
     ensure
       gateway&.close

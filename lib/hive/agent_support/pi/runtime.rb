@@ -278,7 +278,7 @@ module Hive::AgentSupport::Pi::Runtime
           }),
           async execute(_id, params, signal) {
             const [executable, ...argv] = params.argv;
-            return runHive(["evidence", "server", executable, "--json", "--", ...argv], signal);
+            return runHive(["evidence", "server", executable, "--json", "--", ...argv], signal, 100000);
           }
         }));
       TYPESCRIPT
@@ -329,9 +329,9 @@ module Hive::AgentSupport::Pi::Runtime
         pi.registerTool(scopedReadTool(createGrepTool(cwd)));
         pi.registerTool(scopedReadTool(createFindTool(cwd)));
 
-        async function runHive(argv: string[], signal: AbortSignal) {
+        async function runHive(argv: string[], signal: AbortSignal, timeout = 70000) {
           const result = await pi.exec("/usr/bin/ruby", [hiveExecutable, ...argv], {
-            signal, timeout: 70000
+            signal, timeout
           });
           const text = [result.stdout, result.stderr].filter(Boolean).join("\\n").slice(0, 524288);
           if (result.code !== 0) throw new Error(text || `Hive evidence command failed (${result.code})`);

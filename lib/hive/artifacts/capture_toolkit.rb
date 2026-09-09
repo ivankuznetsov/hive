@@ -38,7 +38,7 @@ module Hive
 
       def initialize(browser_bundle: nil, tool_resolver: nil, hive_executable: nil,
                      web_server_factory: nil, browser_command_runner: nil,
-                     runtime_resolver: nil, legacy_runtime_resolver: nil,
+                     runtime_resolver: nil,
                      project_sandbox_factory: nil)
         @browser_bundle = browser_bundle || Hive::Web::BrowserBundle.new
         @tool_resolver = tool_resolver || ->(name) { Hive::InvokedBinary.which(name) }
@@ -47,7 +47,7 @@ module Hive
         )
         @web_server_factory = web_server_factory
         @browser_command_runner = browser_command_runner || method(:run_browser_command)
-        @runtime_resolver = runtime_resolver || legacy_runtime_resolver
+        @runtime_resolver = runtime_resolver
         @project_sandbox_factory = project_sandbox_factory || lambda do |**attributes|
           Hive::Artifacts::ProjectCommandSandbox.new(**attributes)
         end
@@ -100,7 +100,7 @@ module Hive
           } : nil,
           "media" => {}
         }
-        producer_profile ||= Hive::AgentProfiles.default_evidence_producer
+        producer_profile ||= Hive::AgentProfiles.lookup(:codex)
         managed = required & CAPTURE_KINDS
         support = Hive::AgentSupport.for(producer_profile)
         capture_interface = support&.respond_to?(:capture_interface_required?) &&

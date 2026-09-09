@@ -63,6 +63,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       assert_equal "evidence_write", receipt.dig("producer_interface", "document")
       assert_equal "evidence_terminal", receipt.dig("producer_interface", "terminal")
       refute receipt.dig("producer_interface").key?("browser")
+      refute receipt.dig("producer_interface").key?("server")
       toolkit.close
       assert_nil toolkit.producer_runtime_policy
     end
@@ -428,7 +429,7 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
       work = File.join(root, "work")
       FileUtils.mkdir_p(source)
       toolkit = Hive::Artifacts::CaptureToolkit.new(
-        legacy_runtime_resolver: method(:fake_codex_runtime)
+        runtime_resolver: method(:fake_codex_runtime)
       )
       toolkit.prepare!(
         kinds: [ "terminal" ], task_root: root, source_root: source,

@@ -98,7 +98,7 @@ module Hive
         upstream = Socket.tcp("127.0.0.1", app_port, connect_timeout: READ_TIMEOUT_SECONDS)
         upstream.write(rewrite_request(head, method, uri, version))
         upstream.write(remainder) unless remainder.empty?
-        relay_response(client, upstream)
+        relay(client, upstream)
       rescue URI::InvalidURIError, ProxyError
         reject(client, "400 Bad Request")
       rescue SystemCallError, IOError
@@ -209,15 +209,9 @@ module Hive
           connection.to_s.split(",").any? { |token| token.strip.casecmp?("upgrade") }
       end
 
-      def relay_response(client, upstream)
-        head, remainder = read_header(upstream)
-        client.write(rewrite_response(head))
-        client.write(remainder) unless remainder.empty?
-        relay(client, upstream)
-      end
-
       def relay(client, upstream)
         sockets = [ client, upstream ]
+        response_header = +"".b
         loop do
           ready = IO.select(sockets)&.first
           break unless ready
@@ -225,6 +219,20 @@ module Hive
             chunk = source.read_nonblock(16 * 1024, exception: false)
             return if chunk.nil?
             next if chunk == :wait_readable
+
+            # Keep forwarding uploads while the application prepares its
+            # response. Only upstream headers need buffering for redirects.
+            if source.equal?(upstream) && response_header
+              response_header << chunk
+              boundary = response_header.index("\r\n\r\n")
+              header_size = boundary ? boundary + 4 : response_header.bytesize
+              raise ProxyError, "capture proxy response header is oversized" if header_size > MAX_HEADER_BYTES
+              next unless boundary
+
+              chunk = rewrite_response(response_header.byteslice(0, header_size)) +
+                response_header.byteslice(header_size..)
+              response_header = nil
+            end
 
             (source.equal?(client) ? upstream : client).write(chunk)
           end

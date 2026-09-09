@@ -229,7 +229,10 @@ maps only the controller-issued browser origin in `Origin` and `Referer`
 request headers to the same loopback endpoint, so framework CSRF/origin checks
 see metadata consistent with `request.base_url`; foreign values pass through
 unchanged for the application to reject. Exact loopback absolute redirects
-are translated back to the issued browser origin.
+are translated back to the issued browser origin. Request bodies continue
+streaming while response headers are buffered, so uploads do not wait on a
+response from an application that is still reading the request. The response
+header buffer is capped at 64 KiB; response bodies stream without buffering.
 
 When Hive is not itself the reviewed application, Pi visual producers receive
 a second controller-issued capability, `evidence_server`. The producer calls it
@@ -238,7 +241,14 @@ it never starts a long-lived process through terminal capture or a detached
 shell. Hive validates that exact executable beneath the frozen source root,
 starts it with a closed environment and bounded diagnostics, waits for the
 issued HTTP endpoint, and owns teardown. Other producer profiles retain their
-existing workspace sandbox behavior.
+existing workspace sandbox behavior. The Pi producer interface advertises
+`server: evidence_server` for visual capture. Its tool timeout is 100 seconds,
+outside the 95-second gateway timeout and 90-second readiness window.
+
+Runtime overlays preserve child symlinks without copying their targets. The
+controller must not materialize an operator file through an existing runtime
+symlink before the sandbox starts; the sandbox's filesystem mounts determine
+which preserved links can be read.
 
 Inside a durable explicitly routed attempt, that admitted provider/model/effort
 is authoritative for all three fresh role processes and is what actor receipts

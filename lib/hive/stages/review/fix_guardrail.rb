@@ -3,6 +3,7 @@ require "digest"
 require "set"
 require "hive/secret_scanner"
 require "hive/stages/review/fix_guardrail/patterns"
+require "hive/stages/review/guardrail_waivers"
 
 module Hive
   module Stages
@@ -23,17 +24,6 @@ module Hive
         Match = Data.define(
           :pattern_name, :file, :line, :snippet, :severity, :match_sha256
         )
-        WAIVER_SHA256 = /\A[0-9a-f]{64}\z/.freeze
-        PASSWORD_ASSIGNMENT_PREFIX = /\A.*?\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*/i
-        DYNAMIC_PASSWORD_LOOKUP = /\A
-          (?=[^\r\n]*(?:\[|\())
-          [A-Za-z_$][A-Za-z0-9_$]*
-          (?:
-            \.[A-Za-z_$][A-Za-z0-9_$]*
-            | \[[^\]\r\n]+\]
-            | \([^\)\r\n]*\)
-          )+
-        \z/x
         module_function
 
         def run!(cfg:, ctx:, base_sha:, head_sha:)
@@ -139,21 +129,7 @@ module Hive
         # requires a fresh auditable decision instead of inheriting a broad
         # exemption forever.
         def resolve_waivers(cfg)
-          values = Array(cfg.dig("review", "fix", "guardrail", "waivers"))
-          values.each_with_object(Set.new) do |value, result|
-            unless value.is_a?(Hash)
-              raise Hive::ConfigError,
-                    "review.fix.guardrail.waivers entries must contain pattern and sha256"
-            end
-            pattern = (value["pattern"] || value[:pattern]).to_s
-            sha256 = (value["sha256"] || value[:sha256]).to_s.downcase
-            if pattern.empty? || !WAIVER_SHA256.match?(sha256)
-              raise Hive::ConfigError,
-                    "review.fix.guardrail.waivers entries must contain pattern and SHA-256"
-            end
-
-            result.add([ pattern, sha256 ])
-          end.freeze
+          GuardrailWaivers.resolve(cfg)
         end
 
         # Walk the unified diff once, dispatching each line to whichever

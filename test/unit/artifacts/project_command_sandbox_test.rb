@@ -80,6 +80,29 @@ class ArtifactsProjectCommandSandboxTest < Minitest::Test
     end
   end
 
+  def test_runtime_overlay_does_not_copy_external_symlink_targets
+    Dir.mktmpdir("hive-project-command-sandbox-symlink") do |root|
+      source = File.join(root, "source")
+      storage = File.join(source, "storage")
+      FileUtils.mkdir_p(storage)
+      outside = File.join(root, "operator-file")
+      File.write(outside, "private fixture")
+      File.symlink(outside, File.join(storage, "external"))
+      sandbox = Hive::Artifacts::ProjectCommandSandbox.new(
+        source_root: source, sandbox_binary: RbConfig.ruby
+      )
+
+      argv = sandbox.command_argv([ "/bin/true" ])
+      binding = argv.each_cons(3).find { |row| row[0] == "--bind" && row[2] == storage }
+      copied = File.join(binding.fetch(1), "external")
+      assert File.symlink?(copied), "the controller must not materialize host file contents"
+      assert_equal outside, File.readlink(copied)
+      assert_equal "private fixture", File.read(outside)
+    ensure
+      sandbox&.close
+    end
+  end
+
   def test_runtime_writes_use_a_seeded_shared_overlay_without_touching_source
     Dir.mktmpdir("hive-project-command-sandbox-overlay") do |root|
       source = File.join(root, "source")

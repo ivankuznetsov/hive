@@ -153,6 +153,71 @@ class ArtifactsCaptureProxyCoverageGapsTest < Minitest::Test
     assert_equal [ "payload" ], upstream.writes
   end
 
+  def test_large_post_body_reaches_the_app_before_redirect_headers_are_rewritten
+    server = TCPServer.new("127.0.0.1", 0)
+    proxy = Proxy.new(app_port: server.local_address.ip_port)
+    headers_received = Queue.new
+    payload = "upload" * 8192
+    app = Thread.new do
+      peer = server.accept
+      headers = +""
+      headers << peer.read(1) until headers.end_with?("\r\n\r\n")
+      headers_received << true
+      body = peer.read(payload.bytesize)
+      peer.write(
+        "HTTP/1.1 302 Found\r\n" \
+        "Location: http://127.0.0.1:#{proxy.app_port}/uploaded\r\n" \
+        "Content-Length: 0\r\nConnection: close\r\n\r\n"
+      ) if body == payload
+      body
+    ensure
+      peer&.close
+    end
+    app.report_on_exception = false
+    client = TCPSocket.new("127.0.0.1", URI(proxy.proxy_url).port)
+    client.write(
+      "POST #{proxy.origin}/upload HTTP/1.1\r\n" \
+      "Host: #{proxy.hostname}\r\nContent-Length: #{payload.bytesize}\r\n\r\n"
+    )
+    Timeout.timeout(8) do
+      headers_received.pop
+      client.write(payload)
+      assert_equal "HTTP/1.1 302 Found\r\n", client.gets
+      assert_includes client.read, "Location: #{proxy.origin}/uploaded\r\n"
+      assert_equal payload, app.value
+    end
+  ensure
+    client&.close
+    proxy&.close
+    server&.close
+    app&.kill if app&.alive?
+    app&.join
+  end
+
+  def test_split_response_headers_preserve_the_streamed_body
+    proxy = Proxy.allocate
+    client = fake_client
+    upstream = fake_client
+    chunks = [ "HTTP/1.1 200 OK\r\n", "Content-Length: 8\r\n\r\nbody", "tail", nil ]
+    upstream.define_singleton_method(:read_nonblock) { |*, **| chunks.shift }
+    with_replaced_singleton_method(IO, :select, ->(*) { [ [ upstream ] ] }) do
+      proxy.send(:relay, client, upstream)
+    end
+    assert_equal "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nbodytail", client.writes.join
+  end
+
+  def test_response_headers_remain_bounded_while_relaying
+    proxy = Proxy.allocate
+    client = fake_client
+    upstream = fake_client
+    upstream.define_singleton_method(:read_nonblock) { |amount, **| "x" * amount }
+    error = with_replaced_singleton_method(IO, :select, ->(*) { [ [ upstream ] ] }) do
+      assert_raises(Proxy::ProxyError) { proxy.send(:relay, client, upstream) }
+    end
+    assert_includes error.message, "response header is oversized"
+    assert_empty client.writes
+  end
+
   private
 
   def fake_client

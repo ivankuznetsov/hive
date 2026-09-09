@@ -25,7 +25,8 @@ module Hive::AgentSupport::Pi
     {
       "document" => "evidence_write",
       "terminal" => required_kinds.include?("terminal") ? "evidence_terminal" : nil,
-      "browser" => browser ? "evidence_browser" : nil
+      "browser" => browser ? "evidence_browser" : nil,
+      "server" => browser ? "evidence_server" : nil
     }.compact
   end
   def prepare_capture(host:, profile:, task_folder:, package_root:, environment:,

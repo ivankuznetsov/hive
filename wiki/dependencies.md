@@ -264,3 +264,11 @@ an ambiguous command-not-found failure.
 - [[modules/agent]]
 - [[commands/bot]]
 - [[e2e]]
+
+## Release container builder action
+
+The three container publication jobs in `.github/workflows/release.yml` pin
+`docker/setup-buildx-action` v4.3.0 to commit
+`37fe631027851001ddb9b187196cc803df7f5f0e`. The action metadata and inputs are
+unchanged from the preceding v4.2.0 pin; this update refreshes its bundled
+JavaScript dependencies. The workflow remains tag-triggered.

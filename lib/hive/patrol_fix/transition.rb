@@ -375,7 +375,7 @@ module Hive
             intent["to"] == stage_dir("fix") && intent["operator"] == "controller:review" &&
             intent["carried_receipts"].empty?
         elsif intent["route"] == "revalidate"
-          intent["stage"] == "review" && intent["from"] == stage_dir("publish") &&
+          intent["stage"] == "review" && intent["from"] == stage_dir("review") &&
             intent["to"] == stage_dir("validate") &&
             intent["operator"] == "controller:revalidation" &&
             intent["carried_receipts"].length == 1 &&

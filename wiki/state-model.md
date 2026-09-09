@@ -609,6 +609,12 @@ replayable so a crash after the folder move is reconciled from either the old
 caller path or the new location. Blocked outcomes expose no custom operational
 action; they remain visible through the standard `needs_input` task contract.
 
+When Review detects that its clean worktree has advanced after validation, its
+`revalidate` intent moves the task from Review back to Validate. The intent is
+therefore source-bound to Review (not Publish), preserves the current Fix
+receipt as carried evidence, and rotates the generation before validation
+runs again.
+
 `blocked` remains parked and non-terminal. `reject` and `escalate` dispatch the
 normal receipt-gated `approve` transition directly to `6-done`, retaining
 `rejected` or `escalated` as the archived outcome rather than implying publication.

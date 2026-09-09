@@ -3,18 +3,31 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-08-30
+updated: 2026-09-06
 tags: [stage, artifacts, evidence, review]
 ---
 
-**TLDR**: `7-artifacts` now completes only after Hive publishes a strict,
-identity-bound outcome-evidence package. A fresh read-only inference agent maps
+**TLDR**: `7-artifacts` attempts automatic outcome evidence on a best-effort
+basis. Capture, provider, capability, or evidence-validation failures complete
+the stage with `evidence_status=unavailable`, preserving the original reason
+and diagnostic instead of parking otherwise reviewed implementation work.
+This does not publish accepted evidence: packages still require strict,
+identity-bound validation. Source-integrity failures and findings requiring
+implementation rework still block. A fresh read-only inference agent maps
 the task, plan, and exact committed diff into user-meaningful claims; a separate
 producer makes the required proof; and a third fresh read-only reviewer accepts,
 targets evidence for recapture, returns repository defects for implementation
 rework, or blocks every claim and supported exclusion. Legacy
 Hivebox screenshots and recordings remain visible diagnostics but never establish
-completion authority.
+accepted-evidence authority. A best-effort completion is idempotent on resume;
+the existing notes, captures, and rejected packages remain available.
+
+Codex capture resolves its filesystem runtime root through the shared managed
+executable provenance probe, not by scanning PATH for native-looking binaries.
+The npm launcher can execute a vendor binary outside PATH; admitting a different
+installation prevents its sandbox helper from starting and leaves the producer
+unable to capture any evidence. Empty evidence remains invalid, not a successful
+capture or an approval request.
 
 ## Preconditions
 
@@ -22,8 +35,19 @@ completion authority.
    `hive artifacts` as a workflow verb.
 2. The controller-owned task worktree pointer and optional draft-PR receipt must
    agree on the implementation branch, base, worktree, and saved head.
+   Legacy pointers without saved base metadata resolve their comparison base
+   from the repository's default branch through the shared Git change-base
+   resolver. Missing historical metadata alone is not a blocker; contradictory
+   saved identities and non-ancestor saved bases remain errors.
 3. The implementation worktree must be clean. Evidence covers only the committed
    `base..HEAD` range; staged, unstaged, untracked, or symlink changes fail closed.
+   A compatibility recovery exists only for attempts made by the retired direct
+   runtime-directory bind: after the exact `implementation worktree must be clean`
+   artifact failure, the daemon may quarantine exclusively untracked regular files
+   below `log/`, `storage/`, or `tmp/`. It records a digest journal under the task,
+   refuses tracked/staged/other-path/symlink/large residue, and retries normally.
+   The files are preserved outside the implementation range rather than deleted or
+   auto-committed into the product.
 4. The durable attempt must own the current task generation and `7-artifacts`
    stage before the ledger can be opened.
 
@@ -32,7 +56,7 @@ completion authority.
 1. Resolve the immutable implementation base/head and the exact sorted changed
    paths. The controller re-resolves this identity after every agent role so a
    role cannot change the source behind the evidence. It also materializes the
-   bounded exact binary diff once under the immutable generation and supplies
+   exact binary diff once under the immutable generation and supplies
    its path, size, and SHA-256 receipt to both read-only semantic roles; neither
    role needs shell or Git authority.
 2. Launch a fresh read-only **inference** context. It reads `task.md`, `plan.md`,
@@ -65,19 +89,25 @@ completion authority.
    issued port before opening the private origin. The producer receives only a bounded
    filesystem mailbox used by `hive evidence`; the raw browser socket,
    controller-private browser state, and media staging stay outside its sandbox.
-   Codex's managed network proxy runs in limited mode with no admitted domains
-   and local binding enabled, so a producer may start the issued application
-   port but cannot connect directly to arbitrary loopback services. The closed
-   filesystem policy admits the controller's exact Ruby executable, sibling
-   binstubs, runtime libraries, and active gem paths; an env shebang therefore
-   cannot silently fall through to a different system Ruby. Producers use
-   already-installed locked dependencies and cannot contact package registries. The
-   controller executes admitted browser/terminal operations, records exact
-   file receipts, and exclusively publishes basename-only PNG/WebM media into
-   the evidence root.
-   Missing capabilities publish a durable blocker before the producer starts.
-   A paced daemon retry rechecks that blocker against the same immutable
-   requirement; it does not replay a stale capability verdict.
+   For non-Hive visual proof, a Pi producer also receives `hive evidence server`:
+   it selects one executable repository command, while Hive runs that command
+   on the exact issued port in a credential-free bubblewrap sandbox, proves HTTP
+   readiness, keeps it alive for the attempt, and tears it down by exact process
+   identity. The project source is read-only except for existing runtime `log/`,
+   `storage/`, and `tmp/` directories. Codex's managed network proxy runs in
+   limited mode with no admitted domains and local binding enabled, so a producer
+   may start the issued application port but cannot connect directly to arbitrary
+   loopback services. The closed filesystem policy admits the controller's exact
+   Ruby executable, sibling binstubs, runtime libraries, and active gem paths; an
+   env shebang therefore cannot silently fall through to a different system Ruby.
+   Producers use already-installed locked dependencies and cannot contact package
+   registries. The controller executes admitted browser/terminal operations,
+   records exact file receipts, and exclusively publishes basename-only PNG/WebM
+   media into the evidence root. Controller-side terminal commands use the same
+   credential-free project sandbox, while retaining the requested product command
+   rather than Hive's sandbox wrapper. Missing capabilities publish a durable
+   blocker before the producer starts; a paced daemon retry rechecks it against
+   the same immutable requirement rather than replaying a stale capability verdict.
 6. Launch a distinct **producer** context with one writable root under the active
    evidence attempt. Source and controller metadata remain read-only. Every proof
    names one retained original, one bounded reviewer representation, and the
@@ -91,6 +121,18 @@ completion authority.
    role paths.
    Screenshot, video, and terminal representations must match a controller
    capture receipt at handoff; producer-written lookalike media fails closed.
+   If the capture succeeded but the producer returns an empty final message or
+   a malformed descriptor, Hive gives one fresh producer context the bounded
+   validation error and prior output (or `null` when there was no output) so it
+   can reuse the private capture and correct only the JSON. Output parsing runs
+   inside this repair boundary; an empty provider response cannot bypass it and
+   consume a whole evidence recapture. The
+   capture toolkit retains ownership of Pi's isolated runtime home and mailbox
+   across that bounded repair spawn, then removes them at attempt teardown;
+   per-spawn cleanup would make the second bubblewrap launch reference a deleted
+   runtime home and force an unnecessary full recapture.
+   The candidate still crosses the same admission boundary before review; a second
+   invalid descriptor ends the attempt.
 7. Re-admit every retained representation deterministically: safe containment,
    size, hash, declared media type, actual image/video decode, terminal-cast or
    document structure, secret patterns, and provider provenance are checked
@@ -121,7 +163,9 @@ completion authority.
    environment, or decision that repository work cannot solve. Invalid
    exclusions, missing capability, exhausted recaptures, or exhausted
    implementation reworks publish an operator-visible blocked pointer and
-   semantic `ERROR`.
+   semantic `ERROR` inside the collector. The stage wrapper converts capture
+   and evidence-only failures to best-effort completion; implementation rework
+   and exhausted implementation reworks remain blocking.
 
 The default is one initial attempt plus at most two targeted recaptures. Project
 configuration may reduce recaptures to zero or one, but cannot exceed two.
@@ -160,10 +204,51 @@ Playwright, Puppeteer, QML, or ImageMagick. Stable interface state uses a
 screenshot; navigation, ordering, timing, and state transitions use temporal
 video. The gateway accepts only the issued origin, a closed interaction
 vocabulary, and basename PNG/WebM output. It stages media privately and
-publishes it no-follow/exclusive into the writable attempt root. Hive closes
+publishes it no-follow/exclusive into the writable attempt root.
+The controller stops an active recording after 25 seconds even if provider
+latency delays the producer's next turn, retaining that private result until a
+later `record stop` publishes it. It also probes every stopped recording before
+publication and rejects an over-30-second take immediately, clearing the stopped
+session so the producer can capture a shorter replacement in the same attempt.
+The five-second controller margin covers command startup and encoder
+finalization while keeping the capture tool's acceptance boundary aligned with
+final proof admission. Hive closes
 the named browser session before it cleans the managed app/proxy and producer
 process group. Playwright remains a web-system-test dependency, not an
 outcome-evidence capture interface.
+
+The typed Pi `evidence_browser` tool accepts one complete action `argv`, with
+the action verb as its first element (for example `open, ISSUED_ORIGIN` or
+`snapshot, -i`). It has no parallel `command` field. Keeping one argv matches
+the prompt's command examples and prevents the extension from duplicating an
+already-present verb into `open open URL` before the exact-origin gateway.
+
+The capture proxy keeps the application-facing `Host` on the exact issued
+loopback port, preserving development host allowlists. At that boundary it
+maps only the controller-issued browser origin in `Origin` and `Referer`
+request headers to the same loopback endpoint, so framework CSRF/origin checks
+see metadata consistent with `request.base_url`; foreign values pass through
+unchanged for the application to reject. Exact loopback absolute redirects
+are translated back to the issued browser origin. Request bodies continue
+streaming while response headers are buffered, so uploads do not wait on a
+response from an application that is still reading the request. The response
+header buffer is capped at 64 KiB; response bodies stream without buffering.
+
+When Hive is not itself the reviewed application, Pi visual producers receive
+a second controller-issued capability, `evidence_server`. The producer calls it
+once with a repository executable and arguments that bind to the issued port;
+it never starts a long-lived process through terminal capture or a detached
+shell. Hive validates that exact executable beneath the frozen source root,
+starts it with a closed environment and bounded diagnostics, waits for the
+issued HTTP endpoint, and owns teardown. Other producer profiles retain their
+existing workspace sandbox behavior. The Pi producer interface advertises
+`server: evidence_server` for visual capture. Its tool timeout is 100 seconds,
+outside the 95-second gateway timeout and 90-second readiness window.
+
+Runtime overlays preserve child symlinks without copying their targets. The
+controller must not materialize an operator file through an existing runtime
+symlink before the sandbox starts; the sandbox's filesystem mounts determine
+which preserved links can be read.
 
 Inside a durable explicitly routed attempt, that admitted provider/model/effort
 is authoritative for all three fresh role processes and is what actor receipts
@@ -208,11 +293,10 @@ revalidates that selected file's exact size and digest before streaming it.
 Write admission and publication remain responsible for complete media decoding,
 OCR, retained-proof validation, and independent review.
 
-Reviewer and recapture-exhaustion blockers suppress ordinary daemon retry.
-Capability blockers preserve the same audit package but are re-probed on a
-paced ordinary retry, so restored controller tools do not require an operator
-acknowledgement. The task page, status diagnostic, and run output still expose
-an exact command containing the blocked generation and recovery digest:
+Blocked packages retain their audit history even when best-effort collection
+lets the workflow continue. Legacy tasks already parked on a semantic blocker
+can still expose a guarded recovery command containing the blocked generation
+and recovery digest:
 
 ```sh
 hive evidence recover PROJECT:SLUG \
@@ -252,10 +336,20 @@ and reviewer capability. Legacy media follows in a visibly labelled
 
 - A valid accepted pointer is projected as `COMPLETE` and surfaces
   `ready_to_finalize`.
+- A capture/evidence failure is also `COMPLETE`, but explicitly carries
+  `reason=evidence_best_effort evidence_status=unavailable`, the original
+  `warning_reason`, and diagnostic attributes. It surfaces `ready_to_finalize`
+  without claiming an accepted package, and is idempotent on resume.
 - An implementation-rework pointer is a semantic `ERROR` that surfaces the
   exact digest-bound `hive evidence rework` command. The daemon dispatches it
   automatically without provider-route admission, returning the task to
   `4-execute`; it is not handled by the same-stage stale-error healer.
+- Source identity/custody failures retain
+  `ERROR reason=outcome_evidence_integrity_invalid`; exhausted implementation
+  reworks retain their semantic blocker. Neither becomes unavailable evidence.
+- Typed provider failures retain the provider, status code, message, and retry
+  time in the warning. They no longer park a reviewed task merely because an
+  optional capture role exhausted its provider allowance.
 - Capability, review, and recapture-exhaustion blockers are durable `ERROR`
   rows with the exact `hive evidence recover` command. Paced automated recovery
   re-probes capability blockers in the same generation. It does not clear an
@@ -263,6 +357,10 @@ and reviewer capability. Legacy media follows in a visibly labelled
 - Integrity, role-launch, source-drift, or malformed-output failures use
   `ERROR reason=outcome_evidence_invalid` and retain their bounded diagnostic;
   they remain ordinary recoverable stage errors.
+- The daemon bridges residue from the old direct-bind artifact runtime only for
+  the exact clean-worktree diagnostic and only through the bounded, recoverable
+  quarantine described above. Current capture commands use private runtime
+  overlays, so successful teardown leaves no source residue to recover.
 - A role process that returns a typed provider failure keeps that envelope at
   the controller boundary. Quota and credit failures publish
   `ERROR reason=limits_reached provider=<profile> retry_after=<iso8601>` and

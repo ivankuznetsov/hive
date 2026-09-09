@@ -202,7 +202,7 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
         baseline = Hive::GitOps.new(worktree).head_sha
         store = Hive::Attempts::Repository.new(root: File.join(state_root, "attempts"), migrate: true)
         attempt = store.create_launching(
-          attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+          attempt_id: "attempt-1", request_id: "request-1",
           task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
           task_generation: "owner-1", task_input_epoch: task_input_epoch,
           progress_token: "progress", provider: "codex",

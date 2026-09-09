@@ -12,6 +12,7 @@ module Hive
       MAX_DIAGNOSTIC_BYTES = 512
       STAGE_DIRS = %w[1-inbox 2-fix 3-validate 4-review 5-publish 6-done].freeze # not-a-stage-ref: Patrol Fix workflow stages
       PARKED_ROUTES = %w[reject blocked escalate].freeze
+      TERMINAL_OUTCOMES = %w[rejected escalated].freeze
 
       attr_reader :task_folder, :stage
 
@@ -49,10 +50,12 @@ module Hive
         outcome = parked_outcome(decision)
         done = stage == "6-done" # not-a-stage-ref: Patrol Fix workflow stage
         closure = done && publication.nil? && valid_evidence_closure?
-        missing_terminal_authority = done && publication.nil? && !closure
+        terminal_outcome = outcome && (outcome["kind"] == "rejected" ||
+          (outcome["kind"] == "escalated" && manifest.dig("relations", "successor")))
+        missing_terminal_authority = done && publication.nil? && !closure && !terminal_outcome
         state = missing_terminal_authority ? "invalid" : "current"
         diagnostic = if missing_terminal_authority
-          { "summary" => "Patrol-fix done requires an exact current pull-request receipt or valid evidence-closure receipt." }
+          { "summary" => "Patrol-fix done requires an exact current pull-request receipt, rejection, linked escalation, or valid evidence-closure receipt." }
         elsif !closure
           publication_diagnostic
         end
@@ -95,7 +98,8 @@ module Hive
       def current_decision(receipts)
         relevant_stage = stage_name
         decisions = receipts.select do |receipt|
-          receipt["stage"] == relevant_stage && %w[decision reopen].include?(receipt["kind"])
+          (relevant_stage == "done" || receipt["stage"] == relevant_stage) &&
+            %w[decision reopen].include?(receipt["kind"])
         end
         decisions.reduce(nil) do |current, receipt|
           if receipt["kind"] == "decision"
@@ -144,7 +148,7 @@ module Hive
             parked_seconds += elapsed_seconds(opened, receipt.fetch("recorded_at")) if opened
           end
         end
-        if current_decision && PARKED_ROUTES.include?(current_decision.dig("payload", "route"))
+        if stage_name != "done" && current_decision && PARKED_ROUTES.include?(current_decision.dig("payload", "route"))
           parked_since = current_decision.fetch("recorded_at")
         end
         {
@@ -176,6 +180,7 @@ module Hive
       def action_for(state:, done:, outcome:, decision:, fix:, validation:, publication:)
         return action("invalid", runnable: false) if state == "invalid"
         return action("done", runnable: false) if done
+        return action("advance", runnable: true) if TERMINAL_OUTCOMES.include?(outcome&.fetch("kind"))
         return action("parked", runnable: false) if outcome
         ready = case stage
         when "1-inbox" then decision&.dig("payload", "route") == "fix" # not-a-stage-ref: Patrol Fix workflow stage

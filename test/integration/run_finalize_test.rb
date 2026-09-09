@@ -150,6 +150,48 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  # Project clones are allowed to fetch only the default branch. A feature
+  # branch can still be configured with origin as its upstream and be fully
+  # published, but `branch@{u}` is then undefined because the fetch refspec
+  # does not map that branch. Finalize must observe the exact remote ref and
+  # complete instead of retrying an already-pushed branch forever.
+  def test_finalize_accepts_published_branch_outside_fetch_refspec
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        slug = "fix-bug-260424-aaaa"
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        run!("git", "-C", worktree_path, "config", "--unset-all", "remote.origin.fetch")
+        run!("git", "-C", worktree_path, "config", "--add", "remote.origin.fetch",
+             "+refs/heads/main:refs/remotes/origin/main")
+
+        _out, _err, upstream_status = Open3.capture3(
+          "git", "-C", worktree_path, "rev-parse", "#{slug}@{u}"
+        )
+        refute upstream_status.success?,
+               "fixture must reproduce the narrow-refspec branch@{u} failure"
+
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://github.com/acme/app/pull/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+        MD
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :complete, marker.name,
+                     "an exact remote HEAD match must not be reported as unpushed_commits"
+      end
+    end
+  end
+
   # A remote-side auto-rebase (e.g. base churn while several PRs merge in
   # quick succession) advances the PR branch and rebases the fix onto it,
   # leaving the local finalize worktree on the old base with a commit whose
@@ -443,7 +485,7 @@ class RunFinalizeTest < Minitest::Test
           ---
 
           ## Summary
-          api_key sk-ant-#{"a" * 30}
+          api_key ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}
 
           <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
@@ -467,7 +509,7 @@ class RunFinalizeTest < Minitest::Test
         # proves edit was *called*, not that the body was redacted.
         assert_match(/arg=\[redacted: hive detected a credential pattern\]/, log,
                      "gh pr edit --body must carry the redacted placeholder, not the secret-laden agent body")
-        refute_match(/arg=.*sk-ant-aaaaaa/, log,
+        refute_match(/arg=.*ghp_aB3dE6/, log,
                      "the agent-supplied secret must NOT appear in any gh argv")
         refute File.exist?(File.join(task_dir, "summary.md")),
                "summary.md must not be written when secret blocks finalize"
@@ -486,7 +528,7 @@ class RunFinalizeTest < Minitest::Test
           ---
 
           ## Summary
-          leaked token sk-ant-#{"b" * 30}
+          leaked token ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}
 
           <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
         MD
@@ -499,7 +541,7 @@ class RunFinalizeTest < Minitest::Test
         marker = Hive::Markers.current(pr_md)
         assert_equal :error, marker.name
         assert_equal "secret_in_pr_body", marker.attrs.fetch("reason")
-        assert_includes marker.attrs.fetch("patterns"), "anthropic"
+        assert_includes marker.attrs.fetch("patterns"), "github-pat"
         assert_match(/arg=edit\n.*arg=https:\/\/github\.com\/acme\/app\/pull\/9/m, gh_argv_log)
         refute_match(/arg=ready\n/, gh_argv_log)
       end
@@ -527,7 +569,7 @@ class RunFinalizeTest < Minitest::Test
             hits: [], fetch_failed: false, fetch_error: nil
           ),
           Hive::Gh::ScanResult.new(
-            hits: [ { name: "anthropic_api_key" } ],
+            hits: [ { name: "github-pat" } ],
             fetch_failed: true,
             fetch_error: "remote body unavailable"
           )
@@ -550,7 +592,7 @@ class RunFinalizeTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "secret_scan_fetch_failed", marker.attrs.fetch("reason")
         assert_equal "remote body unavailable", marker.attrs.fetch("detail")
-        assert_includes marker.attrs.fetch("patterns"), "anthropic_api_key"
+        assert_includes marker.attrs.fetch("patterns"), "github-pat"
         refute_match(/arg=ready\n/, gh_argv_log)
       end
     end
@@ -689,7 +731,7 @@ class RunFinalizeTest < Minitest::Test
           ---
 
           ## Summary
-          api_key sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          api_key ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}
 
           <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
         MD
@@ -708,7 +750,7 @@ class RunFinalizeTest < Minitest::Test
         marker = Hive::Markers.current(pr_md)
         assert_equal :error, marker.name
         assert_equal "secret_scan_fetch_failed", marker.attrs["reason"]
-        assert_includes marker.attrs["patterns"].to_s, "anthropic_api_key",
+        assert_includes marker.attrs["patterns"].to_s, "github-pat",
                         "local hits must remain visible when the remote fetch also fails"
         refute_match(/arg=ready\n/, gh_argv_log)
       end

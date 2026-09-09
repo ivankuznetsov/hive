@@ -124,7 +124,6 @@ module Hive
           end
           identity = database.installation_identity
           unless identity && identity.fetch(:installation_id) == document.fetch("installation_id") &&
-                 identity.fetch(:lineage_id) == document.fetch("lineage_id") &&
                  identity[:activation_epoch] == document.dig("evidence", "activation_epoch")
             raise Error.new("runtime database identity differs from active manifest", code: :activation_identity_mismatch)
           end
@@ -367,7 +366,7 @@ module Hive
         database.transaction do |db|
           original = db[:installations].get(:installation_id)
           db[:installations].where(installation_id: original).update(
-            installation_id: cutover_id, lineage_id: cutover_id, created_at: timestamp,
+            installation_id: cutover_id, created_at: timestamp,
             activation_epoch: evidence.fetch("activation_epoch"),
             activated_at: evidence.fetch("activated_at")
           )
@@ -377,7 +376,6 @@ module Hive
               registration_id: project.fetch("registration_id"), name: project.fetch("name"),
               observed_path: File.expand_path(project.fetch("path")),
               state_root_path: File.expand_path(project.fetch("hive_state_path")),
-              repository_identity_json: project["repository_identity"] && Codec.dump_json(project["repository_identity"]),
               active: 1, registered_at: project.fetch("registered_at", timestamp), last_observed_at: timestamp
             )
             insert_tasks(db, project, timestamp)
@@ -724,7 +722,7 @@ module Hive
       def publish_phase(phase, projects, exclusions, task_authority, evidence)
         return load_phase(phase) if manifest_present?(phase)
         manifest(phase).publish(CutoverManifest.build(
-          phase: phase, installation_id: cutover_id, lineage_id: cutover_id,
+          phase: phase, installation_id: cutover_id,
           source_release: @source_release, target_release: @target_release,
           exclusions: exclusions, task_authority: task_authority,
           evidence: evidence.merge("projects" => projects.map { |project| project.fetch("project_id") })

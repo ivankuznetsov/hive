@@ -1,17 +1,17 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-09-02
+updated: 2026-09-09
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
 **TLDR**: Authored task/project documents remain in `.hive-state` and feature
-worktrees. A Sequel/SQLite runtime control plane owns coordination state:
-attempt lifecycle, dispatch requests/outbox, capacity, provider circuits and
-audit, routing decisions, task leases and ids, Patrol discovery allowances,
-and PR merge reconciliation. Evidence-bound
+worktrees. A Sequel/SQLite runtime control plane owns machine-local coordination:
+independent attempt lifecycle and fixed per-attempt facts, request/result
+delivery, live capacity, task leases and ids, token history, payload references,
+and PR merge reconciliation. Provider order remains in current config. Evidence-bound
 delivered/superseded closure remains a task-local authority retained with an
 archived task; it is never fabricated attempt success.
 
@@ -247,11 +247,11 @@ integer values mean full 24-hour periods and hide only when
 visible. `never` always remains visible in ordinary views. The dedicated
 archive source bypasses this projection and retains every archived task.
 
-Task ids are allocated from the installation-scoped `task_counters` row
-`namespace=tasks` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
+Task ids are allocated from `installations.next_task_id`
+via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
 The immediate SQLite transaction makes read-plus-increment atomic across
 processes; there is no counter YAML or counter lock file. `peek` returns the
-stored next value (or `1` before the first allocation), and `seed_at_least!`
+stored next value (or infers a floor above numeric task subject IDs), and `seed_at_least!`
 advances without moving backwards. Capture paths use `next_or_nil` so a typed
 runtime-control-plane outage can preserve an already-created task with a nil id
 for explicit migration. `hive migrate` strictly seeds above existing metadata
@@ -344,7 +344,7 @@ without creating an infinite loop.
 
 - **Per-task lease**: installation SQLite `task_leases`, keyed through stable
   `task_subjects.task_id`. Typed holder PID/start identity, holder nonce,
-  generation, lease version, and bounded JSON operation/agent detail provide
+  lease version, and bounded JSON operation/agent detail provide
   liveness plus compare-and-swap fencing. Dead or PID-reused holders are
   reclaimable; an old nonce cannot release or update its replacement. Subject
   lookup is metadata-id-first, validates the registered project/state root,
@@ -460,20 +460,18 @@ journal.
 ## Attempt storage lifecycle
 
 The runtime control plane's `attempts` rows are the bounded authority for live,
-lost-without-a-safe-successor, finalization-pending, and terminal attempts.
+lost, finalization-pending, and terminal attempts. Each row also owns its fixed
+accounting, counted-failure, lost-recovery, and terminal-publication facts.
 Reconciliation and admission use indexed queries rather than scanning a record
-directory. Finalization first observes the terminal attempt into the
-task-authoritative journal and durably acknowledges that receipt. Only then may
-loss/accounting indexes, refunds, provider-health observation, or request
-delivery advance. Promotion removes the live reservation after every required
-consumer acknowledgement while `Repository#fetch(attempt_id)` preserves point
-access to the canonical terminal row.
+directory. Finalization observes the terminal attempt into the task-authoritative
+journal and records monotonic consumer acknowledgements on the same attempt.
+`Repository#fetch(attempt_id)` preserves point access to the canonical row.
 
 Raw frames are sealed into the content-addressed runtime payload store during
-promotion. Maintenance advances a SQL keyset cursor through at most 512 entries
-per hourly pass and expires them when the owning task is archived or three days
-after `ended_at`, whichever is earlier, unless recovery remains pinned. This
-retention does not delete the terminal attempt row or still-referenced payloads.
+promotion. Daemon-only maintenance performs bounded keyset queries and
+idempotently expires eligible bytes while continuing past individual failures.
+The interval is process-local; SQLite stores no maintenance claim or cursor.
+This retention does not delete the terminal attempt row or still-referenced payloads.
 
 The one-way installation cutover is offline and fleet-atomic. A durable
 `ready → intended → active` manifest binds the registered projects,
@@ -505,55 +503,19 @@ Workflow files, task journals, artifacts, and referenced
 payload files remain under their existing authorities after activation; only
 genuinely retired runtime writer paths receive tombstones.
 
-## Runtime dispatch queue and web snapshots
+## Runtime dispatch requests and web snapshots
 
-The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
-(`Hive::Paths.state_home`, not inside a project `.hive-state/`). Ordinary
-producers include Telegram and hivebox web. Every recoverable-marker surface
-(TUI, Rails, Telegram, recorder, CLI/action, and automatic healer scheduling)
-submits through `Hive::Recovery::API`; `RecoveryCoordinator` is the only
-producer of a recovery transition. The `requestor` field records the actual
-adapter rather than disguising web or TUI requests as bot traffic.
-Pending requests are consumed in `(created_at, request_id)` order. If an older
-request observes global or generic durable-attempt capacity exhaustion, later
-requests stay pending for the next scan even when a short-lived worker frees a
-slot before the current scan ends. Project and daily caps preserve order only
-within that project, so unrelated projects can still use available capacity.
-Each pending request is one JSON file:
-
-```yaml
-schema: hive-dispatch-request
-schema_version: 4
-request_id: <hex16>
-created_at: <UTC-ISO8601>
-project: <registered project name>
-slug: <task slug>
-argv: ["hive", "<allowlisted verb>", ...]
-requestor: bot|healer|web|tui|cli|action|daemon|recorder|operator
-chat_id:
-update_id:
-trigger:
-task_generation:
-predecessor_attempt_id:
-inherited_outputs: []
-task_id:
-expected_stage:
-expected_marker_name:
-expected_marker_id:
-recovery: null
-```
+Ordinary producers such as Telegram and Hive web insert `dispatch_requests`
+rows. `RecoveryCoordinator` is the only producer of a recovery transition. The
+`requestor` records the actual adapter. Pending requests are consumed in
+`(created_at, request_id)` order, with capacity preserving project fairness.
 
 Current producers write `hive-dispatch-request.v5`. Ordinary requests leave
 `recovery` null. Coordinator requests persist canonical task/marker/generation
 identity, owner/remediation, retry count, terminal outcome/time, and the
-`admitted → cleared → dispatched → terminal` phase. Recovery variants cover
-marker-bound failures, markerless provider admission, and markerless controller
-failures bound directly to an unchanged task generation. Runtime consumers
-accept v5 only; `hive migrate` owns the one-off upgrade of older pending queue
-records. Queue and claim sidecars
-remain delivery records: after admission the claim stores the attempt
-ID/generation, follows a loss successor, and completes from its terminal
-receipt.
+`admitted → cleared → dispatched → terminal` phase. Lost-attempt recovery
+uses one deterministic request and admits an independent attempt; the source
+attempt's recovery-complete phase is committed with admission.
 
 `Hive::RuntimeControlPlane::DispatchRepository.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
@@ -562,15 +524,11 @@ Ordinary pending requests expire after `EXPIRY_SEC = 600`. V5 recovery
 requests instead persist `admitted → cleared → dispatched → terminal`, bound
 to canonical task/stage/generation identity and, where applicable, marker or
 routing-policy evidence, plus owner/remediation and terminal outcome/time.
-Nonterminal recovery never expires or generic-prunes,
-and a bounded request-keyed lock shard serializes claim, phase CAS, and
-pruning; request IDs are bounded filesystem-safe identifiers. On dispatch, the daemon
-renames the file to `<id>.json.claimed` and writes
-`<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
-after task admission it also carries `attempt_id` and `task_generation`.
-If the daemon dies after admission but before writing those fields, startup
-recovers them from the attempt record's immutable `request_id` correlation.
-Those claims are at-most-once delivery records, not execution owners.
+Nonterminal recovery never expires or generic-prunes. Row revision and claim
+identity serialize claim, phase CAS, and pruning. The request row also stores
+its pending/delivered result envelope under the same stable request identity.
+Delivery is resumable and at-least-once: a crash after an external send and
+before acknowledgement may repeat the notification. There is no second outbox.
 `RecoveryCoordinator` is the destructive authority for recoverable markers:
 adapters submit observations, while replay re-resolves identity and safety
 under lock before resuming the persisted phase.
@@ -638,23 +596,58 @@ delivers no refresh-only prefix; the self-healing retry cannot turn that
 failure into a periodic full-page request loop. Failed delivery remains
 pending across last-subscriber shutdown, and a
 replacement broadcaster retries the retained feed value before resuming normal
-deduplication. Status and task pages use Hive's cancellation-safe custom Turbo
-stream source: a subscription that finishes connecting after its DOM owner has
-left is unsubscribed from its confirmed callback, preserving server command
-order while still releasing the abandoned owner. Confirmation is scoped to the
-current transport; disconnect clears it so teardown during reconnect again
-waits for confirmation, rejection, or disconnect. If none arrives within five
-seconds, Hive closes an otherwise-unowned Cable transport to make server cleanup
-authoritative before local release. `StatusChannel` fences the deferred adapter
-subscribe before it begins and in its completion callback, removing a handler
-that finishes after teardown. An adapter exception after deferral releases the
-lease and reconnects the transport instead of stranding an active unconfirmed
-channel. A rejected server subscription is forgotten
-and retried. A rejected asynchronous consumer setup
-clears turbo-rails' rejected cached consumer promise before retrying at a
-bounded five-second cadence. A synchronous subscription-creation failure drops
-the partial registration and failed consumer before retrying; DOM disconnect
-cancels that retry. The task-page
+deduplication.
+
+Status and task pages use Hive's cancellation-safe custom Turbo stream source.
+Its element holds one current `StatusStreamOwner`; that owner contains the
+current identity-bearing application attempt, `retryTimer`,
+`pendingReleaseTimer` and its disposition, catch-up attempt, and one of
+`connecting`, `connected`, `reconnecting`, `retry_wait`, `disconnecting`, or
+`disconnected`. `disconnected` is terminal for that owner. A later DOM connect
+or attribute supersession installs a new owner; there is no `stopped` state.
+Every application setup or retry attempt creates a fresh dedicated Action Cable
+consumer. A transient `disconnected({ willAttemptReconnect: true })` transition
+moves `connected -> reconnecting` and later reconfirms the same consumer,
+subscription, and attempt. Setup/registration/rejection failures and
+`willAttemptReconnect: false` instead retire the attempt, enter `retry_wait`,
+and let the existing five-second retry create a new attempt and consumer.
+
+All connection `open`/`reopen` paths, callbacks, timer callbacks, setup promise
+continuations, and catch-up work require both the current owner and current
+attempt. Retirement disables opening before external cleanup, so a queued
+visibility-monitor callback or late consumer cannot revive the attempt or
+touch a successor; a late dedicated consumer is closed when it arrives. A
+subscription that confirms after its DOM owner has left is released from that
+confirmed callback, preserving server command order. An unconfirmed detached
+attempt remains only as the disconnected owner's bounded pending-release
+disposition until confirmation, rejection, or disconnect. If no disposition
+arrives within five seconds, the owner closes the dedicated transport before
+local unsubscribe/forgetting, making server connection cleanup authoritative
+without consulting turbo-rails' shared consumer or subscription registry.
+The element retains that bounded custodian across ordinary detach/attach as
+well as attribute supersession, force-retiring an older predecessor before a
+third transport can be allocated.
+`StatusChannel` separately fences deferred adapter registration before it
+begins and at completion; a late handler removes itself, while a deferred
+adapter exception releases its lease and reconnects the same transport.
+
+Disconnect snapshots and clears owner/attempt slots before external calls,
+then records the first thrown value while still attempting each applicable
+timer cancellation, subscription release, consumer disconnect, conditional
+connection/socket fallback, and monitor stop. Consumer disconnect is primary;
+connection close with reconnect disabled and direct captured-socket close run
+only while the socket remains `OPEN` or `CONNECTING`, preventing a normal open
+socket from being closed twice. Final state is `disconnected` and a repeated
+disconnect performs no work. A direct internal caller receives the exact first
+error after finalization; DOM reactions and asynchronous failures warn after
+their cleanup/state obligations instead of leaking an uncaught reaction error.
+Attribute supersession clears the old reference and installs a successor even
+when old retirement fails, with the old failure retaining precedence and a
+successor setup failure routed to that new owner's `retry_wait`. One live
+source therefore intentionally owns one dedicated transport; supersession can
+temporarily own one successor plus one bounded retiring predecessor, detach
+returns to zero after any bounded pending-release custody, and simultaneous
+sources own isolated transports. The task-page
 owner includes all mutation forms, keeping their native submit events inside
 the same refresh-suppression boundary as the stream source; admission begins
 only after Turbo accepts any confirmation.
@@ -681,13 +674,20 @@ its referenced Fix receipt as the progress baseline. An unchanged diff and
 unchanged validation-command plan cannot produce a new Fix receipt, while a
 patch change or validation-plan correction can. A completed route intent remains
 replayable so a crash after the folder move is reconciled from either the old
-caller path or the new location. Parked outcomes expose no custom operational
+caller path or the new location. Blocked outcomes expose no custom operational
 action; they remain visible through the standard `needs_input` task contract.
 
-`reject`, `blocked`, and `escalate` are parked non-terminal outcomes. Escalation
+`blocked` remains parked and non-terminal. `reject` and `escalate` dispatch the
+normal receipt-gated `approve` transition directly to `6-done`, retaining
+`rejected` or `escalated` as the archived outcome rather than implying publication.
+Existing parked rejections and escalations become eligible on the next status
+scan; no fresh agent decision or separate cleanup queue is needed. Escalation
 uses a stable source fingerprint to capture one ordinary coding task and stores
 reciprocal controller-owned relations on both tasks. A crash after capture but
-before either link is repaired reuses the same successor. No issue record or
+before either link is repaired reuses the same successor. Before archiving, the
+transition completes that idempotent handoff for the exact current decision;
+handoff failure leaves the origin active for retry. Only the successor remains
+active after the move. No issue record or
 GitHub mutation is part of this state machine.
 
 Publish is a deterministic stage after an exact current Review `publish`
@@ -713,8 +713,10 @@ branch advancement does not rewrite the immutable creation-base commit.
 
 The stage writes `pr.md` and one strict canonical publication receipt before
 `StageTransition` may move the task from `5-publish` to `6-done`. Done projects
-as current and archived only when that receipt matches the current task and
-evidence generation. Worktree cleanup follows receipt durability; failure is a
+as current and archived when that receipt matches the current task and
+evidence generation, or an exact current rejection, linked escalation, or valid
+evidence closure authorizes terminal entry. Worktree cleanup follows publication
+receipt durability; failure is a
 bounded diagnostic and cannot revoke completion. Publication performs no LLM,
 issue, edit, close, ready, or merge operation.
 
@@ -736,8 +738,8 @@ The read-only web Patrol page uses bounded native `FindingQuery` and `JobQuery`
 reads so it remains available without a daemon. Those two sections fail
 independently and confer no mutation authority. Cohort, latency, token,
 and publication-summary projections are not persisted. Patrol discovery
-allowance and provider-lane holds are typed `patrol_allowances` rows; they are
-admission authority rather than a web projection.
+allowance is derived from current-UTC-day `patrol_discovery_launch` reservations
+in token usage history. There is no mutable allowance counter or provider hold.
 
 ## Patrol Fix finding import
 

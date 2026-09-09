@@ -14,7 +14,10 @@ class TuiCommandTest < Minitest::Test
     # Thor's help index prefixes commands with `$0`; assert on the
     # subcommand-and-summary line instead of the binary name so the
     # test passes whether `bin/hive` or the test runner is at $0.
-    out, _err = capture_io { Hive::CLI.start([ "help" ]) }
+    # Summary assertions need room for Thor's widest command and the runner name.
+    out, _err = with_env("THOR_COLUMNS" => "200") do
+      capture_io { Hive::CLI.start([ "help" ]) }
+    end
     assert_match(/^\s*\S+\s+tui\s+# Open the live/, out,
                  "tui command must appear in `hive help` output with its summary")
   end

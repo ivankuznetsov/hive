@@ -6,7 +6,6 @@ require "hive/runtime_control_plane"
 module Hive
   module RuntimeControlPlane
     class TaskLeaseRepository
-      DEFAULT_LEASE_SEC = 7 * 86_400
       MAX_RETRIES = 8
       MAX_PAYLOAD_BYTES = 16 * 1024
 
@@ -225,14 +224,12 @@ module Hive
       end
 
       def release_dataset(lock_id, task_id: nil)
-        timestamp = Codec.dump_time(@clock.call)
         @database.transaction do |db|
           dataset = db[:task_leases].where(holder_id: lock_id.to_s)
           dataset = dataset.where(task_id: task_id) if task_id
           updated = dataset.update(
-            holder_kind: nil, holder_id: nil, holder_pid: nil,
-            holder_process_identity: nil, payload_json: "{}",
-            acquired_at: nil, expires_at: nil, released_at: timestamp
+            holder_id: nil, holder_pid: nil,
+            holder_process_identity: nil, payload_json: "{}"
           )
           updated == 1
         end
@@ -243,15 +240,9 @@ module Hive
       end
 
       def claim(subject, observed, data, payload_json)
-        timestamp = Codec.dump_time(@clock.call)
-        expiry = Codec.dump_time(@clock.call + DEFAULT_LEASE_SEC)
         values = {
-          holder_kind: data["op"] || data["operation"] || "task_run",
           holder_id: data.fetch("lock_id"), holder_pid: data.fetch("pid"),
-          holder_process_identity: data["process_start_time"], payload_json: payload_json,
-          generation: subject.fetch(:generation),
-          source_fingerprint: subject.fetch(:source_fingerprint),
-          acquired_at: timestamp, expires_at: expiry, released_at: nil
+          holder_process_identity: data["process_start_time"], payload_json: payload_json
         }
         claimed = false
         @database.transaction do |db|

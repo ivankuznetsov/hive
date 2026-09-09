@@ -26,7 +26,6 @@ require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/attempts/record"
-require "hive/provider_health"
 require "tmpdir"
 
 # Schema files under schemas/ are the published artefact for external
@@ -102,7 +101,6 @@ class SchemaFilesTest < Minitest::Test
     expected = Hive::ProviderRouting::EXCLUSION_REASONS.sort
     %w[
       hive-dispatch-request.v5.json
-      hive-circuits.v1.json
       hive-operational-status.v4.json
     ].each do |name|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
@@ -112,10 +110,9 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  def test_provider_routing_public_schemas_allow_two_blockers_per_health_scope
+  def test_provider_routing_public_schemas_bound_candidate_diagnostics
     {
       "hive-dispatch-request.v5.json" => [ "AdmissionCandidate", "AdmissionObservation" ],
-      "hive-circuits.v1.json" => [ "Candidate", "RoutingDecision" ],
       "hive-operational-status.v4.json" => [ "RoutingCandidate", "RoutingDecision" ]
     }.each do |name, (candidate_name, decision_name)|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
@@ -126,15 +123,6 @@ class SchemaFilesTest < Minitest::Test
                    document.dig("$defs", decision_name, "properties", "exclusions", "maxItems"),
                    name
     end
-  end
-
-  def test_provider_failure_and_provenance_vocabularies_do_not_drift
-    assert_equal Hive::ProviderHealth::PROVIDER_FAILURE_CLASSES,
-                 Hive::Attempts::Record::PROVIDER_FAILURE_CLASSES
-    assert_equal Hive::ProviderHealth::MODEL_FAILURE_CLASSES,
-                 Hive::Attempts::Record::MODEL_FAILURE_CLASSES
-    assert_equal Hive::ProviderHealth::TRUSTED_PROVENANCE,
-                 Hive::Attempts::Record::TRUSTED_PROVENANCE
   end
 
   def test_hive_decide_schema_matches_success_payload_contract
@@ -2869,7 +2857,7 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_dispatch_result_required_keys_match_producer
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result")))
     schema_required = doc["required"].sort
-    # Mirrors the runtime control-plane outbox producer — every emitted key
+    # Mirrors the runtime control-plane request-row result producer — every emitted key
     # except the optional/nullable update_id is required.
     producer_required = %w[
       schema schema_version result_id created_at chat_id project slug
@@ -2905,11 +2893,13 @@ class SchemaFilesTest < Minitest::Test
         update_id: nil, now: Time.iso8601(timestamp)
       )
       payload = database.read do |db|
-        Hive::RuntimeControlPlane::Codec.load_json(db[:dispatch_outbox].get(:payload_json))
+        Hive::RuntimeControlPlane::Codec.load_json(
+          db[:dispatch_requests].where(request_id: "abc12345").get(:result_json)
+        )
       end
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result"))))
       assert_empty schemer.validate(payload).to_a,
-                   "SQL outbox output (nil update_id, negative chat_id) must validate"
+                   "SQL request-row output (nil update_id, negative chat_id) must validate"
     end
   end
 

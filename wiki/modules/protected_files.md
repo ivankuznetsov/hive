@@ -228,3 +228,8 @@ retains ownership of exception and marker semantics.
 
 - [[modules/agent]] · [[stages/execute]] · [[stages/review]]
 - [[component-boundaries]] · [[decisions]] (ADR-013)
+
+Managed evidence commands preserve the host's `/bin`, `/sbin`, `/lib`, and
+`/lib64` directory contents through read-only mounts when present. They do not
+invent a distribution-specific loader layout; the selected Ruby prefix is
+mounted separately with the runtime dependencies.

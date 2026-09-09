@@ -98,10 +98,11 @@ module Hive
         argv.concat([
           "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
           "--ro-bind", "/usr", "/usr",
-          "--symlink", "usr/bin", "/bin", "--symlink", "usr/bin", "/sbin",
-          "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64",
           "--dir", "/etc"
         ])
+        %w[/bin /sbin /lib /lib64].each do |path|
+          argv.concat([ "--ro-bind", path, path ]) if File.directory?(path)
+        end
         %w[ssl resolv.conf hosts passwd group nsswitch.conf gai.conf].each do |relative|
           path = File.join("/etc", relative)
           argv.concat([ "--ro-bind", path, path ]) if File.exist?(path)

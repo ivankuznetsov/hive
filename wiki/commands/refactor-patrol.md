@@ -95,8 +95,11 @@ post-merge discovery.
 
 Daemon composition and dispatcher regression tests require a periodic launch
 when no merged-PR jobs exist. Command integration tests exercise the real slice
-producer through review and durable cursor advancement; provider failures must
-leave that cursor retryable.
+producer, default mapper, real reviewer, and durable finding admission with only
+the external provider faked; provider failures must leave that cursor retryable.
+Both Patrol engines inherit batch feature persistence (`write_features`) from
+`Patrol::BaseStateStore`, so non-dry mapping writes to each engine's own namespace.
+Dry-run mapping skips persistence and cannot prove this interface works.
 
 The runtime has no action candidate selection, action reservation, fixer,
 issue filer, branch creator, PR opener, or review handoff. Historical action

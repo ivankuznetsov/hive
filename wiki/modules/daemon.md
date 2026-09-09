@@ -1348,3 +1348,13 @@ code is not part of the daemon scan path.
 - [[decisions]] (ADR-024)
 - [[architecture]]
 - [[cli]]
+
+## Periodic Architecture Patrol wiring
+
+`Commands::Daemon` composes `ScheduledArchitectureScheduler` into
+`RefactorPatrolScheduler`, which offers both periodic and post-merge candidates
+to `PatrolArbiter`. The dispatcher supervises `refactor-patrol-scheduled` with
+an Architecture token whose phase is `scheduled`; completion returns through
+the same scheduler. Periodic work does not require a merged-PR job. Its child
+owns the durable `ScheduledSliceProducer` claim and only advances the cursor
+after successful review and finding admission.

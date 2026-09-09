@@ -191,6 +191,17 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     writer&.close unless writer&.closed?
   end
 
+  def test_disappearing_dependency_path_does_not_restore_ambient_rubylib
+    launcher = Hive::Attempts::DetachedLauncher.new(store: launcher_store)
+    unavailable = ->(*) { raise Errno::ENOENT, "dependency removed" }
+
+    with_env("RUBYLIB" => "/untrusted/checkout/lib") do
+      with_replaced_singleton_method(File, :realpath, unavailable) do
+        assert_equal "", launcher.send(:trusted_runtime_load_path)
+      end
+    end
+  end
+
   def test_wrapper_exec_uses_a_sibling_systemd_scope_without_losing_handshake_fds
     launcher = Hive::Attempts::DetachedLauncher.new(
       store: launcher_store,

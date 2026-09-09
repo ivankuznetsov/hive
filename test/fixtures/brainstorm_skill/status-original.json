@@ -1,6 +1,6 @@
 {
   "schema": "hive-status",
-  "schema_version": 7,
+  "schema_version": 8,
   "ok": true,
   "projects": [
     {

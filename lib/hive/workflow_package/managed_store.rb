@@ -9,6 +9,7 @@ require "hive/workflow_package/mutation_lock"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/transaction"
 require "hive/workflow_package/validator"
+require "hive/warnings"
 
 module Hive
   module WorkflowPackage
@@ -142,7 +143,9 @@ module Hive
             name = File.basename(File.dirname(path))
             selected_unlocked(name, cfg: cfg)
           rescue Hive::ConfigError => e
-            warn "hive: skipping managed workflow #{name.inspect}: #{e.message}"
+            Hive::Warnings.emit(
+              "hive: skipping managed workflow #{name.inspect}: #{e.message}"
+            )
             nil
           end
         end
@@ -190,13 +193,15 @@ module Hive
       end
 
       def verify_generation(name, commit, manifest_digest)
+        # Installed bytes already crossed the security boundary in place_generation.
+        # Reads still verify the pinned manifest, inventory hashes and runtime policy.
         Validator.validate(generation_path(name, commit), expected_name: name,
-                           expected_manifest_digest: manifest_digest)
+                           expected_manifest_digest: manifest_digest, scan_security: false)
       end
 
       def workflow(name, commit, manifest_digest, configuration_digest: nil, cfg: {}, verify_profiles: true)
         result = Validator.validate!(generation_path(name, commit), expected_name: name,
-                                     expected_manifest_digest: manifest_digest)
+                                     expected_manifest_digest: manifest_digest, scan_security: false)
         return result.workflow unless configuration_digest
 
         config = begin
@@ -221,7 +226,7 @@ module Hive
 
       def manifest(name, commit, manifest_digest)
         Validator.validate!(generation_path(name, commit), expected_name: name,
-                            expected_manifest_digest: manifest_digest).manifest
+                            expected_manifest_digest: manifest_digest, scan_security: false).manifest
       end
 
       def task_references(name = nil)
@@ -379,7 +384,7 @@ module Hive
 
         validate_lock!(data, expected_name: name)
         result = Validator.validate!(generation_path(name, data.fetch("source_commit")), expected_name: name,
-                                     expected_manifest_digest: data.fetch("manifest_digest"))
+                                     expected_manifest_digest: data.fetch("manifest_digest"), scan_security: false)
         legacy_configuration_for(
           name: name, commit: data.fetch("source_commit"), manifest_digest: data.fetch("manifest_digest"),
           workflow: result.workflow, manifest: result.manifest, cfg: cfg
@@ -410,7 +415,7 @@ module Hive
       def default_configuration(resolution, cfg: {})
         result = Validator.validate!(generation_path(resolution.name, resolution.source_commit),
                                      expected_name: resolution.name,
-                                     expected_manifest_digest: resolution.manifest_digest)
+                                     expected_manifest_digest: resolution.manifest_digest, scan_security: false)
         Configuration.build(
           result.workflow,
           generation: {

@@ -287,6 +287,7 @@ module Hive
         end
 
         @output.puts "hive: preserving #{Hive::Paths.state_home}"
+        @output.puts "hive: runtime control plane and sealed cutover evidence remain available"
         return if @purge
         return if projects.empty?
 

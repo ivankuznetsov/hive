@@ -1,6 +1,7 @@
 require "json"
 require "hive/config"
 require "hive/commands/status"
+require "hive/attempts/api"
 require "hive/paths"
 require "hive/task_resolver"
 require "hive/task_workspace/artifacts"
@@ -103,9 +104,7 @@ module Hive
       end
 
       def default_log_reader
-        root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-        root = File.join(Hive::Paths.state_home, "attempts", "v4") if root.empty?
-        Hive::TaskWorkspace::CorrelatedLog.new(root: root)
+        Hive::Attempts::API.new.correlated_log_reader
       end
 
       def registered_project!(task)

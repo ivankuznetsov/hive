@@ -37,13 +37,13 @@ class WorkflowPackageValidatorTest < Minitest::Test
   end
 
   def test_rejects_secret_without_placing_secret_bytes_in_any_diagnostic_shape
-    secret = "ghp_#{'A' * 40}"
+    secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     with_package(instruction: "Use #{secret} to inspect the repository.\n") do |root|
       write_manifest(root)
       result = Hive::WorkflowPackage::Validator.validate(root, expected_name: "demo")
 
       refute result.valid?
-      assert_includes result.errors.map(&:rule_id), "security.github_token"
+      assert_includes result.errors.map(&:rule_id), "security.github-pat"
       rendered = JSON.generate(result.to_h) + result.diagnostics.map(&:to_s).join
       refute_includes rendered, secret
     end

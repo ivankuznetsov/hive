@@ -66,7 +66,6 @@ class TuiSmokeCharmTest < Minitest::Test
     FileUtils.mkdir_p(folder)
     state_file = File.join(folder, "brainstorm.md")
     File.write(state_file, "# #{slug}\n\n<!-- COMPLETE -->\n")
-    seed_task_projection(folder, state_file: state_file)
   end
 
   def test_charm_tui_repaints_after_pty_resize

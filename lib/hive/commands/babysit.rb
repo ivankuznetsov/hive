@@ -122,7 +122,7 @@ module Hive
             )
           end
 
-          Process.daemon(true, true) if @detach
+          Hive::RuntimeControlPlane::ProcessGuard.daemonize(true, true) if @detach
 
           own_start_time = Hive::Lock.send(:process_start_time, Process.pid)
           if own_start_time.nil?
@@ -370,7 +370,7 @@ module Hive
 
         # Match daemon re-exec: stable wrapper path, array argv, no shell. The
         # wrapper path comes from the process that launched this Hive command.
-        Kernel.exec(binary, *argv)
+        Hive::RuntimeControlPlane::ProcessGuard.exec(binary, *argv)
       rescue SystemCallError => error
         raise Hive::Error,
               "hive babysitter: failed to re-exec detached start: " \

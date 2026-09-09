@@ -3,18 +3,19 @@ require "test_helper"
 class DaemonRepairsTest < ActionDispatch::IntegrationTest
   test "repair is a resource create that queues global maintenance" do
     sign_in!
-    before = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "*.json")]
+    repository = runtime_dispatch_repository
+    before = repository.pending.map(&:request_id)
 
     post daemon_repair_path
 
     assert_redirected_to root_path
-    created = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "*.json")] - before
-    request = created.find { |path| JSON.parse(File.read(path))["trigger"] == "web_daemon_repair" }
+    request = repository.pending.find do |candidate|
+      !before.include?(candidate.request_id) && candidate.trigger == "web_daemon_repair"
+    end
     assert request, "repair must add a global maintenance request"
-    payload = JSON.parse(File.read(request))
-    assert_equal %w[hive daemon install --force], payload["argv"]
-    assert_equal "web_daemon_repair", payload["trigger"]
+    assert_equal %w[hive daemon install --force], request.argv
+    assert_equal "web_daemon_repair", request.trigger
   ensure
-    Array(created).each { |path| FileUtils.rm_f(path) }
+    repository&.remove(request.request_id) if request
   end
 end

@@ -141,7 +141,7 @@ class TaskWorkspacePublicationTest < Minitest::Test
     end
   end
 
-  def test_foreign_pr_and_declared_head_mismatch_remain_conflicting
+  def test_foreign_pr_remains_conflicting
     with_task do |task|
       write_pr(
         task.folder,
@@ -154,9 +154,24 @@ class TaskWorkspacePublicationTest < Minitest::Test
 
       assert_equal "conflicting", panel.fetch("state")
       assert_equal "identity_conflicting", panel.fetch("publication_state")
-      assert_equal %w[head repository], panel.dig("pull_request", "conflicts").sort
+      assert_equal %w[repository], panel.dig("pull_request", "conflicts")
       refute panel.dig("refresh", "eligible")
       assert_empty cache.reads
+    end
+  end
+
+  def test_old_or_missing_declared_head_does_not_block_live_pr_refresh
+    with_task do |task|
+      [ "a" * 40, nil ].each do |old_head|
+        write_pr(task.folder, head: old_head)
+        cache = FakeCache.new(remote_result)
+        panel = service(task, runner: GitRunner.new, cache: cache).call
+
+        assert_equal "current", panel.fetch("state")
+        assert_empty panel.dig("pull_request", "conflicts")
+        assert panel.dig("refresh", "eligible")
+        assert_equal "d" * 40, cache.reads.first.fetch("expected_head")
+      end
     end
   end
 

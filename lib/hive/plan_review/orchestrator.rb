@@ -9,6 +9,7 @@ require "hive/lock"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
+require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/clearance"
 require "hive/plan_review/decision"
 require "hive/plan_review/identity"
@@ -132,6 +133,7 @@ module Hive
         record = refresh_planner_identity_contract(record)
         record, capability_pending = refresh_capability_probes(record)
         return Projection.new(record) if capability_pending
+        record = refresh_checkpoint_custody_contract(record)
         record = refresh_adversarial_identity_contract(record)
         record = refresh_selected_lenses_contract(record)
         record = refresh_residual_evidence_contract(record)
@@ -415,6 +417,22 @@ module Hive
         )
       end
 
+      # A projection-checkpoint rollout briefly placed Hive's own
+      # review-session write inside reviewer custody. Retry each exact,
+      # runner-authored false positive once after the custody exclusion ships.
+      def refresh_checkpoint_custody_contract(record)
+        routes = CheckpointCustody.recoverable_routes(record["routes"])
+        refresh_route_contract(
+          record, routes:,
+          recovery_attributes: {
+            "checkpoint_custody_recovery" => true,
+            "checkpoint_custody_contract_version" =>
+              CheckpointCustody::CONTRACT_VERSION
+          },
+          diagnostic: "retry reviewer after repairing review-session checkpoint custody"
+        )
+      end
+
       # Older parsers rejected lowercase specialist names such as
       # `product-lens` and persisted the otherwise valid reviewer response as a
       # terminal failure. Re-run that exact legacy diagnostic once under the
@@ -422,7 +440,7 @@ module Hive
       # genuinely malformed result produced by the current parser.
       def refresh_selected_lenses_contract(record)
         routes = ResultParser.recoverable_selected_lenses_routes(record["routes"])
-        refresh_parser_contract(
+        refresh_route_contract(
           record, routes:,
           recovery_attributes: {
             "selected_lenses_contract_recovery" => true,
@@ -439,7 +457,7 @@ module Hive
       # initial role once under the explicit empty-array contract.
       def refresh_residual_evidence_contract(record)
         routes = ResultParser.recoverable_residual_evidence_routes(record["routes"])
-        refresh_parser_contract(
+        refresh_route_contract(
           record, routes:,
           recovery_attributes: {
             "residual_evidence_contract_recovery" => true,
@@ -449,7 +467,7 @@ module Hive
         )
       end
 
-      def refresh_parser_contract(record, routes:, recovery_attributes:, diagnostic:)
+      def refresh_route_contract(record, routes:, recovery_attributes:, diagnostic:)
         return record if routes.empty?
 
         resets = routes.map do |route|
@@ -748,69 +766,79 @@ module Hive
       def ensure_planner_revision(record, plan_bytes, findings)
         role = "planner_revision"
         max_attempts = 1 + Integer(@cfg.dig("plan_review", "attempts", "max_transient"))
-        route = latest_route(record, role)
-        if route && TRANSIENT_OUTCOMES.include?(route["outcome"])
-          if stale_planner_revision_contract?(route)
-            reset = Hive::PlanReview.recovery_reset_route(
-              route,
-              "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION,
-              "contract_upgrade_recovery" => true,
-              "diagnostic" => "planner result adjudication changed; retrying under the current contract"
-            )
-            record = publish_transition(
-              record, state: "revising",
-              required_action: "retry planner revision under the current result contract",
-              routes: record["routes"] + [ reset ]
-            )
-            route = reset
-          end
-          if attempts_in_current_run(record, role) >= max_attempts
-            exhausted = PlannerRevision::Result.new(
-              outcome: route.fetch("outcome"), candidate_bytes: nil,
-              candidate_digest: nil, route_receipt: route.fetch("actual", {}),
-              diagnostic: "planner revision retry bound exhausted"
-            ).freeze
-            return [ record, exhausted, false ]
-          end
-          return [ record, nil, true ] if retry_in_future?(route["retry_at"])
-        end
+        loop do
+          route = latest_route(record, role)
+          if route && TRANSIENT_OUTCOMES.include?(route["outcome"])
+            if stale_planner_revision_contract?(route)
+              reset = Hive::PlanReview.recovery_reset_route(
+                route,
+                "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION,
+                "contract_upgrade_recovery" => true,
+                "diagnostic" => "planner result adjudication changed; retrying under the current contract"
+              )
+              record = publish_transition(
+                record, state: "revising",
+                required_action: "retry planner revision under the current result contract",
+                routes: record["routes"] + [ reset ]
+              )
+              route = reset
+            end
+            if attempts_in_current_run(record, role) >= max_attempts
+              record, pending = schedule_transient_series_recovery(record, role, route)
+              return [ record, nil, true ] if pending
 
-        attempt_id = Identity.attempt(record.review_id)
-        revision = @planner_revision.call(
-          review_id: record.review_id, plan_bytes:, findings:,
-          planner_identity: planner_identity(record),
-          timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec")
-        )
-        retry_at = if TRANSIENT_OUTCOMES.include?(revision.outcome)
-          default_retry_at(record, role, attempt_id)
+              next
+            end
+            return [ record, nil, true ] if retry_in_future?(route["retry_at"])
+          end
+
+          attempt_id = Identity.attempt(record.review_id)
+          revision_identity, fallback = planner_revision_identity(record)
+          revision = @planner_revision.call(
+            review_id: record.review_id, plan_bytes:, findings:,
+            planner_identity: revision_identity,
+            planner_authority: planner_identity(record),
+            timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec")
+          )
+          retry_at = if TRANSIENT_OUTCOMES.include?(revision.outcome)
+            default_retry_at(record, role, attempt_id)
+          end
+          route = planner_revision_route(
+            revision, record, requested: revision_identity, fallback:,
+            attempt_id:, retry_at:
+          )
+          refs = @store.write_attempt!(
+            review_id: record.review_id, attempt_id:, plan_bytes:,
+            result: revision.to_h, coverage: [], route_receipt: route
+          )
+          artifacts = record["artifacts"].merge(
+            "planner_revision_input" => refs.fetch("input_plan"),
+            "planner_revision_result" => refs.fetch("result"),
+            "planner_revision_coverage" => refs.fetch("coverage"),
+            "planner_revision_route" => refs.fetch("route_receipt")
+          )
+          attempts = attempts_in_current_run(record, role) + 1
+          pending = TRANSIENT_OUTCOMES.include?(revision.outcome) && attempts < max_attempts
+          state = pending ? "retry_scheduled" : "revising"
+          record = publish(
+            record,
+            "state" => state, "outcome" => nil,
+            "attempt_ids" => record["attempt_ids"] + [ attempt_id ],
+            "current_attempt_id" => attempt_id,
+            "routes" => record["routes"] + [ route ], "artifacts" => artifacts,
+            "blockers" => [],
+            "required_action" => pending ? "retry planner revision after #{retry_at}" : nil,
+            "retry_at" => pending ? retry_at : nil, "execution_allowed" => false
+          )
+          if TRANSIENT_OUTCOMES.include?(revision.outcome) && !pending
+            record, pending = schedule_transient_series_recovery(record, role, route)
+            return [ record, nil, true ] if pending
+
+            next
+          end
+
+          return [ record, revision, pending ]
         end
-        route = planner_revision_route(
-          revision, record, attempt_id:, retry_at:
-        )
-        refs = @store.write_attempt!(
-          review_id: record.review_id, attempt_id:, plan_bytes:,
-          result: revision.to_h, coverage: [], route_receipt: route
-        )
-        artifacts = record["artifacts"].merge(
-          "planner_revision_input" => refs.fetch("input_plan"),
-          "planner_revision_result" => refs.fetch("result"),
-          "planner_revision_coverage" => refs.fetch("coverage"),
-          "planner_revision_route" => refs.fetch("route_receipt")
-        )
-        attempts = attempts_in_current_run(record, role) + 1
-        pending = TRANSIENT_OUTCOMES.include?(revision.outcome) && attempts < max_attempts
-        state = pending ? "retry_scheduled" : "revising"
-        record = publish(
-          record,
-          "state" => state, "outcome" => nil,
-          "attempt_ids" => record["attempt_ids"] + [ attempt_id ],
-          "current_attempt_id" => attempt_id,
-          "routes" => record["routes"] + [ route ], "artifacts" => artifacts,
-          "blockers" => [],
-          "required_action" => pending ? "retry planner revision after #{retry_at}" : nil,
-          "retry_at" => pending ? retry_at : nil, "execution_allowed" => false
-        )
-        [ record, revision, pending ]
       end
 
       def terminal(record, state:, outcome:, findings: record["findings"], blockers: [],
@@ -1121,8 +1149,9 @@ module Hive
       # Mandatory initial coverage is a liveness requirement, not an operator
       # waiver prompt. The per-series max still bounds one invocation, while a
       # persisted recovery reset lets later daemon ticks try again after a
-      # widening cooldown. Standard reviews retain their existing degraded
-      # fallback and verification/revision loops retain their own hard caps.
+      # widening cooldown. Standard reviews retain their degraded fallback;
+      # verification retries and successful planner-revision rounds retain
+      # their separate caps.
       def automatic_transient_series_recovery?(record, role, route)
         record.effective_level == "mandatory" &&
           %w[primary adversarial].include?(role) &&
@@ -1131,22 +1160,38 @@ module Hive
       end
 
       def schedule_transient_series_recovery(record, role, route)
-        series = record["routes"].count do |entry|
-          entry["role"] == role && entry["transient_series_recovery"] == true
+        role_routes = record["routes"].select { |entry| entry["role"] == role }
+        last_success = role_routes.rindex { |entry| SUCCESS_OUTCOMES.include?(entry["outcome"]) }
+        role_routes = role_routes.drop(last_success + 1) if last_success
+        series = role_routes.count do |entry|
+          entry["transient_series_recovery"] == true
         end + 1
         retry_at = transient_series_retry_at(record, role, route, series)
         pending = retry_in_future?(retry_at)
-        reset = Hive::PlanReview.recovery_reset_route(
-          route,
+        diagnostic = if role == "planner_revision"
+          "transient planner revision attempt series exhausted; retrying automatically"
+        else
+          "transient reviewer attempt series exhausted; retrying automatically"
+        end
+        attributes = {
           "transient_series_recovery" => true,
           "transient_series" => series,
           "retry_at" => retry_at,
-          "diagnostic" => "transient reviewer attempt series exhausted; retrying automatically"
+          "diagnostic" => diagnostic
+        }
+        if role == "planner_revision"
+          attributes["planner_revision_contract_version"] =
+            PlannerRevision::RESULT_CONTRACT_VERSION
+        end
+        reset = Hive::PlanReview.recovery_reset_route(
+          route, attributes
         )
-        state = pending ? "retry_scheduled" : "reviewing"
+        state = pending ? "retry_scheduled" :
+          (role == "planner_revision" ? "revising" : "reviewing")
+        label = role == "planner_revision" ? "planner revision" : "#{role} review"
         required_action = pending ?
-          "retry #{role} review automatically after #{retry_at}" :
-          "retry #{role} review automatically"
+          "retry #{label} automatically after #{retry_at}" :
+          "retry #{label} automatically"
         resumed = publish_transition(
           record, state:, required_action:,
           routes: record["routes"] + [ reset ], retry_at: pending ? retry_at : nil
@@ -1224,10 +1269,11 @@ module Hive
         }
       end
 
-      def planner_revision_route(revision, record, attempt_id: nil, retry_at: nil)
-        actual = revision.route_receipt.empty? ? planner_identity(record) : revision.route_receipt
-        {
-          "role" => "planner_revision", "requested" => planner_identity(record),
+      def planner_revision_route(revision, record, requested:, fallback:,
+                                 attempt_id: nil, retry_at: nil)
+        actual = revision.route_receipt.empty? ? requested : revision.route_receipt
+        route = {
+          "role" => "planner_revision", "requested" => requested,
           "actual" => actual, "capability_result" => "present",
           "independence_verified" => false, "independence_reason" => "same_plan_authority",
           "outcome" => revision.outcome, "attempt_id" => attempt_id,
@@ -1235,6 +1281,38 @@ module Hive
           "diagnostic" => revision.diagnostic,
           "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION
         }.compact
+        return route unless fallback
+
+        route.merge(
+          "planner_revision_fallback" => true,
+          "planner_authority" => planner_identity(record),
+          "fallback_reason" => "captured_planner_transient_failure"
+        )
+      end
+
+      def planner_revision_identity(record)
+        authority = planner_identity(record)
+        row = @cfg.dig("plan_review", "routes", "planner_revision_fallback")
+        return [ authority, false ] unless row.is_a?(Hash)
+
+        fallback = {
+          "provider" => row.fetch("agent"), "model" => row.fetch("model"),
+          "family" => row.fetch("family"), "effort" => row.fetch("effort"),
+          "route" => row.fetch("route")
+        }
+        previous = latest_route(record, "planner_revision")
+        return [ authority, false ] unless previous
+
+        fallback_used = previous["planner_revision_fallback"] == true ||
+          identity_matches?(previous["requested"], fallback)
+        fallback_due = TRANSIENT_OUTCOMES.include?(previous["outcome"])
+        (fallback_used || fallback_due) ? [ fallback, true ] : [ authority, false ]
+      end
+
+      def identity_matches?(observed, expected)
+        observed.is_a?(Hash) && expected.all? do |key, value|
+          observed[key].to_s == value.to_s
+        end
       end
 
       def stale_planner_revision_contract?(route)

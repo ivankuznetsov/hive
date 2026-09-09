@@ -10,9 +10,36 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "slug-260514-abcd")
       FileUtils.mkdir_p(folder)
+      File.write(
+        File.join(folder, "meta.yml"),
+        { "id" => 42, "slug" => "slug-260514-abcd" }.to_yaml
+      )
+      database = prepare_runtime_project(
+        state_home: dir, name: "brainstorm", path: dir,
+        state_root_path: File.join(dir, ".hive-state")
+      )
+      timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+      project_id = database.read { |db| db[:projects].where(name: "brainstorm").get(:project_id) }
+      database.transaction do |db|
+        db[:task_subjects].insert(
+          task_id: "42", project_id: project_id, workflow_id: "coding",
+          task_slug: "slug-260514-abcd", observed_path: folder,
+          source_fingerprint: "brainstorm-source", generation: 0,
+          created_at: timestamp, last_observed_at: timestamp
+        )
+      end
+      prior_repository = Hive::Lock.task_lease_repository
+      Hive::Lock.task_lease_repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+        database: database,
+        process_start_time: Hive::Lock.method(:process_start_time),
+        process_alive: Hive::Lock.method(:process_identity_alive?)
+      )
       path = File.join(folder, "brainstorm.md")
       File.write(path, content)
       yield(path)
+    ensure
+      Hive::Lock.task_lease_repository = prior_repository if defined?(prior_repository)
+      database&.disconnect
     end
   end
 
@@ -692,14 +719,9 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     # the culprit (daemon dispatch, hive run, hive approve, etc).
     with_brainstorm(sample) do |path|
       task_folder = File.dirname(path)
-      # Plant a held lock with this test process's PID so the stale-lock
-      # check sees the holder as live (Process.kill(0, pid) succeeds) and
-      # leaves the lock file in place. Without a live PID the writer would
-      # treat the lock as stale, delete it, and succeed — masking the
-      # contention path we're trying to exercise.
-      held_holder = { "pid" => Process.pid, "op" => "approve", "slug" => "slug-260514-abcd",
-                       "host" => "test-host", "started_at" => Time.utc(2026, 5, 26).iso8601 }
-      File.write(File.join(task_folder, ".lock"), held_holder.to_yaml)
+      held_holder = Hive::Lock.acquire_task_lock(
+        task_folder, op: "approve", slug: "slug-260514-abcd", host: "test-host"
+      )
 
       logger = StubLogger.new
       # Stub the deadline to fail-fast (no need to sleep the real 5s).
@@ -724,7 +746,7 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       assert_equal "approve", payload[:holder]["op"]
       assert_equal "slug-260514-abcd", payload[:holder]["slug"]
     ensure
-      File.delete(File.join(task_folder, ".lock")) if task_folder && File.exist?(File.join(task_folder, ".lock"))
+      Hive::Lock.release_task_lock(task_folder, lock_id: held_holder["lock_id"]) if held_holder
     end
   end
 
@@ -737,8 +759,9 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     # race against the clock.
     with_brainstorm(sample) do |path|
       task_folder = File.dirname(path)
-      held_holder = { "pid" => Process.pid, "op" => "approve", "slug" => "slug-260514-abcd" }
-      File.write(File.join(task_folder, ".lock"), held_holder.to_yaml)
+      held_holder = Hive::Lock.acquire_task_lock(
+        task_folder, op: "approve", slug: "slug-260514-abcd"
+      )
 
       logger = StubLogger.new
       with_deadline(0) do
@@ -757,7 +780,7 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       assert_equal Process.pid, payload[:holder]["pid"]
       assert_equal "approve", payload[:holder]["op"]
     ensure
-      File.delete(File.join(task_folder, ".lock")) if task_folder && File.exist?(File.join(task_folder, ".lock"))
+      Hive::Lock.release_task_lock(task_folder, lock_id: held_holder["lock_id"]) if held_holder
     end
   end
 

@@ -16,7 +16,7 @@ module Hive
 
       # Canonical one-line command shown to installed users when they're
       # behind. Routing every package channel through `hive update` keeps the
-      # automatic migration phase in the guided path; the command re-dispatches
+      # confirmed fleet cutover in the guided path; the command re-dispatches
       # to the channel-specific helper. Dev clones have no single automatic
       # update action, so their nudge remains nil.
       def self.nudge_command(channel)
@@ -32,13 +32,14 @@ module Hive
       end
 
       def initialize(dry_run: false, output: $stdout, runner: nil, env: ENV, channel: nil,
-                     binary_resolver: nil)
+                     binary_resolver: nil, confirm: false)
         @dry_run = dry_run
         @output = output
         @runner = runner || method(:run_command)
         @env = env
         @channel = channel
         @binary_resolver = binary_resolver || method(:resolve_updated_binary)
+        @confirm = confirm
       end
 
       def call
@@ -55,9 +56,12 @@ module Hive
           @output.puts "channel: #{channel}"
           @output.puts "command: #{argv.join(' ')}"
           binary = @binary_resolver.call || "hive"
-          @output.puts "post-update migration: #{Shellwords.join([ binary, 'migrate', '--all' ])}"
+          @output.puts "irreversible boundary: fleet activation from sealed legacy state"
+          @output.puts "post-update migration: #{Shellwords.join([ binary, 'migrate', '--all', '--yes' ])}"
           return 0
         end
+
+        raise Hive::UsageError, "hive update: rerun with --yes after reviewing the irreversible fleet cutover" unless @confirm
 
         @output.puts "hive: update: running #{channel} updater"
         invoke_updater!(argv)
@@ -66,19 +70,19 @@ module Hive
         unless binary
           raise Hive::UnavailableError,
                 "hive update: update installed but the updated Hive executable could not be found; " \
-                "run `hive migrate --all` after restoring Hive on PATH"
+                "reinstall Hive on PATH, then run `hive migrate --all --yes`"
         end
 
-        migration_argv = [ binary, "migrate", "--all" ]
-        @output.puts "hive: update: installed; starting automatic migration"
+        migration_argv = [ binary, "migrate", "--all", "--yes" ]
+        @output.puts "hive: update: installed; starting confirmed fleet cutover"
         result = @runner.call(migration_argv)
         unless command_succeeded?(result)
           raise Hive::Error,
-                "hive update: automatic migration failed#{failure_detail(result)}; review the migration " \
+                "hive update: fleet cutover failed#{failure_detail(result)}; review the cutover " \
                 "errors above, then rerun `#{Shellwords.join(migration_argv)}`"
         end
 
-        @output.puts "hive: update: complete; automatic migration succeeded"
+        @output.puts "hive: update: complete; fleet cutover succeeded"
         0
       end
 
@@ -123,7 +127,7 @@ module Hive
         return result if command_succeeded?(result)
 
         raise Hive::Error,
-              "hive update: updater failed#{failure_detail(result)}; automatic migration was not started"
+              "hive update: updater failed#{failure_detail(result)}; fleet cutover was not started"
       rescue Errno::ENOENT => e
         raise Hive::UnavailableError, "hive update: #{e.message}"
       end

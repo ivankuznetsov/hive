@@ -14,17 +14,19 @@ steps:
     files:
       - path: plan.md
         content: "# Plan\n\n<!-- COMPLETE -->\n"
+      - path: meta.yml
+        content: |
+          id: 98102
+          slug: error-envelope-task
+          display_name: Error envelope task
 
-  # Plant a fresh lock owned by the test process so `Hive::Lock` raises
+  # Plant a live lease owned by the test process so `Hive::Lock` raises
   # ConcurrentRunError (TEMPFAIL=75) when `hive run` tries to acquire it.
   - kind: ruby_block
     block: |
-      lock_path = File.join(sandbox, ".hive-state/stages/4-execute/#{slug}/.lock")
-      File.write(lock_path, {
-        "pid" => Process.pid,
-        "started_at" => Time.now.utc.iso8601,
-        "process_start_time" => Hive::Lock.process_start_time(Process.pid)
-      }.to_yaml)
+      task_folder = File.join(sandbox, ".hive-state/stages/4-execute", slug)
+      @scenario_lease_database, @scenario_lease_repository, @scenario_lock_id =
+        hold_task_lease(task_folder)
 
   # The envelope itself: schema validates against hive-run.v1.json, ok=false,
   # error_kind=concurrent_run, exit_code=75. Each json_assert reruns the CLI;
@@ -57,3 +59,9 @@ steps:
     expect_exit: 75
     pick: [exit_code]
     equals: 75
+
+  - kind: ruby_block
+    block: |
+      task_folder = File.join(sandbox, ".hive-state/stages/4-execute", slug)
+      @scenario_lease_repository.release(task_folder, lock_id: @scenario_lock_id)
+      @scenario_lease_database.disconnect

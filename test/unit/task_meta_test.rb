@@ -109,16 +109,16 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
-  def test_concurrent_completed_at_writers_converge_on_one_value
+  def test_completed_at_is_first_writer_wins_inside_the_callers_task_lease
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 7, slug: "finished", display_name: nil)
-      values = 8.times.map { |index| Time.utc(2026, 7, 20, 8, 0, index) }
-      results = values.map do |value|
-        Thread.new { Hive::TaskMeta.write_completed_at_once(dir, value) }
-      end.map(&:value)
+      first = Time.utc(2026, 7, 20, 8, 0, 0)
+      later = Time.utc(2026, 7, 20, 8, 0, 1)
 
-      assert_equal 1, results.uniq.size
-      assert_equal results.first, Hive::TaskMeta.read(dir)[:completed_at]
+      expected = first.iso8601
+      assert_equal expected, Hive::TaskMeta.write_completed_at_once(dir, first)
+      assert_equal expected, Hive::TaskMeta.write_completed_at_once(dir, later)
+      assert_equal expected, Hive::TaskMeta.read(dir)[:completed_at]
     end
   end
 
@@ -258,14 +258,13 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
-  def test_rewrite_guard_uses_the_existing_ignored_task_lock_namespace
+  def test_rewrite_creates_no_second_task_mutex
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo")
       Hive::TaskMeta.update_display_name(dir, "Updated")
 
-      assert File.exist?(File.join(dir, ".lock.tmp.meta-guard"))
+      assert_empty Dir.glob(File.join(dir, ".meta.yml.tmp.*"))
       refute File.exist?(File.join(dir, ".meta.yml.tmp.guard"))
-      assert_includes Hive::GitOps::HIVE_STATE_GITIGNORE, "stages/*/*/.lock.tmp.*"
     end
   end
 

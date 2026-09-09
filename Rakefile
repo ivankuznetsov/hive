@@ -4,6 +4,7 @@ require "securerandom"
 require_relative "test/support/coverage"
 require_relative "test/support/tmp_cleanup"
 require_relative "test/support/changed_coverage"
+require_relative "test/support/test_partition"
 
 # These expensive outer proofs are intentionally separate from the normal local
 # suite. CI runs them as named merge gates.
@@ -22,31 +23,10 @@ HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
 ].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
 HIVE_COVERAGE_SHARD_COUNT = 6
-HIVE_COVERAGE_SHARDS = begin
-  partition_by_bytes = lambda do |files, count|
-    shards = Array.new(count) { [] }
-    shard_bytes = Array.new(count, 0)
+HIVE_COVERAGE_SHARDS = HiveTestPartition.partition(
+  HIVE_DEFAULT_TEST_FILES, count: HIVE_COVERAGE_SHARD_COUNT, root: __dir__
+).each(&:freeze).freeze
 
-    files.sort_by { |path| [ -File.size(path), path ] }.each do |path|
-      shard = shard_bytes.each_index.min_by { |index| [ shard_bytes[index], index ] }
-      shards.fetch(shard) << path
-      shard_bytes[shard] += File.size(path)
-    end
-
-    shards
-  end
-
-  # Hosted runs identified the third source-balanced partition as the original
-  # long pole, then exposed the fourth as the remaining long pole. Split those
-  # measured hot partitions while preserving the two faster partitions and
-  # adding only two runners instead of reshuffling or doubling the whole matrix.
-  base_shards = partition_by_bytes.call(HIVE_DEFAULT_TEST_FILES, 4)
-  hot_shards = partition_by_bytes.call(base_shards.fetch(2), 2)
-  tail_shards = partition_by_bytes.call(base_shards.fetch(3), 2)
-  shards = [ base_shards[0], base_shards[1], *hot_shards, *tail_shards ]
-  shards.each(&:freeze)
-  shards.freeze
-end
 HIVE_HOSTILE_TEST_FILES = FileList[
   "test/unit/packaging/workflow_creator_values_test.rb"
 ].to_a.freeze
@@ -70,6 +50,20 @@ Rake::TestTask.new("test:agent_cli_runtime") do |t|
 end
 
 Rake::Task[:test].enhance([ "test:agent_cli_runtime" ])
+
+namespace :test do
+  desc "Run the complete local suite in bounded, isolated processes (HIVE_TEST_WORKERS=2)"
+  task :parallel do
+    require_relative "script/test_parallel"
+    success = HiveTestParallel.run(
+      files: HIVE_DEFAULT_TEST_FILES,
+      component_files: Dir["components/agent-cli-runtime/test/**/*_test.rb"].sort,
+      root: File.expand_path(__dir__)
+    )
+    abort "parallel test suite failed" unless success
+  end
+end
+
 
 task "test:enable_hostile" do
   ENV["HIVE_HOSTILE_TESTS"] = "1"
@@ -224,7 +218,7 @@ namespace :coverage do
 
     sources = HiveChangedCoverage.changed_sources(base: base)
     if sources.empty?
-      puts "coverage:changed: no changed lib sources versus #{base}; nothing to run"
+      puts "coverage:changed: no changed lib sources versus #{base}; use bin/test --changed for other changes"
       next
     end
 
@@ -237,7 +231,7 @@ namespace :coverage do
 
     root = File.expand_path(__dir__)
     run_id = "changed-#{Process.pid}-#{SecureRandom.hex(4)}"
-    env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+    env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID HIVE_COVERAGE_COLLECT_ONLY HIVE_COVERAGE_LOAD_ALL RUBYOPT]
     old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
 
     begin
@@ -245,6 +239,8 @@ namespace :coverage do
       ENV["HIVE_COVERAGE"] = "1"
       ENV["HIVE_COVERAGE_ROOT"] = root
       ENV["HIVE_COVERAGE_RUN_ID"] = run_id
+      ENV["HIVE_COVERAGE_COLLECT_ONLY"] = "1"
+      ENV["HIVE_COVERAGE_LOAD_ALL"] = "0"
       ENV["RUBYOPT"] = [ "-I#{File.join(root, 'test')} -rhive_coverage_boot", ENV["RUBYOPT"] ].compact.join(" ")
 
       # Reuse the focused runner so multiple mapped files are all loaded and
@@ -260,8 +256,10 @@ namespace :coverage do
       abort "coverage:changed: focused tests failed" unless success
 
       HiveTestCoverage.configure!(root: root)
-      HiveTestCoverage.report!
-      report = HiveTestCoverage.read_report(File.join(root, "coverage", "coverage.json"))
+      report = HiveTestCoverage.build_report(HiveTestCoverage.merged_results, sources: sources)
+      report_path = File.join(root, "coverage", "#{run_id}.json")
+      File.write(report_path, JSON.pretty_generate(report))
+      puts "coverage:changed: report #{report_path}"
       failures = HiveChangedCoverage.enforce(report, sources: sources)
       abort "coverage:changed failed:\n  - #{failures.join("\n  - ")}" unless failures.empty?
       puts "coverage:changed: exact line coverage holds for all #{sources.length} changed source(s)"

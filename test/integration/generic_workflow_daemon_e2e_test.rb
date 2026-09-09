@@ -115,19 +115,7 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
               max_concurrent_runs: 5, max_concurrent_per_project: 5,
               max_runs_per_day_per_project: 100
             )
-            consumer = LiveStatusConsumer.new(
-              fetch: lambda do
-                out, = capture_io do
-                  Hive::CLI.start([ "status", "--internal-task-graph", "--json" ])
-                end
-                doc = JSON.parse(out)
-                mapper = Hive::Daemon::StatusConsumer.new
-                Hive::Daemon::StatusConsumer::Result.new(
-                  ok: true, rows: mapper.send(:extract_rows, doc),
-                  projects: mapper.send(:extract_projects, doc), error: nil
-                )
-              end
-            )
+            consumer = Hive::Daemon::StatusConsumer.new
             dispatcher = Hive::Daemon::Dispatcher.new(
               # edit_debounce_sec: 0 so the generic ready_to_run debounce never
               # waits — the inline runner writes real file mtimes, and real
@@ -209,20 +197,6 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
     def close; end
   end
 
-  # Status consumer that recomputes rows from a live in-process
-  # the internal task graph each fetch (via the injected lambda), reusing the
-  # real StatusConsumer's row/project mapping so the dispatcher sees on-disk
-  # state every tick.
-  class LiveStatusConsumer
-    def initialize(fetch:)
-      @fetch = fetch
-    end
-
-    def fetch
-      @fetch.call
-    end
-  end
-
   # Supervisor stand-in that runs each dispatched command in-process and
   # surfaces it as a child exit on the NEXT reap — mirroring the real
   # daemon's spawn→reap split across ticks.
@@ -279,7 +253,6 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
     folder = stage_folder(project_root, stage.dir)
     FileUtils.mkdir_p(folder)
     Hive::TaskMeta.write(folder, id: 101, slug: SLUG, display_name: "Generic Daemon", workflow: descriptor.id.to_s)
-    seed_task_projection(folder)
   end
 
   def seed_coding_task(project)
@@ -332,7 +305,8 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
     end
     with_attempt_context(
       attempt_id: "generic-workflow-test-attempt",
-      task_generation: "generic-workflow-test-generation"
+      task_generation: 0,
+      ownership_generation: "generic-workflow-test-generation"
     ) { yield }
   ensure
     Hive::Stages::Base.define_singleton_method(:spawn_agent, original) if original

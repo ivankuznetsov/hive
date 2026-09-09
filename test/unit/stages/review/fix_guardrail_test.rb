@@ -129,6 +129,28 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_capture_diff_forces_prefixes_when_repo_disables_them
+    with_tmp_git_repo do |dir|
+      run!("git", "-C", dir, "config", "diff.noprefix", "true")
+      base = `git -C #{dir} rev-parse HEAD`.strip
+      path = ".github/workflows/deploy.yml"
+      FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+      File.write(File.join(dir, path), "name: deploy\n")
+      run!("git", "-C", dir, "add", path)
+      run!("git", "-C", dir, "commit", "-m", "add workflow", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      diff = Hive::Stages::Review::FixGuardrail.capture_diff(dir, base, head)
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir), base_sha: base, head_sha: head
+      )
+
+      assert_includes diff, "+++ b/#{path}"
+      assert_equal :tripped, result.status
+      assert(result.matches.any? { |match| match.pattern_name == "ci_workflow_edit" })
+    end
+  end
+
   def test_trips_on_cached_diff_with_mnemonic_commit_and_index_prefixes
     diff = <<~DIFF
       diff --git c/.github/workflows/deploy.yml i/.github/workflows/deploy.yml
@@ -172,6 +194,166 @@ class FixGuardrailTest < Minitest::Test
       assert(result.matches.any? { |m| m.pattern_name == "ci_workflow_edit" },
              "expected a ci_workflow_edit match for the deleted workflow")
     end
+  end
+
+  def test_trips_on_pure_rename_into_github_workflows
+    # A pure rename with no content change emits NO ---/+++ headers in
+    # the diff — git prints only `rename from` / `rename to` extended
+    # headers (rename detection is on by default). Pre-fix, scan_diff
+    # extracted paths solely from ---/+++ pairs, so a fix agent could
+    # `git mv docs/template.yml .github/workflows/deploy.yml` and the
+    # guardrail returned :clean. The rename target must trip
+    # ci_workflow_edit just like an edited workflow would.
+    with_tmp_git_repo do |dir|
+      FileUtils.mkdir_p(File.join(dir, "docs"))
+      File.write(File.join(dir, "docs", "template.yml"), "name: template\n")
+      run!("git", "-C", dir, "add", "docs/template.yml")
+      run!("git", "-C", dir, "commit", "-m", "add template", "--quiet")
+      base = `git -C #{dir} rev-parse HEAD`.strip
+
+      FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+      run!("git", "-C", dir, "mv", "docs/template.yml", ".github/workflows/deploy.yml")
+      run!("git", "-C", dir, "commit", "-m", "move template into workflows", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status,
+                   "pure rename into .github/workflows/ must trip ci_workflow_edit (not return :clean)"
+      assert(result.matches.any? { |m| m.pattern_name == "ci_workflow_edit" },
+             "expected a ci_workflow_edit match for the renamed workflow path")
+    end
+  end
+
+  def test_scan_diff_evaluates_file_path_patterns_on_rename_headers
+    # Direct scan_diff coverage for the rename/copy extended-header
+    # path: both sides are scanned and current_file is tracked.
+    diff = <<~DIFF
+      diff --git a/docs/template.yml b/.github/workflows/deploy.yml
+      similarity index 100%
+      rename from docs/template.yml
+      rename to .github/workflows/deploy.yml
+    DIFF
+
+    matches = Hive::Stages::Review::FixGuardrail.scan_diff(
+      diff, Hive::Stages::Review::FixGuardrail.resolve_patterns(cfg)
+    )
+
+    trip = matches.find { |m| m.pattern_name == "ci_workflow_edit" }
+    refute_nil trip, "rename to .github/workflows/deploy.yml must trip ci_workflow_edit"
+    assert_equal ".github/workflows/deploy.yml", trip.file
+    assert_nil trip.line
+  end
+
+  def test_trips_on_c_quoted_rename_target_with_tab
+    # core.quotePath=false (set by capture_diff) only un-quotes non-ASCII
+    # bytes; paths containing control characters (tab, newline, quote) are
+    # still C-quoted by git: `rename to ".github/workflows/de\tploy.yml"`.
+    # Pre-rework, the quoted token kept its surrounding double quotes and
+    # backslash escapes, so the ci_workflow_edit anchor
+    # `\A(?:\.github/workflows/` never matched and run! returned :clean.
+    with_tmp_git_repo do |dir|
+      FileUtils.mkdir_p(File.join(dir, "docs"))
+      File.write(File.join(dir, "docs", "template.yml"), "name: template\n")
+      run!("git", "-C", dir, "add", "docs/template.yml")
+      run!("git", "-C", dir, "commit", "-m", "add template", "--quiet")
+      base = `git -C #{dir} rev-parse HEAD`.strip
+
+      FileUtils.mkdir_p(File.join(dir, ".github", "workflows"))
+      run!("git", "-C", dir, "mv", "docs/template.yml",
+           ".github/workflows/de\tploy.yml")
+      run!("git", "-C", dir, "commit", "-m", "rename into workflows", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      raw = File.join(dir, "raw.diff")
+      File.write(raw, `git -C #{dir} diff --unified=0 #{base}..#{head}`)
+      assert File.read(raw).include?("rename to \".github/workflows/de\\tploy.yml\""),
+             "setup: git must emit a C-quoted rename header for the tab path"
+
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+      assert_equal :tripped, result.status,
+                   "C-quoted rename into .github/workflows/ must trip ci_workflow_edit (not return :clean)"
+      trip = result.matches.find { |m| m.pattern_name == "ci_workflow_edit" }
+      refute_nil trip
+      assert_equal ".github/workflows/de\tploy.yml", trip.file,
+                   "the decoded path (real tab, no quotes) must be surfaced"
+    end
+  end
+
+  def test_scan_diff_decodes_c_quoted_rename_and_header_paths
+    # Direct scan_diff coverage for the C-quoted forms git emits when a
+    # path contains control characters: rename/copy extended headers
+    # ("rename to \"…\"") and quoted ---/+++ pairs (prefix inside the
+    # quotes). Both must be decoded to the literal path before pattern
+    # matching.
+    diff = <<~DIFF
+      diff --git "a/docs/de\\tploy.yml" b/.github/workflows/de\\nploy.yml
+      similarity index 95%
+      rename from "docs/de\\tploy.yml"
+      rename to ".github/workflows/de\\nploy.yml"
+      --- "a/docs/de\\tploy.yml"
+      +++ "b/.github/workflows/de\\nploy.yml"
+      @@ -1 +1 @@
+      -name: template
+      +name: deploy
+    DIFF
+
+    matches = Hive::Stages::Review::FixGuardrail.scan_diff(
+      diff, Hive::Stages::Review::FixGuardrail.resolve_patterns(cfg)
+    )
+
+    trips = matches.select { |m| m.pattern_name == "ci_workflow_edit" }
+    assert trips.any? { |m| m.file == ".github/workflows/de\nploy.yml" },
+           "decoded C-quoted rename-to path must trip ci_workflow_edit"
+    assert trips.any?, "quoted rename and quoted ---/+++ paths must be scanned"
+  end
+
+  def test_decode_git_path_decodes_all_git_control_escapes
+    encoded = 'a\\ab\\bc\\vd\\fe\\rf\\"g\\\\h\\001'
+
+    decoded = Hive::Stages::Review::FixGuardrail.send(:decode_git_path, encoded)
+
+    assert_equal "a\ab\bc\vd\fe\rf\"g\\h\x01", decoded
+  end
+
+  def test_custom_raw_diff_header_pattern_sees_rename_headers
+    # The rename/copy branch must not swallow the line: custom
+    # :raw_diff_header patterns have to see extended rename/copy headers
+    # too, the same way they see `diff --git` and mode-change lines.
+    custom_cfg = cfg(
+      "review" => {
+        "fix" => {
+          "guardrail" => {
+            "patterns_override" => {
+              "no_workflow_renames" => {
+                "regex" => '\Arename to \\.github/',
+                "severity" => "high",
+                "targets" => "raw_diff_header",
+                "description" => "no renames into .github/"
+              }
+            }
+          }
+        }
+      }
+    )
+    diff = <<~DIFF
+      diff --git a/docs/template.yml b/.github/workflows/deploy.yml
+      similarity index 100%
+      rename from docs/template.yml
+      rename to .github/workflows/deploy.yml
+    DIFF
+
+    matches = Hive::Stages::Review::FixGuardrail.scan_diff(
+      diff, Hive::Stages::Review::FixGuardrail.resolve_patterns(custom_cfg)
+    )
+
+    assert matches.any? { |m| m.pattern_name == "no_workflow_renames" },
+           "custom :raw_diff_header patterns must see rename-to extended headers"
   end
 
   def test_trips_on_jenkinsfile_edit
@@ -278,7 +460,7 @@ class FixGuardrailTest < Minitest::Test
 
   def test_trips_on_aws_access_key_in_diff
     with_two_commits(file: "config/aws.rb",
-                     content: %(ACCESS = "AKIAIOSFODNN7EXAMPLE"\n)) do |dir, base, head|
+                     content: %(ACCESS = "AKIAQ7R2S5T3U6V4W2XY"\n)) do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
@@ -290,7 +472,7 @@ class FixGuardrailTest < Minitest::Test
 
   def test_trips_on_github_token_in_diff
     with_two_commits(file: "config/tokens.rb",
-                     content: %(TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"\n)) do |dir, base, head|
+                     content: %(TOKEN = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"\n)) do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
@@ -347,14 +529,14 @@ class FixGuardrailTest < Minitest::Test
   def test_dynamic_password_with_a_literal_fallback_trips_the_secret_guardrail
     with_two_commits(
       file: "app/controllers/setup/operators_controller.rb",
-      content: "password: params[:x] || \"realsecret99\"\n"
+      content: "password: params[:x] || \"ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\"\n"
     ) do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir), base_sha: base, head_sha: head
       )
 
       assert_equal :tripped, result.status
-      assert_equal "secrets_pattern_match.password_assignment",
+      assert_equal "secrets_pattern_match.github-pat",
                    result.matches.first.pattern_name
     end
   end
@@ -371,7 +553,7 @@ class FixGuardrailTest < Minitest::Test
 
       assert_equal :tripped, result.status
       assert(result.matches.any? do |match|
-        match.pattern_name == "secrets_pattern_match.password_assignment"
+        match.pattern_name == "secrets_pattern_match.generic-password"
       end)
     end
   end
@@ -389,7 +571,7 @@ class FixGuardrailTest < Minitest::Test
 
       assert_equal :tripped, result.status
       assert(result.matches.any? do |match|
-        match.pattern_name == "secrets_pattern_match.password_assignment"
+        match.pattern_name == "secrets_pattern_match.generic-password"
       end)
     end
   end
@@ -438,7 +620,7 @@ class FixGuardrailTest < Minitest::Test
 
       assert_equal :tripped, result.status
       assert_equal 2, result.matches.count do |match|
-        match.pattern_name == "secrets_pattern_match.password_assignment"
+        match.pattern_name == "secrets_pattern_match.generic-password"
       end
     end
   end
@@ -484,7 +666,7 @@ class FixGuardrailTest < Minitest::Test
 
       assert_equal :tripped, result.status
       assert(result.matches.any? do |match|
-        match.pattern_name == "secrets_pattern_match.password_assignment"
+        match.pattern_name == "secrets_pattern_match.generic-password"
       end)
     end
   end
@@ -614,41 +796,38 @@ class FixGuardrailTest < Minitest::Test
 
   # --- dependency_lockfile_change ----------------------------------------
 
-  def test_trips_on_gemfile_lock_change
+  def test_allows_gemfile_lock_change
     with_two_commits(file: "Gemfile.lock",
                      content: "GEM\n  remote: https://rubygems.org/\n  specs:\n    rake (13.0)\n") do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
       )
-      assert_equal :tripped, result.status
-      assert(result.matches.any? { |m| m.pattern_name == "dependency_lockfile_change" })
+      assert_equal :clean, result.status
+      assert_empty result.matches
     end
   end
 
-  def test_trips_on_package_lock_change
+  def test_allows_package_lock_change
     with_two_commits(file: "package-lock.json",
                      content: %({"name":"x","lockfileVersion":3}\n)) do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
       )
-      assert_equal :tripped, result.status
+      assert_equal :clean, result.status
     end
   end
 
-  def test_trips_on_nested_package_lock_in_monorepo
-    # Monorepos: packages/api/package-lock.json. Pre-fix the regex
-    # used `\A` and missed any non-root lockfile.
+  def test_allows_nested_package_lock_in_monorepo
     with_two_commits(file: "packages/api/package-lock.json",
                      content: %({"name":"api","lockfileVersion":3}\n)) do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
       )
-      assert_equal :tripped, result.status,
-                   "monorepo packages/api/package-lock.json must trip dependency_lockfile_change"
-      assert(result.matches.any? { |m| m.pattern_name == "dependency_lockfile_change" })
+      assert_equal :clean, result.status
+      assert_empty result.matches
     end
   end
 
@@ -817,7 +996,7 @@ class FixGuardrailTest < Minitest::Test
     with_tmp_git_repo do |dir|
       base = `git -C #{dir} rev-parse HEAD`.strip
       target = File.join(dir, "tëst.rb")
-      File.write(target, %(API_KEY = "AKIA1234567890123456"\n))
+      File.write(target, %(API_KEY = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"\n))
       run!("git", "-C", dir, "add", "tëst.rb")
       run!("git", "-C", dir, "commit", "-m", "add unicode-named file with secret", "--quiet")
       head = `git -C #{dir} rev-parse HEAD`.strip

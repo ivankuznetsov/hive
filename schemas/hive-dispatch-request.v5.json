@@ -20,7 +20,31 @@
     "created_at": { "type": "string", "format": "date-time" },
     "project": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "minLength": 1 },
     "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$" },
-    "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+    "argv": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "type": "string", "minLength": 1 },
+      "prefixItems": [
+        { "const": "hive" },
+        {
+          "enum": [
+            "run", "develop", "brainstorm", "plan", "plan-review-run",
+            "review", "open-pr", "artifacts", "finalize", "archive",
+            "markers", "daemon", "evidence"
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "if": { "prefixItems": [{}, { "const": "daemon" }] },
+          "then": { "const": ["hive", "daemon", "install", "--force"] }
+        },
+        {
+          "if": { "prefixItems": [{}, { "const": "evidence" }] },
+          "then": { "minItems": 3, "prefixItems": [{}, {}, { "const": "rework" }] }
+        }
+      ]
+    },
     "requestor": {
       "type": "string",
       "enum": ["bot", "healer", "web", "tui", "cli", "action", "daemon", "recorder", "operator"]

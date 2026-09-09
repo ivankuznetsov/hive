@@ -180,9 +180,12 @@ creation-only workflow authoring never invokes `hive new`.
 
 ## Serialization fallback
 
-The public `hive new` command remains text-only even when the wrapper lifts a
-`--json` token. It has no command JSON serialization or fallback policy; typed
-programmatic callers receive Ruby exceptions rather than a fallback document.
+Without an idempotency key, `hive new --json` retains its legacy text output.
+With `--idempotency-key KEY --json`, success and error output use `hive-new.v1`.
+The shared envelope emitter wraps success-serialization failures as internal
+errors. If encoding the error envelope also raises `JSON::GeneratorError`, it
+warns on stderr and emits no fallback document; the original typed error still
+controls the command exit. Programmatic `call!` callers receive exceptions.
 
 ## Exit codes
 

@@ -269,7 +269,10 @@ module WikiCommandIndex
         index > start && !lines[index].fenced && lines[index].text.start_with?("## ")
       end
       finish ||= lines.length
-      outside = lines.each_index.filter_map { |index| lines[index] unless (start...finish).cover?(index) }
+      outside = lines.each_index.filter_map do |index|
+        line = lines[index]
+        line unless (start...finish).cover?(index) && !line.fenced && line.text.lstrip.start_with?("|")
+      end
       visible_blocks(outside).filter_map do |block|
         body = block.map(&:text).join
         table = block.any? { |line| line.text.lstrip.start_with?("|") }
@@ -421,9 +424,28 @@ module WikiCommandIndex
       sections.any? do |section|
         next false unless section.heading.match?(heading_pattern)
 
-        texts = context.texts&.fetch(section) || [ "#{section.heading}\n#{section.body}" ]
+        texts = contract_texts(section, requirement, context)
         texts.any? do |text|
           text.match?(content_pattern) && (!meaningful || meaningful_contract_text?(text))
+        end
+      end
+    end
+
+    def contract_texts(section, requirement, context)
+      texts = context.texts.fetch(section)
+      header = section.body.lines.filter_map { |line| cells(line) }.first
+      return texts unless header&.first == "Command"
+
+      column = header.index { |name| name.downcase == requirement.to_s.tr("_", " ") }
+
+      texts.flat_map do |text|
+        rows = text.lines.filter_map { |line| cells(line) }
+        if rows.empty?
+          [ text ]
+        else
+          rows.filter_map do |row|
+            (column ? row[column].to_s : "") if row.first.match?(context.pattern)
+          end
         end
       end
     end
@@ -432,7 +454,7 @@ module WikiCommandIndex
       sections.any? do |section|
         next false unless section.heading.match?(CONTRACT_HEADINGS.fetch(:options))
 
-        texts = context.texts&.fetch(section) || [ "#{section.heading}\n#{section.body}" ]
+        texts = contract_texts(section, :options, context)
         texts.any? do |text|
           explicit_none = text.match?(/options?\s*(?::|are)\s*(?:not applicable|none)|no (?:command-specific )?options?/i)
           flags = text.match?(/--[a-z]/)

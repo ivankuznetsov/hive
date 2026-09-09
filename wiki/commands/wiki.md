@@ -42,6 +42,11 @@ duplicate entries already inside the generated block.
 The command exits with `Hive::InvalidTaskPath` / EX_USAGE when the
 project has no `wiki/` directory or when `--check` finds stale output.
 
+## Options
+
+`hive wiki compile-log --check` reports whether the compiled log is current
+without rewriting it. Omit `--check` to compile the log.
+
 ## Output, exceptions, and exit codes
 
 The command has no JSON mode or schema. Output is human-readable text, so JSON

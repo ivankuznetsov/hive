@@ -37,7 +37,7 @@ impersonate subcommands during that selection.
 
 ## Command index
 
-Rendered `hive help` defines the visible public top-level command set. This
+Rendered top-level help defines the visible public command set. This
 index is navigation only: each canonical first command token has exactly one
 row and one owner link. The linked owner is authoritative for command syntax,
 options, behavior, examples, schemas, output/error exceptions, serialization

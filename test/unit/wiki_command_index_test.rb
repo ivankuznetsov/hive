@@ -202,6 +202,58 @@ class WikiCommandIndexTest < Minitest::Test
     end
   end
 
+  def test_shared_contract_table_requires_each_command_cell
+    owner = File.read(File.join(WIKI_ROOT, "commands/stage_action.md"))
+    command_row = owner.lines.find { |line| line.start_with?("| `hive brainstorm` | Options:") }
+    assert command_row
+    { 2 => :options, 3 => :behavior, 4 => :schema, 5 => :output_exceptions,
+      6 => :serialization_fallback, 7 => :exit_codes }.each do |column, requirement|
+      cells = command_row.split("|", -1)
+      cells[column] = " "
+      incomplete = owner.sub(command_row, cells.join("|"))
+      result = fixture_guard("commands/stage_action" => incomplete).evaluate(
+        help_text: help_for("brainstorm", "plan"),
+        index_text: index_for(
+          [ "brainstorm", "[[commands/stage_action]]" ],
+          [ "plan", "[[commands/stage_action]]" ]
+        )
+      )
+      assert_owner_contract_diagnostic result, "brainstorm", "commands/stage_action", requirement
+    end
+  end
+
+  def test_shared_contract_table_requires_each_named_column
+    owner = File.read(File.join(WIKI_ROOT, "commands/stage_action.md"))
+    { 2 => :options, 3 => :behavior, 4 => :schema, 5 => :output_exceptions,
+      6 => :serialization_fallback, 7 => :exit_codes }.each do |column, requirement|
+      incomplete = owner.lines.map do |line|
+        next line unless line.start_with?("|") && line.split("|", -1).size == 9
+
+        cells = line.split("|", -1)
+        cells.delete_at(column)
+        cells.join("|")
+      end.join
+      result = fixture_guard("commands/stage_action" => incomplete).evaluate(
+        help_text: help_for("brainstorm", "plan"),
+        index_text: index_for(
+          [ "brainstorm", "[[commands/stage_action]]" ],
+          [ "plan", "[[commands/stage_action]]" ]
+        )
+      )
+      assert_owner_contract_diagnostic result, "brainstorm", "commands/stage_action", requirement
+    end
+  end
+
+  def test_navigation_rejects_contract_prose_inside_index_section
+    index = index_for([ "alpha", "[[commands/alpha]]" ]).sub(
+      "## Shared conventions", "`hive alpha --json` emits `hive-alpha.v99`.\n\n## Shared conventions"
+    )
+    result = fixture_guard("commands/alpha" => complete_owner).evaluate(
+      help_text: help_for("alpha"), index_text: index
+    )
+    assert_diagnostic result, :command_contract_outside_index
+  end
+
   def test_guard_validates_each_command_owned_by_a_shared_document
     result = fixture_guard("commands/shared" => complete_owner).evaluate(
       help_text: help_for("alpha", "beta"),

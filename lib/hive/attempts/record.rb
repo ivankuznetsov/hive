@@ -6,6 +6,7 @@ require "hive/output_reference"
 require "hive/billing_evidence"
 require "hive/stringify_keys"
 require "hive/runtime_control_plane/codec"
+require "hive/proposals/source_event"
 
 module Hive
   module Attempts
@@ -16,7 +17,7 @@ module Hive
     # JSON holds only the remaining structured execution details.
     class Record
       SCHEMA = "hive-attempt"
-      SCHEMA_VERSION = 4
+      SCHEMA_VERSION = 5
       RECEIPT_VERSION = 1
       MAX_IDENTIFIER_BYTES = 128
       MAX_DETAIL_BYTES = 240
@@ -162,11 +163,13 @@ module Hive
         )
       end
 
-      def self.task_stage_subject(task_id:, task_slug:, intended_stage:)
-        {
+      def self.task_stage_subject(task_id:, task_slug:, intended_stage:, proposal: nil)
+        subject = {
           "kind" => "task_stage", "task_id" => task_id,
           "task_slug" => task_slug, "intended_stage" => intended_stage
         }
+        subject["proposal"] = Hive::StringifyKeys.call(proposal) if proposal
+        subject
       end
 
       def self.validate_receipt!(receipt, attempt_id:, task_generation:, task_input_epoch: nil,
@@ -245,6 +248,7 @@ module Hive
         validate_source_schema!
         validate!
         self.class.deep_freeze(@data.fetch("routing"))
+        self.class.deep_freeze(@data.fetch("subject"))
         self.class.deep_freeze(@data["receipt"]) if @data["receipt"]
         @data.freeze
       end
@@ -271,6 +275,7 @@ module Hive
       def checkpoint = Hive::StringifyKeys.call(@data["checkpoint"])
       def subject = Hive::StringifyKeys.call(@data["subject"])
       def subject_kind = @data.dig("subject", "kind")
+      def proposal_binding = Hive::StringifyKeys.call(@data.dig("subject", "proposal"))
       def module_hook? = subject_kind == "module_hook"
       def live? = %w[launching running].include?(state)
       def final? = FINAL_STATES.include?(state)
@@ -395,11 +400,13 @@ module Hive
         case value.fetch("kind")
         when "task_stage"
           expected = %w[intended_stage kind task_id task_slug]
+          expected << "proposal" if value.key?("proposal")
           unless @data["task_id"].is_a?(String) && !@data["task_id"].empty? &&
-                 value.keys.sort == expected && value["task_id"] == @data["task_id"] &&
+                 value.keys.sort == expected.sort && value["task_id"] == @data["task_id"] &&
                  value["task_slug"] == @data["task_slug"] && value["intended_stage"] == @data["intended_stage"]
             raise InvalidRecord, "attempt task subject has incompatible identity with legacy fields"
           end
+          validate_proposal_binding!(value["proposal"]) if value.key?("proposal")
         when "module_hook"
           expected = %w[
             configuration_digest event_id event_name grant_digest hook kind module
@@ -415,6 +422,12 @@ module Hive
             raise InvalidRecord, "attempt module hook subject is malformed"
           end
         end
+      end
+
+      def validate_proposal_binding!(value)
+        Hive::Proposals::SourceEvent.normalize_proposal_binding(value)
+      rescue Hive::Proposals::Error => error
+        raise InvalidRecord, "attempt proposal binding is invalid: #{error.message}"
       end
 
       class << self

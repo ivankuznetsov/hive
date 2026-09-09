@@ -18,6 +18,11 @@ Updated: 2026-09-04
 
 Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`, `opencode`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on bounded default liveness status, lock-checked memoized task-journal folds, the operational workflow contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, native semantic `hive task` inspection, and stable-ID semantic E2E profiles; the former public full-fleet status graph is now internal-only pending consumer-specific projection extraction. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and OpenCode `/hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional authenticated live diagnostics.
 
+Project-level [[modules/proposals]] retain immutable skill/workflow candidate
+revisions, evaluations, authoritative lifecycle facts, rollback evidence, live
+CLI discovery, deterministic wiki views, and bounded typed context. The entire
+surface is tracking-only and cannot activate or revert an active artifact.
+
 Reusable mechanisms remain in this monorepo behind the canonical
 [[component-boundaries]] catalog. The seventeen-row internal graph has thirteen
 `boundary-ready` facades—Runtime Control Plane, UserService, Agent Support, Agent ABI, Agent Artifact Firewall,
@@ -70,6 +75,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/patrol]] — `wiki/commands/patrol.md`
 - [[commands/pairing]] — `wiki/commands/pairing.md`
 - [[commands/prune]] — `wiki/commands/prune.md`
+- [[commands/proposal]] — `wiki/commands/proposal.md`
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
 - [[commands/refactor-patrol]] — `wiki/commands/refactor-patrol.md`
 - [[commands/run]] — `wiki/commands/run.md`
@@ -121,6 +127,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[modules/plan_review]] — `wiki/modules/plan_review.md`
 - [[modules/pr]] — `wiki/modules/pr.md`
 - [[modules/protected_files]] — `wiki/modules/protected_files.md`
+- [[modules/proposals]] — `wiki/modules/proposals.md`
 - [[modules/provider_routing]] — `wiki/modules/provider_routing.md`
 - [[modules/rebase]] — `wiki/modules/rebase.md`
 - [[modules/reviewers]] — `wiki/modules/reviewers.md`

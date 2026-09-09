@@ -1,0 +1,9 @@
+{
+  "reverted_revision": "v2",
+  "reason": "A production regression required an external compensating revert.",
+  "external_revert": {
+    "kind": "commit",
+    "reference": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "idempotency_key": "rollback-accepted-review-prompt"
+}

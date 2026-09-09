@@ -1,7 +1,7 @@
 ---
 title: Architecture
 type: architecture
-source: lib/hive/, web/, bin/hive, templates/
+source: lib/hive/, lib/hive/proposals/, web/, bin/hive, templates/
 created: 2026-04-25
 updated: 2026-09-04
 tags: [architecture, overview]
@@ -30,6 +30,25 @@ Top-down, each layer only depends on the ones below it. There are no cycles. Sta
 2. **`<worktree_root>/<slug>/`** (default `~/Dev/<project>.worktrees/<slug>/`) — the feature worktree. Contains actual code, branched off `<default_branch>`. Created by `4-execute/`.
 
 Master is never modified by Hive (apart from one initial `chore: ignore .hive-state worktree` commit). All hive metadata lives on `hive/state` so master `git log` stays code-only.
+
+Project-level proposal tracking is an application subsystem inside the first
+tree. A controller-admitted durable attempt writes an immutable source receipt;
+after that receipt is committed to `hive/state`, a separate transaction creates
+one immutable candidate record or appends one immutable event. Live CLI and
+bounded context read a shared projection, while the wiki compiler reads an
+exact pinned state commit:
+
+```text
+durable attempt → proposals/v1/inbox → record/event files → projection/query
+                                                       ├→ live proposal CLI
+                                                       ├→ typed prompt facts
+                                                       └→ pinned wiki compiler
+```
+
+This boundary is deliberately one-way. Proposal state never calls the active
+skill provisioner, workflow package mutation stores, publication paths, or a
+revert executor. Acceptance and rollback are retained facts, not behavior
+changes. See [[modules/proposals]] and [[commands/proposal]].
 
 ## Process model
 
@@ -526,4 +545,5 @@ precedence, budgets, and negative guarantees are owned by
 - [[cli]] — command surface.
 - [[dependencies]] — gem choices.
 - [[decisions]] — architectural decisions (ADR style).
+- [[modules/proposals]] · [[commands/proposal]] — immutable tracking-only skill/workflow proposal history.
 - [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daemon]] · [[modules/gh]] · [[modules/bot]] · [[commands/refactor-patrol]]

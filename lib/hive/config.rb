@@ -17,6 +17,7 @@ require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 require "hive/warnings"
+require "hive/proposals/config_validator"
 
 module Hive
   module Config
@@ -662,6 +663,27 @@ module Hive
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5,
         "last_seen_state_file" => "~/Dev/hive/.bot.last_seen_update_id"
+      },
+      # Tracking-only skill/workflow proposal history. Empty actor maps make
+      # evaluator and lifecycle mutation authority opt-in; evidence defaults
+      # to digest-only restricted storage.
+      "proposals" => {
+        "evaluators" => {},
+        "authorities" => {},
+        "evidence" => {
+          "visibility" => "restricted",
+          "retention" => "task",
+          "allowed_link_schemes" => [ "https" ]
+        },
+        "limits" => {
+          "max_pending_sources" => 256,
+          "max_project_events" => 10_000,
+          "max_proposal_events" => 1_000,
+          "max_project_bytes" => 67_108_864,
+          "max_proposal_bytes" => 8_388_608,
+          "max_sources_per_actor_per_hour" => 100
+        },
+        "context" => { "max_items" => 20, "max_bytes" => 2_048 }
       },
       # Stage-level invariants enforced by `Hive::Stages::Base.with_stage_events`.
       # `ensure_clean_on_exit` (default true) makes worktree-owning stages
@@ -2059,6 +2081,7 @@ module Hive
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_attempt_timers!(cfg, source_path)
+      validate_proposals!(cfg, source_path)
       validate_conditions!(cfg, source_path)
       validate_artifact_capture!(cfg, source_path)
       validate_daemon!(cfg, source_path)
@@ -2104,6 +2127,7 @@ module Hive
       refactor_patrol
       answer_digest
       bot
+      proposals
       rebase
     ].freeze
 
@@ -3934,6 +3958,12 @@ module Hive
       raise ConfigError,
             "#{label} in #{describe_source(source_path)} must be an integer " \
             ">= #{min}; got #{value.inspect} (#{value.class})"
+    end
+
+    def validate_proposals!(cfg, source_path)
+      Hive::Proposals::ConfigValidator.validate!(
+        cfg.fetch("proposals"), source_path:
+      )
     end
 
     def validate_removed_digest!(cfg, source_path)

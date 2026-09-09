@@ -35,6 +35,71 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_proposal_record_and_event_schemas_are_registered_and_closed
+    %w[
+      hive-proposal-record hive-proposal-event hive-proposal-source-event
+      hive-proposal-source-index hive-proposal-source-status hive-proposal-index
+      hive-proposal-list hive-proposal-show hive-proposal-mutation
+    ].each do |name|
+      path = Hive::Schemas.schema_path(name)
+      document = JSON.parse(File.read(path))
+
+      assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
+      assert_equal false, document.fetch("additionalProperties")
+      assert_equal 1, document.dig("properties", "schema_version", "const")
+    end
+  end
+
+  def test_proposal_cli_ids_and_error_kinds_match_the_closed_runtime_vocabulary
+    %w[hive-proposal-list hive-proposal-show hive-proposal-mutation].each do |name|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(name)))
+      assert_equal Hive::Schemas::ProposalErrorKind::ALL.sort,
+                   document.dig("properties", "error_kind", "enum").sort
+    end
+    mutation = JSON.parse(File.read(Hive::Schemas.schema_path("hive-proposal-mutation")))
+    refute JSONSchemer.schema(mutation).valid?({
+      "schema" => "hive-proposal-mutation", "schema_version" => 1, "ok" => true,
+      "action" => "decide", "proposal_id" => "prp-00000000-0000-1000-8000-000000000001"
+    })
+  end
+
+  def test_proposal_source_index_and_status_schemas_accept_the_durable_shapes
+    proposal_id = "prp-00000000-0000-4000-8000-000000000001"
+    source_event_id = "pse-#{'a' * 64}"
+    event_id = "pev-00000000-0000-4000-8000-000000000002"
+    index = {
+      "schema" => "hive-proposal-source-index", "schema_version" => 1,
+      "pending" => [ source_event_id ], "consumed_count" => 0,
+      "quarantined_count" => 0, "total_sources" => 1,
+      "pending_proposals" => { source_event_id => proposal_id },
+      "reservations" => { source_event_id => { "bytes" => 266_240, "events" => 1 } },
+      "usage" => {
+        "project_bytes" => 1024, "project_events" => 1,
+        "proposals" => { proposal_id => { "bytes" => 1024, "events" => 1 } }
+      },
+      "recent_actor_events" => [
+        { "actor_id" => "reviewer", "occurred_at" => "2026-09-08T12:00:00Z" }
+      ]
+    }
+    status = {
+      "schema" => "hive-proposal-source-status", "schema_version" => 1,
+      "source_event_id" => source_event_id, "proposal_id" => proposal_id,
+      "state" => "consumed",
+      "result" => {
+        "kind" => "event", "proposal_id" => proposal_id,
+        "event_id" => event_id, "source_event_id" => source_event_id
+      },
+      "reason" => nil, "recorded_at" => "2026-09-08T12:00:00Z"
+    }
+
+    assert JSONSchemer.schema(JSON.parse(File.read(
+      Hive::Schemas.schema_path("hive-proposal-source-index")
+    ))).valid?(index)
+    assert JSONSchemer.schema(JSON.parse(File.read(
+      Hive::Schemas.schema_path("hive-proposal-source-status")
+    ))).valid?(status)
+  end
+
   def test_plan_review_schema_is_registered_closed_and_versioned
     path = Hive::Schemas.schema_path("hive-plan-review")
     document = JSON.parse(File.read(path))

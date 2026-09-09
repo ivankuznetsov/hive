@@ -1,0 +1,338 @@
+require "digest"
+require "hive/lock"
+require "hive/proposals/authority"
+require "hive/proposals/ingestor"
+require "hive/proposals/store"
+require "hive/proposals/source_event_store"
+
+module Hive
+  module Proposals
+    LifecycleResult = Data.define(:applied, :event, :projection) do
+      def noop? = !applied
+    end
+
+    class DecisionService
+      def initialize(store:, authority:, git_ops: nil, policy: DEFAULT_POLICY,
+                     clock: -> { Time.now.utc }, limits: {}, source_store: nil)
+        @store = store
+        @authority = authority
+        @git_ops = git_ops
+        @policy = Proposals.policy!(policy)
+        @clock = clock
+        @source_store = source_store || SourceEventStore.new(
+          root: @store.root, limits:, clock:
+        )
+      end
+
+      def decide(proposal_id:, outcome:, considered_evaluations:, rationale_category:,
+                 rationale:, links:, expected_head:, authority_identity:,
+                 expected_policy_fingerprint:, idempotency_key:, provenance:,
+                 policy_receipt: nil)
+        proposal_id = Proposals.proposal_id!(proposal_id)
+        source_event_id = source_id("decision", idempotency_key)
+        with_lifecycle_commit(proposal_id, "decision") do
+          @store.transaction do |transaction|
+            snapshot = transaction.snapshot
+            projection = projection!(snapshot, proposal_id)
+            evaluations = considered_evaluations!(projection, considered_evaluations)
+            authority = authorize!(
+              identity: authority_identity, capability: "decide",
+              expected_policy_fingerprint:, receipt: policy_receipt
+            )
+            data = {
+              "outcome" => outcome, "considered_evaluation_ids" => evaluations.map(&:first),
+              "considered_evaluations" => evaluations.map(&:last),
+              "rationale_category" => rationale_category, "rationale" => rationale,
+              "authority" => authority, "links" => links, "observed_head" => expected_head
+            }
+            normalized = Event.normalize_data("decision", data)
+            if (existing = exact_retry(snapshot, source_event_id, proposal_id, "decision", normalized))
+              next LifecycleResult.new(applied: false, event: existing, projection: projection)
+            end
+            raise Conflict, "proposal already has a terminal decision" if projection.decision
+            validate_head!(projection, normalized.fetch("observed_head"))
+
+            event = transaction.append_event!(
+              proposal_id:, type: "decision", data: normalized, source_event_id:,
+              provenance: lifecycle_provenance(provenance, authority, "decide"),
+              occurred_at: @clock.call, event_id: nil, policy: @policy,
+              before_write: lifecycle_quota(authority)
+            )
+            LifecycleResult.new(
+              applied: true, event:,
+              projection: Projection.new(
+                record: projection.record, events: projection.events + [ event ],
+                reserved_versions: projection.reserved_versions + [ event.version ]
+              )
+            )
+          end
+        end
+      end
+
+      def supersede(proposal_id:, successor_id:, expected_head:, authority_identity:,
+                    expected_policy_fingerprint:, idempotency_key:, provenance:,
+                    policy_receipt: nil)
+        proposal_id = Proposals.proposal_id!(proposal_id)
+        successor_id = Proposals.proposal_id!(successor_id)
+        raise Conflict, "proposal cannot supersede itself" if successor_id == proposal_id
+        source_event_id = source_id("supersession", idempotency_key)
+        with_lifecycle_commit(proposal_id, "supersession") do
+          @store.transaction do |transaction|
+            snapshot = transaction.snapshot
+            projection = projection!(snapshot, proposal_id)
+            successor = projection!(snapshot, successor_id)
+            authority = authorize!(
+              identity: authority_identity, capability: "supersede",
+              expected_policy_fingerprint:, receipt: policy_receipt
+            )
+            data = {
+              "successor_id" => successor_id, "authority" => authority,
+              "observed_head" => expected_head
+            }
+            normalized = Event.normalize_data("supersession", data)
+            if (existing = exact_retry(snapshot, source_event_id, proposal_id, "supersession", normalized))
+              next LifecycleResult.new(applied: false, event: existing, projection: projection)
+            end
+            validate_head!(projection, normalized.fetch("observed_head"))
+            validate_supersession!(snapshot, projection, successor)
+
+            event = transaction.append_event!(
+              proposal_id:, type: "supersession", data: normalized, source_event_id:,
+              provenance: lifecycle_provenance(provenance, authority, "supersede"),
+              occurred_at: @clock.call, event_id: nil, policy: @policy,
+              before_write: lifecycle_quota(authority)
+            )
+            LifecycleResult.new(
+              applied: true, event:,
+              projection: Projection.new(
+                record: projection.record, events: projection.events + [ event ],
+                supersedes: projection.supersedes,
+                reserved_versions: projection.reserved_versions + [ event.version ]
+              )
+            )
+          end
+        end
+      end
+
+      def rollback(proposal_id:, reverted_revision:, reason:, external_revert:,
+                   expected_head:, authority_identity:, expected_policy_fingerprint:,
+                   idempotency_key:, provenance:, policy_receipt: nil)
+        proposal_id = Proposals.proposal_id!(proposal_id)
+        source_event_id = source_id("rollback", idempotency_key)
+        with_lifecycle_commit(proposal_id, "rollback") do
+          @store.transaction do |transaction|
+            snapshot = transaction.snapshot
+            projection = projection!(snapshot, proposal_id)
+            authority = authorize!(
+              identity: authority_identity, capability: "rollback",
+              expected_policy_fingerprint:, receipt: policy_receipt
+            )
+            data = {
+              "reverted_revision" => reverted_revision, "reason" => reason,
+              "external_revert" => external_revert, "authority" => authority,
+              "observed_head" => expected_head
+            }
+            normalized = Event.normalize_data("rollback", data)
+            if (existing = exact_retry(snapshot, source_event_id, proposal_id, "rollback", normalized))
+              next LifecycleResult.new(applied: false, event: existing, projection: projection)
+            end
+            validate_head!(projection, normalized.fetch("observed_head"))
+            unless projection.decision&.fetch("outcome", nil) == "accepted"
+              raise Conflict, "proposal rollback requires historical acceptance"
+            end
+            raise Conflict, "proposal already has a rollback" if projection.rollback
+            unless normalized.fetch("reverted_revision") == projection.revision
+              raise Conflict, "proposal rollback revision does not match accepted candidate"
+            end
+
+            event = transaction.append_event!(
+              proposal_id:, type: "rollback", data: normalized, source_event_id:,
+              provenance: lifecycle_provenance(provenance, authority, "rollback"),
+              occurred_at: @clock.call, event_id: nil, policy: @policy,
+              before_write: lifecycle_quota(authority)
+            )
+            LifecycleResult.new(
+              applied: true, event:,
+              projection: Projection.new(
+                record: projection.record, events: projection.events + [ event ],
+                reserved_versions: projection.reserved_versions + [ event.version ]
+              )
+            )
+          end
+        end
+      end
+
+      private
+
+      def authorize!(identity:, capability:, expected_policy_fingerprint:, receipt:)
+        @authority.authorize!(
+          identity:, capability:, expected_policy_fingerprint:, receipt:
+        )
+      end
+
+      def considered_evaluations!(projection, observations)
+        normalized = Array(observations).map do |value|
+          observation = Proposals.closed_hash!(
+            value, required: %w[evaluation_id result_digest],
+            label: "considered proposal evaluation", error: InvalidEvent
+          )
+          {
+            "evaluation_id" => Proposals.event_id!(observation.fetch("evaluation_id")),
+            "result_digest" => Proposals.digest!(
+              observation.fetch("result_digest"), label: "considered evaluation result digest",
+              error: InvalidEvent
+            )
+          }
+        end.sort_by { |observation| observation.fetch("evaluation_id") }
+        ids = normalized.map { |observation| observation.fetch("evaluation_id") }
+        unless ids.uniq.length == normalized.length
+          raise StaleObservation, "considered proposal evaluations must be unique"
+        end
+        by_id = projection.evaluations.to_h { |evaluation| [ evaluation.fetch("event_id"), evaluation ] }
+        normalized.map do |observation|
+          event_id = observation.fetch("evaluation_id")
+          evaluation = by_id[event_id]
+          raise StaleObservation, "considered proposal evaluation is missing" unless evaluation
+          unless observation.fetch("result_digest") == Proposals.digest(evaluation.fetch("result"))
+            raise StaleObservation, "considered proposal evaluation changed; refresh the observation"
+          end
+          [
+            event_id,
+            {
+              "evaluation_id" => event_id,
+              "evaluator_id" => evaluation.dig("evaluator", "id"),
+              "method" => evaluation.dig("method", "label"),
+              "outcome" => evaluation.dig("result", "outcome"),
+              "result_digest" => Proposals.digest(evaluation.fetch("result"))
+            }
+          ]
+        end
+      end
+
+      def exact_retry(snapshot, source_event_id, proposal_id, type, normalized_data)
+        record = snapshot.records.find { |candidate| candidate.source_event_id == source_event_id }
+        raise Conflict, "lifecycle source event collides with a candidate" if record
+        event = snapshot.events.values.flatten.find { |candidate| candidate.source_event_id == source_event_id }
+        return nil unless event
+        unless event.proposal_id == proposal_id && event.type == type && event.data == normalized_data
+          raise Conflict, "lifecycle source event conflicts with its immutable event"
+        end
+        event
+      end
+
+      def validate_head!(projection, expected)
+        observed = Event.observed_head!(expected)
+        return if observed == projection.lifecycle_head
+
+        raise StaleObservation, "proposal lifecycle head changed; refresh the observation"
+      end
+
+      def validate_supersession!(snapshot, predecessor, successor)
+        raise Conflict, "proposal is already superseded" if predecessor.superseded_by
+        unless predecessor.subject == successor.subject
+          raise Conflict, "proposal supersession requires a matching subject"
+        end
+        requested = successor.record["lineage"]["requested_supersedes"]
+        unless requested == predecessor.proposal_id
+          raise Conflict, "proposal successor did not request this predecessor"
+        end
+        duplicate = snapshot.projections.find do |projection|
+          projection.proposal_id != predecessor.proposal_id &&
+            projection.superseded_by == successor.proposal_id
+        end
+        raise Conflict, "proposal successor already supersedes another candidate" if duplicate
+        edges = snapshot.projections.to_h do |projection|
+          [
+            projection.proposal_id,
+            projection.superseded_by || projection.record["lineage"]["retries"]
+          ]
+        end.compact
+        edges[predecessor.proposal_id] = successor.proposal_id
+        if Proposals.lineage_cycle_nodes(edges).include?(predecessor.proposal_id)
+          raise Conflict, "proposal supersession would create a lineage cycle"
+        end
+      end
+
+      def projection!(snapshot, proposal_id)
+        projection = snapshot.projections.find { |candidate| candidate.proposal_id == proposal_id }
+        return projection if projection
+        raise InvalidRecord, "proposal is missing or quarantined"
+      end
+
+      def lifecycle_provenance(value, authority, capability)
+        provenance = Proposals.stringify(value)
+        provenance["actor"] = {
+          "id" => authority.fetch("id"), "kind" => "lifecycle_authority",
+          "capability" => capability
+        }
+        Proposals.provenance!(provenance, error: InvalidEvent)
+      end
+
+      def source_id(kind, idempotency_key)
+        key = idempotency_key.to_s
+        raise InvalidEvent, "lifecycle idempotency key is required" if key.empty?
+        "pse-#{Digest::SHA256.hexdigest("hive-proposal-#{kind}-v1\0#{key}")}"
+      end
+
+      def lifecycle_quota(authority)
+        lambda do |event, bytes|
+          @source_store.enforce_lifecycle!(
+            proposal_id: event.proposal_id,
+            actor_id: authority.fetch("id"), event_bytes: bytes.bytesize
+          )
+        end
+      end
+
+      def with_lifecycle_commit(proposal_id, action)
+        runner = lambda do
+          snapshot = Ingestor::ImmutableAppendSnapshot.capture(
+            File.join(@store.events_root, proposal_id)
+          )
+          lifecycle_snapshot = Ingestor::PathSnapshot.capture(@source_store.paths_for_lifecycle)
+          index_snapshot = @git_ops && Proposals::GitIndexSnapshot.capture(@git_ops)
+          head_before = @git_ops&.hive_state_head_sha
+          begin
+            result = yield
+            if result.applied && @git_ops
+              paths = [ @store.path_for_event(result.event), *@source_store.paths_for_lifecycle ].uniq
+              expected = paths.to_h do |absolute|
+                relative = Proposals.hive_state_relative_path(
+                  @git_ops, absolute, label: "proposal lifecycle path"
+                )
+                [ relative, File.binread(absolute) ]
+              end
+              commit_result = @git_ops.hive_commit(
+                stage_name: "proposals", slug: proposal_id,
+                action: "recorded #{action}", pathspecs: expected.keys
+              )
+              head = @git_ops.hive_state_head_sha
+              unless commit_result == :committed && head != head_before
+                raise SourceUnavailable, "proposal lifecycle event was not durably committed"
+              end
+              expected.each do |path, bytes|
+                committed = @git_ops.read_hive_state_blob_at(
+                  head, path, max_bytes: bytes.bytesize + 1
+                )
+                unless committed == bytes
+                  raise SourceUnavailable, "proposal lifecycle transaction was not durably committed"
+                end
+              end
+            end
+            result
+          rescue StandardError => error
+            head_advanced = @git_ops && @git_ops.hive_state_head_sha != head_before
+            unless head_advanced
+              snapshot.restore!
+              lifecycle_snapshot.restore!
+              index_snapshot&.restore!
+            end
+            raise error
+          end
+        end
+        return Proposals.with_state_lock(@store.root) { runner.call } unless @git_ops
+
+        Hive::Lock.with_commit_lock(@git_ops.hive_state_path) { runner.call }
+      end
+    end
+  end
+end

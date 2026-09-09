@@ -2,6 +2,124 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
+  def test_proposal_defaults_are_fail_closed_and_configuration_is_closed
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir).fetch("proposals")
+
+      assert_equal({}, cfg.fetch("evaluators"))
+      assert_equal({}, cfg.fetch("authorities"))
+      assert_equal "restricted", cfg.dig("evidence", "visibility")
+      assert_equal "task", cfg.dig("evidence", "retention")
+      assert_equal [ "https" ], cfg.dig("evidence", "allowed_link_schemes")
+      assert_equal 256, cfg.dig("limits", "max_pending_sources")
+
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        proposals:
+          evaluators:
+            benchmark-reviewer:
+              workflows: [coding]
+              stages: [4-execute]
+              agent_profiles: [codex]
+          authorities:
+            proposal-operator:
+              kind: operator
+              capabilities: [decide, supersede, rollback]
+              version: 1
+              revoked: false
+      YAML
+      assert_equal [ "coding" ],
+                   Hive::Config.load(dir).dig("proposals", "evaluators", "benchmark-reviewer", "workflows")
+      assert_equal %w[decide supersede rollback],
+                   Hive::Config.load(dir).dig("proposals", "authorities", "proposal-operator", "capabilities")
+
+      {
+        "surprise: true" => /unknown field.*surprise/i,
+        "evidence: { visibility: public }" => /visibility.*restricted.*project/i,
+        "limits: { max_pending_sources: 0 }" => /max_pending_sources.*positive/i,
+        "evaluators: { bad: { workflows: nope } }" => /workflows.*array/i,
+        "authorities: { bad: { kind: agent, capabilities: [], version: 1, revoked: false } }" =>
+          /kind.*operator.*policy/i,
+        "authorities: { bad: { kind: operator, capabilities: [publish], version: 1, revoked: false } }" =>
+          /capabilities.*malformed/i,
+        "authorities: { bad: { kind: operator, capabilities: [], version: 0, revoked: false } }" =>
+          /version.*positive/i
+      }.each do |fragment, pattern|
+        File.write(config_path, "proposals:\n  #{fragment}\n")
+        assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message
+      end
+    end
+  end
+
+  def test_proposal_configuration_rejects_every_nested_shape_and_policy_boundary
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      reject_fragment = lambda do |yaml, pattern|
+        File.write(config_path, "proposals:\n#{yaml.lines.map { |line| "  #{line}" }.join}")
+        error = assert_raises(Hive::ConfigError, "expected rejection for #{yaml.inspect}") do
+          Hive::Config.load(dir)
+        end
+        assert_match(pattern, error.message)
+      end
+
+      reject_fragment.call("evaluators: []\n", /evaluators.*bounded Hash/i)
+      reject_fragment.call("evaluators:\n  'Bad Identity': {}\n", /evaluators identity.*malformed/i)
+      reject_fragment.call("authorities: []\n", /authorities.*bounded Hash/i)
+      reject_fragment.call("authorities:\n  'Bad Identity': {}\n", /authorities identity.*malformed/i)
+      reject_fragment.call(<<~YAML, /revoked.*boolean/i)
+        authorities:
+          bad:
+            kind: operator
+            capabilities: []
+            version: 1
+            revoked: nope
+      YAML
+      reject_fragment.call(<<~YAML, /validity timestamp.*ISO 8601/i)
+        authorities:
+          bad:
+            kind: operator
+            capabilities: []
+            version: 1
+            revoked: false
+            valid_from: 'not-a-time'
+      YAML
+      reject_fragment.call(<<~YAML, /empty validity interval/i)
+        authorities:
+          bad:
+            kind: operator
+            capabilities: []
+            version: 1
+            revoked: false
+            valid_from: '2026-08-30T12:00:00Z'
+            valid_until: '2026-08-30T12:00:00Z'
+      YAML
+      reject_fragment.call("evidence: nope\n", /evidence.*must be a Hash/i)
+      reject_fragment.call("evidence: { retention: forever }\n", /retention.*invalid/i)
+      reject_fragment.call("evidence: { allowed_link_schemes: ['not valid'] }\n", /link_schemes.*malformed/i)
+      reject_fragment.call("limits: nope\n", /limits.*must be a Hash/i)
+      reject_fragment.call("limits: { max_project_events: 10, max_proposal_events: 11 }\n",
+                           /proposal-level limits.*cannot exceed/i)
+      reject_fragment.call("context: nope\n", /context.*must be a Hash/i)
+      reject_fragment.call("context: { max_items: 0 }\n", /context.max_items.*positive/i)
+
+      File.write(config_path, <<~YAML)
+        proposals:
+          authorities:
+            timed:
+              kind: operator
+              capabilities: [decide]
+              version: 1
+              revoked: false
+              valid_from: '2026-08-30T12:00:00Z'
+              valid_until: '2026-08-31T12:00:00Z'
+      YAML
+      assert_equal "2026-08-31T12:00:00Z",
+                   Hive::Config.load(dir).dig("proposals", "authorities", "timed", "valid_until")
+    end
+  end
+
   def test_plan_review_defaults_are_closed_and_conservative
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
@@ -3632,6 +3750,12 @@ class ConfigTest < Minitest::Test
     # Direct unit test of the helper:
     msg = Hive::Config.send(:describe_source, "/no/such/file.yml")
     assert_match %r{/no/such/file\.yml \(defaults; no file present\)}, msg
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Proposals::ConfigValidator.validate!(
+        { "unexpected" => true }, source_path: "/no/such/proposals.yml"
+      )
+    end
+    assert_match %r{/no/such/proposals\.yml \(defaults; no file present\)}, error.message
     # When the file does exist, no annotation:
     Tempfile.create([ "config", ".yml" ]) do |f|
       f.write("---\n")

@@ -39,6 +39,8 @@ module Hive
       operator_action
       correction
       activity_gap
+      proposal_source_recorded
+      proposal_context_supplied
     ].freeze
 
     AUTHORITATIVE_EVENT_TYPES = %w[

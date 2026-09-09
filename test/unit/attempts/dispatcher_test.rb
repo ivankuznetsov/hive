@@ -1545,4 +1545,37 @@ class AttemptsDispatcherTest < Minitest::Test
       }
     }
   end
+
+  public
+
+  def test_dispatch_persists_the_controller_authored_proposal_subject
+    with_dispatcher do |dispatcher, _launcher, task, _store|
+      proposal = {
+        "schema_version" => 1,
+        "subject" => {
+          "kind" => "skill", "reference" => "agent-skills/reviewer",
+          "revision" => "v2", "proposal_id" => nil
+        },
+        "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:skills" },
+        "evaluator" => nil, "configuration_fingerprint" => "c" * 64,
+        "policy" => {
+          "visibility" => "restricted", "retention" => "task",
+          "allowed_link_schemes" => [ "https" ]
+        }
+      }
+      subject = Hive::Attempts::Record.task_stage_subject(
+        task_id: task.id.to_s, task_slug: task.slug,
+        intended_stage: "4-execute", proposal: proposal
+      )
+
+      result = dispatcher.dispatch(
+        task: task, project: "demo", intended_stage: "4-execute",
+        argv: [ "hive", "run", task.slug ], request_id: "proposal-request",
+        provider: "codex", interactive: false, now: NOW, subject: subject
+      )
+
+      assert_equal :accepted, result.status
+      assert_equal proposal, result.attempt.proposal_binding
+    end
+  end
 end

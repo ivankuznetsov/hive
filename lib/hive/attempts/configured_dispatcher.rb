@@ -4,6 +4,8 @@ require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
 require "hive/attempts/launch_policy"
 require "hive/provider_routing"
+require "hive/git_ops"
+require "hive/proposals/reconciler"
 
 module Hive
   module Attempts
@@ -24,12 +26,13 @@ module Hive
       end
 
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider: nil,
-                   interactive: true, now: Time.now.utc)
+                   interactive: true, now: Time.now.utc, subject: nil)
         cfg = @config_loader.call(task.project_root)
+        reconcile_proposals(task)
         dispatcher_for(task, argv: argv, cfg: cfg).dispatch(
           task: task, project: project, intended_stage: intended_stage, argv: argv,
           request_id: request_id, provider: provider || provider_for(cfg, intended_stage),
-          interactive: interactive, now: now
+          interactive: interactive, now: now, subject: subject
         )
       end
 
@@ -38,6 +41,7 @@ module Hive
         task = Hive::TaskResolver.new(
           request.slug, project_filter: request.project
         ).resolve
+        reconcile_proposals(task)
         dispatcher_for(task, argv: request.argv).dispatch_request(
           request, interactive: interactive, now: now,
           admission_view: admission_view,
@@ -58,6 +62,17 @@ module Hive
       end
 
       private
+
+      def reconcile_proposals(task)
+        ops = Hive::GitOps.new(task.project_root)
+        return unless ops.hive_state_worktree_exists?
+        return unless File.exist?(File.join(ops.hive_state_path, "proposals", "v1"))
+
+        Hive::Proposals::Reconciler.new(git_ops: ops).reconcile!
+      rescue Hive::Proposals::Error, Hive::GitError, SystemCallError => error
+        warn "[hive] proposal reconciliation deferred: #{error.class}"
+        nil
+      end
 
       def dispatcher_for(task, argv:, cfg: nil)
         dispatcher_for_project(

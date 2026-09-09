@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-event.v1.json",
+  "title": "Hive proposal event (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "event_id", "proposal_id", "version", "type",
+    "data", "source_event_id", "provenance", "policy", "occurred_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-proposal-event" },
+    "schema_version": { "const": 1 },
+    "event_id": { "$ref": "#/$defs/EventId" },
+    "proposal_id": { "$ref": "#/$defs/ProposalId" },
+    "version": { "type": "integer", "minimum": 1 },
+    "type": { "enum": ["evaluation", "decision", "supersession", "rollback"] },
+    "data": {
+      "oneOf": [
+        { "$ref": "#/$defs/Evaluation" },
+        { "$ref": "#/$defs/Decision" },
+        { "$ref": "#/$defs/Supersession" },
+        { "$ref": "#/$defs/Rollback" }
+      ]
+    },
+    "source_event_id": { "$ref": "#/$defs/SourceEventId" },
+    "provenance": { "$ref": "#/$defs/Provenance" },
+    "policy": { "$ref": "#/$defs/Policy" },
+    "occurred_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "evaluation" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/Evaluation" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "decision" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/Decision" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "supersession" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/Supersession" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "rollback" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/Rollback" } } }
+    }
+  ],
+  "$defs": {
+    "ProposalId": {
+      "type": "string",
+      "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "EventId": {
+      "type": "string",
+      "pattern": "^pev-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "GitDigest": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "SourceEventId": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+    "BoundedText": { "type": "string", "minLength": 1, "maxLength": 16384 },
+    "Link": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "reference"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "reference": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "Evaluator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "binding_fingerprint"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "binding_fingerprint": { "$ref": "#/$defs/Digest" },
+        "configuration_fingerprint": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Method": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "label"],
+      "properties": {
+        "kind": { "enum": ["benchmark", "test", "manual", "policy", "other"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "reference": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "Result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["outcome", "metrics"],
+      "properties": {
+        "outcome": { "enum": ["pass", "fail", "mixed", "inconclusive"] },
+        "metrics": {
+          "type": "object", "maxProperties": 64,
+          "additionalProperties": {
+            "anyOf": [
+              { "type": "number" }, { "type": "boolean" }, { "type": "null" }
+            ]
+          }
+        },
+        "details_digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Retention": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policy", "enforcement"],
+      "properties": {
+        "policy": { "enum": ["ephemeral", "task", "project", "indefinite"] },
+        "enforcement": { "const": "none" }
+      }
+    },
+    "Policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["visibility", "retention", "allowed_link_schemes"],
+      "properties": {
+        "visibility": { "enum": ["restricted", "private", "project"] },
+        "retention": { "enum": ["ephemeral", "task", "project", "indefinite"] },
+        "allowed_link_schemes": {
+          "type": "array", "maxItems": 16, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9+.-]*$" }
+        }
+      }
+    },
+    "Evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["label", "digest", "bytes", "media_type", "visibility", "retention"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "digest": { "$ref": "#/$defs/Digest" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "visibility": { "enum": ["restricted", "private", "project"] },
+        "retention": { "$ref": "#/$defs/Retention" },
+        "source_ref": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "summary": { "$ref": "#/$defs/BoundedText" }
+      }
+    },
+    "Evaluation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evaluator", "method", "result", "rationale", "evidence", "links"],
+      "properties": {
+        "evaluator": { "$ref": "#/$defs/Evaluator" },
+        "method": { "$ref": "#/$defs/Method" },
+        "result": { "$ref": "#/$defs/Result" },
+        "rationale": { "$ref": "#/$defs/BoundedText" },
+        "evidence": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/Evidence" } },
+        "links": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/Link" } }
+      }
+    },
+    "Authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "policy_fingerprint"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "kind": { "enum": ["operator", "policy"] },
+        "policy_fingerprint": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "ObservedHead": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "digest"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 0 },
+        "digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "ConsideredEvaluation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evaluation_id", "evaluator_id", "method", "outcome", "result_digest"],
+      "properties": {
+        "evaluation_id": { "$ref": "#/$defs/EventId" },
+        "evaluator_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "method": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "outcome": { "enum": ["pass", "fail", "mixed", "inconclusive"] },
+        "result_digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Decision": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "outcome", "considered_evaluation_ids", "considered_evaluations",
+        "rationale_category", "rationale", "authority", "links", "observed_head"
+      ],
+      "properties": {
+        "outcome": { "enum": ["accepted", "rejected"] },
+        "considered_evaluation_ids": {
+          "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/EventId" }
+        },
+        "considered_evaluations": {
+          "type": "array", "items": { "$ref": "#/$defs/ConsideredEvaluation" }
+        },
+        "rationale_category": { "enum": ["evaluated", "no_evaluation"] },
+        "rationale": { "$ref": "#/$defs/BoundedText" },
+        "authority": { "$ref": "#/$defs/Authority" },
+        "links": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/Link" } },
+        "observed_head": { "$ref": "#/$defs/ObservedHead" }
+      }
+    },
+    "Supersession": {
+      "type": "object", "additionalProperties": false,
+      "required": ["successor_id", "authority", "observed_head"],
+      "properties": {
+        "successor_id": { "$ref": "#/$defs/ProposalId" },
+        "authority": { "$ref": "#/$defs/Authority" },
+        "observed_head": { "$ref": "#/$defs/ObservedHead" }
+      }
+    },
+    "ExternalRevert": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "reference"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "reference": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "Rollback": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reverted_revision", "reason", "external_revert", "authority", "observed_head"],
+      "properties": {
+        "reverted_revision": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "reason": { "$ref": "#/$defs/BoundedText" },
+        "external_revert": { "$ref": "#/$defs/ExternalRevert" },
+        "authority": { "$ref": "#/$defs/Authority" },
+        "observed_head": { "$ref": "#/$defs/ObservedHead" }
+      }
+    },
+    "Actor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "binding_fingerprint": { "$ref": "#/$defs/Digest" },
+        "capability": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "EvaluatorBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "fingerprint"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "fingerprint": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "task_id", "task_generation", "ownership_generation", "attempt_id",
+        "workflow_id", "stage", "actor", "source_commit"
+      ],
+      "properties": {
+        "task_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "task_generation": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "minLength": 1, "maxLength": 512 }
+          ]
+        },
+        "ownership_generation": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "attempt_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "workflow_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "stage": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "actor": { "$ref": "#/$defs/Actor" },
+        "source_commit": { "$ref": "#/$defs/GitDigest" },
+        "configuration_fingerprint": { "$ref": "#/$defs/Digest" },
+        "artifact_reference": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "artifact_digest": { "$ref": "#/$defs/Digest" },
+        "evaluator_binding": { "$ref": "#/$defs/EvaluatorBinding" }
+      }
+    }
+  }
+}

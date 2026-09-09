@@ -1242,8 +1242,40 @@ stale generation or digest is rejected.
 
 See [[stages/index]] for one page per stage.
 
+## Proposal ledger
+
+Proposal history is project state beside, rather than inside, task stage
+folders. It initializes lazily on the first newly admitted typed proposal event:
+
+```text
+<project>/.hive-state/proposals/v1/
+├── inbox/                         # committed immutable admission receipts
+├── records/<proposal-id>.json     # immutable candidate revisions
+└── events/<proposal-id>/          # immutable evaluations/lifecycle facts
+```
+
+The committed `hive/state` blobs are authoritative. Inbox indexes track
+unconsumed, consumed, and terminally quarantined source IDs so reconciliation
+does bounded recovery work without reading historical task journals. Worktree-
+only remnants are never ingested as durable evidence. Candidate and event files
+are read independently with bounded no-follow reads, which lets malformed,
+oversize, symlinked, duplicate, or inconsistent inputs produce logical safe
+diagnostics without hiding valid neighbors.
+
+Status is always derived. A candidate record begins as a draft; evaluation
+events may append at any time; one decision retains accepted/rejected history;
+supersession and rollback are orthogonal facts. Thus an accepted candidate can
+display as superseded or rolled back without erasing its acceptance. Lifecycle
+mutations compare the observed lifecycle head and the explicitly considered
+evaluation set under the proposal lock.
+
+`wiki/proposals.json` and `wiki/proposals.md` are deterministic generated views,
+not authority. Retention metadata is declarative and always carries
+`enforcement=none`; v1 neither expires canonical bytes nor executes an external
+artifact deletion. See [[modules/proposals]].
+
 ## Backlinks
 
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
-- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/patrol]] · [[commands/refactor-patrol]]
+- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/patrol]] · [[modules/proposals]] · [[commands/refactor-patrol]]

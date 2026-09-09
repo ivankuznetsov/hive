@@ -4,10 +4,68 @@ require "hive/attempts/record"
 class AttemptsRecordTest < Minitest::Test
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
 
+  def test_task_subject_can_carry_an_immutable_controller_authored_proposal_binding
+    proposal = {
+      "schema_version" => 1,
+      "subject" => {
+        "kind" => "skill", "reference" => "agent-skills/reviewer",
+        "revision" => "v2", "proposal_id" => nil
+      },
+      "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:skills" },
+      "evaluator" => nil,
+      "configuration_fingerprint" => "c" * 64,
+      "policy" => {
+        "visibility" => "restricted", "retention" => "task",
+        "allowed_link_schemes" => [ "https" ]
+      }
+    }
+    subject = Hive::Attempts::Record.task_stage_subject(
+      task_id: "task-1", task_slug: "slug", intended_stage: "4-execute", proposal: proposal
+    )
+    record = Hive::Attempts::Record.launching(
+      **identity.merge(task_id: "task-1", task_slug: "slug", intended_stage: "4-execute", subject: subject),
+      now: NOW, launch_timeout_sec: 30
+    )
+
+    assert_equal proposal, record.proposal_binding
+    assert record.data.dig("subject", "proposal").frozen?
+    assert_raises(FrozenError) { record.data.dig("subject", "proposal", "actor", "id").replace("mallory") }
+
+    spoofed = record.to_h
+    spoofed.dig("subject", "proposal", "subject")["kind"] = "unknown"
+    assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(spoofed) }
+  end
+
+  def test_proposal_binding_replay_rejects_version_identity_evaluator_and_policy_drift
+    canonical = record_with_proposal.to_h
+    mutations = [
+      ->(proposal) { proposal["schema_version"] = 2 },
+      ->(proposal) { proposal["subject"]["proposal_id"] = "not-an-id" },
+      lambda do |proposal|
+        proposal["evaluator"] = {
+          "id" => "reviewer", "fingerprint" => "a" * 64,
+          "configuration_fingerprint" => "b" * 64,
+          "admission" => {
+            "workflows" => %w[coding coding], "stages" => [ "4-execute" ],
+            "agent_profiles" => [ "codex" ]
+          }
+        }
+      end,
+      ->(proposal) { proposal["policy"]["visibility"] = "public" },
+      ->(proposal) { proposal["policy"]["allowed_link_schemes"] = [ "not valid" ] }
+    ]
+
+    mutations.each do |mutate|
+      invalid = Marshal.load(Marshal.dump(canonical))
+      mutate.call(invalid.dig("subject", "proposal"))
+      assert_raises(Hive::Attempts::InvalidRecord) { Hive::Attempts::Record.new(invalid) }
+    end
+  end
+
   def test_launching_record_exposes_unclaimed_deadline_and_immutable_identity
     record = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30)
 
-    assert_equal 4, record["schema_version"]
+    assert_equal 5, record["schema_version"]
     assert_equal "launching", record.state
     assert record.live?
     refute record.claimed?
@@ -383,15 +441,14 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
-  def test_legacy_v2_record_is_rejected_until_migrated
+  def test_legacy_v4_record_is_rejected_until_migrated
     legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
-    legacy["schema_version"] = 2
-    legacy.delete("subject")
+    legacy["schema_version"] = 4
 
     error = assert_raises(Hive::Attempts::InvalidRecord) do
       Hive::Attempts::Record.new(legacy)
     end
-    assert_includes error.message, "unsupported schema_version 2"
+    assert_includes error.message, "unsupported schema_version 4"
   end
 
   def test_task_subject_must_match_the_legacy_identity_fields
@@ -444,6 +501,29 @@ class AttemptsRecordTest < Minitest::Test
   end
 
   private
+
+  def record_with_proposal
+    proposal = {
+      "schema_version" => 1,
+      "subject" => {
+        "kind" => "skill", "reference" => "agent-skills/reviewer",
+        "revision" => "v2", "proposal_id" => nil
+      },
+      "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:skills" },
+      "evaluator" => nil, "configuration_fingerprint" => "c" * 64,
+      "policy" => {
+        "visibility" => "restricted", "retention" => "task",
+        "allowed_link_schemes" => [ "https" ]
+      }
+    }
+    subject = Hive::Attempts::Record.task_stage_subject(
+      task_id: "task-1", task_slug: "slug", intended_stage: "4-execute", proposal:
+    )
+    Hive::Attempts::Record.launching(
+      **identity.merge(task_id: "task-1", task_slug: "slug", intended_stage: "4-execute", subject:),
+      now: NOW, launch_timeout_sec: 30
+    )
+  end
 
   def identity
     {

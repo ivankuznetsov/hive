@@ -92,6 +92,17 @@ module Hive
       "hive-module-status" => 1,
       "hive-module-doctor" => 1,
       "hive-module-dry-run" => 1,
+      # Project-level immutable skill/workflow proposal candidates and their
+      # independently replayable evidence/lifecycle facts.
+      "hive-proposal-record" => 1,
+      "hive-proposal-event" => 1,
+      "hive-proposal-source-event" => 1,
+      "hive-proposal-source-index" => 1,
+      "hive-proposal-source-status" => 1,
+      "hive-proposal-index" => 1,
+      "hive-proposal-list" => 1,
+      "hive-proposal-show" => 1,
+      "hive-proposal-mutation" => 1,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full
       # waiting set (count/tasks); the Thor-usage error path emits the shared
@@ -188,6 +199,21 @@ module Hive
         end
         payload
       end
+    end
+
+    # Closed enum of `error_kind` values emitted by every proposal command.
+    # The list, show, and mutation schemas all expose this same vocabulary.
+    module ProposalErrorKind
+      UNAUTHORIZED       = "unauthorized".freeze
+      STALE              = "stale".freeze
+      CONFLICT           = "conflict".freeze
+      QUOTA              = "quota".freeze
+      QUARANTINE         = "quarantine".freeze
+      SOURCE_UNAVAILABLE = "source_unavailable".freeze
+      CONFIG             = "config".freeze
+      INVALID            = "invalid".freeze
+      ALL = constants(false).reject { |constant| constant == :ALL }
+        .map { |constant| const_get(constant) }.freeze
     end
 
     # Closed enum of `next_action.kind` values emitted by `hive run --json`.

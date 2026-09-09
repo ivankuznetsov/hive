@@ -14,7 +14,10 @@ module Hive
     class Database
       MIGRATE_ACTION = "stop Hive and run hive migrate --all".freeze
       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
-      MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
+      MIGRATIONS = %w[
+        001_create_runtime_control_plane.rb
+        002_version_proposal_subject_binding.rb
+      ].freeze
       REQUEST_FOREIGN_KEY_SCHEMA = "24f43b9a0ac27f015b9a4321b9ff3ac2034cd109f354a30abf50f181a8748935".freeze
       attr_reader :path, :owner_pid
 

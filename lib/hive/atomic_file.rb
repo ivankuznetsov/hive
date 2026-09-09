@@ -12,6 +12,27 @@ module Hive
   module AtomicFile
     module_function
 
+    # Atomically create an immutable file without ever replacing an existing
+    # path. The temporary file is fully flushed before its hard link becomes
+    # visible; link(2) supplies the create-if-absent commit point.
+    def create(path, content, mode: 0o600, fsync: true)
+      dir = File.dirname(path)
+      FileUtils.mkdir_p(dir)
+      tmp = File.join(dir, ".#{File.basename(path)}.create.#{Process.pid}.#{SecureRandom.hex(4)}")
+      File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, mode) do |file|
+        file.write(content)
+        if fsync
+          file.flush
+          file.fsync
+        end
+      end
+      File.link(tmp, path)
+      fsync_directory(dir) if fsync
+      path
+    ensure
+      FileUtils.rm_f(tmp) if tmp && (File.exist?(tmp) || File.symlink?(tmp))
+    end
+
     # Write `content` to `path` atomically. `mode:` sets the permissions of
     # the newly created file (pass 0o600 for owner-private state). `fsync:`
     # flushes to disk before the rename — keep it on for state that must

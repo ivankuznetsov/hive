@@ -141,13 +141,13 @@ module Hive
 
       def record!(record)
         return record if record.is_a?(Record)
-        raise RepositoryError, "attempt decision query requires a schema-v4 record"
+        raise RepositoryError, "attempt decision query requires a schema-v5 record"
       end
 
       def terminal!(record)
         record!(record)
         return record if record.state == "terminal"
-        raise RepositoryError, "terminal decision query requires a terminal schema-v4 record"
+        raise RepositoryError, "terminal decision query requires a terminal schema-v5 record"
       end
     end
   end

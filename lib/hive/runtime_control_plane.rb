@@ -5,7 +5,7 @@ require "hive/paths"
 module Hive
   module RuntimeControlPlane
     APPLICATION_ID = 0x48495645
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     BUSY_TIMEOUT_MS = 5_000
     MINIMUM_SQLITE_VERSION = "3.35.0".freeze
     MIGRATIONS_DIR = File.expand_path("runtime_control_plane/migrations", __dir__).freeze

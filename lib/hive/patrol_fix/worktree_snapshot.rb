@@ -8,6 +8,7 @@ module Hive
     # intentionally run this at different points, but they must enforce the
     # same custody, HEAD, cleanliness, and diff-digest contract.
     module WorktreeSnapshot
+      class StaleValidation < Hive::StageError; end
       module_function
 
       def capture(task:, manifest:, fix:, validation:, worktree_root:, phase:)
@@ -41,7 +42,7 @@ module Hive
           message = phase.to_sym == :review ?
             "fix worktree HEAD changed after validation" :
             "reviewed worktree HEAD changed before publication"
-          raise Hive::StageError, message
+          raise StaleValidation, message
         end
         unless validation.dig("payload", "worktree_head") == expected
           raise Hive::StageError, "validation receipt does not bind the current fix HEAD"

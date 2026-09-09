@@ -56,7 +56,10 @@ module Hive
           )
           current.to_h == request.to_h
         end
-        publication = controller.publish!(request, revalidate: revalidate)
+        options = { revalidate: revalidate }
+        recorded_url = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
+        options[:existing_pr_url] = recorded_url unless recorded_url.to_s.empty?
+        publication = controller.publish!(request, **options)
         complete_publication(task, publication)
       rescue Hive::GithubPublication::Blocked => e
         Hive::Markers.set(

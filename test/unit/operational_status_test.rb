@@ -88,6 +88,26 @@ class OperationalStatusTest < Minitest::Test
                  result.dig("runtime", "display_version")
   end
 
+  def test_controller_failure_is_not_hidden_by_markerless_scheduler_brake
+    %w[secret_policy_publish_blocked fix_worktree_dirty worktree_head_custody_mismatch].each do |code|
+      row = task(action: "ready_to_run", slug: "controller", marker: "none").merge(
+        "workflow" => "patrol-fix",
+        "diagnostic" => { "source" => "artifact", "code" => code,
+                          "owner" => "operator", "detail" => "Exact controller failure" }
+      )
+      snapshot = scheduler_snapshot_for(row, decision: "markerless_stalled", reason: "No progress")
+      projected = project(
+        status_payload(row), scheduler_snapshot: snapshot,
+        project_context: { "demo" => { "daemon_enabled" => true } }
+      ).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state")
+      assert_equal "operator", projected.fetch("blocker_owner")
+      assert_equal code, projected.dig("reasons", 0, "code")
+      assert_equal "markerless_stalled", projected.dig("reasons", 1, "code")
+    end
+  end
+
   def test_closure_projection_advertises_operator_confirmation_and_retains_archived_receipt
     receipt = {
       "schema" => Hive::TaskClosure::SCHEMA,

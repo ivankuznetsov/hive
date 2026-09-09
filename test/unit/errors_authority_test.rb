@@ -39,6 +39,19 @@ class ErrorsAuthorityTest < Minitest::Test
                  "lib/hive.rb must wire in the dedicated errors file")
   end
 
+  def test_errors_boundary_loads_without_the_root_entrypoint
+    script = <<~RUBY
+      require "hive/errors"
+      abort "root entrypoint loaded" if $LOADED_FEATURES.any? { |path| path.end_with?("/lib/hive.rb") }
+      abort "wrong exit code" unless Hive::InvalidTaskPath.new("x").exit_code == 64
+      abort "wrong ancestry" unless Hive::ProviderRouteFailed < Hive::AgentError
+    RUBY
+    output, status = Open3.capture2e(
+      RbConfig.ruby, "-I", File.expand_path("../../lib", __dir__), "-e", script
+    )
+    assert status.success?, output
+  end
+
   def test_moved_taxonomy_preserves_exit_code_contract_and_ancestry
     # The move must not shift behavior: exit-code overrides and inheritance
     # (IS-A for exit-code convenience) survive the relocation verbatim.

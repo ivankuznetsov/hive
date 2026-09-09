@@ -15,6 +15,16 @@ dependency rejection, and Web preview. Deploy a compatible runtime before
 creating cancellation receipts in live state; older readers reject the new
 reason. Task 43085 is the intended first live validation, not yet archived.
 
+## Patrol publication recovery needs an operator correction decision (2026-09-09)
+
+PR #1295 can park publication safely, but routing source/title blocks to Inbox
+does not change the protected manifest or immutable slug rendered by Publish.
+A secret removed from the final diff also remains in commit history; adding a
+new commit cannot erase it. Keep this PR open until source correction and the
+operator recovery contract are resolved. Do not report a routed generation as
+proof that these bytes can be corrected. Review-text rework and exact carried
+receipt authorization are independently testable.
+
 ## Automatic outcome capture remains unreliable (2026-09-06)
 
 Execution safeguards (2026-09-14) also tell planning, implementation, and review

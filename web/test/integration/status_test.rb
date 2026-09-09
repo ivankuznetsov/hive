@@ -2,6 +2,29 @@ require "test_helper"
 require "hive/daemon/status_report"
 
 class StatusTest < ActionDispatch::IntegrationTest
+  test "state filters preserve unavailable project warnings" do
+    sign_in!
+    with_status_snapshot("projects" => [ { "name" => "broken", "error" => "project_load_failed", "tasks" => [] } ]) do
+      %w[running unknown].each do |state|
+        get "/grid", params: { project: "broken", state: state }
+        assert_response :success
+        assert_select ".state-banner-error", text: /Project status unavailable/
+        assert_select ".empty-state", text: /No tasks in this state/, count: 0
+      end
+    end
+  end
+
+  test "state filter query values cannot become URL routing options" do
+    sign_in!
+    with_status_snapshot("projects" => []) do
+      get "/grid", params: { host: "untrusted.example", protocol: "https", script_name: "//untrusted.example" }
+      assert_response :success
+      assert_select ".task-state-filter" do |links|
+        links.each { |link| assert link["href"].start_with?("/grid?"), link["href"] }
+      end
+    end
+  end
+
   test "state filters count the selected project and distinguish ready from running" do
     sign_in!
     projects = [

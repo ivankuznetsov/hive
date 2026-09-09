@@ -586,7 +586,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
            "an exact-log poll reload must morph the pane instead of replacing it"
 
     select "Errors", from: "Show"
-    assert_selector "[data-task-log-target='empty']", text: "No messages match"
+    assert_selector "[data-task-log-target='announcement'][role='status'][aria-live='polite']", text: "No messages match", visible: :all
+    assert_selector "[data-task-log-target='feedback']", text: "No messages match"
     page.execute_script(<<~JS)
       window.logFrameLoads = 0
       document.body.dataset.logFrameLoads = "0"
@@ -595,8 +596,9 @@ class PipelineFlowTest < ApplicationSystemTestCase
     JS
     assert_selector "body[data-log-frame-loads='1']", wait: 5
     assert page.evaluate_script("window.logFrameLoads > 0"), "the filter assertion must follow a completed reload"
+    assert_equal "", find("[data-task-log-target='announcement']", visible: :all).text(:all), "background reloads must leave announcements empty"
     assert_equal "errors", find_field("Show").value
-    assert_selector "[data-task-log-target='empty']", text: "No messages match"
+    assert_selector "[data-task-log-target='feedback']", text: "No messages match"
     select "All activity", from: "Show"
     fill_in "Find in log", with: "line 120"
     assert_selector ".task-log-entry:not([hidden])", count: 1

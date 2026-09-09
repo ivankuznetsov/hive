@@ -1154,3 +1154,10 @@ names, with category and text filters. It preserves bounded reads, safe escaping
 receipt-bound failure logs, polling pauses while reading and filter selections
 across frame replacement. Unrecognized envelopes, reasoning and tool input/output
 payloads are not displayed as log messages.
+
+Task display completion follows explicit archive context or the canonical archived
+action. A workflow’s final directory can still contain an active agent stage.
+State filtering retains unavailable-project warnings; query values remain URL
+query data. Missing artifact or publication evidence is presented as unavailable,
+not as proof that work or publication never happened. Log filter results are
+announced through a polite status region and persist through frame reloads.

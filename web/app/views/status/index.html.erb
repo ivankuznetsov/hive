@@ -83,7 +83,7 @@
     <% { nil => "All tasks" }.merge(TaskDisplay::STATES).each do |state, label| %>
       <% count = state ? @task_counts.fetch(state, 0) : @task_counts.values.sum %>
       <% next if count.zero? && state && state != "running" && state != @task_state %>
-      <%= link_to url_for(request.query_parameters.merge("state" => state)),
+      <%= link_to status_filter_path(state: state),
             class: class_names("task-state-filter", "active": state == @task_state),
             aria: { current: ("page" if state == @task_state) } do %>
         <%= label %> <strong><%= count %></strong>

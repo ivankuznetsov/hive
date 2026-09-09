@@ -4,8 +4,8 @@
          <% if primary %>data-primary-artifact="<%= primary.fetch("reference") %>"<% end %>>
   <div class="workspace-panel-heading">
     <div>
-      <p class="workspace-eyebrow"><%= @task.terminal? || @task_source == "archive" ? "Result" : "Current work" %></p>
-      <h2 id="workspace-primary-result-heading"><%= primary&.fetch("name", nil) || "Work has not started yet" %></h2>
+      <p class="workspace-eyebrow"><%= TaskDisplay.new(@task, archived: @task_source == "archive").completed? ? "Result" : "Current work" %></p>
+      <h2 id="workspace-primary-result-heading"><%= primary&.fetch("name", nil) || "Current document" %></h2>
     </div>
   </div>
 
@@ -14,7 +14,7 @@
   <% end %>
 
   <% if primary.nil? %>
-    <p class="workspace-empty">No document has been produced yet.</p>
+    <p class="workspace-empty">No document is available to display.</p>
   <% elsif primary["binary"] %>
     <p class="workspace-empty">This file cannot be previewed as text.</p>
   <% elsif primary["content"].nil? %>

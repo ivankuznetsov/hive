@@ -19,7 +19,8 @@
       </div>
       <%# Keep the bounded poller's tail-follow/reading pause behavior. %>
       <pre class="task-log-entries" data-tail-follow><% entries.each do |entry| %><span class="task-log-entry <%= "log-error" if entry[:kind] == "errors" %>" data-task-log-target="entry" data-kind="<%= entry[:kind] %>"><span class="task-log-label"><%= entry[:time] %> <%= entry[:label] %></span><span class="task-log-message"><%= entry[:text] %></span></span><% end %></pre>
-      <p class="muted" data-task-log-target="empty" <%= "hidden" if entries.any? %>>No messages match this view.</p>
+      <p class="muted" data-task-log-target="feedback"><%= entries.any? ? "#{pluralize(entries.length, 'message')} shown." : "No messages match this view." %></p>
+      <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-task-log-target="announcement"></span>
       <p class="faint">Recent output. Scroll up or search to pause updates.</p>
     <% else %>
       <p class="muted">No log yet for this task.</p>

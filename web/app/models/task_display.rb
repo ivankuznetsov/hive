@@ -14,6 +14,7 @@ class TaskDisplay
 
   def state = status.first
   def label = status.last
+  def completed? = @archived || task["action"].to_s == "archived"
 
   def detail
     return nil if state == "completed"
@@ -39,7 +40,7 @@ class TaskDisplay
   def status
     @status ||= begin
       action = task["action"].to_s
-      if @archived || task.terminal? || action == "archived"
+      if completed?
         reason = task.dig("closure", "reason")
         [ "completed", reason.present? ? reason.humanize : (@archived ? "Archived" : "Completed") ]
       elsif !@fresh

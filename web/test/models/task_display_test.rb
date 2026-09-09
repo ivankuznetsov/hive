@@ -16,8 +16,26 @@ class TaskDisplayTest < ActiveSupport::TestCase
     assert_equal "Ready to archive", display("stage" => "8-finalize", "action" => "ready_to_archive").label
   end
 
-  test "terminal and archived records do not become failures because telemetry is missing" do
-    assert_equal "Completed", display({ "stage" => "9-done", "action" => "error" }, fresh: false).label
+  test "active final content stages follow their action" do
+    stage = Hive::Workflows::Content::DESCRIPTOR.stages.find { |item| item.name == "done" }
+    assert_equal :agent, stage.kind
+    { "ready_to_run" => "ready", "agent_running" => "running", "error" => "attention",
+      "archived" => "completed" }.each do |action, expected|
+      assert_equal expected, display("workflow" => "content", "stage" => stage.dir, "action" => action).state
+    end
+  end
+
+  test "capacity and recovery receipts retain distinct states" do
+    assert_equal "Waiting for capacity", display("held" => "capacity").label
+    { "queued" => [ "waiting", "Retry queued" ], "running" => [ "running", "Running" ],
+      "blocked" => [ "attention", "Retry blocked" ], "unavailable" => [ "unknown", "Status unavailable" ] }.each do |status, expected|
+      state = display("recovery" => { "status" => status })
+      assert_equal expected, [ state.state, state.label ]
+    end
+  end
+
+  test "completed and archived records do not become failures because telemetry is missing" do
+    assert_equal "Completed", display({ "stage" => "9-done", "action" => "archived" }, fresh: false).label
     assert_equal "Archived", display({ "action" => "error" }, archived: true).label
     assert_equal "Already delivered", display({ "closure" => { "reason" => "already_delivered" } }, archived: true).label
   end

@@ -1,7 +1,7 @@
 import { Controller } from "@hotwired/stimulus"
 
 export default class extends Controller {
-  static targets = ["filter", "search", "entry", "empty"]
+  static targets = ["filter", "search", "entry", "feedback", "announcement"]
 
   connect() {
     this.frame = this.element.closest("turbo-frame")
@@ -28,10 +28,10 @@ export default class extends Controller {
     if (this.frame) this.frame.taskLogViewState = {
       kind: this.filterTarget.value, query: this.searchTarget.value
     }
-    this.apply()
+    this.apply(true)
   }
 
-  apply() {
+  apply(announce = false) {
     const kind = this.filterTarget.value
     const query = this.searchTarget.value.trim().toLowerCase()
     let visible = 0
@@ -40,6 +40,10 @@ export default class extends Controller {
         !entry.textContent.toLowerCase().includes(query)
       if (!entry.hidden) visible += 1
     })
-    if (this.hasEmptyTarget) this.emptyTarget.hidden = visible !== 0
+    const feedback = visible === 0
+      ? "No messages match this view."
+      : `${visible} message${visible === 1 ? "" : "s"} shown.`
+    if (this.hasFeedbackTarget) this.feedbackTarget.textContent = feedback
+    if (announce && this.hasAnnouncementTarget) this.announcementTarget.textContent = feedback
   }
 }

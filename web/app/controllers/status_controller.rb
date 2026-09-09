@@ -1,7 +1,7 @@
 class StatusController < ApplicationController
   VIEWS = %w[board grid].freeze
   VIEW_COOKIE = :hive_status_view
-  helper_method :status_project_filter_path
+  helper_method :status_filter_path
 
   def index
     explicit_view = params[:view].to_s.presence_in(VIEWS)
@@ -15,7 +15,7 @@ class StatusController < ApplicationController
     @projects = StatusBroadcaster.projects(@payload)
     requested_project = params[:project].to_s.presence
     @selected_project = @projects.find { |project| project.name == requested_project }
-    return redirect_to status_project_filter_path(nil) if requested_project && !@selected_project
+    return redirect_to status_filter_path(project: nil) if requested_project && !@selected_project
 
     @visible_projects = @selected_project ? [ @selected_project ] : @projects
     order = TaskDisplay::STATES.keys
@@ -35,7 +35,7 @@ class StatusController < ApplicationController
         tasks = project.attributes.fetch("tasks", []).select do |attributes|
           TaskDisplay.new(Task.new(project: project, attributes: attributes), fresh: @status_fresh).state == @task_state
         end
-        Project.new(project.attributes.merge("tasks" => tasks)) if tasks.any?
+        Project.new(project.attributes.merge("tasks" => tasks)) if tasks.any? || project["error"].present?
       end
     end
     @board = Board.new(@visible_projects) if @status_view == "board"
@@ -47,16 +47,15 @@ class StatusController < ApplicationController
     @projects = StatusBroadcaster.projects(@payload)
     requested_project = params[:project].to_s.presence
     @selected_project = @projects.find { |project| project.name == requested_project }
-    return redirect_to status_project_filter_path(nil) if requested_project && !@selected_project
+    return redirect_to status_filter_path(project: nil) if requested_project && !@selected_project
 
     @visible_projects = @selected_project ? [ @selected_project ] : @projects
   end
 
   private
 
-  def status_project_filter_path(project)
-    query = request.query_parameters.except("project")
-    query["project"] = project if project.present?
+  def status_filter_path(**changes)
+    query = request.query_parameters.merge(changes.stringify_keys).compact
     query.empty? ? request.path : "#{request.path}?#{query.to_query}"
   end
 

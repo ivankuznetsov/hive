@@ -102,25 +102,16 @@ module Hive
         @runtime_root = Dir.mktmpdir("agent-git-isolation-", @task_folder)
         @private_tmpdir = File.join(@runtime_root, "tmp")
         Dir.mkdir(@private_tmpdir, 0o700)
-        git_dir = File.join(@runtime_root, "repository.git")
-        @metadata = Hive::AgentGitGate.prepare_isolated_metadata(
-          repository_path: @worktree_path, worktree_path: @worktree_path,
-          destination: git_dir, destination_root: @runtime_root
-        )
         controls = @git_control_paths || self.class.git_control_paths!(@worktree_path)
-        @source_objects = File.realpath(
-          File.join(File.dirname(controls.fetch("repository config")), "objects")
-        )
-        @source_objects_mount = File.join(@runtime_root, "source-objects")
-        Dir.mkdir(@source_objects_mount, 0o700)
         protected_paths = self.class.git_read_only_paths!(
           @worktree_path, control_paths: controls
         )
-        @worktree_git_dir = File.dirname(controls.fetch("worktree config"))
-        protected_paths = protected_paths.reject do |path|
-          contained_path?(File.expand_path(path), @worktree_git_dir)
+        if @writable_worktree
+          prepare_private_metadata!(controls)
+          protected_paths = protected_paths.reject do |path|
+            contained_path?(File.expand_path(path), @worktree_git_dir)
+          end
         end
-        rebind_private_alternates!
         @command_prefix = sandbox_arguments(home, protected_paths).freeze
         @environment = GIT_ENVIRONMENT.merge("TMPDIR" => @private_tmpdir).freeze
         self
@@ -130,37 +121,29 @@ module Hive
               "Patrol agent Git isolation could not be prepared: #{e.message.to_s[0, 300]}"
       end
 
-      def adopt!
+      def adopt!(allow_unchanged: false)
         unless @writable_worktree
           raise Hive::StageError, "read-only Patrol agent Git metadata cannot be adopted"
         end
 
         restore_controller_alternates!
-        Hive::AgentGitGate.adopt_isolated_metadata(@metadata)
+        Hive::AgentGitGate.adopt_isolated_metadata(@metadata, allow_unchanged: allow_unchanged)
       rescue Hive::AgentGitGate::Error => e
         raise Hive::StageError,
               "Patrol agent Git commit could not be adopted: #{e.message.to_s[0, 300]}"
       end
 
       def adopt_if_changed!
-        restore_controller_alternates!
-        head = Hive::AgentGitGate.read(@metadata.git_dir, :head_oid)
-        unless head.success?
-          raise Hive::StageError, "Patrol isolated Git HEAD is unavailable"
-        end
-        return if head.stdout.strip.downcase == @metadata.base_oid
-
-        adopt!
-      rescue Hive::AgentGitGate::Error => e
-        raise Hive::StageError,
-              "Patrol isolated Git commit could not be inspected: #{e.message.to_s[0, 300]}"
+        adopt!(allow_unchanged: true)
       end
 
       def cleanup!
+        @alternates_directory&.close
+        @alternates_directory = nil
         return :absent unless @runtime_root
 
         root = @runtime_root
-        FileUtils.remove_entry_secure(root, true)
+        FileUtils.remove_entry_secure(root)
         @runtime_root = nil
         :removed
       rescue SystemCallError, IOError => e
@@ -169,6 +152,21 @@ module Hive
       end
 
       private
+
+      def prepare_private_metadata!(controls)
+        @metadata = Hive::AgentGitGate.prepare_isolated_metadata(
+          repository_path: @worktree_path, worktree_path: @worktree_path,
+          destination: File.join(@runtime_root, "repository.git"), destination_root: @runtime_root
+        )
+        @worktree_git_dir = File.dirname(controls.fetch("worktree config"))
+        @source_objects = File.realpath(
+          File.join(File.dirname(controls.fetch("repository config")), "objects")
+        )
+        @source_objects_mount = File.join(@runtime_root, "source-objects")
+        Dir.mkdir(@source_objects_mount, 0o700)
+        rebind_private_alternates!
+        @alternates_directory = Dir.open(File.join(@metadata.git_dir, "objects", "info"))
+      end
 
       def sandbox_arguments(home, protected_paths)
         args = [
@@ -183,8 +181,10 @@ module Hive
         protected_mounts(protected_paths, writable_paths(home)).each do |path|
           args.concat([ "--ro-bind", path, path ])
         end
-        args.concat([ "--ro-bind", @source_objects, @source_objects_mount ])
-        args.concat([ "--bind", @metadata.git_dir, @worktree_git_dir ])
+        if @metadata
+          args.concat([ "--ro-bind", @source_objects, @source_objects_mount ])
+          args.concat([ "--bind", @metadata.git_dir, @worktree_git_dir ])
+        end
         args.concat([ "--chdir", @worktree_path, "--" ])
       end
 
@@ -280,10 +280,24 @@ module Hive
       end
 
       def restore_controller_alternates!
+        directory = File.join(@metadata.git_dir, "objects", "info")
+        bound_directory = "/proc/self/fd/#{@alternates_directory.fileno}"
+        held = File.stat(bound_directory)
+        current = File.stat(directory)
+        unless File.realpath(directory) == directory &&
+               current.dev == held.dev && current.ino == held.ino
+          raise Hive::StageError, "Patrol isolated Git object directory was replaced"
+        end
+
+        # The held directory remains the write target even if the agent
+        # swaps a parent after the identity check. Rename replaces a final
+        # alternates symlink without following it.
         Hive::AtomicFile.write(
-          File.join(@metadata.git_dir, "objects", "info", "alternates"),
+          File.join(bound_directory, "alternates"),
           "#{@source_objects}\n", mode: 0o600
         )
+      rescue SystemCallError, IOError => e
+        raise Hive::StageError, "Patrol isolated Git object directory is unavailable: #{e.class}"
       end
 
       def contained_path?(path, root)

@@ -156,6 +156,20 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_ordinary_reads_refuse_worktree_redirection_to_a_clean_directory
+    with_tmp_git_repo do |repo|
+      with_tmp_dir do |clean|
+        FileUtils.cp(File.join(repo, "README.md"), clean)
+        File.write(File.join(repo, "uncommitted-change"), "selected checkout\n")
+        run!("git", "-C", repo, "config", "core.worktree", clean)
+        assert_empty run!("git", "-C", repo, "status", "--porcelain=v1")
+        assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate.read(repo, :status)
+        end
+      end
+    end
+  end
+
   def test_repository_selected_helpers_in_included_local_config_fail_closed
     with_tmp_git_repo do |repo|
       Dir.mktmpdir("agent-git-included-config") do |root|

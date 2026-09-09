@@ -58,8 +58,9 @@ accepts an explicit allowed transport, and validates one exact
 
 `tracked_gitlinks(repository_path, max_stdout_bytes: 64 * 1024)` is the only
 submodule-discovery operation exposed to production callers. It delegates to a
-fixed bounded `ls-files --stage -z` read and returns validated relative gitlink
-paths; it is not a general Git command or configuration interface.
+fixed streaming `ls-files --stage -z` read and returns validated relative gitlink
+paths. Ordinary file records are discarded before the aggregate gitlink byte
+budget; individual records and the retained gitlink count remain bounded; it is not a general Git command or configuration interface.
 
 `materialize` verifies an already-present commit OID, constrains the destination
 below an explicit root, creates a detached worktree, and verifies exact HEAD,
@@ -78,7 +79,8 @@ registration ownership.
 
 `prepare_isolated_metadata` proves that the supplied worktree belongs to the
 source repository, captures its attached branch and exact HEAD, initializes a
-private Git directory below a declared temporary root, configures only its fixed non-bare worktree identity, reads source objects through an alternates file, and builds a private index without moving the controller branch. `adopt_isolated_metadata` accepts only a clean committed descendant. It imports the exact private HEAD without writing `FETCH_HEAD`, resolves that exact object and re-proves ancestry in the authoritative repository with replace objects disabled, revalidates the controller branch and base, updates the worktree index, and moves the source ref with an expected-old-OID compare-and-swap. Any failure through final authoritative status proof rolls back the ref with an expected-head lease and restores the base index; typed diagnostics preserve the original and rollback failures. A receipt is returned only after the authoritative worktree is clean at the adopted commit.
+private Git directory below a declared temporary root, configures only its fixed non-bare worktree identity, reads source objects through an alternates file, and builds a private index without moving the controller branch. `adopt_isolated_metadata` accepts only a clean committed descendant; its explicit
+`allow_unchanged` mode returns no receipt when the private HEAD is still the base. It imports the exact private HEAD without writing `FETCH_HEAD`, resolves that exact object and re-proves ancestry in the authoritative repository with replace objects disabled, revalidates the controller branch and base, updates the worktree index, and moves the source ref with an expected-old-OID compare-and-swap. Any failure through final authoritative status proof rolls back the ref with an expected-head lease and restores the base index; typed diagnostics preserve the original and rollback failures. A receipt is returned only after the authoritative worktree is clean at the adopted commit.
 
 `publish` requires either an exact expected remote OID or exact expected
 absence. It resolves the local commit, captures one exact push target, observes
@@ -104,7 +106,9 @@ and supplies fixed config that neutralizes:
   config fails closed; private-metadata import also refuses
   `uploadpack.packObjectsHook`);
 - repository-selected HTTP transport policy, alternate-ref commands, and
-  working-tree redirection;
+  working-tree redirection; ordinary operations reject
+  `core.worktree`, while isolated operations pin both `--git-dir` and
+  `--work-tree` explicitly and may inspect their private configuration;
 - inherited credential, SSH-command, askpass, and config-count helpers; and
 - `ext` and `file` transports by default.
 
@@ -145,8 +149,9 @@ details rather than potentially credential-bearing transport output.
   recovery. Its authoritative patch checkout is never the validation command
   working directory.
 - Managed Patrol Fix agents compose the gate with
-  `PatrolFix::AgentGitIsolation`: every launch writes Git config, refs, objects,
-  and index state only in private metadata. A successful Fix report may adopt
+  `PatrolFix::AgentGitIsolation`: writable Fix launches write Git config, refs,
+  objects, and index state only in private metadata. Read-only Inbox/Review
+  launches keep the original metadata read-only and accept detached checkouts. A successful Fix report may adopt
   an exact clean descendant through this gate; Inbox and Review never adopt.
 - Refactor patrol captures one managed push URL, uses managed remote
   observations, and publishes through the exact expected-OID/absence gate.

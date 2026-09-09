@@ -218,8 +218,8 @@ module Hive
       )
     end
 
-    def adopt_isolated_metadata(metadata)
-      Isolation.adopt(metadata)
+    def adopt_isolated_metadata(metadata, allow_unchanged: false)
+      Isolation.adopt(metadata, allow_unchanged: allow_unchanged)
     end
 
     # Return registered submodule paths through the hardened Git boundary.
@@ -904,12 +904,13 @@ module Hive
     end
     private_class_method :capture
 
-    def validate_repository_config!(repository)
+    def validate_repository_config!(repository, allow_worktree: false)
       unsafe, _err, status = Hive::ManagedGit.executable_local_config(repository)
       unless status.success?
         raise InvalidRequest,
               "repository-local Git configuration could not be inspected safely"
       end
+      unsafe = unsafe - [ "core.worktree" ] if allow_worktree
       return if unsafe.empty?
 
       raise InvalidRequest,

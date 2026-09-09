@@ -46,7 +46,7 @@ module Hive
       /\Acredential(?:\..*)?\.helper\z/,
       /\Aremote\..*\.(?:uploadpack|receivepack)\z/,
       /\Auploadpack\.packobjectshook\z/,
-      /\Acore\.(?:alternaterefscommand|gitproxy|pager)\z/,
+      /\Acore\.(?:alternaterefscommand|gitproxy|pager|worktree)\z/,
       /\Ahttp(?:\..*)?\..+\z/,
       /\Apager\..*\z/
     ].freeze
@@ -59,12 +59,7 @@ module Hive
       limit = Integer(max_stdout_bytes)
       raise ArgumentError, "managed Git gitlink output limit must be positive" unless limit.positive?
 
-      out, _err, status, overflow = capture3_bounded_fixed(
-        fixed_command(path, "ls-files", "--stage", "-z"), limit
-      )
-      unless status.success? && !overflow
-        raise ArgumentError, "managed Git gitlink discovery failed"
-      end
+      out = capture_gitlinks(path, limit)
 
       paths = out.split("\0").filter_map do |record|
         next unless record.start_with?("160000 ")
@@ -81,6 +76,39 @@ module Hive
     rescue TypeError
       raise ArgumentError, "managed Git gitlink output limit must be positive"
     end
+
+    def capture_gitlinks(path, limit)
+      out = String.new(encoding: Encoding::BINARY)
+      Open3.popen3(
+        environment, *fixed_command(path, "ls-files", "--stage", "-z"),
+        pgroup: true, unsetenv_others: true
+      ) do |stdin, stdout, stderr, wait|
+        stdin.close
+        stdout.binmode
+        drain = Thread.new { IO.copy_stream(stderr, File::NULL) }
+        begin
+          stdout.each_line("\0", DEFAULT_GITLINK_OUTPUT_BYTES + 1) do |record|
+            unless record.end_with?("\0")
+              raise ArgumentError, "managed Git index record exceeded the size limit"
+            end
+            next unless record.start_with?("160000 ")
+
+            out << record
+            raise ArgumentError, "managed Git gitlink discovery exceeded the output limit" if out.bytesize > limit
+          end
+          raise ArgumentError, "managed Git gitlink discovery failed" unless wait.value.success?
+        ensure
+          begin
+            Process.kill("KILL", -wait.pid) if wait.alive?
+          rescue Errno::ESRCH
+            nil
+          end
+          drain.join
+        end
+      end
+      out
+    end
+    private_class_method :capture_gitlinks
 
     # Set only the two private-repository values needed for ordinary Git
     # discovery through a .git directory or gitdir pointer. This is not a

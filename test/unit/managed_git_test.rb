@@ -92,6 +92,21 @@ class ManagedGitTest < Minitest::Test
     end
   end
 
+  def test_gitlink_budget_does_not_count_ordinary_index_entries
+    with_tmp_git_repo do |repo|
+      records = 2_000.times.map { |i| "100644 #{'a' * 40}\tordinary-#{i}.rb\n" }.join
+      _out, err, status = Open3.capture3(
+        "git", "-C", repo, "update-index", "--index-info", stdin_data: records
+      )
+      assert status.success?, err
+      assert_operator run!("git", "-C", repo, "ls-files", "--stage", "-z").bytesize, :>, 64 * 1024
+      assert_empty Hive::ManagedGit.tracked_gitlinks(repo)
+      run!("git", "-C", repo, "update-index", "--add", "--cacheinfo",
+           "160000,#{'b' * 40},vendor/component")
+      assert_equal [ "vendor/component" ], Hive::ManagedGit.tracked_gitlinks(repo)
+    end
+  end
+
   def test_private_worktree_configuration_is_fixed_and_discoverable
     with_tmp_git_repo do |repo|
       Dir.mktmpdir("managed-git-private") do |root|

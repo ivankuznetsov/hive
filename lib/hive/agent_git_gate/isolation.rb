@@ -90,13 +90,13 @@ module Hive
           alternates = File.join(target, "objects", "info", "alternates")
           Hive::AtomicFile.write(alternates, "#{objects}\n", mode: 0o600)
           ref = "refs/heads/#{branch}"
-          gate_call(
-            :command!, target, "update-ref", ref, base_oid,
+          isolated_command!(
+            target, worktree, "update-ref", ref, base_oid,
             error_class: IsolationFailed,
             message: "isolated Git metadata branch could not be initialized"
           )
-          gate_call(
-            :command!, target, "symbolic-ref", "HEAD", ref,
+          isolated_command!(
+            target, worktree, "symbolic-ref", "HEAD", ref,
             error_class: IsolationFailed,
             message: "isolated Git metadata HEAD could not be initialized"
           )
@@ -114,7 +114,7 @@ module Hive
                 "isolated Git metadata filesystem operation failed: #{e.class}"
         end
 
-        def adopt(metadata)
+        def adopt(metadata, allow_unchanged: false)
           unless metadata.is_a?(IsolatedMetadata)
             raise InvalidRequest, "isolated Git adoption requires IsolatedMetadata"
           end
@@ -123,11 +123,13 @@ module Hive
           git_dir = gate_call(:repository_path, metadata.git_dir)
           assert_source_binding!(metadata, worktree)
 
-          head = AgentGitGate.read(git_dir, :head_oid)
+          head = isolated_read_result(git_dir, worktree, :head_oid)
           raise IsolationFailed, "isolated Git metadata HEAD is unavailable" unless head.success?
 
           head_oid = gate_call(:exact_oid, head.stdout.strip, label: "isolated metadata HEAD OID")
           if head_oid == metadata.base_oid
+            return if allow_unchanged
+
             raise IsolationFailed, "isolated Git metadata contains no committed change"
           end
           status = isolated_read_result(git_dir, worktree, :status)
@@ -223,7 +225,7 @@ module Hive
 
         def isolated_read_result(git_dir, worktree, operation)
           args = gate_call(:read_arguments, operation, {})
-          gate_call(:validate_repository_config!, git_dir)
+          gate_call(:validate_repository_config!, git_dir, allow_worktree: true)
           out, err, status = Hive::ManagedGit.capture3_isolated(git_dir, worktree, *args)
           ReadResult.new(
             operation: operation, stdout: gate_call(:immutable, out),
@@ -235,7 +237,7 @@ module Hive
         end
 
         def isolated_command!(git_dir, worktree, *args, error_class:, message:)
-          gate_call(:validate_repository_config!, git_dir)
+          gate_call(:validate_repository_config!, git_dir, allow_worktree: true)
           out, _err, status = Hive::ManagedGit.capture3_isolated(git_dir, worktree, *args)
           raise error_class, message unless status.success?
 

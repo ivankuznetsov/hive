@@ -223,8 +223,9 @@ receipts. An agent cannot establish a trusted projection or journal state by
 rewriting those task-folder files during its run.
 
 Before any provider process starts, `ManagedAgentCustody` requires
-Linux bubblewrap and creates one task-private Git directory, index, object
-alternates mount, and `TMPDIR`. The namespace starts from a read-only host root
+Linux bubblewrap and a task-private `TMPDIR`. Fix additionally receives a
+private Git directory, index, and object-alternates mount. Inbox and Review use
+the existing read-only Git metadata, including detached validation checkouts. The namespace starts from a read-only host root
 and rebinds only the selected Fix worktree, exact task directory, private
 runtime directory, and admitted provider state directories as writable. Each
 provider directory is canonicalized and must be strictly below the canonical
@@ -243,7 +244,11 @@ Fix receives a writable code worktree and its exact task-report directory.
 After a clean agent result and valid Artifact Firewall report, Hive imports
 only the exact clean private HEAD, rechecks the source branch/base, and moves
 the real branch with an expected-old-OID compare-and-swap. Inbox and Review
-mount the code worktree read-only and never adopt private commits. Missing or
+mount the code worktree read-only and never create or adopt private commits.
+Before restoring Fix alternates, Hive verifies the captured object-directory
+identity and writes through its held directory descriptor. Parent symlink or
+directory substitution therefore cannot redirect a controller write into real
+Git metadata; the descriptor is released even when cleanup fails. Missing or
 unusable bubblewrap fails before `Base.spawn_agent`, and cleanup failure retains
 the private directory with a warning instead of masking the attempt outcome.
 This is targeted Git and report containment, not a general same-user filesystem

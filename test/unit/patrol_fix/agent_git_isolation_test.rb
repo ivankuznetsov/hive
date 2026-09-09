@@ -82,6 +82,74 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
     end
   end
 
+  def test_read_only_sandbox_accepts_a_detached_review_checkout
+    with_isolated_repository do |repo, task_folder, _home|
+      git(repo, "checkout", "--detach")
+      isolation = Hive::PatrolFix::AgentGitIsolation.prepare!(
+        worktree_path: repo, task_folder: task_folder, writable_worktree: false
+      )
+      out, err, status = Open3.capture3(
+        isolation.environment, *isolation.command_prefix, "git", "rev-parse", "HEAD"
+      )
+      assert status.success?, err
+      assert_equal git(repo, "rev-parse", "HEAD"), out
+    ensure
+      isolation&.cleanup!
+    end
+  end
+
+  def test_agent_cannot_redirect_controller_alternates_restoration
+    with_isolated_repository do |repo, task_folder, _home, source|
+      isolation = Hive::PatrolFix::AgentGitIsolation.prepare!(
+        worktree_path: repo, task_folder: task_folder, writable_worktree: true
+      )
+      protected_info = File.join(source, ".git", "objects", "info")
+      protected_alternates = File.join(protected_info, "alternates")
+      refute File.exist?(protected_alternates)
+      script = <<~SH
+        set -eu
+        rm -rf "$PRIVATE_GIT/objects/info"
+        ln -s "$PROTECTED_INFO" "$PRIVATE_GIT/objects/info"
+      SH
+      _out, err, status = Open3.capture3(
+        isolation.environment.merge(
+          "PRIVATE_GIT" => isolation.metadata.git_dir, "PROTECTED_INFO" => protected_info
+        ),
+        *isolation.command_prefix, "/bin/sh", "-c", script
+      )
+      assert status.success?, err
+      assert_raises(Hive::StageError) { isolation.adopt_if_changed! }
+      refute File.exist?(protected_alternates), "controller must not write protected Git metadata"
+    ensure
+      isolation&.cleanup!
+    end
+  end
+
+  def test_controller_alternates_write_stays_bound_during_parent_swap
+    with_isolated_repository do |repo, task_folder, _home, source|
+      isolation = Hive::PatrolFix::AgentGitIsolation.prepare!(
+        worktree_path: repo, task_folder: task_folder, writable_worktree: true
+      )
+      info = File.join(isolation.metadata.git_dir, "objects", "info")
+      moved = File.join(task_folder, "moved-info")
+      protected_info = File.join(source, ".git", "objects", "info")
+      original_write = Hive::AtomicFile.method(:write)
+      swap = lambda do |path, bytes, **options|
+        File.rename(info, moved)
+        File.symlink(protected_info, info)
+        original_write.call(path, bytes, **options)
+      end
+      with_replaced_singleton_method(Hive::AtomicFile, :write, swap) do
+        isolation.send(:restore_controller_alternates!)
+      end
+      refute File.exist?(File.join(protected_info, "alternates"))
+      assert_equal "#{File.join(source, '.git', 'objects')}\n",
+                   File.read(File.join(moved, "alternates"))
+    ensure
+      isolation&.cleanup!
+    end
+  end
+
   def test_read_only_sandbox_denies_source_and_shared_config_writes_but_allows_report
     with_isolated_repository do |repo, task_folder, _home|
       repository_config = git(repo, "rev-parse", "--path-format=absolute", "--git-path", "config").strip
@@ -96,7 +164,7 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
       )
       script = <<~SH
         set -eu
-        git config --local review.private true
+        if git config --local review.private true; then exit 80; fi
         if printf 'puts :tampered\n' > app.rb; then exit 81; fi
         if printf '[hostile]\n\tvalue = direct\n' > "$HOST_REPOSITORY_CONFIG"; then exit 82; fi
         printf '{}\n' > "$REPORT_PATH"
@@ -115,9 +183,7 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
       assert_equal original_source, File.binread(File.join(repo, "app.rb"))
       assert_equal original_config, File.binread(repository_config)
       assert File.file?(output)
-      assert_equal "true", git(
-        isolation.metadata.git_dir, "config", "--local", "--get", "review.private"
-      ).strip
+      assert_nil isolation.metadata, "read-only actors do not need writable private metadata"
     ensure
       isolation&.cleanup!
     end
@@ -263,7 +329,7 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
       nested = File.join(task_folder, "nested-fixture")
       isolation = Hive::PatrolFix::AgentGitIsolation.prepare!(
         worktree_path: repo, task_folder: task_folder,
-        writable_worktree: false
+        writable_worktree: true
       )
       script = <<~SH
         set -eu
@@ -350,7 +416,7 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
       ) do
         Hive::PatrolFix::AgentGitIsolation.prepare!(
           worktree_path: repo, task_folder: task_folder,
-          writable_worktree: false, git_control_paths: controls
+          writable_worktree: true, git_control_paths: controls
         )
       end
 
@@ -381,7 +447,7 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
       isolation = Hive::PatrolFix::AgentGitIsolation.prepare!(
         worktree_path: repo,
         task_folder: task_folder,
-        writable_worktree: false
+        writable_worktree: true
       )
       failure = lambda do |*|
         raise Errno::EACCES, "cleanup denied"
@@ -447,23 +513,8 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
       error = assert_raises(Hive::StageError) { read_only.adopt! }
       assert_includes error.message, "read-only"
 
-      failed_head = Hive::AgentGitGate::ReadResult.new(
-        operation: :head_oid, stdout: "", stderr: "missing",
-        exitstatus: 1, overflow: false
-      )
-      with_replaced_singleton_method(
-        Hive::AgentGitGate, :read, ->(*) { failed_head }
-      ) do
-        error = assert_raises(Hive::StageError) { read_only.adopt_if_changed! }
-        assert_includes error.message, "HEAD is unavailable"
-      end
-      with_replaced_singleton_method(
-        Hive::AgentGitGate, :read,
-        ->(*) { raise Hive::AgentGitGate::InvalidRequest, "invalid private metadata" }
-      ) do
-        error = assert_raises(Hive::StageError) { read_only.adopt_if_changed! }
-        assert_includes error.message, "could not be inspected"
-      end
+      error = assert_raises(Hive::StageError) { read_only.adopt_if_changed! }
+      assert_includes error.message, "read-only"
     ensure
       read_only&.cleanup!
     end

@@ -361,6 +361,62 @@ class WorkflowsBenchTest < Minitest::Test
       assert origin_status.success?, "controller origin did not receive main"
       refute redirected_status.success?, "candidate pushurl received main"
       refute_path_exists hook_marker
+      File.symlink(wrapper, File.join(controller_bin, "git"))
+      require "hive/managed_git"
+      _out, err, status = Hive::ManagedGit.capture3(work, "rev-parse", "HEAD", env: controller_env)
+      assert status.success?, "managed Git must work after environment scrubbing: #{err}"
+      resolved, err, status = Hive::ManagedGit.capture3(work, "remote", "get-url", "origin", env: controller_env)
+      assert status.success?, err
+      assert_equal "/opt/hb/controller-state/origin.git", resolved.strip
+
+      run_git.call("-C", work, "config", "url.#{redirected}.insteadOf", origin)
+      _out, err, status = Open3.capture3(controller_env, "bash", wrapper, "-C", work, "push", origin, "main")
+      refute status.success?
+      assert_match(/refuses URL rewriting/, err)
+    end
+  end
+
+  def test_unsealed_review_origin_accepts_shallow_candidate_history
+    runtime = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness", "lib")
+    stages = File.read(File.join(runtime, "hive_stages.sh"))
+    setup = stages[/^  ORIGIN=.*?(?=^  cat >)/m]
+    refute_nil setup
+    Dir.mktmpdir("hive-bench-review-origin") do |root|
+      source = File.join(root, "source")
+      work = File.join(root, "work")
+      state = File.join(root, "controller-state")
+      FileUtils.mkdir_p(state)
+      commands = [
+        [ "init", "-q", "-b", "main", source ],
+        [ "-C", source, "-c", "user.name=Bench", "-c", "user.email=bench@example.test",
+          "commit", "--allow-empty", "-qm", "first" ],
+        [ "-C", source, "-c", "user.name=Bench", "-c", "user.email=bench@example.test",
+          "commit", "--allow-empty", "-qm", "second" ],
+        [ "clone", "-q", "--depth=1", "file://#{source}", work ],
+        [ "-C", work, "remote", "remove", "origin" ]
+      ]
+      commands.each do |args|
+        _out, err, status = Open3.capture3("git", *args)
+        assert status.success?, err
+      end
+      template = File.join(root, "candidate-template")
+      FileUtils.mkdir_p(template)
+      File.write(File.join(template, "candidate-file"), "must not be copied")
+      File.write(File.join(root, ".gitconfig"), "[init]\n  templateDir = #{template}\n")
+      env = { "CONTROLLER_STATE" => state, "BENCH_WORK" => work,
+              "HB_CONTROLLER_ORIGIN" => nil, "HB_SEALED_AGENT_RUNTIME" => "0", "HOME" => root }
+      2.times do
+        _out, err, status = Open3.capture3(
+          env, "bash", "-uc", setup.gsub("git -C /work", 'git -C "$BENCH_WORK"')
+        )
+        assert status.success?, err
+      end
+      origin, err, status = Open3.capture3("git", "-C", work, "remote", "get-url", "origin")
+      assert status.success?, err
+      assert_equal File.join(state, "origin.git"), origin.strip
+      refute_path_exists File.join(origin.strip, "candidate-file")
+      _out, err, status = Open3.capture3("git", "--git-dir=#{origin.strip}", "rev-parse", "main")
+      assert status.success?, err
     end
   end
 

@@ -445,10 +445,18 @@ task_dir() { find /work/.hive-state/stages -maxdepth 2 -type d -name "$SLUG" 2>/
 
 REVIEW_RC=""
 if [ "${HB_REVIEW:-1}" = "1" ] && [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
-  ORIGIN="$HB_CONTROLLER_ORIGIN"
+  ORIGIN="$CONTROLLER_STATE/origin.git"
   rm -rf -- "$ORIGIN"
-  /usr/bin/git init -q --bare "$ORIGIN" 2>/dev/null || exit 4
-  chown -R 1000:1000 "$ORIGIN" || exit 4
+  env -i PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    /usr/bin/git init -q --bare --template= "$ORIGIN" || exit 4
+  env -i PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    /usr/bin/git --git-dir="$ORIGIN" config receive.shallowUpdate true || exit 4
+  if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
+    chown -R 1000:1000 "$ORIGIN" || exit 4
+  else
+    git -C /work remote set-url origin "$ORIGIN" 2>/dev/null ||
+      git -C /work remote add origin "$ORIGIN" || exit 4
+  fi
   git -C /work push -q "$ORIGIN" main 2>/dev/null || exit 4
 
   cat >"$CONTROLLER_BIN/gh" <<'GH'

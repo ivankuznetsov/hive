@@ -1386,11 +1386,18 @@ unchanged installed plugin observes the matching status identity.
 
 ## Sealed benchmark controller hardening awaits a live canary (2026-08-27)
 
-Focused tests execute the Pi and Git wrappers, including a candidate pre-push
-hook and redirected `origin.pushurl`. They do not start a sealed runner with a
-candidate-created `hive`/`git` shim and then complete the offline review cycle.
-Keep this gap open until the packaged CI gate proves those attacks remain
-unprivileged and cannot redirect the controller while ordinary review succeeds.
+The sweep ran a network-disabled Docker canary through the actual root-controller
+origin setup with candidate-created `hive`/`git` shims, a pre-push hook, and a
+malicious global `init.templateDir` pointing at the sealed bundle. The shallow
+push and actual ManagedGit environment-scrubbing call passed; no hook, shim, or
+template copy ran, and uid 1000 could not read the control bundle. Executable
+Pi extension checks covered both GLM routes and unchanged other-model payloads.
+This is boundary/setup proof, not a complete model-driven offline review cycle.
+Keep the full-cycle gap open until that lifecycle has its own packaged canary.
+Resumed review also needs verification: recreated offline origins omit prior
+published branches, while the existing remote-CI gate rejects local repository
+identity before that expected-head path. Setup proof does not establish that
+these older offline lifecycle limitations are solved.
 
 ## Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
 

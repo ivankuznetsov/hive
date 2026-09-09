@@ -598,17 +598,13 @@ module HiveBench
     end
 
     def generation_egress
-      return @generation_egress if defined?(@generation_egress)
-
       network = ENV["HB_GEN_NETWORK"].to_s.strip
       proxy = ENV["HB_GEN_HTTPS_PROXY"].to_s.strip
       required = ENV["HB_REQUIRE_EGRESS_ALLOWLIST"] == "1"
       if network.empty? && proxy.empty?
         raise "benchmark requires provider-only generation egress" if required
 
-        return @generation_egress = {
-          mode: "unrestricted", network: nil, proxy: nil
-        }.freeze
+        return { mode: "unrestricted", network: nil, proxy: nil }.freeze
       end
       if network.empty? || proxy.empty?
         raise "HB_GEN_NETWORK and HB_GEN_HTTPS_PROXY must be set together"
@@ -620,7 +616,7 @@ module HiveBench
         raise "HB_GEN_HTTPS_PROXY must be a credential-free internal http://host:port URL"
       end
 
-      @generation_egress = { mode: "provider-allowlist", network:, proxy: }.freeze
+      { mode: "provider-allowlist", network:, proxy: }.freeze
     end
 
     # Mount the auth each used agent needs. claude: creds+settings+plugins at the

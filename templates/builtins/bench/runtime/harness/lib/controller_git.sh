@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -eu
 
-: "${HB_CONTROLLER_ORIGIN:?sealed controller Git requires HB_CONTROLLER_ORIGIN}"
+# ManagedGit deliberately scrubs benchmark environment variables.
+HB_CONTROLLER_ORIGIN=${HB_CONTROLLER_ORIGIN:-/opt/hb/controller-state/origin.git}
+case "$(id -u)" in
+  0)
+    exec setpriv --reuid=1000 --regid=1000 --init-groups --no-new-privs \
+      --bounding-set=-all --inh-caps=-all --ambient-caps=-all /bin/bash "$0" "$@"
+    ;;
+  1000) ;;
+  *) echo "sealed controller Git requires uid 0 or 1000" >&2; exit 126 ;;
+esac
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_COUNT=5
 export GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
@@ -28,6 +37,12 @@ if [ "${args[$index]:-}" = "remote" ] &&
   exit 0
 fi
 if [ "${args[$index]:-}" = "push" ]; then
+  config_status=0
+  /usr/bin/git "${args[@]:0:index}" config --get-regexp '^url\..*\.(insteadof|pushinsteadof)$' >/dev/null || config_status=$?
+  if [ "$config_status" -ne 1 ]; then
+    echo "sealed controller Git refuses URL rewriting or unreadable configuration" >&2
+    exit 126
+  fi
   for ((position = index + 1; position < ${#args[@]}; position++)); do
     if [ "${args[$position]}" = "origin" ]; then
       args[position]="$HB_CONTROLLER_ORIGIN"
@@ -36,11 +51,4 @@ if [ "${args[$index]:-}" = "push" ]; then
   done
 fi
 
-case "$(id -u)" in
-  0)
-    exec setpriv --reuid=1000 --regid=1000 --init-groups --no-new-privs \
-      --bounding-set=-all --inh-caps=-all --ambient-caps=-all /usr/bin/git "${args[@]}"
-    ;;
-  1000) exec /usr/bin/git "${args[@]}" ;;
-  *) echo "sealed controller Git requires uid 0 or 1000" >&2; exit 126 ;;
-esac
+exec /usr/bin/git "${args[@]}"

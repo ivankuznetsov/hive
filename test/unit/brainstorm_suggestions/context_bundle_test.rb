@@ -4,6 +4,17 @@ require "hive/brainstorm_suggestions/context_bundle"
 class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
   include HiveTestHelper
 
+  def github_pat_fixture
+    suffix = 40.times.map do |index|
+      case index % 3
+      when 0 then ("a".ord + index % 26).chr
+      when 1 then ("A".ord + index % 26).chr
+      else (index % 10).to_s
+      end
+    end.join
+    "ghp_#{suffix}"
+  end
+
   def git(root, *args)
     env = {
       "GIT_AUTHOR_NAME" => "Test", "GIT_AUTHOR_EMAIL" => "test@example.com",
@@ -54,7 +65,7 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
       File.write(File.join(root, "untracked.rb"), "UNTRACKED = true\n")
       File.write(
         File.join(root, "secret-adapter.yml"),
-        "TOKEN=#{["ghp", "a" * 36].join("_")}\n"
+        "TOKEN=#{github_pat_fixture}\n"
       )
       git(root, "add", "secret-adapter.yml")
 
@@ -80,7 +91,7 @@ class HiveBrainstormSuggestionsContextBundleTest < Minitest::Test
         refute_includes paths, "deleted.txt"
         refute_includes paths, "untracked.rb"
         refute_includes paths, "secret-adapter.yml"
-        refute_includes context, "#{["ghp", "a" * 36].join("_")}"
+        refute_includes context, github_pat_fixture
         assert_equal [ "Keep the public API." ], bundle.settled_answers.map { |row| row.fetch("answer") }
         assert_equal "Which adapter should we use?", bundle.question.fetch("text")
         assert bundle.diagnostics.fetch("head")

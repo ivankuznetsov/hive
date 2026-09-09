@@ -604,6 +604,14 @@ module Hive
           pre_effect_routing_validation = false
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
+          # Bind the post-fix guardrail before CleanExit snapshots any residue.
+          # A recovery from fix_auto_commit_scope_failed re-enters with the
+          # rejected fix-agent edits still dirty. prepare_worktree_for_fix
+          # preserves those edits in a checkpoint commit before the retrying
+          # fix agent runs; capturing HEAD afterwards would omit that whole
+          # checkpoint from the guardrail diff and launder precisely the
+          # changes the scope check rejected.
+          before_fix_head = git_head(worktree_path)
           pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
           case pre_fix_status
           when :dirty
@@ -663,8 +671,6 @@ module Hive
             permitted_writable_roots: [ task.folder, worktree_path ]
           )
           agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
-          before_fix_head = git_head(worktree_path)
-
           fix_result = spawn_fix_agent(
             task, cfg, ctx_pass, accepted: accepted, identity: fix_identity,
             agent_custody: agent_custody

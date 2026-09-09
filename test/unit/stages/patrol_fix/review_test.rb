@@ -7,8 +7,15 @@ class PatrolFixReviewStageTest < Minitest::Test
   def test_failed_validation_is_untrusted_context_for_one_independent_publish_decision
     with_review_task do |task, worktree_root, _manifest, fix, validation|
       captured = nil
+      test = self
       runner = lambda do |**values|
         captured = values
+        owner = Hive::PatrolFix::WorktreeReceipt.new(
+          task_folder: task.folder, project_root: task.project_root, slug: task.slug,
+          worktree_root: worktree_root
+        ).read
+        test.refute_equal owner.fetch("worktree"), values.fetch(:cwd)
+        File.write(File.join(values.fetch(:cwd), "installed-dependency"), "review setup")
         File.write(values.fetch(:output_path), JSON.generate(
           "schema" => "hive-patrol-fix-review-report", "schema_version" => 1,
           "route" => "publish", "rationale" => "The failure is unrelated and bounded.",
@@ -72,7 +79,10 @@ class PatrolFixReviewStageTest < Minitest::Test
   def test_changed_worktree_head_after_review_cannot_write_a_decision
     with_review_task do |task, worktree_root, _manifest, _fix, _validation|
       runner = lambda do |**values|
-        worktree = values.fetch(:worktree)
+        worktree = Hive::PatrolFix::WorktreeReceipt.new(
+          task_folder: task.folder, project_root: task.project_root, slug: task.slug,
+          worktree_root: worktree_root
+        ).read.fetch("worktree")
         File.write(File.join(worktree, "after.rb"), "puts :changed\n")
         PatrolFixStageFixture.git(worktree, "add", "after.rb")
         PatrolFixStageFixture.git(worktree, "commit", "-m", "Changed after validation")
@@ -94,6 +104,33 @@ class PatrolFixReviewStageTest < Minitest::Test
       refute(Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).read_all.any? do |row|
         row["kind"] == "decision" && row["stage"] == "review"
       end)
+    end
+  end
+
+  def test_clean_repair_before_review_returns_to_real_validation_with_old_receipts_retained
+    with_review_task do |task, worktree_root, _manifest, fix, validation|
+      worktree = fix.dig("payload", "worktree")
+      File.write(File.join(worktree, "repair.rb"), "puts :repair\n")
+      PatrolFixStageFixture.git(worktree, "add", "repair.rb")
+      PatrolFixStageFixture.git(worktree, "commit", "-m", "Repair after validation")
+      repaired_head = PatrolFixStageFixture.git(worktree, "rev-parse", "HEAD").strip
+      transition = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root, commit: ->(**) { })
+      result = Hive::Stages::PatrolFix::Review.run!(
+        task, {}, worktree_root: worktree_root, transition: transition,
+        agent_runner: ->(**) { flunk "must revalidate before review" }
+      )
+      moved = Hive::Task.new(result.fetch(:moved_task_folder))
+      assert_equal "validate", moved.stage_name
+      rows = Hive::PatrolFix::ReceiptStore.new(task_folder: moved.folder).read_all
+      assert_includes rows, fix
+      assert_includes rows, validation
+      assert_equal repaired_head, rows.last.dig("payload", "head_revision")
+      validated = Hive::Stages::PatrolFix::Validate.run!(
+        moved, {}, worktree_root: worktree_root,
+        command_runner: ->(_path, _commands) { { "commands" => [] } }
+      )
+      assert_equal 2, validated.dig(:receipt, "task", "generation")
+      assert_equal repaired_head, validated.dig(:receipt, "payload", "worktree_head")
     end
   end
 

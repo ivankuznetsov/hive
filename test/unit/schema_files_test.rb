@@ -143,7 +143,7 @@ class SchemaFilesTest < Minitest::Test
       %w[hive daemon status] => false,
       %w[hive evidence recover my-task] => false
     }
-    [4, 5].each do |version|
+    [ 4, 5 ].each do |version|
       document = JSON.parse(File.read(Hive::Schemas.schema_path(
         "hive-dispatch-request", version: version
       )))

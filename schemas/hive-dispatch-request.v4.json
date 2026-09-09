@@ -36,12 +36,12 @@
       ],
       "allOf": [
         {
-          "if": { "prefixItems": [{}, { "const": "daemon" }] },
-          "then": { "const": ["hive", "daemon", "install", "--force"] }
+          "if": { "prefixItems": [ {}, { "const": "daemon" } ] },
+          "then": { "const": [ "hive", "daemon", "install", "--force" ] }
         },
         {
-          "if": { "prefixItems": [{}, { "const": "evidence" }] },
-          "then": { "minItems": 3, "prefixItems": [{}, {}, { "const": "rework" }] }
+          "if": { "prefixItems": [ {}, { "const": "evidence" } ] },
+          "then": { "minItems": 3, "prefixItems": [ {}, {}, { "const": "rework" } ] }
         }
       ]
     },

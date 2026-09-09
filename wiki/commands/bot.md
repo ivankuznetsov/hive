@@ -337,6 +337,10 @@ service the daemon has (`hive daemon install`), built on the shared
 
 ## Exit codes
 
+Bot JSON producers do not define an alternate serialization document. If
+`JSON.generate` fails, no prose or second JSON payload is substituted; the
+encoding failure remains a failed invocation.
+
 | Subcommand | Code | Condition |
 |------------|------|-----------|
 | `start` | 0 | Background bot started, or foreground bot exited cleanly |

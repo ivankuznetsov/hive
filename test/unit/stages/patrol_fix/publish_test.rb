@@ -157,6 +157,30 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_revalidation_rejects_a_commit_racing_the_transition
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      transition = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root, commit: ->(**) { })
+      custody = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task.folder, project_root: task.project_root, slug: task.slug,
+        worktree_root: worktree_root
+      )
+      worktree = custody.read.fetch("worktree")
+      refresh = transition.method(:refresh_fix_receipt!)
+      transition.define_singleton_method(:refresh_fix_receipt!) do |folder, intent|
+        File.write(File.join(worktree, "racing.rb"), "puts :racing\n")
+        PatrolFixStageFixture.git(worktree, "add", "racing.rb")
+        PatrolFixStageFixture.git(worktree, "commit", "-m", "Race revalidation")
+        refresh.call(folder, intent)
+      end
+
+      error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) { transition.revalidate! }
+      assert_equal "worktree changed during revalidation transition", error.message
+      destination = File.join(task.hive_state_path, "stages", "3-validate", task.slug)
+      rows = Hive::PatrolFix::ReceiptStore.new(task_folder: destination).read_all
+      refute rows.any? { |row| row["kind"] == "fix" && row.dig("task", "generation") == 2 }
+    end
+  end
+
   def test_revalidation_rejects_changed_custody_and_missing_source_receipt
     with_publish_task do |task, worktree_root, _manifest, _review, _remote|
       transition = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root, commit: ->(**) { })

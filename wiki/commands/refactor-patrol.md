@@ -64,6 +64,14 @@ dependency risk, and cross-feature scope before assigning the route. Missing
 or unsafe proof becomes `dismiss` or `discuss`; only an admissible thesis uses
 the `fix` route.
 
+Merged-PR classification judges architectural impact, including fixes, refactors,
+and maintenance. PR title prefixes, authors, and labels do not exclude production
+changes. Deterministic exclusions retain controller-owned Patrol publications
+(to prevent recursive intake), dependency-only paths, documentation-only changes,
+and changes without production paths. The existing `feature` decision means
+architecture review is warranted; it is not restricted to new features.
+Previously persisted skip and blocked decisions are not automatically replayed.
+
 Merged-PR intake binds discovery to an immutable manifest and an exact clean
 analysis worktree. The daemon and manual `--pr` path use the same v4 JobStore
 aggregate, generation-fenced discovery claim, feature checkpoints, and

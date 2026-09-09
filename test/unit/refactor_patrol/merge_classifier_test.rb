@@ -25,9 +25,7 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
         "non_production_only" => snapshot(title: "Improve test coverage", paths: [ "test/workflow_test.rb" ]),
         "dependency_only" => snapshot(
           title: "chore(deps): bump rack", author: "dependabot[bot]", paths: [ "Gemfile.lock" ]
-        ),
-        "fix_only" => snapshot(title: "fix: avoid nil lookup"),
-        "chore_only" => snapshot(title: "chore: refresh generated metadata")
+        )
       }
 
       cases.each_with_index do |(reason, input), index|
@@ -41,6 +39,27 @@ class RefactorPatrolMergeClassifierTest < Minitest::Test
         assert_equal reason, record.fetch("reason")
       end
       assert_equal 0, calls
+    end
+  end
+
+  def test_merge_categories_do_not_exclude_production_changes_from_classification
+    [ "fix: change persistence ownership", "fix(runtime)!: change locking",
+      "chore: reorganize modules", "docs: update runtime contract",
+      "chore(deps): replace storage adapter" ].each do |title|
+      with_tmp_dir do |dir|
+        calls = 0
+        classifier = build_classifier(dir) do |_prompt|
+          calls += 1
+          decision("feature", rationale: "Changes an architectural boundary")
+        end
+
+        input = snapshot(title: title, author: "dependabot[bot]").merge("labels" => [ "dependencies" ])
+        record = classifier.call(input, now: T0)
+
+        assert_equal "feature", record.fetch("decision"), title
+        assert_equal "llm", record.fetch("reason"), title
+        assert_equal 1, calls, title
+      end
     end
   end
 

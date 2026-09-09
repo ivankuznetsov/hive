@@ -9,32 +9,28 @@ module TestChangedCoverage
       assert_equal [ "test/unit/commands/run_test.rb" ], files
     end
 
-    def test_basename_only_match_is_rejected_as_ambiguous
-      source = nil
-      # Find a real lib source whose mirrored test path does not exist but
-      # whose basename matches some test file somewhere in the suite.
-      Dir.glob("lib/**/*.rb").each do |path|
-        stem = path.delete_prefix("lib/").delete_suffix(".rb")
-        stems = [ stem, stem.delete_prefix("hive/") ].uniq
-        next if HiveChangedCoverage::TEST_ROOTS.product(stems).any? do |root, candidate|
-          File.exist?(File.join(root, "#{candidate}_test.rb"))
+    def test_basename_only_match_is_rejected_without_an_owner
+      Dir.mktmpdir do |directory|
+        Dir.chdir(directory) do
+          FileUtils.mkdir_p("test/unit/unrelated")
+          File.write("test/unit/unrelated/widget_test.rb", "")
+          assert_raises(HiveChangedCoverage::MappingError) do
+            HiveChangedCoverage.test_files_for("lib/new/widget.rb")
+          end
         end
-
-        basename = File.basename(stem)
-        fallbacks = Dir.glob("test/{unit,integration,babysitter}/**/#{basename}_test.rb")
-        next if fallbacks.empty?
-
-        source = path
-        break
       end
+    end
 
-      skip "no basename-fallback case currently exists in the tree" unless source
-
-      error = assert_raises(HiveChangedCoverage::MappingError) do
-        HiveChangedCoverage.test_files_for(source)
+    def test_nested_source_maps_to_nearest_owner_and_exact_require
+      Dir.mktmpdir do |directory|
+        Dir.chdir(directory) do
+          FileUtils.mkdir_p("test/unit")
+          File.write("test/unit/owner_test.rb", "")
+          File.write("test/unit/consumer_test.rb", 'require "hive/elsewhere/widget"')
+          assert_equal [ "test/unit/owner_test.rb" ], HiveChangedCoverage.test_files_for("lib/hive/owner/part.rb")
+          assert_equal [ "test/unit/consumer_test.rb" ], HiveChangedCoverage.test_files_for("lib/hive/elsewhere/widget.rb")
+        end
       end
-      assert_includes error.message, source
-      assert_includes error.message, "explicit override"
     end
 
     def test_explicit_override_can_require_only_the_coverage_bootstrap
@@ -85,6 +81,13 @@ module TestChangedCoverage
       failures = HiveChangedCoverage.enforce(report, sources: [ "lib/hive/b.rb" ])
 
       assert_equal [ "lib/hive/b.rb: uncovered lines 3, 4" ], failures
+    end
+
+    def test_explicit_unloaded_entry_and_collector_errors_fail
+      report = { "files" => [ { "file" => "lib/hive/a.rb", "loaded" => false, "uncovered_lines" => [] } ],
+                 "result_errors" => [ "invalid shard" ] }
+      assert_equal [ "coverage result: invalid shard", "lib/hive/a.rb: never loaded by the focused run" ],
+                   HiveChangedCoverage.enforce(report, sources: [ "lib/hive/a.rb" ])
     end
 
     def test_never_loaded_source_is_a_failure_even_if_tests_passed

@@ -272,6 +272,13 @@ module Hive
 
       def resolve_destination(task)
         return resolve_explicit_to(task, @to) if @to
+        if task.workflow.controller?
+          projection = Hive::PatrolFix::Projection.new(
+            task_folder: task.folder, stage: "#{task.stage_index}-#{task.stage_name}"
+          ).to_h
+          return task.workflow.stages.last.dir if
+            Hive::PatrolFix::Projection::TERMINAL_OUTCOMES.include?(projection.dig("outcome", "kind"))
+        end
 
         task.workflow.next_stage_after(task.stage_name)&.dir ||
           raise(Hive::FinalStageReached.new(

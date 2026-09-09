@@ -7,6 +7,41 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Automatic outcome capture remains unreliable (2026-09-06)
+
+Dogfood producers can still fail to obtain controller screenshot receipts or
+start the target application. The artifact stage now treats these as best-effort
+warnings, not task-completion blockers, without labelling missing or rejected
+proof accepted. Rebuilding capture and the Screenote integration is deferred;
+this change makes workflow progress independent of that larger project, not
+the evidence pipeline reliable. Real implementation rework and source-integrity
+failures retain their blocking behavior.
+
+## Betterleaks distribution and recovery verification
+
+Betterleaks 1.8.1 binaries are checksum-pinned for Linux/macOS x64/arm64.
+Real scanner regression tests run on Linux x64; execution on the other three
+targets and packaged installation remain release/CI verification obligations.
+Publication range and size fixes have candidate-code checks, but live task
+advancement must be verified after an authorized dogfood deployment. Scanning
+Git objects does not fetch LFS payloads or decrypt encrypted artifacts.
+Ordinary publication hashes stream, but outcome-evidence materialization and
+Patrol snapshots still buffer a complete diff. Betterleaks staged-blob checks
+start a process per current blob (and matching prior blobs only when needed);
+large multi-file commits need throughput measurement before adding batching.
+
+## Test performance measurement limits
+
+The checked-in shard timings come from three completed nightly seeds on
+`cce8c398b`, run `33848365560`; that sweep reported missing-history failures and
+one provider-exit race, so the snapshot is a scheduling estimate, not a clean
+performance acceptance result. Both issues are addressed by the test-flow
+change; a future hosted run must establish the new CI wall clock. Timing-guided
+selection is not used to skip tests. The local task-capture profile took 16.7s
+versus a nightly 178s mean, so no timeout reductions were made from that mismatch.
+Focused source-to-test mapping cannot establish every transitive consumer;
+shared infrastructure falls back broadly and the full coverage gate remains.
+
 ## Ten-table runtime deployment proof
 
 The ten-table runtime and SQL-authoritative attempt records have local regression
@@ -1368,3 +1403,19 @@ prevents lower-priority leapfrogging, but a rare project-only race can leave an
 unrelated slot unused for the full-scan interval plus scan time. Keep this gap
 open until durable admission emits a typed capacity scope that the row
 scheduler can preserve directly.
+## Attempt request-provenance upgrade awaits deployment (2026-09-06)
+
+The exact-schema upgrade removing the dispatch-request foreign key is tested
+against a reconstructed copy of the preceding schema, including row preservation
+and transaction rollback. It has not been applied to dogfood. Stop all writers
+and take an external SQLite backup before the explicit upgrade described in
+[[modules/attempts]]. Request IDs already cleared by the old foreign key are not
+recovered by this change; retained IDs and future attempts are preserved.
+
+## Conservative Git index-lock recovery (2026-09-07)
+
+Automatic recovery requires successful process and open-file probes (`ps` and
+`fuser`). Missing tools, inaccessible process state, any Git process, and
+nonempty locks deliberately leave recovery to a later retry or operator.
+This is not general recovery of interrupted Git operations; preserved lock
+files may still require inspection on platforms without these probes.

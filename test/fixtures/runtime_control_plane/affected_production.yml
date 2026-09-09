@@ -6,10 +6,22 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 8260
-outside_inventory_net_lines: -7848
-final_lines: 412
+final_inventory_lines: 9189
+outside_inventory_net_lines: -7517
+final_lines: 1672
 final_paths:
+- path: lib/hive/betterleaks.rb
+  lines: 26
+- path: lib/hive/secret_scanner.rb
+  lines: 114
+- path: packaging/betterleaks.rb
+  lines: 36
+- path: lib/hive/artifacts/managed_project_server.rb
+  lines: 203
+- path: lib/hive/artifacts/project_command_sandbox.rb
+  lines: 219
+- path: lib/hive/artifacts/runtime_residue_recovery.rb
+  lines: 267
 - path: lib/hive/attempts/capacity_snapshot.rb
   lines: 96
 - path: lib/hive/attempts/coordination.rb
@@ -43,13 +55,13 @@ final_paths:
 - path: lib/hive/runtime_control_plane/cutover_manifest.rb
   lines: 114
 - path: lib/hive/runtime_control_plane/database.rb
-  lines: 366
+  lines: 395
 - path: lib/hive/runtime_control_plane/dispatch_repository.rb
   lines: 773
 - path: lib/hive/runtime_control_plane/maintenance.rb
   lines: 113
 - path: lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
-  lines: 283
+  lines: 282
 - path: lib/hive/runtime_control_plane/operational_repository.rb
   lines: 63
 - path: lib/hive/runtime_control_plane/payload_store.rb
@@ -58,6 +70,8 @@ final_paths:
   lines: 168
 - path: lib/hive/runtime_control_plane/task_lease_repository.rb
   lines: 307
+- path: lib/hive/stages/review/guardrail_waivers.rb
+  lines: 36
 - path: lib/hive/task_counter.rb
   lines: 44
 - path: lib/hive/task_journal.rb

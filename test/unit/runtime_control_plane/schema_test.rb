@@ -128,7 +128,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
           end
         }
       end
-      assert_equal :set_null, foreign_keys.dig(:attempt, :on_delete)
+      assert_nil foreign_keys[:attempt], "queue cleanup must not mutate attempt provenance"
 
       database.transaction do |connection|
         request = {

@@ -279,7 +279,7 @@ class AttemptsSupervisorTest < Minitest::Test
         attempt_id: attempt.attempt_id,
         recorded_at: NOW
       )
-      secret = "github" + "_pat_" + ("A" * 24)
+      secret = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
       draft = draft.merge("detail" => "\e[31magent failed #{secret}")
       worker = <<~RUBY
         diagnostic = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_DIAGNOSTIC_FD")), "w")
@@ -530,7 +530,7 @@ class AttemptsSupervisorTest < Minitest::Test
         stage: "4-review", task_generation: attempt.task_generation,
         attempt_id: attempt.attempt_id, recorded_at: NOW
       )
-      secret = "github" + "_pat_" + ("A" * 24)
+      secret = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
       draft = JSON.parse(JSON.generate(draft))
       draft.fetch("provider")["provenance"] = secret
       worker = <<~RUBY

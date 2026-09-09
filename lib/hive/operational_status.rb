@@ -390,9 +390,13 @@ module Hive
           scheduler_disposition.fetch("reason", "scheduler disposition is unavailable"),
           "scheduler"
         )
-        reasons.unshift(scheduler_reason) if material_scheduler_disposition?(scheduler_disposition)
+        controller_failure = scheduler_disposition["decision"] == "markerless_stalled" &&
+          typed_attempt_diagnostic(row)
+        if material_scheduler_disposition?(scheduler_disposition)
+          controller_failure ? reasons.push(scheduler_reason) : reasons.unshift(scheduler_reason)
+        end
         scheduler_state, scheduler_owner = classify_scheduler_disposition(scheduler_disposition)
-        unless running?(row) || scheduler_state.nil?
+        unless running?(row) || scheduler_state.nil? || controller_failure
           state = scheduler_state
           owner = scheduler_owner
         end
@@ -582,7 +586,7 @@ module Hive
     end
 
     def material_scheduler_disposition?(disposition)
-      !%w[not_evaluated skip project_disabled].include?(disposition["decision"])
+      !%w[not_evaluated skip project_disabled attempt_terminal_replay].include?(disposition["decision"])
     end
 
     def classify_scheduler_disposition(disposition)
@@ -597,8 +601,6 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]
-      when "attempt_terminal_replay"
-        [ "idle", "none" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
       when "semantic_terminal_error"

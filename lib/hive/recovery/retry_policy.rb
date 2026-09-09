@@ -9,7 +9,12 @@ module Hive
     # adapters. It identifies the ordinary workflow verb that owns a stage;
     # marker mutation, admission, pacing, and dispatch remain coordinator-only.
     module RetryPolicy
+      BACKOFF_SEC = [ 5, 10, 60, 300, 900, 3600 ].freeze
       module_function
+
+      def delay_sec(retry_count)
+        BACKOFF_SEC[retry_count.to_i.clamp(0, BACKOFF_SEC.length - 1)]
+      end
 
       def verb_for(stage, workflow: nil, project: nil)
         stage = stage.to_s

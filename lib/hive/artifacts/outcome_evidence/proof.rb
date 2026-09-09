@@ -7,7 +7,7 @@ require "hive/atomic_file"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/identity"
 require "hive/invoked_binary"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/web/project_capture_provider"
 
 module Hive
@@ -775,7 +775,7 @@ module Hive
         private_class_method :bounded_text!
 
         def reject_secrets!(text, label)
-          hits = Hive::SecretPatterns.scan(text)
+          hits = Hive::SecretScanner.scan(text)
           return if hits.empty?
 
           names = hits.map { |hit| hit.fetch(:name) }.uniq.join(", ")

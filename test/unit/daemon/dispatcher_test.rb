@@ -3043,7 +3043,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       row(slug: "c", stage: "6-review", action: "ready_to_run"),
       row(slug: "d", stage: "7-artifacts", action: "ready_to_run"),
       row(slug: "e", stage: "9-done", action: "ready_to_run"),
-      row(slug: "accepted", stage: "2-brainstorm", action: "ready_to_advance")
+      row(slug: "accepted", stage: "2-brainstorm", workflow: "patrol-fix", action: "ready_to_advance")
     ]
     dispatcher, = make_dispatcher
 
@@ -5310,7 +5310,10 @@ def test_changed_task_tick_considers_cached_terminal_advances_before_fresh_work
     max_concurrent_runs: 1, max_concurrent_per_project: 1,
     max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
   )
-  dispatcher.send(:refresh_status_index, [ accepted ])
+  with_replaced_singleton_method(controller, :can_dispatch?, ->(**) { :cooldown }) do
+    dispatcher.tick(now: T0)
+  end
+  assert_empty supervisor.spawned
   status = dispatcher.instance_variable_get(:@status_consumer)
   status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
     ok: true, rows: [ fresh ]
@@ -5321,7 +5324,7 @@ def test_changed_task_tick_considers_cached_terminal_advances_before_fresh_work
   )
 
   assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
-  assert_equal 0, status.fetch_count, "incremental priority must not trigger a full status scan"
+  assert_equal 1, status.fetch_count, "incremental priority must not trigger another full status scan"
   assert_equal 1, status.fetch_task_count
 end
 
@@ -5337,6 +5340,7 @@ def test_changed_task_tick_does_not_replay_cached_coding_advance
   )
   dispatcher, supervisor = make_dispatcher(rows: [ coding_advance ])
   dispatcher.send(:refresh_status_index, [ coding_advance ])
+  dispatcher.send(:cache_terminal_advances, [ coding_advance ])
   status = dispatcher.instance_variable_get(:@status_consumer)
   status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
     ok: true, rows: [ fresh ]
@@ -5347,6 +5351,82 @@ def test_changed_task_tick_does_not_replay_cached_coding_advance
   )
 
   assert_equal [ "new-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
+def test_changed_task_tick_does_not_replay_cached_non_patrol_generic_advance
+  generic = row(
+    slug: "content-ready", stage: "1-inbox", workflow: "content",
+    action: "ready_to_advance", command: "hive approve content-ready --from 1-inbox"
+  )
+  fresh = row(slug: "fresh", action: "ready_to_run")
+  dispatcher, supervisor = make_dispatcher(rows: [ generic ])
+  dispatcher.send(:refresh_status_index, [ generic ])
+  dispatcher.send(:cache_terminal_advances, [ generic ])
+  dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+    Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+
+  dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+  assert_equal [ "fresh" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
+def test_durable_advance_ownership_consumes_the_cached_row_before_an_unrelated_tick
+  %i[accepted existing_live terminal_replay].each do |initial_status|
+    accepted = row(
+      slug: "accepted", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve accepted --project p1 --from 1-inbox --force"
+    )
+    fresh = row(slug: "fresh", action: "ready_to_run")
+    requests = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **|
+      requests << request.slug
+      Hive::Attempts::DispatchResult.new(
+        status: requests.length == 1 ? initial_status : :accepted,
+        attempt: nil, receipt: nil, attach_descriptor: nil, reason: nil
+      )
+    end
+    dispatcher, = make_dispatcher(rows: [ accepted ], attempt_dispatcher: attempt_dispatcher)
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    dispatcher.tick(now: T0)
+
+    # Durable workers never enter the local child supervisor. With no active
+    # capacity remaining, the old approval must not be admitted a second time.
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+    dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+    assert_equal [ "accepted", "fresh" ], requests, initial_status.to_s
+  end
+end
+
+def test_cached_advance_yields_to_a_pending_same_task_request_after_cooldown
+  with_tmp_dir do |state_home|
+    accepted = row(
+      slug: "accepted", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve accepted --project p1 --from 1-inbox --force"
+    )
+    fresh = row(slug: "fresh", action: "ready_to_run")
+    dispatcher, supervisor, controller = make_dispatcher(
+      rows: [ accepted ], dispatch_request_state_home: state_home
+    )
+    write_request_file(state_home, slug: "accepted", request_id: "EXPLICIT")
+    stub_find_project!(dispatcher, "p1")
+    begin
+      with_replaced_singleton_method(controller, :can_dispatch?, ->(**) { :cooldown }) do
+        dispatcher.tick(now: T0)
+      end
+      assert_empty supervisor.spawned
+      dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+        Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+
+      dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+      assert_equal [ "fresh" ], supervisor.spawned.map { |entry| entry[:slug] }
+      refute_nil Q.fetch("EXPLICIT", state_home: state_home)
+    ensure
+      restore_find_project!
+    end
+  end
 end
 
 def test_failed_changed_task_status_keeps_cached_external_capacity
@@ -5430,6 +5510,7 @@ def test_live_heartbeat_tick_does_not_reconcile_attempt_history
     rows: [ running ], attempt_reconciler: reconciler
   )
   dispatcher.send(:refresh_status_index, [ running, accepted ])
+  dispatcher.send(:cache_terminal_advances, [ running, accepted ])
   dispatcher.instance_variable_get(:@status_consumer).next_task_result =
     Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ running ])
 

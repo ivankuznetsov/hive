@@ -53,14 +53,11 @@ class AttemptsContextTest < Minitest::Test
     routing.fetch("route")["model"] = "changed-after-admission"
 
     assert context.explicit_routing?
-    assert_equal "decision-1", context.routing_decision.fetch("decision_id")
     assert_equal "codex-account-a", context.provider_account_id
     assert_equal "codex", context.adapter
     assert_equal "codex-home-a", context.launch_binding_id
     assert_equal "gpt-5.6-sol", context.model
     assert_equal "high", context.effort
-    assert_equal 2, context.circuit_generations.length
-    assert_equal 1, context.probe_bindings.length
     assert_raises(FrozenError) { context.admitted_route["model"].replace("other") }
 
     legacy = Hive::Attempts::Context.send(
@@ -68,8 +65,6 @@ class AttemptsContextTest < Minitest::Test
     )
     refute legacy.explicit_routing?
     assert_nil legacy.admitted_route
-    assert_empty legacy.circuit_generations
-    assert legacy.circuit_generations.frozen?
   end
 
   def test_environment_context_is_authenticated_bound_and_scrubbed
@@ -136,7 +131,6 @@ class AttemptsContextTest < Minitest::Test
 
   def test_explicit_environment_context_installs_the_dedicated_evidence_writer
     routing = explicit_routing
-    routing["probe_bindings"] = []
     with_running_attempt(routing: routing) do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(
         FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
@@ -180,14 +174,14 @@ class AttemptsContextTest < Minitest::Test
       )
       with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
         with_context_environment(store, capability: "f" * 64) do
-          error = assert_raises(Hive::Attempts::StoreError) do
+          error = assert_raises(Hive::Attempts::RepositoryError) do
             Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
           end
           assert_includes error.message, "capability"
         end
 
         with_context_environment(store, capability: CLAIM_CAPABILITY) do
-          error = assert_raises(Hive::Attempts::StoreError) do
+          error = assert_raises(Hive::Attempts::RepositoryError) do
             Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
           end
           assert_includes error.message, "task or intended stage"
@@ -200,14 +194,14 @@ class AttemptsContextTest < Minitest::Test
   def test_wrong_argv_and_unreleased_gate_fail_closed
     with_running_attempt do |store, _record|
       with_context_environment(store, capability: CLAIM_CAPABILITY) do
-        error = assert_raises(Hive::Attempts::StoreError) do
+        error = assert_raises(Hive::Attempts::RepositoryError) do
           Hive::Attempts::Context.install_from_env!(argv: [ "hive", "run", "other" ])
         end
         assert_includes error.message, "argv"
       end
 
       with_context_environment(store, capability: CLAIM_CAPABILITY, gate: "") do
-        error = assert_raises(Hive::Attempts::StoreError) do
+        error = assert_raises(Hive::Attempts::RepositoryError) do
           Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
         end
         assert_includes error.message, "gate"
@@ -224,7 +218,7 @@ class AttemptsContextTest < Minitest::Test
       )
 
       with_context_environment(store, capability: CLAIM_CAPABILITY) do
-        error = assert_raises(Hive::Attempts::StoreError) do
+        error = assert_raises(Hive::Attempts::RepositoryError) do
           Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
         end
         assert_includes error.message, "process identity"
@@ -246,7 +240,8 @@ class AttemptsContextTest < Minitest::Test
       current
     end
     context = Hive::Attempts::Context.send(
-      :new, attempt_id: "attempt-1", task_generation: "generation-current",
+      :new, attempt_id: "attempt-1", task_generation: 0,
+      ownership_generation: "generation-current",
       project: "demo", intended_stage: "4-execute"
     )
 
@@ -257,7 +252,8 @@ class AttemptsContextTest < Minitest::Test
     assert_equal 1, calls
 
     stale = Hive::Attempts::Context.send(
-      :new, attempt_id: "attempt-stale", task_generation: "generation-old",
+      :new, attempt_id: "attempt-stale", task_generation: 0,
+      ownership_generation: "generation-old",
       project: "demo", intended_stage: "4-execute"
     )
     with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, resolver) do
@@ -277,15 +273,14 @@ class AttemptsContextTest < Minitest::Test
       assert_raises(Hive::ConcurrentRunError) { epoch_stale.validate_generation!(task) }
     end
 
-    successor = Hive::Attempts::Context.send(
+    independent_retry = Hive::Attempts::Context.send(
       :new,
       attempt_id: "attempt-successor",
       task_generation: 2,
       ownership_generation: "generation-predecessor",
       project: "demo",
       intended_stage: "4-execute",
-      progress_token: "post-clear-progress",
-      predecessor_attempt_id: "attempt-predecessor"
+      progress_token: "post-clear-progress"
     )
     current_successor = Struct.new(
       :ownership_generation, :task_input_epoch, :progress_token
@@ -293,24 +288,8 @@ class AttemptsContextTest < Minitest::Test
     with_replaced_singleton_method(
       Hive::Attempts::Generation, :resolve, ->(**) { current_successor }
     ) do
-      assert successor.validate_generation!(task)
-    end
-
-    stale_successor = Hive::Attempts::Context.send(
-      :new,
-      attempt_id: "attempt-successor-stale",
-      task_generation: 2,
-      ownership_generation: "generation-predecessor",
-      project: "demo",
-      intended_stage: "4-execute",
-      progress_token: "admitted-progress",
-      predecessor_attempt_id: "attempt-predecessor"
-    )
-    with_replaced_singleton_method(
-      Hive::Attempts::Generation, :resolve, ->(**) { current_successor }
-    ) do
       assert_raises(Hive::ConcurrentRunError) do
-        stale_successor.validate_generation!(task)
+        independent_retry.validate_generation!(task)
       end
     end
   end
@@ -329,7 +308,7 @@ class AttemptsContextTest < Minitest::Test
       )
     end
 
-    assert_raises(Hive::Attempts::StoreError) do
+    assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::Context.send(:read_inherited, "not-an-fd", limit: 1)
     end
   end
@@ -384,7 +363,7 @@ class AttemptsContextTest < Minitest::Test
     ]
     record = Hive::Attempts::Record.launching(
       attempt_id: "attempt-module", request_id: "request-module",
-      predecessor_attempt_id: nil, task_id: nil, project: "demo",
+      task_id: nil, project: "demo",
       task_slug: "module-patrol-scheduled-scan", intended_stage: "module-hook",
       task_generation: "generation-module", progress_token: "event-1",
       provider: "native", worker_argv: argv,
@@ -394,7 +373,7 @@ class AttemptsContextTest < Minitest::Test
     )
 
     assert_nil Hive::Attempts::Context.send(:validate_task_binding!, record, argv)
-    assert_raises(Hive::Attempts::StoreError) do
+    assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::Context.send(
         :validate_task_binding!, record, argv.take(6) + [ "other-event" ]
       )
@@ -408,7 +387,7 @@ class AttemptsContextTest < Minitest::Test
         }[key]
       end
     end.new(subject.except("event_id"))
-    error = assert_raises(Hive::Attempts::StoreError) do
+    error = assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::Context.send(
         :validate_module_hook_binding!, incomplete, argv
       )
@@ -416,13 +395,7 @@ class AttemptsContextTest < Minitest::Test
     assert_includes error.message, "binding is incomplete"
   end
 
-  def test_legacy_opaque_generation_is_bridged_without_becoming_an_epoch
-    context = Hive::Attempts::Context.send(
-      :new, attempt_id: "attempt", task_generation: "opaque"
-    )
-
-    assert_equal 0, context.task_generation
-    assert_equal "opaque", context.ownership_generation
+  def test_context_requires_a_numeric_nonnegative_task_epoch
     assert_raises(ArgumentError) do
       Hive::Attempts::Context.send(:new, attempt_id: "attempt", task_generation: -1)
     end
@@ -438,44 +411,21 @@ class AttemptsContextTest < Minitest::Test
   private
 
   def explicit_routing
-    account_scope = {
-      "kind" => "provider_account", "provider_account_id" => "codex-account-a", "model" => nil
-    }
-    model_scope = {
-      "kind" => "model", "provider_account_id" => "codex-account-a", "model" => "gpt-5.6-sol"
-    }
     {
       "mode" => "explicit",
-      "policy_digest" => "a" * 64,
-      "decision" => {
-        "decision_id" => "decision-1", "policy_digest" => "a" * 64,
-        "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6), "exclusions" => []
-      },
       "route" => {
         "route_id" => "codex-account-a/gpt-5.6-sol",
         "provider_account_id" => "codex-account-a", "adapter" => "codex",
         "launch_binding_id" => "codex-home-a", "model" => "gpt-5.6-sol", "effort" => "high"
-      },
-      "circuit_generations" => [
-        { "scope" => account_scope, "journal_epoch" => 1, "observed_generation" => 4 },
-        { "scope" => model_scope, "journal_epoch" => 1, "observed_generation" => 7 }
-      ],
-      "probe_bindings" => [
-        {
-          "scope" => model_scope, "journal_epoch" => 1,
-          "observed_generation" => 7, "claim_generation" => 8,
-          "attempt_id" => "attempt-1", "task_generation" => "generation-1",
-          "ownership_fence" => "generation-1"
-        }
-      ]
+      }
     }
   end
 
   def with_running_attempt(routing: { "mode" => "legacy" })
     with_tmp_dir do |root|
-      store = Hive::Attempts::Store.new(root: root)
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
       record = store.create_launching(
-        attempt_id: "attempt-env", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-env", request_id: "request-1",
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
         task_generation: "generation-env", task_input_epoch: 5,
         progress_token: "progress", provider: "codex",
@@ -510,7 +460,7 @@ class AttemptsContextTest < Minitest::Test
     gate_w.write(gate) unless gate.empty?
     gate_w.close
     test_case = self
-    with_replaced_singleton_method(Hive::Attempts::Store, :new, lambda { |**options|
+    with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, lambda { |**options|
       test_case.assert_empty options, "worker context must not accept an environment-selected store root"
       store
     }) do

@@ -1,11 +1,13 @@
 require "fileutils"
+require "digest"
 require "json"
 require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
 require "hive/stages"
-require "hive/task_projection/store"
+require "hive/task_meta"
+require "hive/task_projection/reader"
 require_relative "artifact_capture"
 require_relative "background_process"
 require_relative "cli_driver"
@@ -227,6 +229,12 @@ module Hive
         @ctx.slug_default!(slug)
         folder = File.join(project_dir, ".hive-state", "stages", stage, slug)
         FileUtils.mkdir_p(folder)
+        task_id = Digest::SHA256.hexdigest(
+          [ @scenario.name, step.position, step.args["project"], stage, slug ].join("\0")
+        )[0, 12].to_i(16)
+        Hive::TaskMeta.write(
+          folder, id: task_id, slug: slug, display_name: slug, workflow: "coding"
+        )
         state_file = contained_relative_path(folder, step.args["state_file"] || default_state_file(stage), "seed_state state_file")
         File.write(state_file, expand_string(step.args["content"] || default_state_content(slug, stage)))
         Array(step.args["files"]).each do |file_spec|
@@ -234,9 +242,6 @@ module Hive
           FileUtils.mkdir_p(File.dirname(path))
           File.write(path, expand_string(file_spec.fetch("content", "")))
         end
-        Hive::TaskProjection::Store.new(task_folder: folder).initialize_pristine!(
-          marker: Hive::Markers.current(state_file)
-        )
       end
 
       def step_write_file(step)
@@ -263,6 +268,47 @@ module Hive
         run_home = @ctx.run_home
         eval(step.args.fetch("block"), binding, @scenario.path, step.position)
         @ctx.slug_default!(slug)
+      end
+
+      def hold_task_lease(task_folder)
+        require "hive/runtime_control_plane/task_lease_repository"
+        root, separator, = File.expand_path(task_folder).partition("/.hive-state/stages/")
+        raise "task lease fixture is outside a Hive state root" if separator.empty?
+
+        config = YAML.safe_load(File.read(File.join(@ctx.run_home, "config.yml"))) || {}
+        project = Array(config["registered_projects"]).find do |entry|
+          File.expand_path(entry.fetch("path")) == root
+        end
+        raise "task lease fixture project is not registered" unless project
+
+        database = Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(@ctx.run_home)
+        ).migrate!
+        timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+        database.transaction do |db|
+          installation_id = db[:installations].first.fetch(:installation_id)
+          db[:projects].insert_conflict.insert(
+            project_id: project.fetch("project_id"),
+            installation_id: installation_id,
+            registration_id: project.fetch("registration_id"),
+            name: project.fetch("name"), observed_path: root,
+            state_root_path: File.join(root, ".hive-state"), active: 1,
+            registered_at: timestamp, last_observed_at: timestamp
+          )
+        end
+        repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+          database: database,
+          process_start_time: Hive::Lock.method(:process_start_time),
+          process_alive: lambda { |pid, recorded_start_time:|
+            Hive::Lock.send(
+              :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+            )
+          }
+        )
+        held = repository.acquire(
+          task_folder, { "op" => "e2e-contention" }, create: false
+        )
+        [ database, repository, held.fetch("lock_id") ]
       end
 
       def step_tui_expect(step)

@@ -11,7 +11,6 @@ require "hive/agent_skills"
 require "hive/artifact_firewall"
 require "hive/config"
 require "hive/plan_review/adapters/base"
-require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
@@ -132,22 +131,17 @@ module Hive
             }
           end
 
-          # Hive journals the review attempt itself — stage entry, agent
-          # session, projection checkpoints — while the reviewer is running.
-          # Those writes land in the task's own bookkeeping files, so holding
-          # them under the firewall made every review fail with "reviewer
-          # modified protected artifacts: task-journal.jsonl,
-          # task-projection.json, task-projection.checkpoint.json" for edits
-          # the reviewer never made.
+          # Hive journals the review attempt itself while the reviewer is
+          # running. Exclude that one controller-written log from this exact
+          # custody window; plan.md, meta.yml, and prior review records remain
+          # protected.
           #
           # They stay protected everywhere else (the execute-stage firewall is
           # untouched); here they are excluded because hive is the one writing
           # them during this exact window. What the reviewer must not touch —
           # plan.md, meta.yml, and every existing plan-review record — is still
           # anchored below.
-          ORCHESTRATOR_JOURNALS = %w[
-            task-journal.jsonl task-projection.json
-          ].push(CheckpointCustody::BASENAME).freeze
+          ORCHESTRATOR_JOURNALS = %w[task-journal.jsonl].freeze
 
           # Review history is append-only. Keep every record in one custody
           # transaction so validation failure cannot skip restoration of a
@@ -276,15 +270,28 @@ module Hive
           end
           validate_output!(output_path, disposable)
           bytes = File.binread(output_path, ResultParser::MAX_BYTES + 1)
-          parsed = ResultParser.parse(
-            bytes,
-            expected: {
-              "attempt_id" => request.attempt_id,
-              "plan_digest" => request.plan_digest,
-              "policy_fingerprint" => request.policy_fingerprint
-            },
-            snapshot_bytes:
-          )
+          begin
+            parsed = ResultParser.parse(
+              bytes,
+              expected: {
+                "attempt_id" => request.attempt_id,
+                "plan_digest" => request.plan_digest,
+                "policy_fingerprint" => request.policy_fingerprint
+              },
+              snapshot_bytes:
+            )
+          rescue InvalidRecord => e
+            # A well-confined reviewer that emitted malformed JSON or one bad
+            # diagnostic field did not judge the plan. Treat the producer's
+            # output failure like other retryable provider output, while the
+            # orchestrator's max_transient bound prevents a retry loop.
+            return result(
+              "retryable_failure", diagnostic: e.message,
+              route_receipt: route_receipt(
+                request, actual: runner_result["actual_route"], diagnostic_source: "parser"
+              )
+            )
+          end
           result(
             parsed.outcome,
             findings: parsed.findings,

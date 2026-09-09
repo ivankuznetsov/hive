@@ -3,22 +3,23 @@ title: hive update
 type: command
 source: lib/hive/commands/update.rb, lib/hive/commands/migrate_all.rb, lib/hive/install_channel.rb, install.sh
 created: 2026-05-21
-updated: 2026-08-13
+updated: 2026-08-30
 tags: [command, install, update, migration]
 ---
 
-**TLDR**: `hive update` delegates to the channel that installed Hive, then
-runs `hive migrate --all` through the newly installed binary. It reports both
-phases, names project migration failures, and prints exact recovery commands.
+**TLDR**: `hive update --yes` delegates publication to the normal install
+channel, then runs one confirmed irreversible fleet cutover through the
+installed candidate. Hive never renames package-owned launchers.
 
 ## Usage
 
 ```bash
-hive update [--dry-run]
+hive update [--dry-run] [--yes]
 ```
 
-`--dry-run` prints the selected channel, updater command, and post-update
-migration command without executing either one.
+`--dry-run` prints the selected channel, updater command, irreversible
+activation boundary, and post-update migration command without executing
+either one. A mutating update refuses without `--yes`.
 
 ## Channel detection
 
@@ -48,36 +49,39 @@ that tag came from `HIVE_VERSION`/`--version` or the latest-release API; the
 latest-version path therefore authenticates the same exact workflow identity
 as an explicitly pinned install.
 
-## Automatic migration
+## Confirmed irreversible fleet cutover
 
-The package updater runs as a child process so the current command can continue
-after installation. When it succeeds, Hive resolves the updated executable
-again and invokes `<updated-hive> migrate --all`; migrations therefore execute
-with the newly installed code, not the old in-memory implementation.
+The configured package updater publishes the candidate through its normal
+channel. Hive does not copy, rename, or replace Homebrew, AUR, bash, or other
+package-owned launcher entries. The update command then resolves the installed
+candidate and runs `migrate --all --yes`; its own `--yes` confirmation is the
+authority for that non-interactive cutover call.
 
-The standalone `install.sh` path also invokes the exact newly installed
-wrapper's `migrate --all` before installing or restarting daemon autostart.
-This covers a direct installer upgrade as well as `hive update`; the bash
-channel's second post-updater invocation is intentionally harmless because all
-migrations are idempotent. Migration failure stops the install command before
-daemon setup and prints the exact installed-wrapper recovery command.
+The candidate's read-only activation gate runs before LLM-wiki reconciliation
+or any other startup mutation. Until SQLite activation is complete, ordinary
+entrypoints refuse and point to fleet cutover or `hive runtime status`. Only
+the exact forward maintenance/diagnostic routes remain available.
 
-`hive migrate --all` checks global recovery state and then every registered
-project. Output includes a global-state check, `[N/total]` progress for each
-project, per-project success, and a final migrated/failed count. Project
-failures do not hide later projects: the fleet pass continues, prints a
-one-line error plus a shell-escaped recovery command using the active `hive` or
-`hv` wrapper, and exits non-zero after the complete inventory has been
-attempted. A missing registered path names restore, `forget`, and `prune`
-options instead of suggesting a project migration that cannot run.
+The standalone `install.sh` path deliberately does not migrate runtime state or
+start services. A genuinely fresh install finishes with `hive setup --yes`,
+which performs explicit bootstrap before service installation. Existing
+installations use `hive update --yes`. The immediately previous release already
+invokes candidate `migrate --all` without `--yes`; the candidate therefore asks
+for `yes` on a TTY and refuses non-TTY use with the exact
+`hive migrate --all --yes` instruction.
+
+`hive migrate --all` validates every registered project and global legacy
+domain before activation. Missing projects require an explicit recorded
+exclusion. One project failure, source mutation, live owner, unsupported
+record, or parity/integrity failure leaves the installation unactivated; this
+is not a sequence of independently committed project migrations.
 
 If the channel updater fails, migration is not started. If the updated binary
-cannot be resolved or the fleet migration exits non-zero, `hive update` reports
-that distinction and prints the exact `hive migrate --all` command to retry.
-Project migrations defer daemon restart requests so the fleet restarts once,
-and only after every registered project succeeds. A successful retry restarts
-even when the earlier partial pass already committed the only config changes;
-a partial fleet failure prints that restart is deferred until that repair run.
+cannot be resolved or fleet migration exits non-zero, `hive update` reports
+that distinction and prints the exact `hive migrate --all --yes` or runtime
+status/resume action. Before sealing, retry uses intact legacy input. After
+sealing, the immutable source, candidate, and writer fences remain and
+`hive runtime resume` converges only forward.
 
 ## Nudge command (shared with the update flow)
 
@@ -85,20 +89,23 @@ a partial fleet failure prints that restart is deferred until that repair run.
 installed channel and `nil` for `dev` (a git clone has no single automatic
 update action). The daemon-driven [[update-flow]] uses this string when it
 records a per-version nudge. Keeping the user-facing command channel-neutral
-ensures every guided update includes the automatic migration phase; the update
+ensures every guided update includes the confirmed fleet cutover; the update
 command itself still selects brew, `yay`/`paru`, or the bash installer.
 
 ## Tests
 
 - `test/unit/commands/update_test.rb` covers channel selection, dry-run output,
   bash-prefix reuse, helper preflights, AUR fallback, update/migration ordering,
-  status output, and readable recovery failures.
-- `test/unit/commands/migrate_all_test.rb` covers fleet progress, global-state
-  migration, continue-after-failure behavior, readable errors, and recovery
-  commands.
+  package-launcher non-mutation, status output, and readable forward-recovery
+  failures.
+- `test/unit/commands/migrate_all_test.rb` covers the fleet-cutover delegation,
+  TTY/non-TTY confirmation and exclusions.
+- `test/integration/release_candidate_latest_stable_upgrade_test.rb` covers the
+  immediately previous packaged release's real Update-to-candidate argv,
+  candidate confirmation contract, activation, and retired-writer fences.
 - `test/unit/install_channel_test.rb` covers marker reads/writes, XDG paths, Homebrew marker probing, prefix marker precedence, and fail-closed invalid markers.
-- `test/unit/install_script_test.rb` proves direct installs migrate all
-  registered projects before daemon setup and fail closed on migration error.
+- `test/unit/install_script_test.rb` proves direct installation leaves runtime
+  bootstrap and service activation to the explicit `hive setup --yes` step.
 
 ## Backlinks
 

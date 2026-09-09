@@ -158,10 +158,10 @@ class HiveStagesExecuteTest < Minitest::Test
         task.define_singleton_method(:worktree_path) { worktree }
         write_plan(task)
         baseline = Hive::GitOps.new(worktree).head_sha
-        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
         policy = Hive::Workflows::Coding::DESCRIPTOR.stage_named("execute").condition_policy.to_h
         attempt = store.create_launching(
-          attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+          attempt_id: "attempt-1", request_id: "request-1",
           task_id: task.id.to_s, project: "demo", task_slug: task.slug,
           intended_stage: "4-execute", task_generation: "owner-1",
           ownership_generation: "owner-1", task_input_epoch: 1,
@@ -176,13 +176,12 @@ class HiveStagesExecuteTest < Minitest::Test
         original = Hive::Markers.method(:set)
         observed = []
         Hive::Markers.define_singleton_method(:set) do |path, name, attrs = {}|
-          projection_path = File.join(File.dirname(path), "task-projection.json")
           journal_path = File.join(File.dirname(path), "task-journal.jsonl")
-          observed << [ File.exist?(journal_path), File.exist?(projection_path), name ]
+          observed << [ File.exist?(journal_path), name ]
           original.call(path, name, attrs)
         end
 
-        with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(dir, "attempts")) do
+        with_env("HIVE_HOME" => store.root) do
           with_attempt_context(
             attempt_id: attempt.attempt_id, task_generation: 1,
             ownership_generation: attempt.ownership_generation
@@ -198,7 +197,7 @@ class HiveStagesExecuteTest < Minitest::Test
             assert_equal :execute_complete, result.fetch(:status)
           end
         end
-        assert_equal [ [ true, true, :execute_complete ] ], observed
+        assert_equal [ [ true, :execute_complete ] ], observed
       ensure
         Hive::Markers.define_singleton_method(:set, original) if original
       end
@@ -937,7 +936,7 @@ class HiveStagesExecuteTest < Minitest::Test
 
       protected = Hive::Stages::Execute.execute_protected_files(task)
 
-      assert_includes protected, "task-projection.checkpoint.json"
+      assert_includes protected, "task-journal.jsonl"
       assert_includes protected, "context-receipts/older.launch.json"
       assert_includes protected, "activity-operations/operation.json"
       refute_includes protected, "context-receipts/current.json.next"

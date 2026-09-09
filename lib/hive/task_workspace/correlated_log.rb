@@ -15,8 +15,9 @@ module Hive
       READ_BYTES = 64 * 1024
       CHANNELS = %w[stdout stderr supervisor].freeze
 
-      def initialize(root:)
+      def initialize(root:, reference_resolver: nil)
         @root = File.realpath(File.expand_path(root))
+        @reference_resolver = reference_resolver
       rescue SystemCallError => e
         raise ArgumentError, "invalid attempt log root: #{e.message}"
       end
@@ -24,7 +25,9 @@ module Hive
       def read(reference)
         return nil unless reference.respond_to?(:to_h)
 
-        reference = reference.to_h.transform_keys(&:to_s)
+        original = reference.to_h.transform_keys(&:to_s)
+        Hive::OutputReference.validate_shape!(original)
+        reference = resolved_reference(original)
         Hive::OutputReference.validate_shape!(reference)
         return nil if reference.fetch("size") > MAX_BYTES
 
@@ -43,7 +46,7 @@ module Hive
           return nil unless bytes == reference.fetch("size")
           return nil unless digest == reference.fetch("sha256")
 
-          content = reference.fetch("path").end_with?(".frames") ?
+          content = original.fetch("path").end_with?(".frames") ?
             decode_frames(tail) : tail.force_encoding(Encoding::UTF_8).scrub
           {
             "path" => File.basename(reference.fetch("path")),
@@ -57,6 +60,12 @@ module Hive
       end
 
       private
+
+      def resolved_reference(reference)
+        return reference unless @reference_resolver
+
+        @reference_resolver.call(reference) || reference
+      end
 
       def contained_path(relative)
         candidate = File.expand_path(relative, @root)

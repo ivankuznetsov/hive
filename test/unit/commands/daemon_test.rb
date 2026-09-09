@@ -60,9 +60,13 @@ class HiveCommandsDaemonTest < Minitest::Test
 
   def setup
     @home = Dir.mktmpdir("hive-daemon-command")
+    @runtime_database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(@home)
+    ).migrate!
   end
 
   def teardown
+    @runtime_database&.disconnect
     FileUtils.rm_rf(@home) if @home
   end
 
@@ -156,7 +160,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     attempts_api = captured.fetch(:attempt_dispatcher)
     assert_instance_of Hive::Attempts::API, attempts_api
     assert_equal(
-      File.join(@home, "attempts", "v4"),
+      Hive::Paths.runtime_payload_root(@home),
       attempts_api.instance_variable_get(:@store).root
     )
     refute File.exist?(File.join(@home, "attempts", "v2")),
@@ -167,9 +171,6 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_instance_of Hive::Daemon::RefactorPatrolMergeReconciler, reconciler
     assert_same reconciler, captured.fetch(:merge_watcher).instance_variable_get(:@merge_intake),
                 "immediate watcher and catch-up must share one intake boundary"
-    projection_reader = captured.fetch(:merge_watcher)
-      .instance_variable_get(:@attempt_store_factory).call
-    assert_respond_to projection_reader, :fetch_projection_binding
     assert_equal true, reconciler.instance_variable_get(:@dry_run)
     admission = captured.fetch(:patrol_fix_admission_scheduler)
     with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do

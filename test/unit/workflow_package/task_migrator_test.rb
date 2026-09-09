@@ -354,6 +354,9 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
   private
 
   def migrator(hive_state, store, pruner: ->(*) { 0 })
+    prepare_test_runtime_project(
+      File.dirname(hive_state), state_root_path: hive_state
+    )
     Hive::WorkflowPackage::TaskMigrator.new(
       hive_state,
       store: store,
@@ -397,10 +400,13 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
   end
 
   def task_folder(hive_state, stage, pin, slug: "managed-task-260812-abcd")
+    prepare_test_runtime_project(
+      File.dirname(hive_state), state_root_path: hive_state
+    )
     folder = File.join(hive_state, "stages", stage, slug)
     Hive::TaskMeta.write(
       folder,
-      id: 42,
+      id: Digest::SHA256.hexdigest(slug)[0, 12].to_i(16),
       slug: slug,
       display_name: "Managed task",
       depends_on: "source-task-260811-abcd",

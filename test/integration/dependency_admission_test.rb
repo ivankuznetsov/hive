@@ -175,7 +175,7 @@ class DependencyAdmissionIntegrationTest < Minitest::Test
         execute = File.join(dir, ".hive-state", "stages", "4-execute", "held-task")
         FileUtils.mkdir_p(File.dirname(execute))
         FileUtils.mv(brainstorm, execute)
-        File.write(File.join(execute, "meta.yml"), "depends_on: [broken\n")
+        File.write(File.join(execute, "plan.md"), "---\ndepends_on: [broken\n---\n")
         capture_io { Hive::Commands::Approve.new(execute, to: "3-plan").call }
         assert File.directory?(File.join(dir, ".hive-state", "stages", "3-plan", "held-task")),
                "backward recovery must remain possible with corrupt admission metadata"

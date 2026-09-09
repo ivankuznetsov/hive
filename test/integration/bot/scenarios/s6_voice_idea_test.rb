@@ -132,6 +132,7 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
   def write_brainstorm(project_root, slug)
     folder = File.join(project_root, ".hive-state", "stages", "2-brainstorm", slug)
     FileUtils.mkdir_p(folder)
+    ensure_test_task_identity(folder)
     path = File.join(folder, "brainstorm.md")
     File.write(path, <<~MARKDOWN)
       ## Round 1
@@ -146,7 +147,6 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
 
       <!-- WAITING -->
     MARKDOWN
-    seed_task_projection(folder, state_file: path)
     path
   end
 

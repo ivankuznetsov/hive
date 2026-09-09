@@ -4,6 +4,25 @@ require "hive/commands/update"
 class UpdateCommandTest < Minitest::Test
   include HiveTestHelper
 
+  def setup
+    @update_initialize = Hive::Commands::Update.instance_method(:initialize)
+    original_initialize = @update_initialize
+    Hive::Commands::Update.define_method(:initialize) do |**options|
+      original_initialize.bind_call(self, **{ confirm: true }.merge(options))
+    end
+  end
+
+  def teardown
+    Hive::Commands::Update.define_method(:initialize, @update_initialize)
+  end
+
+  def test_update_requires_explicit_cutover_confirmation
+    error = assert_raises(Hive::UsageError) do
+      Hive::Commands::Update.new(dry_run: false, channel: "brew", confirm: false).call
+    end
+    assert_includes error.message, "rerun with --yes"
+  end
+
   def test_brew_dry_run_prints_brew_upgrade
     out = StringIO.new
     Hive::Commands::Update.new(
@@ -48,7 +67,7 @@ class UpdateCommandTest < Minitest::Test
       assert_includes captured[0][2], '-o "$tmpdir/install.sh"'
       assert_includes captured[0][2], 'bash "$tmpdir/install.sh"'
       refute_match(/\|\s*bash/, captured[0][2])
-      assert_equal [ "/usr/local/bin/hive", "migrate", "--all" ], captured[1]
+      assert_equal [ "/usr/local/bin/hive", "migrate", "--all", "--yes" ], captured[1]
     end
   end
 
@@ -72,7 +91,7 @@ class UpdateCommandTest < Minitest::Test
 
       assert_includes captured[0][2], "raw.githubusercontent.com/ivankuznetsov/hive/main/install.sh"
       assert_includes captured[0][2], "--prefix=#{Shellwords.escape(prefix)}"
-      assert_equal [ "/usr/local/bin/hive", "migrate", "--all" ], captured[1]
+      assert_equal [ "/usr/local/bin/hive", "migrate", "--all", "--yes" ], captured[1]
     end
   end
 
@@ -100,7 +119,7 @@ class UpdateCommandTest < Minitest::Test
       ).call
 
       assert_equal [ yay, "-Syu", "hive-bin" ], captured[0]
-      assert_equal [ "/usr/local/bin/hive", "migrate", "--all" ], captured[1]
+      assert_equal [ "/usr/local/bin/hive", "migrate", "--all", "--yes" ], captured[1]
     end
   end
 
@@ -127,7 +146,7 @@ class UpdateCommandTest < Minitest::Test
       ).call
 
       assert_equal [ paru, "-Syu", "hive-bin" ], captured[0]
-      assert_equal [ "/usr/local/bin/hive", "migrate", "--all" ], captured[1]
+      assert_equal [ "/usr/local/bin/hive", "migrate", "--all", "--yes" ], captured[1]
     end
   end
 
@@ -181,7 +200,7 @@ class UpdateCommandTest < Minitest::Test
     assert_nil Hive::Commands::Update.nudge_command("dev")
   end
 
-  def test_successful_update_reports_automatic_migration_status
+  def test_successful_update_reports_confirmed_fleet_cutover_status
     with_update_helper("brew") do |env|
       out = StringIO.new
       calls = []
@@ -198,13 +217,13 @@ class UpdateCommandTest < Minitest::Test
       assert_equal(
         [
           [ "brew", "upgrade", Hive::Commands::Update::BREW_TAP ],
-          [ "/opt/homebrew/bin/hive", "migrate", "--all" ]
+          [ "/opt/homebrew/bin/hive", "migrate", "--all", "--yes" ]
         ],
         calls
       )
       assert_includes out.string, "hive: update: running brew updater"
-      assert_includes out.string, "hive: update: installed; starting automatic migration"
-      assert_includes out.string, "hive: update: complete; automatic migration succeeded"
+      assert_includes out.string, "hive: update: installed; starting confirmed fleet cutover"
+      assert_includes out.string, "hive: update: complete; fleet cutover succeeded"
     end
   end
 
@@ -225,11 +244,11 @@ class UpdateCommandTest < Minitest::Test
 
       assert_equal [ [ "brew", "upgrade", Hive::Commands::Update::BREW_TAP ] ], calls
       assert_match(/updater failed/, error.message)
-      assert_match(/automatic migration was not started/, error.message)
+      assert_match(/fleet cutover was not started/, error.message)
     end
   end
 
-  def test_failed_automatic_migration_has_human_readable_recovery
+  def test_failed_fleet_cutover_has_human_readable_recovery
     with_update_helper("brew") do |env|
       out = StringIO.new
       calls = []
@@ -247,15 +266,15 @@ class UpdateCommandTest < Minitest::Test
         ).call
       end
 
-      assert_equal [ "/usr/local/bin/hive", "migrate", "--all" ], calls.last
-      assert_match(/automatic migration failed/, error.message)
+      assert_equal [ "/usr/local/bin/hive", "migrate", "--all", "--yes" ], calls.last
+      assert_match(/fleet cutover failed/, error.message)
       assert_match(%r{/usr/local/bin/hive migrate --all}, error.message)
-      assert_includes out.string, "starting automatic migration"
-      refute_includes out.string, "automatic migration succeeded"
+      assert_includes out.string, "starting confirmed fleet cutover"
+      refute_includes out.string, "fleet cutover succeeded"
     end
   end
 
-  def test_failed_automatic_migration_reports_the_exit_status
+  def test_failed_fleet_cutover_reports_the_exit_status
     with_update_helper("brew") do |env|
       calls = 0
 
@@ -274,7 +293,7 @@ class UpdateCommandTest < Minitest::Test
         ).call
       end
 
-      assert_match(/automatic migration failed \(exit 23\)/, error.message)
+      assert_match(/fleet cutover failed \(exit 23\)/, error.message)
     end
   end
 
@@ -290,7 +309,7 @@ class UpdateCommandTest < Minitest::Test
       end
 
       assert_match(/update installed but the updated Hive executable could not be found/, error.message)
-      assert_match(/run `hive migrate --all`/, error.message)
+    assert_match(/run `hive migrate --all --yes`/, error.message)
     end
   end
 

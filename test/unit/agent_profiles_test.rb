@@ -378,17 +378,17 @@ class AgentProfilesTest < Minitest::Test
     assert_includes names, :opencode
   end
 
-  def test_grok_prompt_rides_the_headless_flag_value
+  def test_grok_prompt_uses_stdin
     grok = Hive::AgentProfiles.lookup(:grok)
 
-    assert_equal :headless_flag_value, grok.prompt_style
+    assert_equal :piped_stdin, grok.prompt_style
   end
 
   def test_grok_profile_shape
     grok = Hive::AgentProfiles.lookup(:grok)
 
     assert_equal "grok", grok.bin_default
-    assert_equal "-p", grok.headless_flag
+    assert_equal "--prompt-file=/dev/stdin", grok.headless_flag
     assert_equal "--always-approve", grok.permission_skip_flag
     assert_equal [ "--output-format", "streaming-json" ], grok.output_format_flags
     assert_equal :grok_end, grok.structured_output_protocol

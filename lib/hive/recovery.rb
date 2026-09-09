@@ -34,7 +34,7 @@ module Hive
         value.map { |entry| canonical_wire_value(entry) }
       when String
         utf8 = value.dup.force_encoding(Encoding::UTF_8)
-        utf8.valid_encoding? ? utf8 : value.b
+        utf8.valid_encoding? ? utf8.unicode_normalize(:nfc) : value.b
       else
         value
       end

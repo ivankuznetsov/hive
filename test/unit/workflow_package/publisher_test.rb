@@ -36,7 +36,7 @@ class WorkflowPackagePublisherTest < Minitest::Test
   end
 
   def test_secret_fails_preflight_without_leaking_secret_material
-    secret = "sk-ant-#{'x' * 30}"
+    secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     with_authored_workflow(instruction: "Use #{secret}\n") do |project, _authored_dir|
       error = Dir.mktmpdir("publisher-test-") do |destination|
         assert_raises(Hive::WorkflowPackage::PackageError) do

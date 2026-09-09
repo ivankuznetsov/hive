@@ -1,5 +1,5 @@
 require "stringio"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/commands/module/install"
 require "hive/commands/module/state_change"
 require "hive/commands/module/update"

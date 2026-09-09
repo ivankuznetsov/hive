@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-09-01
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage]
 ---
 
@@ -58,19 +58,47 @@ authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
-The default fast loop for implementation is `bundle exec rake coverage:changed` (or the
-equivalent focused files via `bin/test`). It maps git-diff-touched `lib/`
-sources to their mirrored test files, runs only those, and enforces exact
-line coverage on the changed sources; the global 100% gate stays CI's job.
-Mapping accepts only mirrored paths or the explicit override table in
-`test/support/changed_coverage.rb`; an unmapped or ambiguous basename fails
-loudly instead of running a plausibly unrelated test. `HIVE_COVERAGE_BASE`
-overrides the merge base.
+Use `bin/test --changed --list` to inspect selection, then `bin/test --changed`
+for the implementation loop. Selection includes branch changes against the merge
+base, staged/unstaged edits, untracked files, and deletions. Changed test files
+run directly. Ruby sources use mirrored tests, exact require references, or
+nearest owning facade tests; unmapped sources fall back visibly to the root
+suite. Shared infrastructure selects the offline root, component, and Rails
+suites. Documentation-only changes select no tests. Rails and component tests
+run in separate processes with their own loaders; Rails uses its own bundle.
+This is focused feedback, not proof of complete transitive dependency coverage.
+The full CI gate remains mandatory.
 
 ```bash
-bundle exec rake coverage:changed                         # locked bundle + focused exact coverage
-bin/test test/unit/a_test.rb test/integration/b_test.rb   # every named file, with a plain-Ruby fallback
+bin/test --changed --list                    # inspect files, commands, fallback reasons
+bin/test --changed --base origin/main        # run selected tests
+bin/test test/unit/a_test.rb test/integration/b_test.rb
+bin/test --all                              # full local suite, two worker processes
+HIVE_TEST_WORKERS=4 bin/test --all           # explicit maximum of four workers
+bundle exec rake coverage:changed           # exact coverage on changed lib sources
 ```
+
+`bin/test --all` invokes `rake test:parallel`, preserving the default root
+manifest and the standalone Agent CLI Runtime suite. Workers have separate
+processes and short private temporary directories outside Git checkouts, so
+Unix sockets and disposable repository discovery behave normally. A per-user
+advisory lock serializes these
+parallel suite invocations across worktrees; it does not constrain unrelated
+Ruby commands or serial coverage runs. Worker logs and Minitest summaries live
+under `tmp/test-parallel-*`, alongside PID-bound result receipts. A zero exit
+without a receipt fails; filtered workers may be empty only if the aggregate
+contains actual tests and assertions. Interrupts terminate owned process groups,
+including descendants that ignore SIGTERM. Workers
+are bounded to 1–4 (`HIVE_TEST_WORKERS`, default 2). `TESTOPTS` forwards Minitest
+options. `rake test` remains the serial compatibility/debugging command.
+
+`coverage:changed` reports only selected `lib/` sources, disables full-catalog
+preloading and automatic child reports, and merges subprocess evidence once.
+Unloaded selected sources and corrupt resultsets still fail. Reports use unique
+`coverage/changed-*.json` names. It does not replace the general changed-test
+selector for test-only, component, or Rails work. `HIVE_COVERAGE_BASE` overrides
+the comparison base. Global CI coverage retains the complete source catalog and
+its exact 100% threshold.
 
 The plain-Ruby fallback clears inherited Bundler activation before
 launching the `ruby` selected by `PATH`. That matters when `bin/test` is itself
@@ -93,6 +121,9 @@ the seed, test identifier, source location, and focused repro command. Every
 root-Minitest-owning job in `ci.yml` retains that file: coverage shards,
 expensive proof gates, e2e harness library tests, the advisory TUI latency job,
 and the macOS launchd proof.
+
+Publication tests disable automatic Git maintenance in their disposable local
+and bare repositories, so detached maintenance cannot race with fixture cleanup.
 
 During implementation, run the smallest relevant test files directly:
 
@@ -133,6 +164,10 @@ bundle exec ruby -Itest test/unit/agent_skills/canonical_skill_test.rb
 From `web/`, run the Rails task integration/helper/model tests with
 `bundle exec ruby bin/rails test ...` and the focused Playwright file with
 `bundle exec ruby bin/rails test:system test/system/task_workspace_test.rb`.
+The shared Rails test home explicitly bootstraps a real migrated and activated
+SQLite runtime control plane before tests create projects. E2E sandboxes do the
+same before invoking `hive init`; tests do not rely on an implicit repository
+migration path that production forbids.
 
 Do not run the full suite after every commit. Use the default suite as a broad
 local checkpoint, normally once before handoff:
@@ -170,9 +205,11 @@ as named gates. Exhaustive coverage is collected by six deterministic
 test-file shards and merged once by the exact coverage gate. The first shard
 preloads the complete `lib/` catalog so never-required source files remain
 visible as unloaded, while the other five stay lazy to avoid redundant
-coverage state in forked subprocesses. Shard membership is a greedy
-byte-balanced partition of the test-file list, so editing the size of any test
-file can move unrelated files between shards. A test therefore has to require
+coverage state in forked subprocesses. Shard membership uses deterministic
+longest-runtime-first assignment from `test/support/shard_timings.json`. Unknown
+files use the measured median; a missing or invalid timing table falls back to
+file bytes. A timing refresh or changed manifest can move files between shards.
+A test therefore has to require
 every production file it depends on rather than relying on a co-running file to
 load it: requiring only a nested file such as
 `hive/commands/babysit/service_installer` opens `Hive::Commands::Babysit` as a
@@ -384,9 +421,12 @@ Ruby version, shard index/count, exact test-file partition, and complete list
 of process-result files. Shard zero also runs the Agent CLI Runtime
 component suite and loads every source file, which preserves unloaded-file
 detection without repeating that fixed catalog cost in every collector. The
-partition begins with four source-byte-balanced groups, then splits the third
-and fourth groups after hosted measurements identified them as the two long
-poles; the first two groups remain stable. The downstream `coverage:report`
+partition uses the same runtime partitioner as the local parallel runner.
+The checked-in timing table is a reviewed snapshot of nightly three-seed means;
+`script/flake_sweep_report.rb` emits replacement `shard-timings.json` artifacts.
+Refresh the table deliberately and revalidate all six partitions; required CI
+never downloads a moving timing table. Nightly checkout fetches full history and
+tags because historical-baseline tests need both. The downstream `coverage:report`
 job retains each artifact in its own `coverage-shard-N` directory, rejects
 missing, duplicate, foreign, empty, corrupt, or unlisted inputs, merges only
 the manifest-listed results, and applies the same exact 100% gate. The
@@ -551,8 +591,8 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | `atomic_file_test.rb` | `Hive::AtomicFile` — atomic file replacement plus the shared directory-fsync helper's real flush and unsupported-platform (`NotImplementedError` / `EINVAL` / `ENOTSUP` / `EBADF`) behavior. |
 | `attempts/*_test.rb`, `daemon/attempt_loss_healer_test.rb` | Durable task attempts — record/schema/CAS edges, competing claim/expiry, artifact-plus-dependency-verdict generation duplicates/successors, inherited-output fallback, authenticated launching handoff acceptance, capacity, detached session lifecycle, final terminal/lost frame drain, PID-reuse-safe adoption and orphan cleanup, marker/git evidence precedence, legacy backfill, mutation-free dirty capture, and restart-persistent unbounded loss healing paced by the shared cooldown. |
 | `attempts/context_test.rb`, `commands/{run,stage_action}_test.rb`, `integration/{run_error_envelope,run_stage_action}_test.rb` | Durable command-result interpretation — authenticated task/stage binding for generic `run`/`approve` and stage-specific admitted argv, plus the shared `CommandDispatch` policy for success receipts, lost attempts, non-zero receipts with or without worker JSON, exact exit propagation, and one command-shaped error document when a failed worker emitted none. |
-| `work_ledger_test.rb`, `task_journal_test.rb`, `conditions/*_test.rb`, `task_projection*_test.rb`, `task_action_conditions_test.rb` | Policy-light WorkLedger plus Hive-owned generation conditions — clean loading without workflow/condition/attempt policy; structural descriptor topology; exact cursor/hash receipts; locked, fsynced, idempotent complete JSONL append with short-write completion and partial-append rollback; generic replay duplicate/malformed refusal; strict Hive journal durability/attempt integrity; authenticated compatibility replay with future-schema/forged-attempt rejection; registry/evidence lifecycle; generation/HEAD reconciliation; deterministic supersession; telemetry-tail-stable snapshot validation/replay; terminal checkpoint history excluded from the mutable attempt-ID budget while over-budget mutable bindings still fail closed; gate/migration/shadow modes; execute boundary ordering; canonical TaskAction/status consumption; and sanitized task-1849 replay across missing/corrupt/stale snapshots with durable-attempt metadata and live-observation sentinels. |
-| `lock_test.rb` | `Hive::Lock` — acquire/release, stale-PID detection, exact child-identity compare-and-clear, commit-lock process contention, same-thread reentrancy, fork-inherited ownership refusal, bounded timeout, exception cleanup, and kernel release after `SIGKILL`. |
+| `work_ledger_test.rb`, `task_journal_test.rb`, `conditions/*_test.rb`, `task_projection*_test.rb`, `task_action_conditions_test.rb` | Policy-light WorkLedger plus Hive-owned generation conditions — clean loading without workflow/condition/attempt policy; structural descriptor topology; exact cursor/hash receipts; locked, fsynced, idempotent complete JSONL append with short-write completion and partial-append rollback; generic replay duplicate/malformed refusal; strict Hive journal durability/attempt integrity; task/workflow stream and stable attempt binding; first-append reader/writer locking; complete routine folds with bounded workspace detail; registry/evidence lifecycle; generation/HEAD reconciliation; deterministic supersession; terminal-publication fencing; gate/migration/shadow modes; execute boundary ordering; canonical TaskAction/status consumption; and sanitized task-1849 replay with durable-attempt metadata and live-observation sentinels. |
+| `lock_test.rb`, `runtime_control_plane/process_guard_test.rb`, `task_counter_test.rb`, `patrol/launch_budget_test.rb` | SQLite coordination — stable task identity, CAS/fenced lease acquire/update/release, dead/PID-reuse reclaim, move/recreated/custom-root refusal, same-thread reentrancy, commit-lock process contention, atomic multiprocess task ids and Patrol allowance, bounded legacy seed/reservation state, process-wide checkout/fork barrier, all-wrapper disconnect, diagnostics race, and real fork/spawn/self-exec/daemon descriptor proof. |
 | `bot/{brainstorm_parser,brainstorm_answer_writer}_test.rb`, `commands/answer_test.rb` | Literal brainstorm answer boundary — physical slot order across rounds, marker-free question fingerprints, normalized fingerprints, missing-header repair, exact ordinal writes when source numbers repeat, unique-unanswered relocation despite answered duplicates, duplicate/missing match refusal, stable generation and corrupt-journal/input-epoch handling, moved-stage/folder refusal without source recreation, identical retry idempotency, different-answer conflict, creation-disabled task locking plus marker-sidecar serialization, invalid-UTF-8 and CRLF writes, reversible structural-line/marker neutralization, 64 KiB UTF-8 stdin and shell-metacharacter literalness, public binding validation, schema-valid closed outcomes/errors, and final-slot completion without direct dispatch. |
 | `worktree_test.rb` | `Hive::Worktree` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), explicit remote-head selection over a same-named tag, stalled-transport deadline/process-group cleanup, empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, detached exact analysis materialization plus orphan-registration self-healing, quarantine-and-reattach recovery for a registered exact worktree whose `.git` pointer disappeared, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix validation. |
 | `dependencies_test.rb`, `task_meta_test.rb`, `plan_frontmatter_test.rb`, `repository_identity_test.rb`, `dependency_admission_test.rb`, `dependency_snapshot_test.rb` | Fail-closed dependency admission and preserving task metadata — exhaustive scalar grammar and duplicate-key rejection; tolerant-vs-strict metadata reads and corrupt-mutation refusal; immutable UTC `completed_at` first-write behavior and preservation across rewrites; bounded optional exact plan assertion; indexed same/cross-project and archived-fallback resolution; workflow/action-aware completed dependency snapshots; full cycle paths; and unexpected-error backstop. |
@@ -594,7 +634,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | `stages/brainstorm_tmux_sentinel_test.rb`, `stages/brainstorm_tmux_preflight_test.rb`, `claude_launcher_test.rb` | Claude/tmux sentinel, preflight, and cleanup behavior — direct launcher readiness, pgrep pattern shape, missing/failing pgrep logging, oversized orphan-sweep log rotation, and the v0.2.3 invariant that a task cleanup kills matched Claude PIDs individually while skipping a matched tmux server. |
 | `display_name/generator_test.rb` | `Hive::DisplayName::Generator` — timeout handling, process groups, agent output sanitization, best-effort sidecar updates/commits, and Codex stdin prompt delivery. |
 | `tmux_runner_test.rb` | `Hive::TmuxRunner` — detached session startup, environment propagation, prompt injection via tmux buffers, typed tmux failure/timeout classes, prompt-buffer cleanup, paste-settle polling before Enter submit, bounded pane-tail capture, PID lookup, idempotent teardown including tmux's `no current target` race after a short-lived child exits, and a lightweight fake-tmux timeout harness so setup commands cannot consume the timeout budget before the intentionally hanging `send-keys` call. |
-| `daemon/pr_merge_reconciliation_store_test.rb`, `daemon/pr_merge_watcher_test.rb`, `daemon/dispatcher_test.rb`, `task_closure_test.rb` | Durable task-bound merge reconciliation — schema-valid/private atomic ledger writes, identity/corruption quarantine, concurrent-update locking, persisted fair cursor and uncapped/capped-time backoff; stage 5–8 plus error observation; held-candidate retention/release; identity-matched observed-head drift polling that releases orphaned-review recovery for open/closed-unmerged PRs only after stronger operational holds clear; terminal merged/delivered-elsewhere/ambiguous drift fencing including checkpoint-crash recovery and no repeated polling; open and closed-unmerged visibility; exact repository/head/reachable-merge checks; phase checkpoints before architecture/archive; restart without duplicate GitHub or intake work; per-project failure isolation; dry-run; daemon-owned same-repository closure, idempotent replay, public-channel rejection, and operator-receipt non-takeover. Dispatcher coverage proves reconciliation precedes provider recovery and consumes no provider slot. |
+| `daemon/pr_merge_watcher_test.rb`, `daemon/dispatcher_test.rb`, `task_closure_test.rb` | Stateless task-bound merge reconciliation: fair process-local polling; held/failing sibling progress; current PR/repository/head and reachable-merge evidence; architecture intake replay; real stage 5–8 archive; restart after receipt persistence before archive; dry-run and recovery fencing. No durable PR polling ledger or cursor. |
 | `screenote/{credential_store,oauth_client,loopback_server,pkce,mcp_client,mcp_config}_test.rb`, `commands/{connect,disconnect}_test.rb` | Screenote OAuth/MCP support — mode-0600 credential storage, expiry boundaries, OAuth discovery/DCR/auth-code exchange/revoke with injectable HTTP, loopback callback state validation, PKCE S256 vectors, authenticated MCP `list_projects`, ephemeral MCP config shape/cleanup, connect project selection/client reuse, and disconnect revoke/clear behavior. |
 | `stages/artifacts_test.rb`, `stages/execute_test.rb`, `commands/evidence_test.rb`, `artifacts/outcome_evidence/{range_resolver,store,proof,contract,recovery,rework}_test.rb`, `full_flow_stage_action_test.rb`, `test/e2e/scenarios/full_pipeline_happy_path.yml` | `Hive::Stages::Artifacts` and outcome evidence — controller-owned base/head resolution, complete changed-path traceability, three fresh role contexts, scoped producer custody, closed proof kinds/media, independent per-target verdicts, append-only attempts/current publication including revise-then-rework history, bounded targeted recapture, stale-safe operator recovery, two digest-bound implementation reworks with protected future receipt slots, maximal contract-valid feedback, non-receipt sibling tolerance, and semantic-diff refusal of identical HEADs and empty descendant commits; plus legacy capture non-authority and the real CLI pipeline retaining and accepting a two-representation document package before `9-done`. Proof-media tests use process-level `ffprobe`, `ffmpeg`, and `tesseract` stand-ins so optional host binaries cannot abort coverage before the admission branches execute. |
 | `screenote_oauth_live_test.rb`, `screenote_capture_live_test.rb` | Opt-in live Screenote tests — real OAuth discovery, rate-limited dynamic registration when enabled, auth-code token exchange when preseeded, and the blocked real `create_screenshot_upload` round-trip through Screenote's non-interactive test-token endpoint once that endpoint ships. |
@@ -710,7 +750,7 @@ bin/hive-e2e run --coverage workflow.full_pipeline
 bin/hive-e2e run --profile release
 ```
 
-The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. A `seed_state` step publishes the same zero-history projection snapshot and checkpoint as a canonical task creator, so direct filesystem fixtures exercise current routine-read behavior; scenarios for historical missing checkpoints must opt into that damaged state explicitly. `SandboxEnv` routes every built-in provider binary (Claude, Codex, Pi, and Grok) to `test/fixtures/fake-claude`, places the checked-in default-deny `gh` shim first on `PATH`, pins the direct `HIVE_GH_BIN` seam, and exposes only Bundler's resolved gem require paths through a protected `RUBYLIB` for every CLI, background, tmux, and replay process. Harness-owned home, dependency, agent, Hive, and GitHub paths cannot be replaced by scenario overrides. No scenario can fall through to a host `gh` or make a real GitHub request. Scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server; teardown captures the final pane, terminates unfinished detached workflow process groups from the run-scoped PID lifecycle log, and then stops tmux before GitHub verification and filesystem evidence capture.
+The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. A `seed_state` step writes the same zero-history journal state as a canonical task creator, so direct filesystem fixtures exercise current routine-read behavior without a projection sidecar. `SandboxEnv` routes every built-in provider binary (Claude, Codex, Pi, and Grok) to `test/fixtures/fake-claude`, places the checked-in default-deny `gh` shim first on `PATH`, pins the direct `HIVE_GH_BIN` seam, and exposes only Bundler's resolved gem require paths through a protected `RUBYLIB` for every CLI, background, tmux, and replay process. Harness-owned home, dependency, agent, Hive, and GitHub paths cannot be replaced by scenario overrides. No scenario can fall through to a host `gh` or make a real GitHub request. Scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server; teardown captures the final pane, terminates unfinished detached workflow process groups from the run-scoped PID lifecycle log, and then stops tmux before GitHub verification and filesystem evidence capture.
 
 The semantic layer joins `test/e2e/coverage.yml` to each scenario's
 `coverage.primary` / `coverage.supporting` metadata. Catalog, parser, runner,
@@ -807,10 +847,10 @@ task creation. Generated task slugs use a 16-bit random suffix, so the helper
 retries rare `SlugCollisionError` cases and identifies the created folder by
 comparing inbox children before/after the command instead of relying on mtime
 ordering. Playwright examples share a process but not project state:
-`ApplicationSystemTestCase` stops the subscriber-owned feed, clears only the
-throwaway sandbox's canonical `repos/` tree, clears its registry through the
-locked atomic config updater, and resets workflow descriptor caches before each
-example. This keeps later refresh assertions
+`ApplicationSystemTestCase` stops the subscriber-owned feed, deregisters every
+throwaway project through the ordinary Hive registry API so its SQL identity is
+retired, clears only the sandbox's canonical `repos/` tree, and resets workflow
+descriptor caches before each example. This keeps later refresh assertions
 independent of test order and prevents a synthetic fleet accumulated by prior
 examples from dominating browser timing. Tests that mutate the filesystem and
 expect a Cable refresh first wait for the browser's confirmed subscription.
@@ -1142,6 +1182,10 @@ task files, agent logs) are printed or copied under `/tmp/golden-e2e-debug`.
 The final browser wait targets that durable PR-gate result rather than the
 transient `execute` badge: a fast daemon may complete execute between two
 Turbo renders, while the real worktree commit proves the stage ran.
+The fake plan declares its production/test files, a test scenario, and an
+explicit rollback, so the real plan-review classifier admits its local
+skip-review path. The provider-free golden test therefore cannot accidentally
+launch an installed Codex or Grok reviewer.
 The first task-page navigation deliberately re-resolves the grid link through
 brief row-lookup misses or Playwright "not attached to the DOM" click errors
 because Turbo can replace the row while the daemon advances the task from
@@ -1199,7 +1243,7 @@ bounded reads, exact failed/retry session aggregation, usage completeness,
 local API-equivalent pricing, correlated-log selection, field provenance,
 typed resources, timeline ordering/cursors/noise grouping, dependency bounds,
 artifact handling, publication/cache isolation, and the shared builder.
-Context provenance, activity reconciliation, task-journal checkpoints,
+Context provenance, activity reconciliation, direct task-journal folds,
 attempt dispatch, UsageDb migration, dependency admission, worktree/Git, and
 status/TUI correspondence tests cover their capture and compatibility seams.
 `test/integration/task_command_test.rb` proves native v2 output uses the shared

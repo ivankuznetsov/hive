@@ -3,7 +3,7 @@ require "hive/conditions/generation_tracker"
 require "hive/git_ops"
 require "hive/stringify_keys"
 require "hive/task_journal"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 
 module Hive
   module Conditions
@@ -13,7 +13,7 @@ module Hive
       class Execute
         TRANSITION = "execute_to_open_pr".freeze
 
-        def initialize(task:, attempt:, attempt_store:, writer: nil, projection_store: nil,
+        def initialize(task:, attempt:, attempt_store:, writer: nil, history_reader: nil,
                        git_ops: nil, generation_tracker: GenerationTracker.new,
                        workflow_policy: {}, operator_decisions: [])
           @task = task
@@ -22,8 +22,8 @@ module Hive
           @writer = writer || Hive::TaskJournal::Writer.new(
             task_folder: task.folder, attempt_store: attempt_store
           )
-          @projection_store = projection_store || Hive::TaskProjection::Store.new(
-            task_folder: task.folder, attempt_store: attempt_store
+          @history_reader = history_reader || Hive::TaskProjection::Reader.new(
+            task_folder: task.folder, task: task
           )
           @git_ops = git_ops || Hive::GitOps.new(task.worktree_path)
           @generation_tracker = generation_tracker
@@ -34,9 +34,7 @@ module Hive
         def reconcile(baseline_head: nil, waiting_reason: nil, research: false,
                       research_evidence: false, generation_reason: "accepted_input_changed",
                       invalidation_token: nil)
-          records = Hive::TaskProjection.read_journal(
-            @writer.path, attempt_store: @writer.attempt_store
-          )
+          records = Hive::TaskProjection.read_journal(@writer.path)
           generation = @generation_tracker.resolve(
             task: @task, records: records, workflow_policy: @workflow_policy,
             operator_decisions: @operator_decisions, reason: generation_reason,
@@ -60,7 +58,7 @@ module Hive
           )
           fresh = observations.reject { |observation| already_recorded?(records, observation) }
           append_result = fresh.empty? ? nil : @writer.append_batch(fresh)
-          projection = @projection_store.rebuild!
+          projection = @history_reader.read
           ExecuteResult.new(
             append_result: append_result, projection: projection,
             observations: fresh.freeze
@@ -227,8 +225,7 @@ module Hive
               "source" => "execute_reconciler",
               "attempt_id" => @attempt.attempt_id,
               "lease_version" => @attempt.lease_version,
-              "attempt_accepted_at" => @attempt["accepted_at"],
-              "predecessor_attempt_id" => @attempt["predecessor_attempt_id"]
+              "attempt_accepted_at" => @attempt["accepted_at"]
             },
             payload: payload
           }

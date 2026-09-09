@@ -1,10 +1,9 @@
 require "test_helper"
-require "json"
 require "hive/bot/supervisor"
 require "hive/bot/status_watcher"
 require "hive/bot/telegram"
 require "hive/bot/brainstorm_parser"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 
 class HiveBotScenarioBrainstormTest < Minitest::Test
   include HiveTestHelper
@@ -46,13 +45,12 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
       <!-- WAITING -->
     MARKDOWN
-    seed_task_projection(File.dirname(brainstorm), state_file: brainstorm)
     File.write(File.join(@home, "config.yml"), {
-      "registered_projects" => [
-        { "name" => "hive", "path" => project, "hive_state_path" => File.join(project, ".hive-state") }
-      ],
       "bot" => { "chat_id_allowlist" => [ 12345 ] }
     }.to_yaml)
+    activate_test_control_plane(@home)
+    Hive::Config.register_project(name: "hive", path: project)
+    ensure_test_task_identity(File.dirname(brainstorm))
 
     supervisor = supervisor_for(project: project, slug: slug)
     supervisor.status_tick
@@ -64,19 +62,16 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
 
     answers = Hive::Bot::BrainstormParser.parse(brainstorm).map(&:answer)
     assert_equal [ "Answer 1", "Answer 2", "Answer 3", "Answer 4" ], answers
-    # After plan 2026-05-28-002, `hive run` is queue-routable: the bot
-    # writes a dispatch-request file under <HIVE_HOME>/dispatch_requests/
-    # instead of spawning a child. The daemon picks the request up.
     assert_empty child.commands,
                  "hive run must no longer spawn from the bot — it's the daemon's job now"
-    request_files = Dir.glob(File.join(@home, "dispatch_requests", "*.json"))
-    assert_equal 1, request_files.size, "exactly one dispatch request must have landed in the queue"
-    payload = JSON.parse(File.read(request_files.first))
-    assert_match(/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/, payload["request_id"])
-    assert_equal [ "hive", "run", slug, "--json" ], payload["argv"]
-    assert_equal "hive", payload["project"]
-    assert_equal slug, payload["slug"]
-    assert_equal "bot", payload["requestor"]
+    with_runtime_dispatch_repository(@home) do |repository|
+      request = repository.pending.fetch(0)
+      assert_match(/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/, request.request_id)
+      assert_equal [ "hive", "run", slug, "--json" ], request.argv
+      assert_equal "hive", request.project
+      assert_equal slug, request.slug
+      assert_equal "bot", request.requestor
+    end
   end
 
   private
@@ -158,7 +153,7 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
     def record_dispatch(project:, slug:); end
   end
 
-  # This scenario asserts the request-file contract. Durable foreground
+  # This scenario asserts the queued SQL request contract. Durable foreground
   # admission has dedicated DispatchRequestWriter coverage; delegating only to
   # write! here prevents an actual detached worker racing the scenario teardown.
   module QueueOnlyDispatchRequestWriter

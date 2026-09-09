@@ -15,6 +15,7 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
       canonical = File.join(task_folder, "plan.md")
       File.write(canonical, "# Original\n<!-- COMPLETE -->\n")
       runner = lambda do |output_path:, **|
+        assert_equal "# Original\n", File.binread(output_path)
         File.write(output_path, "# Revised\n<!-- COMPLETE -->\n")
         { "status" => "success", "actual_route" => planner_identity }
       end
@@ -30,6 +31,33 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
       assert result.success?
       assert_equal "# Revised\n<!-- COMPLETE -->\n", result.candidate_bytes
       assert_equal "# Original\n<!-- COMPLETE -->\n", File.binread(canonical)
+    end
+  end
+
+  def test_seeds_a_non_terminal_candidate_for_in_place_revision
+    Dir.mktmpdir("hive-plan-revision-checkpoint") do |root|
+      initialize_repository(root)
+      task_folder = File.join(root, ".hive-state", "stages", "3-plan", "demo")
+      FileUtils.mkdir_p(task_folder)
+      observed_prompt = nil
+      runner = lambda do |prompt:, output_path:, **|
+        observed_prompt = prompt
+        assert_equal "# Plan\n\nBody\n", File.binread(output_path)
+        refute_equal :complete, Hive::Markers.current(output_path).name
+        File.write(output_path, "# Revised\n<!-- COMPLETE -->\n")
+        { "status" => "success" }
+      end
+
+      result = Hive::PlanReview::PlannerRevision.new(
+        task: Task.new(folder: task_folder, project_root: root), cfg: {}, runner:
+      ).call(
+        review_id: "pr-#{'7' * 64}",
+        plan_bytes: "# Plan\n\nBody\n<!-- COMPLETE -->\n",
+        findings: [], planner_identity:, timeout_sec: 60
+      )
+
+      assert result.success?
+      assert_includes observed_prompt, "non-terminal copy"
     end
   end
 
@@ -184,6 +212,20 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         assert_equal "served-model", result.dig("actual_route", "model")
       end
 
+      incomplete = lambda do |_task, agent_custody:, **kwargs|
+        agent_custody.call do
+          File.write(kwargs.fetch(:expected_output), "# Candidate without marker\n")
+          { status: :ok, usage: { model: "served-model" } }
+        end
+      end
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, incomplete) do
+        result = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+        assert_equal "retryable_failure", result.fetch("status")
+      end
+
       timed_out_complete = lambda do |_task, agent_custody:, **kwargs|
         agent_custody.call do
           File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
@@ -241,10 +283,8 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
     Dir.mktmpdir("hive-plan-revision-controller-bookkeeping") do |root|
       meta = File.join(root, "meta.yml")
       journal = File.join(root, "task-journal.jsonl")
-      projection = File.join(root, "task-projection.json")
       File.write(meta, "id: demo\n")
       File.write(journal, "before\n")
-      File.write(projection, "before\n")
       workspace = File.join(root, "workspace")
       FileUtils.mkdir_p(workspace)
       File.write(File.join(workspace, "input-plan.md"), "# Plan\n")
@@ -259,7 +299,6 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
           File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
           { status: :ok, usage: { model: "served-model" } }
         end
-        File.write(projection, "session-finish\n")
         result
       end
 
@@ -273,7 +312,6 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
 
       assert_equal "success", observed.fetch("status")
       assert_equal "session-start\n", File.read(journal)
-      assert_equal "session-finish\n", File.read(projection)
     end
   end
 

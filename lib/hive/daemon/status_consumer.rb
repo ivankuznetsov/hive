@@ -8,7 +8,7 @@ module Hive
     # daemon. Producer failures become `{ok: false}` results so one bad scan
     # does not crash the daemon.
     class StatusConsumer
-      # `live_task_lock` is the per-task `.lock`-holder-alive signal
+      # `live_task_lock` is the per-task lease-holder-alive signal
       # `Hive::Commands::Status` derives from a PID + process_start_time
       # match. It is true while a `hive run` invocation is actively inside
       # the task — including pre-stage work like auto-rebase — even before
@@ -26,7 +26,7 @@ module Hive
                        :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
                        :condition_migration, :condition_provenance, :shadow_audit,
                        :condition_warning, :pr_url,
-                       :plan_review, :projection_repair,
+                       :plan_review, :task_history_invalid,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -192,7 +192,7 @@ module Hive
               workflow: task["workflow"],
               marker: task["marker"],
               marker_attrs: task["attrs"].is_a?(Hash) ? task["attrs"] : {},
-              projection_repair: task["projection_repair"] == true,
+              task_history_invalid: task["task_history_invalid"] == true,
               folder: task["folder"],
               state_file: task["state_file"],
               status_payload_mtime: task["mtime"],

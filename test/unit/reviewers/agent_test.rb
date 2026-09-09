@@ -22,9 +22,12 @@ class ReviewersAgentTest < Minitest::Test
   end
 
   def make_ctx(dir)
+    task_folder = File.join(dir, ".hive-state", "stages", "6-review", "test")
+    FileUtils.mkdir_p(task_folder)
+    prepare_test_task_run(task_folder)
     Hive::Reviewers::Context.new(
       worktree_path: dir,
-      task_folder: File.join(dir, ".hive-state", "stages", "6-review", "test"),
+      task_folder: task_folder,
       default_branch: "main",
       pass: 1
     )
@@ -49,7 +52,7 @@ class ReviewersAgentTest < Minitest::Test
       FileUtils.mkdir_p(ctx.task_folder)
       reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
 
-      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] finding: justification\n"
 
       result = reviewer.run!
@@ -58,6 +61,7 @@ class ReviewersAgentTest < Minitest::Test
       assert_equal reviewer.output_path, result.output_path
       assert File.exist?(reviewer.output_path)
       assert_includes File.read(reviewer.output_path), "## High"
+      refute File.exist?(reviewer.failure_output_path)
     end
   end
 
@@ -116,6 +120,7 @@ class ReviewersAgentTest < Minitest::Test
       captured = nil
       spawn = lambda do |_task, **options|
         captured = options
+        File.write(options.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
 
@@ -143,6 +148,7 @@ class ReviewersAgentTest < Minitest::Test
       captured = nil
       spawn = lambda do |_task, **options|
         captured = options
+        File.write(options.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
 
@@ -175,6 +181,7 @@ class ReviewersAgentTest < Minitest::Test
       captured = nil
       spawn = lambda do |_task, **options|
         captured = options
+        File.write(options.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
 
@@ -225,7 +232,7 @@ class ReviewersAgentTest < Minitest::Test
       File.write(task_md, "## Implementation\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
 
       reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
-      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
 
       reviewer.run!
@@ -408,6 +415,10 @@ class ReviewersAgentTest < Minitest::Test
       labels << kwargs[:log_label]
       result = results[call_count] || results.last
       call_count += 1
+      if result[:status] == :ok
+        FileUtils.mkdir_p(File.dirname(kwargs.fetch(:expected_output)))
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
+      end
       result
     end
     begin
@@ -442,6 +453,7 @@ class ReviewersAgentTest < Minitest::Test
       original = Hive::Stages::Base.method(:spawn_agent)
       Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
         captured = kwargs
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
       begin
@@ -479,6 +491,7 @@ class ReviewersAgentTest < Minitest::Test
       original = Hive::Stages::Base.method(:spawn_agent)
       Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
         captured = kwargs
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
 
@@ -611,6 +624,7 @@ class ReviewersAgentTest < Minitest::Test
       original = Hive::Stages::Base.method(:spawn_agent)
       Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
         captured_timeouts << kwargs[:timeout_sec]
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
       begin
@@ -634,6 +648,7 @@ class ReviewersAgentTest < Minitest::Test
       handle = Object.new
       handle.define_singleton_method(:send_and_wait!) do |**kwargs|
         calls << kwargs
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
 
@@ -654,6 +669,7 @@ class ReviewersAgentTest < Minitest::Test
       original = Hive::Stages::Base.method(:spawn_agent)
       Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
         captured_timeouts << kwargs[:timeout_sec]
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
       begin
@@ -673,6 +689,7 @@ class ReviewersAgentTest < Minitest::Test
       original = Hive::Stages::Base.method(:spawn_agent)
       Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
         captured_timeouts << kwargs[:timeout_sec]
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
         { status: :ok }
       end
       begin
@@ -686,8 +703,8 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
-  def test_run_clears_output_path_on_every_retry_attempt
-    # pr-review-toolkit round-5 pr-test-analyzer #9 — output_path must
+  def test_run_clears_staged_output_path_on_every_retry_attempt
+    # pr-review-toolkit round-5 pr-test-analyzer #9 — staged output must
     # be cleared before EACH attempt, not just the first. A regression
     # that hoists the clear out of the loop would let attempt 2's
     # stale file from attempt 1 satisfy the :output_file_exists check.
@@ -709,7 +726,7 @@ class ReviewersAgentTest < Minitest::Test
         assert_equal 3, observations.size,
                      "expected 3 spawn attempts under max_attempts=3"
         assert observations.none?(true),
-               "every attempt must see output_path absent at spawn-time, not just the first"
+               "every attempt must see staged output absent at spawn-time, not just the first"
       ensure
         Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
         Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
@@ -723,7 +740,7 @@ class ReviewersAgentTest < Minitest::Test
       original_delete = File.method(:delete)
 
       File.define_singleton_method(:delete) do |*paths|
-        raise Errno::EACCES, reviewer.output_path if paths.include?(reviewer.output_path)
+        raise Errno::EACCES, reviewer.failure_output_path if paths.include?(reviewer.failure_output_path)
 
         original_delete.call(*paths)
       end
@@ -731,7 +748,7 @@ class ReviewersAgentTest < Minitest::Test
       error = assert_raises(Hive::Error) { reviewer.run! }
       assert_includes error.message, "failed to clear partial output_path"
       assert_includes error.message, "(pre_attempt)"
-      assert_includes error.message, reviewer.output_path
+      assert_includes error.message, reviewer.failure_output_path
     ensure
       File.define_singleton_method(:delete, original_delete)
     end
@@ -750,48 +767,56 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
-  def test_run_clears_stale_output_path_before_each_attempt
-    # ce-review P1 #3: a prior crashed attempt may have left a
-    # non-empty file at output_path. spawn_agent's
-    # :output_file_exists check only verifies file-exists + non-empty
-    # + exit-0, so a retry that exits 0 (even with no real findings)
-    # would be accepted on stale content. The adapter must clear
-    # output_path before each spawn attempt.
+  def test_failed_run_preserves_existing_successful_output
     with_tmp_dir do |dir|
-      reviewer, _ = with_stubbed_adapter(dir)
+      reviewer, _ = with_stubbed_adapter(dir, "max_attempts" => 1)
       FileUtils.mkdir_p(File.dirname(reviewer.output_path))
-      File.write(reviewer.output_path, "STALE content from a prior crashed attempt\n")
+      prior = "## High\n- [ ] retained finding: prior successful review\n"
+      File.write(reviewer.output_path, prior)
 
-      cleared_observations = []
-      with_spawn_stub([ ok_result ]) do |count_fn, _labels|
-        # Observe the file state inside the stub. spawn_agent is
-        # replaced by the test stub, so we can inspect what's on disk
-        # at the moment the stub runs.
-        original = Hive::Stages::Base.method(:spawn_agent)
-        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
-        Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
-          cleared_observations << File.exist?(kwargs[:expected_output])
-          { status: :ok }
-        end
-        begin
-          reviewer.run!
-        ensure
-          Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
-          Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
-        end
-        _ = count_fn # silence unused-block-arg
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        File.write(kwargs.fetch(:expected_output), "## High\n- [ ] partial\n")
+        { status: :error, error_message: "agent timed out" }
       end
+      result = reviewer.run!
 
-      refute_includes cleared_observations, true,
-                      "stale output_path must be deleted BEFORE spawn_agent runs"
+      assert result.error?
+      assert_equal reviewer.failure_output_path, result.output_path
+      assert_equal prior, File.read(reviewer.output_path)
+      refute File.exist?(reviewer.failure_output_path)
+    ensure
+      Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent, &original) if original
     end
   end
 
-  def test_run_deletes_output_path_after_final_failure
+  def test_publish_failure_preserves_existing_successful_output
+    with_tmp_dir do |dir|
+      reviewer, _ = with_stubbed_adapter(dir, "max_attempts" => 1)
+      FileUtils.mkdir_p(File.dirname(reviewer.output_path))
+      File.write(reviewer.output_path, "previous success\n")
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **_kwargs|
+        { status: :ok }
+      end
+
+      result = reviewer.run!
+
+      assert result.error?
+      assert_match(/failed to publish staged output/, result.error_message)
+      assert_equal "previous success\n", File.read(reviewer.output_path)
+    ensure
+      Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent, &original) if original
+    end
+  end
+
+  def test_run_deletes_staged_output_after_final_failure
     # ce-review P1 #3: even after the retry loop exhausts, a partial
-    # file from the last attempt could be left at output_path. Triage's
-    # discover_reviewer_files would then mistake it for real reviewer
-    # output. Final failures must surface only through errors-NN.md.
+    # file from the last attempt could be left at the staging path.
+    # Final failures must surface only through errors-NN.md; the staging
+    # file must disappear without touching any canonical prior result.
     with_tmp_dir do |dir|
       reviewer, _ = with_stubbed_adapter(dir, "max_attempts" => 1)
       FileUtils.mkdir_p(File.dirname(reviewer.output_path))
@@ -813,8 +838,9 @@ class ReviewersAgentTest < Minitest::Test
         Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
       end
 
-      refute File.exist?(reviewer.output_path),
-             "final-failure cleanup must delete output_path so triage doesn't see partial content"
+      refute File.exist?(reviewer.output_path)
+      refute File.exist?(reviewer.failure_output_path),
+             "final-failure cleanup must delete staged content so triage doesn't see it"
     end
   end
 
@@ -844,7 +870,7 @@ class ReviewersAgentTest < Minitest::Test
 
       log_dir = Dir.mktmpdir("fake-claude-argv")
       ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
-      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
 
       reviewer.run!
@@ -882,7 +908,7 @@ class ReviewersAgentTest < Minitest::Test
 
       log_dir = Dir.mktmpdir("fake-claude-argv")
       ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
-      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
 
       reviewer.run!
@@ -909,7 +935,7 @@ class ReviewersAgentTest < Minitest::Test
 
       log_dir = Dir.mktmpdir("fake-claude-argv")
       ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
-      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
       ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
 
       reviewer.run!

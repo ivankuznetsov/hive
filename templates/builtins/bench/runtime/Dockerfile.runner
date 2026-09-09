@@ -82,6 +82,10 @@ RUN apt-get update \
 COPY hive-src.tar /tmp/hive-src.tar
 RUN mkdir -p /tmp/hive-build \
   && tar xf /tmp/hive-src.tar -C /tmp/hive-build \
+  && cd /tmp/hive-build/components/agent-cli-runtime \
+  && gem build agent-cli-runtime.gemspec \
+  && gem install ./agent-cli-runtime-*.gem --no-document \
+  && ruby -e 'require "agent_cli_runtime"; abort "agent-cli-runtime provider errors unavailable" unless AgentCliRuntime.respond_to?(:extract_provider_error); abort "agent-cli-runtime OpenCode permissions unavailable" unless defined?(AgentCliRuntime::OpenCode::Permissions)' \
   && cd /tmp/hive-build \
   && gem build hive.gemspec \
   && gem install ./hive-cli-*.gem --no-document \

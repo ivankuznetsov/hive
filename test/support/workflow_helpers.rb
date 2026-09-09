@@ -1,4 +1,5 @@
 require "hive/workflow"
+require "hive/workflows"
 require "hive/workflows/registry"
 require "hive/stages/base"
 

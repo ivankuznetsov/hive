@@ -248,8 +248,23 @@ class DisplayNameGeneratorTest < Minitest::Test
       }.merge(config_overrides.transform_keys(&:to_s))
 
       task = Hive::Task.new(folder)
+      Hive::TaskMeta.write(folder, id: 42, slug: slug, display_name: nil)
+      database = prepare_runtime_project(state_home: root, name: "display-name")
+      prior_repository = Hive::Lock.task_lease_repository
+      Hive::Lock.task_lease_repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+        database: database,
+        process_start_time: Hive::Lock.method(:process_start_time),
+        process_alive: lambda { |pid, recorded_start_time:|
+          Hive::Lock.send(
+            :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+          )
+        }
+      )
       gen = Hive::DisplayName::Generator.new(task, cfg: cfg, commit: commit)
       yield gen, task
+    ensure
+      Hive::Lock.task_lease_repository = prior_repository if prior_repository
+      database&.disconnect
     end
   end
 end

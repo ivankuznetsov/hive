@@ -58,6 +58,9 @@
 .babysitter-dry-run-skipped.log
 .hive-babysitter-dry-run-bin/
 
+# Verified release dependencies are bundled at build time, never committed.
+/lib/hive/assets/betterleaks/
+
 # Telegram E2E headless client (Telethon) — local secrets/artifacts
 test/e2e/tg/.venv/
 test/e2e/tg/*.session

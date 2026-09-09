@@ -68,6 +68,14 @@ module Hive
         )
       end
 
+      # Path the orchestrator may delete when this adapter fails. Legacy and
+      # custom adapters write directly to output_path, so that remains the
+      # compatibility default. Adapters that stage output before atomically
+      # publishing it override this to protect an already-successful result.
+      def failure_output_path
+        output_path
+      end
+
       def run!
         raise NotImplementedError, "#{self.class} must implement #run!"
       end
@@ -79,6 +87,18 @@ module Hive
       end
 
       private
+
+      def staged_output_path
+        "#{output_path}.partial"
+      end
+
+      def promote_staged_output!
+        File.rename(staged_output_path, output_path)
+      rescue SystemCallError => e
+        raise Hive::Error,
+              "reviewer #{name.inspect}: failed to publish staged output " \
+              "#{staged_output_path} -> #{output_path}: #{e.class}: #{e.message}"
+      end
 
       # Reviewer specs are validated before adapter construction, but custom
       # integrations can still instantiate an adapter directly. Keep their

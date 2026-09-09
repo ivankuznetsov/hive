@@ -1,16 +1,14 @@
-require "open3"
-require "json"
 require "time"
 require "hive/dependency_admission"
+require "hive/commands/status"
 
 module Hive
   module Daemon
-    # Wraps Hive's internal task-graph invocation. Returns a typed array of
-    # task rows the daemon's dispatcher consumes. Surfaces parse failures
-    # as a structured `{ok: false}` rather than raising, so a transient
-    # status hiccup doesn't crash the daemon.
+    # Maps Hive's in-process task graph into the typed rows consumed by the
+    # daemon. Producer failures become `{ok: false}` results so one bad scan
+    # does not crash the daemon.
     class StatusConsumer
-      # `live_task_lock` is the per-task `.lock`-holder-alive signal
+      # `live_task_lock` is the per-task lease-holder-alive signal
       # `Hive::Commands::Status` derives from a PID + process_start_time
       # match. It is true while a `hive run` invocation is actively inside
       # the task — including pre-stage work like auto-rebase — even before
@@ -28,7 +26,7 @@ module Hive
                        :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
                        :condition_migration, :condition_provenance, :shadow_audit,
                        :condition_warning, :pr_url,
-                       :plan_review, :projection_repair,
+                       :plan_review, :task_history_invalid,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -48,17 +46,8 @@ module Hive
           !Array(legacy_stage_dirs).empty?
         end
       end
-      # `warning` carries a non-fatal advisory the dispatcher logs once per
-      # tick. Two sources feed it: (1) a forward schema-version skew that was
-      # tolerated and parsed best-effort, and (2) any non-empty stderr from an
-      # otherwise-successful (exit-0) internal task-graph fetch. In JSON mode
-      # stdout carries the payload and stderr is empty on a healthy run, so
-      # non-empty stderr is the status command's own degradation breadcrumbs
-      # (fail-open dependency gate, dropped depends_on). (The collapsed-stack
-      # warn fires only from the execute/open_pr child processes, never the
-      # status command, so it never reaches this channel.)
-      # Surfacing it here makes those breadcrumbs observable in daemon.log
-      # instead of being silently discarded. nil on a clean fetch.
+      # `warning` carries non-fatal status-projection advisories that the
+      # dispatcher logs once per tick. nil on a clean fetch.
       # Full reads also retain the validated source payload so the daemon can
       # publish the graph it already paid to collect; bounded reads leave it
       # nil because they are not an authoritative fleet snapshot.
@@ -80,112 +69,78 @@ module Hive
         end
       end
 
-      def initialize(hive_bin: ENV.fetch("HIVE_BIN", "hive"),
-                     extra_env: {})
-        @hive_bin = hive_bin
-        @extra_env = extra_env
+      def initialize(producer: nil)
+        @producer = producer || method(:produce_in_process)
       end
 
       def fetch
-        fetch_command("status", "--internal-task-graph", "--json")
+        fetch_producer
       end
 
       def fetch_tasks(task_keys)
         keys = Array(task_keys).map do |project, slug|
           [ project.to_s, slug.to_s ]
         end.uniq
-        references = keys.map { |project, slug| "#{project}:#{slug}" }
-        return Result.new(ok: true) if references.empty?
-
-        fetch_command(
-          "status", "--internal-task-graph", "--json", "--daemon-task", *references,
-          require_partial: true, expected_task_keys: keys
+        return Result.new(ok: true) if keys.empty?
+        fetch_producer(
+          task_keys: keys, require_partial: true, expected_task_keys: keys
         )
       end
 
       private
 
-      def fetch_command(*argv, require_partial: false, expected_task_keys: nil)
-        out, err, status = Open3.capture3(@extra_env, @hive_bin, *argv)
-        unless status.success?
-          return Result.new(
-            ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
-            error: "hive status exited #{status.exitstatus}: #{err.strip}"
-          )
-        end
+      def fetch_producer(task_keys: nil, require_partial: false, expected_task_keys: nil)
+        warnings = []
+        doc = @producer.call(task_keys: task_keys, warnings: warnings)
+        consume_document(
+          doc, warning: warnings.join(" | "), require_partial: require_partial,
+          expected_task_keys: expected_task_keys
+        )
+      rescue StandardError => e
+        failed_result(e, warnings: warnings)
+      end
 
-        doc = JSON.parse(out)
-        # Envelope SHAPE validation runs OUTSIDE the best-effort extraction
-        # rescue below: a missing schema / ok=false is a real failure whose
-        # message must ALWAYS surface, even on a newer-schema doc. Folding
-        # it into the skew degrade would relabel a genuine "ok=false:
-        # <reason>" as a misleading "restart to pick up the new version".
+      def produce_in_process(task_keys:, warnings:)
+        references = Array(task_keys).map { |project, slug| "#{project}:#{slug}" }
+        Hive::Commands::Status.new(
+          daemon_tasks: references, warning_sink: warnings
+        ).internal_task_graph_payload
+      end
+
+      def consume_document(doc, warning: "", require_partial: false, expected_task_keys: nil)
         validate_envelope!(doc)
         if require_partial && doc["partial"] != true
           raise ArgumentError, "bounded status response is missing partial=true"
         end
         validate_bounded_projects!(doc, expected_task_keys) if require_partial
-        skew = schema_skew(doc)
-        # An OLDER payload (a stale `hive` on PATH than this daemon
-        # expects) can't be trusted to carry the fields the dispatcher
-        # reads, so surface a clear, actionable failure instead of
-        # advancing on stale data. A NEWER (or equal) payload is parsed
-        # best-effort: hive-status envelopes are additive by contract, so
-        # an updated binary's output stays readable by an older
-        # long-running daemon process. The dispatcher logs `warning`.
-        if skew == :older
-          return Result.new(
-            ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
-            error: older_skew_message(doc)
-          )
-        end
-
-        begin
-          rows = extract_rows(doc)
-          validate_bounded_rows!(rows, expected_task_keys) if require_partial
-          projects = extract_projects(doc)
-        rescue StandardError => e
-          # ONLY a failure inside best-effort EXTRACTION degrades. On a
-          # newer-schema doc this is the tolerated forward-skew path, but we
-          # PRESERVE the underlying exception (class + message) in the
-          # surfaced error so a genuine extraction bug stays recoverable —
-          # an operator who restarts into the same buggy binary would
-          # otherwise keep chasing the friendly "restart" hint. On an
-          # exact/equal-version doc there is nothing to tolerate: re-raise to
-          # the outer rescue, which records the raw "#{e.class}: ...".
-          raise unless skew == :newer
-
-          return Result.new(
-            ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
-            error: forward_skew_message(doc, underlying: e)
-          )
-        end
+        rows = extract_rows(doc)
+        validate_bounded_rows!(rows, expected_task_keys) if require_partial
+        projects = extract_projects(doc)
         Result.new(
           ok: true, rows: rows, projects: projects, error: nil,
-          warning: success_warning(skew, doc, err),
+          warning: warning.empty? ? nil : warning,
           hidden_archived_task_count: projects.sum(&:hidden_archived_task_count),
           status_payload: require_partial ? nil : doc
         )
-      rescue JSON::ParserError => e
+      end
+
+      def failed_result(error, warnings: [])
+        details = [ "#{error.class}: #{error.message}" ]
+        details << "projection warnings: #{warnings.join(' | ')}" unless warnings.empty?
         Result.new(
           ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
-          error: "malformed JSON from hive status: #{e.message}"
-        )
-      rescue StandardError => e
-        Result.new(
-          ok: false, rows: [], projects: [], hidden_archived_task_count: 0,
-          error: "#{e.class}: #{e.message}"
+          error: details.join(" | ")
         )
       end
 
-      # Envelope-shape validation (hard errors) ONLY. A missing/wrong
-      # `schema` key or `ok=false` is a malformed/failed envelope and must
-      # still raise. Schema VERSION skew is NOT validated here — it is
-      # handled tolerantly via `schema_skew` so a binary/process version
-      # mismatch never hard-crashes the daemon tick.
       def validate_envelope!(doc)
         unless doc.is_a?(Hash) && doc["schema"] == "hive-status"
           raise ArgumentError, "missing schema=hive-status in envelope"
+        end
+        expected = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")
+        unless doc["schema_version"] == expected
+          raise ArgumentError,
+                "hive-status schema version must be #{expected}, got #{doc['schema_version'].inspect}"
         end
         return if doc["ok"] == true
 
@@ -219,58 +174,6 @@ module Hive
               "bounded status returned unrequested task #{unexpected.project}:#{unexpected.slug}"
       end
 
-      # Classify the envelope's schema_version against what THIS daemon was
-      # built for: :match, :newer (payload from an updated binary), or
-      # :older (a stale binary on PATH). Never raises.
-      def schema_skew(doc)
-        expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
-        got = doc["schema_version"]
-        return :match if got == expected
-        return :newer if got.is_a?(Integer) && got > expected
-
-        :older
-      end
-
-      # Compose the success-path advisory from the (optional) tolerated-skew
-      # message and any non-empty stderr this fetch emitted, so one warning
-      # channel surfaces both. On a healthy JSON fetch stderr is empty and
-      # there is no skew → both arms are nil → warning is nil.
-      def success_warning(skew, doc, stderr)
-        parts = []
-        parts << forward_skew_warning(doc) if skew == :newer
-        breadcrumbs = stderr.to_s.strip
-        parts << "hive status stderr: #{breadcrumbs}" unless breadcrumbs.empty?
-        parts.empty? ? nil : parts.join(" | ")
-      end
-
-      def forward_skew_warning(doc)
-        "#{forward_skew_summary(doc)}; parsing best-effort. " \
-          "Restart the hive daemon to pick up the new schema."
-      end
-
-      # `underlying` is the exception that aborted best-effort extraction on
-      # a newer-schema doc. We append its class + message so the genuine
-      # defect stays diagnosable in the daemon log / status_failure event
-      # instead of being masked by the friendly restart hint — an operator
-      # who restarts into the same buggy binary would otherwise keep
-      # chasing the hint.
-      def forward_skew_message(doc, underlying:)
-        "hive status: #{forward_skew_summary(doc)}; " \
-          "restart the hive daemon to pick up the new version " \
-          "(underlying error: #{underlying.class}: #{underlying.message})"
-      end
-
-      def forward_skew_summary(doc)
-        expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
-        "envelope schema v#{doc['schema_version']} is newer than this process (v#{expected})"
-      end
-
-      def older_skew_message(doc)
-        expected = Hive::Schemas::SCHEMA_VERSIONS["hive-status"]
-        "hive status: envelope schema v#{doc['schema_version']} is older than this process " \
-          "(v#{expected}); update/reinstall the hive binary on PATH"
-      end
-
       def extract_rows(doc)
         rows = []
         Array(doc["projects"]).each do |project_doc|
@@ -289,7 +192,7 @@ module Hive
               workflow: task["workflow"],
               marker: task["marker"],
               marker_attrs: task["attrs"].is_a?(Hash) ? task["attrs"] : {},
-              projection_repair: task["projection_repair"] == true,
+              task_history_invalid: task["task_history_invalid"] == true,
               folder: task["folder"],
               state_file: task["state_file"],
               status_payload_mtime: task["mtime"],
@@ -364,7 +267,7 @@ module Hive
 
       # Surface per-project payload-level signal (legacy_stage_dirs) so
       # the dispatcher can gate dispatch on a project being in a clean
-      # layout, without re-walking the JSON. Skips error projects (same
+      # layout, without re-walking the graph. Skips error projects (same
       # filter as extract_rows) so the projects list is in 1:1
       # correspondence with dispatchable projects. Issue #95.
       def extract_projects(doc)

@@ -32,7 +32,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrates_legacy_stage_directories
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -65,7 +65,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_runs_the_injected_global_migration_once
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         calls = 0
@@ -79,8 +79,73 @@ class MigrateTest < Minitest::Test
     end
   end
 
+  def test_default_migration_refuses_a_missing_or_unactivated_control_plane
+    with_tmp_global_config(runtime: false) do |home|
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+          Hive::Commands::Migrate.new(dir).call
+        end
+        assert_equal :missing_database, error.code
+        refute_path_exists Hive::Paths.runtime_control_plane_path(home)
+
+        Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(home)
+        ).migrate!.disconnect
+        error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+          Hive::Commands::Migrate.new(dir).call
+        end
+        assert_equal :control_plane_inactive, error.code
+      end
+    end
+  end
+
+  def test_default_migration_continues_after_fleet_activation
+    with_tmp_global_config(runtime: false) do |home|
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        activate_control_plane(home)
+
+        out, = capture_io { Hive::Commands::Migrate.new(dir).call }
+
+        assert_includes out, "hive: migrate"
+      end
+    end
+  end
+
+  def test_class_restart_entrypoint_delegates_to_the_instance_boundary
+    called = false
+    instance = Object.new
+    instance.define_singleton_method(:restart_daemon_if_running!) { called = true }
+
+    with_replaced_singleton_method(Hive::Commands::Migrate, :new, ->(*) { instance }) do
+      Hive::Commands::Migrate.restart_daemon_if_running!
+    end
+
+    assert called
+  end
+
+  def test_healthy_database_without_active_phase_requires_fleet_cutover
+    with_tmp_global_config(runtime: false) do |home|
+      Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(home)
+      ).migrate!.disconnect
+      command = Hive::Commands::Migrate.new(home)
+
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::Cutover, :inspect_status,
+        ->(**) { { "phase" => "ready" } }
+      ) do
+        error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+          command.send(:ensure_active_control_plane!)
+        end
+        assert_equal :control_plane_inactive, error.code
+      end
+    end
+  end
+
   def test_explicit_migrate_rebuilds_the_patrol_fix_pending_index_once
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         root = File.join(dir, ".hive-state", "patrol-fix", "admissions")
@@ -113,7 +178,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_patrol_index_cutover_restarts_then_rebuilds_once_more
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         root = File.join(dir, ".hive-state", "patrol-fix", "admissions")
@@ -150,7 +215,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_backfills_plan_review_requirement_before_execute_but_grandfathers_execute
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -177,7 +242,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrates_attributed_legacy_dirty_execute_wait_once
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -273,7 +338,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_backfills_missing_registered_repository_identity_once
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         entry = Hive::Config.registered_projects.find { |project| project["path"] == dir }
@@ -306,7 +371,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrates_previous_canonical_finalize_and_done_stage_directories
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -328,7 +393,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_refuses_conflicting_slug
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -347,7 +412,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_preflight_catches_plan_internal_duplicate_destination
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -374,7 +439,7 @@ class MigrateTest < Minitest::Test
   # by a 6-pr→8-finalize collision would leave the filesystem partially
   # renamed with no rollback.
   def test_migrate_preflight_catches_later_collision_before_first_mv
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -403,7 +468,7 @@ class MigrateTest < Minitest::Test
   # Skip non-slug entries (round-1 finding): only task-folder slugs
   # should migrate. `.DS_Store`, stray `.lock`, etc. must stay put.
   def test_migrate_skips_non_slug_entries
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -421,7 +486,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_reports_already_migrated_noop
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
 
@@ -433,7 +498,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_reports_plain_noop_when_legacy_dirs_only_have_non_slug_entries
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -452,7 +517,7 @@ class MigrateTest < Minitest::Test
   # Commit-message assertion (round-1 finding): regression that drops
   # the commit (or changes the message) would otherwise be invisible.
   def test_migrate_writes_a_commit_with_descriptive_message
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -475,7 +540,7 @@ class MigrateTest < Minitest::Test
   # `.finalize` so Stages::Finalize's read-through fallback has
   # somewhere to go.
   def test_migrate_rewrites_legacy_config_keys
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -507,7 +572,7 @@ class MigrateTest < Minitest::Test
   # Idempotent rerun: when both legacy and canonical keys exist, the
   # canonical value wins (user-tuned post-migration).
   def test_migrate_preserves_canonical_on_collision_with_legacy
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -529,7 +594,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_removes_retired_patrol_policy_once_and_restarts_daemon
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -584,7 +649,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_keeps_comments_that_document_surviving_keys_after_retired_policy
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -619,7 +684,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_failed_atomic_config_replacement_preserves_original_and_retry_succeeds
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -652,7 +717,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_semantically_rewrites_flow_style_retired_patrol_policy
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -769,7 +834,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_rejects_a_non_mapping_config_before_rewriting_retired_policy
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -785,7 +850,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_removes_complete_multiline_retired_patrol_values
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -824,7 +889,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_config_rewrite_requests_coalesced_restart_before_later_migration_failure
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -845,7 +910,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_standalone_config_rewrite_restarts_daemon_before_later_migration_failure
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -866,7 +931,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_moves_top_level_reviewers_under_review_without_losing_comments
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -904,7 +969,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_creates_review_mapping_when_legacy_reviewers_are_the_only_key
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -918,7 +983,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_rejects_flow_style_review_mapping_without_reformatting_the_file
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -936,7 +1001,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_reports_invalid_yaml_before_rewriting_legacy_reviewers
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -952,7 +1017,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_refuses_to_choose_between_legacy_and_canonical_reviewers
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -977,7 +1042,7 @@ class MigrateTest < Minitest::Test
   # When legacy config keys are rewritten AND task ids are backfilled in the
   # same run (with no stage folders to move), the no-move message reports both.
   def test_migrate_no_move_message_reports_config_rewrite_and_backfill
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         cfg_path = File.join(dir, ".hive-state", "config.yml")
@@ -998,7 +1063,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_backfills_task_meta_ids_in_created_at_order
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1024,7 +1089,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_upgrades_idless_recovery_markers_once
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1085,7 +1150,7 @@ class MigrateTest < Minitest::Test
 
   def test_migrate_upgrades_the_authoritative_state_file_for_a_custom_workflow
     with_registered_workflow(research_workflow) do
-      with_tmp_global_config do
+      with_tmp_global_config(runtime: false) do
         with_tmp_git_repo do |dir|
           capture_io { Hive::Commands::Init.new(dir).call }
           stages = File.join(dir, ".hive-state", "stages")
@@ -1120,7 +1185,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_backfill_is_idempotent
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1139,7 +1204,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_fills_null_id_and_preserves_display_name
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1159,7 +1224,7 @@ class MigrateTest < Minitest::Test
   # there would silently strip a task's dependency during migrate. Seed a
   # populated depends_on and assert it survives a full migrate run.
   def test_migrate_fills_null_id_and_preserves_depends_on
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1188,7 +1253,7 @@ class MigrateTest < Minitest::Test
   # Dropping any field can silently change the workflow or make its immutable
   # generation/configuration impossible to resolve.
   def test_migrate_fills_null_id_and_preserves_managed_workflow_provenance
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1237,7 +1302,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_backfills_missing_display_names_without_renaming_existing_names
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1265,7 +1330,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_backfills_archived_completion_times_explicitly
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1305,7 +1370,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_completion_time_commit_failure_restores_metadata_for_a_retry
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1341,7 +1406,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_invalid_completion_time_keeps_that_task_visible_and_commits_earlier_metadata
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1496,7 +1561,7 @@ class MigrateTest < Minitest::Test
   end
 
   def test_migrate_seeds_counter_above_existing_ids
-    with_tmp_global_config do
+    with_tmp_global_config(runtime: false) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         stages = File.join(dir, ".hive-state", "stages")
@@ -1927,11 +1992,17 @@ class MigrateTest < Minitest::Test
 
   def migrate_command(project_path, display_name_generator: NoopDisplayNameGenerator,
                       **options)
+    prepare_test_runtime_project(project_path)
+    options[:global_migration] = -> { } unless options.key?(:global_migration)
     Hive::Commands::Migrate.new(
       project_path,
       display_name_generator: display_name_generator,
       **options
     )
+  end
+
+  def activate_control_plane(home)
+    activate_test_control_plane(home)
   end
 
   def patrol_fix_source_snapshot

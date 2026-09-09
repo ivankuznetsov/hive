@@ -67,6 +67,11 @@ Hive::Agent.new(
 
 Headless `Hive::Agent#spawn_and_wait` scans each raw stream line for limit text while still preserving the structured final message and bounded plain tail. That raw-stream path catches CLIs that emit usage walls as JSON error events which `MessageExtractor` does not surface as a final assistant message; `handle_exit` then prefers `result[:limit_text]` and falls back to scanning `final_message`. Structured provider status extraction accepts both the generic `code` field and Grok's nested `http_status` field, so an HTTP 402 Grok Build balance exhaustion is typed as `provider_limit` instead of a generic reviewer error. Ordinary successful command output is never scanned into failure, but a profile extractor's typed provider error remains authoritative even when the CLI exits zero. A typed quota error retains `limits_reached`; another provider-side failed turn returns `error_reason=provider_error` with its bounded redacted diagnostic. For `:state_file_marker` spawns Hive stamps the corresponding `ERROR`; for `:exit_code_only` and `:output_file_exists` spawns it returns the error without overwriting the orchestrator-owned marker. `Hive::ClaudeLauncher` uses the same limit classifier while waiting for tmux readiness, terminal markers, and expected-output files, so a visible provider-limit pane wins over readiness timeout, tmux-session-death, and missing-output fallbacks.
 
+Claude's structured `rate_limit_event` has no message field. The runtime accepts
+only rejected `five_hour` and `seven_day` windows and synthesizes bounded quota
+text, allowing output-file review and triage spawns to propagate
+`limit_text` even when Claude exits nonzero before writing an artifact.
+
 Claude's own per-invocation cap has a separate protocol boundary.
 `MessageExtractor.extract_failure` recognizes only a structured terminal
 `type=result`, `subtype=error_max_budget_usd` event. It never infers failure
@@ -117,12 +122,10 @@ profile-native routed arguments in the subcommand segment. Unscoped calls and
 inactive resolutions stay on the original assembly path, including the
 existing flat implementation-identity argument position.
 
-Prompt placement is profile data: Claude uses a trailing positional prompt,
-Codex sends the prompt through stdin and places `-` in argv, Pi sends the
-prompt through piped stdin without an argv marker, and Grok places the prompt
-immediately after `-p` because `--single` consumes a value. Keeping Pi's
-prompt out of argv avoids the operating system's per-argument size limit for
-large implementation plans. Grok's streaming `text` fragments are
+Prompt placement is profile data: Claude and Pi use piped stdin without an
+argv marker; Codex uses stdin and places `-` in argv. Grok reads stdin through
+`--prompt-file=/dev/stdin`. Keeping prompts out of argv avoids the operating
+system's per-argument size limit for large plans and reviews. Grok's streaming `text` fragments are
 concatenated verbatim into `final_message`.
 
 For the built-in Claude profile this is still:
@@ -140,8 +143,9 @@ claude -p
   --include-partial-messages
   --verbose
   --no-session-persistence
-  <prompt>
 ```
+
+The complete Claude prompt is supplied on stdin.
 
 `--verbose` is required by `claude` whenever `-p` is paired with
 `--output-format stream-json`; without it claude rejects the invocation

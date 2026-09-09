@@ -56,7 +56,10 @@ class RunApproveTest < Minitest::Test
     File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: #{descriptor.id}\n")
     folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
     FileUtils.mkdir_p(folder)
-    File.write(File.join(folder, "meta.yml"), "workflow: #{descriptor.id}\n")
+    Hive::TaskMeta.write(
+      folder, id: Digest::SHA256.hexdigest(slug)[0, 12].to_i(16),
+      slug: slug, display_name: nil, workflow: descriptor.id.to_s
+    )
     File.write(File.join(folder, state_file), "# #{slug}\n")
     write_marker(folder, marker)
     [ folder, slug ]
@@ -79,7 +82,10 @@ class RunApproveTest < Minitest::Test
           File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: agent_entry\n")
           hold = File.join(dir, ".hive-state", "stages", "2-hold", slug)
           FileUtils.mkdir_p(hold)
-          File.write(File.join(hold, "meta.yml"), "slug: #{slug}\nworkflow: agent_entry\n")
+          Hive::TaskMeta.write(
+            hold, id: Digest::SHA256.hexdigest(slug)[0, 12].to_i(16),
+            slug: slug, display_name: nil, workflow: "agent_entry"
+          )
           File.write(File.join(hold, "hold.md"), "# #{slug}\n")
 
           task = Hive::Task.new(hold)
@@ -423,8 +429,10 @@ class RunApproveTest < Minitest::Test
           capture_io { Hive::Commands::Init.new(dir2).call }
           slug = "shared-slug-260424-aaaa"
           [ dir1, dir2 ].each do |d|
-            FileUtils.mkdir_p(File.join(d, ".hive-state", "stages", "1-inbox", slug))
-            File.write(File.join(d, ".hive-state", "stages", "1-inbox", slug, "idea.md"),
+            folder = File.join(d, ".hive-state", "stages", "1-inbox", slug)
+            FileUtils.mkdir_p(folder)
+            ensure_test_task_identity(folder)
+            File.write(File.join(folder, "idea.md"),
                        "# x\n<!-- WAITING -->\n")
           end
 
@@ -887,7 +895,7 @@ class RunApproveTest < Minitest::Test
     end
   end
 
-  def test_orphan_task_lock_at_destination_is_not_committed
+  def test_runtime_task_lease_is_released_after_stage_move
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         _, inbox, slug = seed_project_with_inbox_task(dir)
@@ -895,18 +903,12 @@ class RunApproveTest < Minitest::Test
         FileUtils.mkdir_p(File.dirname(brainstorm))
         FileUtils.mv(inbox, brainstorm)
         write_marker(brainstorm, :complete)
+        prepare_test_task_lease_repository(brainstorm)
 
         capture_io { Hive::Commands::Approve.new(slug).call }
         plan = File.join(dir, ".hive-state", "stages", "3-plan", slug)
-        files_in_commit = `git -C #{File.join(dir, ".hive-state")} show --pretty= --name-only HEAD`.lines.map(&:strip)
-        refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock",
-                        "the per-process .lock file must not be committed"
-        refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock.tmp.guard",
-                        "the stable task-lock guard must remain ignored"
-        refute File.exist?(File.join(plan, ".lock")),
-               "orphan .lock from with_task_lock must be cleaned at destination"
-        assert File.exist?(File.join(plan, ".lock.tmp.guard")),
-               "the regression must exercise the persistent guard artifact"
+        assert_nil Hive::Lock.read_task_lock(plan),
+                   "approve must release the task lease after the stage move"
       end
     end
   end

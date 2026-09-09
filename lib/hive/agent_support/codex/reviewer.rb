@@ -165,9 +165,9 @@ module Hive::AgentSupport::Codex
       run = nil
       loop do
         attempts += 1
-        # Clear any partial file from a prior crashed attempt so a stale
-        # file can't satisfy this attempt's format check.
-        delete_output!
+        # Clear any staged file from a prior crashed attempt. The canonical
+        # output remains intact until a complete replacement is published.
+        delete_partial_output!
 
         spawn_timeout = effective_timeout(configured_timeout, deadline)
         if spawn_timeout && spawn_timeout <= 0
@@ -191,6 +191,10 @@ module Hive::AgentSupport::Codex
       end
 
       finalize(run, attempts, max_attempts)
+    end
+
+    def failure_output_path
+      staged_output_path
     end
 
     private
@@ -230,15 +234,17 @@ module Hive::AgentSupport::Codex
     def finalize(run, attempts, max_attempts)
       case review_status(run)
       when :findings
-        @runtime.write(output_path, format_body(findings_markdown(review_body(run.stdout))))
+        @runtime.write(staged_output_path, format_body(findings_markdown(review_body(run.stdout))))
+        promote_staged_output!
         Hive::Reviewers::Result.new(name:, output_path:, status: :ok, error_message: nil)
       when :clean
-        @runtime.write(output_path, clean_findings(review_body(run.stdout)))
+        @runtime.write(staged_output_path, clean_findings(review_body(run.stdout)))
+        promote_staged_output!
         Hive::Reviewers::Result.new(name:, output_path:, status: :ok, error_message: nil)
       else
         # Failure: leave no malformed findings file behind — triage would
         # otherwise treat it as real reviewer output.
-        delete_output!
+        delete_partial_output!
         error_result(base_reason(run), attempts, max_attempts, detail: captured_tail(run))
       end
     end
@@ -319,7 +325,7 @@ module Hive::AgentSupport::Codex
           base_msg
         end
       msg = "#{msg}#{detail}" if detail && !detail.empty?
-      Hive::Reviewers::Result.new(name:, output_path:, status: :error, error_message: msg)
+      Hive::Reviewers::Result.new(name:, output_path: failure_output_path, status: :error, error_message: msg)
     end
 
     def valid_findings?(stdout)
@@ -496,7 +502,7 @@ module Hive::AgentSupport::Codex
           task_folder: ctx.task_folder,
           default_branch: ctx.default_branch,
           pass: ctx.pass,
-          output_path: output_path,
+          output_path: staged_output_path,
           user_supplied_tag: tag,
           plan_context_section: Hive::Reviewers::PlanContext.render(ctx.task_folder, tag)
         )
@@ -511,8 +517,8 @@ module Hive::AgentSupport::Codex
       sleep(seconds)
     end
 
-    def delete_output!
-      @runtime.delete(output_path, label: "reviewer #{name.inspect}")
+    def delete_partial_output!
+      @runtime.delete(staged_output_path, label: "reviewer #{name.inspect}")
     end
   end
 end

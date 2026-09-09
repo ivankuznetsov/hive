@@ -14,8 +14,8 @@ require "hive/paths"
 require "hive/patrol_fix/admission_store"
 require "hive/process_kill"
 require "hive/recovery"
-require "hive/recovery/migration"
 require "hive/repository_identity"
+require "hive/runtime_control_plane/cutover"
 require "hive/stages"
 require "hive/task"
 require "hive/task_action"
@@ -86,13 +86,13 @@ module Hive
       def initialize(project_path = Dir.pwd, display_name_generator: Hive::DisplayName::Generator,
                      managed_store_factory: Hive::WorkflowPackage::ManagedStore.method(:new),
                      config_loader: Hive::Config.method(:load),
-                     global_migration: Hive::Recovery::Migration.method(:ensure!),
+                     global_migration: nil,
                      daemon_restarter: nil, daemon_cutover: nil)
         @project_path = File.expand_path(project_path)
         @display_name_generator = display_name_generator
         @managed_store_factory = managed_store_factory
         @config_loader = config_loader
-        @global_migration = global_migration
+        @global_migration = global_migration || method(:ensure_active_control_plane!)
         @daemon_restarter = daemon_restarter
         @daemon_cutover = daemon_cutover
       end
@@ -276,6 +276,33 @@ module Hive
           (@daemon_restarter || method(:restart_daemon_if_running!)).call
         end
         moved
+      end
+
+      def ensure_active_control_plane!
+        state_home = Hive::Paths.state_home
+        database = Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(state_home)
+        )
+        status = Hive::RuntimeControlPlane::Cutover.inspect_status(
+          state_home: state_home, database: database
+        )
+        return true if status.fetch("phase") == "active"
+
+        database.open! # preserve the typed missing/corrupt schema diagnosis
+        migration_required!
+      rescue Hive::RuntimeControlPlane::Cutover::Error,
+             Hive::RuntimeControlPlane::CutoverManifest::IntegrityError
+        migration_required!
+      ensure
+        database&.disconnect
+      end
+
+      def migration_required!
+        raise Hive::RuntimeControlPlane::MigrationRequired.new(
+          "runtime control plane is not active; run hive migrate --all",
+          code: :control_plane_inactive,
+          action: "stop Hive and run hive migrate --all"
+        )
       end
 
       private

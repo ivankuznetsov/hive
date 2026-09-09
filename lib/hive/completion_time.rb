@@ -1,6 +1,7 @@
 require "open3"
 require "time"
 require "hive/git_ops"
+require "hive/warnings"
 
 module Hive
   # Resolves the immutable first-completion clock used by archive visibility.
@@ -116,13 +117,21 @@ module Hive
       return nil if value.nil?
       return value.utc if value.is_a?(Time)
       unless value.is_a?(String) && value.match?(/(?:Z|[+-]\d{2}:\d{2})\z/)
-        warn "hive: completion_time: invalid completed_at for #{warn_context}; keeping task visible" if warn_context
+        if warn_context
+          Hive::Warnings.emit(
+            "hive: completion_time: invalid completed_at for #{warn_context}; keeping task visible"
+          )
+        end
         return nil
       end
 
       Time.iso8601(value).utc
     rescue ArgumentError
-      warn "hive: completion_time: invalid completed_at for #{warn_context}; keeping task visible" if warn_context
+      if warn_context
+        Hive::Warnings.emit(
+          "hive: completion_time: invalid completed_at for #{warn_context}; keeping task visible"
+        )
+      end
       nil
     end
 
@@ -131,7 +140,9 @@ module Hive
       from_history(task, history: history, deadline: deadline, monotonic_clock: monotonic_clock) ||
         discover_from_mtimes(task, deadline: deadline, monotonic_clock: monotonic_clock)
     rescue Hive::GitError => e
-      warn "hive: completion_time: #{e.message}; falling back to filesystem mtimes"
+      Hive::Warnings.emit(
+        "hive: completion_time: #{e.message}; falling back to filesystem mtimes"
+      )
       discover_from_mtimes(task, deadline: deadline, monotonic_clock: monotonic_clock)
     end
 

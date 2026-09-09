@@ -9,6 +9,8 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
   include HiveTestHelper
 
   FixedStatus = Data.define(:command, :project, :now) do
+    include Hive::Web::StatusCommand
+
     def json_payload(_registered_projects)
       command.json_payload([ project ], now: now)
     end
@@ -201,6 +203,5 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
       workflow: workflow,
       completed_at: completed_at
     )
-    seed_task_projection(folder, state_file: state_path)
   end
 end

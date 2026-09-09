@@ -418,11 +418,14 @@ module Hive
             # appears, including during Cable reconnect catch-up.
             paths << row.folder
             paths << row.state_file
-            # A runner can acquire the task lock before it writes
-            # AGENT_WORKING, so the lock file is a status-affecting path.
-            paths << File.join(row.folder, ".lock") if row.folder
           end
         end
+        runtime_path = Hive::Paths.runtime_control_plane_path
+        # SQLite runs in WAL mode: committed mutations normally touch the WAL,
+        # not the main database file, until checkpoint. Watch both so lease
+        # acquire/update/release invalidates the cached projection immediately.
+        paths << runtime_path
+        paths << "#{runtime_path}-wal"
         paths.compact.uniq.to_h { |path| [ path, safe_mtime(path) ] }
       end
 

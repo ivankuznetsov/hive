@@ -216,7 +216,11 @@ agent) resolves by its own declaration.
 
 ## Lock interactions
 
-- **Task lock** (`<task folder>/.lock`) wraps the entire stage run, including the long-running claude subprocess. Lock contains `pid`, `started_at`, `process_start_time`, and gets `claude_pid` injected after spawn (used by `hive status` to detect stale agents).
+- **Task lease** (`task_leases`, keyed by stable task id) wraps the entire stage
+  run, including the long-running agent subprocess. Typed columns carry the
+  fenced runner identity/version; bounded JSON receives `claude_pid` and its
+  start identity after spawn. The logical lease stays held while external work
+  runs, but no SQLite transaction spans that work.
 - **Commit lock** (`<project>/.hive-state/.commit-lock`) is taken only during the post-run `git add && git commit` to serialize concurrent commits across multiple in-flight tasks.
 
 See [[modules/lock]].

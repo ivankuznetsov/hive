@@ -74,13 +74,13 @@ class TaskActivityCoverageGapsTest < Minitest::Test
       end
       workflow = Struct.new(:id).new("custom")
       task = Struct.new(:folder, :workflow, :id, :slug).new(root, workflow, 1, "task")
-      with_replaced_singleton_method(Hive::TaskProjection::Store, :new, ->(**) { projection }) do
+      with_replaced_singleton_method(Hive::TaskProjection::Reader, :new, ->(**) { projection }) do
         activity = Hive::TaskActivity.for_task(task, attempt_store: store)
         assert_equal "custom", activity.binding.fetch("workflow")
       end
 
       with_replaced_singleton_method(
-        Hive::TaskProjection::Store, :new, ->(**) { raise Hive::Error, "bad projection" }
+        Hive::TaskProjection::Reader, :new, ->(**) { raise Hive::Error, "bad projection" }
       ) do
         assert_nil Hive::TaskActivity.for_task(task, attempt_store: store)
       end
@@ -250,32 +250,6 @@ class TaskActivityCoverageGapsTest < Minitest::Test
       with_operation_existing(conflicting) do
         assert_same conflicting,
                     Hive::TaskActivity::Operation.begin!(activity: activity, receipt: receipt)
-      end
-
-      retry_operation = Object.new
-      retry_operation.define_singleton_method(:receipt) { { "state" => "aborted" } }
-      retry_operation.define_singleton_method(:same_intent?) { |_| true }
-      with_replaced_singleton_method(File, :exist?, ->(*) { true }) do
-        with_replaced_singleton_method(
-          Hive::TaskActivity::Operation, :open!, ->(**) { retry_operation }
-        ) do
-          assert_raises(Hive::TaskActivity::Conflict) do
-            Hive::TaskActivity::Operation.begin_retry!(activity: activity, receipt: receipt)
-          end
-        end
-      end
-
-      conflicting_retry = Object.new
-      conflicting_retry.define_singleton_method(:receipt) { { "state" => "complete" } }
-      conflicting_retry.define_singleton_method(:same_intent?) { |_| false }
-      with_replaced_singleton_method(File, :exist?, ->(*) { true }) do
-        with_replaced_singleton_method(
-          Hive::TaskActivity::Operation, :open!, ->(**) { conflicting_retry }
-        ) do
-          assert_raises(Hive::TaskActivity::Conflict) do
-            Hive::TaskActivity::Operation.begin_retry!(activity: activity, receipt: receipt)
-          end
-        end
       end
 
       assert_raises(Hive::TaskActivity::InvalidActivity) do

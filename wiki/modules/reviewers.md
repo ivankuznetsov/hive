@@ -3,11 +3,11 @@ title: Hive::Reviewers
 type: module
 source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,runtime,synthetic_task,plan_context}.rb, lib/hive/agent_support/codex/reviewer.rb
 created: 2026-04-26
-updated: 2026-07-18
+updated: 2026-08-30
 tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 ---
 
-**TLDR**: Reviewer adapter layer for the 6-review stage's Phase 2. `Hive::Reviewers.dispatch(spec, ctx)` returns an adapter keyed by the spec's `kind`: `"agent"` (default → `Reviewers::Agent`, spawns an LLM CLI with the configured CE skill+prompt; the agent writes the findings file itself) or `"codex_review"` (→ `AgentSupport::Codex::Reviewer`, runs codex's native single-pass `codex review` and CAPTURES its stdout into the findings file — the cheap patrol default). Either way findings land in `reviews/<output_basename>-<pass>.md` in the GFM-checkbox format the triage/fix loop consumes. `Reviewers::Context` carries per-spawn fields; `Reviewers::Result` is the return shape; `Reviewers::SyntheticTask` is the task-shaped facade `spawn_agent` requires for headless sub-spawns inside the review stage. `Reviewers::PlanContext` renders the task's `plan.md` into an authoritative-on-scope block embedded in every reviewer system prompt, so reviewers stop flagging plan-deferred scope as defects. Tool-specific linters are NOT a reviewer kind — they belong in `review.ci.command` per ADR-014. References ADR-014 / ADR-015.
+**TLDR**: Reviewer adapter layer for the 6-review stage's Phase 2. `Hive::Reviewers.dispatch(spec, ctx)` returns an adapter keyed by the spec's `kind`: `"agent"` (default → `Reviewers::Agent`, spawns an LLM CLI with the configured CE skill+prompt; the agent writes the findings file itself) or `"codex_review"` (→ `AgentSupport::Codex::Reviewer`, runs codex's native single-pass `codex review` and captures its stdout — the cheap patrol default). Both adapters write `<output_path>.partial` and atomically publish complete findings to `reviews/<output_basename>-<pass>.md`; a failed retry therefore cannot erase an earlier successful result for the same pass. `Reviewers::Context` carries per-spawn fields; `Reviewers::Result` is the return shape; `Reviewers::SyntheticTask` is the task-shaped facade `spawn_agent` requires for headless sub-spawns inside the review stage. `Reviewers::PlanContext` renders the task's `plan.md` into an authoritative-on-scope block embedded in every reviewer system prompt, so reviewers stop flagging plan-deferred scope as defects. Tool-specific linters are NOT a reviewer kind — they belong in `review.ci.command` per ADR-014. References ADR-014 / ADR-015.
 
 ## Public API
 
@@ -17,6 +17,7 @@ Hive::Reviewers.backoff_seconds_for(n)         # → capped retry delay in secon
 Hive::Reviewers::Context.new(worktree_path:, task_folder:, default_branch:, pass:)
 Hive::Reviewers::Result.new(name:, output_path:, status:, error_message:)
 Hive::Reviewers.synthetic_task_for(ctx)        # → SyntheticTask facade
+# adapter.failure_output_path                  # → failure-only cleanup target
 ```
 
 `dispatch`'s `kind` discriminator defaults to `"agent"`; `"codex_review"` lazily selects `AgentSupport::Codex::Reviewer`. An explicit `kind: "linter"` raises `UnknownKindError` (exit code `CONFIG = 78`) with a message pointing the user at `review.ci.command` rather than silently ignoring the request. Any other value also raises `UnknownKindError`.
@@ -29,6 +30,9 @@ Shared shell for adapter classes. Subclasses set:
 
 - `name` — derived from `spec["name"]`.
 - `output_path` — `<task_folder>/reviews/<output_basename>-<pass>.md`.
+- `failure_output_path` — the path orchestration may delete after failure;
+  defaults to `output_path` for legacy/custom adapters and is the staging path
+  for adapters that preserve canonical evidence across retries.
 - `ensure_reviews_dir!` — `FileUtils.mkdir_p(File.dirname(output_path))`.
 - monotonic deadline clamping — preserves an adapter's configured timeout when
   no outer deadline exists and otherwise caps each spawn to the review stage's
@@ -43,10 +47,12 @@ The v1 reviewer adapter. `run!`:
 1. Resolves the agent profile via `AgentProfiles.lookup(spec["agent"])`.
 2. Reads `spec["prompt_template"]`; resolves it via `Stages::Base.resolve_template_path` (path-escape guard).
 3. Renders the prompt with bindings: `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation` (formatted via `profile.format_skill_invocation`, which honors profile-specific syntax — pi receives `/skill:<name>`), `user_supplied_tag`.
-4. Spawns via `Stages::Base.spawn_agent(synthetic_task, prompt:, add_dirs: [task_folder], cwd: worktree_path, profile:, status_mode: :output_file_exists, expected_output: output_path, max_budget_usd: spec["budget_usd"] || 50, timeout_sec: spec["timeout_sec"] || 3600, log_label: "review-#{name}-pass#{NN}")`.
-5. Returns `Result.new(status: :ok | :error, ...)`.
+4. Spawns via `Stages::Base.spawn_agent(synthetic_task, prompt:, add_dirs: [task_folder], cwd: worktree_path, profile:, status_mode: :output_file_exists, expected_output: "#{output_path}.partial", max_budget_usd: spec["budget_usd"] || 50, timeout_sec: spec["timeout_sec"] || 7200, log_label: "review-#{name}-pass#{NN}")`.
+5. On success, atomically renames the staged file to `output_path`. On failure,
+   deletes only the staged file and returns it as `Result#output_path`, allowing
+   orchestration cleanup without deleting a prior successful canonical file.
 
-When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive::ClaudeLauncher` session per pass for Claude agent reviewers. `Reviewers::Agent#run_in_session!` sends each Claude reviewer prompt into that same pane sequentially and still waits on that reviewer's own `output_path`. Non-Claude reviewers and all reviewers under `claude.mode: headless` keep the `run!` / `spawn_agent` path.
+When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive::ClaudeLauncher` session per pass for Claude agent reviewers. `Reviewers::Agent#run_in_session!` sends each Claude reviewer prompt into that same pane sequentially and waits on that reviewer's staging path before publishing it atomically. Non-Claude reviewers and all reviewers under `claude.mode: headless` keep the `run!` / `spawn_agent` path.
 
 `status_mode: :output_file_exists` is critical: reviewer spawns own a per-pass output file, not the task marker — the orchestrator's `REVIEW_WORKING` marker must persist across each reviewer's spawn (per ADR-021).
 
@@ -64,7 +70,7 @@ local to the selected provider.
 1. Resolves the codex profile via `AgentProfiles.lookup(spec["agent"])` and calls `check_version!` (preflight; missing binary → `:error "preflight failed: …"`).
 2. Renders `templates/reviewer_codex_native_review.md.erb` (no `skill_invocation` binding — codex review takes no CE skill).
 3. Spawns `codex review --title <title> <prompt>` with `cwd = worktree_path`, capturing combined stdout+stderr under a wall-clock timeout (`spec["timeout_sec"]`, default 7200; process-group TERM on timeout).
-4. Validates: stdout must contain at least one `## High|Medium|Nit` header AND must NOT be the prompt template echoed back. codex occasionally returns the prompt's own example block (the literal `- [ ] <finding>: <one-line justification>` placeholder under each header) instead of reviewing; that passes the header check but is hollow, so `TEMPLATE_ECHO` rejects it as a failure (it retries rather than recording a fake clean pass — a real `No findings.` review still passes). Valid → trims the codex banner to the first severity header, drops the middle `exec` / `thinking` / `codex` tool-call transcript that `codex review` streams after the findings block, keeps codex's final assistant message when present, and writes the normalized body to `output_path`. Invalid / template-echo / non-zero exit / timeout → deletes any partial file and returns `:error` (so triage never sees a malformed findings file). On failure the captured combined stdout+stderr **tail** (last `FAILURE_TAIL_BYTES = 2000`) is appended to the `:error` message, so it lands in `reviews/errors-NN.md` and a `reviewer all_failed` becomes diagnosable instead of an opaque `exited status=1`; surfacing it also lets `Hive::AgentLimit.limit_reached?` (which only sees the error message) catch a codex usage-limit and route the phase to the cooldown `limits_reached` path instead of `all_failed`. Shares Agent's `max_attempts` retry, `Hive::Reviewers.backoff_seconds_for` delay formula, and monotonic `deadline:` handling.
+4. Validates: stdout must contain at least one `## High|Medium|Nit` header AND must NOT be the prompt template echoed back. codex occasionally returns the prompt's own example block (the literal `- [ ] <finding>: <one-line justification>` placeholder under each header) instead of reviewing; that passes the header check but is hollow, so `TEMPLATE_ECHO` rejects it as a failure (it retries rather than recording a fake clean pass — a real `No findings.` review still passes). Valid → trims the codex banner to the first severity header, drops the middle `exec` / `thinking` / `codex` tool-call transcript that `codex review` streams after the findings block, keeps codex's final assistant message when present, writes the normalized body to `<output_path>.partial`, and atomically promotes it. Invalid / template-echo / non-zero exit / timeout → deletes only the staged file and returns `:error` (so triage never sees malformed findings and any earlier successful canonical result survives). On failure the captured combined stdout+stderr **tail** (last `FAILURE_TAIL_BYTES = 2000`) is appended to the `:error` message, so it lands in `reviews/errors-NN.md` and a `reviewer all_failed` becomes diagnosable instead of an opaque `exited status=1`; surfacing it also lets `Hive::AgentLimit.limit_reached?` (which only sees the error message) catch a codex usage-limit and route the phase to the cooldown `limits_reached` path instead of `all_failed`. Shares Agent's `max_attempts` retry, `Hive::Reviewers.backoff_seconds_for` delay formula, and monotonic `deadline:` handling.
 4. Classifies codex's **real answer** — NOT the raw stdout. `codex review` always echoes the prompt (which carries the template's own `## High/Medium/Nit` headers AND the literal `- [ ] <finding>: <one-line justification>` placeholder) at the top of its session, then streams an `exec`/`thinking`/`codex` tool-call transcript, then a final assistant message. `review_body` strips the echoed prompt (a leading findings block whose only content is the `TEMPLATE_ECHO` placeholder is dropped) and the middle transcript, keeping a *real* leading findings block plus codex's final message. The decision then runs on that answer:
    - **structured findings** (`## High|Medium|Nit` present, no placeholder) → `:findings`, published as-is;
    - **native `codex review` findings** (no `## High|Medium|Nit` header, but ≥1 `[Pn]` priority bullet — the format codex emits when it ignores the prompt's GFM coercion, notably on the "No plan was found" patrol path) → `:findings`, but `findings_markdown` first normalizes them via `normalize_native_findings`: each `- [P1] …` bullet becomes a `## High/Medium/Nit` checkbox (P1→High, P2→Medium, P3+→Nit, per `NATIVE_SEVERITY`), folding the finding's indented justification onto its line and de-duplicating codex's repeated echoes. This is what fixes the second `all_failed` regression — a real codex finding in native format used to fail every retry as "missing High/Medium/Nit headers";
@@ -96,7 +102,7 @@ Reviewers live in `cfg.review.reviewers`. Each entry:
   prompt_template: reviewer_claude_ce_code_review.md.erb  # required
   output_basename: claude-ce-code-review                  # required (validated unique, non-empty)
   budget_usd: 50                     # optional; default 50
-  timeout_sec: 3600                  # optional; default 3600
+  timeout_sec: 7200                  # optional; default 7200
 ```
 
 A `codex_review` entry omits `skill` and `budget_usd`:
@@ -117,8 +123,8 @@ The DEFAULTS `patrol.review.reviewers` is the single `codex-native-review` entry
 ## Tests
 
 - `test/unit/reviewers_test.rb` — dispatch (agent / linter / unknown), Context / Result shape.
-- `test/unit/reviewers/agent_test.rb` — adapter render + spawn integration and retry-loop behavior through the adapter seam.
-- `test/unit/reviewers/codex_review_test.rb` — `codex review` argv (no `--base`), cwd, stdout→findings, banner trim, template-echo rejection, session-transcript drop with and without a trailing codex reply, native `[Pn]`-format normalization (P1→High/P2→Medium checkboxes, indented-justification folding, duplicate de-dup), malformed/empty/non-zero → error + no file, timeout kill, version gate, retry/deadline, dispatch, prompt render. Fakes the codex subprocess via `test/fixtures/fake-codex` + `HIVE_CODEX_BIN`.
+- `test/unit/reviewers/agent_test.rb` — adapter render + spawn integration, retry-loop behavior, atomic publication, and prior-result preservation through the adapter seam.
+- `test/unit/reviewers/codex_review_test.rb` — `codex review` argv (no `--base`), cwd, stdout→findings, atomic publication and prior-result preservation, banner trim, template-echo rejection, session-transcript drop with and without a trailing codex reply, native `[Pn]`-format normalization (P1→High/P2→Medium checkboxes, indented-justification folding, duplicate de-dup), malformed/empty/non-zero → error + no file, timeout kill, version gate, retry/deadline, dispatch, prompt render. Fakes the codex subprocess via `test/fixtures/fake-codex` + `HIVE_CODEX_BIN`.
 - `test/unit/reviewers/synthetic_task_test.rb` — facade shape.
 
 ## Backlinks

@@ -29,7 +29,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
 
   Store = Struct.new(:records) do
     def fetch(id) = records[id]
-    def scan = raise("workspace attempted a global attempt scan")
+    def active_attempts = raise("workspace attempted a global attempt query")
   end
 
   def test_builds_one_schema_valid_snapshot_and_projects_answer_posture
@@ -452,7 +452,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
         ]
       }
     }
-    read = Hive::TaskWorkspace::Builder::ProjectionRead.new(
+    read = Hive::TaskProjection::Reader::BoundedRead.new(
       projection: projection, state: projection_state,
       diagnostics: projection_diagnostics,
       truncated: projection_truncated, journal_cursor: 0, journal_records: events
@@ -472,7 +472,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
       status_availability: status_availability, status_error: status_error,
       cursor_codec: Hive::TaskWorkspace::Timeline::CursorCodec.new(secret: SECRET),
       limits: limits, attempt_store: Store.new({ "attempt-1" => attempt }),
-      projection_read: read,
+      history_read: read,
       event_reader: Struct.new(:value) do
         def call
           Hive::TaskWorkspace::JsonlReader::Result.new(

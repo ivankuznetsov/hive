@@ -66,8 +66,8 @@ class DiagnosisAgentTest < Minitest::Test
     capture = []
     Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn(capture_to: capture)).run!
 
-    refute File.exist?(File.join(@folder, ".lock")),
-           "DiagnosisAgent must not write a .lock file (no task-lock claim)"
+    refute Hive::Lock.task_lock_held?(@folder),
+           "DiagnosisAgent must not claim the task lease"
     state_body = File.read(@state_file)
     refute_includes state_body, "<!-- AGENT_WORKING",
                     "DiagnosisAgent must not write :agent_working marker"

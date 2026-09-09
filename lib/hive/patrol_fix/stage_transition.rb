@@ -42,6 +42,19 @@ module Hive
                evidence_closure_to_terminal?(destination)
           raise InvalidTransition, "patrol-fix transition requires a current terminal stage receipt"
         end
+        outcome = projection.dig("outcome", "kind")
+        if Projection::TERMINAL_OUTCOMES.include?(outcome)
+          unless destination == @task.workflow.stages.last.dir
+            raise InvalidTransition, "rejected and escalated Patrol-fix tasks must move to archive"
+          end
+          if outcome == "escalated"
+            require "hive/patrol_fix/successor_materializer"
+            decision = ReceiptStore.new(task_folder: @task.folder).read_all.find do |receipt|
+              receipt["receipt_id"] == projection.dig("outcome", "receipt_id")
+            end
+            SuccessorMaterializer.new(@task).call(decision)
+          end
+        end
         pending = pending_record
         values = identity.merge("event" => "intent", "from" => "#{@task.stage_index}-#{@task.stage_name}", "to" => destination)
         if pending

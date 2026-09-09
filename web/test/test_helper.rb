@@ -14,6 +14,9 @@ FileUtils.mkdir_p(ENV["HIVE_HOME"])
 require_relative "../config/environment"
 require "rails/test_help"
 require "hive/commands/new"
+require_relative "../../test/support/runtime_control_plane_fixture"
+
+HiveRuntimeControlPlaneFixture.activate!(ENV.fetch("HIVE_HOME"))
 
 Minitest.after_run do
   root = ENV["HIVE_TEST_HOME_ROOT"]
@@ -76,6 +79,15 @@ module ActiveSupport
     # perform this scan; the accepted Cable subscription owns it instead.
     def refresh_status_feed!
       StatusBroadcaster.feed.snapshot_state.payload
+    end
+
+    def runtime_dispatch_repository
+      Hive::RuntimeControlPlane::DispatchRepository.open_default
+    end
+
+    def runtime_dispatch_requests
+      repository = runtime_dispatch_repository
+      repository.pending + repository.claimed.map(&:request)
     end
 
     def stage_dir(project, stage)

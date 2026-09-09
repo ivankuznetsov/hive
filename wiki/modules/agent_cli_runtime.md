@@ -15,6 +15,14 @@ can add, switch, and upgrade agent CLIs behind one request and result
 vocabulary. It is the first independently versioned gem kept in the Hive
 monorepo, with Hive as its primary consumer and orchestration policy owner.
 
+Claude print-mode prompts use the existing `piped_stdin` transport, like Pi
+and OpenCode. Hive supplies the complete prompt through its temporary stdin
+file rather than one process argument, avoiding `E2BIG` for large review diffs.
+The real-process regression sends 256 KiB and verifies byte-for-byte delivery.
+Grok also uses `piped_stdin`, with `--prompt-file=/dev/stdin`: its Unix CLI
+reads the managed stdin file instead of receiving a potentially oversized
+`-p` argument. Grok does not interpret `--prompt-file -` as stdin.
+
 ## Public surface
 
 The package lives at `components/agent-cli-runtime/`, loads with
@@ -49,8 +57,8 @@ SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
 
 The prompt transport distinguishes stdin with an argv marker (`:stdin`, used
-by Codex) from a raw non-TTY pipe (`:piped_stdin`, used by Pi and OpenCode).
-Both CLIs construct the initial message from that pipe, so implementation-sized
+by Codex) from unmarked stdin (`:piped_stdin`, used by Claude, Pi, Grok and OpenCode).
+These CLIs read the initial message from stdin, so implementation-sized
 prompts never occupy one operating-system-limited argv element. This matters
 before the total `ARG_MAX` ceiling: Linux rejects one argument at roughly 128
 KiB, which a deeply reviewed plan can exceed on its own.
@@ -118,6 +126,12 @@ OpenCode's profile-specific provider-error extractor reads only dedicated
 upstream rate-limit refusal therefore reaches Hive as a typed `rate_limited`
 signal and writes the normal cooldown-retry marker, while identical prose in
 ordinary model output cannot forge a retryable provider wall.
+Claude's extractor also recognizes its exact message-free rejected
+`rate_limit_event` for the known `five_hour` and `seven_day` account windows.
+It synthesizes bounded quota text and a typed `provider_limit`, so review,
+triage, and other output-file spawns retain normal `limits_reached` recovery
+instead of degrading to an exit-code error. Non-rejected and unknown window
+types remain unclassified.
 When OpenCode exits zero with an empty terminal assistant message after writing
 a current terminal stage artifact, Hive trusts that controller-scoped artifact;
 the strict malformed transcript remains a failure whenever the artifact itself
@@ -172,6 +186,15 @@ Hive requires `agent-cli-runtime ~> 0.2.0` and resolves the monorepo component
 path during development. This keeps installed Hive on the independently
 published OpenCode-capable line while allowing compatible 0.2.x patches;
 component publication and Hive dependency cutover remain separate operations.
+OpenCode's prepared invocation keeps its configuration, data, cache, state,
+and temporary roots private, while Hive forwards the operator-selected
+`GEM_HOME` and `GEM_PATH` alongside the existing base process environment. A
+systemd daemon commonly has no explicit `GEM_PATH`; in that case Hive supplies
+the effective `Gem.path` of its own Ruby process. Those paths are runtime
+inputs, like `PATH`: dropping them can make a
+repository's checked-in Ruby binstubs fail to load `bundler/setup` even though
+the exact same binstubs work for the operator. Ruby code-injection options such
+as `RUBYOPT` remain outside the forwarded environment.
 `Hive::AgentRuntime`
 preserves its
 public request, probe, error, and result names as a forwarding facade, while

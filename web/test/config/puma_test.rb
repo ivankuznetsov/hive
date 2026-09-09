@@ -5,6 +5,32 @@ require "puma/server"
 require "socket"
 
 class PumaTest < ActiveSupport::TestCase
+  test "every cluster worker fork is wrapped by the runtime database barrier" do
+    options = puma_configuration.options
+
+    assert_nil options[:before_fork], "the once-per-cluster hook cannot guard respawned workers"
+    assert_equal 1, options.fetch(:before_worker_fork).size
+    assert_equal 1, options.fetch(:after_worker_fork).size
+    assert_equal 1, options.fetch(:before_worker_boot).size
+  end
+
+  test "cluster hooks execute the process guard in fork order" do
+    options = puma_configuration.options
+    guard = Hive::RuntimeControlPlane::ProcessGuard
+    methods = %i[before_fork! after_fork_parent! after_fork_child!]
+    originals = methods.to_h { |name| [ name, guard.method(name) ] }
+    calls = []
+    methods.each { |name| guard.define_singleton_method(name) { calls << name } }
+
+    options.fetch(:before_worker_fork).each { |hook| hook.fetch(:block).call }
+    options.fetch(:after_worker_fork).each { |hook| hook.fetch(:block).call }
+    options.fetch(:before_worker_boot).each { |hook| hook.fetch(:block).call }
+
+    assert_equal methods, calls
+  ensure
+    originals&.each { |name, implementation| guard.define_singleton_method(name, implementation) }
+  end
+
   test "oversized bodies receive 413 before the Rack app runs" do
     config = puma_configuration
     limit = Hive::Web::RequestLimits::MAX_BODY_BYTES

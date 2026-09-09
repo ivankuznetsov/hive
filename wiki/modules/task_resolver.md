@@ -19,7 +19,7 @@ task = Hive::TaskResolver.new(target, project_filter: nil, stage_filter: nil).re
 ## Resolution rules
 
 1. **Path-shaped TARGET** (contains `/` or starts with `~`/`.`): `File.expand_path` then `File.realpath`. The realpath flows into `Hive::Task.new`, whose `PATH_RE` validates that the result still looks like `<root>/.hive-state/stages/<N>-<name>/<slug>`. A slug-named symlink pointing outside the `.hive-state` hierarchy is therefore rejected at the PATH_RE check, not silently followed.
-2. **Numeric id** (`/\A\d+\z/`): searched across registered projects by reading each candidate task's `meta.yml` via `Hive::TaskMeta.read(folder)[:id]`. `--project` and `stage_filter` narrow the scan the same way slug lookup does. A missing match raises `Hive::InvalidTaskPath` with `"no task folder for id <id>"`.
+2. **Numeric id** (`/\A\d+\z/`): parsed strictly as base 10 (`Integer(@target, 10)`) — bare `Integer()` treats a leading `0` as an octal prefix, which would make TARGET `"010"` select task 8 and `"09"` raise `ArgumentError`. The parsed id is searched across registered projects by reading each candidate task's `meta.yml` via `Hive::TaskMeta.read(folder)[:id]`. `--project` and `stage_filter` narrow the scan the same way slug lookup does. A missing match raises `Hive::InvalidTaskPath` with `"no task folder for id <id>"`.
 3. **Bare slug**: searched across registered projects (filtered by `--project` if given) for an unambiguous match. The search walks every stage directory under each project's `.hive-state/stages/`, or only `stage_filter` when one is provided.
 4. **Ambiguity**:
    - **0 hits** → `Hive::InvalidTaskPath` (exit 64). Message includes the optional `--project <name>` hint when `--project` was set.

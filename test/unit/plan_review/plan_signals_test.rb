@@ -130,7 +130,7 @@ class PlanReviewPlanSignalsTest < Minitest::Test
   end
 
   def test_literal_credential_pattern_requires_mandatory_review
-    token = "sk-#{'A' * 24}"
+    token = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     with_plan(<<~PLAN) do |path, task_folder|
       # Update a local fixture
 
@@ -177,6 +177,48 @@ class PlanReviewPlanSignalsTest < Minitest::Test
 
       assert_equal %w[lib/hive/parser.rb test/unit/parser_test.rb], result.declared_files
       assert_equal 2, result.test_scenarios.length
+      assert result.skip_eligible?
+    end
+  end
+
+  def test_unquoted_frontmatter_date_and_list_prefixed_evidence_are_parsed
+    with_plan(<<~PLAN) do |path, task_folder|
+      ---
+      date: 2026-08-30
+      ---
+      # Local parser guard
+
+      - **Files:**
+        - `lib/hive/parser.rb`
+        - `test/unit/parser_test.rb`
+      - **Test scenarios:**
+        1. accepts a valid input
+      - **Rollback:** Revert the commit.
+    PLAN
+      result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+      assert_equal %w[lib/hive/parser.rb test/unit/parser_test.rb], result.declared_files
+      assert_equal [ "accepts a valid input" ], result.test_scenarios
+      assert result.rollback_explicit
+      assert result.skip_eligible?
+      refute_includes result.uncertainties, "malformed_frontmatter"
+    end
+  end
+
+  def test_inline_bold_files_label_is_parsed
+    with_plan(<<~PLAN) do |path, task_folder|
+      # Local parser guard
+
+      **Files:** `lib/hive/parser.rb`, `test/unit/parser_test.rb`
+
+      **Test scenarios:**
+      - accepts a valid input
+
+      **Rollback:** Revert the commit.
+    PLAN
+      result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)
+
+      assert_equal %w[lib/hive/parser.rb test/unit/parser_test.rb], result.declared_files
       assert result.skip_eligible?
     end
   end
@@ -320,7 +362,7 @@ class PlanReviewPlanSignalsTest < Minitest::Test
       - `lib/hive/parser.rb`
 
       ## Notes
-      Replace the placeholder with aws_secret_access_key = AKIAIOSFODNN7EXAMPLE
+      Replace the placeholder with aws_secret_access_key = ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}
     PLAN
     with_plan(body) do |path, task_folder|
       result = Hive::PlanReview::PlanSignals.analyze(plan_path: path, task_folder:)

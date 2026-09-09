@@ -137,6 +137,20 @@ class GhUnitTest < Minitest::Test
 
   # --- scan_pr_for_secrets ---------------------------------------------
 
+  def test_scan_pr_for_secrets_fails_closed_when_scanner_is_unavailable
+    with_tmp_dir do |dir|
+      state = File.join(dir, "pr.md")
+      File.write(state, "clean local body\n")
+      unavailable = ->(*) { raise Hive::SecretScanner::Unavailable, "scanner unavailable" }
+      with_replaced_singleton_method(Hive::SecretScanner, :scan, unavailable) do
+        result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "")
+        assert result.fetch_failed
+        assert_equal "scanner unavailable", result.fetch_error
+        assert_empty result.hits
+      end
+    end
+  end
+
   def test_scan_pr_for_secrets_clean_when_state_file_clean_and_no_url
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")
@@ -161,9 +175,9 @@ class GhUnitTest < Minitest::Test
   def test_scan_pr_for_secrets_detects_secret_in_state_file
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")
-      File.write(state, "key: sk-ant-#{'a' * 30}\n")
+      File.write(state, "key: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "")
-      assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key"
+      assert_includes result.hits.map { |h| h[:name].to_s }, "github-pat"
     end
   end
 
@@ -184,12 +198,12 @@ class GhUnitTest < Minitest::Test
   def test_scan_pr_for_secrets_preserves_local_hits_on_fetch_failure
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")
-      File.write(state, "key: sk-ant-#{'a' * 30}\n")
+      File.write(state, "key: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
 
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       assert result.fetch_failed
-      assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key"
+      assert_includes result.hits.map { |h| h[:name].to_s }, "github-pat"
     end
   end
 
@@ -197,11 +211,11 @@ class GhUnitTest < Minitest::Test
     with_tmp_dir do |dir|
       state = File.join(dir, "pr.md")
       File.write(state, "clean local body\n")
-      ENV["HIVE_FAKE_GH_PR_BODY"] = "remote body containing sk-ant-#{'a' * 30}"
+      ENV["HIVE_FAKE_GH_PR_BODY"] = "remote body containing ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
 
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       refute result.fetch_failed
-      assert_includes result.hits.map { |h| h[:name].to_s }, "anthropic_api_key",
+      assert_includes result.hits.map { |h| h[:name].to_s }, "github-pat",
                       "remote body must be scanned"
     end
   end
@@ -987,13 +1001,13 @@ end
 def test_scan_pr_for_secrets_reports_fetch_failed_when_capture_raises
   with_tmp_dir do |dir|
     state = File.join(dir, "pr.md")
-    File.write(state, "key: sk-ant-#{'a' * 30}\n")
+    File.write(state, "key: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
 
     with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { raise Hive::GhError, "api unavailable" }) do
       result = Hive::Gh.scan_pr_for_secrets(state_file: state, pr_url: "https://example.com/pr/42")
       assert result.fetch_failed
       assert_equal "api unavailable", result.fetch_error
-      assert_includes result.hits.map { |hit| hit[:name].to_s }, "anthropic_api_key"
+      assert_includes result.hits.map { |hit| hit[:name].to_s }, "github-pat"
     end
   end
 end
@@ -1581,6 +1595,42 @@ def test_failing_job_log_fetch_errors_are_normalized_to_utf8
     assert_predicate log, :valid_encoding?
     assert_includes log, "transport — error ?"
   end
+end
+
+def test_failing_job_log_fetch_falls_back_to_check_annotations
+  success = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  failure = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  rollup = {
+    "statusCheckRollup" => [
+      { "name" => "unit", "databaseId" => 11, "conclusion" => "FAILURE" }
+    ]
+  }
+  annotation = "The job was not started because recent account payments have failed " \
+               "or your spending limit needs to be increased."
+  calls = []
+  capture = lambda do |*cmd, **_kwargs|
+    calls << cmd
+    if cmd[1] == "run"
+      [ "", "log not found", failure ]
+    else
+      [ JSON.generate([ { "message" => annotation } ]), "", success ]
+    end
+  end
+
+  with_replaced_singleton_method(
+    Hive::Gh, :repository_identity,
+    ->(*, **) { { "host" => "github.com", "repository" => "acme/demo" } }
+  ) do
+    with_replaced_singleton_method(Hive::Gh, :capture3, capture) do
+      log = Hive::Gh.failing_jobs_with_logs(
+        "/tmp/repo", rollup, byte_cap: 2_048
+      ).first.fetch("log")
+
+      assert_includes log, annotation
+    end
+  end
+
+  assert calls.any? { |cmd| cmd[1] == "api" && cmd.join(" ").include?("check-runs/11/annotations") }
 end
 
 def test_failing_job_logs_support_check_urls_and_legacy_status_contexts

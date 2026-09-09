@@ -55,8 +55,8 @@ class AttemptsStreamLogTest < Minitest::Test
       File.open(path, "ab") { |file| file.write('{"sequence":2') }
 
       assert_equal [ "complete" ], Hive::Attempts::StreamLog.read(path).map(&:bytes)
-      reference = Hive::Attempts::OutputReference.build(path, root: root)
-      assert Hive::Attempts::OutputReference.verify(reference, root: root)
+      reference = Hive::OutputReference.build(path, root: root)
+      assert Hive::OutputReference.verify(reference, root: root)
     end
   end
 

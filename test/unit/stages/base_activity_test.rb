@@ -21,18 +21,25 @@ class HiveStagesBaseActivityTest < Minitest::Test
       fake
     end
 
-    with_attempt_context(
-      attempt_id: "attempt-1", task_generation: 3,
-      ownership_generation: "owner-3"
-    ) do
-      context = Hive::Attempts::Context.current
-      context.instance_variable_set(:@intended_stage, "4-execute")
-      with_replaced_singleton_method(Hive::TaskActivity, :new, replacement) do
-        assert Hive::Stages::Base.record_stage_activity(task, "4-execute", "entered")
-        marker = Struct.new(:name).new(:execute_complete)
-        assert Hive::Stages::Base.record_stage_activity(
-          task, "4-execute", "exited", marker: marker
-        )
+    with_tmp_dir do |state_home|
+      Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(state_home)
+      ).migrate!.disconnect
+      with_env("HIVE_HOME" => state_home) do
+        with_attempt_context(
+          attempt_id: "attempt-1", task_generation: 3,
+          ownership_generation: "owner-3"
+        ) do
+          context = Hive::Attempts::Context.current
+          context.instance_variable_set(:@intended_stage, "4-execute")
+          with_replaced_singleton_method(Hive::TaskActivity, :new, replacement) do
+            assert Hive::Stages::Base.record_stage_activity(task, "4-execute", "entered")
+            marker = Struct.new(:name).new(:execute_complete)
+            assert Hive::Stages::Base.record_stage_activity(
+              task, "4-execute", "exited", marker: marker
+            )
+          end
+        end
       end
     end
 

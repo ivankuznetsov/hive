@@ -304,3 +304,8 @@ No render-layer snapshot tests beyond layout pinning; mainstream Ruby tooling do
 
 - [[cli]] · [[commands/status]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]]
 - [[modules/task_action]] · [[modules/workflows]] · [[modules/findings]]
+
+The new-idea resolution result carries only state, exact name, and diagnostic
+detail. Numeric entry accepts only scope; name revalidation is a separate
+method. A cleared picker highlight shows the first six choices without selecting
+one until the operator explicitly moves and confirms.

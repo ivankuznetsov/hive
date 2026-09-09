@@ -758,7 +758,6 @@ class TuiSnapshotTest < Minitest::Test
 
     assert_equal :available, available.state
     assert_equal "alpha", available.name
-    assert_same snapshot.projects.first, available.project
     assert_predicate available, :available?
     assert_predicate available, :frozen?
     assert_equal :unhealthy, unhealthy.state
@@ -780,7 +779,7 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal :no_projects, snapshot.resolve_new_idea_entry(scope: 1).state
   end
 
-  def test_new_idea_entry_resolution_rejects_invalid_scopes_and_name_conflicts
+  def test_new_idea_entry_resolution_rejects_invalid_scopes
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
       { "name" => "alpha", "tasks" => [] },
       { "name" => "beta", "tasks" => [] }
@@ -792,11 +791,8 @@ class TuiSnapshotTest < Minitest::Test
       scope.nil? ? assert_nil(resolution.detail) : assert_equal(scope, resolution.detail)
     end
 
-    conflict = snapshot.resolve_new_idea_entry(scope: 1, name: "alpha")
     available = snapshot.resolve_new_idea_entry(scope: 2)
 
-    assert_equal :invalid_scope, conflict.state
-    assert_equal "alpha", conflict.name
     assert_equal :available, available.state
     assert_equal "beta", available.name
   end
@@ -859,7 +855,7 @@ class TuiSnapshotTest < Minitest::Test
     entry = original.resolve_new_idea_entry(scope: 9)
 
     assert_equal :invalid_scope, entry.state
-    assert_nil entry.project
+    assert_nil entry.name
     assert_equal :selection_required,
       refreshed.resolve_new_idea_project(name: entry.name).state,
       "refresh must not reinterpret the stale numeric position"

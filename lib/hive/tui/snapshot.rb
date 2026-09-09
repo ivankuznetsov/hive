@@ -46,16 +46,16 @@ module Hive
       end
 
       # Closed result shared by numeric composer entry and later exact-name
-      # revalidation. `project` is populated only for `available`; `name`
-      # preserves the attempted stable identity; `detail` carries the raw
+      # revalidation. `name` preserves the attempted stable identity;
+      # `detail` carries the raw
       # captured error or invalid scope for state-specific feedback.
-      NewIdeaResolution = Data.define(:state, :project, :name, :detail) do
-        def initialize(state:, project: nil, name: nil, detail: nil)
+      NewIdeaResolution = Data.define(:state, :name, :detail) do
+        def initialize(state:, name: nil, detail: nil)
           unless Hive::Tui::Snapshot::NEW_IDEA_RESOLUTION_STATES.include?(state)
             raise ArgumentError, "unknown new-idea resolution state: #{state.inspect}"
           end
 
-          super(state: state, project: project, name: name, detail: detail)
+          super(state: state, name: name, detail: detail)
         end
 
         def available?
@@ -378,13 +378,9 @@ module Hive
       end
 
       # Resolve a dashboard numeric scope exactly once, against this
-      # snapshot's original registry order. Supplying an existing name at
-      # this boundary is a conflicting entry intent and therefore invalid;
-      # name-only revalidation belongs to `resolve_new_idea_project`.
-      def resolve_new_idea_entry(scope:, name: nil)
-        unless name.to_s.empty?
-          return new_idea_resolution(:invalid_scope, name: name.to_s, detail: scope)
-        end
+      # snapshot's original registry order. Name-only revalidation belongs to
+      # `resolve_new_idea_project`.
+      def resolve_new_idea_entry(scope:)
         return new_idea_resolution(:no_projects) if @new_idea_registry_projects.empty?
         unless scope.is_a?(Integer) && scope.between?(1, @new_idea_registry_projects.size)
           return new_idea_resolution(:invalid_scope, detail: scope)
@@ -419,7 +415,7 @@ module Hive
           )
         end
 
-        new_idea_resolution(:available, project: project, name: candidate)
+        new_idea_resolution(:available, name: candidate)
       end
 
       # Case-insensitive substring filter on each row's slug, display name,
@@ -555,10 +551,9 @@ module Hive
         )
       end
 
-      def new_idea_resolution(state, project: nil, name: nil, detail: nil)
+      def new_idea_resolution(state, name: nil, detail: nil)
         NewIdeaResolution.new(
           state: state,
-          project: project,
           name: frozen_new_idea_value(name),
           detail: frozen_new_idea_value(detail)
         )

@@ -135,6 +135,24 @@ class HiveTuiViewsNewIdeaProjectPickerTest < Minitest::Test
     assert_match(/j first \/ k last/i, out)
   end
 
+  def test_nil_highlight_windows_a_long_project_list_without_selecting_a_target
+    snap = Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-09-09T00:00:00Z",
+      "projects" => 8.times.map { |index| { "name" => "project-#{index + 1}", "tasks" => [] } }
+    )
+    model = Hive::Tui::Model.initial.with(
+      mode: :new_idea_project, snapshot: snap, new_idea_project_cursor: nil
+    )
+
+    out = Hive::Tui::Views::NewIdeaProjectPicker.render(model, width: 100)
+
+    assert_equal (1..6).map { |index| "  project-#{index}" },
+                 out.lines.map(&:chomp).select { |line| line.include?("project-") }
+    refute_match(/^> /, out)
+    assert_match(/j first \/ k last/, out)
+    assert_nil model.new_idea_project_cursor
+  end
+
   def test_retained_resolution_remains_visible_after_flash_expires
     resolution = Hive::Tui::Snapshot::NewIdeaResolution.new(
       state: :disappeared,

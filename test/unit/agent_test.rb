@@ -49,6 +49,19 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_completion_probe_must_be_callable
+    Dir.mktmpdir("hive-agent-completion-probe-contract") do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: 1,
+          timeout_sec: 5, completion_probe: true
+        )
+      end
+
+      assert_equal "completion_probe must be callable", error.message
+    end
+  end
+
   def run_delta_before_write(dir, max_turns: nil, max_tokens: nil)
     task = make_task(dir)
     output = File.join(dir, "findings.json")
@@ -133,6 +146,23 @@ class AgentTest < Minitest::Test
         assert_nil agent.child_environment.fetch(key)
       end
       refute agent.child_environment.key?("GROK_AUTH_PATH")
+    end
+  end
+
+  def test_pi_child_environment_cannot_reach_controller_credential_transports
+    with_tmp_dir do |dir|
+      with_env(
+        "DBUS_SESSION_BUS_ADDRESS" => "unix:path=/run/user/1000/bus",
+        "SSH_AUTH_SOCK" => "/run/user/1000/keyring/ssh"
+      ) do
+        agent = Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: nil,
+          timeout_sec: 5, profile: Hive::AgentProfiles.lookup(:pi)
+        )
+
+        assert_nil agent.child_environment.fetch("DBUS_SESSION_BUS_ADDRESS")
+        assert_nil agent.child_environment.fetch("SSH_AUTH_SOCK")
+      end
     end
   end
 
@@ -2276,8 +2306,47 @@ class AgentTest < Minitest::Test
       agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
 
       with_replaced_singleton_method(Process, :wait2, ->(*) { raise Errno::ECHILD }) do
-        assert_equal [ false, nil ], agent.send(:wait_for_process, 123, 123, 5)
+        assert_equal [ false, nil, false ], agent.send(:wait_for_process, 123, 123, 5)
       end
+    end
+  end
+
+  def test_wait_for_process_completes_after_the_probe_grace_period
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      status = Object.new
+      now = Time.now
+      agent.define_singleton_method(:kill_group) { |_pgid| nil }
+      agent.define_singleton_method(:sleep_grace_then_kill) { |_pgid, _pid| nil }
+
+      with_replaced_singleton_method(Time, :now, -> { now }) do
+        with_replaced_singleton_method(
+          Process, :wait2, ->(_pid, flags = nil) { flags ? nil : raise(Errno::ECHILD) }
+        ) do
+          assert_equal [ false, nil, true ], agent.send(
+            :wait_for_process, 123, 123, 5,
+            completion_probe: -> { true }, completion_grace_seconds: 0
+          )
+        end
+      end
+    end
+  end
+
+  def test_cleanup_failure_is_a_terminal_state_marker_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      agent = Hive::Agent.new(task:, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        process_cleanup_completed: false,
+        process_cleanup_error: "synthetic cleanup failure"
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "process_cleanup_failed", result.fetch(:error_reason)
+      assert_equal "synthetic cleanup failure", result.fetch(:error_message)
+      assert_equal "process_cleanup_failed", Hive::Markers.current(task.state_file).attrs.fetch("reason")
     end
   end
 
@@ -2604,7 +2673,12 @@ class AgentTest < Minitest::Test
 
       with_env(
         "HIVE_PI_BIN" => FAKE_BIN,
-        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event),
+        # Keep the fixture alive after it emits the terminal provider event.
+        # Hive deliberately terminates work once the model says its output was
+        # truncated; without the hang, natural exit and TERM race and make the
+        # asserted process status scheduler-dependent.
+        "HIVE_FAKE_CLAUDE_HANG" => "10"
       ) do
         result = Hive::Agent.new(
           task: task,
@@ -2616,10 +2690,7 @@ class AgentTest < Minitest::Test
           expected_output: output
         ).run!
 
-        # The reader may terminate the process as soon as Pi reports the
-        # output limit, before the fixture reaches its natural zero exit.
-        assert_includes [ 0, -Signal.list.fetch("TERM") ], result[:exit_code]
-        refute result[:timed_out]
+        assert_equal(-Signal.list.fetch("TERM"), result[:exit_code])
         assert_equal :error, result[:status]
         assert_equal "model_output_limit", result[:error_reason]
         assert_equal "model_output_limit", result.dig(:resource_exhaustion, :reason)

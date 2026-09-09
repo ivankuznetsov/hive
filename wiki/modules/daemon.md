@@ -104,7 +104,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and advances the projection: a terminal `succeeded` receipt is satisfied, ordinary failed/cancelled/lost outcomes fail closed, and exit `75 (TEMPFAIL)` remains a scheduler-owned pending retry rather than an agent-health failure. A valid checkpoint supplies the restart idempotency and generation facts, so retained pre-cutover history is not strictly replayed; absent or invalid checkpoints retain the fail-closed full-replay path. Confirmed deliveries are memoized in-process before task lookup. A deleted task folder is `not_applicable`, not perpetually pending. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Durable TEMPFAIL admission holds emit the closed `attempt_transient_retry` event and a scheduler-owned operational disposition. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises), with source-parity coverage for both inline and multiline literal event calls so supervised Patrol Fix semantic completion cannot terminate the daemon through enum drift. Size-rotated. |
-| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound, explicit-route admission, and controller-markerless recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy/failure-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. An id-less task remains blocked and its receipt names the explicit `hive migrate --all` repair; no runtime backfiller is implied. Controller failures bind to the unchanged task generation and never append compatibility markers to structured JSON state. Failure fingerprints and retry ladders are stage- and runtime-source-scoped: varying failures retry freely, repeated failures surface degraded state, and three identical failures at the retry-ladder ceiling park as `deterministic_failure`. Same-runtime ticks keep a park inert; a different validated release/build digest automatically rearms one bounded fresh probe, while a freshness-bound operator `workflow.retry` remains the explicit same-runtime unpark. User-facing adapters only submit observations and render its receipt. |
+| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound, explicit-route admission, and controller-markerless recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy/failure-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. An id-less task remains blocked and its receipt names the explicit `hive migrate --all` repair; no runtime backfiller is implied. Controller failures bind to the unchanged task generation and never append compatibility markers to structured JSON state. Failure fingerprints and retry ladders are stage- and runtime-source-scoped: varying failures retry freely, repeated failures surface degraded state, and three identical failures at the retry-ladder ceiling park as `deterministic_failure`. A `dirty_worktree` fingerprint additionally binds controller-observed dirty-worktree commit evidence, so productive checkpoints restart the ladder while repeated empty stops at the same revision converge on the park. Same-runtime ticks keep a park inert; a different validated release/build digest automatically rearms one bounded fresh probe, while a freshness-bound operator `workflow.retry` remains the explicit same-runtime unpark. User-facing adapters only submit observations and render its receipt. |
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Turns an already-cleared coding `3-plan` pause into `hive develop ... --from 3-plan`. It validates command shape, prepares and re-verifies the exact `PlanReview::TransitionGuard` observation under the task lock, and only then flips `WAITING` to `COMPLETE`; uncleared review never mutates the marker. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership. For an unchanged `markerless_stalled` row it converts marker-driven workflows to `ERROR reason=agent_exited_without_terminal_marker`; controller workflows instead enqueue a generation-bound markerless recovery without changing their structured state file. It is the sole automatic scheduler that submits these failures and cooled recoverable marker observations to `RecoveryCoordinator`, including `REVIEW_CI_STALE` and resolved `REVIEW_STALE`; a newer operator-edited escalation remains parked, and invalid task-history rows are always skipped. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` using the reconciler's bounded `AdmissionView`; it never falls back to a global attempt scan or clears a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
@@ -179,7 +179,14 @@ probe: non-blocking child reap plus a rotating batch of at most 64 state-file
 mtime stats from the last full status scan. A child exit identifies its exact
 tracked task; an mtime change identifies the task owning that file. The daemon
 then asks status for only those project/slug rows and applies only their
-per-task heal/dispatch path. Every refreshed row with a dependency fails closed
+per-task heal/dispatch path. A cached `ready_to_advance` Patrol Fix approval
+can still claim capacity before a fresh same-stage row; coding `ready_to_*`
+transitions and other generic workflows are never replayed from that cache.
+The full tick seeds terminal contenders before dispatch. Local or durable
+ownership consumes each contender, preventing an old approval from being
+re-admitted after completion. Pending same-task requests exclude cached rows
+from incremental replay and retain full-tick queue precedence. Heartbeat-only
+ticks do not inspect this queue or replay cached work. Every refreshed row with a dependency fails closed
 until authoritative dependency admission runs, so the incremental path does not
 build or traverse a dependency graph. Pure live-agent heartbeat refreshes reuse
 the last full attempt snapshot; a row that could heal or dispatch reconciles
@@ -259,6 +266,11 @@ Fresh rows therefore preserve the pipeline WIP limit, while an old eligible
 plan, retry, or generic-stage row eventually outranks a continuous stream of
 newer later-stage work instead of starving indefinitely. Rows with missing or
 future mtimes receive no aging boost, and equal scores retain source order.
+Within an equal stage-and-age lane, a generic Patrol Fix `ready_to_advance`
+controller transition receives a half-step tie-break ahead of fresh work. The
+same score participates in the shared row/request arbitration, so this
+terminal progress does not bypass request FIFO, capacity fences, or the
+same-slug request precedence.
 
 Chronological dispatch-request consumption applies the same rule within each
 queue scan. Once an older request or a higher-priority interleaved row observes
@@ -375,10 +387,15 @@ daemon crash between queue preclaim and attempt-ID stamping is repaired on
 restart by looking up the immutable attempt `request_id`; the repaired claim is
 persisted before normal live/terminal/lost delivery reconciliation continues.
 
-On Linux the shipped systemd-user unit uses `KillMode=process`. Service
-restart therefore replaces only the daemon process; detached durable-attempt
-wrappers and workers remain alive for the first reconciliation pass to adopt,
-rather than being killed as cgroup children and replayed.
+On Linux with a reachable systemd user manager, each durable-attempt wrapper
+runs in its own transient `hive-attempt-<digest>.scope`. The scope is a sibling
+of `hive-daemon.service`, preserves the launcher's exact environment and
+capability/ready file descriptors, and is collected after the wrapper exits.
+An ordinary service restart still uses `KillMode=process`, while a
+systemd-oomd kill of the daemon cgroup can no longer erase every accepted
+attempt with it; only an independently selected attempt scope is affected and
+the normal lost-attempt recovery contract applies. Hosts without a usable
+systemd user bus retain the POSIX double-fork/session fallback.
 
 The answer-digest scheduler dispatches before status fetch because it is global,
 not project-row driven. The dispatcher tracks its synthetic project/stage and

@@ -7,5 +7,6 @@ This closes a build-time dependency-resolution gap where RubyGems selected the
 older published 0.2.0 patch, causing Pi and OpenCode cells to fail before model
 execution despite the source tree and lockfiles carrying 0.2.4.
 
-The dependency remains inside the root-only sealed control bundle. Candidate
-containers still receive neither Hive source nor the control-bundle gem path.
+The root-only control bundle includes the dependency. Candidate containers
+cannot read Hive source or the control-bundle path; their separate bundle retains
+shared dependency gems, including `agent-cli-runtime`.

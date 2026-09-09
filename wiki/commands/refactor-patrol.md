@@ -122,3 +122,7 @@ projection after its guarded transition.
 ## Backlinks
 
 - [[modules/patrol]] · [[modules/daemon]] · [[commands/patrol]]
+
+Scheduled completion waits a full configured poll interval before the next attempt,
+including failures and empty slices. Empty or allowance-exhausted children emit
+`architecture_patrol_skipped` with a reason, rather than claiming a review closed.

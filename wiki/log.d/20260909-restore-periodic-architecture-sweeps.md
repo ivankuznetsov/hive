@@ -17,3 +17,7 @@ failure, including a crash after admission is marked consumed. Live claims retai
 ownership. Long admission occurrence IDs use a stable digest while preserving
 existing short IDs. Regression tests cover nonempty durable admission, repeated
 periodic launches, interrupted completion, and dry-run cadence.
+
+Scheduled completion waits a full configured poll interval before the next attempt,
+including failures and empty slices. Empty or allowance-exhausted children emit
+`architecture_patrol_skipped` with a reason, rather than claiming a review closed.

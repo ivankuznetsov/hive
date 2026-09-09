@@ -71,7 +71,8 @@ module Hive
                    "--result-file #{Shellwords.escape(path)} --json",
           state_file_path: nil, state_file_mtime: nil,
           dispatch_token: { kind: :architecture_patrol, phase: :scheduled,
-                            registration: project, job_id: "scheduled-#{run_id}", result_path: path }
+                            registration: project, job_id: "scheduled-#{run_id}", result_path: path,
+                            poll_interval_sec: cfg.dig("patrol", "poll_interval_sec") || 600 }
         )
       end
 
@@ -83,9 +84,17 @@ module Hive
         project = dispatch_token.fetch(:registration)
         @pending.delete(project)
         success = exit_code == 0 && envelope.is_a?(Hash) && envelope["ok"] == true
-        @next_check[project] = now + 600 unless success
+        @next_check[project] = now + dispatch_token.fetch(:poll_interval_sec, 600)
         report = envelope.is_a?(Hash) ? envelope.fetch("report", {}) : {}
-        { status: success ? :closed : :retry, job_id: dispatch_token[:job_id],
+        reason = envelope.is_a?(Hash) ? envelope["reason"] : nil
+        status = if !success
+          :retry
+        elsif %w[no_available_slice discovery_allowance_exhausted].include?(reason)
+          :skipped
+        else
+          :closed
+        end
+        { status: status, reason: reason, job_id: dispatch_token[:job_id],
           lane: "scheduled", fix_count: Array(report["fix"]).size,
           discuss_count: Array(report["discuss"]).size, dismiss_count: Array(report["dismiss"]).size }
       end

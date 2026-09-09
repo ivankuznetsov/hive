@@ -1164,9 +1164,21 @@ class HiveDaemonDispatcherTest < Minitest::Test
         ) ]
         dispatcher.tick(now: T0 + 3602)
         assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
-        remaining = 0
         dispatcher.tick(now: T0 + 7200)
-        assert_equal 2, supervisor.spawned.size, "exhausted discovery allowance must block another launch"
+        third_child = supervisor.spawned.last
+        assert_equal 3, supervisor.spawned.size
+        supervisor.next_exits = [ ChildExit.new(
+          pid: third_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: third_child.fetch(:command), started_at: T0 + 7200,
+          finished_at: T0 + 7202, json_envelope: { "ok" => true, "reason" => "no_available_slice" },
+          dispatch_token: third_child.fetch(:dispatch_token)
+        ) ]
+        dispatcher.tick(now: T0 + 7202)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_skipped && attrs[:reason] == "no_available_slice" }
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        remaining = 0
+        dispatcher.tick(now: T0 + 10800)
+        assert_equal 3, supervisor.spawned.size, "exhausted discovery allowance must block another launch"
       end
     end
   end

@@ -44,8 +44,8 @@ class HiveDaemonScheduledArchitectureSchedulerTest < Minitest::Test
       result = subject.complete(dispatch_token: dispatch.fetch(:dispatch_token),
                                 exit_code: 1, envelope: nil, now: NOW + 101)
       assert_equal :retry, result.fetch(:status)
-      assert_empty subject.candidates(now: NOW + 700)
-      assert_equal 1, subject.candidates(now: NOW + 701).size
+      assert_empty subject.candidates(now: NOW + 160)
+      assert_equal 1, subject.candidates(now: NOW + 161).size
     end
   end
 
@@ -74,6 +74,18 @@ class HiveDaemonScheduledArchitectureSchedulerTest < Minitest::Test
       assert_empty subject.candidates(now: NOW)
       assert_equal "scheduled_discovery_unavailable", subject.drain_events.fetch(0).fetch(:reason)
       assert_empty subject.drain_events
+    end
+  end
+
+  def test_empty_child_is_skipped_and_waits_a_full_interval_after_completion
+    with_scheduler do |subject, _entry, _cfg, _budget|
+      dispatch = subject.reserve(subject.candidates(now: NOW).fetch(0), now: NOW)
+      result = subject.complete(dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+                                envelope: { "ok" => true, "reason" => "no_available_slice" }, now: NOW + 120)
+      assert_equal :skipped, result.fetch(:status)
+      assert_equal "no_available_slice", result.fetch(:reason)
+      assert_empty subject.candidates(now: NOW + 179)
+      assert_equal 1, subject.candidates(now: NOW + 180).size
     end
   end
 end

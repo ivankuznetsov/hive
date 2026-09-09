@@ -1476,6 +1476,69 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_periodic_child_charges_real_architecture_allowance_and_stops_at_the_daily_limit
+    with_refactor_patrol_project do |repo|
+      with_tmp_dir do |worktree_root|
+        entry = Hive::Config.find_project("demo")
+        sha = IO.popen([ "git", "-C", repo, "rev-parse", "HEAD" ], &:read).strip
+        cfg = Hive::Config.deep_merge(
+          Hive::Config.load(repo),
+          "worktree_root" => worktree_root, "daemon" => { "enabled" => true },
+          "patrol" => { "scheduled_discovery_launches_per_engine_per_day" => 1 }
+        )
+        producer = Hive::RefactorPatrol::ScheduledSliceProducer.new(
+          entry: entry, cfg: cfg, snapshotter: ->(**) {
+            Hive::RefactorPatrol::ScheduledSliceProducer::Snapshot.new(
+              analysis_sha: sha, feature_ids: %w[billing checkout]
+            )
+          }
+        )
+        command = Hive::Commands::RefactorPatrolScheduled.new(
+          "demo", config_loader: ->(*) { cfg }, producer_factory: ->(*) { producer },
+          result_file: File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "results",
+                                 "scheduled-#{'b' * 32}.json"),
+          command_factory: ->(project, **options) {
+            Hive::Commands::RefactorPatrol.new(
+              project, **options,
+              mapper_factory: ->(*) { FakeMapper.new([ feature("billing"), feature("checkout") ]) }
+            )
+          }
+        )
+        budget = Hive::Patrol::LaunchBudget.new(
+          repo, cfg: cfg, project_id: entry.fetch("project_id"), project_name: "demo", engine: :architecture
+        )
+        assert_equal 1, budget.remaining_launches
+        launches = 0
+        fake_agent_factory = lambda do |**options|
+          agent = Object.new
+          agent.define_singleton_method(:run!) do
+            launches += 1
+            File.write(options.fetch(:expected_output), JSON.generate("theses" => []))
+            { status: :ok, usage: { input: 10, output: 5, cached: 0 } }
+          end
+          agent
+        end
+        with_replaced_singleton_method(Hive::Agent, :new, fake_agent_factory) do
+          capture_io do
+            first = command.call
+            assert first.fetch("ok"), first.inspect
+            assert_equal "completed", first.fetch("reason")
+            assert_equal 0, budget.remaining_launches
+            assert_equal 1, budget.allowance_snapshot.fetch(:used)
+            assert_equal 1, budget.remaining_launches(engine: :ordinary), "Architecture must not charge ordinary Patrol"
+            second = command.call
+            assert_equal "discovery_allowance_exhausted", second.fetch("reason")
+          end
+        end
+        assert_equal 1, launches, "exhausted allowance must prevent a second provider launch"
+        assert_equal [ "billing" ], producer.each_result.map { |record| record.fetch("feature_id") }
+        next_claim = producer.claim
+        assert_equal "checkout", next_claim.fetch("feature_id"), "blocked launch must not advance the slice cursor"
+        producer.release(claim_id: next_claim.fetch("id"))
+      end
+    end
+  end
+
   def test_scheduled_slice_rejects_malformed_or_incomplete_identity
     entry = { "project_id" => "project-1" }
     valid = {

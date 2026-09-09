@@ -271,4 +271,24 @@ class MetricsCommandTest < Minitest::Test
 
     assert_equal true, cmd.instance_variable_get(:@stdout_written)
   end
+
+  def test_error_envelope_serialization_failure_is_suppressed_and_preserves_original_error
+    original_error = Hive::ConfigError.new("bad config")
+    cmd = Hive::Commands::Metrics.new("rollback-rate", json: true)
+    cmd.define_singleton_method(:do_call) { raise original_error }
+
+    raised = nil
+    out, err = capture_io do
+      with_replaced_singleton_method(JSON, :generate, lambda { |_payload|
+        raise JSON::GeneratorError, "forced generator failure"
+      }) do
+        raised = assert_raises(Hive::ConfigError) { cmd.call }
+      end
+    end
+
+    assert_same original_error, raised
+    assert_empty out, "suppressed serialization must not emit a partial or fallback document"
+    assert_empty err
+    assert_equal true, cmd.instance_variable_get(:@stdout_written)
+  end
 end

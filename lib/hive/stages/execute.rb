@@ -43,8 +43,7 @@ module Hive
       # window. Implementers never own task.md, so protect it alongside the
       # reviewed plan and worktree pointer.
       PROTECTED_FILES = %w[
-        task.md plan.md worktree.yml task-journal.jsonl task-projection.json
-        task-projection.checkpoint.json
+        task.md plan.md worktree.yml task-journal.jsonl
       ].freeze
       CONTROLLER_RECEIPT_DIRECTORIES = %w[context-receipts activity-operations].freeze
       COMPLETION_TRAILER = "Hive-Execute-Complete".freeze

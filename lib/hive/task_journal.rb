@@ -63,13 +63,13 @@ module Hive
     AppendResult = Data.define(:cursor, :event_id, :journal_hash, :records)
 
     class Validator
-      def initialize(attempt_store: nil, require_attempt_store: false,
-                     projection_bindings: false)
+      def initialize(attempt_store: nil, require_attempt_store: false)
         @attempt_store = attempt_store
         @require_attempt_store = require_attempt_store
-        @projection_bindings = projection_bindings
         @attempt_cache = {}
-        @lineage_cache = {}
+        @stream_task = nil
+        @stream_task_id = nil
+        @stream_attempts = {}
       end
 
       def validate!(record)
@@ -105,6 +105,7 @@ module Hive
         end
         validate_activity!(record) if record["event_type"] == "activity_recorded"
         validate_attempt!(record)
+        validate_stream_binding!(record)
         true
       end
 
@@ -122,15 +123,33 @@ module Hive
         raise AttemptMismatch, e.message
       end
 
-      def attempt_for(attempt_id)
-        @attempt_cache[attempt_id]
-      end
-
-      def lineage_for(attempt_id)
-        @lineage_cache.fetch(attempt_id, []).dup
-      end
-
       private
+
+      def validate_stream_binding!(record)
+        task = record.fetch("task")
+        stream_task = [ task.fetch("slug"), record["workflow"].to_s ]
+        if @stream_task && @stream_task != stream_task
+          raise AttemptMismatch, "task journal mixes task or workflow identities"
+        end
+        @stream_task ||= stream_task
+
+        task_id = task["id"].to_s
+        if !task_id.empty? && @stream_task_id && @stream_task_id != task_id
+          raise AttemptMismatch, "task journal mixes task IDs"
+        end
+        @stream_task_id ||= task_id unless task_id.empty?
+
+        attempt_id = record.fetch("attempt_id")
+        binding = [
+          record.fetch("stage"), record.fetch("task_generation"),
+          record["ownership_generation"]
+        ]
+        existing = @stream_attempts[attempt_id]
+        if existing && existing != binding
+          raise AttemptMismatch, "task journal attempt #{attempt_id} changes identity"
+        end
+        @stream_attempts[attempt_id] ||= binding
+      end
 
       def validate_activity!(record)
         payload = record.fetch("payload")
@@ -189,55 +208,12 @@ module Hive
           raise AttemptMismatch, "durable attempt mismatch: #{mismatches.join(', ')}"
         end
 
-        @lineage_cache[attempt_id] ||= validate_lineage!(attempt)
       rescue Hive::Error => e
         raise AttemptMismatch, e.message
       end
 
-      def validate_lineage!(attempt)
-        expected = {
-          "task_slug" => attempt["task_slug"],
-          "task_id" => attempt["task_id"].to_s,
-          "intended_stage" => attempt["intended_stage"],
-          "task_input_epoch" => attempt_value(attempt, :task_input_epoch)
-        }
-        lineage = []
-        seen = {}
-        current = attempt
-        loop do
-          id = attempt_value(current, :attempt_id)
-          raise AttemptMismatch, "durable attempt lineage cycle at #{id}" if seen[id]
-
-          seen[id] = true
-          lineage << current
-          predecessor_id = current["predecessor_attempt_id"]
-          break if predecessor_id.to_s.empty?
-
-          predecessor = if @attempt_cache.key?(predecessor_id)
-            @attempt_cache[predecessor_id]
-          else
-            @attempt_cache[predecessor_id] = fetch_attempt(predecessor_id)
-          end
-          unless predecessor
-            raise AttemptMismatch, "durable attempt lineage is missing predecessor #{predecessor_id}"
-          end
-          unless predecessor["task_slug"] == expected.fetch("task_slug") &&
-                 predecessor["task_id"].to_s == expected.fetch("task_id") &&
-                 predecessor["intended_stage"] == expected.fetch("intended_stage") &&
-                 attempt_value(predecessor, :task_input_epoch) == expected.fetch("task_input_epoch")
-            raise AttemptMismatch, "durable attempt lineage predecessor #{predecessor_id} has incompatible identity"
-          end
-          current = predecessor
-        end
-        lineage.freeze
-      end
-
       def fetch_attempt(attempt_id)
-        if @projection_bindings && @attempt_store.respond_to?(:fetch_projection_binding)
-          @attempt_store.fetch_projection_binding(attempt_id)
-        else
-          @attempt_store.fetch(attempt_id)
-        end
+        @attempt_store.fetch(attempt_id)
       end
 
       def attempt_value(attempt, name)

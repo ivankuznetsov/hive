@@ -5,14 +5,14 @@ require "hive/implementation_identity/event_builder"
 require "hive/implementation_identity/resolver"
 require "hive/agent_support"
 require "hive/task_journal"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "digest"
 require "json"
 
 module Hive
   module ImplementationIdentity
     class Store
-      def initialize(task:, cfg:, attempt_store: nil, writer: nil, projection_store: nil,
+      def initialize(task:, cfg:, attempt_store: nil, writer: nil, history_reader: nil,
                      resolver: nil, generation_tracker: Hive::Conditions::GenerationTracker.new)
         @task = task
         @cfg = cfg
@@ -21,8 +21,8 @@ module Hive
         @writer = writer || Hive::TaskJournal::Writer.new(
           task_folder: task.folder, attempt_store: @attempt_store
         )
-        @projection_store = projection_store || Hive::TaskProjection::Store.new(
-          task_folder: task.folder, attempt_store: @attempt_store
+        @history_reader = history_reader || Hive::TaskProjection::Reader.new(
+          task_folder: task.folder, task: task
         )
         @resolver = resolver || Resolver.new(cfg: cfg)
         @generation_tracker = generation_tracker
@@ -30,7 +30,8 @@ module Hive
 
       def capture_execute!
         context = context!
-        if (existing = projected_execute(context.task_generation))
+        projection = @history_reader.read
+        if (existing = projected_execute(context.task_generation, projection: projection))
           return selection_from_projection(existing)
         end
 
@@ -43,24 +44,26 @@ module Hive
                          reason: "execute_identity_captured"),
           idempotency_key: identity_key(context.task_generation)
         )
-        @projection_store.rebuild!
-        selection_from_projection(projected_execute(context.task_generation))
+        projection = @history_reader.read
+        selection_from_projection(projected_execute(context.task_generation, projection: projection))
       end
 
-      def projected_execute(generation)
-        identity = @projection_store.read["implementation_identity"]
+      def projected_execute(generation, projection:)
+        identity = projection["implementation_identity"]
         execute = identity && identity["execute"]
         execute if execute && execute["generation"] == generation
       end
 
-      def ensure_execute!
+      def ensure_execute!(projection: nil)
         context = context!
-        return selection_from_projection(projected_execute(context.task_generation)) if projected_execute(context.task_generation)
+        projection ||= @history_reader.read
+        existing = projected_execute(context.task_generation, projection: projection)
+        return selection_from_projection(existing) if existing
 
         require "hive/implementation_identity/reconstructor"
         Reconstructor.new(
           task: @task, cfg: @cfg, attempt_store: @attempt_store,
-          writer: @writer, projection_store: @projection_store, resolver: @resolver
+          writer: @writer, history_reader: @history_reader, resolver: @resolver
         ).reconstruct!
       end
 
@@ -71,11 +74,12 @@ module Hive
         end
 
         context = context!
-        if (existing = projected_stage(stage, context.task_generation))
+        projection = @history_reader.read
+        if (existing = projected_stage(stage, context.task_generation, projection: projection))
           return selection_from_projection(existing)
         end
 
-        execute = ensure_execute!
+        execute = ensure_execute!(projection: projection)
         selection = @resolver.resolve_stage(
           stage, execute_identity: execute, attempt_id: context.attempt_id
         )
@@ -86,13 +90,12 @@ module Hive
             idempotency_key: "#{task_key}/#{context.task_generation}/#{stage}"
           )
         rescue Hive::TaskJournal::Conflict
-          @projection_store.rebuild!
-          existing = projected_stage(stage, context.task_generation)
+          projection = @history_reader.read
+          existing = projected_stage(stage, context.task_generation, projection: projection)
           raise unless existing
 
           return selection_from_projection(existing)
         end
-        @projection_store.rebuild!
         selection
       end
 
@@ -106,9 +109,10 @@ module Hive
         end
 
         context = context!
+        projection = @history_reader.read
         selected = stage == "execute" ?
-          projected_execute(context.task_generation) :
-          projected_stage(stage, context.task_generation)
+          projected_execute(context.task_generation, projection: projection) :
+          projected_stage(stage, context.task_generation, projection: projection)
         unless selected
           raise ResolutionError,
                 "#{stage} implementation identity must be persisted before observation"
@@ -143,7 +147,6 @@ module Hive
             provenance.fetch("namespace"), identity
           ].join("/")
         )
-        @projection_store.rebuild!
         observation
       end
 
@@ -153,8 +156,8 @@ module Hive
         @resolver.materialize_persisted(identity)
       end
 
-      def projected_stage(stage, generation)
-        identity = @projection_store.read["implementation_identity"]
+      def projected_stage(stage, generation, projection:)
+        identity = projection["implementation_identity"]
         selected = identity&.dig("stages", stage.to_s)
         selected if selected && selected["generation"] == generation
       end
@@ -221,7 +224,7 @@ module Hive
       end
 
       def default_attempt_store
-        Hive::Attempts::Repository.runtime
+        Hive::Attempts::Repository.open_default
       end
     end
   end

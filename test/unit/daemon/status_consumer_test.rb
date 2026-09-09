@@ -52,7 +52,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       state_file = File.join(folder, "idea.md")
       File.write(state_file, "<!-- WAITING -->\n")
       File.write(File.join(folder, "meta.yml"), "id: [not-valid\n")
-      Hive::TaskProjection::Store.new(task_folder: folder).rebuild!(
+      Hive::TaskProjection::Reader.new(task_folder: folder).read(
         marker: Hive::Markers.current(state_file)
       )
 
@@ -65,7 +65,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
         completed_folder, id: nil, slug: completed_slug, display_name: nil,
         completed_at: Time.now.utc
       )
-      Hive::TaskProjection::Store.new(task_folder: completed_folder).rebuild!(
+      Hive::TaskProjection::Reader.new(task_folder: completed_folder).read(
         marker: Hive::Markers.current(completed_state_file)
       )
 
@@ -199,7 +199,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
         task_row(slug: "fix-bug").merge(
           "pr_url" => "https://github.com/acme/writero/pull/42",
           "plan_review" => plan_review,
-          "projection_repair" => true
+          "task_history_invalid" => true
         )
       ]
     } ])
@@ -215,26 +215,26 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "hive brainstorm slug", row.suggested_command
       assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
       assert_equal plan_review, row.plan_review
-      assert_equal true, row.projection_repair
+      assert_equal true, row.task_history_invalid
       assert_equal payload, result.status_payload
       assert_equal 3, result.hidden_archived_task_count
       assert_equal 3, result.projects.first.hidden_archived_task_count
     end
   end
 
-  def test_projection_repair_requires_a_literal_json_boolean
+  def test_task_history_invalid_requires_a_literal_json_boolean
     payload = make_envelope(projects: [ {
       "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
       "tasks" => [
-        task_row(slug: "true").merge("projection_repair" => true),
-        task_row(slug: "false").merge("projection_repair" => false),
-        task_row(slug: "string").merge("projection_repair" => "true")
+        task_row(slug: "true").merge("task_history_invalid" => true),
+        task_row(slug: "false").merge("task_history_invalid" => false),
+        task_row(slug: "string").merge("task_history_invalid" => "true")
       ]
     } ])
 
     with_status(payload) do |producer|
       rows = Hive::Daemon::StatusConsumer.new(producer: producer).fetch.rows
-      assert_equal [ true, false, false ], rows.map(&:projection_repair)
+      assert_equal [ true, false, false ], rows.map(&:task_history_invalid)
     end
   end
 

@@ -1188,8 +1188,7 @@ class CommandsRunTest < Minitest::Test
       )
     end
     entrypoint = Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher, client: client,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+      store: Object.new, dispatcher: dispatcher, client: client
     )
     run = command(durable: true, json: true, attempt_entrypoint: entrypoint)
     run.define_singleton_method(:resolve_task) { resolved }

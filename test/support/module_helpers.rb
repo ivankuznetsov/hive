@@ -4,8 +4,8 @@ require "hive/module_package/validator"
 require "hive/workflow_package/canonical_yaml"
 
 module HiveModuleTestHelper
-  EMPTY_ATTEMPT_STORE = Data.define(:scan).new(
-    scan: Data.define(:records).new(records: [].freeze)
+  EMPTY_ATTEMPT_STORE = Data.define(:active_attempts).new(
+    active_attempts: [].freeze
   ).freeze
 
   def empty_attempt_store = EMPTY_ATTEMPT_STORE

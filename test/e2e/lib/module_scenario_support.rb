@@ -85,7 +85,7 @@ module Hive
         event = record_event(runtime, key: "task-completed-1", occurred_at: START + 60)
         first = runtime.fetch(:dispatcher).dispatch(module_name: "demo", hook_id: "task", event: event)
         replay = runtime.fetch(:dispatcher).dispatch(module_name: "demo", hook_id: "task", event: event)
-        attempts = runtime.fetch(:attempt_store).scan.records
+        attempts = runtime.fetch(:attempt_store).active_attempts
         decisions = runtime.fetch(:journal).all
 
         unless first.decision.fetch("outcome") == "launch"
@@ -169,7 +169,7 @@ module Hive
         raise "lifecycle watermarks did not block admission: #{reasons.inspect}" unless
           reasons == %w[disabled cursor_stale uninstalled]
         raise "disabled or uninstalled module created an attempt" unless
-          runtime.fetch(:attempt_store).scan.records.empty?
+          runtime.fetch(:attempt_store).active_attempts.empty?
         tombstone = store.selected("demo", include_tombstone: true)
         raise "uninstall did not retain tombstone history" unless
           tombstone && !tombstone.fetch("installed") && File.directory?(store.runtime_path("demo"))

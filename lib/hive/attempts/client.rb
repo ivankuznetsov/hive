@@ -59,20 +59,15 @@ module Hive
       private
 
       def drain_frames(attempt_id, sequence, stdout_bytes, stdout:, stderr:)
-        result = read_frames(attempt_id, after_sequence: sequence)
-        result.fetch(:frames).each do |frame|
+        result = @store.read_log(attempt_id, after_sequence: sequence)
+        result.frames.each do |frame|
           target = frame.channel == "stdout" ? stdout : stderr
           target.write(frame.bytes)
           target.flush if target.respond_to?(:flush)
           stdout_bytes += frame.bytes.bytesize if frame.channel == "stdout"
           sequence = frame.sequence
         end
-        [ sequence, stdout_bytes, result.fetch(:availability) ]
-      end
-
-      def read_frames(attempt_id, after_sequence:)
-        result = @store.read_log(attempt_id, after_sequence: after_sequence)
-        { frames: result.frames, availability: result.availability }
+        [ sequence, stdout_bytes, result.availability ]
       end
 
       def report_expired_output(stderr, attempt_id)

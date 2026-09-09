@@ -171,8 +171,7 @@ class CommandsStageActionTest < Minitest::Test
       )
     end
     entrypoint = Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher, client: client,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+      store: Object.new, dispatcher: dispatcher, client: client
     )
     command = Hive::Commands::StageAction.new(
       "plan", "some-slug", json: true, durable: true,

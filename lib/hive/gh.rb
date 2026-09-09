@@ -5,7 +5,7 @@ require "hive/agent_git_gate"
 require "hive/atomic_file"
 require "hive/git_ref"
 require "hive/gh/repository_identity"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module Gh
@@ -819,7 +819,7 @@ module Hive
     def scan_pr_for_secrets(state_file:, pr_url:, cfg: nil)
       sources = []
       sources << File.read(state_file) if File.exist?(state_file)
-      local_hits = sources.flat_map { |s| Hive::SecretPatterns.scan(s) }
+      local_hits = sources.flat_map { |s| Hive::SecretScanner.scan(s) }
 
       if pr_url.to_s.empty?
         return ScanResult.new(
@@ -838,14 +838,15 @@ module Hive
         )
       end
 
-      sources << out unless out.empty?
       ScanResult.new(
-        hits: sources.flat_map { |s| Hive::SecretPatterns.scan(s) },
+        hits: local_hits + Hive::SecretScanner.scan(out),
         fetch_failed: false,
         fetch_error: nil
       )
     rescue Hive::GhError => e
       ScanResult.new(hits: local_hits || [], fetch_failed: true, fetch_error: e.message)
+    rescue Hive::SecretScanner::Unavailable => e
+      ScanResult.new(hits: [], fetch_failed: true, fetch_error: e.message)
     end
 
     def network_timeout_sec(cfg = nil)

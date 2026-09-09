@@ -14,6 +14,22 @@ Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
 artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 `gtimeout`) for timeout-governed Git-ref, QMD, and provider operations.
 
+## Bundled secret detection
+
+Hive's release gem includes Betterleaks 1.8.1 for Linux/macOS on x64/arm64,
+plus its MIT license. `ruby packaging/betterleaks.rb` downloads the pinned
+upstream archives and checks the per-platform SHA-256 values in
+`lib/hive/betterleaks.rb` before bundling. The release-candidate builder and
+Hivebox build run this step; Homebrew, AUR, and install.sh consume that gem.
+Generated binaries are ignored by Git. Source developers run the same bundling
+step or install Betterleaks locally. Runtime scans never download tools.
+
+Detection uses the upstream rules with network validation disabled. Hive turns
+off global path exclusions, supplies a private policy-free Git view, and ignores
+inline suppressions. Reports are consumed in memory and reduced to rule names,
+locations, redacted snippets, and exact-match hashes. Missing/failed scanners
+fail closed; they are not a clean scan.
+
 ## GitHub Actions
 
 Every canonical and generated-mirror workflow pins `actions/checkout` v7.0.1
@@ -256,3 +272,11 @@ an ambiguous command-not-found failure.
 - [[modules/agent]]
 - [[commands/bot]]
 - [[e2e]]
+
+## Release container builder action
+
+The three container publication jobs in `.github/workflows/release.yml` pin
+`docker/setup-buildx-action` v4.3.0 to commit
+`37fe631027851001ddb9b187196cc803df7f5f0e`. The action metadata and inputs are
+unchanged from the preceding v4.2.0 pin; this update refreshes its bundled
+JavaScript dependencies. The workflow remains tag-triggered.

@@ -6,7 +6,7 @@ require "hive/atomic_file"
 require "hive/attempts/repository"
 require "hive/secret_patterns"
 require "hive/task_journal"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_workspace"
 
 module Hive
@@ -42,8 +42,8 @@ module Hive
     # authority from timestamps, markers, or process state.
     def self.for_task(task, attempt_store: nil, clock: -> { Time.now.utc })
       attempt_store ||= Hive::Attempts::Repository.open_default
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempt_store
+      projection = Hive::TaskProjection::Reader.new(
+        task_folder: task.folder, task: task
       ).read.to_h
       attempt_id = projection.dig("identity", "attempt_id").to_s
       return nil if attempt_id.empty?
@@ -354,7 +354,6 @@ module Hive
         },
         idempotency_key: operation_id
       )
-      refresh_projection_checkpoint
       result
     rescue Hive::TaskJournal::Conflict => e
       raise Conflict, safe_error(e)
@@ -367,23 +366,6 @@ module Hive
     end
 
     private
-
-    # The journal remains lifecycle authority; this checkpoint only lets the
-    # bounded Web reader prove that it consumed the complete authoritative
-    # prefix. Refresh it after every successful append so a newly admitted
-    # task does not remain permanently degraded until an unrelated projection
-    # rebuild happens. A checkpoint failure cannot turn an already-durable
-    # activity into a failed mutation acknowledgement.
-    def refresh_projection_checkpoint
-      return unless @writer.respond_to?(:attempt_store) && @writer.attempt_store
-
-      Hive::TaskProjection::Store.new(
-        task_folder: task_folder, attempt_store: @writer.attempt_store
-      ).refresh_after_append!
-    rescue StandardError => e
-      warn "[hive] task workspace checkpoint refresh failed: #{e.class}"
-      nil
-    end
 
     def reconciliation_verdict(value)
       if value.is_a?(Hash)
@@ -484,7 +466,10 @@ module Hive
               unless existing.same_domain_intent?(operation.receipt)
                 raise Conflict, "conflicting operation receipt #{operation.operation_id}"
               end
-              return begin_retry!(activity: activity, receipt: receipt)
+              # Reconciliation proved this operation had no committed effect.
+              # Reuse its stable identity; attempts already retain retry history.
+              operation.send(:persist!)
+              return operation
             else
               unless existing.same_intent?(operation.receipt)
                 raise Conflict, "conflicting operation receipt #{operation.operation_id}"
@@ -494,34 +479,6 @@ module Hive
           end
           operation.persist_new!
           operation
-        end
-
-        def begin_retry!(activity:, receipt:)
-          base = receipt.fetch("operation_id")
-          1.upto(100) do |number|
-            candidate = "#{base}:retry:#{number}"
-            path = File.join(
-              activity.task_folder, OPERATION_DIRECTORY,
-              "#{Digest::SHA256.hexdigest(candidate)}.json"
-            )
-            candidate_receipt = receipt.merge("operation_id" => candidate)
-            unless File.exist?(path)
-              operation = new(activity: activity, receipt: candidate_receipt)
-              operation.persist_new!
-              return operation
-            end
-
-            existing = open!(activity: activity, filename: File.basename(path))
-            if existing.same_intent?(candidate_receipt)
-              return existing unless existing.receipt["state"] == "aborted"
-              next
-            end
-            unless existing.receipt["state"] == "aborted" &&
-                   existing.same_domain_intent?(candidate_receipt)
-              raise Conflict, "conflicting operation receipt #{candidate}"
-            end
-          end
-          raise Conflict, "operation receipt retry limit exhausted"
         end
 
         def open!(activity:, filename:)
@@ -649,9 +606,7 @@ module Hive
       # second event for the same operation id.
       def restore_authoritative!
         path = File.join(@activity.task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
-        events = Hive::TaskProjection.read_journal(
-          path, attempt_store: @activity.attempt_store
-        ).select do |event|
+        events = Hive::TaskProjection.read_journal(path).select do |event|
           event.dig("payload", "idempotency_key") == operation_id
         end
         unless events.length == 1 && authoritative_event_matches?(events.first)

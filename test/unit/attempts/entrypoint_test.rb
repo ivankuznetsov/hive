@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/entrypoint"
+require "hive/attempts/finalization_maintenance"
 
 class AttemptsEntrypointTest < Minitest::Test
   include HiveTestHelper
@@ -14,15 +15,9 @@ class AttemptsEntrypointTest < Minitest::Test
     )
     dispatcher = Object.new
     dispatcher.define_singleton_method(:dispatch) { |**_kwargs| deferred }
-    dispatcher.define_singleton_method(:dispatch_successor) do |**_kwargs|
-      flunk "capacity deferral must not be superseded"
-    end
-    config = Hive::Config.merge_defaults({})
-
     error = assert_raises(Hive::ConcurrentRunError) do
       Hive::Attempts::Entrypoint.new(
-        store: Object.new, dispatcher: dispatcher,
-        config_loader: ->(_root) { config }
+        store: Object.new, dispatcher: dispatcher
       ).dispatch(
         task: task, intended_stage: "4-execute", argv: [ "hive", "run", "/tmp/task" ],
         request_id: "request-1"
@@ -55,11 +50,8 @@ class AttemptsEntrypointTest < Minitest::Test
         receipt: {}, attempt_id: id
       )
     end
-    config = Hive::Config.merge_defaults({})
-
     value = Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher, client: client,
-      config_loader: ->(_root) { config }
+      store: Object.new, dispatcher: dispatcher, client: client
     ).dispatch(
       task: task, intended_stage: "4-execute", argv: [ "hive", "run", "/tmp/task" ],
       request_id: "request-1"
@@ -71,7 +63,7 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_equal "demo", calls.first.fetch(:project)
     assert_equal "4-execute", calls.first.fetch(:intended_stage)
     assert_equal true, calls.first.fetch(:interactive)
-    assert calls.first.fetch(:routing_policy).legacy?
+    assert_nil calls.first.fetch(:provider)
   end
 
   def test_noninteractive_dispatch_returns_attempt_reference_without_attaching
@@ -85,51 +77,20 @@ class AttemptsEntrypointTest < Minitest::Test
     dispatcher.define_singleton_method(:dispatch) { |**_kwargs| result }
 
     value = Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher, client: Object.new,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+      store: Object.new, dispatcher: dispatcher, client: Object.new
     ).dispatch(task: task, intended_stage: "4-execute", argv: [ "hive", "develop", "task" ],
                interactive: false)
 
     assert_same result, value
   end
 
-  def test_foreground_dispatch_runs_due_maintenance_before_admission
+  def test_foreground_dispatch_never_constructs_or_runs_periodic_maintenance
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
     attempt = Struct.new(:attempt_id).new("attempt-1")
     result = Hive::Attempts::DispatchResult.new(
       status: :existing_live, attempt: attempt, receipt: nil,
       attach_descriptor: nil, reason: nil
     )
-    order = []
-    maintenance = Object.new
-    maintenance.define_singleton_method(:run_if_due) { |now:| order << [ :maintenance, now ] }
-    dispatcher = Object.new
-    dispatcher.define_singleton_method(:dispatch) do |**_kwargs|
-      order << :dispatch
-      result
-    end
-
-    Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher, maintenance: maintenance,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
-    ).dispatch(
-      task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ],
-      interactive: false, now: Time.utc(2026, 8, 10, 12, 0, 0)
-    )
-
-    assert_equal [ [ :maintenance, Time.utc(2026, 8, 10, 12, 0, 0) ], :dispatch ], order
-  end
-
-  def test_foreground_dispatch_continues_when_opportunistic_maintenance_fails
-    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
-    result = Hive::Attempts::DispatchResult.new(
-      status: :existing_live, attempt: Struct.new(:attempt_id).new("attempt-1"),
-      receipt: nil, attach_descriptor: nil, reason: nil
-    )
-    maintenance = Object.new
-    maintenance.define_singleton_method(:run_if_due) do |now:|
-      raise Hive::Attempts::RepositoryError, "maintenance failed at #{now}"
-    end
     dispatched = false
     dispatcher = Object.new
     dispatcher.define_singleton_method(:dispatch) do |**_kwargs|
@@ -137,58 +98,21 @@ class AttemptsEntrypointTest < Minitest::Test
       result
     end
 
-    value = Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher, maintenance: maintenance,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
-    ).dispatch(
-      task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ],
-      interactive: false, now: Time.utc(2026, 8, 10, 12, 0, 0)
-    )
+    with_replaced_singleton_method(
+      Hive::Attempts::FinalizationMaintenance, :runtime,
+      ->(**) { flunk "foreground dispatch must not construct periodic maintenance" }
+    ) do
+      value = Hive::Attempts::Entrypoint.new(
+        store: Object.new, dispatcher: dispatcher
+      ).dispatch(
+        task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ],
+        interactive: false, now: Time.utc(2026, 8, 10, 12, 0, 0)
+      )
+
+      assert_same result, value
+    end
 
     assert dispatched
-    assert_same result, value
-  end
-
-  def test_default_store_builds_runtime_maintenance_before_dispatch
-    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
-    result = Hive::Attempts::DispatchResult.new(
-      status: :existing_live, attempt: Struct.new(:attempt_id).new("attempt-1"),
-      receipt: nil, attach_descriptor: nil, reason: nil
-    )
-    store = Object.new
-    events = []
-    maintenance = Object.new
-    maintenance.define_singleton_method(:run_if_due) do |now:|
-      events << [ :maintenance, now ]
-    end
-    dispatcher = Object.new
-    dispatcher.define_singleton_method(:dispatch) do |**_kwargs|
-      events << :dispatch
-      result
-    end
-    now = Time.utc(2026, 8, 10, 12, 0, 0)
-
-    with_replaced_singleton_method(Hive::Attempts::Repository, :new, -> { store }) do
-      with_replaced_singleton_method(
-        Hive::Attempts::FinalizationMaintenance, :runtime,
-        lambda { |store:|
-          events << [ :runtime, store ]
-          maintenance
-        }
-      ) do
-        value = Hive::Attempts::Entrypoint.new(
-          dispatcher: dispatcher,
-          config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
-        ).dispatch(
-          task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ],
-          interactive: false, now: now
-        )
-
-        assert_same result, value
-      end
-    end
-
-    assert_equal [ [ :runtime, store ], [ :maintenance, now ], :dispatch ], events
   end
 
   def test_deferred_admission_is_a_retryable_error
@@ -200,8 +124,7 @@ class AttemptsEntrypointTest < Minitest::Test
     dispatcher = Object.new
     dispatcher.define_singleton_method(:dispatch) { |**_kwargs| result }
     entrypoint = Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+      store: Object.new, dispatcher: dispatcher
     )
 
     error = assert_raises(Hive::ConcurrentRunError) do
@@ -231,8 +154,7 @@ class AttemptsEntrypointTest < Minitest::Test
     end
     entrypoint = Hive::Attempts::Entrypoint.new(
       store: Object.new, dispatcher: dispatcher,
-      recovery_coordinator: coordinator,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+      recovery_coordinator: coordinator
     )
 
     assert_same result, entrypoint.dispatch(
@@ -268,8 +190,7 @@ class AttemptsEntrypointTest < Minitest::Test
       )
     end
     entrypoint = Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher, client: client,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+      store: Object.new, dispatcher: dispatcher, client: client
     )
 
     result = entrypoint.dispatch(
@@ -279,39 +200,6 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_equal :lost, result.status
     assert_equal "attempt-1", result.attempt_id
     assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_status
-  end
-
-  def test_default_dispatcher_uses_attempt_timers_and_daemon_limits
-    config = Hive::Config.merge_defaults({})
-    daemon = Hive::Config::DEFAULTS.fetch("daemon").merge(
-      "child_timeout_sec" => 90,
-      "child_verb_timeouts" => { "review" => 720 },
-      "child_kill_grace_sec" => 12
-    )
-    launcher = Object.new
-    launcher_options = nil
-    captured = nil
-    dispatcher = Object.new
-    with_replaced_singleton_method(Hive::Attempts::DetachedLauncher, :new, lambda { |**kwargs|
-      launcher_options = kwargs
-      launcher
-    }) do
-      with_replaced_singleton_method(Hive::Attempts::Dispatcher, :new, lambda { |**kwargs|
-        captured = kwargs
-        dispatcher
-      }) do
-        entrypoint = Hive::Attempts::Entrypoint.new
-        assert_same dispatcher,
-                    entrypoint.send(
-                      :build_dispatcher, Object.new, config, daemon, %w[hive review task]
-                    )
-      end
-    end
-    assert_equal config.fetch("attempt_heartbeat_sec"), launcher_options.fetch(:heartbeat_sec)
-    assert_equal 720, launcher_options.fetch(:timeout_sec)
-    assert_equal 12, launcher_options.fetch(:kill_grace_sec)
-    assert_same launcher, captured.fetch(:launcher)
-    assert_equal daemon.fetch("max_concurrent_runs"), captured.dig(:limits, :max_global)
   end
 
   def test_dispatch_uses_registered_project_name_for_matching_root
@@ -324,13 +212,16 @@ class AttemptsEntrypointTest < Minitest::Test
     captured = nil
     dispatcher.define_singleton_method(:dispatch) { |**kwargs| captured = kwargs; result }
     entrypoint = Hive::Attempts::Entrypoint.new(
-      store: Object.new, dispatcher: dispatcher,
-      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+      store: Object.new, dispatcher: dispatcher
     )
+    resolved_paths = []
 
     with_replaced_singleton_method(
-      Hive::Config, :registered_projects,
-      -> { [ { "name" => "registered", "path" => "/tmp/registered" } ] }
+      Hive::Config, :project_for_path,
+      lambda { |path|
+        resolved_paths << path
+        { "name" => "registered", "path" => path }
+      }
     ) do
       entrypoint.dispatch(
         task: task, intended_stage: "4-execute", argv: [ "hive", "develop", "task" ],
@@ -339,5 +230,6 @@ class AttemptsEntrypointTest < Minitest::Test
     end
 
     assert_equal "registered", captured.fetch(:project)
+    assert_equal [ "/tmp/registered" ], resolved_paths
   end
 end

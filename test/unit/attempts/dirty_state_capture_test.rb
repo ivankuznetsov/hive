@@ -33,7 +33,7 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
         assert_equal before_revision, run!("git", "-C", worktree, "rev-parse", "HEAD")
         assert_equal before_status,
                      run!("git", "-C", worktree, "status", "--porcelain=v2", "--untracked-files=all")
-        assert capture.references.all? { |reference| Hive::Attempts::OutputReference.verify(reference, root: root) }
+        assert capture.references.all? { |reference| Hive::OutputReference.verify(reference, root: root) }
         manifest = JSON.parse(File.binread(File.join(capture.directory, "manifest.json")))
         binary = manifest.fetch("untracked").find do |entry|
           Base64.strict_decode64(entry.fetch("path_base64")) == "binary.bin"
@@ -59,7 +59,7 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
 
   def lost_attempt(store)
     attempt = store.create_launching(
-      attempt_id: "lost-1", request_id: "request-1", predecessor_attempt_id: nil,
+      attempt_id: "lost-1", request_id: "request-1",
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-1",
       progress_token: "progress", provider: "codex",

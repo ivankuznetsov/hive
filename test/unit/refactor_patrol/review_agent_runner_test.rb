@@ -69,12 +69,11 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
         Hive::UsageDb.define_singleton_method(:record!, original_record)
       end
 
-      assert_equal 2, records.size
-      reservation, completed = records
-      assert_equal "claude", reservation.fetch(:agent)
-      assert_equal "refactor-patrol-review-unmetered", reservation.fetch(:stage)
+      assert_equal 1, records.size
+      completed = records.fetch(0)
+      assert_equal "claude", completed.fetch(:agent)
       assert_equal "refactor-patrol-review", completed.fetch(:stage)
-      assert_equal reservation.fetch(:session_id), completed.fetch(:session_id)
+      assert_equal "patrol_discovery_launch", completed.fetch(:source)
     end
   end
 

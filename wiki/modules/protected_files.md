@@ -23,7 +23,7 @@ require "hive/artifact_firewall"
 manifest = Hive::ArtifactFirewall::Manifest.new(
   root: task.folder,
   protected_anchors: %w[
-    plan.md worktree.yml task.md task-journal.jsonl task-projection.json
+    plan.md worktree.yml task.md task-journal.jsonl
   ],
   permitted_writable_roots: [task.folder, worktree_path],
   required_outputs: {"fix-report.md" => File.join(task.folder, "fix-report.md")},
@@ -126,7 +126,6 @@ worktree.yml
 handoff.yml
 task.md
 task-journal.jsonl
-task-projection.json
 ```
 
 The facade publishes the same set as
@@ -171,10 +170,10 @@ Hive keeps stage semantics above the facade:
   receipt growth instead of hiding it behind batches.
 - `Stages::OpenPr` and `Stages::Finalize` protect controller task state around
   body-authoring spawns and retain their current error markers. Open PR keeps
-  the complete controller-owned anchor set, including `task-journal.jsonl` and
-  `task-projection.json`, in its provider-call manifest. The daemon's terminal
+  the complete controller-owned anchor set, including `task-journal.jsonl`, in
+  its provider-call manifest. The daemon's terminal
   execute-attempt observer acquires the ordinary task ownership lock before it
-  appends or rebuilds those files. If open PR or any other stage owns the task,
+  appends that file. If open PR or any other stage owns the task,
   the observer returns `:pending` immediately and retries after release. This
   prevents legitimate late controller bookkeeping from entering the custody
   window without weakening provider tamper detection or restricting reviewer

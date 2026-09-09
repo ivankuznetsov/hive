@@ -10,10 +10,10 @@ module Hive
     ReconciledAttempt = Data.define(:attempt, :classification, :owner_status, :evidence)
     ReconciliationSnapshot = Data.define(
       :capacity, :attempts, :lost_attempts, :newly_lost_attempts,
-      :terminal_attempts, :hot_scan, :admission_view
+      :terminal_attempts, :admission_view
     ) do
       def initialize(capacity:, attempts:, lost_attempts:, newly_lost_attempts:,
-                     terminal_attempts:, hot_scan: nil, admission_view: nil)
+                     terminal_attempts:, admission_view: nil)
         super
       end
     end
@@ -37,23 +37,15 @@ module Hive
         @store.fetch(attempt_id)
       end
 
-      # Recover dispatch-request correlation when the daemon crashed after
-      # durable admission but before it could stamp the request claim sidecar.
-      def find_by_request_id(request_id)
-        @store.scan.records
-              .select { |record| record["request_id"] == request_id.to_s }
-              .max_by { |record| [ record["accepted_at"], record.lease_version ] }
-      end
-
       def reconcile(now: Time.now.utc)
-        scan = @store.scan
+        records = @store.active_attempts
         statuses = []
         newly_lost = []
         all_lost = []
         terminals = []
         effective_records = []
 
-        scan.records.each do |record|
+        records.each do |record|
           reconciled = reconcile_record(record, now: now)
           prepared = @finalization_maintenance&.prepare(reconciled.attempt)
           observation = observe_condition(reconciled, now: now)
@@ -75,12 +67,9 @@ module Hive
           effective_records << current if current
           next
         end
-        hot_scan = Scan.new(records: effective_records.freeze)
-        admission_view = AdmissionView.new(store: @store, records: hot_scan.records)
-        capacity = CapacitySnapshot.build(
-          store: @store,
-          now: now
-        )
+        hot_attempts = effective_records.freeze
+        admission_view = AdmissionView.new(store: @store, records: hot_attempts)
+        capacity = admission_view.capacity(now: now)
 
         ReconciliationSnapshot.new(
           capacity: capacity,
@@ -88,7 +77,6 @@ module Hive
           lost_attempts: all_lost.freeze,
           newly_lost_attempts: newly_lost.freeze,
           terminal_attempts: terminals.freeze,
-          hot_scan: hot_scan,
           admission_view: admission_view
         )
       end
@@ -106,19 +94,19 @@ module Hive
       end
 
       def operational_storage_status(snapshot)
-        scan = snapshot&.hot_scan
+        attempts = snapshot&.admission_view&.records
         unless @finalization_maintenance
           return StorageStatus.unknown.merge(
             "hot" => {
-              "records" => scan&.records&.size,
-              "invalid" => scan ? 0 : nil
+              "records" => attempts&.size,
+              "invalid" => attempts ? 0 : nil
             }
           )
         end
 
         @finalization_maintenance.storage_snapshot(
-          hot_count: scan&.records&.size,
-          invalid_hot_count: scan ? 0 : nil
+          hot_count: attempts&.size,
+          invalid_hot_count: attempts ? 0 : nil
         )
       end
 

@@ -171,9 +171,6 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_instance_of Hive::Daemon::RefactorPatrolMergeReconciler, reconciler
     assert_same reconciler, captured.fetch(:merge_watcher).instance_variable_get(:@merge_intake),
                 "immediate watcher and catch-up must share one intake boundary"
-    projection_reader = captured.fetch(:merge_watcher)
-      .instance_variable_get(:@attempt_store_factory).call
-    assert_respond_to projection_reader, :fetch_projection_binding
     assert_equal true, reconciler.instance_variable_get(:@dry_run)
     admission = captured.fetch(:patrol_fix_admission_scheduler)
     with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do

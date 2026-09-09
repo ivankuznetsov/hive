@@ -1,8 +1,9 @@
 require "open3"
 require "digest"
 require "set"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/stages/review/fix_guardrail/patterns"
+require "hive/stages/review/guardrail_waivers"
 
 module Hive
   module Stages
@@ -23,7 +24,6 @@ module Hive
         Match = Data.define(
           :pattern_name, :file, :line, :snippet, :severity, :match_sha256
         )
-        WAIVER_SHA256 = /\A[0-9a-f]{64}\z/.freeze
         module_function
 
         def run!(cfg:, ctx:, base_sha:, head_sha:)
@@ -129,21 +129,7 @@ module Hive
         # requires a fresh auditable decision instead of inheriting a broad
         # exemption forever.
         def resolve_waivers(cfg)
-          values = Array(cfg.dig("review", "fix", "guardrail", "waivers"))
-          values.each_with_object(Set.new) do |value, result|
-            unless value.is_a?(Hash)
-              raise Hive::ConfigError,
-                    "review.fix.guardrail.waivers entries must contain pattern and sha256"
-            end
-            pattern = (value["pattern"] || value[:pattern]).to_s
-            sha256 = (value["sha256"] || value[:sha256]).to_s.downcase
-            if pattern.empty? || !WAIVER_SHA256.match?(sha256)
-              raise Hive::ConfigError,
-                    "review.fix.guardrail.waivers entries must contain pattern and SHA-256"
-            end
-
-            result.add([ pattern, sha256 ])
-          end.freeze
+          GuardrailWaivers.resolve(cfg)
         end
 
         # Walk the unified diff once, dispatching each line to whichever
@@ -151,6 +137,7 @@ module Hive
         # appearance in the diff.
         def scan_diff(diff, patterns)
           matches = []
+          secret_lines = Hash.new { |hash, path| hash[path] = [] }
           current_file = nil
           current_line = nil
 
@@ -250,20 +237,7 @@ module Hive
               # plain-regex arm below.
               case spec[:detector]
               when :secret_patterns
-                Hive::SecretPatterns.scan(added).each do |hit|
-                  next if Hive::SecretPatterns.runtime_password_reference?(
-                    path: current_file, line: added, hit: hit
-                  )
-
-                  matches << build_match(
-                    pattern_name: "secrets_pattern_match.#{hit[:name]}",
-                    file: current_file,
-                    line: current_line,
-                    snippet: hit[:snippet],
-                    severity: spec[:severity],
-                    match_sha256: hit.fetch(:sha256)
-                  )
-                end
+                secret_lines[current_file] << [ current_line, added, spec[:severity] ]
               when :regex
                 if spec[:regex] && spec[:regex] =~ added
                   matched = Regexp.last_match[0]
@@ -285,6 +259,16 @@ module Hive
             current_line += 1 if current_line
           end
 
+          secret_lines.each do |path, lines|
+            Hive::SecretScanner.scan(lines.map { |entry| entry[1] }.join("\n"), path: path.to_s).each do |hit|
+              source = lines.fetch(hit.fetch(:line) - 1)
+              matches << build_match(
+                pattern_name: "secrets_pattern_match.#{hit[:name]}", file: path,
+                line: source[0], snippet: hit[:snippet], severity: source[2],
+                match_sha256: hit.fetch(:sha256)
+              )
+            end
+          end
           matches
         end
 

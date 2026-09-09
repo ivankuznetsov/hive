@@ -160,7 +160,7 @@ module Hive
       end
 
       def module_attempts(name)
-        @attempt_store.scan.records.select do |attempt|
+        @attempt_store.active_attempts.select do |attempt|
           attempt.module_hook? && attempt.subject["project_id"] == @project_id &&
             attempt.subject["module"] == name
         end

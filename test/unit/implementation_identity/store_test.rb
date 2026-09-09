@@ -37,9 +37,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
 
       assert_equal %w[generation_advanced implementation_identity_captured],
                    observed.map { |record| record["event_type"] }
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempt_store
-      ).read
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
       assert_equal "codex", projection["implementation_identity"].dig("execute", "provider")
     end
   end
@@ -108,9 +106,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       assert_nil observation.dig("usage", "input")
       assert_equal 0, observation.dig("usage", "output")
 
-      projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempt_store
-      ).read
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
       execute = projection["implementation_identity"].fetch("execute")
       assert_equal "anthropic/claude-sonnet-4-5", execute.fetch("model")
       assert_equal "claude-sonnet-4-5-20250929", execute.fetch("actual_model")
@@ -295,6 +291,39 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
+  def test_stage_resolution_and_route_observation_each_read_one_projection_snapshot
+    with_identity_attempt(
+      intended_stage: "6-review", attempt_id: "review-opencode-single-read"
+    ) do |task, attempt_store, attempt|
+      cfg = execute_config("opencode", "anthropic/claude-sonnet-4-5")
+      seed_execute_identity(task, attempt_store, cfg)
+      history_reader = Hive::TaskProjection::Reader.new(task_folder: task.folder, task: task)
+      original_read = history_reader.method(:read)
+      reads = 0
+      history_reader.define_singleton_method(:read) do |**kwargs|
+        reads += 1
+        original_read.call(**kwargs)
+      end
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: cfg, attempt_store: attempt_store, history_reader: history_reader
+      )
+
+      with_attempt_context(
+        attempt_id: attempt.attempt_id, task_generation: 1,
+        ownership_generation: attempt.ownership_generation
+      ) do
+        selected = store.resolve_stage!("review.fix")
+        store.observe_route!(
+          stage: "review.fix", requested_route: selected.model,
+          actual_route: nil, resolution_status: :unobserved,
+          outcome_kind: :configuration_failure, usage: nil
+        )
+      end
+
+      assert_equal 2, reads
+    end
+  end
+
   def test_downstream_resolution_is_journaled_before_launch_and_matches_native_arguments
     with_identity_attempt(intended_stage: "5-open-pr", attempt_id: "open-pr-attempt") do |task, attempt_store, attempt|
       execute_cfg = execute_config("codex", "gpt-5.6-sol")
@@ -340,8 +369,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
         first_attempt, reason: "retry_superseded", now: Time.now.utc
       )
       retry_attempt = create_attempt(
-        attempt_store, task, attempt_id: "open-pr-retry", intended_stage: "5-open-pr",
-        predecessor_attempt_id: first_attempt.attempt_id
+        attempt_store, task, attempt_id: "open-pr-retry", intended_stage: "5-open-pr"
       )
       drifted_cfg = execute_config(
         "claude", "claude-fable-5",
@@ -428,19 +456,19 @@ class ImplementationIdentityStoreTest < Minitest::Test
       winner = resolver.resolve_stage(
         "open_pr", execute_identity: execute, attempt_id: "open-pr-winner"
       )
-      rebuilt = false
-      projection_store = Object.new
-      projection_store.define_singleton_method(:read) do
+      reads = 0
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read) do
+        reads += 1
         {
           "implementation_identity" => {
             "execute" => execute.to_h.except("native_arguments"),
             "stages" => (
-              rebuilt ? { "open_pr" => winner.to_h.except("native_arguments") } : {}
+              reads > 1 ? { "open_pr" => winner.to_h.except("native_arguments") } : {}
             )
           }
         }
       end
-      projection_store.define_singleton_method(:rebuild!) { rebuilt = true }
       captured_key = nil
       writer = Object.new
       writer.define_singleton_method(:path) do
@@ -452,7 +480,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       end
       store = Hive::ImplementationIdentity::Store.new(
         task: task, cfg: cfg, attempt_store: attempt_store,
-        writer: writer, projection_store: projection_store, resolver: resolver
+        writer: writer, history_reader: history_reader, resolver: resolver
       )
 
       selection = with_attempt_context(
@@ -473,8 +501,8 @@ class ImplementationIdentityStoreTest < Minitest::Test
       execute = Hive::ImplementationIdentity::Resolver.new(cfg: cfg).resolve_execute(
         generation: 1, attempt_id: "execute-first"
       )
-      projection_store = Object.new
-      projection_store.define_singleton_method(:read) do
+      history_reader = Object.new
+      history_reader.define_singleton_method(:read) do
         {
           "implementation_identity" => {
             "execute" => execute.to_h.except("native_arguments"),
@@ -482,7 +510,6 @@ class ImplementationIdentityStoreTest < Minitest::Test
           }
         }
       end
-      projection_store.define_singleton_method(:rebuild!) { }
       writer = Object.new
       writer.define_singleton_method(:path) do
         File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
@@ -492,7 +519,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       end
       store = Hive::ImplementationIdentity::Store.new(
         task: task, cfg: cfg, attempt_store: attempt_store,
-        writer: writer, projection_store: projection_store
+        writer: writer, history_reader: history_reader
       )
 
       assert_raises(Hive::TaskJournal::Conflict) do
@@ -613,7 +640,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
       File.write(File.join(folder, "plan.md"), "# plan\n")
       attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
       attempt = attempt_store.create_launching(
-        attempt_id: attempt_id, request_id: "request", predecessor_attempt_id: nil,
+        attempt_id: attempt_id, request_id: "request",
         task_id: "42", project: "demo", task_slug: task.slug, intended_stage: intended_stage,
         task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
         progress_token: "progress", provider: "codex", starting_revision: nil,
@@ -627,7 +654,7 @@ class ImplementationIdentityStoreTest < Minitest::Test
 
   def seed_execute_identity(task, attempt_store, cfg)
     execute_attempt = attempt_store.create_launching(
-      attempt_id: "seed-execute", request_id: "seed", predecessor_attempt_id: nil,
+      attempt_id: "seed-execute", request_id: "seed",
       task_id: "42", project: "demo", task_slug: task.slug, intended_stage: "4-execute",
       task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
       progress_token: "seed-progress", provider: "codex", starting_revision: nil,
@@ -645,11 +672,10 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
-  def create_attempt(attempt_store, task, attempt_id:, intended_stage:, generation: 1,
-                     predecessor_attempt_id: nil)
+  def create_attempt(attempt_store, task, attempt_id:, intended_stage:, generation: 1)
     attempt_store.create_launching(
       attempt_id: attempt_id, request_id: "request-#{attempt_id}",
-      predecessor_attempt_id: predecessor_attempt_id, task_id: task.id.to_s, project: "demo",
+      task_id: task.id.to_s, project: "demo",
       task_slug: task.slug, intended_stage: intended_stage,
       task_generation: "owner-#{generation}", ownership_generation: "owner-#{generation}",
       task_input_epoch: generation, progress_token: "progress-#{attempt_id}",

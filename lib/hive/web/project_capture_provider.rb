@@ -9,6 +9,7 @@ require "hive"
 require "hive/invoked_binary"
 require "hive/process_kill"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module Web
@@ -1128,7 +1129,7 @@ module Hive
       end
 
       def reject_secret_shaped_output!(*values)
-        hits = Hive::SecretPatterns.scan(values.join("\n"))
+        hits = Hive::SecretScanner.scan(values.join("\n"))
         return if hits.empty?
 
         names = hits.map { |hit| hit.fetch(:name) }.uniq.join(", ")

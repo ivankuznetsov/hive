@@ -1,13 +1,13 @@
 require "digest"
 require "securerandom"
 require "time"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 require "hive/paths"
 require "hive/runtime_control_plane"
 
 module Hive
   module RuntimeControlPlane
-    # Durable dispatch requests and their completion outbox. Task/provider
+    # Durable dispatch requests and their one-row results. Task/provider
     # admission itself belongs exclusively to AdmissionTransition.
     class DispatchRepository
       SCHEMA = "hive-dispatch-request".freeze
@@ -25,7 +25,8 @@ module Hive
       EXPIRY_SEC = 600
       CLAIM_EXPIRY_SEC = 14_400
       TERMINAL_RECOVERY_RETENTION_SEC = 7 * 24 * 60 * 60
-      OUTBOX_EXPIRY_SEC = 3600
+      RESULT_RETENTION_SEC = 3600
+      PENDING_RESULT_LIMIT = 512
       RECOVERY_PROJECTION_LIMIT = 500
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
@@ -34,13 +35,13 @@ module Hive
       Request = Data.define(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
         :chat_id, :update_id, :trigger, :task_generation,
-        :predecessor_attempt_id, :inherited_outputs, :task_id,
+        :inherited_outputs, :task_id,
         :expected_stage, :expected_marker_name, :expected_marker_id,
         :recovery, :schema_version, :state, :revision
       ) do
         def initialize(request_id:, created_at:, project:, slug:, argv:, requestor:,
                        chat_id: nil, update_id: nil, trigger: "", task_generation: nil,
-                       predecessor_attempt_id: nil, inherited_outputs: [], task_id: nil,
+                       inherited_outputs: [], task_id: nil,
                        expected_stage: nil, expected_marker_name: nil, expected_marker_id: nil,
                        recovery: nil, schema_version: DispatchRepository::SCHEMA_VERSION,
                        state: "queued", revision: 0)
@@ -48,7 +49,6 @@ module Hive
             request_id: request_id, created_at: created_at, project: project, slug: slug,
             argv: argv, requestor: requestor, chat_id: chat_id, update_id: update_id,
             trigger: trigger, task_generation: task_generation,
-            predecessor_attempt_id: predecessor_attempt_id,
             inherited_outputs: inherited_outputs, task_id: task_id,
             expected_stage: expected_stage, expected_marker_name: expected_marker_name,
             expected_marker_id: expected_marker_id, recovery: recovery,
@@ -89,14 +89,14 @@ module Hive
 
       def write_request!(project:, slug:, argv:, requestor: "bot", chat_id: nil,
                          update_id: nil, trigger: nil, request_id: generate_request_id,
-                         task_generation: nil, predecessor_attempt_id: nil,
+                         task_generation: nil,
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
                          expected_marker_id: nil, recovery: nil, now: @clock.call, **)
         payload = request_payload(
           project: project, slug: slug, argv: argv, requestor: requestor,
           request_id: request_id, chat_id: chat_id, update_id: update_id, trigger: trigger,
-          task_generation: task_generation, predecessor_attempt_id: predecessor_attempt_id,
+          task_generation: task_generation,
           inherited_outputs: inherited_outputs, task_id: task_id, expected_stage: expected_stage,
           expected_marker_name: expected_marker_name, expected_marker_id: expected_marker_id,
           recovery: recovery, now: now
@@ -217,9 +217,9 @@ module Hive
       def release_claim(request_id, **)
         database.transaction do |db|
           db[:dispatch_requests].where(request_id: request_id.to_s, state: "claimed").update(
-            state: "queued", claim_owner: nil, claim_pid: nil,
-            claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
-            updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+            cleared_claim_columns(state: "queued").merge(
+              updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+            )
           ) == 1
         end
       end
@@ -229,11 +229,11 @@ module Hive
           row = db[:dispatch_requests].where(request_id: request_id.to_s).first
           next false unless row
           dataset = db[:dispatch_requests].where(request_id: request_id.to_s)
-          if db[:dispatch_outbox].where(request_id: request_id.to_s).any?
+          if row[:result_state]
             dataset.update(
-              state: "completed", claim_owner: nil, claim_pid: nil,
-              claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
-              updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+              cleared_claim_columns(state: "completed").merge(
+                updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+              )
             ) == 1
           else
             dataset.delete == 1
@@ -243,7 +243,9 @@ module Hive
 
       def remove_if_unclaimed(request_id, **)
         database.transaction do |db|
-          row = db[:dispatch_requests].where(request_id: request_id.to_s, state: "queued").first
+          row = db[:dispatch_requests].where(
+            request_id: request_id.to_s, state: "queued", result_state: nil
+          ).first
           next false unless row
           payload = Codec.load_json(row.fetch(:payload_json))
           next false if payload["recovery"].is_a?(Hash)
@@ -338,9 +340,9 @@ module Hive
       def complete_delivery(request_id, now: @clock.call, **)
         database.transaction do |db|
           db[:dispatch_requests].where(request_id: request_id.to_s, state: DELIVERY_STATES).update(
-            state: "completed", claim_owner: nil, claim_pid: nil,
-            claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil,
-            updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
+            cleared_claim_columns(state: "completed").merge(
+              updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
+            )
           ) == 1
         end
       end
@@ -364,9 +366,8 @@ module Hive
       def prune_terminal_recoveries(now: @clock.call, retention_sec: TERMINAL_RECOVERY_RETENTION_SEC, **)
         cutoff = now.utc - retention_sec
         database.transaction do |db|
-          ids = db[:dispatch_requests].where(state: "completed").where { updated_at < cutoff.iso8601(6) }
-            .select_map(:request_id)
-          db[:dispatch_requests].where(request_id: ids).delete
+          db[:dispatch_requests].where(state: "completed", result_state: nil)
+            .where { updated_at < cutoff.iso8601(6) }.delete
         end
       end
 
@@ -411,56 +412,92 @@ module Hive
       def write_result!(chat_id:, project:, slug:, request_id:, exit_code:, command:,
                         update_id: nil, attempt_id: nil, attempt_state: nil,
                         receipt: nil, now: @clock.call, **)
-        delivery_id = SecureRandom.hex(8)
         timestamp = now.utc.iso8601(6)
-        payload = {
-          "schema" => "hive-dispatch-result", "schema_version" => 2,
-          "result_id" => delivery_id, "created_at" => timestamp,
-          "chat_id" => chat_id, "update_id" => update_id, "project" => project.to_s,
-          "slug" => slug.to_s, "request_id" => request_id.to_s,
-          "exit_code" => exit_code, "command" => command.to_s,
-          "attempt_id" => attempt_id, "attempt_state" => attempt_state, "receipt" => receipt
-        }
         database.transaction do |db|
-          db[:dispatch_outbox].insert(
-            delivery_id: delivery_id, request_id: request_id.to_s,
-            kind: "bot_result", state: "pending",
-            idempotency_key: "result:#{request_id}:#{attempt_id}:#{exit_code}",
-            payload_json: Codec.dump_json(payload), delivery_attempts: 0,
-            available_at: timestamp, retain_until: (now.utc + OUTBOX_EXPIRY_SEC).iso8601(6)
+          dataset = db[:dispatch_requests].where(request_id: request_id.to_s)
+          row = dataset.first
+          unless row
+            raise IntegrityError.new(
+              "dispatch result request is missing", code: :dispatch_result_request_missing,
+              action: "restore the request row before retrying result publication"
+            )
+          end
+
+          available_at = row[:result_available_at] || timestamp
+          payload = result_payload(
+            chat_id: chat_id, update_id: update_id, project: project, slug: slug,
+            request_id: request_id, exit_code: exit_code, command: command,
+            attempt_id: attempt_id, attempt_state: attempt_state, receipt: receipt,
+            created_at: available_at
           )
+          result_json = Codec.dump_json(payload)
+          result_digest = Digest::SHA256.hexdigest(result_json)
+          if row[:result_state]
+            result_from(row)
+            next request_id.to_s if row.fetch(:result_json) == result_json &&
+              row.fetch(:result_digest) == result_digest
+
+            raise IntegrityError.new(
+              "dispatch request already has a different result",
+              code: :dispatch_result_conflict,
+              action: "inspect the retained request result before retrying publication",
+              details: { request_id: request_id.to_s }
+            )
+          end
+
+          changed = dataset.where(result_state: nil, revision: row.fetch(:revision)).update(
+            result_state: "pending", result_json: result_json, result_digest: result_digest,
+            result_available_at: available_at,
+            retain_until: (now.utc + RESULT_RETENTION_SEC).iso8601(6),
+            updated_at: timestamp, revision: Sequel[:revision] + 1
+          )
+          unless changed == 1
+            raise IntegrityError.new(
+              "dispatch result write raced", code: :dispatch_update_conflict,
+              action: "retry the result write"
+            )
+          end
+
+          request_id.to_s
         end
-        delivery_id
-      rescue Sequel::UniqueConstraintViolation
+      end
+
+      def pending_results(now: @clock.call, limit: PENDING_RESULT_LIMIT, **)
+        limit = Integer(limit)
+        raise ArgumentError, "pending result limit is invalid" unless limit.between?(1, PENDING_RESULT_LIMIT)
+
         database.read do |db|
-          db[:dispatch_outbox].where(
-            idempotency_key: "result:#{request_id}:#{attempt_id}:#{exit_code}"
-          ).get(:delivery_id)
+          db[:dispatch_requests].where(result_state: "pending")
+            .where { result_available_at <= now.utc.iso8601(6) }
+            .order(:result_available_at, :request_id).limit(limit).map { |row| result_from(row) }
         end
       end
 
-      def pending_results(now: @clock.call, **)
-        database.read do |db|
-          db[:dispatch_outbox].where(state: "pending").where { available_at <= now.utc.iso8601(6) }
-            .order(:available_at, :delivery_id).map { |row| result_from(row) }
-        end
+      def acknowledge_result(request_id, now: @clock.call, **)
+        acknowledge_results([ request_id ], now: now) == 1
       end
 
-      def result_expired?(result, now: @clock.call, expiry_sec: OUTBOX_EXPIRY_SEC)
-        now.utc - result.created_at.utc > expiry_sec
-      end
+      def acknowledge_results(request_ids, now: @clock.call, **)
+        ids = Array(request_ids).map(&:to_s).uniq
+        raise ArgumentError, "dispatch result acknowledgement is too large" if
+          ids.length > PENDING_RESULT_LIMIT
+        return 0 if ids.empty?
 
-      def remove_result(result_id, **)
         database.transaction do |db|
-          db[:dispatch_outbox].where(delivery_id: result_id.to_s, state: "pending").update(
-            state: "delivered", delivered_at: @clock.call.utc.iso8601(6)
-          ) == 1
+          db[:dispatch_requests].where(
+            request_id: ids, result_state: "pending"
+          ).update(
+            result_state: "delivered", result_delivered_at: now.utc.iso8601(6),
+            updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
+          )
         end
       end
 
       def prune_results(now: @clock.call, **)
         database.transaction do |db|
-          db[:dispatch_outbox].where { retain_until < now.utc.iso8601(6) }.delete
+          db[:dispatch_requests].where(
+            state: "completed", result_state: "delivered"
+          ).where { retain_until < now.utc.iso8601(6) }.delete
         end
       end
 
@@ -468,7 +505,7 @@ module Hive
 
       def request_payload(project:, slug:, argv:, requestor:, request_id:, now:, chat_id: nil,
                           update_id: nil, trigger: nil, task_generation: nil,
-                          predecessor_attempt_id: nil, inherited_outputs: [], task_id: nil,
+                          inherited_outputs: [], task_id: nil,
                           expected_stage: nil, expected_marker_name: nil,
                           expected_marker_id: nil, recovery: nil, remaining_argvs: [])
         validate_request!(project, slug, argv, requestor, request_id, inherited_outputs, recovery)
@@ -478,7 +515,6 @@ module Hive
           "project" => project.to_s, "slug" => slug.to_s, "argv" => Array(argv),
           "requestor" => requestor.to_s, "chat_id" => chat_id, "update_id" => update_id,
           "trigger" => trigger.to_s, "task_generation" => task_generation,
-          "predecessor_attempt_id" => predecessor_attempt_id,
           "inherited_outputs" => Array(inherited_outputs), "task_id" => task_id,
           "expected_stage" => expected_stage, "expected_marker_name" => expected_marker_name,
           "expected_marker_id" => expected_marker_id, "recovery" => recovery,
@@ -513,7 +549,7 @@ module Hive
         existing = Codec.load_json(row.fetch(:payload_json))
         %w[
           request_id project slug argv requestor chat_id update_id trigger task_generation
-          predecessor_attempt_id inherited_outputs task_id expected_stage
+          inherited_outputs task_id expected_stage
           expected_marker_name expected_marker_id recovery
           remaining_argvs
         ].all? { |key| existing[key] == payload[key] }
@@ -536,7 +572,6 @@ module Hive
           chat_id: payload["chat_id"], update_id: payload["update_id"],
           trigger: payload.fetch("trigger"),
           task_generation: blank_to_nil(row[:task_generation]),
-          predecessor_attempt_id: payload["predecessor_attempt_id"],
           inherited_outputs: payload.fetch("inherited_outputs"), task_id: payload["task_id"],
           expected_stage: payload["expected_stage"],
           expected_marker_name: payload["expected_marker_name"],
@@ -544,7 +579,7 @@ module Hive
           schema_version: payload.fetch("schema_version"), state: row.fetch(:state),
           revision: row.fetch(:revision)
         )
-      rescue KeyError, ArgumentError, CodecError => error
+      rescue KeyError, ArgumentError, TypeError, CodecError => error
         raise IntegrityError.new(
           "dispatch request row is invalid: #{error.message}",
           code: :dispatch_row_invalid, action: "stop Hive and restore a verified recovery set"
@@ -552,9 +587,26 @@ module Hive
       end
 
       def result_from(row)
-        payload = Codec.load_json(row.fetch(:payload_json))
+        result_json = row.fetch(:result_json)
+        digest = Digest::SHA256.hexdigest(result_json)
+        raise CodecError.new("dispatch result digest does not match", code: :digest_mismatch) unless
+          digest == row.fetch(:result_digest)
+
+        payload = Codec.load_json(result_json)
+        expected_keys = %w[
+          attempt_id attempt_state chat_id command created_at exit_code project receipt
+          request_id result_id schema schema_version slug update_id
+        ]
+        raise CodecError.new("dispatch result shape is not closed", code: :shape_invalid) unless
+          payload.keys.sort == expected_keys
+        raise CodecError.new("dispatch result schema is invalid", code: :schema_invalid) unless
+          payload["schema"] == "hive-dispatch-result" && payload["schema_version"] == 2
+        raise CodecError.new("dispatch result identity is invalid", code: :identity_invalid) unless
+          payload["request_id"] == row.fetch(:request_id) &&
+          payload["result_id"] == row.fetch(:request_id)
+
         Result.new(
-          result_id: row.fetch(:delivery_id), created_at: Time.iso8601(payload.fetch("created_at")),
+          result_id: row.fetch(:request_id), created_at: Time.iso8601(payload.fetch("created_at")),
           chat_id: payload.fetch("chat_id"), update_id: payload["update_id"],
           project: payload.fetch("project"), slug: payload.fetch("slug"),
           request_id: payload.fetch("request_id"), exit_code: payload.fetch("exit_code"),
@@ -570,8 +622,27 @@ module Hive
         )
       end
 
+      def result_payload(chat_id:, update_id:, project:, slug:, request_id:, exit_code:, command:,
+                         attempt_id:, attempt_state:, receipt:, created_at:)
+        {
+          "schema" => "hive-dispatch-result", "schema_version" => 2,
+          "result_id" => request_id.to_s, "created_at" => created_at,
+          "chat_id" => chat_id, "update_id" => update_id, "project" => project.to_s,
+          "slug" => slug.to_s, "request_id" => request_id.to_s,
+          "exit_code" => exit_code, "command" => command.to_s,
+          "attempt_id" => attempt_id, "attempt_state" => attempt_state, "receipt" => receipt
+        }
+      end
+
       def blank_to_nil(value)
         value.to_s.empty? ? nil : value
+      end
+
+      def cleared_claim_columns(state:)
+        {
+          state: state, claim_owner: nil, claim_pid: nil,
+          claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil
+        }
       end
 
       def payload_for(request_id)
@@ -616,10 +687,7 @@ module Hive
           recovery["phase"] = changes[:phase] if changes.key?(:phase)
           validate_recovery!(recovery)
           if state
-            row_changes.merge!(
-              state: state, claim_owner: nil, claim_pid: nil,
-              claim_process_identity: nil, claim_attempt_id: nil, claimed_at: nil
-            )
+            row_changes.merge!(cleared_claim_columns(state: state))
           end
           true
         end
@@ -640,7 +708,16 @@ module Hive
       def remove_matching(project, slug)
         ids = matching_recoveries(project, slug).select { |request| yield(request) }.map(&:request_id)
         return 0 if ids.empty?
-        database.transaction { |db| db[:dispatch_requests].where(request_id: ids).delete }
+        database.transaction do |db|
+          dataset = db[:dispatch_requests].where(request_id: ids)
+          deleted = dataset.where(result_state: nil).delete
+          completed = dataset.exclude(result_state: nil).update(
+            cleared_claim_columns(state: "completed").merge(
+              updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
+            )
+          )
+          deleted + completed
+        end
       end
 
       def validate_request!(project, slug, argv, requestor, request_id, outputs, recovery)
@@ -649,7 +726,7 @@ module Hive
         raise ArgumentError, "slug is invalid" unless SLUG_RE.match?(slug.to_s)
         raise ArgumentError, "requestor is invalid" unless REQUESTORS.include?(requestor.to_s)
         raise ArgumentError, "request id is invalid" unless REQUEST_ID_RE.match?(request_id.to_s)
-        Array(outputs).each { |reference| Hive::Attempts::OutputReference.validate_shape!(reference) }
+        Array(outputs).each { |reference| Hive::OutputReference.validate_shape!(reference) }
         validate_recovery!(recovery) if recovery
       end
 

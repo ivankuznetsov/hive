@@ -952,6 +952,7 @@ module Hive
                       permission_arguments: nil,
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
+                      cleanup_runtime_policy: true,
                       routing_resolution: nil, routing_arguments: nil,
                       additional_read_roots: [], additional_write_roots: [],
                       edit_patterns: [], bash_patterns: [],
@@ -1156,7 +1157,7 @@ module Hive
           end
         end
       ensure
-        runtime_policy&.cleanup!
+        runtime_policy&.cleanup! if cleanup_runtime_policy
       end
 
       def admitted_routing_arguments(context, profile)

@@ -11,7 +11,7 @@ require "hive/git_ops"
 require "hive/lock"
 require "hive/markers"
 require "hive/paths"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_resolver"
 require "hive/task_closure_contract"
 require "hive/workflow_package/canonical_json"
@@ -206,9 +206,9 @@ module Hive
           condition_task_generation = projection["identity"]["task_generation"]
           commit_generation = projection["identity"]["commit_generation"]
         elsif condition_task_generation.nil? || commit_generation.nil?
-          store_options = { task_folder: task.folder }
-          store_options[:attempt_store] = attempt_store if attempt_store
-          projection = Hive::TaskProjection::Store.new(**store_options).read(marker: marker)
+          projection = Hive::TaskProjection::Reader.new(
+            task_folder: task.folder, task: task
+          ).read(marker: marker)
           condition_task_generation = projection["identity"]["task_generation"]
           commit_generation = projection["identity"]["commit_generation"]
         end
@@ -847,7 +847,7 @@ module Hive
     end
 
     def active_attempts(task, project)
-      @attempt_store.scan.records.select do |attempt|
+      @attempt_store.active_attempts.select do |attempt|
         attempt.live? &&
           attempt["project"].to_s == project.to_s &&
           attempt["task_slug"].to_s == task.slug.to_s
@@ -1462,7 +1462,7 @@ module Hive
     end
 
     def default_attempt_store
-      Hive::Attempts::Repository.runtime(create_directories: false)
+      Hive::Attempts::Repository.open_default(create_directories: false)
     end
   end
 end

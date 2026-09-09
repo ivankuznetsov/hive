@@ -65,9 +65,7 @@ class TaskClosureTest < Minitest::Test
   end
 
   EmptyAttempts = Struct.new(:unused) do
-    def scan
-      Hive::Attempts::Scan.new(records: [])
-    end
+    def active_attempts = []
   end
 
   Attempt = Struct.new(:attempt_id, :state, :payload, keyword_init: true) do
@@ -76,9 +74,7 @@ class TaskClosureTest < Minitest::Test
   end
 
   AttemptStore = Struct.new(:records, keyword_init: true) do
-    def scan
-      Hive::Attempts::Scan.new(records: records)
-    end
+    def active_attempts = records
   end
 
   def test_verified_same_repository_merge_closes_and_replays_idempotently
@@ -510,9 +506,9 @@ class TaskClosureTest < Minitest::Test
         :build_receipt, preview, operator: "tester", channel: "cli"
       )
       File.binwrite(File.join(task.folder, "closure.json"), JSON.generate(receipt))
-      task_projection = Hive::TaskProjection::Store.new(
-        task_folder: task.folder, attempt_store: attempt_store
-      ).read(marker: Hive::Markers.current(task.state_file))
+      task_projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read(
+        marker: Hive::Markers.current(task.state_file)
+      )
 
       with_replaced_singleton_method(
         Hive::Attempts::Repository, :new,
@@ -635,6 +631,7 @@ class TaskClosureTest < Minitest::Test
       run!("git", "-C", worktree.path, "add", "delivered.txt")
       run!("git", "-C", worktree.path, "commit", "-m", "delivered", "--quiet")
       head = Hive::GitOps.new(worktree.path).head_sha
+      assert_equal head, Hive::TaskClosure.local_pr_head_binding(task, frontmatter: { "head_oid" => "f" * 40 })
       service = service_for(gh: FakeGh.new(head_oid: head))
       input = input_for("acme/app#42")
       preview = service.preview(task: task, project: project, input: input)
@@ -847,11 +844,11 @@ class TaskClosureTest < Minitest::Test
   def test_task_generation_accepts_an_already_projected_condition_generation
     with_closure_project do |task, _project|
       marker = Hive::Markers.current(task.state_file)
-      projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read(marker: marker)
       expected = Hive::TaskClosure.task_generation(task, marker: marker)
 
       with_replaced_singleton_method(
-        Hive::TaskProjection::Store, :new,
+        Hive::TaskProjection::Reader, :new,
         ->(**) { flunk "task generation rebuilt an accepted projection" }
       ) do
         assert_equal expected,
@@ -984,7 +981,7 @@ class TaskClosureTest < Minitest::Test
   def test_ownership_and_storage_failures_become_blockers_or_invalid_reads
     with_closure_project do |task, project|
       failing_attempts = Object.new
-      failing_attempts.define_singleton_method(:scan) do
+      failing_attempts.define_singleton_method(:active_attempts) do
         raise Hive::Error, "attempt ledger unavailable"
       end
       preview = service_for(attempt_store: failing_attempts).preview(

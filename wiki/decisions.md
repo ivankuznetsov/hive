@@ -26,9 +26,9 @@ composition sites without adding generic lifecycle, cancellation, export, or
 raw-store APIs. The former Patrol Effect Evidence candidate and its migration
 exception were retired when Patrol discovery moved to direct native stores and
 direct Patrol Fix admission. U8
-removed the former reciprocal Attempts/WorkLedger catalog edge by keeping
-`TaskProjection::Store` as a Hive-owned adapter rather than WorkLedger-owned
-source. RunReceipt remains the strongest standalone opportunity without
+removed the former reciprocal Attempts/WorkLedger catalog edge by keeping the
+direct `TaskProjection::Reader` as a Hive-owned adapter rather than
+WorkLedger-owned source. RunReceipt remains the strongest standalone opportunity without
 forcing the largest refactor first. Operational
 status/Statewatch, layout migration, standalone capability probes, separate
 lease/capsule products, generic status rendering, and a new local-agent
@@ -665,7 +665,7 @@ shapes. The universal recovery and evidence-closure rollout needs one truthful
 projection, not another compatibility layer beside the earlier mechanisms.
 
 **Decision:** Migrate every in-repository producer and consumer in one change,
-then publish only the current `hive-status.v7`,
+then publish only the current `hive-status.v8`,
 `hive-operational-status.v4`, and `hive-act.v2` contracts. Operational-status
 v4 adds the coordinated required nullable exact-routing projection. Remove their
 superseded schema files and compatibility assertions instead of accepting or

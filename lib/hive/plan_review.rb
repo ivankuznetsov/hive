@@ -7,6 +7,9 @@ module Hive
     LEVELS = %w[skip standard mandatory].freeze
     LEVEL_RANK = LEVELS.each_with_index.to_h.freeze
     CLASSIFIER_VERSION = 1
+    # Bump when the reviewer prompt/output contract changes in a way that
+    # requires an identical plan to be judged again under the new contract.
+    ADAPTER_CONTRACT_VERSION = 2
     RECOVERY_RESET_ROUTE_KEYS = %w[
       role requested actual capability_result
       independence_verified independence_reason

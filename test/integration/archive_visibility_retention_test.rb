@@ -203,6 +203,5 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
       workflow: workflow,
       completed_at: completed_at
     )
-    seed_task_projection(folder, state_file: state_path)
   end
 end

@@ -69,7 +69,8 @@ class AdhocReviewIntegrationTest < Minitest::Test
         }) do
           with_attempt_context(
             attempt_id: "adhoc-review-test-attempt",
-            task_generation: "adhoc-review-test-generation"
+            task_generation: 0,
+            ownership_generation: "adhoc-review-test-generation"
           ) { yield materialized }
         end
       end

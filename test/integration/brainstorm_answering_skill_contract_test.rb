@@ -518,7 +518,6 @@ class BrainstormAnsweringSkillContractTest < Minitest::Test
     )
     path = File.join(folder, "brainstorm.md")
     FileUtils.cp(fixture_path(fixture), path)
-    seed_task_projection(folder, state_file: path)
     { slug: slug, folder: folder, path: path }
   end
 

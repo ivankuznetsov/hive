@@ -23,6 +23,16 @@ module Hive
         @dispatcher_class = dispatcher_class
       end
 
+      def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider: nil,
+                   interactive: true, now: Time.now.utc)
+        cfg = @config_loader.call(task.project_root)
+        dispatcher_for(task, argv: argv, cfg: cfg).dispatch(
+          task: task, project: project, intended_stage: intended_stage, argv: argv,
+          request_id: request_id, provider: provider || provider_for(cfg, intended_stage),
+          interactive: interactive, now: now
+        )
+      end
+
       def dispatch_request(request, interactive: false, now: Time.now.utc,
                            admission_view: nil, replay_semantic_terminal: false)
         task = Hive::TaskResolver.new(
@@ -35,8 +45,8 @@ module Hive
         )
       end
 
-      def dispatch_successor(task:, **attributes)
-        dispatcher_for(task, argv: attributes.fetch(:argv)).dispatch_successor(
+      def dispatch_recovery(task:, **attributes)
+        dispatcher_for(task, argv: attributes.fetch(:argv)).dispatch_recovery(
           task: task, **attributes
         )
       end
@@ -49,15 +59,15 @@ module Hive
 
       private
 
-      def dispatcher_for(task, argv:)
+      def dispatcher_for(task, argv:, cfg: nil)
         dispatcher_for_project(
           task.project_root, argv: argv,
-          task_resolver: ->(_request) { task }
+          task_resolver: ->(_request) { task }, cfg: cfg
         )
       end
 
-      def dispatcher_for_project(project_root, argv:, task_resolver: nil)
-        cfg = @config_loader.call(project_root)
+      def dispatcher_for_project(project_root, argv:, task_resolver: nil, cfg: nil)
+        cfg ||= @config_loader.call(project_root)
         daemon = @daemon_config_loader.call
         launcher = @launcher_class.new(
           store: @store,
@@ -98,6 +108,11 @@ module Hive
 
       def routing_stage_name(intended_stage)
         intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
+      end
+
+      def provider_for(cfg, intended_stage)
+        stage = routing_stage_name(intended_stage)
+        cfg.dig(stage, "agent") || Hive::Config::DEFAULTS.dig(stage, "agent") || "claude"
       end
     end
   end

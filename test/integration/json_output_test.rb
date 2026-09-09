@@ -40,9 +40,6 @@ class JsonOutputTest < Minitest::Test
       "path" => worktree_path,
       "branch" => slug
     }.to_yaml)
-    seed_task_projection(
-      execute_dir, state_file: File.join(execute_dir, "task.md")
-    )
     execute_dir
   end
 

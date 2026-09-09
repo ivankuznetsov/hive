@@ -112,7 +112,6 @@ class TuiStateSourceTest < Minitest::Test
     )
     state_file = File.join(folder, state_file_name(stage))
     File.write(state_file, "<!-- #{marker} -->\n")
-    seed_task_projection(folder, state_file: state_file)
     folder
   end
 
@@ -165,7 +164,6 @@ class TuiStateSourceTest < Minitest::Test
     )
     state_file = File.join(folder, "done.md")
     File.write(state_file, "<!-- COMPLETE -->\n")
-    seed_task_projection(folder, state_file: state_file)
     folder
   end
 

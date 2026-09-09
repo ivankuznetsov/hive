@@ -1,10 +1,9 @@
 require "digest"
 require "hive/dependency_snapshot"
-require "hive/attempts/repository"
 require "hive/conditions/generation_tracker"
 require "hive/markers"
 require "hive/paths"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 
 module Hive
   module Attempts
@@ -17,7 +16,7 @@ module Hive
     ) do
       def self.resolve(task:, project:, intended_stage:, progress_token: nil,
                        task_generation: nil, ownership_generation: nil, task_input_epoch: nil,
-                       attempt_store: nil, admission_context: nil)
+                       admission_context: nil)
         task_id = task.respond_to?(:id) ? task.id : nil
         slug = task.slug.to_s
         locator = task_id.nil? ? "project:#{project}/slug:#{slug}" : "id:#{task_id}"
@@ -38,7 +37,7 @@ module Hive
               task: task, workflow_policy: workflow_policy
             ).task_generation
           else
-            current_task_input_epoch(task, attempt_store: attempt_store)
+            current_task_input_epoch(task)
           end
         else
           Integer(task_input_epoch)
@@ -84,38 +83,29 @@ module Hive
         ::Digest::SHA256.hexdigest("hive-progress-v2\0unreadable\0#{e.class}\0#{task.state_file}")
       end
 
-      def self.current_task_input_epoch(task, attempt_store: nil)
+      def self.current_task_input_epoch(task)
         folder = if task.respond_to?(:folder) && task.folder
           task.folder
         else
           File.dirname(task.state_file)
         end
-        store = attempt_store || default_attempt_store
         workflow = task.respond_to?(:workflow) ? task.workflow : nil
         marker = if workflow.respond_to?(:controller?) && workflow.controller?
           Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
         elsif workflow
           Hive::Markers.current(task.state_file)
         end
-        bounded = Hive::TaskProjection::Store.new(
-          task_folder: folder, attempt_store: store
-        ).read_routine(
-          marker: marker,
-          pristine: marker && Hive::TaskProjection::Store.pristine_task?(task, marker)
-        )
+        bounded = Hive::TaskProjection::Reader.new(
+          task_folder: folder, task: task
+        ).read_routine(marker: marker)
         unless bounded.current?
           reason = bounded.diagnostics.first&.fetch("reason", nil) || bounded.state
-          raise Hive::TaskProjection::InvalidJournal,
-                "bounded task projection requires repair (#{reason})"
+          raise Hive::TaskProjection::InvalidJournal, "task journal is unavailable (#{reason})"
         end
 
         Integer(bounded.projection.to_h.dig("identity", "task_generation") || 0)
       rescue ArgumentError, TypeError => e
         raise Hive::TaskProjection::InvalidJournal, e.message
-      end
-
-      def self.default_attempt_store
-        Hive::Attempts::Repository.runtime(create_directories: false)
       end
     end
   end

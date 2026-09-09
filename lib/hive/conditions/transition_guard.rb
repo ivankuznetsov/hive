@@ -1,9 +1,10 @@
 require "shellwords"
+require "hive/attempts/repository"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/migration"
 require "hive/conditions/recovery_action"
 require "hive/plan_frontmatter"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_closure"
 require "hive/conditions/evidence"
 
@@ -28,8 +29,22 @@ module Hive
         )
 
         marker = Hive::Markers.current(task.state_file)
-        projection_store = Hive::TaskProjection::Store.new(task_folder: task.folder)
-        projection = projection_store.read(marker: marker)
+        history_reader = Hive::TaskProjection::Reader.new(task_folder: task.folder, task: task)
+        history = history_reader.read_routine(marker: marker)
+        unless history.current?
+          raise Hive::TaskProjection::InvalidJournal,
+                history.diagnostics.first&.fetch("message", nil) || "task history is invalid"
+        end
+        repository = Hive::Attempts::Repository.open_default(create_directories: false)
+        if history.journal_records.empty? && admitted_attempt?(task, repository: repository)
+          raise Hive::TaskProjection::InvalidJournal,
+                "task journal is empty for a task with an admitted attempt"
+        end
+        projection = history.projection
+        if journal_publication_pending?(projection, repository: repository)
+          raise Hive::ConcurrentRunError,
+                "terminal attempt publication to the task journal is still pending"
+        end
         selection = Hive::Conditions::Migration.selection(
           config: config, stage: EXECUTE_STAGE, projection: projection,
           rule: rule # coding-scoped: increment 1 guards coding execute
@@ -42,8 +57,8 @@ module Hive
         )
         if force
           audit_force!(
-            task: task, projection: projection, projection_store: projection_store,
-            marker: marker, result: result, source: source
+            task: task, projection: projection, history_reader: history_reader,
+            result: result, source: source, repository: repository
           ) unless result.eligible?
           return true
         end
@@ -80,13 +95,10 @@ module Hive
         true
       end
 
-      def audit_force!(task:, projection:, projection_store:, marker:, result:, source:)
+      def audit_force!(task:, projection:, history_reader:, result:, source:, repository:)
         data = projection.to_h
         attempt_id = data.dig("identity", "attempt_id")
-        binding = Array(data.dig("journal", "attempts")).find do |entry|
-          entry["attempt_id"] == attempt_id
-        end
-        unless binding
+        if attempt_id.to_s.empty?
           raise Hive::TaskProjection::InvalidJournal,
                 "condition override cannot identify its durable attempt"
         end
@@ -98,9 +110,7 @@ module Hive
           "waived_diagnostics" => result.diagnostics,
           "source_command" => source.to_s
         }
-        records = Hive::TaskProjection.read_journal(
-          projection_store.journal_path, attempt_store: projection_store.attempt_store
-        )
+        records = Hive::TaskProjection.read_journal(history_reader.journal_path)
         duplicate = records.any? do |record|
           record["event_type"] == "operator_action" &&
             record["attempt_id"] == attempt_id &&
@@ -110,7 +120,7 @@ module Hive
         return if duplicate
 
         Hive::TaskJournal::Writer.new(
-          task_folder: task.folder, attempt_store: projection_store.attempt_store
+          task_folder: task.folder, attempt_store: repository
         ).append(
           event_type: "operator_action",
           task: {
@@ -120,8 +130,8 @@ module Hive
           workflow: task.workflow.id.to_s,
           stage: EXECUTE_STAGE,
           attempt_id: attempt_id,
-          task_generation: binding.fetch("task_generation"),
-          ownership_generation: binding["ownership_generation"],
+          task_generation: data.dig("identity", "task_generation"),
+          ownership_generation: data.dig("identity", "ownership_generation"),
           commit_generation: data.dig("identity", "commit_generation") || 0,
           reason: "forced_condition_transition",
           evidence: [],
@@ -132,13 +142,27 @@ module Hive
           },
           payload: payload
         )
-        projection_store.rebuild!(marker: marker)
       end
 
       def research_execution?(task)
         path = File.join(task.folder, "plan.md")
         result = Hive::PlanFrontmatter.read(path)
         result.valid? && result.data["execution_mode"].to_s == "research"
+      end
+
+      def admitted_attempt?(task, repository:)
+        task_id = task.respond_to?(:id) ? task.id&.to_s : nil
+        return false if task_id.to_s.empty?
+
+        !repository.live_attempt_for(task_id: task_id).nil?
+      end
+
+      def journal_publication_pending?(projection, repository:)
+        attempt_id = projection.to_h.dig("identity", "attempt_id").to_s
+        return false if attempt_id.empty?
+
+        publication = repository.publication(attempt_id)
+        publication && publication.fetch("consumers", {}).fetch("journal", false) != true
       end
     end
   end

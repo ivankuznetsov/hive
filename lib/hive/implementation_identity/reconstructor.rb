@@ -4,12 +4,12 @@ require "hive/agent_support"
 require "hive/implementation_identity/event_builder"
 require "hive/implementation_identity/resolver"
 require "hive/task_journal"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 
 module Hive
   module ImplementationIdentity
     class Reconstructor
-      def initialize(task:, cfg:, attempt_store:, writer: nil, projection_store: nil,
+      def initialize(task:, cfg:, attempt_store:, writer: nil, history_reader: nil,
                      resolver: nil)
         @task = task
         @cfg = cfg
@@ -18,8 +18,8 @@ module Hive
         @writer = writer || Hive::TaskJournal::Writer.new(
           task_folder: task.folder, attempt_store: attempt_store
         )
-        @projection_store = projection_store || Hive::TaskProjection::Store.new(
-          task_folder: task.folder, attempt_store: attempt_store
+        @history_reader = history_reader || Hive::TaskProjection::Reader.new(
+          task_folder: task.folder, task: task
         )
         @resolver = resolver || Resolver.new(cfg: cfg)
       end
@@ -27,7 +27,7 @@ module Hive
       def reconstruct!
         context = Hive::Attempts::Context.current ||
           raise(ResolutionError, "legacy identity reconstruction requires a durable attempt context")
-        projected = @projection_store.read["implementation_identity"]&.dig("execute")
+        projected = @history_reader.read["implementation_identity"]&.dig("execute")
         if projected && projected["generation"] == context.task_generation
           return @resolver.materialize_persisted(projected)
         end
@@ -53,7 +53,6 @@ module Hive
           identity_event(context, selection, recovery),
           idempotency_key: "#{task_key}/#{context.task_generation}/execute-identity"
         )
-        @projection_store.rebuild!
         selection
       end
 
@@ -144,7 +143,7 @@ module Hive
 
       def execute_attempts(current_attempt)
         @execute_attempts ||= begin
-          candidates = @attempt_store.scan.records.dup
+          candidates = @attempt_store.active_attempts.dup
           if (indexed = indexed_execute_attempt(current_attempt))
             candidates << indexed
           end

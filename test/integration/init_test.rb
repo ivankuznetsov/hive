@@ -2489,7 +2489,7 @@ class InitTest < Minitest::Test
 
         cfg = Hive::Config.load(dir)
         assert_equal "codex", cfg.dig("brainstorm", "agent")
-        assert_equal "headless", cfg.dig("brainstorm", "runtime")
+        assert_nil cfg.dig("brainstorm", "runtime")
         assert_equal "bypassPermissions", cfg.dig("claude", "permission_mode")
         assert_equal "codex", cfg.dig("plan", "agent")
         assert_equal "codex", cfg.dig("execute", "agent")

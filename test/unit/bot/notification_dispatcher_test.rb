@@ -42,7 +42,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
         { "stage_dir" => "5-review", "task_count" => review_count },
         { "stage_dir" => "6-pr", "task_count" => pr_count }
       ],
-      legacy_migrate_command: "hive migrate"
+      legacy_state_guide: "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     )
   end
 
@@ -99,9 +99,9 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
     d.process_rows([ changed_while_dirty ])
 
     assert_equal 2, telegram.messages.size
-    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/hive",
                  telegram.messages.first[:text]
-    assert_equal "Project hive has 4 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+    assert_equal "Project hive has 4 tasks hidden in legacy stage dirs (5-review, 6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/hive",
                  telegram.messages.last[:text]
     assert(logger.events.any? { |name, _| name == :notification_skipped_dedupe },
            "legacy-stage warning must dedupe while the project remains legacy-dirty")
@@ -196,7 +196,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       d.process_rows([ pre_existing, legacy ])
 
       assert_equal 1, telegram.messages.size
-      assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+      assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/hive",
                    telegram.messages.first[:text]
       assert(logger.events.any? { |name, attrs| name == :fresh_install_seeded && attrs[:fingerprint_count] == 1 },
              "fresh install should seed task backlog without seeding legacy-stage migration warnings")

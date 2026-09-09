@@ -1,38 +1,35 @@
 require "json"
-require "hive/config"
 require "hive/paths"
-require "hive/runtime_control_plane/cutover"
+require "hive/runtime_control_plane/installation"
 require "hive/schemas"
 
 module Hive
   module Commands
-    # Read-only diagnosis or explicit forward convergence. There is no restore
-    # or downgrade surface after the irreversible legacy seal.
+    # Read-only diagnosis of the current runtime database.
     class Runtime
-      ACTIONS = %w[status resume].freeze
+      ACTIONS = %w[status].freeze
 
       def initialize(action, json: false, output: $stdout,
-                     state_home: Hive::Paths.state_home,
-                     projects: Hive::Config.registered_projects)
+                     state_home: Hive::Paths.state_home)
         @action = action.to_s
         @json = json
         @output = output
         @state_home = File.expand_path(state_home)
-        @projects = projects
       end
 
       def call
         unless ACTIONS.include?(@action)
           raise Hive::UsageError, "hive runtime: expected #{ACTIONS.join(' or ')}"
         end
-        result = @action == "status" ? status : resume_cutover
+        result = Hive::RuntimeControlPlane::Installation.status(state_home: @state_home)
+        healthy = result.fetch("phase") == "active"
         envelope = {
           "schema" => "hive-runtime-maintenance",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-runtime-maintenance"),
-          "action" => @action, "ok" => true, "result" => wire(result)
+          "action" => @action, "ok" => healthy, "result" => wire(result)
         }
         @json ? @output.puts(JSON.generate(envelope)) : render(envelope.fetch("result"))
-        0
+        healthy ? 0 : 1
       rescue Hive::Error => error
         emit_json_error(error) if @json
         raise
@@ -40,32 +37,14 @@ module Hive
 
       private
 
-      def status
-        database = Hive::RuntimeControlPlane::Database.new(
-          path: Hive::Paths.runtime_control_plane_path(@state_home)
-        )
-        Hive::RuntimeControlPlane::Cutover.inspect_status(
-          state_home: @state_home,
-          database: database
-        )
-      ensure
-        database&.disconnect
-      end
-
-      def resume_cutover
-        Hive::RuntimeControlPlane::Cutover.resume(state_home: @state_home, projects: @projects)
-      end
-
       def wire(result)
         RuntimeControlPlane::Codec.normalize(result.respond_to?(:to_h) ? result.to_h : result)
       end
 
       def emit_json_error(error)
-        next_action = error.respond_to?(:action) && error.action
+        next_action = error.respond_to?(:action) ? error.action : nil
         if !error.is_a?(Hive::UsageError) && next_action.to_s.empty?
-          next_action = @action == "status" ?
-            "repair the reported runtime evidence, then run hive runtime status" :
-            "run hive runtime status and follow its forward-only recovery action"
+          next_action = "repair the reported runtime database, then run hive runtime status"
         end
         @output.puts(JSON.generate(Hive::Schemas::ErrorEnvelope.build(
           schema: "hive-runtime-maintenance", error: error,

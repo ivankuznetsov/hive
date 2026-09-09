@@ -13,7 +13,6 @@ require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
-require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/planner_revision"
 require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
@@ -740,21 +739,9 @@ module Hive
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
       when "blocked"
-        if recoverable_planner_identity_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_transient_planner_revision?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif stale_planner_revision_contract?
+        if recoverable_transient_planner_revision?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_adversarial_identity_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_checkpoint_custody_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_selected_lenses_contract_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_residual_evidence_contract_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_transient_coverage_review?
           ACTIONS.fetch(:plan_reviewing)
@@ -969,24 +956,6 @@ module Hive
       false
     end
 
-    # A blocked planner-revision series is terminal only under the result
-    # contract that adjudicated it. When Hive upgrades that contract, the
-    # orchestrator owns one new bounded attempt series; classify this exact
-    # stale-controller case as runnable so the daemon can reach that recovery
-    # path without an operator manufacturing a linked plan generation.
-    def stale_planner_revision_contract?
-      route = Array(plan_review["routes"]).reverse.find do |entry|
-        entry["role"] == "planner_revision"
-      end
-      return false unless route
-      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
-
-      Integer(route["planner_revision_contract_version"] || 0) <
-        Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
-    rescue ArgumentError, TypeError
-      true
-    end
-
     # Older builds terminalized an exhausted transient planner-revision series.
     # The orchestrator now owns opening cooled attempt series until that route
     # recovers, so expose only the exact old planner-owned transient block as
@@ -1004,14 +973,6 @@ module Hive
       Array(plan_review["blockers"]).any? do |blocker|
         blocker["owner"] == "planner" && blocker["reason"] == expected_reason
       end
-    end
-
-    def recoverable_planner_identity_review?
-      route = Array(plan_review["routes"]).reverse.find do |entry|
-        entry["role"] == "planner"
-      end
-      identity = route&.fetch("actual", nil) || route&.fetch("requested", nil)
-      Hive::PlanReview::PlannerIdentity.recoverable?(identity)
     end
 
     # An awaiting-decision projection normally belongs to the operator. A
@@ -1059,42 +1020,6 @@ module Hive
         end
         route && route["outcome"] == "unsupported"
       end
-    end
-
-    # A successful legacy Grok attempt can still carry the pre-alias-fix
-    # `reviewer_family_unknown` receipt. Re-enter only when current provider
-    # support can now attest the exact requested/served identity pair, and only
-    # until the orchestrator has recorded its versioned one-time retry.
-    def recoverable_adversarial_identity_review?
-      routes = Array(plan_review["routes"])
-      planner = routes.find { |entry| entry["role"] == "planner" }
-      planner_identity = planner&.fetch("actual", nil) || planner&.fetch("requested", nil)
-      !Hive::PlanReview::RouteResolver.recoverable_identity_route(
-        routes:, planner_identity:
-      ).nil?
-    end
-
-    # Builds that first protected the bounded projection checkpoint included
-    # Hive's own session write in reviewer custody. Surface only the adapter's
-    # exact runner-provenance false positive as runnable until the orchestrator
-    # records its versioned one-time reset.
-    def recoverable_checkpoint_custody_review?
-      Hive::PlanReview::CheckpointCustody.recoverable?(plan_review["routes"])
-    end
-
-    # The old selected-lens grammar rejected natural lowercase kebab-case
-    # names. Surface that exact versionless parser verdict as runnable until the
-    # orchestrator records its one-time contract recovery reset.
-    def recoverable_selected_lenses_contract_review?
-      !Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
-        plan_review["routes"]
-      ).empty?
-    end
-
-    def recoverable_residual_evidence_contract_review?
-      !Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
-        plan_review["routes"]
-      ).empty?
     end
 
     # A mandatory initial reviewer can exhaust its bounded in-process retry

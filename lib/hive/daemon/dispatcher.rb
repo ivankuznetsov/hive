@@ -3905,7 +3905,7 @@ module Hive
        # its `legacy_stage_dirs` array is non-empty (i.e. tasks were left
        # in a pre-rename stage directory). Advancing a row on top of a
        # half-migrated layout would silently lose work, so we skip the
-       # whole project until the operator runs `hive migrate`. Logging is
+       # whole project until the operator runs an offline agent conversion. Logging is
        # gated by `@legacy_layout_logged` so a half-migrated project
        # doesn't spam daemon.log every tick — first-sight only.
        # Issue #95.

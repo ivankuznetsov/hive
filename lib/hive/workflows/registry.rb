@@ -74,9 +74,7 @@ module Hive
       # descriptor shadows a runtime one, which shadows a built-in — though in
       # practice register! REFUSES any id already present in a lower tier (the
       # collision guard below), so the precedence only governs lookup order, not
-      # silent overrides. The sole exception is the exact pre-built-in bench
-      # descriptor, which temporarily shadows the built-in until explicit init
-      # archives it.
+      # silent overrides.
       #
       # Two distinct overlay tiers exist on purpose:
       #   - project_registrations — PRODUCTION overlay. Owner-authored
@@ -92,7 +90,7 @@ module Hive
       def register!(descriptor, source_path: nil, project: false)
         id = descriptor.id.to_sym
         target = project ? project_registrations : registrations
-        if workflows.key?(id) && !legacy_project_bench_override?(descriptor, source_path: source_path, project: project)
+        if workflows.key?(id)
           raise Hive::ConfigError,
                 "#{registration_label(id, source_path)} collides with registered workflow #{id.inspect}"
         end
@@ -100,12 +98,6 @@ module Hive
         target[id] = descriptor
         reset_union_cache
         descriptor
-      end
-
-      def legacy_project_bench_override?(descriptor, source_path:, project:)
-        project && descriptor.id.to_sym == :bench && WORKFLOWS.key?(:bench) &&
-          !registrations.key?(:bench) && !project_registrations.key?(:bench) &&
-          Hive::Workflows::Bench.legacy_project_descriptor?(descriptor, source_path: source_path)
       end
 
       def reset_project_registrations!

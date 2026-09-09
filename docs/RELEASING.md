@@ -167,8 +167,8 @@ command, release-asset fetch argv, and—when required—the reviewed offline-ca
 materialization argv. The closure inventories under
 `packaging/release_candidate/baseline_manifests/` pin every RubyGem filename,
 size, and SHA-256. Execute only the returned `baseline_cache.fetch_argv[]`; the
-materializer stages those bytes before historical code runs with networking
-disabled.
+materializer authenticates and stages the retained baseline inputs. Candidate
+execution does not fetch missing inputs automatically.
 
 The reviewed materializer entry has this shape (copy the plan's exact argv,
 including its resolved Ruby and cache root):
@@ -187,10 +187,11 @@ version.
 
 `run`, `resume`, and `rerun` create only local, append-only evidence under
 `tmp/release-candidates/<sha>/`. A passing local scope remains `qa_blocked`.
-The default local CLI does not run a production historical container lane:
-those gates report `compliant_local_upgrade_executor_unavailable` and point to
-the exact hosted dispatch. The fixed executor is injectable for focused tests;
-real blocking upgrade proof belongs to the trusted hosted workflow.
+Local checks cover artifact integrity, the coverage and baseline catalogs, and
+candidate version ordering. Trusted hosted validation remains required for
+`qa_ready`. Historical upgrade-survivor gates and executors have been removed;
+conversion of unsupported state is a separate supervised operation described in
+[the current-format guide](guides/current-format-migration.md).
 Only `dispatch` writes to GitHub; the following `collect` is read-only:
 
 ```sh
@@ -203,17 +204,16 @@ The trusted `.github/workflows/release-candidate.yml` run requires no
 model-provider credentials. It builds one manifest-bound gem, committed-source,
 four-platform skill, and managed-web candidate before fan-out; runs the release
 semantic E2E profile, packaging and managed-web checks, three native installs,
-latest-stable upgrades on all supported platforms, the v0.4.1→v0.4.2→candidate
-historical lane, baseline freshness/version checks, and exact protected
-ordinary CI; then publishes digest-bound `trusted_remote` evidence and a
+baseline catalog integrity/freshness, candidate version checks, and exact
+protected ordinary CI; then publishes digest-bound `trusted_remote` evidence and a
 `hive-release-candidate` Check Run. Missing, duplicate, skipped, cancelled,
 failed, stale, or substituted deterministic rows block QA. Authenticated
 OpenClaw/Claude/Codex/Pi proof is advisory only and cannot replace a required
 row. Each blocking cell rejects candidate-controlled harness drift against the
-protected-main control checkout before execution. Linux historical lanes run
-in digest-pinned, unprivileged, read-only containers with no network or
-capabilities; macOS uses a deny-network sandbox. Both expose only read-only
-trusted-control/cache roots and one writable run root.
+protected-main control checkout before execution. Native install jobs install
+the exact candidate gem into an isolated prefix on Linux x86-64, Linux ARM64,
+and macOS ARM64, then verify the installed version. Historical Linux/macOS
+upgrade sandbox jobs are no longer part of candidate proof.
 
 Targeted retries preserve the original candidate bytes and predecessor rows:
 
@@ -520,14 +520,14 @@ version until you bump it manually or set the token.
 
 ## Install verification
 
-CI does **real installs** on native OS runners and containers. Four layers feed
+CI does **real installs** on native OS runners and containers. Five layers feed
 the release and channel graph:
 
 1. **Trusted pre-tag candidate** (`release-candidate.yml`) — builds candidate
    bytes once, then blocks on the semantic release profile, packaging/managed
    web, native Linux x86_64/arm64 and macOS arm64 installs, authenticated
-   latest-stable upgrades, the historical v0.4.1→v0.4.2→candidate survivor,
-   baseline freshness/version, and exact ordinary CI. It publishes immutable
+   latest-stable baseline identity, baseline freshness/version, and exact
+   ordinary CI. It publishes immutable
    evidence and a digest-bound Check Run; it does not tag or publish.
 2. **Exact-byte tag selection** (`select-candidate` in `release.yml`) —
    revalidates the trusted evidence and candidate artifact by server ID/digest,

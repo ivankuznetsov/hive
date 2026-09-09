@@ -50,6 +50,7 @@ Gem::Specification.new do |spec|
     "examples/systemd/*",
     "examples/launchd/*",
     "install.md",
+    "docs/guides/current-format-migration.md",
     "CHANGELOG.md",
     "LICENSE",
     "README.md",

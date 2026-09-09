@@ -362,7 +362,7 @@ projects stay on `markers`; operators may set only `stages.4-execute` to
 [condition rollout runbook](condition-rollout.md). Other stages remain
 marker-authoritative in this increment.
 
-`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set and the narrower `patrol.review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks; they read project state and operate on stage folders.
+`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set and the narrower `patrol.review.reviewers` set. `hive archive` reads project state and operates on stage folders. Historical conversion is outside runtime; see `docs/guides/current-format-migration.md`.
 
 `HIVE_HOME` changes where Hive reads the global registry. `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, and `HIVE_PI_BIN` override agent binaries for tests or local shims.
 

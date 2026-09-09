@@ -61,12 +61,14 @@ components:
       - lib/hive/attempts/detached_launcher.rb
       - lib/hive/babysitter/passthrough_runner.rb
       - lib/hive/commands/daemon.rb
-      - lib/hive/commands/migrate.rb
+      - lib/hive/commands/runtime.rb
+      - lib/hive/commands/setup.rb
       - lib/hive/commands/web.rb
       - lib/hive/daemon/dispatcher.rb
       - lib/hive/daemon/operational_snapshot.rb
       - lib/hive/lock.rb
       - lib/hive/patrol/launch_budget.rb
+      - lib/hive/runtime_control_plane/installation.rb
       - lib/hive/task_counter.rb
       - lib/hive/usage_db.rb
       - web/config/puma.rb
@@ -75,6 +77,7 @@ components:
     wiki_page: wiki/component-boundaries.md
     focused_tests:
       - test/unit/runtime_control_plane/database_test.rb
+      - test/unit/runtime_control_plane/installation_test.rb
       - test/unit/runtime_control_plane/process_guard_test.rb
       - test/unit/runtime_control_plane/schema_test.rb
       - test/unit/lock_test.rb

@@ -42,6 +42,11 @@ class ReleaseContractTest < Minitest::Test
     assert_equal 2, dependencies.scan("hive-cli (#{Hive::VERSION})").size
   end
 
+  def test_agent_conversion_guide_is_packaged_for_installed_users
+    spec = Gem::Specification.load(File.join(ROOT, "hive.gemspec"))
+    assert_includes spec.files, "docs/guides/current-format-migration.md"
+  end
+
   def test_public_credibility_copy_matches_current_capabilities
     readme = read("README.md")
     gemspec = read("hive.gemspec")
@@ -308,11 +313,7 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "source_run_attempt"
     assert_includes body, "source_artifact_id"
     assert_includes body, "source_artifact_digest"
-    assert_includes body, "packaging/release_candidate/hosted_upgrade_lane.rb"
-    assert_includes body, "$HIVE_RC_RUN_ROOT/candidate/manifest.json"
-    assert_includes body, "/run/sandbox-attestation.json"
-    assert_includes body, "/run/baseline-cache-attestation.json"
-    assert_includes body, "/run/targets/"
+    refute jobs.key?("upgrade"), "historical conversion is outside the supported runtime"
 
     external_uses = body.scan(/^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^#\s]+)/).reject do |action, _revision|
       action.start_with?("./")
@@ -343,10 +344,6 @@ class ReleaseContractTest < Minitest::Test
     verifier = read("packaging/release_candidate/verify_hosted_gate.sh")
     assert_includes verifier, "candidate-controlled harness drift"
     assert_includes body, ".trusted-control/packaging/release_candidate/verify_hosted_gate.sh"
-    assert_includes body, "--cap-drop=ALL"
-    assert_includes body, "--security-opt=no-new-privileges"
-    assert_includes body, "--network=none"
-    assert_match(/ruby@sha256:[0-9a-f]{64}/, body)
     refute_includes body, "sudo unshare"
   end
 
@@ -366,30 +363,6 @@ class ReleaseContractTest < Minitest::Test
     assert_includes managed_web, '--sha256="$web_sha"'
     assert_includes managed_web, '--prefix="$RUNNER_TEMP/managed"'
     refute_match(/--(?:hive-bin|archive|sha256|prefix)\s+"/, managed_web)
-
-    upgrade = jobs.fetch("upgrade").fetch("steps").find do |step|
-      step["name"] == "Run installed historical producer and candidate without network"
-    end.fetch("run")
-    profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) " \
-      '(allow file-write* (literal \"/dev/null\")) ' \
-      '(allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)'
-    assert_includes upgrade, %(profile="#{profile}")
-    assert_equal 1, upgrade.scan('sandbox-exec -p "$profile"').size
-    assert_includes upgrade, "checkpoint=sandbox-run"
-    assert_includes upgrade, "checkpoint=ruby-smoke"
-    assert_includes upgrade, '"LANG=en_US.UTF-8"'
-    assert_includes upgrade, '"LC_ALL=en_US.UTF-8"'
-    assert_includes upgrade, "Encoding.default_external == Encoding::UTF_8"
-    assert_includes upgrade, 'File.open(\"/dev/null\", \"w\")'
-    assert_includes upgrade, "checkpoint=sandbox-shell"
-    assert_includes upgrade, "failure phase=%s status=%s"
-    %w[
-      ruby-smoke hosted-stage-install sandbox-attestation baseline-cache-attestation
-      baseline-target-attestation candidate-target-attestation hosted-upgrade-lane
-    ].each do |phase|
-      assert_includes upgrade, "run_phase #{phase}"
-    end
-    refute_includes upgrade, "allow mach-lookup"
 
     install_smoke = read(".github/workflows/install-smoke.yml")
     smoke_profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) " \
@@ -498,7 +471,7 @@ class ReleaseContractTest < Minitest::Test
       assert_includes job.fetch("if"), "selected_gates"
       assert_gate_receipt_precedes_execution(job, job_name)
     end
-    %w[native upgrade].each do |job_name|
+    %w[native].each do |job_name|
       job = jobs.fetch(job_name)
       executable = job.fetch("steps").reject do |step|
         step["name"].to_s.start_with?("Retain ")

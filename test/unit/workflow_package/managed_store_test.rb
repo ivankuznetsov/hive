@@ -171,7 +171,7 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
 
       error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(task) }
       assert_match(/is not selected/, error.message)
-      assert_match(/run hive migrate/, error.message)
+      assert_includes error.message, "install it and read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     end
   end
 

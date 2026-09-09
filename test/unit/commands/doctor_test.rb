@@ -109,30 +109,7 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
-  def test_runtime_probe_reports_corrupt_active_manifest_even_without_database
-    with_tmp_dir do |root|
-      current = File.join(root, ".runtime-cutover", "current")
-      FileUtils.mkdir_p(current, mode: 0o700)
-      File.binwrite(File.join(current, "active.json"), "{\n")
-      File.chmod(0o600, File.join(current, "active.json"))
-      previous = ENV["HIVE_HOME"]
-      ENV["HIVE_HOME"] = root
-      doctor = Hive::Commands::Doctor.new(
-        config: base_config, project_root: root, inspector: ResolutionOnlyInspector.new(
-          config: base_config, project_root: root
-        )
-      )
-
-      row = doctor.send(:check_runtime_control_plane).fetch(0)
-
-      assert_equal "missing", row.fetch(:status)
-      assert_includes row.fetch(:message), "manifest_corrupt"
-    ensure
-      previous.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = previous
-    end
-  end
-
-  def test_runtime_probe_recommends_only_forward_recovery_actions
+  def test_runtime_probe_recommends_current_runtime_setup
     with_tmp_dir do |root|
       File.binwrite(Hive::Paths.runtime_control_plane_path(root), "placeholder")
       previous = ENV["HIVE_HOME"]
@@ -142,14 +119,14 @@ class HiveCommandsDoctorTest < Minitest::Test
           config: base_config, project_root: root
         )
       )
-      status = { "phase" => "ready", "database" => { "status" => "missing" } }
+      status = { "phase" => "absent", "database" => { "status" => "missing" } }
 
       with_replaced_singleton_method(
-        Hive::RuntimeControlPlane::Cutover, :inspect_status, ->(**) { status }
+        Hive::RuntimeControlPlane::Installation, :status, ->(**) { status }
       ) do
         row = doctor.send(:check_runtime_control_plane).fetch(0)
         assert_equal(
-          "run hive runtime status, then hive runtime resume when its forward action is approved",
+          "run hive runtime status; use hive setup for a new installation",
           row.fetch(:remediation)
         )
         refute_match(/restore|rollback|downgrade/, row.values.compact.join(" "))
@@ -607,28 +584,6 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
-  def test_legacy_brainstorm_runtime_row_warns_to_migrate
-    with_fake_home do |home|
-      write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
-      write_file("#{home}/.claude/commands/plan.md")
-      out = StringIO.new
-      cfg = base_config(
-        "brainstorm" => {
-          "agent" => "claude",
-          "skill" => "/compound-engineering:ce-brainstorm",
-          "runtime" => "tmux_interactive"
-        },
-        "plan" => { "agent" => "claude", "skill" => "/plan" }
-      )
-
-      exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: out).call
-
-      assert_equal 0, exit_code
-      assert_match(%r{2-brainstorm/brainstorm\.runtime.*! warning}, out.string)
-      assert_match(/superseded by claude\.mode/, out.string)
-    end
-  end
-
   # ---- Review.reviewers extension (U1/U2/U3) ----
 
   def cfg_with_reviewers(reviewers)
@@ -940,16 +895,6 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
-  def test_legacy_runtime_probe_ignores_invalid_yaml_when_called_directly
-    with_tmp_dir do |project|
-      FileUtils.mkdir_p(File.join(project, ".hive-state"))
-      File.write(File.join(project, ".hive-state", "config.yml"), "brainstorm: [broken\n")
-      doctor = Hive::Commands::Doctor.new(config: base_config, project_root: project)
-
-      refute doctor.send(:legacy_brainstorm_runtime_present?)
-    end
-  end
-
   def test_private_dependency_and_rendering_boundaries
     with_tmp_dir do |dir|
       executable = File.join(dir, "qmd")
@@ -963,7 +908,6 @@ class HiveCommandsDoctorTest < Minitest::Test
       state = File.join(dir, ".hive-state")
       FileUtils.mkdir_p(state)
       File.write(File.join(state, "config.yml"), "brainstorm:\n  runtime: tmux\n")
-      assert doctor.send(:legacy_brainstorm_runtime_present?)
 
       clean = Hive::Commands::Doctor.new(config: base_config, project_root: dir, output: StringIO.new)
       refute clean.send(:config_yml_unreadable?)

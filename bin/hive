@@ -14,7 +14,7 @@ require "hive/runtime_control_plane/activation_gate"
 
 begin
   Hive::RuntimeControlPlane::ActivationGate.check!(argv: ARGV)
-rescue Hive::RuntimeControlPlane::MigrationRequired => e
+rescue Hive::RuntimeControlPlane::Error => e
   if ARGV.include?("--json")
     require "json"
     require "hive/schemas"

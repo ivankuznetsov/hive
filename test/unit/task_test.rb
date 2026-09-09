@@ -23,7 +23,7 @@ class TaskTest < Minitest::Test
       YAML
       error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
       assert_includes error.message, "not selected"
-      assert_includes error.message, "hive migrate"
+      assert_includes error.message, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     end
   end
 
@@ -81,7 +81,7 @@ class TaskTest < Minitest::Test
       with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
         error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
         assert_includes error.message, "requires migration"
-        assert_includes error.message, "hive migrate"
+        assert_includes error.message, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
       end
     end
   end

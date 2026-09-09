@@ -465,7 +465,7 @@ class TuiSnapshotTest < Minitest::Test
                                  "hive_state_path" => "/tmp/alpha/.hive-state",
                                  "tasks" => [],
                                  "legacy_stage_dirs" => legacy_entries,
-                                 "legacy_migrate_command" => "hive migrate"
+                                 "legacy_state_guide" => "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
                                }
                              ])
 
@@ -476,8 +476,8 @@ class TuiSnapshotTest < Minitest::Test
     # The machine-readable recovery hint must flow through ProjectView
     # so non-TUI consumers (and the TUI itself, eventually) can read it
     # without re-deriving "is this project clean?". Issue #94.
-    assert_equal "hive migrate", project.legacy_migrate_command,
-                 "ProjectView must preserve legacy_migrate_command verbatim"
+    assert_equal "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", project.legacy_state_guide,
+                 "ProjectView must preserve legacy_state_guide verbatim"
   end
 
   def test_from_payload_defaults_legacy_stage_dirs_to_empty_array_when_key_absent
@@ -487,7 +487,7 @@ class TuiSnapshotTest < Minitest::Test
                                  "path" => "/tmp/alpha",
                                  "hive_state_path" => "/tmp/alpha/.hive-state",
                                  "tasks" => []
-                                 # no legacy_stage_dirs / legacy_migrate_command keys
+                                 # no legacy_stage_dirs / legacy_state_guide keys
                                }
                              ])
 
@@ -495,8 +495,8 @@ class TuiSnapshotTest < Minitest::Test
     project = snapshot.projects.first
     assert_equal [], project.legacy_stage_dirs,
                  "missing legacy_stage_dirs key must default to []"
-    assert_nil project.legacy_migrate_command,
-               "missing legacy_migrate_command key must default to nil"
+    assert_nil project.legacy_state_guide,
+               "missing legacy_state_guide key must default to nil"
   end
 
   def test_build_project_view_unknown_action_labels_sort_last_and_preserve_json_order

@@ -7,7 +7,7 @@ updated: 2026-09-06
 tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, daily digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, daily digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 The live project template includes a commented, copyable `models:` example.
 Exact and coarse entries inherit model and effort independently, never select an
@@ -46,17 +46,8 @@ error names the source config path. The loader raises
 discovery cannot mistake this shared validation result for a recoverable config
 read failure and fall back to the built-in `coding` workflow.
 
-There is one narrow upgrade compatibility alias. Older Hive versions silently
-ignored a literal root-level `reviewers` key, so the loader temporarily promotes
-that value in memory to `review.reviewers`, validates it there, and emits one
-warning per process and source path telling the operator to run `hive migrate`.
-This keeps an older project usable immediately after `hive update` without
-silently discarding its intended reviewer selection. `hive migrate` performs
-the durable, comment-preserving rewrite in the project's tracked Hive state.
-If both the legacy and canonical locations exist, Hive exits 78 and requires
-the operator to choose which value to keep; it never guesses. Invalid promoted
-values such as `reviewers: null` still fail the normal
-`review.reviewers` validation.
+Root-level `reviewers` is rejected. Set `review.reviewers` explicitly; older
+configuration can be converted using `docs/guides/current-format-migration.md`.
 
 The canonical form is:
 
@@ -76,8 +67,7 @@ This root allowlist applies only to project config loaded through
 same malformed project config fails consistently in `hive run`, `hive doctor`,
 `hive new`, text/JSON `hive status`, and other consumers instead of reaching
 command-specific fallback behavior. An invalid workflow path cannot pre-empt
-an unsupported-root diagnostic; the legacy reviewers alias is normalized before
-workflow-path resolution.
+an unsupported-root diagnostic. Root-level reviewers is not normalized.
 
 ## Model-routing ownership and structure
 
@@ -91,8 +81,7 @@ Structural validation rejects non-mapping roots, unknown or wrong-owner stage
 keys, empty/non-mapping entries, fields other than `model` and `effort`,
 blank/non-scalar models, and efforts outside the shared accepted vocabulary.
 Each entry retains only authored fields, so model-only and effort-only
-overrides stay distinguishable. This structural pass runs before the legacy
-top-level-reviewers warning. Reachable-profile capability validation remains a
+overrides stay distinguishable. Reachable-profile capability validation remains a
 separate, pure routing-domain step after exact/coarse shadowing is known.
 
 ## Explicit provider-routing validation
@@ -713,13 +702,8 @@ per-engine launch values are respectively 16, 8, 4, 2, and disabled for
 ordinary scheduling. The legacy `max_agent_spawns_per_day` key is inert and
 cannot distort either engine lane. Modes never change finding/PR
 caps, diversity, confidence, or alpha gates. Patrol has no token budget or
-token-based admission; usage totals remain telemetry. `hive migrate`, including
-the automatic fleet migration run by `hive update`, deletes retired token,
-per-cycle launch, architecture-specific launch, USD, and multiplier keys, then
-requests one daemon restart after the fleet succeeds.
-Standalone migration requests the normal best-effort restart immediately after
-that independent config commit, before later project-specific preparation can
-fail; fleet mode injects the coalescing restart request instead.
+token-based admission; usage totals remain telemetry. Retired configuration keys must be removed explicitly during offline conversion.
+Updates do not rewrite project YAML or restart services for old configuration.
 
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not
@@ -853,11 +837,11 @@ they do not create a second writable copy of patrol checkpoints or ledgers.
 
 | Function | Returns / does |
 |----------|----------------|
-| `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated) |
+| `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; no historical path fallback) |
 | `global_config_path` | `<hive_home>/config.yml` |
 | `hive_state_dir(project_root, name = ".hive-state")` | `<project_root>/<name>` |
 | `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; validates raw project root keys against static keys plus registered workflow stage names; then recursively deep-merges onto DEFAULTS, validates values, and returns a Hash with `"project_root"` injected. |
-| `registered_projects` | Reads the authoritative global config; returns `[{name, project_id, path, real_path, hive_state_path, repository_identity}, …]` (runtime paths `expand_path`-ed). `real_path` is the immutable canonical anchor captured at enrollment and is not recomputed by this projection. The repository identity is a normalized canonical `origin` captured at enrollment when available. The ordinary reader retains the existing one-off move of a legacy registry into XDG config storage. |
+| `registered_projects` | Reads the authoritative global config; returns `[{name, project_id, path, real_path, hive_state_path, repository_identity}, …]` (runtime paths `expand_path`-ed). `real_path` is the immutable canonical anchor captured at enrollment and is not recomputed by this projection. The repository identity is a normalized canonical `origin` captured at enrollment when available. Readers never move an old registry or config into XDG storage. |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
 | `register_project(name:, path:, repository_identity: :detect)` | Adds or replaces an entry under `config.yml.lock`; stores private `real_path` for relink detection and the transport-independent canonical `origin` identity when detectable. Before writing, canonicalizes the proposed `.hive-state` root through its nearest existing ancestor and rejects a distinct registered project identity that would share the same state root; a same-name replacement is excluded from its own conflict check. Enrollment still succeeds without an origin, but an explicit cross-project dependency targeting that project later fails closed until identity is configured and re-enrolled. When an activated runtime database exists, the complete authoritative registry is projected to `projects` after the YAML mutation; omitted rows become inactive rather than remaining schedulable. Pre-activation enrollment never creates or migrates SQLite. |
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`, then refreshes the activated SQL projection. |

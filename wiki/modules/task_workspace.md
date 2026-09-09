@@ -1,7 +1,7 @@
 ---
 title: Task workspace projection
 type: module
-source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-context-receipt.v1.json, lib/hive/commands/task.rb, web/app/controllers/tasks/, web/app/views/tasks/
+source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v2.json, schemas/hive-context-receipt.v1.json, lib/hive/commands/task.rb, web/app/controllers/tasks/, web/app/views/tasks/
 created: 2026-08-12
 updated: 2026-09-01
 tags: [task, web, projection, semantic, result, usage, provenance, attempts, timeline, dependencies, publication]
@@ -12,8 +12,9 @@ two bounded read models. Semantic `hive-task-workspace` v2 is the normal Web
 and native-agent contract: canonical headline/action, workflow result and
 applicability, primary/supporting artifacts, exactly attributed usage with an
 API-equivalent estimate, and an attempt-correlated diagnostic-log reference.
-Strict v1 remains the authenticated audit/mutation compatibility document with
-attempts, provenance, resources, and timeline panels. Neither version replaces
+The internal audit snapshot retains attempts, provenance, resources, and
+timeline panels for mutation checks and the semantic builder; its old public
+v1 contract is no longer shipped or served. Neither read model replaces
 `hive-status` v7, enters `Commands::Status`, scans the fleet or the global
 attempt store, contacts GitHub from any read path, performs provider/pricing
 network requests, or creates a new action protocol; the projection owns no
@@ -26,13 +27,13 @@ through `Hive::Web::TaskTargetResolver`. It passes that native task, its
 already-projected status row, the broadcaster's existing dependency context,
 and injected bounded readers to `Hive::TaskWorkspace::Builder`.
 
-The authenticated routes keep version choice explicit:
+Both authenticated JSON routes serve the current semantic contract:
 
 ```text
-GET /tasks/:project/:slug            # HTML composed from semantic v2; v1 is private mutation state
-GET /tasks/:project/:slug.json       # explicit strict v1 audit compatibility document
+GET /tasks/:project/:slug            # HTML composed from semantic v2; audit data is private mutation state
+GET /tasks/:project/:slug.json       # semantic v2 JSON
 GET /tasks/:project/:slug/workspace  # semantic v2 JSON
-GET /tasks/:project/:slug/timeline   # signed older/raw v1 audit cursor page
+GET /tasks/:project/:slug/timeline   # signed audit cursor page
 ```
 
 Native agents read the same semantic projection without starting or scraping
@@ -102,9 +103,9 @@ retaining identities and explicit truncation. Absolute paths, executable
 commands/tokens, prompts, credentials, secrets, and provider-reported cost are
 rejected recursively.
 
-## Audit v1 document and evidence states
+## Internal audit document and evidence states
 
-The v1 top-level document contains exact task identity, generation time, status
+The internal audit document contains exact task identity, generation time, status
 freshness, normalized operator state, one decision posture, and seven panel
 envelopes. Operator state owns bounded open-question bindings, recovery
 lifecycle/action facts, and its compatibility diagnostic summary:
@@ -375,13 +376,13 @@ conflicting, unavailable, or lacks the exact current attempt. Questions,
 recovery lifecycle/action state, and diagnostic summary are normalized into
 the same snapshot consumed by JSON and task HTML.
 
-The v1 schema continues to define closed records for attempts, resources,
-timeline entries, dependency nodes/edges, publication facts, and artifacts.
+Internal readers continue to normalize attempts, resources, timeline entries,
+dependency nodes/edges, publication facts, and artifacts.
 Normal HTML instead renders semantic v2 in this order: headline and guarded
 actions, concise usage, primary work product, genuine diagnostic if any, then
 only applicable supporting/change evidence. Raw attempt cards, provenance
 receipts, `agent_start`/`agent_end`, session lifecycle, stage chronology, and
-the newest-log tail are absent from the normal page; their v1/timeline/log
+the newest-log tail are absent from the normal page; their internal/timeline/log
 audit sources remain available.
 
 Stable DOM identities and `data-workspace-disclosure-key` values let the
@@ -408,7 +409,7 @@ path. Operator changes continue through the generation-guarded
 
 ## Tests
 
-- `test/unit/task_workspace/` pins v1/v2 schemas, bounded readers, semantic
+- `test/unit/task_workspace/` pins the current v2 schema and internal read models, bounded readers, semantic
   result/applicability/usage/diagnostic composition, provenance,
   attempts/resources, timeline, dependency, and publication/cache.
 - `test/integration/task_command_test.rb` pins native semantic v2 output,
@@ -416,7 +417,7 @@ path. Operator changes continue through the generation-guarded
 - `test/unit/context_provenance_test.rb`, `task_activity_test.rb`,
   `task_projection_store_test.rb`, and `usage_db_test.rb` pin capture and
   persistence boundaries.
-- `web/test/integration/tasks_test.rb` pins authenticated v1 compatibility,
+- `web/test/integration/tasks_test.rb` pins authenticated current-format JSON,
   v2 workspace/HTML parity, workflow-aware primary/applicability behavior,
   exact log-reference selection, raw-lifecycle omission, and existing task
   actions.

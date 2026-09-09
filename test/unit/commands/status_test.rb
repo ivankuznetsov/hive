@@ -589,7 +589,7 @@ class CommandsStatusTest < Minitest::Test
       refute_includes slugs, "manual-task"
       assert_equal [], payload.fetch("projects").first.fetch("legacy_stage_dirs"),
                    "archived-manual is an intentional status-private sibling, not a legacy stage"
-      assert_nil payload.fetch("projects").first.fetch("legacy_migrate_command")
+      assert_nil payload.fetch("projects").first.fetch("legacy_state_guide")
     end
   end
 
@@ -984,7 +984,7 @@ class CommandsStatusTest < Minitest::Test
       }, actions_by_slug)
       assert_equal [ { "stage_dir" => "5-review", "task_count" => 1 } ],
                    project.fetch("legacy_stage_dirs")
-      assert_equal "hive migrate", project.fetch("legacy_migrate_command")
+      assert_equal "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", project.fetch("legacy_state_guide")
     end
   end
 
@@ -1386,20 +1386,18 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_json_status_keeps_legacy_root_reviewers_operational_during_migration_window
+  def test_json_status_rejects_obsolete_root_reviewers
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       FileUtils.mkdir_p(File.join(hive_state, "stages"))
       File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
       project = { "name" => "legacy", "path" => project_root, "hive_state_path" => hive_state }
 
-      payload = nil
-      _out, err = capture_io do
-        payload = Hive::Commands::Status.new.json_payload([ project ])
+      error = assert_raises(Hive::UnsupportedProjectConfigError) do
+        capture_io { Hive::Commands::Status.new.json_payload([ project ]) }
       end
-
-      assert_equal [ "legacy" ], payload.fetch("projects").map { |entry| entry.fetch("name") }
-      assert_includes err, "run `hive migrate`"
+      assert_includes error.message, "Unknown top-level key `reviewers`."
+      assert_equal "reviewers: []\n", File.read(File.join(hive_state, "config.yml"))
     end
   end
 
@@ -3768,7 +3766,7 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_includes output, "3 tasks hidden in legacy stage dirs: 5-review (2), 6-pr (1)"
-    assert_includes output, "hive migrate"
+    assert_includes output, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
   end
 
   private

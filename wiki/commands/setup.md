@@ -58,12 +58,10 @@ Without `--no-bootstrap`, setup provisions in this order:
    `Hive::Web::AppBundle.ensure!`.
 4. Initialize or enroll the current project unless `--no-init` is passed. If
    the project is already initialized, setup enables it for daemon dispatch.
-5. Explicitly activate a verified empty SQLite runtime control plane through
-   the same manifest/candidate protocol as fleet cutover, but only when the
-   installation is genuinely fresh. An existing healthy database is observed;
-   legacy state directs to `hive migrate --all`, while a corrupt, partial, or
-   wrong-identity database fails the phase. No ordinary runtime open creates or
-   migrates the database.
+5. Explicitly initialize the current SQLite runtime through `Installation.setup`.
+   Setup publishes a complete private database once; an existing healthy database
+   is validated and retained. Unsupported, corrupt or wrong-identity storage is
+   refused. There are no cutover manifests or automatic historical imports.
 6. Run `hive daemon install` semantics through
    `Hive::Commands::Daemon::ServiceInstaller` with autostart, forced template
    refresh, and the same `Hive::InvokedBinary.path` used to invoke setup. The

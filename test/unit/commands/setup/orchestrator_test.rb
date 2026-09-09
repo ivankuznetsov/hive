@@ -16,7 +16,7 @@ require "hive/commands/daemon/service_installer"
 require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/commands/web/service_installer"
-require "hive/runtime_control_plane/cutover"
+require "hive/runtime_control_plane/installation"
 
 # End-to-end coverage of the `hive setup` orchestrator (lib/hive/commands/setup.rb):
 # #call phase ordering, the --no-bootstrap / --no-init / --service branches, each
@@ -178,8 +178,8 @@ class SetupOrchestratorTest < Minitest::Test
                     )
                     with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
                       ->(**_kw) { status }) do
-                      runtime = Struct.new(:phase, :database_path).new("active", "/runtime.sqlite3")
-                      with_replaced_singleton_method(Hive::RuntimeControlPlane::Cutover, :bootstrap,
+                      runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" } }
+                      with_replaced_singleton_method(Hive::RuntimeControlPlane::Installation, :setup,
                         ->(**) { runtime }) do
                         stub_web_config { yield }
                       end
@@ -457,7 +457,7 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal %w[diagnostics agent_skills web_bundle runtime_control_plane daemon_service babysitter_service web_service web], names
   end
 
-  def test_setup_does_not_accept_a_healthy_but_unactivated_runtime_database
+  def test_setup_accepts_a_healthy_runtime_database_without_a_manifest
     with_tmp_dir do |root|
       path = File.join(root, "runtime-control-plane.sqlite3")
       Hive::RuntimeControlPlane::Database.new(path: path).migrate!.disconnect
@@ -470,8 +470,8 @@ class SetupOrchestratorTest < Minitest::Test
       end
 
       phase = setup.instance_variable_get(:@phases).last
-      refute phase.fetch("ok")
-      assert_includes phase.fetch("message"), "active cutover manifest"
+      assert phase.fetch("ok")
+      assert_equal "active", phase.fetch("phase")
     end
   end
 

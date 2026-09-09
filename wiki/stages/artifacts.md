@@ -318,11 +318,12 @@ The transition appends one of two task-level authorization receipts, rearms the
 coding workflow from `7-artifacts` to `4-execute`, and leaves the rejected
 evidence generation immutable for audit.
 
-## Legacy capture diagnostics
+## Capture diagnostics
 
-`capture-requirement.json`, `media/capture-manifest.json`, and the older
-`media/manifest.json` remain readable for historical compatibility and Hivebox
-diagnostics. Project-provider manifests may participate as a proof source only
+Current v2 `media/capture-manifest.json` remains readable for Hivebox
+diagnostics; v1 captures are rejected. The artifacts stage uses only the
+outcome-evidence collector. Its old marker-driven capture agent, Screenote
+prompt integration, and compatibility capture reader have been removed. Project-provider manifests may participate as a proof source only
 when they explicitly declare `evidence_role: claim_evidence` and pass the new
 proof contract. Built-in synthetic Hivebox media is always diagnostic-only and
 cannot be admitted as accepted outcome evidence.

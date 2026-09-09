@@ -160,15 +160,11 @@ class CurrentMainCoverageGapTest < Minitest::Test
       profile = FakeProfile.new(:codex)
 
       with_spawn_agent_capture(calls) do
-        Hive::Stages::Artifacts.spawn_artifacts_agent(task, { "budget_usd" => {}, "timeout_sec" => {} }, "collect", profile,
-                                                      screenote: { connected: false })
         Hive::Stages::Finalize.spawn_finalize_agent(task, { "budget_usd" => {}, "timeout_sec" => {} }, "final", profile, root)
       end
 
-      assert_equal 2, calls.length
-      assert_equal %w[artifacts finalize], calls.map { |_task, kwargs| kwargs[:log_label] }
-      assert_equal "error", Hive::Stages::Artifacts.action_for(:error)
-      assert_equal "custom", Hive::Stages::Artifacts.action_for(:custom)
+      assert_equal 1, calls.length
+      assert_equal %w[finalize], calls.map { |_task, kwargs| kwargs[:log_label] }
     end
   end
 

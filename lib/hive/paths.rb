@@ -1,5 +1,3 @@
-require "fileutils"
-
 module Hive
   module Paths
     module_function
@@ -70,22 +68,6 @@ module Hive
       !hive_home_override.nil?
     end
 
-    def ensure_migrated!
-      return if hive_home_override
-      return if File.exist?(File.join(config_home, "config.yml"))
-
-      legacy = legacy_registry_path
-      return unless legacy
-
-      FileUtils.mkdir_p(config_home)
-      FileUtils.mv(legacy, File.join(config_home, "config.yml"))
-      File.write(
-        File.join(config_home, ".migrated-from"),
-        "#{legacy}\n"
-      )
-      remove_empty_legacy_dir(File.dirname(legacy))
-    end
-
     def base_home(env_key, fallback)
       File.expand_path(env_or_blank(env_key) || File.join(home, fallback))
     end
@@ -109,23 +91,6 @@ module Hive
       return nil if value.nil? || value.empty?
 
       File.expand_path(value)
-    end
-
-    def remove_empty_legacy_dir(path)
-      Dir.rmdir(path)
-    rescue SystemCallError => e
-      warn "hive: could not remove empty legacy dir #{path}: #{e.message}"
-      nil
-    end
-
-    # Legacy registry candidates probed by `ensure_migrated!`. Order
-    # matters: the older `~/Dev/hive/config.yml` is migrated only when
-    # there is no `~/.hive-state/registry.yml`.
-    def legacy_registry_path
-      [
-        File.expand_path("~/.hive-state/registry.yml"),
-        File.expand_path("~/Dev/hive/config.yml")
-      ].find { |p| File.exist?(p) }
     end
   end
 end

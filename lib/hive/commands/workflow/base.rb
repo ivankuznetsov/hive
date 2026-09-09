@@ -135,7 +135,7 @@ module Hive
 
           raise Hive::Error,
                 "managed workflow #{name.inspect} retained task migration failed " \
-                "(#{error.class}: #{error.message}); finish any live task, then run hive migrate"
+                "(#{error.class}: #{error.message}); finish any live task, then retry the workflow install or update"
         ensure
           prepared&.close
         end

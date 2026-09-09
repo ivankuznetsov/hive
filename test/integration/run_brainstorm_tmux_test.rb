@@ -248,7 +248,7 @@ class RunBrainstormTmuxTest < Minitest::Test
     end
     config_path = File.join(dir, ".hive-state", "config.yml")
     cfg = YAML.safe_load(File.read(config_path))
-    cfg["brainstorm"]["runtime"] = "tmux_interactive"
+    cfg["claude"]["mode"] = "tmux"
     cfg["timeout_sec"]["brainstorm"] = timeout
     File.write(config_path, cfg.to_yaml)
 

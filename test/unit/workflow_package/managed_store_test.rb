@@ -9,6 +9,45 @@ require "hive/workflows/loader"
 class WorkflowPackageManagedStoreTest < Minitest::Test
   include HiveTestHelper
 
+  def test_installed_workflow_reads_check_integrity_without_launching_secret_scans
+    with_tmp_dir do |dir|
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40)
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      generation = store.place_generation(package, resolution)
+      store.activate(resolution)
+      unexpected_scan = ->(*) { raise Minitest::Assertion, "installed workflow reads must not launch secret scans" }
+
+      with_replaced_singleton_method(Hive::SecretScanner, :scan, unexpected_scan) do
+        assert_equal :demo, Hive::Workflows::Loader.load_dir(store.workflows_dir).fetch(:demo).id
+        assert_equal :demo, store.workflow("demo", resolution.source_commit, resolution.manifest_digest).id
+        assert store.manifest("demo", resolution.source_commit, resolution.manifest_digest)
+        assert store.verify_generation("demo", resolution.source_commit, resolution.manifest_digest).valid?
+
+        readme = File.join(generation, "README.md")
+        File.chmod(0o644, readme)
+        File.write(readme, "tampered\n")
+        refute store.verify_generation("demo", resolution.source_commit, resolution.manifest_digest).valid?
+        assert_raises(Hive::WorkflowPackage::PackageError) do
+          store.workflow("demo", resolution.source_commit, resolution.manifest_digest)
+        end
+      end
+    end
+  end
+
+  def test_installation_still_requires_secret_scanning
+    with_tmp_dir do |dir|
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40)
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      unavailable = ->(*) { raise Hive::SecretScanner::Unavailable, "scanner unavailable" }
+      with_replaced_singleton_method(Hive::SecretScanner, :scan, unavailable) do
+        assert_raises(Hive::SecretScanner::Unavailable) { store.place_generation(package, resolution) }
+      end
+      refute File.exist?(store.generation_path("demo", resolution.source_commit))
+    end
+  end
+
   def test_places_activates_and_verifies_immutable_generation
     with_tmp_dir do |dir|
       hive_state = File.join(dir, ".hive-state")

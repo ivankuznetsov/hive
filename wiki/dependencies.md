@@ -109,6 +109,14 @@ dying in seconds rather than as a test failure.
 | `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
+The benchmark runner builds and installs `components/agent-cli-runtime` from
+its exact Hive source archive before installing `hive-cli`, then checks that
+provider-error extraction and the OpenCode permission compiler load. This keeps
+Hive's compatible dependency constraint from selecting an older published patch.
+The root-only control bundle contains Hive and its dependencies; the candidate
+bundle excludes `hive-cli` but retains shared dependency gems, including
+`agent-cli-runtime`.
+
 `telegram-bot-ruby` also pulls Faraday and `faraday-multipart`, but
 Hive declares both directly because `Hive::Bot::Transcriber` requires
 them itself to POST Telegram voice-note bytes to the configured
@@ -264,3 +272,11 @@ an ambiguous command-not-found failure.
 - [[modules/agent]]
 - [[commands/bot]]
 - [[e2e]]
+
+## Release container builder action
+
+The three container publication jobs in `.github/workflows/release.yml` pin
+`docker/setup-buildx-action` v4.3.0 to commit
+`37fe631027851001ddb9b187196cc803df7f5f0e`. The action metadata and inputs are
+unchanged from the preceding v4.2.0 pin; this update refreshes its bundled
+JavaScript dependencies. The workflow remains tag-triggered.

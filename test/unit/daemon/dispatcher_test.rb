@@ -3038,20 +3038,76 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def test_dispatch_priority_order_is_later_stage_first_and_stable
     rows = [
-      row(slug: "a", stage: "2-brainstorm"),
-      row(slug: "b", stage: "7-artifacts"),
-      row(slug: "c", stage: "6-review"),
-      row(slug: "d", stage: "7-artifacts"),
-      row(slug: "e", stage: "9-done")
+      row(slug: "a", stage: "2-brainstorm", action: "ready_to_run"),
+      row(slug: "b", stage: "7-artifacts", action: "ready_to_run"),
+      row(slug: "c", stage: "6-review", action: "ready_to_run"),
+      row(slug: "d", stage: "7-artifacts", action: "ready_to_run"),
+      row(slug: "e", stage: "9-done", action: "ready_to_run"),
+      row(slug: "accepted", stage: "2-brainstorm", workflow: "patrol-fix", action: "ready_to_advance")
     ]
     dispatcher, = make_dispatcher
 
     ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
 
-    assert_equal %w[9-done 7-artifacts 7-artifacts 6-review 2-brainstorm],
-                 ordered.map(&:stage), "later stages first"
+    assert_equal %w[e b d c accepted a], ordered.map(&:slug),
+                 "stage rank remains primary and terminal work wins within a stage"
     assert_equal %w[b d], ordered.select { |r| r.stage == "7-artifacts" }.map(&:slug),
-                 "stable within a stage — original status order preserved"
+                 "stable within the same stage and action class"
+  end
+
+  def test_terminal_advance_claims_a_scarce_slot_before_new_work_in_the_same_stage
+    rows = [
+      row(
+        slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_run", command: "hive run new-finding --project p1"
+      ),
+      row(
+        slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_advance",
+        command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+      )
+    ]
+    dispatcher, supervisor, controller, = make_dispatcher(rows: rows)
+    controller.update_limits(
+      max_concurrent_runs: 1, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] },
+                 "terminal work must drain before another agent starts in the shared stage"
+  end
+
+  def test_terminal_priority_precedes_a_queued_fresh_request
+    Dir.mktmpdir("hive-dispatch-priority") do |state_home|
+      accepted = row(
+        slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_advance",
+        command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+      )
+      dispatcher, supervisor, controller, logger, = make_dispatcher(
+        rows: [ accepted ], dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(state_home, slug: "new-finding", request_id: "FRESH")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+        assert_equal [ "FRESH" ], Q.pending(state_home: state_home).map(&:request_id)
+        assert logger.events.any? { |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "FRESH" &&
+            attrs[:reason] == "global_cap"
+        }
+      ensure
+        restore_find_project!
+      end
+    end
   end
 
   def test_dispatch_priority_ages_waiting_rows_past_fresh_later_stage_work
@@ -5131,6 +5187,22 @@ def test_incremental_row_removal_resets_an_empty_probe_cursor
   assert_equal 0, dispatcher.instance_variable_get(:@tracked_state_file_cursor)
 end
 
+def test_incremental_status_replacement_keeps_a_terminal_advance_row_prioritized
+  dispatcher, = make_dispatcher(rows: [])
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance"
+  )
+  fresh = row(slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix")
+
+  dispatcher.send(
+    :replace_incremental_status_rows, [ [ "p1", "accepted-finding" ] ], [ accepted ]
+  )
+
+  assert_equal [ "accepted-finding", "new-finding" ],
+               dispatcher.send(:incremental_dispatch_rows, [ fresh ]).map(&:slug)
+end
+
 def test_changed_task_ticks_do_not_delay_the_periodic_full_repair_scan
   status_row = row(action: nil, command: nil)
   dispatcher, = make_dispatcher(rows: [ status_row ], clock: -> { T0 })
@@ -5223,6 +5295,140 @@ def test_changed_task_ticks_leave_global_schedulers_to_the_full_scan
   assert dispatcher.tick_changed(task_keys: [ [ "p1", "s1" ] ], now: T0)
 end
 
+def test_changed_task_tick_considers_cached_terminal_advances_before_fresh_work
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance",
+    command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+  )
+  fresh = row(
+    slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_run", command: "hive run new-finding --project p1"
+  )
+  dispatcher, supervisor, controller = make_dispatcher(rows: [ accepted ])
+  controller.update_limits(
+    max_concurrent_runs: 1, max_concurrent_per_project: 1,
+    max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+  )
+  with_replaced_singleton_method(controller, :can_dispatch?, ->(**) { :cooldown }) do
+    dispatcher.tick(now: T0)
+  end
+  assert_empty supervisor.spawned
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ fresh ]
+  )
+
+  assert dispatcher.tick_changed(
+    task_keys: [ [ "p1", "new-finding" ] ], now: T0 + 1
+  )
+
+  assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+  assert_equal 1, status.fetch_count, "incremental priority must not trigger another full status scan"
+  assert_equal 1, status.fetch_task_count
+end
+
+def test_changed_task_tick_does_not_replay_cached_coding_advance
+  coding_advance = row(
+    slug: "ready-for-pr", stage: "5-open-pr", workflow: "coding",
+    action: "ready_to_open_pr",
+    command: "hive open-pr ready-for-pr --from 5-open-pr"
+  )
+  fresh = row(
+    slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_run", command: "hive run new-finding --project p1"
+  )
+  dispatcher, supervisor = make_dispatcher(rows: [ coding_advance ])
+  dispatcher.send(:refresh_status_index, [ coding_advance ])
+  dispatcher.send(:cache_terminal_advances, [ coding_advance ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ fresh ]
+  )
+
+  assert dispatcher.tick_changed(
+    task_keys: [ [ "p1", "new-finding" ] ], now: T0 + 1
+  )
+
+  assert_equal [ "new-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
+def test_changed_task_tick_does_not_replay_cached_non_patrol_generic_advance
+  generic = row(
+    slug: "content-ready", stage: "1-inbox", workflow: "content",
+    action: "ready_to_advance", command: "hive approve content-ready --from 1-inbox"
+  )
+  fresh = row(slug: "fresh", action: "ready_to_run")
+  dispatcher, supervisor = make_dispatcher(rows: [ generic ])
+  dispatcher.send(:refresh_status_index, [ generic ])
+  dispatcher.send(:cache_terminal_advances, [ generic ])
+  dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+    Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+
+  dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+  assert_equal [ "fresh" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
+def test_durable_advance_ownership_consumes_the_cached_row_before_an_unrelated_tick
+  %i[accepted existing_live terminal_replay].each do |initial_status|
+    accepted = row(
+      slug: "accepted", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve accepted --project p1 --from 1-inbox --force"
+    )
+    fresh = row(slug: "fresh", action: "ready_to_run")
+    requests = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **|
+      requests << request.slug
+      Hive::Attempts::DispatchResult.new(
+        status: requests.length == 1 ? initial_status : :accepted,
+        attempt: nil, receipt: nil, attach_descriptor: nil, reason: nil
+      )
+    end
+    dispatcher, = make_dispatcher(rows: [ accepted ], attempt_dispatcher: attempt_dispatcher)
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    dispatcher.tick(now: T0)
+
+    # Durable workers never enter the local child supervisor. With no active
+    # capacity remaining, the old approval must not be admitted a second time.
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+    dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+    assert_equal [ "accepted", "fresh" ], requests, initial_status.to_s
+  end
+end
+
+def test_cached_advance_yields_to_a_pending_same_task_request_after_cooldown
+  with_tmp_dir do |state_home|
+    accepted = row(
+      slug: "accepted", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve accepted --project p1 --from 1-inbox --force"
+    )
+    fresh = row(slug: "fresh", action: "ready_to_run")
+    dispatcher, supervisor, controller = make_dispatcher(
+      rows: [ accepted ], dispatch_request_state_home: state_home
+    )
+    write_request_file(state_home, slug: "accepted", request_id: "EXPLICIT")
+    stub_find_project!(dispatcher, "p1")
+    begin
+      with_replaced_singleton_method(controller, :can_dispatch?, ->(**) { :cooldown }) do
+        dispatcher.tick(now: T0)
+      end
+      assert_empty supervisor.spawned
+      dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+        Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+
+      dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+      assert_equal [ "fresh" ], supervisor.spawned.map { |entry| entry[:slug] }
+      refute_nil Q.fetch("EXPLICIT", state_home: state_home)
+    ensure
+      restore_find_project!
+    end
+  end
+end
+
 def test_failed_changed_task_status_keeps_cached_external_capacity
   running = row(
     slug: "external", action: "agent_running", command: nil,
@@ -5291,15 +5497,28 @@ def test_live_heartbeat_tick_does_not_reconcile_attempt_history
     slug: "external", action: "agent_running", command: nil,
     claude_pid_alive: true
   )
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance",
+    command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+  )
   reconciler = Object.new
   reconciler.define_singleton_method(:reconcile) do |now:|
     raise "heartbeat tick scanned attempt history"
   end
-  dispatcher, = make_dispatcher(rows: [ running ], attempt_reconciler: reconciler)
+  dispatcher, supervisor = make_dispatcher(
+    rows: [ running ], attempt_reconciler: reconciler
+  )
+  dispatcher.send(:refresh_status_index, [ running, accepted ])
+  dispatcher.send(:cache_terminal_advances, [ running, accepted ])
+  dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+    Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ running ])
 
   assert dispatcher.tick_changed(
     task_keys: [ [ "p1", "external" ] ], now: T0 + 1
   )
+  assert_empty supervisor.spawned,
+               "heartbeat-only ticks must not dispatch cached advance rows"
 end
 
 def test_changed_task_tick_stops_when_attempt_reconciliation_fails
@@ -6124,10 +6343,18 @@ end
   end
 
   def test_terminal_attempt_receipt_completes_claimed_delivery_without_wait2
+    assert_terminal_attempt_completes_delivery(chat_id: 42)
+  end
+
+  def test_terminal_attempt_is_promoted_in_same_tick_when_request_is_deleted
+    assert_terminal_attempt_completes_delivery(chat_id: nil)
+  end
+
+  def assert_terminal_attempt_completes_delivery(chat_id:)
     Dir.mktmpdir("hive-attempt-delivery") do |state_home|
       request_id = Q.write_request!(
         project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
-        chat_id: 42, request_id: "request-1", task_id: "42",
+        chat_id: chat_id, request_id: "request-1", task_id: "42",
         task_generation: "generation-1", expected_stage: "4-execute",
         state_home: state_home, now: T0
       )
@@ -6188,11 +6415,17 @@ end
       assert_empty supervisor.spawned
       assert_empty Q.claimed(state_home: state_home)
       notice = Q.pending_results(state_home: state_home).first
-      assert_equal "attempt-1", notice.attempt_id
-      assert_equal "terminal", notice.attempt_state
-      assert_equal "succeeded", notice.receipt["outcome"]
+      if chat_id
+        assert_equal "attempt-1", notice.attempt_id
+        assert_equal "terminal", notice.attempt_state
+        assert_equal "succeeded", notice.receipt["outcome"]
+      else
+        assert_nil notice
+        assert_nil Q.repository(state_home).fetch(request_id)
+      end
       assert_nil store.fetch_hot("attempt-1")
       assert_equal "terminal", store.fetch("attempt-1").state
+      assert_equal request_id, store.fetch("attempt-1")["request_id"]
     end
   end
 

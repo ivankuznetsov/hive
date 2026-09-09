@@ -7,6 +7,13 @@ updated: 2026-09-04
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
+Failed automatic stage transitions now use the shared recovery backoff ladder,
+including when the source stage remains `COMPLETE`. The latest same-generation
+terminal receipt supplies the failure time and retry charge; each admitted
+successor increments that charge. No extra timer table or watcher is involved.
+Explicit operator retries retain their existing bypass of automatic pacing.
+The project daily dispatch cap remains the emergency brake.
+
 **TLDR**: Hive admits task-stage work as independent durable attempts. One
 `attempts` row owns the attempt record plus fixed accounting,
 lost-recovery, and terminal-publication facts. Live rows provide capacity.
@@ -19,6 +26,17 @@ and module-hook paths use the same dispatcher. A successful admission starts a
 detached supervisor; callers may attach or observe but do not own the worker's
 lifetime.
 The API does not own or reap child processes after handoff.
+
+Supervisor self-reentry preserves canonical directories from the running Ruby
+interpreter's resolved load path. This includes dependencies loaded without
+RubyGems activation, as in the isolated CLI scenario harness. It does not re-read
+ambient `RUBYLIB`; `bin/hive` places its own source directories first.
+
+The private supervisor route is selected before public CLI dispatch. Its detached
+wrapper removes inherited Bundler and Ruby toolchain variables before it re-enters
+Hive, anchoring startup to the invoked Hive checkout rather than a caller bundle
+or transient test home. The capability and handshake descriptors are the only
+inherited launch authority.
 
 SQLite owns machine-local coordination only. Task Markdown and task journals
 remain workflow authority. Large logs and outputs live in the content-addressed
@@ -42,6 +60,21 @@ for the same task, generation, stage and runtime. A failed, cancelled or lost
 attempt delays automatic retry by `AgentLimit.retry_cooldown_sec`; success or
 changed inputs/runtime clears that delay. Explicit retry bypasses pacing, not
 live capacity or unresolved-loss recovery. There are no cohort counters or probes.
+
+`request_id` is immutable provenance, not a foreign key to the disposable
+dispatch queue. Completing or pruning a request must not change an attempt
+snapshot or prevent same-tick finalization. The unique request index still
+prevents duplicate admission. Finalization retains its full-record equality
+checks; mismatches are not ignored or retried inside the tick.
+
+For the preceding SQLite layout only, explicit `Database#migrate!` recognizes
+the exact old schema fingerprint and atomically rebuilds the attempts table
+without that foreign key. It preserves rows, indexes and CHECK constraints,
+validates the new schema and foreign keys before committing, and rolls back
+on failure. Other tables, token history and payload references are retained.
+Normal open/startup rejects the old schema and does not upgrade it. Stop all
+writers and take an external SQLite backup before invoking the migration.
+Previously nulled request IDs cannot be reconstructed by this schema change.
 
 SQL columns own lifecycle and identity values. `details_json` contains only
 execution details absent from those columns; `subject_json` holds the structured

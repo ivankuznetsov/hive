@@ -1,5 +1,6 @@
 require "fileutils"
 require "time"
+require "hive/git_index_lock"
 require "hive/attempts/context"
 require "hive/runtime_control_plane/task_lease_repository"
 
@@ -121,6 +122,7 @@ module Hive
         end
         held[lock_key] = Process.pid
         begin
+          Hive::GitIndexLock.recover!(project_hive_state_path)
           return yield
         ensure
           held.delete(lock_key) if held[lock_key] == Process.pid

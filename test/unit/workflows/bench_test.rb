@@ -79,7 +79,9 @@ class WorkflowsBenchTest < Minitest::Test
     runtime = Hive::Workflows::Bench::RUNTIME_DIR
 
     assert_path_exists File.join(runtime, "harness", "hive_run.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "campaign_contract.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "judge_slate.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "controller_git.sh")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_runtime.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_launcher.sh")
     assert_path_exists File.join(runtime, "harness", "lib", "pi_bench_launcher.sh")
@@ -195,21 +197,72 @@ class WorkflowsBenchTest < Minitest::Test
     assert_equal "high", config.dig("models", "plan", "effort")
   end
 
+  def test_pi_launcher_always_loads_the_packaged_tool_stream_extension
+    launcher = File.join(
+      Hive::Workflows::Bench::RUNTIME_DIR,
+      "harness", "lib", "pi_bench_launcher.sh"
+    )
+    Dir.mktmpdir("hive-bench-pi-launcher") do |root|
+      argv_path = File.join(root, "argv")
+      real_pi = File.join(root, "pi")
+      extension = File.join(root, "pi-tool-stream.ts")
+      File.write(extension, "// fixture\n")
+      File.write(real_pi, <<~SH)
+        #!/bin/sh
+        printf '%s\n' "$@" >#{argv_path}
+      SH
+      FileUtils.chmod(0o755, real_pi)
+
+      _out, err, status = Open3.capture3(
+        {
+          "HB_PI_REAL_BIN" => real_pi,
+          "HB_PI_TOOL_STREAM" => extension
+        },
+        "bash", launcher, "--model", "openrouter/z-ai/glm-5.3-flash:high"
+      )
+
+      assert status.success?, err
+      assert_equal [
+        "--extension", extension,
+        "--model", "openrouter/z-ai/glm-5.3-flash:high"
+      ], File.readlines(argv_path, chomp: true)
+    end
+  end
+
+  def test_pi_tool_stream_extension_covers_the_current_disclosed_route
+    extension = File.read(File.join(
+                            Hive::Workflows::Bench::RUNTIME_DIR,
+                            "harness", "lib", "pi_tool_stream.ts"
+                          ))
+
+    assert_includes extension, '"z-ai/glm-5.3-flash"'
+    assert_includes extension, "tool_stream: true"
+  end
+
   def test_packaged_runtime_seals_hive_source_from_pi_and_opencode
     runtime = Hive::Workflows::Bench::RUNTIME_DIR
     dockerfile = File.read(File.join(runtime, "Dockerfile.runner"))
     driver = File.read(File.join(runtime, "harness", "lib", "hive_driver.rb"))
     stages = File.read(File.join(runtime, "harness", "lib", "hive_stages.sh"))
+    controller_git = File.read(File.join(runtime, "harness", "lib", "controller_git.sh"))
     pi_launcher = File.read(File.join(runtime, "harness", "lib", "pi_bench_launcher.sh"))
     opencode_launcher = File.read(File.join(runtime, "harness", "lib", "opencode_bench_launcher.sh"))
 
     assert_includes dockerfile, 'io.hive.bench.hive-build-sha="${HIVE_BUILD_SHA}"'
     assert_includes dockerfile, "chmod -R go-rwx /opt/hb/control-bundle"
     assert_includes dockerfile, "rm -rf /usr/local/bundle/gems/hive-cli-*"
+    assert_includes dockerfile, "gem build agent-cli-runtime.gemspec"
+    assert_includes dockerfile, "gem install ./agent-cli-runtime-*.gem --no-document"
+    assert_includes dockerfile, "AgentCliRuntime.respond_to?(:extract_provider_error)"
+    assert_includes dockerfile, "defined?(AgentCliRuntime::OpenCode::Permissions)"
     assert_includes driver, "HB_REQUIRE_SEALED_AGENT_RUNTIME"
     assert_includes driver, 'runner image #{image} is not the sealed Hive build'
     assert_includes driver, '"--user", "0:0"'
     assert_includes stages, "HB_ERROR hive_runtime_visible_to_candidate"
+    assert_includes stages, "CONTROLLER_BIN=/opt/hb/controller-bin"
+    assert_includes controller_git, "--reuid=1000"
+    assert_includes controller_git, 'args[position]="$HB_CONTROLLER_ORIGIN"'
+    assert_includes stages, 'cat >"$CONTROLLER_BIN/gh"'
     [ pi_launcher, opencode_launcher ].each do |launcher|
       assert_includes launcher, "--bounding-set=-all --inh-caps=-all --ambient-caps=-all"
       assert_includes launcher, "GEM_HOME=/usr/local/bundle"
@@ -248,10 +301,134 @@ class WorkflowsBenchTest < Minitest::Test
     refute args.any? { |arg| arg.include?("/host/hive") || arg.include?("/host/gems") }
   end
 
+  def test_sealed_controller_git_ignores_candidate_hooks_and_push_redirects
+    wrapper = File.join(
+      Hive::Workflows::Bench::RUNTIME_DIR,
+      "harness", "lib", "controller_git.sh"
+    )
+    Dir.mktmpdir("hive-bench-controller-git") do |root|
+      origin = File.join(root, "origin.git")
+      redirected = File.join(root, "redirected.git")
+      work = File.join(root, "work")
+      controller_bin = File.join(root, "controller-bin")
+      controller_id = File.join(controller_bin, "id")
+      FileUtils.mkdir_p(controller_bin)
+      # Host runner UIDs vary; the sealed runtime always invokes Git as uid 1000.
+      File.write(controller_id, "#!/bin/sh\nprintf '1000\\n'\n")
+      FileUtils.chmod(0o755, controller_id)
+      controller_env = {
+        "HB_CONTROLLER_ORIGIN" => origin,
+        "PATH" => "#{controller_bin}:#{ENV.fetch("PATH")}"
+      }
+      run_git = lambda do |*argv|
+        out, err, status = Open3.capture3("/usr/bin/git", *argv)
+        assert status.success?, "git #{argv.join(' ')} failed: #{out}#{err}"
+      end
+      run_git.call("init", "-q", "--bare", origin)
+      run_git.call("init", "-q", "--bare", redirected)
+      run_git.call("init", "-q", "-b", "main", work)
+      run_git.call("-C", work, "config", "user.email", "bench@example.test")
+      run_git.call("-C", work, "config", "user.name", "Bench")
+      File.write(File.join(work, "README.md"), "candidate\n")
+      run_git.call("-C", work, "add", "README.md")
+      run_git.call("-C", work, "commit", "-q", "-m", "candidate")
+      run_git.call("-C", work, "remote", "add", "origin", origin)
+      run_git.call("-C", work, "config", "remote.origin.pushurl", redirected)
+
+      hook_marker = File.join(root, "pre-push-ran")
+      hook = File.join(work, ".git", "hooks", "pre-push")
+      File.write(hook, "#!/bin/sh\ntouch #{hook_marker}\n")
+      FileUtils.chmod(0o755, hook)
+
+      resolved, err, status = Open3.capture3(
+        controller_env,
+        "bash", wrapper, "-C", work, "remote", "get-url", "--push", "--all", "origin"
+      )
+      assert status.success?, err
+      assert_equal origin, resolved.strip
+
+      _out, err, status = Open3.capture3(
+        controller_env,
+        "bash", wrapper, "-C", work, "push", "-q", "origin", "main"
+      )
+
+      assert status.success?, err
+      _out, _err, origin_status = Open3.capture3(
+        "/usr/bin/git", "--git-dir", origin, "rev-parse", "main"
+      )
+      _out, _err, redirected_status = Open3.capture3(
+        "/usr/bin/git", "--git-dir", redirected, "rev-parse", "main"
+      )
+      assert origin_status.success?, "controller origin did not receive main"
+      refute redirected_status.success?, "candidate pushurl received main"
+      refute_path_exists hook_marker
+      File.symlink(wrapper, File.join(controller_bin, "git"))
+      require "hive/managed_git"
+      _out, err, status = Hive::ManagedGit.capture3(work, "rev-parse", "HEAD", env: controller_env)
+      assert status.success?, "managed Git must work after environment scrubbing: #{err}"
+      resolved, err, status = Hive::ManagedGit.capture3(work, "remote", "get-url", "origin", env: controller_env)
+      assert status.success?, err
+      assert_equal "/opt/hb/controller-state/origin.git", resolved.strip
+
+      run_git.call("-C", work, "config", "url.#{redirected}.insteadOf", origin)
+      _out, err, status = Open3.capture3(controller_env, "bash", wrapper, "-C", work, "push", origin, "main")
+      refute status.success?
+      assert_match(/refuses URL rewriting/, err)
+    end
+  end
+
+  def test_unsealed_review_origin_accepts_shallow_candidate_history
+    runtime = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness", "lib")
+    stages = File.read(File.join(runtime, "hive_stages.sh"))
+    setup = stages[/^  ORIGIN=.*?(?=^  cat >)/m]
+    refute_nil setup
+    Dir.mktmpdir("hive-bench-review-origin") do |root|
+      source = File.join(root, "source")
+      work = File.join(root, "work")
+      state = File.join(root, "controller-state")
+      FileUtils.mkdir_p(state)
+      commands = [
+        [ "init", "-q", "-b", "main", source ],
+        [ "-C", source, "-c", "user.name=Bench", "-c", "user.email=bench@example.test",
+          "commit", "--allow-empty", "-qm", "first" ],
+        [ "-C", source, "-c", "user.name=Bench", "-c", "user.email=bench@example.test",
+          "commit", "--allow-empty", "-qm", "second" ],
+        [ "clone", "-q", "--depth=1", "file://#{source}", work ],
+        [ "-C", work, "remote", "remove", "origin" ]
+      ]
+      commands.each do |args|
+        _out, err, status = Open3.capture3("git", *args)
+        assert status.success?, err
+      end
+      template = File.join(root, "candidate-template")
+      FileUtils.mkdir_p(template)
+      File.write(File.join(template, "candidate-file"), "must not be copied")
+      File.write(File.join(root, ".gitconfig"), "[init]\n  templateDir = #{template}\n")
+      env = { "CONTROLLER_STATE" => state, "BENCH_WORK" => work,
+              "HB_CONTROLLER_ORIGIN" => nil, "HB_SEALED_AGENT_RUNTIME" => "0", "HOME" => root }
+      2.times do
+        _out, err, status = Open3.capture3(
+          env, "bash", "-uc", setup.gsub("git -C /work", 'git -C "$BENCH_WORK"')
+        )
+        assert status.success?, err
+      end
+      origin, err, status = Open3.capture3("git", "-C", work, "remote", "get-url", "origin")
+      assert status.success?, err
+      assert_equal File.join(state, "origin.git"), origin.strip
+      refute_path_exists File.join(origin.strip, "candidate-file")
+      _out, err, status = Open3.capture3("git", "--git-dir=#{origin.strip}", "rev-parse", "main")
+      assert status.success?, err
+    end
+  end
+
   def test_generate_exports_campaign_sealed_runtime_requirement
     instruction = File.read(stages_by_name.fetch("generate").instruction)
+    contract = File.read(File.join(
+                           Hive::Workflows::Bench::RUNTIME_DIR,
+                           "harness", "lib", "campaign_contract.rb"
+                         ))
 
-    assert_includes instruction, "isolation.sealed_agent_runtime must be true or false"
+    assert_includes contract, "isolation.sealed_agent_runtime must be true or false"
     assert_includes instruction,
                     'env << "HB_REQUIRE_SEALED_AGENT_RUNTIME=1" if isolation["sealed_agent_runtime"] == true'
   end
@@ -621,36 +798,112 @@ class WorkflowsBenchTest < Minitest::Test
   end
 
   def test_judge_stage_maps_codex_openrouter_campaign_fields_to_harness_arguments
-    instruction = File.read(stages_by_name.fetch("judge").instruction)
-    prefix = instruction.split("\n' >.judge-args.out", 2).first
-    args_script = prefix.rpartition("ruby -ryaml -e '\n").last
-    refute_empty args_script
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/campaign_contract")
+    judges = {
+      "claude" => { "model" => "claude-fable-5" },
+      "codex" => {
+        "model" => "gpt-5.6-sol", "reasoning_effort" => "ultra",
+        "provider" => "openrouter", "provider_model" => "openai/gpt-5.6-sol"
+      },
+      "openrouter" => { "model" => "moonshotai/kimi-k2" }
+    }
 
-    Dir.mktmpdir("hive-bench-judge-route") do |root|
-      File.write(File.join(root, "campaign.yml"), <<~YAML)
-        judges:
-          claude:
-            model: claude-fable-5
-          codex:
-            model: gpt-5.6-sol
-            reasoning_effort: ultra
-            provider: openrouter
-            provider_model: openai/gpt-5.6-sol
-          openrouter:
-      YAML
+    common = [
+      "--claude-judge", "--judge-model", "claude-fable-5",
+      "--codex-judge", "--codex-judge-model", "gpt-5.6-sol",
+      "--codex-judge-effort", "ultra",
+      "--codex-judge-provider", "openrouter",
+      "--codex-judge-provider-model", "openai/gpt-5.6-sol",
+      "--openrouter-judge"
+    ]
+    assert_equal common + [ "--openrouter-model", "moonshotai/kimi-k2" ],
+                 HiveBench::CampaignContract.judge_arguments(
+      judges, openrouter_model_flag: "--openrouter-model"
+    )
+    assert_equal common + [ "--openrouter-judge-model", "moonshotai/kimi-k2" ],
+                 HiveBench::CampaignContract.judge_arguments(
+      judges, openrouter_model_flag: "--openrouter-judge-model"
+    )
+    assert HiveBench::CampaignContract.judges_require_openrouter?(judges)
+  end
 
-      out, err, status = Open3.capture3(RbConfig.ruby, "-ryaml", "-e", args_script, chdir: root)
+  def test_campaign_contract_requires_openrouter_for_opencode_candidates
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "profiles/candidates")
+    require File.join(harness, "lib/campaign_contract")
+    campaign = {
+      "candidates" => [ "all-ox-alpha-opencode@high" ],
+      "judges" => {
+        "claude" => { "model" => "claude-fable-5" },
+        "codex" => {
+          "model" => "gpt-5.6-sol", "reasoning_effort" => "ultra"
+        }
+      }
+    }
 
-      assert status.success?, err
-      assert_equal [
-        "--claude-judge", "--judge-model", "claude-fable-5",
-        "--codex-judge", "--codex-judge-model", "gpt-5.6-sol",
-        "--codex-judge-effort", "ultra",
-        "--codex-judge-provider", "openrouter",
-        "--codex-judge-provider-model", "openai/gpt-5.6-sol",
-        "--no-openrouter-judge"
-      ], out.lines.map(&:chomp)
+    assert HiveBench::CampaignContract.campaign_requires_openrouter?(campaign)
+  end
+
+  def test_campaign_contract_canonicalizes_relative_source_before_marker_use
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/campaign_contract")
+    repo = File.expand_path("../../..", __dir__)
+
+    source = HiveBench::CampaignContract.source({ "source" => "." }, repo_root: repo)
+
+    assert_equal repo, source
+    assert_nil HiveBench::CampaignContract.validate_marker_runtime!(source)
+  end
+
+  def test_campaign_contract_judge_validation_does_not_require_current_generation_catalogs
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/campaign_contract")
+    historical = {
+      "campaign_id" => "historical-campaign",
+      "source" => ".",
+      "seeds" => 1,
+      "judges" => {
+        "claude" => { "model" => "claude-fable-5" },
+        "codex" => { "model" => "gpt-5.6-sol", "reasoning_effort" => "high" }
+      }
+    }
+
+    assert_same historical, HiveBench::CampaignContract.validate_judging!(historical)
+  end
+
+  def test_campaign_contract_verifies_strict_egress_before_parallel_cells_start
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/campaign_contract")
+    campaign = {
+      "isolation" => {
+        "require_provider_egress" => true,
+        "docker_network" => "bench-provider-only",
+        "https_proxy" => "http://bench-egress:3128"
+      }
+    }
+    inspector = lambda do |_network|
+      {
+        "Internal" => true,
+        "Containers" => { "proxy" => { "Name" => "bench-egress" } }
+      }
     end
+
+    assert_nil HiveBench::CampaignContract.verify_generation_network!(
+      campaign, inspector: inspector
+    )
+    _stdout, stderr = capture_io do
+      assert_raises(SystemExit) do
+        HiveBench::CampaignContract.verify_generation_network!(
+          campaign,
+          inspector: ->(_network) { { "Internal" => false, "Containers" => {} } }
+        )
+      end
+    end
+    assert_includes stderr, "must be an internal Docker network"
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    assert_operator instruction.index("verify_generation_network!"), :<,
+                    instruction.index("generate_pids=()")
   end
 
   def test_judge_runtime_guard_rejects_a_pre_retry_snapshot_with_refresh_guidance

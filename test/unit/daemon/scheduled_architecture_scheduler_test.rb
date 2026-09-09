@@ -88,4 +88,29 @@ class HiveDaemonScheduledArchitectureSchedulerTest < Minitest::Test
       assert_equal 1, subject.candidates(now: NOW + 180).size
     end
   end
+
+  def test_real_daily_allowance_uses_tick_time_and_recovers_on_the_next_utc_day
+    with_tmp_global_config do
+      with_tmp_git_repo do |root|
+        cfg = Hive::Config.merge_defaults(
+          "daemon" => { "enabled" => true }, "refactor_patrol" => { "enabled" => true },
+          "patrol" => { "mode" => "low" }
+        )
+        FileUtils.mkdir_p(File.join(root, ".hive-state"))
+        File.write(File.join(root, ".hive-state", "config.yml"), cfg.to_yaml)
+        Hive::Config.register_project(name: "demo", path: root)
+        subject = Hive::Daemon::ScheduledArchitectureScheduler.new
+        assert_equal [ "demo" ], subject.candidates(now: NOW).map { |item| item.fetch(:project) }
+        limit = Hive::Config.load(root).dig("patrol", "scheduled_discovery_launches_per_engine_per_day")
+        limit.times do |index|
+          Hive::UsageDb.reserve_patrol_discovery!(
+            session_id: "daily-architecture-#{index}", agent: "codex", project_slug: "demo",
+            stage: "refactor-patrol-review", started_at: NOW, limit: limit
+          )
+        end
+        assert_empty subject.candidates(now: NOW + 1)
+        assert_equal [ "demo" ], subject.candidates(now: NOW + 86_400).map { |item| item.fetch(:project) }
+      end
+    end
+  end
 end

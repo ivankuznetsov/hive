@@ -247,6 +247,17 @@ provider-only proxy, and sealed controller bundle remain the isolation
 boundary. The old OpenCode score is superseded pending a sealed six-cell rerun
 with that parity grant.
 
+Invocation-token custody now cleans ordinary inherited descendants even after
+`setsid` and reparenting, which is the leak observed during live Webmail
+dogfood. It is lifecycle cleanup, not hostile-process containment: a command
+that deliberately erases the custody environment or delegates a service to an
+external manager without forwarding it can evade the inventory. The same
+limit applies when a descendant becomes non-dumpable: an unreadable process
+environment cannot prove ownership. Unreadable same-user rows are skipped
+because unrelated service managers can legitimately have that property. A dedicated
+cgroup/namespace owner that preserves OpenCode's required repository writes,
+network, and cross-platform support remains a deeper isolation follow-up.
+
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 
 The serial Hive web job took 441 seconds in exact-head run `31818138021`, led
@@ -1401,6 +1412,16 @@ Finally, bot delivery of `auto_residue` on a row that becomes archived between
 polls has not been proven under the active-only transport. If that terminal
 transition carries a notification that was not visible before the move, the
 bot needs an exact event/receipt source instead of periodic archive scanning.
+
+## Benchmark egress preflight awaits a live Docker bypass canary (2026-08-27)
+
+Focused tests inject Docker network metadata and prove that strict topology is
+checked before the parallel campaign matrix starts. The 2026-09-09 sweep also
+ran real Docker network inspection: an internal network with only the named
+proxy container was admitted, and adding a peer was rejected. That proof used
+inert containers; it did not run the packaged CONNECT proxy or attempt direct
+HTTPS from a candidate. Keep this gap open until the packaged CI gate proves direct egress
+fails while the allowlisted proxy route still succeeds end to end.
 
 ## Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
 

@@ -183,6 +183,7 @@ module Hive
         @tracked_state_file_order_members = Set.new
         @tracked_state_file_cursor = 0
         @known_rows_by_key = {}
+        @advance_rows_by_key = {}
         @dispatched_today = 0
         reset_active_agent_snapshot
         # Per-tick enable cache. Populated lazily within one tick so
@@ -400,6 +401,7 @@ module Hive
         # consume every newly opened slot before an old direct row is ever
         # considered. Single-writer invariant: only the daemon spawns
         # `hive run`-class verbs.
+        cache_terminal_advances(result.rows)
         queue_dispatch = process_dispatch_requests(
           now: now, rows: result.rows, projects: result.projects
         )
@@ -527,7 +529,8 @@ module Hive
         # Reuse the last full attempt snapshot for them. Any row that could
         # heal or dispatch refreshes attempt ownership first, preserving the
         # capacity gate without scanning attempt history on every heartbeat.
-        if result.rows.any? { |row| !active_agent_row?(row) } && !reconcile_attempts(now: now)
+        dispatchable_change = result.rows.any? { |row| !active_agent_row?(row) }
+        if dispatchable_change && !reconcile_attempts(now: now)
           @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                    action: "incremental_attempt_reconciliation_failed")
           return false
@@ -549,8 +552,9 @@ module Hive
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
+        dispatch_rows = dispatchable_change ? incremental_dispatch_rows(result.rows) : result.rows
         @priority_capacity_fences = dispatch_rows_in_priority_order(
-          result.rows, now: now, capacity_fences: @priority_capacity_fences
+          dispatch_rows, now: now, capacity_fences: @priority_capacity_fences
         )
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  action: "incremental",
@@ -1236,6 +1240,12 @@ module Hive
         keys = task_keys.map { |project, slug| [ project.to_s, slug.to_s ] }.uniq
         keys.each { |key| @known_rows_by_key.delete(key) }
         rows.each { |row| @known_rows_by_key[task_key(row)] = row }
+        keys.each { |key| @advance_rows_by_key.delete(key) }
+        rows.each do |row|
+          next unless terminal_advance?(row)
+
+          @advance_rows_by_key[task_key(row)] = row
+        end
 
         keys.each { |key| @tracked_state_files.delete(key) }
         rows.each do |row|
@@ -2048,7 +2058,7 @@ module Hive
         []
       end
 
-      # Order fresh rows so tasks closer to the end of the pipeline dispatch
+      # Order rows so tasks closer to the end of the pipeline dispatch
       # first: a 7-artifacts row before a 6-review row, an 8-finalize before
       # both. Each half-hour waited adds one stage of priority, preventing
       # old earlier-stage work from starving behind a continuous stream of
@@ -2058,6 +2068,35 @@ module Hive
         rows.each_with_index
             .sort_by { |row, idx| [ -dispatch_priority(row, now: now), idx ] }
             .map(&:first)
+      end
+
+      # Coding's ready_to_* actions initiate their next stage and may require
+      # an agent run. Only the generic Patrol Fix approval is a terminal
+      # controller transition that must outrank fresh work in the same stage.
+      # Treating every Policy.advance? action as terminal makes a fast tick
+      # replay a cached coding transition after an unrelated state change.
+      def terminal_advance?(row)
+        row.workflow == "patrol-fix" && row.action == "ready_to_advance"
+      end
+
+      def cache_terminal_advances(rows)
+        @advance_rows_by_key = rows.filter_map do |row|
+          [ task_key(row), row ] if terminal_advance?(row)
+        end.to_h
+      end
+
+      # A bounded status refresh may contain only a newly-ready run row while
+      # an unchanged accepted Patrol Fix row remains in the last full-scan cache. Merge
+      # those cached terminal contenders with the changed non-terminal rows so
+      # the same ordering applies without reading another task file or
+      # rebuilding the complete status graph.
+      def incremental_dispatch_rows(changed_rows)
+        return changed_rows if @advance_rows_by_key.empty?
+
+        pending_keys = dispatch_repository.pending(state_home: dispatch_request_state_home)
+          .map { |request| [ request.project.to_s, request.slug.to_s ] }.to_set
+        cached = @advance_rows_by_key.values.reject { |row| pending_keys.include?(task_key(row)) }
+        cached + changed_rows.reject { |row| terminal_advance?(row) }
       end
 
       # Preserve priority across the full status frame and any changed-task
@@ -2086,6 +2125,9 @@ module Hive
           project_key = row.project.to_s
           capacity_fence = global_fence || project_fences[project_key]
           outcome = handle_row(row, now: now, capacity_fence: capacity_fence)
+          if %i[dispatched in_flight attempt_terminal_replay].include?(outcome)
+            @advance_rows_by_key.delete(task_key(row))
+          end
           case outcome
           when :global_cap, :attempt_capacity
             global_fence ||= outcome
@@ -2119,7 +2161,8 @@ module Hive
       end
 
       def dispatch_priority(row, now:)
-        stage_rank(row.stage) + dispatch_age_steps(row, now: now)
+        stage_rank(row.stage) + dispatch_age_steps(row, now: now) +
+          (terminal_advance?(row) ? 0.5 : 0)
       end
 
       def dispatch_age_steps(row, now:)

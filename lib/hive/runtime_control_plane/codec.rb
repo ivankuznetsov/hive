@@ -74,7 +74,11 @@ module Hive
       end
 
       def normalize_string(value)
-        string = value.encode(Encoding::UTF_8)
+        string = if value.encoding == Encoding::BINARY
+          value.dup.force_encoding(Encoding::UTF_8)
+        else
+          value.encode(Encoding::UTF_8)
+        end
         raise ArgumentError, "canonical JSON requires valid UTF-8" unless string.valid_encoding?
 
         string.unicode_normalize(:nfc)

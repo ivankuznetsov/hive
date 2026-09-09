@@ -5,6 +5,7 @@ require "hive/agent_profiles"
 require "hive/agent_support/pi"
 require "hive/scripts/workflow_policy_hook"
 require "hive/workflow_package/runtime_policy"
+require "hive/commands/evidence"
 
 class WorkflowPackageRuntimePolicyTest < Minitest::Test
   include HiveTestHelper
@@ -891,6 +892,29 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_trusted_actors_use_normal_environment_and_direct_file_output_for_every_provider
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      with_env("TRUSTED_WORKFLOW_TEST_VALUE" => "inherited") do
+        %i[claude codex grok pi opencode].each do |name|
+          policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            "yolo", task_folder: task, package_root: package,
+            profile: Hive::AgentProfiles.lookup(name),
+            managed_outputs: [ File.join(task, "review.md") ]
+          )
+          assert_equal "inherited", policy.environment["TRUSTED_WORKFLOW_TEST_VALUE"], name
+          assert_empty policy.command_prefix, name
+          assert_empty policy.cli_flags, name
+          assert_nil policy.allowed_tools, name
+          assert_nil policy.disallowed_tools, name
+          refute policy.host_outputs?, name
+        end
+      end
+    end
+  end
+
   def test_yolo_actor_rejects_unavailable_or_non_directory_trusted_caller_roots
     with_tmp_dir do |dir|
       task = File.join(dir, "task")
@@ -1580,8 +1604,15 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       end
 
       tools_index = policy.cli_flags.index("--tools")
-      assert_equal "read,ls,grep,find,evidence_write,evidence_terminal,evidence_browser",
+      assert_equal "read,ls,grep,find,evidence_write,evidence_terminal,evidence_browser,evidence_server",
                    policy.cli_flags.fetch(tools_index + 1)
+      interface = Hive::AgentSupport::Pi.producer_interface(
+        required_kinds: %w[screenshot video], browser: true
+      )
+      assert_equal "evidence_server", interface.fetch("server")
+      interface.each_value do |tool|
+        assert_includes policy.cli_flags.fetch(tools_index + 1).split(","), tool
+      end
       assert_includes policy.cli_flags, "--no-builtin-tools"
       refute_includes policy.cli_flags, "bash"
       mounts = policy.command_prefix.each_cons(3).to_a
@@ -1599,6 +1630,15 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       assert_includes extension, 'name: "evidence_write"'
       assert_includes extension, 'name: "evidence_terminal"'
       assert_includes extension, 'name: "evidence_browser"'
+      assert_includes extension, 'name: "evidence_server"'
+      assert_includes extension,
+                      '["evidence", "browser", ...params.argv]'
+      refute_includes extension, "params.command"
+      assert_includes extension,
+                      '["evidence", "server", executable, "--json", "--", ...argv]'
+      server_timeout = extension[/runHive\(\["evidence", "server"[^\n]+signal, (\d+)\)/, 1]
+      refute_nil server_timeout
+      assert_operator server_timeout.to_i, :>, Hive::Commands::Evidence::SERVER_GATEWAY_TIMEOUT_SECONDS * 1000
       refute_includes extension, "createBashTool"
       refute_includes extension, "createWriteTool"
       assert_equal writable, policy.environment.fetch("HIVE_EVIDENCE_WRITE_ROOT")

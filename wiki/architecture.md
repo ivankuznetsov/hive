@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-09-04
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Authored task and workflow documents remain files, while the activated SQLite runtime control plane owns attempt lifecycle, admission/accounting relationships, capacity, and routing-policy snapshots.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable independent attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Authored task and workflow documents remain files, while the activated SQLite runtime control plane owns machine-local attempt lifecycle, live capacity, request/result delivery, leases, payload references, PR reconciliation, and token history. Provider order stays in current configuration.
 
 ## Layer cake
 
@@ -38,8 +38,8 @@ protocol: a generation-scoped lease claimed by a detached supervisor wrapper
 that starts the ordinary Hive command as its worker. CLI calls admit locally
 and attach; bot/web requests are durable SQL deliveries consumed by the
 daemon when present; daemon auto-advance and coordinator-owned recovery call
-the same dispatcher; attempt-loss healing is a separate ledger successor
-admission. A daemon is optional after acceptance. Every surface attaches to
+the same dispatcher; attempt-loss healing creates one deterministic recovery
+request and an independent replacement attempt. A daemon is optional after acceptance. Every surface attaches to
 or observes the durable attempt instead of owning agent lifetime.
 
 ```text
@@ -55,7 +55,7 @@ daemon auto-advance / recovery ────┘          │
                                       provider agent group
 ```
 
-Attempt custody, wrapper ownership, successor healing, and lease durability
+Attempt custody, wrapper ownership, lost recovery, and lease durability
 are owned by [[modules/attempts]]; delivery scheduling, reconciliation
 policy, and non-task ancillary children are owned by [[modules/daemon]].
 

@@ -69,6 +69,10 @@ class AttemptsOutputReferenceTest < Minitest::Test
       reader = store.read_session
 
       assert_equal "typed diagnostic", reader.read_output(reference, max_bytes: 64)
+      empty_path = store.output_path("attempt-1", "empty.json")
+      File.binwrite(empty_path, "")
+      empty_reference = Hive::OutputReference.build(empty_path, root: root)
+      assert_equal "", reader.read_output(empty_reference, max_bytes: 64)
       assert_raises(Hive::Attempts::RepositoryError) do
         reader.read_output(reference, max_bytes: 0)
       end

@@ -28,7 +28,7 @@ prose-only maintenance refusal.
 
 `status` is read-only. It validates the immutable cutover manifest, the exact
 SQLite schema and application identity when a database exists, installation
-lineage, and activation epoch. A healthy database beside a missing, corrupt, or
+identity, and activation epoch. A healthy database beside a missing, corrupt, or
 identity-mismatched manifest is an error rather than an inferred active
 installation.
 

@@ -36,12 +36,12 @@ module Hive
         )
       end
 
-      def dispatch_successor(predecessor:, task:, project:, argv:, request_id:,
-                             provider:, inherited_outputs: nil, retry_charge: nil,
-                             interactive: false, now: Time.now.utc,
-                             admission_view: nil)
-        daemon.dispatch_successor(
-          predecessor: predecessor, task: task, project: project, argv: argv,
+      def dispatch_recovery(source_attempt:, task:, project:, argv:, request_id:,
+                            provider:, inherited_outputs: nil, retry_charge: nil,
+                            interactive: false, now: Time.now.utc,
+                            admission_view: nil)
+        daemon.dispatch_recovery(
+          source_attempt: source_attempt, task: task, project: project, argv: argv,
           request_id: request_id, provider: provider,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
           interactive: interactive, now: now, admission_view: admission_view
@@ -50,13 +50,12 @@ module Hive
 
       def dispatch_module_hook(project_root:, generation:, subject:, argv:,
                                request_id:, provider:, interactive: false,
-                               predecessor_attempt_id: nil, retry_charge: 0,
+                               retry_charge: 0,
                                now: Time.now.utc)
         daemon.dispatch_module_hook(
           project_root: project_root, generation: generation, subject: subject,
           argv: argv, request_id: request_id, provider: provider,
           interactive: interactive,
-          predecessor_attempt_id: predecessor_attempt_id,
           retry_charge: retry_charge, now: now
         )
       end

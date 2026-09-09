@@ -128,14 +128,13 @@ class TaskWorkspacePublicationCoverageGapsTest < Minitest::Test
   def test_pr_reader_and_frontmatter_failures_are_bounded
     with_service do |subject, folder, worktrees|
       pointer = strict_pointer(worktrees)
-      local = { "head_oid" => "d" * 40 }
       diagnostics = []
 
       File.binwrite(File.join(folder, "pr.md"), "\0binary")
-      assert_equal "unavailable", subject.send(:read_pr, pointer, local, diagnostics).fetch("state")
+      assert_equal "unavailable", subject.send(:read_pr, pointer, diagnostics).fetch("state")
 
       File.write(File.join(folder, "pr.md"), "# No identity\n")
-      assert_equal "partial", subject.send(:read_pr, pointer, local, diagnostics).fetch("state")
+      assert_equal "partial", subject.send(:read_pr, pointer, diagnostics).fetch("state")
 
       duplicate = "---\npr_url: a\npr_url: b\n---\nbody\n"
       assert_equal({}, subject.send(:parse_pr_document, duplicate, diagnostics).first)
@@ -147,7 +146,7 @@ class TaskWorkspacePublicationCoverageGapsTest < Minitest::Test
       FileUtils.rm_f(File.join(folder, "pr.md"))
       File.write(File.join(folder, "linked-pr"), "body")
       File.symlink(File.join(folder, "linked-pr"), File.join(folder, "pr.md"))
-      assert_equal "unavailable", subject.send(:read_pr, pointer, local, diagnostics).fetch("state")
+      assert_equal "unavailable", subject.send(:read_pr, pointer, diagnostics).fetch("state")
     end
   end
 

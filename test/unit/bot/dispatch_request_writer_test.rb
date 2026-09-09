@@ -61,7 +61,7 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
       assert_equal 926_850_952, request.update_id
       assert_equal "answer_complete", request.trigger
       assert_nil request.task_generation
-      assert_nil request.predecessor_attempt_id
+      refute_respond_to request, :predecessor_attempt_id
       assert_equal [], request.inherited_outputs
     end
   end
@@ -71,13 +71,13 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
       migrate!(dir)
       W.write!(project: "hive", slug: "task-260528-aaaa",
                argv: [ "hive", "run", "task-260528-aaaa" ],
-               task_generation: "generation-one", predecessor_attempt_id: "attempt-zero",
+               task_generation: "generation-one",
                inherited_outputs: [ { "path" => "outputs/old", "size" => 1, "sha256" => "0" * 64 } ],
                state_home: dir)
       request = repository(dir).pending.first
 
       assert_equal "generation-one", request.task_generation
-      assert_equal "attempt-zero", request.predecessor_attempt_id
+      refute_respond_to request, :predecessor_attempt_id
       assert_equal 1, request.inherited_outputs.size
     end
   end

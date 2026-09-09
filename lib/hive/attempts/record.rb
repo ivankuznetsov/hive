@@ -5,15 +5,15 @@ require "hive/attempts/capability"
 require "hive/output_reference"
 require "hive/billing_evidence"
 require "hive/stringify_keys"
+require "hive/runtime_control_plane/codec"
 
 module Hive
   module Attempts
     class InvalidRecord < Hive::Error; end
     class InvalidReceipt < InvalidRecord; end
 
-    # Immutable in-memory view of the one mutable JSON record for a durable
-    # task-stage attempt. Mutation is constructed by Store while holding the
-    # generation lock; callers can only observe snapshots.
+    # Immutable view of an attempt row. SQL owns lifecycle and identity fields;
+    # JSON holds only the remaining structured execution details.
     class Record
       SCHEMA = "hive-attempt"
       SCHEMA_VERSION = 4
@@ -39,23 +39,14 @@ module Hive
         ownership_generation task_input_epoch outcome exit_status started_at ended_at
         final_checkpoint output_references log_reference provider_evidence
       ].freeze
-      EXPLICIT_ROUTING_KEYS = %w[
-        mode policy_digest decision route circuit_generations probe_bindings
-      ].freeze
-      DECISION_KEYS = %w[decision_id policy_digest decided_at exclusions].freeze
-      EXCLUSION_KEYS = %w[route_id reason detail].freeze
+      EXPLICIT_ROUTING_KEYS = %w[mode route].freeze
       ROUTE_KEYS = %w[
         route_id provider_account_id adapter launch_binding_id model effort
       ].freeze
       ROUTE_BILLING_KEYS = %w[billing_route billing_evidence_source].freeze
       BILLING_ROUTES = Hive::BillingEvidence::ROUTES
       BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES
-      CIRCUIT_GENERATION_KEYS = %w[scope journal_epoch observed_generation].freeze
       SCOPE_KEYS = %w[kind provider_account_id model].freeze
-      PROBE_BINDING_KEYS = %w[
-        scope journal_epoch observed_generation claim_generation attempt_id
-        task_generation ownership_fence
-      ].freeze
       PROVIDER_EVIDENCE_KEYS = %w[
         failure_class scope provenance route_id reset_hint_seconds fingerprint
         source_reference
@@ -65,7 +56,7 @@ module Hive
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
       FINAL_STATES = %w[terminal lost].freeze
       IMMUTABLE_KEYS = %w[
-        schema schema_version attempt_id request_id predecessor_attempt_id
+        schema schema_version attempt_id request_id
         task_id project task_slug intended_stage task_generation progress_token
         ownership_generation task_input_epoch
         provider routing worker_argv claim_capability_digest starting_revision retry_charge
@@ -78,9 +69,46 @@ module Hive
         receipt loss diagnostics
       ]).uniq.freeze
 
+      ROW_FIELDS = %w[
+        attempt_id request_id task_id task_slug task_generation ownership_generation
+        state outcome lease_version retry_charge created_at accepted_at started_at heartbeat_at ended_at
+      ].to_h { |key| [ key, key.to_sym ] }.merge("project" => :project_name).freeze
+      DETAIL_KEYS = (REQUIRED_KEYS - ROW_FIELDS.keys - %w[schema schema_version subject receipt]).freeze
+
+      def self.from_row(row)
+        details = RuntimeControlPlane::Codec.load_json(row.fetch(:details_json))
+        validate_exact_keys!(details, DETAIL_KEYS, "attempt details", InvalidRecord)
+        data = details.merge(ROW_FIELDS.transform_values { |column| row.fetch(column) })
+        routing = data["routing"]
+        route = routing["route"] if routing.is_a?(Hash)
+        route["provider_account_id"] = row.fetch(:provider_account_id) if route.is_a?(Hash)
+        if row[:state] == "terminal"
+          receipt_json = row.fetch(:terminal_receipt_json)
+          unless Digest::SHA256.hexdigest(receipt_json) == row.fetch(:terminal_receipt_digest)
+            raise InvalidRecord, "terminal receipt digest mismatch"
+          end
+          receipt = RuntimeControlPlane::Codec.load_json(receipt_json)
+        end
+        new(data.merge(
+          "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
+          "subject" => RuntimeControlPlane::Codec.load_json(row.fetch(:subject_json)),
+          "receipt" => receipt
+        ))
+      end
+
+      def to_row
+        details = to_h.slice(*DETAIL_KEYS)
+        details.fetch("routing")["route"]&.delete("provider_account_id")
+        ROW_FIELDS.to_h { |key, column| [ column, self[key] ] }.merge(
+          details_json: RuntimeControlPlane::Codec.dump_json(details),
+          subject_json: RuntimeControlPlane::Codec.dump_json(subject),
+          provider_account_id: self["routing"].dig("route", "provider_account_id")
+        )
+      end
+
       attr_reader :data
 
-      def self.launching(attempt_id:, request_id:, predecessor_attempt_id:, task_id:, project:,
+      def self.launching(attempt_id:, request_id:, task_id:, project:,
                          task_slug:, intended_stage:, task_generation:, progress_token:, provider:,
                          worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
                          inherited_outputs:, now:,
@@ -95,7 +123,6 @@ module Hive
           "schema_version" => SCHEMA_VERSION,
           "attempt_id" => attempt_id,
           "request_id" => request_id,
-          "predecessor_attempt_id" => predecessor_attempt_id,
           "task_id" => task_id,
           "project" => project,
           "task_slug" => task_slug,
@@ -368,7 +395,8 @@ module Hive
         case value.fetch("kind")
         when "task_stage"
           expected = %w[intended_stage kind task_id task_slug]
-          unless value.keys.sort == expected && value["task_id"] == @data["task_id"] &&
+          unless @data["task_id"].is_a?(String) && !@data["task_id"].empty? &&
+                 value.keys.sort == expected && value["task_id"] == @data["task_id"] &&
                  value["task_slug"] == @data["task_slug"] && value["intended_stage"] == @data["intended_stage"]
             raise InvalidRecord, "attempt task subject has incompatible identity with legacy fields"
           end
@@ -417,50 +445,9 @@ module Hive
           validate_exact_keys!(
             routing, EXPLICIT_ROUTING_KEYS, "explicit attempt routing", InvalidRecord
           )
-          policy_digest = routing["policy_digest"]
-          validate_sha256!(policy_digest, "routing policy digest", InvalidRecord)
-          validate_decision!(routing["decision"], policy_digest: policy_digest)
           route = validate_route!(routing["route"])
           unless route["adapter"] == provider
             raise InvalidRecord, "explicit routing adapter must match the attempt provider"
-          end
-
-          circuits = validate_circuit_generations!(
-            routing["circuit_generations"], route: route
-          )
-          validate_probe_bindings!(
-            routing["probe_bindings"],
-            circuits: circuits,
-            attempt_id: attempt_id,
-            task_generation: task_generation,
-            ownership_generation: ownership_generation
-          )
-        end
-
-        def validate_decision!(decision, policy_digest:)
-          validate_exact_keys!(decision, DECISION_KEYS, "routing decision", InvalidRecord)
-          validate_identifier!(decision["decision_id"], "routing decision", InvalidRecord)
-          validate_sha256!(decision["policy_digest"], "routing decision policy digest", InvalidRecord)
-          unless decision["policy_digest"] == policy_digest
-            raise InvalidRecord, "routing decision policy digest mismatch"
-          end
-          parse_time(decision["decided_at"], label: "routing decision time", error_class: InvalidRecord)
-
-          exclusions = decision["exclusions"]
-          unless exclusions.is_a?(Array) && exclusions.length <= 1_024
-            raise InvalidRecord, "routing decision exclusions must be a bounded array"
-          end
-          route_ids = exclusions.map do |exclusion|
-            validate_exact_keys!(
-              exclusion, EXCLUSION_KEYS, "routing decision exclusion", InvalidRecord
-            )
-            validate_identifier!(exclusion["route_id"], "excluded route", InvalidRecord)
-            validate_identifier!(exclusion["reason"], "routing exclusion reason", InvalidRecord)
-            validate_optional_detail!(exclusion["detail"], "routing exclusion detail", InvalidRecord)
-            exclusion["route_id"]
-          end
-          if route_ids.uniq.length != route_ids.length
-            raise InvalidRecord, "routing decision cannot repeat an excluded route"
           end
         end
 
@@ -490,77 +477,6 @@ module Hive
             end
           end
           route
-        end
-
-        def validate_circuit_generations!(generations, route:)
-          unless generations.is_a?(Array) && generations.length == 2
-            raise InvalidRecord, "explicit routing requires both enclosing circuit generations"
-          end
-          scopes = generations.map do |entry|
-            validate_exact_keys!(
-              entry, CIRCUIT_GENERATION_KEYS, "routing circuit generation", InvalidRecord
-            )
-            scope = validate_scope!(entry["scope"], "routing circuit scope", InvalidRecord)
-            validate_nonnegative_integer!(
-              entry["journal_epoch"], "routing circuit journal epoch", InvalidRecord
-            )
-            validate_nonnegative_integer!(
-              entry["observed_generation"], "routing circuit observed generation", InvalidRecord
-            )
-            scope
-          end
-          if scopes.uniq.length != scopes.length
-            raise InvalidRecord, "routing circuit generation vector cannot repeat a scope"
-          end
-
-          expected = [
-            [ "provider_account", route["provider_account_id"], nil ],
-            [ "model", route["provider_account_id"], route["model"] ]
-          ]
-          actual = scopes.map { |scope| scope_identity(scope) }
-          unless expected.all? { |scope| actual.include?(scope) }
-            raise InvalidRecord, "routing circuit scopes must enclose the selected route"
-          end
-          generations
-        end
-
-        def validate_probe_bindings!(bindings, circuits:, attempt_id:, task_generation:,
-                                     ownership_generation:)
-          unless bindings.is_a?(Array) && bindings.length <= 2
-            raise InvalidRecord, "routing probe bindings must be a bounded array"
-          end
-          scopes = bindings.map do |binding|
-            validate_exact_keys!(
-              binding, PROBE_BINDING_KEYS, "routing probe binding", InvalidRecord
-            )
-            scope = validate_scope!(binding["scope"], "routing probe scope", InvalidRecord)
-            validate_nonnegative_integer!(
-              binding["journal_epoch"], "routing probe journal epoch", InvalidRecord
-            )
-            validate_nonnegative_integer!(
-              binding["observed_generation"], "routing probe observed generation", InvalidRecord
-            )
-            validate_nonnegative_integer!(
-              binding["claim_generation"], "routing probe claim generation", InvalidRecord
-            )
-            unless binding["claim_generation"] == binding["observed_generation"] + 1
-              raise InvalidRecord, "routing probe claim generation must follow its observation"
-            end
-            unless binding["attempt_id"] == attempt_id &&
-                   binding["task_generation"] == task_generation &&
-                   binding["ownership_fence"] == ownership_generation
-              raise InvalidRecord, "routing probe binding does not match attempt ownership"
-            end
-            circuit = circuits.find { |entry| entry["scope"] == scope }
-            unless circuit && circuit["journal_epoch"] == binding["journal_epoch"] &&
-                   circuit["observed_generation"] == binding["observed_generation"]
-              raise InvalidRecord, "routing probe binding does not match its circuit observation"
-            end
-            scope
-          end
-          if scopes.uniq.length != scopes.length
-            raise InvalidRecord, "routing probe bindings cannot repeat a scope"
-          end
         end
 
         def validate_provider_evidence!(evidence, routing:, protected_references:)
@@ -651,15 +567,6 @@ module Hive
           true
         end
 
-        def validate_optional_detail!(value, label, error_class)
-          return true if value.nil?
-          unless value.is_a?(String) && !value.empty? && value.bytesize <= MAX_DETAIL_BYTES &&
-                 value.valid_encoding? && !value.match?(/[\u0000-\u001f\u007f]/)
-            raise error_class, "#{label} is invalid"
-          end
-          true
-        end
-
         def validate_nonnegative_integer!(value, label, error_class)
           unless value.is_a?(Integer) && value >= 0
             raise error_class, "#{label} must be a non-negative integer"
@@ -672,10 +579,6 @@ module Hive
             raise error_class, "#{label} must be lowercase SHA-256"
           end
           true
-        end
-
-        def scope_identity(scope)
-          [ scope["kind"], scope["provider_account_id"], scope["model"] ]
         end
 
         def canonical_value(value)

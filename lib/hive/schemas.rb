@@ -11,7 +11,6 @@ module Hive
       "hive-running-status" => 2,
       "hive-operational-status" => 4,
       "hive-runtime-maintenance" => 1,
-      "hive-circuits" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
       "hive-init" => 2,

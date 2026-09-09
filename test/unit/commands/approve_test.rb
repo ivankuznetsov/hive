@@ -605,7 +605,7 @@ class HiveCommandsApproveTest < Minitest::Test
       now = Time.utc(2026, 8, 25, 10, 0, 0)
       store = Hive::Attempts::Repository.new(root: File.join(folder, "attempts"), migrate: true)
       first = store.create_launching(
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "demo", task_slug: "durable-task",
         intended_stage: "2-fix", task_generation: "ownership-1",
         ownership_generation: "ownership-1", task_input_epoch: 0,
@@ -621,7 +621,7 @@ class HiveCommandsApproveTest < Minitest::Test
       store.first_heartbeat(claimed, stale_sec: 30, now: now)
       store.create_launching(
         attempt_id: "attempt-2", request_id: "request-2",
-        predecessor_attempt_id: "attempt-1", task_id: "42", project: "demo",
+        task_id: "42", project: "demo",
         task_slug: "durable-task", intended_stage: "2-fix",
         task_generation: "ownership-2", ownership_generation: "ownership-2",
         task_input_epoch: 0, progress_token: "progress-2", provider: "pi",

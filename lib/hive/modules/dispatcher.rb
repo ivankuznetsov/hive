@@ -171,7 +171,6 @@ module Hive
               argv: retry_attempt.argv,
               request_id: "module-retry:#{retry_attempt.subject.fetch('event_id')}:#{hook_id}:#{charge}",
               provider: "module", interactive: false,
-              predecessor_attempt_id: previous_attempt.attempt_id,
               retry_charge: charge, now: @clock.call,
               project_root: File.dirname(@store.hive_state_path)
             )

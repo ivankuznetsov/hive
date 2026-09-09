@@ -70,18 +70,18 @@ class AttemptsAPITest < Minitest::Test
     assert_equal true, call.last.fetch(:replay_semantic_terminal)
   end
 
-  def test_dispatch_successor_delegates_recovery_admission
+  def test_dispatch_recovery_delegates_independent_admission
     daemon = Object.new
     call = nil
-    daemon.define_singleton_method(:dispatch_successor) do |**attributes|
+    daemon.define_singleton_method(:dispatch_recovery) do |**attributes|
       call = attributes
       :accepted
     end
     api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
 
-    result = api.dispatch_successor(
+    result = api.dispatch_recovery(
       task: :task,
-      predecessor: :lost,
+      source_attempt: :lost,
       project: "demo",
       argv: %w[hive run task],
       request_id: "request-2",
@@ -91,7 +91,7 @@ class AttemptsAPITest < Minitest::Test
 
     assert_equal :accepted, result
     assert_equal :task, call.fetch(:task)
-    assert_equal :lost, call.fetch(:predecessor)
+    assert_equal :lost, call.fetch(:source_attempt)
     assert_equal "demo", call.fetch(:project)
     assert_equal %w[hive run task], call.fetch(:argv)
     assert_equal "request-2", call.fetch(:request_id)
@@ -116,7 +116,6 @@ class AttemptsAPITest < Minitest::Test
       request_id: "request-3",
       provider: "internal",
       interactive: false,
-      predecessor_attempt_id: "attempt-2",
       retry_charge: 2,
       now: Time.at(2).utc
     )
@@ -129,7 +128,7 @@ class AttemptsAPITest < Minitest::Test
     assert_equal "request-3", call.fetch(:request_id)
     assert_equal "internal", call.fetch(:provider)
     assert_equal false, call.fetch(:interactive)
-    assert_equal "attempt-2", call.fetch(:predecessor_attempt_id)
+    refute_includes call, :predecessor_attempt_id
     assert_equal 2, call.fetch(:retry_charge)
     assert_equal Time.at(2).utc, call.fetch(:now)
 

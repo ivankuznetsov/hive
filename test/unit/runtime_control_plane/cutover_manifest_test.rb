@@ -8,7 +8,7 @@ class RuntimeControlPlaneCutoverManifestTest < Minitest::Test
   def test_document_normalizes_identity_and_cutover_evidence
     with_tmp_dir do
       manifest = Hive::RuntimeControlPlane::CutoverManifest.build(
-        phase: "ready", installation_id: "install-1", lineage_id: "lineage-1",
+        phase: "ready", installation_id: "install-1",
         source_release: "0.7.2", target_release: "candidate",
         exclusions: [ { "project_id" => "retired", "reason" => "deregistered" } ],
         task_authority: [ { "task_id" => "task-1", "fingerprint" => "abc" } ],
@@ -102,7 +102,7 @@ class RuntimeControlPlaneCutoverManifestTest < Minitest::Test
 
   def minimal_document
     Hive::RuntimeControlPlane::CutoverManifest.build(
-      phase: "ready", installation_id: "install-1", lineage_id: "lineage-1",
+      phase: "ready", installation_id: "install-1",
       source_release: "0.7.2", target_release: "candidate",
       exclusions: [], task_authority: []
     )

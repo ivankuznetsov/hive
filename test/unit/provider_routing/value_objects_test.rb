@@ -5,16 +5,15 @@ require "rbconfig"
 require "hive/provider_routing"
 
 class ProviderRoutingValueObjectsTest < Minitest::Test
-  def test_public_entrypoint_resolves_policy_repository_without_legacy_storage
+  def test_public_entrypoint_does_not_expose_retired_provider_state
     lib = File.expand_path("../../../lib", __dir__)
     script = <<~'RUBY'
       require "json"
       require "hive/provider_routing"
       puts JSON.generate(
-        "constant" => Hive::ProviderRouting::PolicyRepository.name,
-        "attempts_point_storage_loaded" => $LOADED_FEATURES.any? do |feature|
-          feature.end_with?("/hive/attempts/point_storage.rb")
-        end
+        "policy_repository" => Hive::ProviderRouting.const_defined?(:PolicyRepository, false),
+        "operational_projection" => Hive::ProviderRouting.const_defined?(:OperationalProjection, false),
+        "provider_health" => Hive.const_defined?(:ProviderHealth, false)
       )
     RUBY
     out, err, status = Open3.capture3(
@@ -27,8 +26,9 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
 
     assert status.success?, err
     payload = JSON.parse(out)
-    assert_equal "Hive::ProviderRouting::PolicyRepository", payload.fetch("constant")
-    assert_equal false, payload.fetch("attempts_point_storage_loaded")
+    assert_equal false, payload.fetch("policy_repository")
+    assert_equal false, payload.fetch("operational_projection")
+    assert_equal false, payload.fetch("provider_health")
   end
 
   def test_request_route_and_decision_are_deeply_immutable
@@ -64,8 +64,8 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
     request = Hive::ProviderRouting::Request.new(
       policy: policy,
       task_generation: "generation-1",
-      health: { "codex-primary" => { "state" => "closed" } },
-      capacity: { "codex-primary" => { "observed" => 0, "max" => 2 } }
+      capacity: { "codex-primary" => { "observed" => 0, "max" => 2 } },
+      failed_route_id: "previous/route"
     )
     decision = Hive::ProviderRouting::Decision.selected(
       request: request,
@@ -78,7 +78,8 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
     assert route.capabilities.frozen?
     assert route.capabilities.fetch("tools").frozen?
     assert request.frozen?
-    assert request.health.dig("codex-primary").frozen?
+    assert request.capacity.dig("codex-primary").frozen?
+    assert_equal "previous/route", request.failed_route_id
     assert decision.frozen?
     assert decision.considered.frozen?
     assert_equal "codex-primary", decision.account
@@ -95,6 +96,7 @@ class ProviderRoutingValueObjectsTest < Minitest::Test
     assert_empty policy.routes
     assert_nil policy.digest
     assert_nil policy.decision_id
+    assert_equal "hive-provider-routing-policy/v1", policy.to_h.fetch("schema")
   end
 
   def test_request_decision_and_canonical_values_reject_invalid_inputs

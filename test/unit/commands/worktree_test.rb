@@ -272,7 +272,7 @@ class HiveCommandsWorktreeTest < Minitest::Test
       reason: "dirty_worktree", marker_id: "execute-dirty-secret", attempt_id: "attempt-secret"
     )
     FileUtils.mkdir_p(File.join(@worktree, "web", "config"))
-    secret = "AKIAABCDEFGHIJKLMNOP"
+    secret = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
     File.write(File.join(@worktree, "web", "config", "routes.rb"), "#{secret}\n")
     recovered = false
     recovery = ->(*) { recovered = true }
@@ -293,7 +293,7 @@ class HiveCommandsWorktreeTest < Minitest::Test
 
   def test_commit_residue_rejects_secret_content_without_committing_or_leaking_it
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
-    secret = "AKIAABCDEFGHIJKLMNOP"
+    secret = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
     File.write(File.join(@worktree, "wiki", "residue.md"), "#{secret}\n")
 
     out, error = run_command_error("commit-residue")
@@ -552,7 +552,8 @@ class HiveCommandsWorktreeTest < Minitest::Test
   def test_discard_residue_uses_private_exact_identity_for_redacted_filename
     FileUtils.mkdir_p(File.join(@worktree, "wiki"))
     FileUtils.mkdir_p(File.join(@worktree, "lib"))
-    secret_path = "wiki/AKIAABCDEFGHIJKLMNOP.md"
+    secret = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
+    secret_path = "wiki/#{secret}.md"
     meaningful_path = "lib/repair.rb"
     File.write(File.join(@worktree, secret_path), "generated baseline\n")
     File.write(File.join(@worktree, meaningful_path), "meaningful change\n")
@@ -562,12 +563,12 @@ class HiveCommandsWorktreeTest < Minitest::Test
     )
     assert_equal :safety_violation, result.fetch(:status)
     assert_equal [ secret_path ], result.fetch(:recovery_paths)
-    refute_includes result.fetch(:paths).join(","), "AKIAABCDEFGHIJKLMNOP"
+    refute_includes result.fetch(:paths).join(","), secret
     attrs = Hive::Stages::CleanExit.failure_marker_attrs(
       result, origin: :review_pre_fix, task_folder: @task.folder
     )
     refute attrs.key?(:residue_paths_b64)
-    refute_includes attrs.fetch(:residue_paths), "AKIAABCDEFGHIJKLMNOP"
+    refute_includes attrs.fetch(:residue_paths), secret
     assert_equal Hive::Stages::CleanExit::RESIDUE_PATHS_FILE,
                  attrs.fetch(:residue_paths_file)
     Hive::Markers.set(@task.state_file, :error, **attrs)

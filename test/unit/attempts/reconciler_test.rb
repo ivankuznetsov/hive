@@ -412,7 +412,7 @@ class AttemptsReconcilerTest < Minitest::Test
 
   def create(store, attempt_id: "attempt-1", timeout: 30)
     store.create_launching(
-      attempt_id: attempt_id, request_id: "request-#{attempt_id}", predecessor_attempt_id: nil,
+      attempt_id: attempt_id, request_id: "request-#{attempt_id}",
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-#{attempt_id}",
       progress_token: "progress", provider: "codex",

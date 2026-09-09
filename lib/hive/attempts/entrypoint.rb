@@ -1,7 +1,6 @@
 require "securerandom"
 require "hive/attempts/client"
 require "hive/attempts/configured_dispatcher"
-require "hive/attempts/finalization_maintenance"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/recovery_coordinator"
 
@@ -12,11 +11,10 @@ module Hive
     # command implementation runs later inside the wrapper.
     class Entrypoint
       def initialize(store: nil, dispatcher: nil, client: nil,
-                     maintenance: nil, recovery_coordinator: nil, state_home: nil)
+                     recovery_coordinator: nil, state_home: nil)
         @store = store
         @dispatcher = dispatcher
         @client = client
-        @maintenance = maintenance
         @recovery_coordinator = recovery_coordinator
         @state_home = state_home
       end
@@ -24,8 +22,6 @@ module Hive
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
                    provider: nil, interactive: true, now: Time.now.utc)
         store = @store ||= Repository.open_default
-        @maintenance ||= FinalizationMaintenance.runtime(store: store)
-        run_opportunistic_maintenance(@maintenance, now: now)
         dispatcher = @dispatcher ||= ConfiguredDispatcher.new(store: store)
         project = project_name_for(task)
         result = dispatcher.dispatch(
@@ -77,7 +73,6 @@ module Hive
           slug: task.slug,
           argv: argv,
           requestor: "cli",
-          predecessor_attempt_id: nil,
           inherited_outputs: [], chat_id: nil, update_id: nil, trigger: "recovery",
           task_generation: nil, task_id: task.id, expected_stage: task.stage_name,
           expected_marker_name: nil, expected_marker_id: nil, recovery: nil,
@@ -95,15 +90,6 @@ module Hive
         File.dirname(File.dirname(store.root))
       rescue NoMethodError
         Hive::Paths.state_home
-      end
-
-      # Storage upkeep must never become an admission outage. The concrete
-      # maintenance service records degraded health before raising, then the
-      # next due run retries while this request continues to dispatch.
-      def run_opportunistic_maintenance(maintenance, now:)
-        maintenance&.run_if_due(now: now)
-      rescue StandardError
-        nil
       end
 
       def project_name_for(task)

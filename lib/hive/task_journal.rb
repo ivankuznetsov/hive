@@ -208,47 +208,8 @@ module Hive
           raise AttemptMismatch, "durable attempt mismatch: #{mismatches.join(', ')}"
         end
 
-        validate_lineage!(attempt)
       rescue Hive::Error => e
         raise AttemptMismatch, e.message
-      end
-
-      def validate_lineage!(attempt)
-        expected = {
-          "task_slug" => attempt["task_slug"],
-          "task_id" => attempt["task_id"].to_s,
-          "intended_stage" => attempt["intended_stage"],
-          "task_input_epoch" => attempt_value(attempt, :task_input_epoch)
-        }
-        lineage = []
-        seen = {}
-        current = attempt
-        loop do
-          id = attempt_value(current, :attempt_id)
-          raise AttemptMismatch, "durable attempt lineage cycle at #{id}" if seen[id]
-
-          seen[id] = true
-          lineage << current
-          predecessor_id = current["predecessor_attempt_id"]
-          break if predecessor_id.to_s.empty?
-
-          predecessor = if @attempt_cache.key?(predecessor_id)
-            @attempt_cache[predecessor_id]
-          else
-            @attempt_cache[predecessor_id] = fetch_attempt(predecessor_id)
-          end
-          unless predecessor
-            raise AttemptMismatch, "durable attempt lineage is missing predecessor #{predecessor_id}"
-          end
-          unless predecessor["task_slug"] == expected.fetch("task_slug") &&
-                 predecessor["task_id"].to_s == expected.fetch("task_id") &&
-                 predecessor["intended_stage"] == expected.fetch("intended_stage") &&
-                 attempt_value(predecessor, :task_input_epoch) == expected.fetch("task_input_epoch")
-            raise AttemptMismatch, "durable attempt lineage predecessor #{predecessor_id} has incompatible identity"
-          end
-          current = predecessor
-        end
-        lineage.freeze
       end
 
       def fetch_attempt(attempt_id)

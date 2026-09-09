@@ -2,6 +2,7 @@ require "json"
 require "pathname"
 require "time"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/task_workspace"
 
 module Hive
@@ -113,7 +114,7 @@ module Hive
         reference = value.tr("\\", "/")
         path = Pathname.new(reference)
         if reference.empty? || reference.include?("\0") || path.absolute? ||
-           path.each_filename.any? { |part| part == ".." } || Hive::SecretPatterns.match?(reference)
+           path.each_filename.any? { |part| part == ".." } || Hive::SecretScanner.match?(reference)
           raise InvalidReceipt, "selected context reference is unsafe"
         end
         root = File.realpath(File.expand_path(project_root))

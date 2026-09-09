@@ -13,7 +13,9 @@
   current; it re-resolves and integrity-checks the current receipt reference
   before printing a bounded tail.
 - Use `hive daemon status --json` for daemon process health. Do not substitute daemon health for task or scheduler truth.
-- Use `hive circuits inspect --json` for the shared provider-account/model health, capacity, and routing-decision projection. Add `--provider ACCOUNT` or `--model MODEL` to keep accounts and decisions in the same scope.
+- Read the nullable routing decision in current operational status. Routing is
+  stateless: Hive tries the configured routes in order and rotates away from a
+  failed route without retaining provider-health or circuit state.
 
 Operational status is the public fleet workflow projection. A current daemon observation may add scheduler ownership, capacity, queue, provider-hold, cooldown, and recovery facts. Only a complete, unexpired observation from the live daemon generation is current. Missing, stale, invalid, or mismatched scheduler evidence lowers completeness and must not become a confident blocker claim.
 
@@ -89,8 +91,8 @@ substitute for the task's result or the correlated failure log.
 The task view does not probe providers and does not reconcile invoices. Never
 infer live provider health, quota, credential validity, actual subscription or
 API charge, or provider-observed billing from it. Use current operational
-scheduler evidence for task ownership and `hive circuits inspect --json` for
-the dedicated provider-account/model health projection.
+scheduler and routing evidence for task ownership and the route selected for
+that dispatch; Hive has no durable provider-health projection.
 
 ## Watch selected work
 

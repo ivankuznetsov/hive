@@ -100,7 +100,7 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
       Hive::RuntimeControlPlane::CutoverManifest.new(path: manifest_path).publish(
         Hive::RuntimeControlPlane::CutoverManifest.build(
           phase: "active", installation_id: identity.fetch(:installation_id),
-          lineage_id: identity.fetch(:lineage_id), source_release: "old", target_release: "new",
+          source_release: "old", target_release: "new",
           exclusions: [], task_authority: [], evidence: { "activation_epoch" => 0 }
         )
       )

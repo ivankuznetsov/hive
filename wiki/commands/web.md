@@ -1120,3 +1120,7 @@ ffmpeg, ffprobe, and Tesseract. The separate Playwright dependency in
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].
+
+Live-status setup uses one error boundary for consumer creation, installation,
+and subscription registration. It routes failure by current attempt identity;
+retired attempts dispose their own resources and cannot affect the successor.

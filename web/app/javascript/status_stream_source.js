@@ -105,35 +105,15 @@ class StatusStreamOwner {
   }
 
   async setupAttempt(attempt) {
-    let consumer
     try {
-      consumer = await this.source.createConsumer()
-    } catch (error) {
-      if (this.isCurrentAttempt(attempt)) {
-        this.failAttempt(attempt, error)
-      } else {
-        this.retireStaleAttempt(attempt, error)
-      }
-      return
-    }
-
-    try {
+      const consumer = await this.source.createConsumer()
       this.installConsumer(attempt, consumer)
-    } catch (error) {
-      if (this.isCurrentAttempt(attempt)) {
-        this.failAttempt(attempt, error)
-      } else {
-        this.retireStaleAttempt(attempt, error)
+
+      if (!this.isCurrentAttempt(attempt)) {
+        this.retireStaleAttempt(attempt)
+        return
       }
-      return
-    }
 
-    if (!this.isCurrentAttempt(attempt)) {
-      this.retireStaleAttempt(attempt)
-      return
-    }
-
-    try {
       const subscription = consumer.subscriptions.create(this.source.channel, {
         received: (data) => this.runAttemptCallback(
           attempt,

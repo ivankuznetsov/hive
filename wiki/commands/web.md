@@ -768,6 +768,38 @@ rendered while a plan review applies, and task mutations independently invoke
 
 ## Tests
 
+### Status stream lifecycle checks and rollback
+
+The application fence is checked separately through real Async, real Solid
+Cable with an isolated temporary database, and the browser boundary:
+
+```bash
+cd web
+bin/rails test test/channels/status_channel_test.rb
+bin/rails test test/channels/status_channel_solid_cable_test.rb
+bin/rails test test/system/kanban_board_test.rb
+STATUS_CHANNEL_STRESS_ITERATIONS=100 STATUS_CHANNEL_STRESS_SEED=42837 \
+  bin/rails test test/channels/status_channel_test.rb
+```
+
+Production warning signals are a `StatusBroadcaster` subscriber lease count
+that drifts from connected pages and the never-confirmed cleanup path leaving a
+board that never becomes live. If the application coordination deadlocks,
+leaks, or suppresses a legitimate confirmation after merge, stop the rollout
+and revert the production lifecycle coordination in `StatusChannel` while
+retaining the owner-neutral contract, negative controls, and documentation.
+Before a repaired change is deployed, rerun the focused Async and Solid Cable
+suites plus the affected never-confirmed/disposed-source system case (and the
+full system file when the boundary is not isolated).
+
+A future Rails-owned handoff has a different, atomic rollback: restore the last
+verified released Rails declaration and complete lockfile together with the
+application fence, then rerun the focused lifecycle suite and whichever outer
+gate failed. Do not accept framework ownership until the exact upstream
+PR/merge/release provenance and every applicable verification row pass. A
+dependency bump, fence deletion, deployment, or version choice is not part of
+the current lifecycle repair.
+
 `web/test/integration/` drives the real GithubAuth through the device-flow
 routes via the `http:` DI seam (no API stubbing), including ownerless
 first-login claim, persisted `web.github.owner`, request-time owner-change

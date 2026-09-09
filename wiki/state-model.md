@@ -574,7 +574,17 @@ authoritative before local release. `StatusChannel` fences the deferred adapter
 subscribe before it begins and in its completion callback, removing a handler
 that finishes after teardown. An adapter exception after deferral releases the
 lease and reconnects the transport instead of stranding an active unconfirmed
-channel. A rejected server subscription is forgotten
+channel. Queued and registering attempts live only in a synchronized
+application registry; a handler enters Rails' `streams` registry only after
+the adapter success callback. A named or global stop cancels pending attempts
+without a raw unsubscribe, while each registered handler has exactly one raw
+unsubscribe owner. If stop wins while registration completes, the callback
+suppresses confirmation and delivery and posts one late unsubscribe back to
+the event loop, outside adapter subscriber locks. Repeated stops are
+idempotent. Adapter failure clears both registries before releasing the
+independent broadcaster lease and requesting one reconnect, so teardown and
+failure cannot double-release another page's lease or retain an unconfirmed
+stream. A rejected server subscription is forgotten
 and retried. A rejected asynchronous consumer setup
 clears turbo-rails' rejected cached consumer promise before retrying at a
 bounded five-second cadence. A synchronous subscription-creation failure drops

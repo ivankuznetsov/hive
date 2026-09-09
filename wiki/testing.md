@@ -867,6 +867,48 @@ confirmation callback ever arrives, retry after a real server-side startup
 rejection, and reconnect after deferred adapter registration fails. Unit barriers
 bound every wait and assert the exact shared scan count and first-poller lease
 rollback rather than relying on scheduler timing.
+
+`web/test/channels/status_channel_test.rb` now pairs those application-specific
+barriers with an explicit channel that binds directly to Rails' unfenced
+`ActionCable::Channel::Streams` implementation. Each negative control must
+expose the forbidden late registration/confirmation before `StatusChannel`
+proves queued cancellation, in-registration teardown, targeted/global and
+repeated stops, exact raw unsubscribe counts, failure/recovery, empty state,
+callback/coder/default-transmit compatibility, and private-API drift guards.
+The reusable assertions in
+`web/test/support/status_channel_stream_lifecycle_contract.rb` construct a real
+`ActionCable::Connection::Base` and channel without the Rails `ChannelStub` or
+a deferred-start assumption. The same contract runs against real Async and,
+unconditionally in `status_channel_solid_cable_test.rb`, real Solid Cable. The
+Solid suite loads `db/cable_schema.rb` into a per-example temporary SQLite
+database, leaves `config/cable.yml` test delivery on Async, and asserts row,
+connection, listener-thread, and database cleanup.
+
+```bash
+cd web
+bin/rails test test/channels/status_channel_test.rb
+bin/rails test test/channels/status_channel_solid_cable_test.rb
+bin/rails test test/system/kanban_board_test.rb
+STATUS_CHANNEL_STRESS_ITERATIONS=100 STATUS_CHANNEL_STRESS_SEED=42837 \
+  bin/rails test test/channels/status_channel_test.rb
+```
+
+Stress is not a default test or CI path: `STATUS_CHANNEL_STRESS_ITERATIONS`
+defaults to zero, and an enabled run prints its generated or supplied seed,
+adapter/window, and count before executing. The 2026-08-30 acceptance run used
+seed `42837`, completed 100 bounded iterations for each teardown window, and
+reported 1,935 assertions with no failures, errors, or skips. The disposed-DOM
+browser case also records confirmation before server teardown and proves no
+catch-up action or later confirmation crosses that boundary.
+
+The same acceptance run completed the release-default Web suite at 344 tests /
+2,055 assertions and the full system suite at 63 tests / 636 assertions, with
+no failures, errors, or skips; RuboCop was clean. The standalone golden-path
+gate remains unproven for this change: two runs reached `3-plan`, where the
+unchanged E2E fixture invoked the real mandatory Codex plan reviewer and
+exceeded its 90-second browser transition bound. The fixture and default route
+are unchanged from `origin/main`; the Action Cable change does not claim that
+baseline isolation gap as a passing result.
 Before submitting the
 brainstorm answer, it waits for the daemon to classify the
 `needs_input` row and for the current `brainstorm.md` mtime second to pass, so

@@ -1392,6 +1392,21 @@ installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
 
+## Sealed benchmark controller hardening awaits a live canary (2026-08-27)
+
+The sweep ran a network-disabled Docker canary through the actual root-controller
+origin setup with candidate-created `hive`/`git` shims, a pre-push hook, and a
+malicious global `init.templateDir` pointing at the sealed bundle. The shallow
+push and actual ManagedGit environment-scrubbing call passed; no hook, shim, or
+template copy ran, and uid 1000 could not read the control bundle. Executable
+Pi extension checks covered both GLM routes and unchanged other-model payloads.
+This is boundary/setup proof, not a complete model-driven offline review cycle.
+Keep the full-cycle gap open until that lifecycle has its own packaged canary.
+Resumed review also needs verification: recreated offline origins omit prior
+published branches, while the existing remote-CI gate rejects local repository
+identity before that expected-head path. Setup proof does not establish that
+these older offline lifecycle limitations are solved.
+
 ## Benchmark egress preflight awaits a live Docker bypass canary (2026-08-27)
 
 Focused tests inject Docker network metadata and prove that strict topology is

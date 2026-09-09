@@ -1531,3 +1531,7 @@ discovery. This change does not claim every numeric dependency is scan-free.
 The targeted path verifies the selected folder ID and detects copies of its
 slug across stages; it is not an audit for hand-copied duplicate IDs under
 unrelated slugs. Full admission scans retain that broader ambiguity check.
+
+- PR #1331 integrated active-row reuse has a fresh classification-count regression
+  (two calls on the repaired parent, one after reuse), but no fresh fleet-scale
+  wall-clock measurement. Earlier percentage improvements are historical.

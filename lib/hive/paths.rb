@@ -16,34 +16,16 @@ module Hive
       hive_home_override || File.join(base_home("XDG_STATE_HOME", ".local/state"), "hive")
     end
 
+    def runtime_control_plane_path(root = state_home)
+      File.join(root, "runtime-control-plane.sqlite3")
+    end
+
+    def runtime_payload_root(root = state_home)
+      File.join(root, "runtime-payloads")
+    end
+
     def cache_home
       hive_home_override || File.join(base_home("XDG_CACHE_HOME", ".cache"), "hive")
-    end
-
-    def task_counter_path
-      File.join(state_home, "task-counter.yml")
-    end
-
-    def task_counter_lock_path
-      File.join(state_home, ".task-counter.lock")
-    end
-
-    # Owner-private daemon-to-CLI operational observation. Callers running
-    # against an injected daemon home may pass that state root explicitly.
-    def operational_snapshot_path(root = state_home)
-      File.join(root, "operational", "daemon-snapshot.json")
-    end
-
-    # The daemon's last validated full status graph. Kept separate from the
-    # small scheduler snapshot so unrelated readers never parse the fleet.
-    def operational_status_cache_path(root = state_home)
-      File.join(root, "operational", "daemon-status-cache.json")
-    end
-
-    # Owner-private, host-global provider-account and exact-model health.
-    # Explicit routing alone consults this state; legacy attempts bypass it.
-    def provider_health_root
-      File.join(state_home, "provider-health", "v1")
     end
 
     def workflow_publish_root

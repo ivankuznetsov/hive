@@ -17,17 +17,19 @@ class DaemonTest < ActiveSupport::TestCase
   end
 
   test "queues repair through the daemon resource" do
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path
+    ).migrate!
     request_id = Daemon.new.repair!
 
-    request = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "**", "*#{request_id}*")]
-              .find { |path| File.file?(path) }
-    payload = JSON.parse(File.read(request))
+    request = Hive::RuntimeControlPlane::DispatchRepository.new(database: database).fetch(request_id)
 
-    assert_equal Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT, payload["project"]
-    assert_equal %w[hive daemon install --force], payload["argv"]
-    assert_equal "web_daemon_repair", payload["trigger"]
+    assert_equal Hive::RuntimeControlPlane::DispatchRepository::GLOBAL_MAINTENANCE_PROJECT,
+                 request.project
+    assert_equal %w[hive daemon install --force], request.argv
+    assert_equal "web_daemon_repair", request.trigger
   ensure
-    FileUtils.rm_rf(File.join(Hive::Paths.state_home, "dispatch_requests"))
+    database&.disconnect
   end
 
   test "turns a rejected repair request into operator guidance" do

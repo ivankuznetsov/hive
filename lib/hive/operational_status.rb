@@ -1,5 +1,5 @@
 require "time"
-require "hive/attempts/storage_health"
+require "hive/attempts/storage_status"
 require "hive/operational_action"
 require "hive/recovery"
 require "hive/workflows"
@@ -349,7 +349,7 @@ module Hive
       value = @daemon_snapshot.is_a?(Hash) ? @daemon_snapshot["attempt_storage"] : nil
       return value if value.is_a?(Hash)
 
-      Hive::Attempts::StorageHealth.unknown_snapshot
+      Hive::Attempts::StorageStatus.unknown
     end
 
     def attempt_storage_issues(status)
@@ -390,9 +390,13 @@ module Hive
           scheduler_disposition.fetch("reason", "scheduler disposition is unavailable"),
           "scheduler"
         )
-        reasons.unshift(scheduler_reason) if material_scheduler_disposition?(scheduler_disposition)
+        controller_failure = scheduler_disposition["decision"] == "markerless_stalled" &&
+          typed_attempt_diagnostic(row)
+        if material_scheduler_disposition?(scheduler_disposition)
+          controller_failure ? reasons.push(scheduler_reason) : reasons.unshift(scheduler_reason)
+        end
         scheduler_state, scheduler_owner = classify_scheduler_disposition(scheduler_disposition)
-        unless running?(row) || scheduler_state.nil?
+        unless running?(row) || scheduler_state.nil? || controller_failure
           state = scheduler_state
           owner = scheduler_owner
         end
@@ -582,7 +586,7 @@ module Hive
     end
 
     def material_scheduler_disposition?(disposition)
-      !%w[not_evaluated skip project_disabled].include?(disposition["decision"])
+      !%w[not_evaluated skip project_disabled attempt_terminal_replay].include?(disposition["decision"])
     end
 
     def classify_scheduler_disposition(disposition)
@@ -597,8 +601,6 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]
-      when "attempt_terminal_replay"
-        [ "idle", "none" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
       when "semantic_terminal_error"
@@ -631,6 +633,9 @@ module Hive
         owner = diagnostic.fetch("owner")
         state = owner == "provider" ? "waiting_on_provider_or_scheduler" : "needs_repair"
         return [ state, owner ]
+      end
+      if row.dig("attrs", "reason") == "condition_task_history_unavailable"
+        return [ "waiting_on_provider_or_scheduler", "scheduler" ]
       end
       return [ "waiting_on_provider_or_scheduler", "scheduler" ] if automatic_error_retry?(project, row)
       return [ "needs_repair", "operator" ] if repair?(row)
@@ -667,8 +672,8 @@ module Hive
       return malformed_routing_payload(row, project_name) unless routing_value_safe?(raw)
 
       keys = %w[
-        candidates circuit_generations decided_at decision_id exclusions next_action_owner
-        policy policy_digest probe_requirements reason selected_route status task_generation
+        candidates decided_at decision_id exclusions next_action_owner policy policy_digest
+        reason selected_route status task_generation
       ]
       return malformed_routing_payload(row, project_name) unless raw.keys.sort == keys.sort
       core = %w[
@@ -689,9 +694,7 @@ module Hive
         "policy" => raw["policy"],
         "selected_route" => raw["selected_route"],
         "candidates" => Array(raw["candidates"]),
-        "exclusions" => Array(raw["exclusions"]),
-        "circuit_generations" => Array(raw["circuit_generations"]),
-        "probe_requirements" => Array(raw["probe_requirements"])
+        "exclusions" => Array(raw["exclusions"])
       }
     rescue KeyError
       malformed_routing_payload(row, project_name)
@@ -911,12 +914,17 @@ module Hive
       daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
 
-    # Durable workflow errors remain retryable. A synthetic projection-repair
-    # row is operator-owned because another agent run cannot rebuild its proof.
+    # Durable workflow errors remain retryable. Invalid journal history is
+    # operator-owned; a busy writer is transient scheduler-owned state.
     def automatic_error_retry?(project, row)
       daemon_enabled?(project["name"]) &&
         %w[error review_error].include?(row["marker"].to_s) &&
-        !Hive::TaskProjection.repair_required_row?(row)
+        !Hive::TaskProjection.history_invalid_row?(row) &&
+        !task_history_unavailable?(row)
+    end
+
+    def task_history_unavailable?(row)
+      row.dig("attrs", "reason") == "condition_task_history_unavailable"
     end
 
     def reasons_for(project, row)
@@ -948,6 +956,12 @@ module Hive
           diagnostic.fetch("code"),
           diagnostic["detail"] || diagnostic.fetch("summary"),
           "attempt_diagnostic"
+        )
+      elsif task_history_unavailable?(row)
+        reasons << reason(
+          "task_history_unavailable",
+          row.dig("attrs", "message") || "task journal is temporarily locked by a writer",
+          "scheduler"
         )
       elsif automatic_error_retry?(project, row)
         marker = row["marker"].to_s.upcase

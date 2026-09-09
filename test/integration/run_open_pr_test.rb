@@ -54,6 +54,7 @@ class RunOpenPrTest < Minitest::Test
     slug = "fix-bug-260424-aaaa"
     task_dir = File.join(project_root, ".hive-state", "stages", "5-open-pr", slug)
     FileUtils.mkdir_p(task_dir)
+    ensure_test_task_identity(task_dir)
     File.write(File.join(task_dir, "plan.md"), "## Plan\nImplement the fix.\n")
     File.write(File.join(task_dir, "task.md"), "## Execute Output\nImplemented and tested.\n")
 
@@ -111,7 +112,11 @@ class RunOpenPrTest < Minitest::Test
         assert_equal 1, controller.requests.length
         request = controller.requests.first
         assert_equal "Fix the bug", request.title
-        assert_includes request.diff, "fix.rb"
+        diff = Hive::AgentGitGate.read(
+          request.worktree_path, :diff, base_oid: request.scan_base_oid, head_oid: request.head_oid
+        )
+        assert_includes diff.stdout, "fix.rb"
+        assert_equal Digest::SHA256.hexdigest(diff.stdout), request.diff_digest
         pr_md = File.read(File.join(task_dir, "pr.md"))
         assert_includes pr_md, "https://github.com/acme/app/pull/9"
         assert_includes pr_md, "publication_id: #{request.publication_id}"

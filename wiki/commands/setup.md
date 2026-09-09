@@ -3,14 +3,15 @@ title: hive setup
 type: command
 source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,babysit,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-08-07
+updated: 2026-08-30
 tags: [command, setup, install, agents, skills, consent, web, daemon, babysitter]
 ---
 
 **TLDR**: `hive setup` is the normal native Linux/macOS first run. It checks
 dependencies, provisions Hive's operating skill for Claude, Codex, and Pi
 before other mutations, bootstraps authenticated Hive-owned dependencies,
-installs the daemon and PR babysitter, optionally enrolls the current project, and by default
+explicitly bootstraps the SQLite runtime control plane, installs the daemon and
+PR babysitter, optionally enrolls the current project, and by default
 installs, enables, starts, and probes the loopback Hive web service. One
 preview/consent boundary covers the run: interactive setup asks once; JSON or
 non-TTY setup requires `--yes` and otherwise performs no mutation. Human and
@@ -55,17 +56,23 @@ Without `--no-bootstrap`, setup provisions in this order:
    bounded, and captured in the `qmd` phase `message`.
 3. Install or refresh the managed Rails web bundle through
    `Hive::Web::AppBundle.ensure!`.
-4. Run `hive daemon install` semantics through
+4. Initialize or enroll the current project unless `--no-init` is passed. If
+   the project is already initialized, setup enables it for daemon dispatch.
+5. Explicitly activate a verified empty SQLite runtime control plane through
+   the same manifest/candidate protocol as fleet cutover, but only when the
+   installation is genuinely fresh. An existing healthy database is observed;
+   legacy state directs to `hive migrate --all`, while a corrupt, partial, or
+   wrong-identity database fails the phase. No ordinary runtime open creates or
+   migrates the database.
+6. Run `hive daemon install` semantics through
    `Hive::Commands::Daemon::ServiceInstaller` with autostart, forced template
    refresh, and the same `Hive::InvokedBinary.path` used to invoke setup. The
    adapter delegates platform-neutral service planning/application to
    `Hive::UserService`.
-5. Install the separate `hive-babysitter` service through
+7. Install the separate `hive-babysitter` service through
    `Hive::Commands::Babysit::ServiceInstaller`. The global process starts but
    only acts on registered projects with `babysitter.enabled: true`.
-6. Initialize or enroll the current project unless `--no-init` is passed. If
-   the project is already initialized, setup enables it for daemon dispatch.
-7. Unless `--no-service` is passed, install the separate `hive-web` service
+8. Unless `--no-service` is passed, install the separate `hive-web` service
    through the same boundary and invoked binary, then observe installed, enabled/loaded,
    running/active, and bounded readiness state. A failed web-bundle phase
    blocks mutation but still reports the read-only lifecycle state. If a

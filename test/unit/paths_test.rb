@@ -28,12 +28,10 @@ class PathsTest < Minitest::Test
         assert_equal File.join(dir, "config", "hive"), Hive::Paths.config_home
         assert_equal File.join(dir, "data", "hive"), Hive::Paths.data_home
         assert_equal File.join(dir, "state", "hive"), Hive::Paths.state_home
-        assert_equal File.join(dir, "state", "hive", "operational", "daemon-snapshot.json"),
-                     Hive::Paths.operational_snapshot_path
+        assert_equal File.join(dir, "state", "hive", "runtime-control-plane.sqlite3"),
+                     Hive::Paths.runtime_control_plane_path
         assert_equal File.join(dir, "cache", "hive"), Hive::Paths.cache_home
         assert_equal File.join(dir, "bin"), Hive::Paths.bin_home
-        assert_equal File.join(dir, "state", "hive", "provider-health", "v1"),
-                     Hive::Paths.provider_health_root
         publish = File.join(dir, "state", "hive", "workflow-publish", "v1")
         assert_equal publish, Hive::Paths.workflow_publish_root
         assert_equal File.join(publish, "receipts"), Hive::Paths.workflow_publish_receipts_root

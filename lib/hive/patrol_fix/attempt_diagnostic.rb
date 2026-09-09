@@ -3,6 +3,7 @@ require "time"
 require "hive/output_reference"
 require "hive/patrol_fix"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/stringify_keys"
 
 module Hive
@@ -44,11 +45,13 @@ module Hive
         return nil unless receipt.is_a?(Hash)
         return nil if receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
 
-        path = File.join("outputs", attempt_id, FILENAME)
-        reference = Array(receipt["output_references"]).find do |candidate|
-          candidate.is_a?(Hash) && candidate["path"] == path
+        references = Array(receipt["output_references"]).select do |candidate|
+          candidate.is_a?(Hash) && File.basename(candidate["path"].to_s) == FILENAME
         end
-        return nil unless reference
+        return nil unless references.one?
+
+        reference = references.first
+        Hive::OutputReference.validate_shape!(reference)
 
         document = JSON.parse(store.read_output(reference, max_bytes: MAX_BYTES))
         validate!(document)
@@ -93,7 +96,7 @@ module Hive
           "custody_status" => bounded_token(source["custody_status"] || "unknown", "custody status"),
           "detail" => detail,
           "redaction_status" => redaction_status,
-          "secret_policy_version" => Hive::SecretPatterns::POLICY_VERSION,
+          "secret_policy_version" => Hive::SecretPatterns::REDACTION_VERSION,
           "transport_status" => transport_status,
           "log_reference" => log_reference && Hive::StringifyKeys.call(log_reference),
           "recorded_at" => normalize_time(recorded_at)
@@ -164,7 +167,7 @@ module Hive
           raise InvalidDiagnostic, "attempt diagnostic detail is invalid"
         end
         unless REDACTION_VALUES.include?(value["redaction_status"]) &&
-               value["secret_policy_version"] == Hive::SecretPatterns::POLICY_VERSION
+               value["secret_policy_version"] == Hive::SecretPatterns::REDACTION_VERSION
           raise InvalidDiagnostic, "attempt diagnostic secret policy is invalid"
         end
         if require_log_reference
@@ -175,7 +178,7 @@ module Hive
         Time.iso8601(value.fetch("recorded_at"))
         encoded = JSON.generate(value)
         raise InvalidDiagnostic, "attempt diagnostic exceeds #{MAX_BYTES} bytes" if encoded.bytesize > MAX_BYTES
-        if Hive::SecretPatterns.match?(encoded)
+        if Hive::SecretScanner.match?(encoded)
           raise InvalidDiagnostic, "attempt diagnostic contains secret-pattern text"
         end
         true

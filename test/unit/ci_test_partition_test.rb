@@ -49,7 +49,7 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
-  def test_coverage_shards_are_complete_disjoint_and_split_the_measured_hot_partition
+  def test_coverage_shards_are_complete_disjoint_and_runtime_balanced
     with_loaded_rakefile do
       files = Object.const_get(:HIVE_DEFAULT_TEST_FILES)
       shard_count = Object.const_get(:HIVE_COVERAGE_SHARD_COUNT)
@@ -63,17 +63,11 @@ class CiTestPartitionTest < Minitest::Test
       assert shards.all?(&:frozen?)
       assert shards.frozen?
 
-      base_shards = size_balanced_shards(files, 4)
-      assert_equal base_shards[0].sort, shards[0].sort
-      assert_equal base_shards[1].sort, shards[1].sort
-      assert_equal base_shards[2].sort, (shards[2] + shards[3]).sort
-      assert_equal base_shards[3].sort, (shards[4] + shards[5]).sort
-
-      [ shards[2, 2], shards[4, 2] ].each do |pair|
-        byte_counts = pair.map { |shard| shard.sum { |path| File.size(File.join(ROOT, path)) } }
-        assert_operator byte_counts.max - byte_counts.min, :<, 10_000,
-                        "split hot coverage shards should remain source-byte balanced: #{byte_counts.inspect}"
-      end
+      timings = HiveTestPartition.read_timings(HiveTestPartition::DEFAULT_TIMINGS)
+      totals = shards.map { |shard| shard.sum { |path| timings.fetch(path, 0.0) } }
+      assert_operator totals.max - totals.min, :<, 10,
+                      "recorded runtimes should balance the complete suite: #{totals.inspect}"
+      assert_equal shards, HiveTestPartition.partition(files.reverse, count: shard_count, root: ROOT)
     end
   end
 
@@ -224,6 +218,11 @@ class CiTestPartitionTest < Minitest::Test
       File.join(ROOT, ".github", "workflows", "nightly-flake-sweep.yml"),
       aliases: true,
     )
+    checkout = workflow.dig("jobs", "sweep", "steps").find do |step|
+      step["uses"].to_s.start_with?("actions/checkout@")
+    end
+    assert_equal 0, checkout.dig("with", "fetch-depth"),
+                 "nightly release contracts require full history and tags"
     analyze = workflow.fetch("jobs").fetch("analyze")
     steps = analyze.fetch("steps")
     merge = steps.find { |step| step["name"] == "Merge reports into candidates and timings" }
@@ -573,17 +572,6 @@ class CiTestPartitionTest < Minitest::Test
   end
 
   private
-
-  def size_balanced_shards(files, count)
-    shards = Array.new(count) { [] }
-    byte_counts = Array.new(count, 0)
-    files.sort_by { |path| [ -File.size(File.join(ROOT, path)), path ] }.each do |path|
-      shard = byte_counts.each_index.min_by { |index| [ byte_counts[index], index ] }
-      shards.fetch(shard) << path
-      byte_counts[shard] += File.size(File.join(ROOT, path))
-    end
-    shards
-  end
 
   def coverage_state_snapshot
     HiveTestCoverage.instance_variables.to_h do |ivar|

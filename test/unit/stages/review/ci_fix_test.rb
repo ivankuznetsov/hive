@@ -31,6 +31,7 @@ class CiFixTest < Minitest::Test
       task_folder = File.join(dir, ".hive-state", "stages", "6-review", "ci-test-task")
       FileUtils.mkdir_p(File.join(task_folder, "reviews"))
       FileUtils.mkdir_p(File.join(task_folder, "logs"))
+      prepare_test_task_run(task_folder)
       yield(dir, task_folder)
     end
   end
@@ -238,6 +239,7 @@ class CiFixTest < Minitest::Test
       with_tmp_git_repo do |worktree|
         task_folder = File.join(task_root, ".hive-state", "stages", "6-review", "ci-dirty")
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        prepare_test_task_run(task_folder)
         File.write(File.join(task_folder, "task.md"), "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
         File.write(File.join(task_folder, "plan.md"), "plan\n")
         File.write(File.join(task_folder, "worktree.yml"), { "path" => worktree }.to_yaml)
@@ -263,6 +265,7 @@ class CiFixTest < Minitest::Test
       with_tmp_git_repo do |worktree|
         task_folder = File.join(task_root, ".hive-state", "stages", "6-review", "ci-tamper")
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        prepare_test_task_run(task_folder)
         task_md = File.join(task_folder, "task.md")
         File.write(task_md, "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
         File.write(File.join(task_folder, "plan.md"), "plan\n")
@@ -294,6 +297,7 @@ class CiFixTest < Minitest::Test
           task_root, ".hive-state", "stages", "6-review", "ci-restore-failure"
         )
         FileUtils.mkdir_p(File.join(task_folder, "reviews"))
+        prepare_test_task_run(task_folder)
         task_md = File.join(task_folder, "task.md")
         File.write(task_md, "<!-- REVIEW_WORKING phase=ci pass=1 -->\n")
         File.write(File.join(task_folder, "plan.md"), "plan\n")

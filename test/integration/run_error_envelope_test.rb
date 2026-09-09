@@ -30,6 +30,7 @@ class RunErrorEnvelopeTest < Minitest::Test
 
   def init_project(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
+    prepare_test_runtime_project(dir)
     set_project_claude_mode(dir, "headless")
   end
 
@@ -73,11 +74,11 @@ class RunErrorEnvelopeTest < Minitest::Test
         FileUtils.mkdir_p(File.dirname(brainstorm_dir))
         FileUtils.mv(File.join(dir, ".hive-state", "stages", "1-inbox", slug), brainstorm_dir)
 
-        # Plant a fresh stale lock — a live PID owned by us so Lock treats it as a
-        # genuine concurrent runner rather than a stale lock to recover.
-        File.write(File.join(brainstorm_dir, ".lock"),
-                   { "pid" => Process.pid, "slug" => slug, "stage" => "brainstorm",
-                     "started_at" => Time.now.utc.iso8601 }.to_yaml)
+        # Publish a live lease owned by this process so Run observes genuine
+        # contention rather than reclaiming a dead holder.
+        publish_test_task_lease(
+          brainstorm_dir, { "slug" => slug, "stage" => "brainstorm" }
+        )
 
         out, err, status = with_captured_exit { Hive::Commands::Run.new(brainstorm_dir, json: true).call }
         assert_equal Hive::ExitCodes::TEMPFAIL, status, "ConcurrentRunError must exit 75"
@@ -93,7 +94,8 @@ class RunErrorEnvelopeTest < Minitest::Test
                        "ConcurrentRunError envelope must surface the lock holder's metadata so agents can recover"
         assert_equal Process.pid, payload["holder"]["pid"], "holder.pid must mirror the live lock's pid"
         assert_equal slug, payload["holder"]["slug"]
-        assert_match %r{\.lock\z}, payload["lock_path"], "lock_path must point at the colliding .lock file"
+        assert_match %r{\Aruntime-control-plane:task:}, payload["lock_path"],
+                     "lock_path must identify the colliding task lease"
         assert @schemer.valid?(payload),
                "ErrorPayload must validate against schemas/hive-run.v1.json (errors: #{@schemer.validate(payload).map { |e| e['error'] }.inspect})"
       end
@@ -252,8 +254,9 @@ class RunErrorEnvelopeTest < Minitest::Test
         brainstorm_dir = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
         FileUtils.mkdir_p(File.dirname(brainstorm_dir))
         FileUtils.mv(File.join(dir, ".hive-state", "stages", "1-inbox", slug), brainstorm_dir)
-        File.write(File.join(brainstorm_dir, ".lock"),
-                   { "pid" => Process.pid, "slug" => slug, "stage" => "brainstorm" }.to_yaml)
+        publish_test_task_lease(
+          brainstorm_dir, { "slug" => slug, "stage" => "brainstorm" }
+        )
 
         out, err, status = with_captured_exit { Hive::Commands::Run.new(brainstorm_dir, json: false).call }
         assert_equal Hive::ExitCodes::TEMPFAIL, status

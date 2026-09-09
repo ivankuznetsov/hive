@@ -87,7 +87,7 @@ module Hive
         end
         raise InvalidOutputReference, "attempt output exceeds read bound" if stat.size > max_bytes
 
-        file.read(max_bytes + 1)
+        file.read(max_bytes + 1) || "".b
       end
       unless bytes.bytesize == value.fetch("size") &&
              Digest::SHA256.hexdigest(bytes) == value.fetch("sha256")

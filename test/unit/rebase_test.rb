@@ -31,6 +31,40 @@ class HiveRebaseTest < Minitest::Test
     FakeTask.new(worktree, folder, File.join(folder, "logs"), File.join(folder, "task.md"), "4-execute")
   end
 
+  def test_rebased_publication_wraps_the_exact_lease_push_in_its_record_update
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    File.write(File.join(folder, "github-publication.json"), "{}")
+    git = FakeGitOps.new(worktree)
+    git.head_sha_value = "b" * 40
+    controller = Object.new
+    recorded = nil
+    pushed = nil
+    controller.define_singleton_method(:publish_rebase!) do |**values, &block|
+      recorded = values
+      block.call
+    end
+    push = lambda do |path, branch, **options|
+      pushed = [ path, branch, options ]
+      Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+    end
+    warnings = []
+    stub_gitops!(git) do
+      with_replaced_singleton_method(Hive::GithubPublication::Controller, :new, ->(**) { controller }) do
+        with_replaced_singleton_method(Hive::Gh, :push_branch, push) do
+          Hive::Rebase.publish_rebased_branch!(
+            task, base_cfg, Hive::Rebase::PublishLease.new(branch: "task", remote_oid: "a" * 40), warnings
+          )
+        end
+      end
+    end
+    assert_equal({ worktree_path: worktree, branch: "task", before_oid: "a" * 40, after_oid: "b" * 40 }, recorded)
+    assert_equal "a" * 40, pushed.last.fetch(:expected_remote_oid)
+    assert_empty warnings
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
   def base_cfg(overrides = {})
     {
       "rebase" => { "enabled" => true, "conflict_resolution_timeout_sec" => 60 },
@@ -458,7 +492,7 @@ class HiveRebaseTest < Minitest::Test
 
     assert result.succeeded
     assert(result.post_rebase_warnings.any? { |warning| warning.include?("Hive::GhError: offline") })
-    assert_match(/remote history was left unchanged/, err)
+    assert_match(/publication outcome requires reconciliation/, err)
   ensure
     teardown_dirs(worktree, folder)
   end

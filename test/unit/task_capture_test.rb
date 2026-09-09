@@ -97,7 +97,7 @@ class TaskCaptureTest < Minitest::Test
       marker = Hive::Markers.current(File.join(result.folder, state_file))
       assert_equal :waiting, marker.name
       assert_equal "imported", marker.attrs.fetch("reason")
-      bounded = Hive::TaskProjection::Store.new(
+      bounded = Hive::TaskProjection::Reader.new(
         task_folder: result.folder
       ).read_routine(marker: marker)
       assert bounded.current?

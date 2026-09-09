@@ -84,6 +84,21 @@ ambient OpenCode configuration does not contain the plugin. Provider selection
 therefore cannot pass configuration and runtime probing only to fail later
 because the review skill contract omitted or ignored that supported host.
 
+Primary and adversarial result prompts spell out the machine-only fields that
+are easy for a natural-language reviewer to misread: `selected_lenses` uses
+snake_case identifiers and `residual_evidence` stays empty until disposition
+verification. A malformed reviewer result is retryable within the existing
+bounded attempt budget; plan or snapshot mutation remains terminal. The
+adapter-contract version participates in the policy fingerprint, so shipping a
+corrected prompt/parser contract gives an unchanged plan a fresh review instead
+of replaying a verdict Hive never successfully parsed.
+
+The disposable revision workspace starts with a controller-owned, non-terminal
+copy of the immutable input plan. Long-form planners edit that checkpoint in
+place instead of holding a replacement document until their first full write.
+Only a candidate ending in `<!-- COMPLETE -->` is accepted or salvaged, so the
+seed can preserve useful progress without authorizing an unchanged revision.
+
 Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
 contracts instead of checking only the document against itself. Codex and Grok
@@ -126,8 +141,9 @@ adversarial route with the exact old selected-lens diagnostic is classified as
 runnable and receives one versioned recovery reset; the daemon can therefore
 rerun each affected initial reviewer leg automatically after upgrade. Missing
 diagnostic provenance is accepted only for historical records. Current adapter
-receipts distinguish parser failures from reviewer- or runner-authored
-diagnostics, so a reviewer cannot request this migration retry by copying the
+receipts distinguish parser failures, including retryable malformed reviewer
+output, from reviewer- or runner-authored diagnostics, so a reviewer cannot
+request this migration retry by copying the
 old text. The reset is one-time, so a genuinely malformed current-contract
 result remains terminal instead of looping. Verification output uses the new
 grammar but is not eligible for the legacy reset, preserving the existing
@@ -224,7 +240,7 @@ refuse a non-Git temporary directory. Each call writes one immutable,
 digest-named `candidate-plan-<sha256>.md`. Its ArtifactFirewall custody is
 passed into the shared agent launcher, so the protected snapshot surrounds only the untrusted
 provider process. Hive's own durable session-start/session-finish writes to
-`task-journal.jsonl` and `task-projection.json` occur outside that interval;
+`task-journal.jsonl` occur outside that interval;
 they cannot be misclassified as planner tampering, while provider writes to
 the same anchors still fail closed and are restored. A launcher that returns
 success without invoking the supplied custody is rejected. Hive then runs a
@@ -384,6 +400,13 @@ required route from the sanctioned recovery action. Its semantic target binds
 the current terminal attempt IDs, so a later failed attempt can receive a new
 recovery decision while an exact replay remains a no-op.
 
+A retired projection-checkpoint rollout briefly included Hive's own
+`task-projection.checkpoint.json` write in reviewer custody. The current
+reviewer firewall excludes that orchestrator-owned file. Exact historical
+runner diagnostics for this false positive receive one versioned recovery
+reset for primary, adversarial, or verification; unrelated diagnostics and a
+second failure under the current contract remain terminal.
+
 Under ADR-008's local same-user trust model, direct CLI invocation is the
 operator boundary; Web actions use the authenticated access predicate. An
 agent with unrestricted same-user shell access therefore has CLI authority.
@@ -399,7 +422,7 @@ manual or unmatched decisions remain operator-owned.
 
 ## Shared status and Web projection
 
-`hive-status.v7` and `hive-operational-status.v4` contain one required nullable
+`hive-status.v8` and `hive-operational-status.v4` contain one required nullable
 `plan_review` field. Applicable rows include review and observation identity,
 computed/effective level, state/outcome, degradation reason, attempt/current
 attempt, coverage and finding counts, blockers/owner/reason, retry time, one

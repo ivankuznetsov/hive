@@ -10,5 +10,5 @@
   },
   "gate": { "diagnostics": [], "status": "eligible", "transition": "execute_to_open_pr", "waivers": [] },
   "history": [],
-  "identity": { "attempt_id": "sample-attempt", "commit_generation": 1, "head_sha": "cccccccccccccccccccccccccccccccccccccccc", "task_generation": 1 }
+  "identity": { "attempt_id": "sample-attempt", "commit_generation": 1, "head_sha": "cccccccccccccccccccccccccccccccccccccccc", "ownership_generation": "sample-owner", "task_generation": 1 }
 }

@@ -128,7 +128,7 @@ class HiveRecoveryAuthorityTest < Minitest::Test
     forbidden = {
       "task marker mutation" => /Hive::Markers\.(?:set|clear_current|clear_all)/,
       "recovery request mutation" => /Hive::Recovery|RecoveryCoordinator/,
-      "dispatch queue mutation" => /DispatchRequestQueue\.(?:write|claim|remove|release|update)/,
+      "dispatch request mutation" => /DispatchRepository\.(?:new|open_default)/,
       "successor admission" => /(?:create|dispatch)_successor|successor_attempt_id\s*=/,
       "delayed work" => /enqueue_delayed|next_eligible_at\s*=/,
       "stage verb invocation" => /Hive::Commands::(?:Run|StageAction)|\.run_stage\(/,

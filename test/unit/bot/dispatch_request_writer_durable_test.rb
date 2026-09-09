@@ -11,8 +11,9 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
     def state_file = File.join(project_root, "task.md")
   end
 
-  def test_local_admission_claims_delivery_with_attempt_reference
+  def test_local_admission_returns_attempt_without_a_second_writer_side_claim
     with_tmp_dir do |state_home|
+      repository(state_home)
       task = FakeTask.new(
         slug: "demo-task", project_root: "/tmp/demo", project_name: "demo",
         stage_index: 4, stage_name: "execute"
@@ -39,16 +40,16 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
 
         assert_equal "attempt-1", reference.attempt_id
         assert_equal :accepted, reference.status
-        claim = Dir.glob(File.join(state_home, "dispatch_requests", "*.claim")).first
-        metadata = JSON.parse(File.read(claim))
-        assert_equal "attempt-1", metadata["attempt_id"]
-        assert_equal "generation-1", metadata["task_generation"]
+        request = repository(state_home).pending.fetch(0)
+        assert_equal "request-1", request.request_id
+        assert_equal "queued", request.state
       end
     end
   end
 
   def test_capacity_deferral_leaves_delivery_pending
     with_tmp_dir do |state_home|
+      repository(state_home)
       task = FakeTask.new(
         slug: "demo-task", project_root: "/tmp/demo", project_name: "demo",
         stage_index: 4, stage_name: "execute"
@@ -66,13 +67,14 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
         )
 
         assert_equal :queued, reference.status
-        assert_equal 1, Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).size
+        assert_equal 1, repository(state_home).pending.size
       end
     end
   end
 
   def test_initial_no_route_leaves_delivery_pending_without_dereferencing_an_attempt
     with_tmp_dir do |state_home|
+      repository(state_home)
       task = FakeTask.new(
         slug: "demo-task", project_root: "/tmp/demo", project_name: "demo",
         stage_index: 4, stage_name: "execute"
@@ -95,14 +97,14 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
 
         assert_equal :queued, reference.status
         assert_nil reference.attempt_id
-        assert_equal 1,
-                     Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).size
+        assert_equal 1, repository(state_home).pending.size
       end
     end
   end
 
   def test_unexpected_admission_failure_removes_unclaimed_delivery
     with_tmp_dir do |state_home|
+      repository(state_home)
       task = FakeTask.new(
         slug: "demo-task", project_root: "/tmp/demo", project_name: "demo",
         stage_index: 4, stage_name: "execute"
@@ -122,7 +124,7 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
         assert_same failure, raised
       end
 
-      assert_empty Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home)
+      assert_empty repository(state_home).pending
     end
   end
 
@@ -156,6 +158,7 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
 
   def test_write_current_binds_the_delivery_to_the_observed_task_identity
     with_tmp_dir do |state_home|
+      repository(state_home)
       task = FakeTask.new(
         id: 42, slug: "demo-task", project_root: "/tmp/demo", project_name: "demo",
         stage_index: 4, stage_name: "execute"
@@ -170,7 +173,7 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
         )
       end
 
-      request = Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).fetch(0)
+      request = repository(state_home).pending.fetch(0)
       assert_equal 42, request.task_id
       assert_equal "4-execute", request.expected_stage
       assert_match(/\A[0-9a-f]{64}\z/, request.task_generation)
@@ -179,6 +182,7 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
 
   def test_resolution_race_keeps_a_stage_bound_delivery_without_foreground_admission
     with_tmp_dir do |state_home|
+      repository(state_home)
       entrypoint = Object.new
       entrypoint.define_singleton_method(:dispatch) { |**| flunk "unresolved task must stay queued" }
 
@@ -197,10 +201,29 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
         assert_equal :queued, reference.status
       end
 
-      request = Hive::Daemon::DispatchRequestQueue.pending(state_home: state_home).fetch(0)
+      request = repository(state_home).pending.fetch(0)
       assert_equal "4-execute", request.expected_stage
       assert_nil request.task_id
       assert_nil request.task_generation
     end
+  end
+
+  private
+
+  def repository(state_home)
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(state_home)
+    ).migrate!
+    timestamp = Time.now.utc.iso8601(6)
+    database.transaction do |db|
+      installation = db[:installations].first.fetch(:installation_id)
+      db[:projects].insert_conflict.insert(
+        project_id: "project-demo", installation_id: installation,
+        registration_id: "demo", name: "demo", observed_path: "/tmp/demo",
+        state_root_path: "/tmp/demo/.hive-state", active: 1,
+        registered_at: timestamp, last_observed_at: timestamp
+      )
+    end
+    Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
   end
 end

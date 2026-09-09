@@ -108,9 +108,13 @@ first authoritative mutation; read-only queries do not create state.
 ## Scheduling and capacity
 
 Patrol is opt-in and coding-workflow-only. Ordinary and Architecture scheduled
-discovery have separate per-project, per-engine daily launch allowances.
-`UsageDb` is telemetry, not admission authority. Provider resource exhaustion
-parks only the affected lane.
+discovery have separate per-project, per-engine daily launch allowances. Each
+allowance is derived from unique `patrol_discovery_launch` reservations in
+`token_usage` for the current UTC date. One immediate transaction recognizes an
+existing session reservation before counting and inserting a new zero-token
+row, so retries are idempotent and concurrent daemon processes cannot
+oversubscribe the limit. The next UTC date resets naturally. Provider failures
+do not create lane holds or other durable usability state.
 
 The Patrol arbiter alternates ready ordinary and architecture candidates under
 `daemon.max_concurrent_patrol_scans`. Candidate discovery is read-only;

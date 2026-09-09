@@ -4,7 +4,7 @@ type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-08-29
-tags: [commands, api, skills, agents, operational, provisioning, projection-repair]
+tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
@@ -13,9 +13,8 @@ documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
-agent-first `hive status --operational --json`, explicit `hive circuits`
-inspection/administration, bounded `hive watch`, closed `hive act`, native
-semantic `hive task` detail, exact-task [[commands/repair-projection]], the
+agent-first `hive status --operational --json`, bounded `hive watch`, closed `hive act`, native
+semantic `hive task` detail, the
 `hive doctor` / consent-safe setup split for one canonical Hive
 operating skill projected to OpenClaw, Claude, Codex, Pi, and OpenCode, and the single
 ClawHub `hive-cli` listing whose installed slash command is `/hive`.
@@ -37,7 +36,6 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/setup_agents.rb`
 - `lib/hive/commands/watch.rb`
 - `lib/hive/commands/act.rb`
-- `lib/hive/commands/circuits.rb`
 - `lib/hive/operational_status.rb`
 - `lib/hive/operational_action.rb`
 - `skills/hive/`
@@ -75,11 +73,8 @@ its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
 authorized actions), and
 [[commands/doctor]] read-only managed health reporting,
 [[commands/setup-agents]] consent-safe native provisioning,
-[[commands/circuits]] as the generation-fenced provider-health surface,
 [[commands/task]] as the bounded read-only semantic result/usage/diagnostic
 surface for one exact task,
-[[commands/repair-projection]] as the explicit exact-task rebuild for a
-synthetic bounded-projection repair row,
 `--json` envelopes where the command page says they exist.
 Bare `hive status` and `hive status --json` are the bounded current-liveness
 surface. `--operational --json` selects the v4 agent workflow document with a

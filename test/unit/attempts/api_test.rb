@@ -58,7 +58,8 @@ class AttemptsAPITest < Minitest::Test
     api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
 
     result = api.dispatch_request(
-      :request, interactive: false, now: Time.at(1).utc, admission_view: :tick
+      :request, interactive: false, now: Time.at(1).utc, admission_view: :tick,
+      replay_semantic_terminal: true
     )
 
     assert_equal :accepted, result
@@ -66,20 +67,21 @@ class AttemptsAPITest < Minitest::Test
     assert_equal false, call.last.fetch(:interactive)
     assert_equal Time.at(1).utc, call.last.fetch(:now)
     assert_equal :tick, call.last.fetch(:admission_view)
+    assert_equal true, call.last.fetch(:replay_semantic_terminal)
   end
 
-  def test_dispatch_successor_delegates_recovery_admission
+  def test_dispatch_recovery_delegates_independent_admission
     daemon = Object.new
     call = nil
-    daemon.define_singleton_method(:dispatch_successor) do |**attributes|
+    daemon.define_singleton_method(:dispatch_recovery) do |**attributes|
       call = attributes
       :accepted
     end
     api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
 
-    result = api.dispatch_successor(
+    result = api.dispatch_recovery(
       task: :task,
-      predecessor: :lost,
+      source_attempt: :lost,
       project: "demo",
       argv: %w[hive run task],
       request_id: "request-2",
@@ -89,7 +91,7 @@ class AttemptsAPITest < Minitest::Test
 
     assert_equal :accepted, result
     assert_equal :task, call.fetch(:task)
-    assert_equal :lost, call.fetch(:predecessor)
+    assert_equal :lost, call.fetch(:source_attempt)
     assert_equal "demo", call.fetch(:project)
     assert_equal %w[hive run task], call.fetch(:argv)
     assert_equal "request-2", call.fetch(:request_id)
@@ -114,7 +116,6 @@ class AttemptsAPITest < Minitest::Test
       request_id: "request-3",
       provider: "internal",
       interactive: false,
-      predecessor_attempt_id: "attempt-2",
       retry_charge: 2,
       now: Time.at(2).utc
     )
@@ -127,7 +128,7 @@ class AttemptsAPITest < Minitest::Test
     assert_equal "request-3", call.fetch(:request_id)
     assert_equal "internal", call.fetch(:provider)
     assert_equal false, call.fetch(:interactive)
-    assert_equal "attempt-2", call.fetch(:predecessor_attempt_id)
+    refute_includes call, :predecessor_attempt_id
     assert_equal 2, call.fetch(:retry_charge)
     assert_equal Time.at(2).utc, call.fetch(:now)
 
@@ -176,5 +177,17 @@ class AttemptsAPITest < Minitest::Test
 
     assert_same store, foreground_store
     assert_same store, daemon_store
+  end
+
+  def test_correlated_log_reader_resolves_sealed_references_through_the_store
+    with_tmp_dir do |root|
+      store = Struct.new(:root) do
+        def sealed_payload_reference(reference) = reference.merge("sealed" => true)
+      end.new(root)
+      reader = Hive::Attempts::API.new(store: store).correlated_log_reader
+      resolver = reader.instance_variable_get(:@reference_resolver)
+
+      assert_equal({ "path" => "log", "sealed" => true }, resolver.call("path" => "log"))
+    end
   end
 end

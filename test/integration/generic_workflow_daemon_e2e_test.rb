@@ -253,7 +253,6 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
     folder = stage_folder(project_root, stage.dir)
     FileUtils.mkdir_p(folder)
     Hive::TaskMeta.write(folder, id: 101, slug: SLUG, display_name: "Generic Daemon", workflow: descriptor.id.to_s)
-    seed_task_projection(folder)
   end
 
   def seed_coding_task(project)
@@ -306,7 +305,8 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
     end
     with_attempt_context(
       attempt_id: "generic-workflow-test-attempt",
-      task_generation: "generic-workflow-test-generation"
+      task_generation: 0,
+      ownership_generation: "generic-workflow-test-generation"
     ) { yield }
   ensure
     Hive::Stages::Base.define_singleton_method(:spawn_agent, original) if original

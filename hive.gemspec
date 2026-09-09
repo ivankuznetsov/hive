@@ -43,6 +43,7 @@ Gem::Specification.new do |spec|
     "lib/hive/scripts/**/*.sh",
     "lib/hive/assets/qmd/*",
     "lib/hive/assets/capture-tools/*",
+    "lib/hive/assets/betterleaks/**/*",
     "templates/**/*",
     "templates/builtins/bench/runtime/.dockerignore",
     "schemas/**/*.json",
@@ -100,6 +101,7 @@ Gem::Specification.new do |spec|
   # REXML::Document; without this declaration `hive daemon install/status`
   # and `hive setup` raise LoadError on a stock 3.4 install.
   spec.add_dependency "rexml", "~> 3.2"
+  spec.add_dependency "sequel", "~> 5.107"
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"

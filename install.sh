@@ -22,9 +22,9 @@ is signed with cosign keyless attestation against this repo's release
 workflow; verification always fails closed when cosign is unavailable.
 
 After install the \`hive\` and \`hv\` executables are symlinked into
-\${XDG_BIN_HOME:-~/.local/bin}. The installer also runs \`hive daemon install\`
-to write and enable the per-user daemon autostart unit when the host supports
-it. The gem and its runtime dependencies (bubbletea, lipgloss, thor,
+\${XDG_BIN_HOME:-~/.local/bin}. Run \`hive setup --yes\` after installation to
+bootstrap the runtime control plane and install the per-user services. The gem
+and its runtime dependencies (bubbletea, lipgloss, thor,
 telegram-bot-ruby) live under \${HIVE_PREFIX:-~/.local/share}/hive/gems so an
 uninstall is a clean \`rm -rf\` plus symlink removal.
 
@@ -264,77 +264,6 @@ runtime_preflight() {
       warn "missing runtime dependency '${dep}' — install with: $(install_hint "$dep")"
     fi
   done
-}
-
-# Hive's daemon is global user infrastructure. Project setup later only
-# controls whether a project is enrolled for dispatch; the service itself
-# should already be installed, enabled, and started after Hive is installed.
-daemon_autostart_setup() {
-  local out err rc outcome
-  out="${tmpdir}/daemon-install.out"
-  err="${tmpdir}/daemon-install.err"
-
-  if "$link_path" daemon install --json >"$out" 2>"$err"; then
-    # `jq -e` fails when the envelope is unparseable or `.outcome` is
-    # absent/null, so a garbled-but-exit-0 install is reported instead
-    # of being silently trusted as success.
-    if outcome="$(jq -er '.outcome' "$out" 2>/dev/null)"; then
-      case "$outcome" in
-        written|upgraded|unchanged)
-          log "daemon autostart enabled via hive daemon install (${outcome})"
-          ;;
-        unsupported)
-          # Known-platform limitation (e.g. Linux without systemd-user):
-          # the unit was written but autostart could not be enabled. The
-          # CLI exits 0 for this, so it is not a failure to warn about.
-          log "daemon unit written; autostart unavailable on this host (hive daemon install: unsupported)"
-          ;;
-        *)
-          warn "daemon autostart setup reported outcome '${outcome}'; Hive is installed, but the daemon may not start after reboot"
-          ;;
-      esac
-    else
-      warn "daemon autostart setup succeeded but its JSON output was unreadable; Hive is installed, but the daemon may not start after reboot"
-      if [[ -s "$out" ]]; then
-        sed 's/^/hive install: daemon output: /' "$out" >&2
-      fi
-    fi
-    if jq -e '.messages? | length > 0' "$out" >/dev/null 2>&1; then
-      jq -r '.messages[]?' "$out" | sed 's/^/hive install: daemon message: /' >&2
-    fi
-    return 0
-  else
-    # `rc=$?` is the first statement in the else branch, so it captures
-    # the exit code of the failed `hive daemon install` (NOT 0 — `$?`
-    # after a false `if` condition with no else would be 0).
-    rc=$?
-    warn "daemon autostart setup did not complete (exit ${rc}); Hive is installed, but the daemon may not start after reboot"
-    warn "run '${link_path} daemon install' after fixing launchd/systemd-user, or '${link_path} daemon install --force' if an existing unit is customized"
-    if [[ -s "$err" ]]; then
-      sed 's/^/hive install: daemon stderr: /' "$err" >&2
-    fi
-    if [[ -s "$out" ]]; then
-      sed 's/^/hive install: daemon output: /' "$out" >&2
-    fi
-    return 0
-  fi
-}
-
-# An installed binary owns the state transition for every registered project.
-# Run it before daemon setup so no newly started daemon can dispatch a retained
-# task against a stale managed-workflow generation.
-migrate_registered_projects() {
-  local migrate_help
-  if ! migrate_help="$("${gem_home}/bin/hive" help migrate 2>/dev/null)" ||
-     [[ "$migrate_help" != *"--all"* ]]; then
-    log "installed Hive ${version} predates fleet migration; no automatic project migration is available"
-    return 0
-  fi
-
-  log "migrating registered projects with installed Hive"
-  if ! "${gem_home}/bin/hive" migrate --all; then
-    die "automatic project migration failed; resolve the reported project error and run '${gem_home}/bin/hive migrate --all'"
-  fi
 }
 
 qmd_install_enabled() {
@@ -660,8 +589,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry run: would download ${gem_url}"
   log "dry run: would verify SHA256SUMS and write ${data_home}/install-channel"
   log "dry run: would gem install --install-dir ${gem_home} ${gem_file}"
-  log "dry run: would run ${gem_home}/bin/hive migrate --all before daemon startup"
-  log "dry run: would run ${link_path} daemon install to enable daemon autostart"
+  log "dry run: first-run control-plane bootstrap and services remain explicit in hive setup --yes"
   if qmd_install_enabled; then
     log "dry run: would npm ci --ignore-scripts the release-owned QMD dependency lock under ${data_home}/qmd"
     log "dry run: would build better-sqlite3 from locked source with local Node headers"
@@ -939,9 +867,7 @@ else
 fi
 
 runtime_preflight
-migrate_registered_projects
-daemon_autostart_setup
 
 log "installed hive ${version} (hive-cli rubygem)"
-log "next: run 'hive --version', then 'hive init' in a project to enroll it for daemon dispatch"
+log "next: run 'hive --version', then 'hive setup --yes' to bootstrap runtime state and services"
 log "agent skills are installed separately; see install.md"

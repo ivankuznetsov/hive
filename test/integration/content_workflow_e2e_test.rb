@@ -26,7 +26,8 @@ class ContentWorkflowE2ETest < Minitest::Test
         with_deterministic_content_agent(record: ran) do
           with_attempt_context(
             attempt_id: "content-workflow-test-attempt",
-            task_generation: "content-workflow-test-generation"
+            task_generation: 0,
+            ownership_generation: "content-workflow-test-generation"
           ) do
             supervisor = InlineSupervisor.new(
               run: ->(command) { capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }; 0 }

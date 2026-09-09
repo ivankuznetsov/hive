@@ -1316,6 +1316,8 @@ class GithubPublicationTest < Minitest::Test
       repo = File.join(dir, "repo")
       capture("git", "init", "--bare", remote)
       capture("git", "init", "-b", "main", repo)
+      # Detached maintenance must not race with temporary-directory cleanup.
+      [ repo, remote ].each { |path| capture("git", "-C", path, "config", "maintenance.auto", "false") }
       capture("git", "-C", repo, "config", "user.email", "test@example.com")
       capture("git", "-C", repo, "config", "user.name", "Test")
       File.write(File.join(repo, "base.txt"), "base\n")

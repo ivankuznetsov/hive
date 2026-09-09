@@ -122,6 +122,9 @@ root-Minitest-owning job in `ci.yml` retains that file: coverage shards,
 expensive proof gates, e2e harness library tests, the advisory TUI latency job,
 and the macOS launchd proof.
 
+Publication tests disable automatic Git maintenance in their disposable local
+and bare repositories, so detached maintenance cannot race with fixture cleanup.
+
 During implementation, run the smallest relevant test files directly:
 
 ```bash

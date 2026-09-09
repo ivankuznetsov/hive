@@ -642,18 +642,39 @@ module Hive
       def terminate_and_reap(pid)
         signal_process_group(pid, "TERM")
         deadline = monotonic_now + TERMINATION_GRACE_SEC
+        leader_reaped = false
+        leader_status = nil
         loop do
-          waited = Process.wait2(pid, Process::WNOHANG)
-          return waited.last if waited
+          unless leader_reaped
+            begin
+              waited = Process.wait2(pid, Process::WNOHANG)
+              if waited
+                leader_reaped = true
+                leader_status = waited.last
+              end
+            rescue Errno::ECHILD
+              leader_reaped = true
+            end
+          end
+          break if leader_reaped && !process_group_alive?(pid)
           break if monotonic_now >= deadline
 
           sleep 0.01
         end
 
-        signal_process_group(pid, "KILL")
-        Process.wait2(pid).last
+        signal_process_group(pid, "KILL") unless leader_reaped && !process_group_alive?(pid)
+        leader_reaped ? leader_status : Process.wait2(pid).last
       rescue Errno::ECHILD
         nil
+      end
+
+      def process_group_alive?(pid)
+        Process.kill(0, -pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
       end
 
       def signal_process_group(pid, signal)

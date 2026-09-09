@@ -274,6 +274,30 @@ class UserServiceTransactionJournalTest < Minitest::Test
     assert_equal "removal_prepared", document.fetch("phase")
   end
 
+  def test_remove_can_durably_adopt_a_newly_available_manager
+    journal = fake_journal(writer: ->(*) { nil })
+    document = journal.prepare(
+      operation: :remove,
+      prior_content: nil,
+      prior_digest: nil,
+      prior_enabled: false,
+      prior_running: false,
+      desired_digest: nil,
+      backup_path: nil,
+      manager_intent: nil,
+      result_kind: :absent,
+      autostart: true
+    )
+
+    adopted = journal.record_removal_manager_intent(document)
+
+    assert_equal "disable", adopted.fetch("manager_intent")
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      journal.record_removal_manager_intent(adopted)
+    end
+    assert_match(/cannot record removal manager intent/, error.message)
+  end
+
   def test_process_identity_fields_must_be_coherent
     base = prepared_document(fake_journal(writer: ->(*) { nil }))
     invalid = [

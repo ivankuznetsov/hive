@@ -360,6 +360,50 @@ class UserServiceManagerTest < Minitest::Test
     end
   end
 
+  def test_production_cleanup_kills_group_members_after_the_leader_is_reaped
+    manager = build_manager(:linux, runner: nil)
+    reader, writer = IO.pipe
+    pid = Process.spawn(
+      "/bin/sh", "-c", "sh -c 'trap \"\" TERM; echo \$\$; exec sleep 30' & wait",
+      out: writer,
+      pgroup: true
+    )
+    writer.close
+    child_pid = Integer(reader.gets)
+
+    manager.send(:terminate_and_reap, pid)
+
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+    alive = true
+    while alive && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+      begin
+        Process.kill(0, child_pid)
+        sleep 0.01
+      rescue Errno::ESRCH
+        alive = false
+      end
+    end
+    refute alive, "a TERM-ignoring group member must not survive leader reaping"
+  ensure
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+    begin
+      Process.kill("KILL", child_pid) if child_pid
+    rescue Errno::ESRCH
+      nil
+    end
+    begin
+      Process.kill("KILL", -pid) if pid
+    rescue Errno::ESRCH
+      nil
+    end
+    begin
+      Process.wait(pid) if pid
+    rescue Errno::ECHILD
+      nil
+    end
+  end
+
   def test_command_diagnostics_distinguish_timeout_and_failed_commands
     manager = build_manager(:linux)
     timeout = Hive::UserService::Manager::Command.new(ok: false, failure: :timeout)

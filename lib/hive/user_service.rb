@@ -1014,6 +1014,17 @@ module Hive
 
       status = inspect_status(manager: true)
       intent = document.fetch("manager_intent")
+      if intent.nil? && status.manager_available?
+        document = transaction.journal.record_removal_manager_intent(document)
+        intent = document.fetch("manager_intent")
+      elsif intent.nil? && status.manager_availability != :conclusively_absent
+        return pending_result(
+          operation: :remove,
+          document: document,
+          status: status,
+          diagnostics: diagnostics + status.diagnostics
+        )
+      end
       if intent
         unless status.manager_available?
           return pending_result(

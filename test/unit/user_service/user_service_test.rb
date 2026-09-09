@@ -3830,6 +3830,105 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_filesystem_only_removal_replay_reconciles_a_newly_available_manager_before_unlink
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      document = remove_document(
+        phase: "removal_prepared",
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: nil
+      )
+      enabled = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        enabled: true,
+        running: true
+      )
+      disabled = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        enabled: false,
+        running: false
+      )
+      removed = synthetic_status(
+        dir,
+        content_state: :absent,
+        digest: nil,
+        enabled: false,
+        running: false,
+        definition_current: false,
+        load_state: "not-found"
+      )
+      observations = [ enabled, disabled, disabled, removed, removed, removed ]
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || removed }
+      calls = []
+      manager = Object.new
+      manager.define_singleton_method(:disable) do
+        calls << :disable
+        Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: [])
+      end
+      manager.define_singleton_method(:reload_after_remove) do
+        calls << :reload_after_remove
+        Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: [])
+      end
+      service.instance_variable_set(:@manager, manager)
+
+      result = service.send(
+        :complete_removal,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert result.success?
+      assert_equal %i[disable reload_after_remove], calls
+      refute File.exist?(path)
+    end
+  end
+
+  def test_filesystem_only_removal_replay_preserves_the_unit_on_indeterminate_manager_state
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      document = remove_document(
+        phase: "removal_prepared",
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: nil
+      )
+      indeterminate = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        manager_availability: :indeterminate,
+        enabled: true,
+        running: true
+      )
+      service = build_service(dir, runner: ->(_argv) { raise "manager must not mutate" })
+      service.define_singleton_method(:inspect_status) { |manager:| indeterminate }
+
+      result = service.send(
+        :complete_removal,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :recovery_pending
+      assert File.exist?(path)
+    end
+  end
+
   def test_filesystem_only_removal_advances_reload_without_manager_mutation
     with_tmp_dir do |dir|
       service = build_service(dir, runner: ->(_argv) { raise "manager must not mutate" })
@@ -4555,6 +4654,9 @@ class UserServiceTest < Minitest::Test
         "activation_from_main_pid" => main_pid,
         "activation_from_process_start" => process_start
       )
+    end
+    journal.define_singleton_method(:record_removal_manager_intent) do |candidate|
+      candidate.merge("manager_intent" => "disable")
     end
     journal.define_singleton_method(:advance) do |candidate, phase:, direction: candidate.fetch("direction"),
                                                      activation_process: nil|

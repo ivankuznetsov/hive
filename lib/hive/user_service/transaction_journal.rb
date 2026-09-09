@@ -202,6 +202,21 @@ module Hive
         write(updated, expected_document: document)
       end
 
+      def record_removal_manager_intent(document)
+        validate_document!(document)
+        unless document.fetch("operation") == "remove" &&
+               document.fetch("direction") == "forward" &&
+               document.fetch("manager_intent").nil?
+          raise Invalid, "transition journal cannot record removal manager intent in this state"
+        end
+
+        updated = document.merge(
+          "manager_intent" => "disable",
+          "updated_at" => @clock.call.utc.iso8601(6)
+        )
+        write(updated, expected_document: document)
+      end
+
       def phase?(document, phase)
         document.fetch("phase") == phase.to_s
       end

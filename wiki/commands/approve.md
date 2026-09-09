@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-09-02
 tags: [command, approval, json, dependencies, admission]
 ---
 
@@ -113,6 +113,12 @@ The envelope is emitted on stdout BEFORE the exception propagates, mirroring `hi
 `Hive::Commands::Approve.error_kind_for` is the shared transition-error
 classifier. Workflow stage actions delegate to it because their outer envelope
 exposes the same closed error-kind enum while composing this command.
+
+Pre-dispatch usage failures, including missing or extra arguments rejected by
+Thor before command dispatch, use the same `hive-approve.v2` error contract
+with `error_kind: "invalid_task_path"`. For command-level error emission,
+`JSON::GeneratorError` is deliberately propagated rather than suppressed or
+replaced with a second document.
 
 Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and the command/schema suites. The current artifact is `schemas/hive-approve.v2.json`; v1 remains available for historical validation.
 

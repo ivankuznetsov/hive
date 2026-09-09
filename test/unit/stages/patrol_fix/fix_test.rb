@@ -215,7 +215,7 @@ module PatrolFixStageFixture
     Dir.mktmpdir do |dir|
       repo = File.join(dir, "repo")
       FileUtils.mkdir_p(repo)
-      git(repo, "init", "-b", "main"); git(repo, "config", "user.email", "test@example.com"); git(repo, "config", "user.name", "Test")
+      git(repo, "init", "-b", "main"); git(repo, "config", "maintenance.auto", "false"); git(repo, "config", "user.email", "test@example.com"); git(repo, "config", "user.name", "Test")
       File.write(File.join(repo, "app.rb"), "puts :broken\n"); git(repo, "add", "app.rb"); git(repo, "commit", "-m", "Initial")
       head = git(repo, "rev-parse", "HEAD").strip
       folder = File.join(repo, ".hive-state", "stages", stage, "repair-one")

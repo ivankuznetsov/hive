@@ -143,22 +143,29 @@ class TestHelperIsolationTest < Minitest::Test
   end
 
   def test_rake_smoke_scopes_real_user_environment_to_its_child
+    code = <<~'RUBY'
+      require "rake"
+      load "Rakefile"
+      Rake::Task[:smoke].invoke
+      abort "smoke opt-in leaked into the Rake parent" if ENV.key?("HIVE_TEST_ALLOW_REAL_USER_ENV")
+    RUBY
     _stdout, stderr, status = Open3.capture3(
       {
         "HIVE_TEST_ALLOW_REAL_USER_ENV" => nil,
         "OPENAI_API_KEY" => nil,
         "OPENROUTER_API_KEY" => nil,
-        "TESTOPTS" => "--name=/test_operator_home_is_retained_while_hive_install_paths_are_disposable/"
+        "TEST" => "test/smoke/real_user_environment_isolation_smoke_test.rb",
+        "TESTOPTS" => nil
       },
       "bundle",
       "exec",
-      "rake",
-      "smoke",
+      RbConfig.ruby,
+      "-e",
+      code,
       chdir: File.expand_path("../..", __dir__)
     )
 
     assert status.success?, stderr
-    refute ENV.key?("HIVE_TEST_ALLOW_REAL_USER_ENV")
   end
 
   def test_runtime_fixture_restores_dynamic_database_defaults

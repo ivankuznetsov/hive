@@ -549,7 +549,10 @@ task default: :test
   focused smoke invocations use the same boundary as the Rake smoke task. A
   zero-provider smoke case exercises that path and its normal cleanup hooks.
   The Rake task injects the opt-in only into its test child, so later tasks in
-  the same Rake process cannot inherit real-user access. PATH-based diagnostics
+  the same Rake process cannot inherit real-user access. Its regression probe
+  explicitly selects the provider-free smoke file despite an inherited `TEST`
+  selector and checks the Rake parent's environment after the child exits.
+  PATH-based diagnostics
   may still execute operator tools such as QMD by design; their Hive installer
   write targets remain redirected.
 - `with_tmp_dir` — creates a `hive-test*` directory and removes it through

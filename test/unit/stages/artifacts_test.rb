@@ -4,9 +4,73 @@ require "hive/config"
 require "hive/markers"
 require "hive/stages/artifacts"
 require "hive/task"
+require "hive/task_action"
 
 class StagesArtifactsTest < Minitest::Test
   include HiveTestHelper
+
+  def test_best_effort_capture_failure_completes_without_claiming_accepted_evidence
+    Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
+      task = make_artifacts_task(dir)
+      File.write(task.state_file, "Existing evidence notes\n")
+      calls = 0
+      collector = lambda do |*_|
+        calls += 1
+        raise Hive::Artifacts::OutcomeEvidence::StoreError, "screenshot has no matching controller capture receipt"
+      end
+      with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, collector) do
+        result = Hive::Stages::Artifacts.run!(task, {})
+        assert_equal :complete, result.fetch(:status)
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal "unavailable", marker.attrs.fetch("evidence_status")
+        assert_equal "outcome_evidence_invalid", marker.attrs.fetch("warning_reason")
+        assert_includes marker.attrs.fetch("diagnostic"), "capture receipt"
+        assert_includes File.read(task.state_file), "Existing evidence notes"
+        assert_equal "ready_to_finalize", Hive::TaskAction.for(task, marker).key
+        assert_equal :complete, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+        assert_equal 1, calls
+      end
+    end
+  end
+
+  def test_best_effort_does_not_hide_source_integrity_failures_or_implementation_rework
+    Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
+      task = make_artifacts_task(dir)
+      [ Hive::Stages::Artifacts::IntegrityError,
+        Hive::Artifacts::OutcomeEvidence::ResolutionError ].each do |error_class|
+        with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, ->(*_) { raise error_class, "source changed" }) do
+          assert_equal :error, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+          assert_equal "outcome_evidence_integrity_invalid", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        end
+      end
+      %w[outcome_evidence_implementation_rework outcome_evidence_reworks_exhausted].each do |reason|
+        rework = lambda do |*_|
+          Hive::Markers.set(task.state_file, :error, reason: reason)
+          { status: :error, commit: "rework" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, rework) do
+          assert_equal :error, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+        end
+      end
+    end
+  end
+
+  def test_best_effort_continues_after_capture_quota_or_a_blocked_capture
+    Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
+      %w[limits_reached outcome_evidence_capability_blocked outcome_evidence_recaptures_exhausted].each do |reason|
+        task = make_artifacts_task(dir)
+        File.write(task.state_file, "")
+        failed = lambda do |*_|
+          Hive::Markers.set(task.state_file, :error, reason: reason)
+          { status: :error, commit: "error" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, failed) do
+          assert_equal :complete, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+          assert_equal reason, Hive::Markers.current(task.state_file).attrs.fetch("warning_reason")
+        end
+      end
+    end
+  end
 
   def test_markerless_artifacts_stage_spawns_agent_and_returns_complete_marker
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
@@ -686,6 +750,197 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_rejected_producer_descriptor_gets_one_fresh_bounded_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      writable_root = File.join(task.folder, "evidence")
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        representation = {
+          "role" => "original", "media_type" => "video/webm",
+          "path" => "evidence/flow.webm"
+        }
+        representation["rendering"] = "temporal" if prompts.length == 1
+        {
+          actor: { "context_id" => "producer-#{prompts.length}", "agent" => "pi" },
+          output: {
+            "evidence" => [
+              {
+                "kind" => "video", "summary" => "The recording proves the flow.",
+                "claims" => [ "claim-flow" ],
+                "representations" => [ representation ]
+              }
+            ]
+          }
+        }
+      end
+
+      producer, retained = Hive::Stages::Artifacts.run_producer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        prompt_values: {
+          requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+          capture_tools_json: "{}", writable_root: writable_root,
+          writable_relative_root: "evidence"
+        },
+        writable_root: writable_root, launch_environment: nil,
+        producer_add_dirs: [], producer_permission_arguments: nil,
+        producer_runtime_policy: nil
+      ) do |candidate, _actor|
+        representation = candidate.first.fetch("representations").first
+        if representation.key?("rendering")
+          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+                "producer outcome evidence representation contains unknown keys: rendering"
+        end
+        candidate
+      end
+
+      assert_equal "producer-2", producer.dig(:actor, "context_id")
+      refute retained.first.fetch("representations").first.key?("rendering")
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "contains unknown keys: rendering"
+      assert_includes prompts.last, '"rendering": "temporal"'
+      assert_includes prompts.last, "Reuse successful controller-issued captures"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_empty_producer_output_gets_one_fresh_bounded_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      writable_root = File.join(task.folder, "evidence")
+      FileUtils.mkdir_p(writable_root)
+      capture = File.join(writable_root, "flow.webm")
+      File.binwrite(capture, "captured-before-empty-output")
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        if prompts.length == 1
+          raise Hive::Stages::Artifacts::RoleOutputError,
+                "producer output is missing or oversized"
+        end
+
+        {
+          actor: { "context_id" => "producer-2", "agent" => "pi" },
+          output: {
+            "evidence" => [
+              {
+                "kind" => "video", "summary" => "The recording proves the flow.",
+                "claims" => [ "claim-flow" ],
+                "representations" => [
+                  {
+                    "role" => "original", "media_type" => "video/webm",
+                    "path" => "evidence/flow.webm"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      end
+
+      producer, retained = Hive::Stages::Artifacts.run_producer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        prompt_values: {
+          requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+          capture_tools_json: "{}", writable_root: writable_root,
+          writable_relative_root: "evidence"
+        },
+        writable_root: writable_root, launch_environment: nil,
+        producer_add_dirs: [], producer_permission_arguments: nil,
+        producer_runtime_policy: nil
+      ) do |candidate, _actor|
+        assert_path_exists capture,
+                           "the repair turn must retain controller-issued captures"
+        candidate
+      end
+
+      assert_equal "producer-2", producer.dig(:actor, "context_id")
+      assert_equal 1, retained.length
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "producer output is missing or oversized"
+      assert_includes prompts.last, '"previous_output": null'
+      assert_includes prompts.last, "Reuse successful controller-issued captures"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_producer_launch_store_failure_is_not_mislabeled_as_output_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      writable_root = File.join(task.folder, "evidence")
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        raise Hive::Artifacts::OutcomeEvidence::StoreError,
+              "producer modified protected task state"
+      end
+
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        Hive::Stages::Artifacts.run_producer!(
+          task: task, cfg: {}, identity: outcome_identity,
+          prompt_values: {
+            requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+            capture_tools_json: "{}", writable_root: writable_root,
+            writable_relative_root: "evidence"
+          },
+          writable_root: writable_root, launch_environment: nil,
+          producer_add_dirs: [], producer_permission_arguments: nil,
+          producer_runtime_policy: nil
+        ) { |candidate, _actor| candidate }
+      end
+
+      assert_equal "producer modified protected task state", error.message
+      assert_equal 1, prompts.length,
+                   "launch and custody failures must not enter descriptor repair"
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
+  def test_producer_output_with_extra_top_level_keys_gets_one_bounded_repair
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      writable_root = File.join(task.folder, "evidence")
+      prompts = []
+      original = Hive::Stages::Artifacts.method(:run_role!)
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!) do |prompt:, **|
+        prompts << prompt
+        output = { "evidence" => [] }
+        output["explanation"] = "captured successfully" if prompts.length == 1
+        {
+          actor: { "context_id" => "producer-#{prompts.length}", "agent" => "pi" },
+          output: output
+        }
+      end
+
+      producer, retained = Hive::Stages::Artifacts.run_producer!(
+        task: task, cfg: {}, identity: outcome_identity,
+        prompt_values: {
+          requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
+          capture_tools_json: "{}", writable_root: writable_root,
+          writable_relative_root: "evidence"
+        },
+        writable_root: writable_root, launch_environment: nil,
+        producer_add_dirs: [], producer_permission_arguments: nil,
+        producer_runtime_policy: nil
+      ) { |candidate, _actor| candidate }
+
+      assert_equal "producer-2", producer.dig(:actor, "context_id")
+      assert_empty retained
+      assert_equal 2, prompts.length
+      assert_includes prompts.last, "producer output must contain only evidence"
+      assert_includes prompts.last, '"explanation": "captured successfully"'
+    ensure
+      Hive::Stages::Artifacts.define_singleton_method(:run_role!, original) if original
+    end
+  end
+
   def test_overlong_verdict_reason_gets_one_repair_round_before_the_append
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -1022,6 +1277,44 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  def test_pi_producer_leaves_runtime_policy_cleanup_to_capture_toolkit
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      identity = { "implementation_head" => "a" * 40 }
+      resolver = Struct.new(:value) { def resolve = value }.new(identity)
+      policy = Struct.new(
+        :permission_mode, :allowed_tools, :disallowed_tools
+      ).new(nil, %w[Read], %w[Bash Write Edit])
+      captured = nil
+      spawn = lambda do |_task, agent_custody:, **kwargs|
+        captured = kwargs
+        agent_custody.call do
+          {
+            status: :ok, final_message: '{"evidence":[]}',
+            final_message_truncated: false
+          }
+        end
+      end
+
+      with_replaced_singleton_method(
+        Hive::Artifacts::OutcomeEvidence::Identity, :new, ->(**) { resolver }
+      ) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          Hive::Stages::Artifacts.run_role!(
+            role: "producer", task: task,
+            cfg: { "artifacts" => { "evidence" => { "producer" => { "agent" => "pi" } } } },
+            prompt: "produce", identity: identity,
+            writable_root: File.join(task.folder, "evidence"),
+            producer_runtime_policy: policy
+          )
+        end
+      end
+
+      assert_equal false, captured.fetch(:cleanup_runtime_policy)
+      assert_same policy, captured.fetch(:runtime_policy)
+    end
+  end
+
   def test_role_inherits_stage_local_model_when_it_uses_the_stage_agent
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
@@ -1201,9 +1494,11 @@ class StagesArtifactsTest < Minitest::Test
           target = File.join(writable_root, "target.md")
           link = File.join(writable_root, "original.md")
           review = File.join(writable_root, "review.txt")
-          File.write(target, "# Checkout\n\nConfirmation is visible.\n")
-          File.symlink(target, link)
-          File.write(review, "Checkout confirmation is visible.\n")
+          unless File.exist?(target)
+            File.write(target, "# Checkout\n\nConfirmation is visible.\n")
+            File.symlink(target, link)
+            File.write(review, "Checkout confirmation is visible.\n")
+          end
           relative = ->(path) { Pathname.new(path).relative_path_from(Pathname.new(task.folder)).to_s }
           representation = lambda do |path, role_name, media_type|
             {
@@ -1329,7 +1624,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_run_touches_state_and_translates_controller_errors_to_a_durable_marker
+  def test_collection_touches_state_and_translates_controller_errors_to_a_durable_marker
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       FileUtils.rm_f(task.state_file)
@@ -1337,7 +1632,7 @@ class StagesArtifactsTest < Minitest::Test
       result = with_replaced_singleton_method(
         Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
       ) do
-        Hive::Stages::Artifacts.run!(task, nil)
+        Hive::Stages::Artifacts.collect!(task, nil)
       end
       assert_equal({ commit: "done", status: :complete }, result)
       assert File.exist?(task.state_file)
@@ -1348,7 +1643,7 @@ class StagesArtifactsTest < Minitest::Test
       result = with_replaced_singleton_method(
         Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
       ) do
-        Hive::Stages::Artifacts.run!(task, {})
+        Hive::Stages::Artifacts.collect!(task, {})
       end
       assert_equal({ commit: "error", status: :error }, result)
       marker = Hive::Markers.current(task.state_file)
@@ -1357,7 +1652,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_run_preserves_role_provider_limits_as_a_cooldown_marker
+  def test_collection_preserves_role_provider_limits_as_a_cooldown_marker
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       retry_at = "2026-08-21T10:15:00Z"
@@ -1379,7 +1674,7 @@ class StagesArtifactsTest < Minitest::Test
       result = with_replaced_singleton_method(
         Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
       ) do
-        Hive::Stages::Artifacts.run!(task, {})
+        Hive::Stages::Artifacts.collect!(task, {})
       end
 
       assert_equal({ commit: "limits_reached", status: :error }, result)
@@ -1392,7 +1687,7 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
-  def test_run_preserves_non_limit_role_provider_errors
+  def test_collection_preserves_non_limit_role_provider_errors
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = make_artifacts_task(dir)
       failure = Hive::Stages::Artifacts::RoleAgentError.new(
@@ -1410,7 +1705,7 @@ class StagesArtifactsTest < Minitest::Test
       result = with_replaced_singleton_method(
         Hive::Stages::Artifacts, :run_outcome_evidence!, replacement
       ) do
-        Hive::Stages::Artifacts.run!(task, {})
+        Hive::Stages::Artifacts.collect!(task, {})
       end
 
       assert_equal({ commit: "error", status: :error }, result)
@@ -1723,10 +2018,16 @@ class StagesArtifactsTest < Minitest::Test
       store.define_singleton_method(:review_context_for_identity) do |_value|
         { "path" => "outcome-evidence/context.diff" }
       end
+      failed_root = nil
+      closed = false
       toolkit = Object.new
-      toolkit.define_singleton_method(:prepare!) do |**|
+      toolkit.define_singleton_method(:prepare!) do |writable_root:, **|
+        failed_root = writable_root
+        FileUtils.mkdir_p(writable_root)
+        File.write(File.join(writable_root, "partial-capture"), "private")
         raise Hive::ConfigError, "ffmpeg unavailable"
       end
+      toolkit.define_singleton_method(:close) { closed = true }
 
       result = Hive::Stages::Artifacts.run_outcome_evidence!(
         task, {}, identity_resolver: resolver, store: store, capture_toolkit: toolkit
@@ -1736,6 +2037,9 @@ class StagesArtifactsTest < Minitest::Test
       assert_equal "capability_blocked", published.first.fetch(:reason)
       assert_equal [ "claim-flow" ], published.first.fetch(:failed_targets)
       assert_equal :error, Hive::Markers.current(task.state_file).name
+      assert closed, "partially prepared capture tooling must be closed"
+      refute_path_exists failed_root,
+                         "capability failure must not leave a private attempt directory"
     end
   end
 
@@ -2185,9 +2489,23 @@ class StagesArtifactsTest < Minitest::Test
         { "evidence" => [] },
         Hive::Stages::Artifacts.parse_role_output!(fenced, "producer")
       )
+      prefixed = <<~OUTPUT
+        Capture is complete. Final evidence:
+
+        {"evidence":[]}
+      OUTPUT
+      assert_equal(
+        { "evidence" => [] },
+        Hive::Stages::Artifacts.parse_role_output!(prefixed, "producer")
+      )
       assert_raises(Hive::Stages::Artifacts::RoleOutputError) do
         Hive::Stages::Artifacts.parse_role_output!(
           "```json\n{\"evidence\":[]}\n```\ntrailing prose", "producer"
+        )
+      end
+      assert_raises(Hive::Stages::Artifacts::RoleOutputError) do
+        Hive::Stages::Artifacts.parse_role_output!(
+          "Capture is complete.\n\n{\"evidence\":[]}\ntrailing prose", "producer"
         )
       end
       assert_raises(Hive::Stages::Artifacts::RoleOutputError) do

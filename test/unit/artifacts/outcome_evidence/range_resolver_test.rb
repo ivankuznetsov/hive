@@ -37,7 +37,7 @@ class OutcomeEvidenceRangeResolverTest < Minitest::Test
 
       FileUtils.rm_f(File.join(worktree, "dirty.txt"))
       write_pointer(task, worktree)
-      assert_resolution_error(task, root, /base/)
+      assert_equal base, resolver(task, root).resolve.fetch("implementation_base")
 
       unrelated = run!("git", "-C", task.project_root, "commit-tree", "HEAD^{tree}", "-m", "unrelated").strip
       write_pointer(task, worktree, base_oid: unrelated)
@@ -55,6 +55,19 @@ class OutcomeEvidenceRangeResolverTest < Minitest::Test
         worktree_root: root
       )
       assert_resolution_error(task, root, /contradicts/)
+    end
+  end
+
+  def test_legacy_pointer_without_base_metadata_uses_repository_comparison_base
+    with_repository do |task, worktree, base, root|
+      commit_path(worktree, "lib/feature.rb", "FEATURE = true\n")
+      File.write(File.join(task.folder, "worktree.yml"),
+                 { "path" => worktree, "branch" => task.slug }.to_yaml)
+
+      identity = resolver(task, root).resolve
+
+      assert_equal base, identity.fetch("implementation_base")
+      assert_equal [ "lib/feature.rb" ], identity.fetch("changed_paths")
     end
   end
 

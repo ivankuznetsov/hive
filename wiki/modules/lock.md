@@ -111,6 +111,14 @@ and holds the descriptor while yielding. It is same-thread reentrant but
 process-scoped; forked children must contend normally. The kernel releases it
 on close or process death.
 
+While holding that commit lock, Hive checks for an abandoned Git `index.lock`.
+It only quarantines an unchanged, empty, regular file owned by the current user
+and older than a minute, after `ps` finds no Git process and `fuser` finds no
+open holder. Age alone is never sufficient. Missing/inaccessible inspection
+tools, live writers, nonempty locks, and symlinks are preserved. The quarantined
+file remains beside the index with a `.hive-stale-<nonce>` suffix. This recovery
+is limited to Hive state-repository commit windows, not arbitrary agent Git use.
+
 The commit lock serializes the shared hive-state Git index and brief commit
 window. It does not serialize long agents on different tasks. `.markers-lock`
 and other domain-specific filesystem mutexes remain narrower machine-local

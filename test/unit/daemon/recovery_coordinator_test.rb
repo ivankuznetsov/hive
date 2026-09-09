@@ -216,7 +216,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       "retry_after" => (NOW + 3 * 3600).iso8601
     }, mtime: NOW - 3600) do |coordinator, row, state_home|
       write_terminal_recovery_history(
-        row: row, state_home: state_home, retry_count: 25
+        row: row, state_home: state_home, retry_count: 25,
+        failure_fingerprint: coordinator.send(:failure_fingerprint, row, row.marker_attrs),
+        identical_failure_count: 25
       )
       receipt = coordinator.request(
         row: row, requestor: "healer", request_id: "auto-26",
@@ -231,6 +233,42 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal (NOW + 3 * 3600).iso8601,
                    request.recovery.dig("provider_hint", "retry_after")
       assert_equal true, request.recovery.dig("provider_hint", "display_only")
+    end
+  end
+
+  def test_first_provider_limit_waits_an_hour_instead_of_using_crash_backoff
+    with_fixture(marker_attrs: { "reason" => "limits_reached", "marker_id" => "marker-1" },
+                 mtime: NOW - 1800) do |coordinator, row, state_home|
+      receipt = coordinator.request(row:, requestor: "healer", now: NOW)
+      assert_equal "cooldown", receipt.status
+      assert_equal (NOW + 1800).iso8601(6), receipt.next_eligible_at
+      assert_empty Q.pending(state_home:)
+    end
+  end
+
+  def test_previously_parked_provider_limit_rearms_without_skipping_hourly_cooldown
+    with_fixture(marker_attrs: { "reason" => "limits_reached", "marker_id" => "marker-1" },
+                 mtime: NOW - 3600) do |coordinator, row, state_home|
+      coordinator.request(row:, requestor: "healer", request_id: "quota", now: NOW)
+      Q.update_recovery!(
+        "quota", expected_phase: "admitted", changes: {
+          "blocked_reason" => "deterministic_failure", "owner" => "operator",
+          "next_eligible_at" => (NOW + 1800).iso8601(6)
+        }, state_home:
+      )
+
+      receipt = coordinator.request(row:, requestor: "healer", now: NOW)
+
+      assert_equal "cooldown", receipt.status
+      assert_equal "scheduler", receipt.owner
+      assert_equal (NOW + 1800).iso8601(6), receipt.next_eligible_at
+      request = Q.fetch("quota", state_home:)
+      assert_nil request.recovery.fetch("blocked_reason")
+      early = coordinator.resume(request:, row:, now: NOW + 1799)
+      assert_equal "admitted", early.phase
+      assert_equal "error", Hive::Markers.current(row.state_file).name.to_s
+      due = coordinator.resume(request: Q.fetch("quota", state_home:), row:, now: NOW + 1800)
+      assert_equal "cleared", due.phase
     end
   end
 
@@ -506,6 +544,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal "queued", receipt.status
       request = Q.fetch("changed", state_home: state_home)
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, request.recovery.fetch("retry_count")
       assert_equal 1, request.recovery.fetch("identical_failure_count")
       refute_equal "f" * 64, request.recovery.fetch("failure_fingerprint")
     end
@@ -536,6 +576,79 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal Hive::RuntimeIdentity.source_digest, recovery.fetch("runtime_digest")
       assert_equal 1, recovery.fetch("identical_failure_count")
       assert_equal [ "attempt-3" ], recovery.fetch("failure_attempt_history")
+    end
+  end
+
+  def test_dirty_worktree_progress_starts_a_fresh_failure_series
+    attrs = {
+      "reason" => "dirty_worktree", "marker_id" => "marker-progress",
+      "provider" => "pi", "message" => "agent left uncommitted changes",
+      "attempt_id" => "attempt-current"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 6) do |coordinator, row, state_home|
+      old_row = row.to_h.merge("evidence" => [ dirty_commit_evidence("a" * 40) ])
+      old_fingerprint = coordinator.send(:failure_fingerprint, old_row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:, retry_count: 4,
+        failure_fingerprint: old_fingerprint, identical_failure_count: 4,
+        failure_attempt_history: %w[attempt-1 attempt-2 attempt-3 attempt-4]
+      )
+      progressed_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("b" * 40) ]
+      )
+      invalid_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("not-a-revision") ]
+      )
+
+      assessment = coordinator.assessment(progressed_row, now: NOW)
+
+      assert_equal "", coordinator.send(:dirty_progress_revision, invalid_row, attrs)
+      receipt = coordinator.request(
+        row: progressed_row, requestor: "healer", request_id: "progressed", now: NOW
+      )
+
+      assert assessment.fetch(:due)
+      assert_equal NOW - 1, assessment.fetch(:retry_at)
+      assert_equal "queued", receipt.status
+      request = Q.fetch("progressed", state_home: state_home)
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, request.recovery.fetch("retry_count")
+      assert_equal 1, request.recovery.fetch("identical_failure_count")
+      assert_equal [ "attempt-current" ],
+                   request.recovery.fetch("failure_attempt_history")
+      refute_equal old_fingerprint, request.recovery.fetch("failure_fingerprint")
+    end
+  end
+
+  def test_dirty_worktree_without_progress_remains_an_identical_failure
+    attrs = {
+      "reason" => "dirty_worktree", "marker_id" => "marker-same",
+      "provider" => "pi", "message" => "agent left uncommitted changes",
+      "attempt_id" => "attempt-current"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      observed_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("a" * 40) ]
+      )
+      fingerprint = coordinator.send(:failure_fingerprint, observed_row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:, retry_count: 2,
+        failure_fingerprint: fingerprint, identical_failure_count: 1,
+        failure_attempt_history: [ "attempt-previous" ]
+      )
+
+      receipt = coordinator.request(
+        row: observed_row, requestor: "healer", request_id: "unchanged", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      request = Q.fetch("unchanged", state_home: state_home)
+      assert_equal 3, receipt.retry_count
+      assert_equal 3, request.recovery.fetch("retry_count")
+      assert_equal 2, request.recovery.fetch("identical_failure_count")
+      assert_equal %w[attempt-previous attempt-current],
+                   request.recovery.fetch("failure_attempt_history")
+      assert_equal fingerprint, request.recovery.fetch("failure_fingerprint")
     end
   end
 
@@ -986,6 +1099,45 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "recovery_unavailable", receipt.reason
       assert_includes receipt.remediation, "resolver offline"
       assert_empty Q.pending(state_home: state_home)
+    end
+  end
+
+  def test_artifact_recovery_runs_before_admission_and_fails_closed
+    calls = []
+    recovery = lambda do |task:, marker:, intended_stage:|
+      calls << [ task, marker, intended_stage ]
+    end
+    artifacts_resolver = lambda do |task, _dir|
+      ->(**_kwargs) { task.with(stage_index: 7, stage_name: "artifacts") }
+    end
+    with_fixture(runtime_residue_recovery: recovery, task_resolver_builder: artifacts_resolver) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row.with(stage: "7-artifacts"), requestor: "web",
+        request_id: "recover-artifacts", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      assert_equal [ [ row.folder, :error, "7-artifacts" ] ],
+                   calls.map { |task, marker, stage| [ task.folder, marker.name, stage ] }
+      assert Q.fetch("recover-artifacts", state_home:).recovery
+    end
+
+    failing_recovery = lambda do |**_kwargs|
+      raise Hive::Artifacts::RuntimeResidueRecovery::RecoveryError, "quarantine failed"
+    end
+    with_fixture(
+      runtime_residue_recovery: failing_recovery,
+      task_resolver_builder: artifacts_resolver
+    ) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row.with(stage: "7-artifacts"), requestor: "web",
+        request_id: "recover-artifacts-failure", now: NOW
+      )
+
+      assert_equal "blocked", receipt.status
+      assert_equal "runtime_residue_recovery_failed", receipt.reason
+      assert_equal "quarantine failed", receipt.remediation
+      assert_empty Q.pending(state_home:)
     end
   end
 
@@ -2139,6 +2291,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
   private
 
+  def dirty_commit_evidence(sha)
+    { "type" => "commit", "observation" => "dirty_worktree", "sha" => sha }
+  end
+
   def request_for_helpers(recovery: nil)
     Q::Request.new(
       request_id: "helper-request",
@@ -2351,7 +2507,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
   def with_fixture(marker_attrs: nil, marker_name: "ERROR", mtime: NOW - 3600,
                    safety: nil, task_resolver_builder: nil, task_id: 817,
-                   generation_resolver: nil, attempt_store: nil)
+                   generation_resolver: nil, attempt_store: nil,
+                   runtime_residue_recovery: nil)
     Dir.mktmpdir("hive-recovery-coordinator") do |dir|
       project_root = File.join(dir, "project")
       folder = File.join(
@@ -2391,6 +2548,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         attempt_store: attempt_store,
         task_resolver: task_resolver,
         safety: safety || ->(_row) { [ true, "safe" ] },
+        runtime_residue_recovery:,
         generation_resolver: generation_resolver || lambda do |resolved_task, project:, intended_stage:, state_file_content:|
           progress = Digest::SHA256.hexdigest(
             [ resolved_task.state_file, state_file_content ].join("\0")

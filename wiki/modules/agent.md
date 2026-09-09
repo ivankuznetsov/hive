@@ -132,12 +132,10 @@ profile-native routed arguments in the subcommand segment. Unscoped calls and
 inactive resolutions stay on the original assembly path, including the
 existing flat implementation-identity argument position.
 
-Prompt placement is profile data: Claude uses a trailing positional prompt,
-Codex sends the prompt through stdin and places `-` in argv, Pi sends the
-prompt through piped stdin without an argv marker, and Grok places the prompt
-immediately after `-p` because `--single` consumes a value. Keeping Pi's
-prompt out of argv avoids the operating system's per-argument size limit for
-large implementation plans. Grok's streaming `text` fragments are
+Prompt placement is profile data: Claude and Pi use piped stdin without an
+argv marker; Codex uses stdin and places `-` in argv. Grok reads stdin through
+`--prompt-file=/dev/stdin`. Keeping prompts out of argv avoids the operating
+system's per-argument size limit for large plans and reviews. Grok's streaming `text` fragments are
 concatenated verbatim into `final_message`.
 
 For the built-in Claude profile this is still:
@@ -155,8 +153,9 @@ claude -p
   --include-partial-messages
   --verbose
   --no-session-persistence
-  <prompt>
 ```
+
+The complete Claude prompt is supplied on stdin.
 
 `--verbose` is required by `claude` whenever `-p` is paired with
 `--output-format stream-json`; without it claude rejects the invocation

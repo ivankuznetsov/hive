@@ -2,6 +2,7 @@ require "digest"
 require "pathname"
 require "hive/agent_git_gate"
 require "hive/draft_pr_receipt"
+require "hive/git_ops"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/worktree"
 
@@ -35,10 +36,14 @@ module Hive
           head = oid!(git_read!(worktree, :head_oid).strip, "implementation head")
           base = controller_base(pointer, handoff)
           verify_controller_head!(head, handoff)
-          git_read!(worktree, :commit_oid, oid: base)
-          ancestor!(worktree, base, head)
+          if base
+            git_read!(worktree, :commit_oid, oid: base)
+            ancestor!(worktree, base, head)
+          end
           base = Hive::AgentGitGate.change_base(
-            worktree, branch: pointer.fetch("base_branch"), head_oid: head
+            worktree,
+            branch: pointer["base_branch"] || Hive::GitOps.new(@task.project_root).default_branch,
+            head_oid: head
           ) unless handoff
           merge_base = base
 
@@ -105,7 +110,6 @@ module Hive
         def controller_base(pointer, handoff)
           values = [ pointer["base_oid"], handoff&.fetch("base_oid", nil) ]
                    .compact.map { |value| oid!(value, "controller base") }.uniq
-          raise ResolutionError, "controller implementation base is missing" if values.empty?
           raise ResolutionError, "controller implementation base contradicts saved PR identity" if values.length > 1
 
           values.first

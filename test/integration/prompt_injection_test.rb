@@ -148,6 +148,27 @@ class PromptInjectionTest < Minitest::Test
     end
   end
 
+  def test_plan_prompt_requires_durable_non_terminal_checkpoints
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      prompt = Hive::Stages::Base.render(
+        "plan_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: File.basename(dir),
+          task_folder: task.folder,
+          brainstorm_text: "Build a complete mail client",
+          user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+          skill_invocation: "/skill:wiki-plan"
+        )
+      )
+
+      assert_includes prompt, "Hive creates a non-terminal outline"
+      assert_match(/Do not hold the\s+complete plan only in one long model response/, prompt)
+      assert_includes prompt, "preserve and improve useful plan bytes already on disk"
+      assert_includes prompt, "Those markers are terminal and belong only on the final write"
+    end
+  end
+
   def test_execute_prompt_wraps_plan
     # 4-execute is impl-only since U9 — there's no accepted_findings
     # binding anymore (moved to fix_prompt.md.erb in the 6-review stage).

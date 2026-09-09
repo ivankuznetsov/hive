@@ -7,6 +7,16 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Automatic outcome capture remains unreliable (2026-09-06)
+
+Dogfood producers can still fail to obtain controller screenshot receipts or
+start the target application. The artifact stage now treats these as best-effort
+warnings, not task-completion blockers, without labelling missing or rejected
+proof accepted. Rebuilding capture and the Screenote integration is deferred;
+this change makes workflow progress independent of that larger project, not
+the evidence pipeline reliable. Real implementation rework and source-integrity
+failures retain their blocking behavior.
+
 ## Betterleaks distribution and recovery verification
 
 Betterleaks 1.8.1 binaries are checksum-pinned for Linux/macOS x64/arm64.
@@ -1420,3 +1430,11 @@ and transaction rollback. It has not been applied to dogfood. Stop all writers
 and take an external SQLite backup before the explicit upgrade described in
 [[modules/attempts]]. Request IDs already cleared by the old foreign key are not
 recovered by this change; retained IDs and future attempts are preserved.
+
+## Conservative Git index-lock recovery (2026-09-07)
+
+Automatic recovery requires successful process and open-file probes (`ps` and
+`fuser`). Missing tools, inaccessible process state, any Git process, and
+nonempty locks deliberately leave recovery to a later retry or operator.
+This is not general recovery of interrupted Git operations; preserved lock
+files may still require inspection on platforms without these probes.

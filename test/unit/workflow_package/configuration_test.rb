@@ -64,7 +64,7 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     assert_empty reviewer
   end
 
-  def test_unknown_slot_and_profile_drift_fail_closed
+  def test_unknown_slot_is_rejected_but_updated_agent_installations_are_accepted
     assert_raises(Hive::ConfigError) do
       build_configuration(overrides: { "stages.missing" => { "agent" => "claude" } })
     end
@@ -77,8 +77,7 @@ class WorkflowPackageConfigurationTest < Minitest::Test
       assert_match(/no executable slot "stages\.missing"/, missing_slot.message)
 
       drifted = { "agents" => { "codex" => { "bin" => "/tmp/different-codex" } } }
-      error = assert_raises(Hive::ConfigError) { configuration.apply(workflow, cfg: drifted) }
-      assert_match(/profile drifted/, error.message)
+      assert_equal "codex", configuration.apply(workflow, cfg: drifted).stage_named("draft").agent
     end
   end
 
@@ -88,10 +87,7 @@ class WorkflowPackageConfigurationTest < Minitest::Test
       drifted = { "agents" => { "codex" => { "bin" => "/tmp/different-codex" } } }
 
       configuration.verify_profile!(workflow, "stages.review", cfg: drifted)
-      error = assert_raises(Hive::ConfigError) do
-        configuration.verify_profile!(workflow, "stages.draft", cfg: drifted)
-      end
-      assert_match(/profile drifted for stages\.draft/, error.message)
+      configuration.verify_profile!(workflow, "stages.draft", cfg: drifted)
     end
   end
 
@@ -214,7 +210,8 @@ class WorkflowPackageConfigurationTest < Minitest::Test
   end
 
   def test_manifest_without_recommendations_retains_legacy_configuration_digest
-    assert_equal "efc0eb0c09c9ae9ba9d741893a925330dab75f824b62ab8251c2a1c954327e7d",
+    # The profile fingerprint includes Claude's piped-stdin transport.
+    assert_equal "567a35755fe39500f2ebf464bbfaed3ae46ca7886da6b76bdeb70c258840c6d2",
                  build_configuration.digest
   end
 

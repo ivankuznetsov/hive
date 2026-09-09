@@ -96,8 +96,9 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     assert_equal [
       "claude", "-p", "--dangerously-skip-permissions",
       "--output-format", "stream-json", "--include-partial-messages",
-      "--verbose", "--no-session-persistence", "hello"
+      "--verbose", "--no-session-persistence"
     ], compile(:claude).argv
+    assert_equal "hello", compile(:claude).stdin_data
 
     codex = compile(:codex)
     assert_equal [
@@ -113,9 +114,20 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     assert_equal "hello", pi.stdin_data
 
     assert_equal [
-      "grok", "-p", "hello", "--always-approve",
+      "grok", "--prompt-file=/dev/stdin", "--always-approve",
       "--output-format", "streaming-json"
     ], compile(:grok).argv
+    assert_equal "hello", compile(:grok).stdin_data
+  end
+
+  def test_every_builtin_keeps_large_prompts_out_of_argv_without_truncation
+    prompt = "large review material\n" * 20_000
+    AgentCliRuntime::Profiles.names.each do |provider|
+      invocation = compile(provider, prompt: prompt, permission_arguments: [])
+
+      assert_equal prompt, invocation.stdin_data, provider
+      refute invocation.argv.any? { |argument| argument.include?(prompt) }, provider
+    end
   end
 
   def test_compile_translates_models_effort_directories_and_tool_scope

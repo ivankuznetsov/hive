@@ -130,6 +130,9 @@ namespace and the production path fails closed when that dependency is
 unavailable, so the hosted test environment must provide `/usr/bin/bwrap`
 rather than bypassing the preflight.
 
+Publication tests disable automatic Git maintenance in their disposable local
+and bare repositories, so detached maintenance cannot race with fixture cleanup.
+
 During implementation, run the smallest relevant test files directly:
 
 ```bash

@@ -78,9 +78,12 @@ weakening owner-authored descriptor compatibility:
   Immutable task reads apply their saved mapping without resolving the process's
   current agent profile, so status and retained history survive later profile
   renames, capability changes, and compatible upgrades. Runtime-context
-  preparation verifies current pin support and the fingerprint for the exact
-  executable slot about to launch; drift therefore remains fail-closed at the
-  side-effect boundary without invalidating unrelated or completed task records.
+  preparation verifies current pin support for the exact executable slot about
+  to launch. Saved profile fingerprints describe installation-time metadata;
+  they do not veto updated executables or compatible adapter changes. Updates
+  preserve the selected agent/model/effort without reconfirming a fingerprint.
+  Runner availability and explicit permission capabilities are still checked
+  by the launch boundary.
   Configuration-only activation against an
   unchanged package generation compares the selected source, manifest, and
   configuration digests before swapping the pointer. Cleanup is serialized
@@ -140,6 +143,14 @@ built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
 all three managed provenance fields.
 
 Honeycomb v2 permission summaries are disclosure data, not executable policy.
+Owner-trusted actors declare `permissions: yolo`. They run directly with the
+ordinary agent environment plus explicit package input bindings, without a
+Hive Bubblewrap wrapper, tool allowlists, private agent home, or JSON-to-file
+adapter. Agents write their stage outputs normally. Package provenance, task
+locks, recovery, and completion validation remain unchanged. Restricted actors
+still use their declared scoped policy; installing from Honeycomb alone is not
+a reason to restrict an explicitly trusted actor.
+
 Managed execution uses each stage/reviewer/reviser descriptor's exact
 `permissions:` block. Install reports explicit `yolo`, scoped shell, and
 unqualified scoped file-write actors without adding a second approval gate; a v2

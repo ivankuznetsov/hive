@@ -350,6 +350,16 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_completion_probe_waits_for_a_partially_written_authoring_file
+    with_task do |task, _repo, _base_oid|
+      output = File.join(task.folder, Hive::Stages::OpenPr::AUTHORING_FILE)
+      File.write(output, '{"title":')
+      refute Hive::Stages::OpenPr.complete_authoring_file?(output)
+      write_authoring(task)
+      assert Hive::Stages::OpenPr.complete_authoring_file?(output)
+    end
+  end
+
   def test_rendered_prompt_explicitly_forbids_remote_mutation
     with_task do |task, repo, _base_oid|
       prompt = Hive::Stages::OpenPr.render_prompt(

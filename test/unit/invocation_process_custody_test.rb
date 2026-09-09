@@ -23,6 +23,39 @@ class InvocationProcessCustodyTest < Minitest::Test
     terminate_exact(owned) if owned
   end
 
+  def test_procfs_rechecks_ownership_after_a_pid_is_reused_during_inventory
+    with_tmp_dir do |dir|
+      pid = 424_242
+      write_proc_entry(dir, pid, environ: custody_environ(TOKEN))
+      custody = build_custody(dir)
+      replacement = lambda do |*_args|
+        File.write(File.join(dir, pid.to_s, "environ"), "OTHER=value")
+        "replacement-start"
+      end
+      with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, replacement) do
+        assert_empty custody.send(:matching_processes)
+      end
+    end
+  end
+
+  def test_ps_rechecks_ownership_after_a_pid_is_reused_during_inventory
+    with_tmp_dir do |dir|
+      custody = Hive::InvocationProcessCustody.new(token: TOKEN, proc_root: File.join(dir, "absent"))
+      output = "424242 command #{Hive::InvocationProcessCustody::ENVIRONMENT_KEY}=#{TOKEN}\n"
+      success = Struct.new(:success?).new(true)
+      inventory = ->(*) { [ output, "", success ] }
+      identity = lambda do |*_args|
+        output = "424242 replacement OTHER=value\n"
+        "replacement-start"
+      end
+      with_replaced_singleton_method(Open3, :capture3, inventory) do
+        with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, identity) do
+          assert_empty custody.send(:matching_processes)
+        end
+      end
+    end
+  end
+
   def test_environment_contains_only_one_opaque_custody_value
     custody = Hive::InvocationProcessCustody.new(token: "a" * 64)
 

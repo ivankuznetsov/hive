@@ -138,4 +138,3 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
-

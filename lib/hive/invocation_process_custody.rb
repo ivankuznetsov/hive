@@ -60,6 +60,15 @@ module Hive
     end
 
     def matching_processes
+      targets = inventory
+      return targets if targets.empty?
+
+      # The token read and start-time read are separate snapshots. Confirm
+      # both together before trusting either inventory's ownership claim.
+      targets & inventory
+    end
+
+    def inventory
       if RUBY_PLATFORM.include?("linux") && File.directory?(@proc_root)
         procfs_matches
       else
@@ -149,14 +158,11 @@ module Hive
     end
 
     def signal_current(signal, target)
-      return unless Hive::ProcessKill.captured_process_current?(
-        target, require_identity: true
+      permission_denied = Hive::ProcessKill.signal_captured_processes(
+        signal, [ target ], require_identity: true
       )
+      return unless permission_denied
 
-      Process.kill(signal, target.fetch(:pid))
-    rescue Errno::ESRCH
-      nil
-    rescue Errno::EPERM
       raise CleanupError,
             "process-custody cannot signal same-user pid #{target.fetch(:pid)}"
     end

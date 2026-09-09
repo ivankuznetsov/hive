@@ -10,6 +10,24 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
 
   ROUTE = "anthropic/claude-sonnet-4-5"
 
+  def test_escaped_native_child_is_cleaned_before_its_output_is_drained
+    skip "native descendant custody requires Linux procfs" unless RUBY_PLATFORM.include?("linux")
+
+    with_fixture(mode: :escaped_child) do |fixture|
+      agent = build_agent(make_task(fixture.fetch(:dir)), fixture)
+      original_capture = agent.method(:capture_process)
+      agent.define_singleton_method(:capture_process) do |**kwargs|
+        original_capture.call(**kwargs.merge(drain_timeout: 0.1))
+      end
+
+      result = agent.run!
+
+      assert_equal :ok, result.fetch(:status), result.inspect
+      assert result.fetch(:process_cleanup_completed)
+      assert_includes File.read(result.fetch(:log_file)), "escaped child cleaned"
+    end
+  end
+
   def test_native_login_is_used_in_place_without_staging_credentials
     with_fixture do |fixture|
       home = File.join(fixture.fetch(:dir), "home")
@@ -893,6 +911,24 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             "native_credential_mode" =>
               (File.stat(credential_path).mode & 0777 if File.file?(credential_path))
           }))
+          if #{mode == :escaped_child}
+            ready_reader, ready_writer = IO.pipe
+            fork do
+              ready_reader.close
+              Process.setsid
+              trap("TERM") do
+                STDERR.puts "escaped child cleaned"
+                exit! 0
+              end
+              ready_writer.write("ready")
+              ready_writer.close
+              sleep 15
+              exit! 0
+            end
+            ready_writer.close
+            ready_reader.read
+            ready_reader.close
+          end
           sleep 10 if #{%i[timeout cancelled].include?(mode)}
           sleep 0.3 if #{mode == :drain}
           print #{run_output.dump}

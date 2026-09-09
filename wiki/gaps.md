@@ -251,7 +251,10 @@ Invocation-token custody now cleans ordinary inherited descendants even after
 `setsid` and reparenting, which is the leak observed during live Webmail
 dogfood. It is lifecycle cleanup, not hostile-process containment: a command
 that deliberately erases the custody environment or delegates a service to an
-external manager without forwarding it can evade the inventory. A dedicated
+external manager without forwarding it can evade the inventory. The same
+limit applies when a descendant becomes non-dumpable: an unreadable process
+environment cannot prove ownership. Unreadable same-user rows are skipped
+because unrelated service managers can legitimately have that property. A dedicated
 cgroup/namespace owner that preserves OpenCode's required repository writes,
 network, and cross-platform support remains a deeper isolation follow-up.
 

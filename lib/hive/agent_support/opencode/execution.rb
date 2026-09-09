@@ -33,10 +33,12 @@ module Hive
             record_spawn: true,
             forward_signals: @terminate_on_parent_signal,
             drain_timeout: CAPTURE_DRAIN_SECONDS,
-            completion_probe: @completion_probe
+            completion_probe: @completion_probe,
+            after_exit: lambda do
+              process_custody.cleanup!
+              process_cleanup_finished = true
+            end
           )
-          process_custody.cleanup!
-          process_cleanup_finished = true
           provider_error = write_capture_log(log_file, run.stdout, run.stderr)
           inspection_output, inspection_diagnostic = inspect_run(launch, run)
           captured = Hive::AgentRuntime::CapturedResult.new(

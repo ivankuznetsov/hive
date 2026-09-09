@@ -308,7 +308,7 @@ module Hive
       def complete_authoring_file?(path)
         read_authoring(path)
         true
-      rescue Hive::StageError
+      rescue Hive::StageError, JSON::ParserError
         false
       end
 

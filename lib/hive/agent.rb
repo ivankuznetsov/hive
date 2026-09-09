@@ -637,7 +637,7 @@ module Hive
                         stdin_data: nil, timeout_sec: @timeout_sec,
                         record_spawn: false, forward_signals: false,
                         drain_timeout: 2, completion_probe: nil,
-                        completion_grace_seconds: 5)
+                        completion_grace_seconds: 5, after_exit: nil)
       pid = nil
       child_start_time = nil
       child_finished = false
@@ -673,6 +673,7 @@ module Hive
         pid, pgid, timeout_sec, completion_probe:, completion_grace_seconds:
       )
       child_finished = !status.nil?
+      after_exit&.call
       finish_capture_thread(
         stdout_thread, stdout_reader, timeout: drain_timeout, capture: stdout
       )

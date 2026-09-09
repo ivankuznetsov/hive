@@ -22,6 +22,13 @@ module Hive
         @root = File.expand_path(root)
       end
 
+      # Holds the store's exclusive cross-process lock across a complete
+      # read/derive/write operation. Store methods are reentrant while the
+      # calling thread owns this transaction.
+      def transaction
+        synchronize { yield }
+      end
+
       def write_base(record)
         prepared = Record.prepare(record)
         date = prepared.fetch("local_date")
@@ -414,6 +421,8 @@ module Hive
       end
 
       def synchronize(shared: false)
+        return yield if lock_owned_by_current_thread?
+
         ensure_private_directory!(root)
         lock_path = File.join(root, ".store.lock")
         flags = File::RDWR | File::CREAT
@@ -423,8 +432,10 @@ module Hive
 
           lock.chmod(0o600)
           lock.flock(shared ? File::LOCK_SH : File::LOCK_EX)
+          @lock_owner = Thread.current
           yield
         ensure
+          @lock_owner = nil if lock_owned_by_current_thread?
           lock&.flock(File::LOCK_UN)
         end
       rescue Errno::ELOOP
@@ -432,6 +443,7 @@ module Hive
       end
 
       def synchronize_read
+        return yield if lock_owned_by_current_thread?
         return yield unless File.directory?(root)
 
         lock_path = File.join(root, ".store.lock")
@@ -453,6 +465,10 @@ module Hive
         end
       rescue Errno::ELOOP
         raise UnsafePath, "digest store lock cannot be a symlink"
+      end
+
+      def lock_owned_by_current_thread?
+        @lock_owner.equal?(Thread.current)
       end
 
       def ensure_private_directory!(path)

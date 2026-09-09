@@ -88,6 +88,10 @@ module Hive
         @prior_frontiers = prior_frontiers.to_h
         @source_factory = source_factory || lambda do |project:, starts_at:, ends_at:, prior_frontier:|
           ProjectSource.new(project: project, starts_at: starts_at, ends_at: ends_at,
+                            membership_starts_at: project["membership_starts_at"] || starts_at,
+                            membership_ends_at: project["membership_ends_at"] || ends_at,
+                            membership_end_exclusive: project["membership_end_exclusive"] == true,
+                            attention_ends_at: @ends_at,
                             prior_frontier: prior_frontier,
                             observed_at: @observed_at)
         end
@@ -106,9 +110,11 @@ module Hive
           normalized = stringify(project)
           projects << normalized.slice("project_id", "registration_id", "name")
           frontier_key = self.class.frontier_key(normalized)
+          source_starts_at = [ utc(@starts_at), utc(normalized["membership_starts_at"] || @starts_at) ].max
+          source_ends_at = [ utc(@ends_at), utc(normalized["membership_ends_at"] || @ends_at) ].min
           begin
             result = @source_factory.call(
-              project: normalized, starts_at: @starts_at, ends_at: @ends_at,
+              project: normalized, starts_at: source_starts_at, ends_at: source_ends_at,
               prior_frontier: self.class.frontier_for(
                 @prior_frontiers,
                 project_id: normalized.fetch("project_id"),
@@ -155,6 +161,10 @@ module Hive
 
       def stringify(value)
         value.to_h.each_with_object({}) { |(key, child), out| out[key.to_s] = child }
+      end
+
+      def utc(value)
+        (value.is_a?(Time) ? value : Time.iso8601(value.to_s)).utc
       end
 
       def bounded_reason(error)

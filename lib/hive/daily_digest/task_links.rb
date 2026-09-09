@@ -7,6 +7,14 @@ module Hive
     # Resolves persisted task identities against the exact current registration.
     # Historical rows remain readable but lose actionable task links.
     class TaskLinks
+      def self.destination_for(project, task)
+        terminal = task.workflow.stages.last
+        {
+          project: project.fetch("name"), slug: task.slug,
+          source: terminal.name == task.stage_name ? "archive" : nil
+        }
+      end
+
       def initialize(current_projects: Hive::Config.registered_projects, resolver: nil)
         @current_projects = Array(current_projects)
         @resolver = resolver || method(:resolve_task)
@@ -67,10 +75,7 @@ module Hive
         task = Hive::TaskResolver.new(
           row.fetch("task_slug"), project_filter: project.fetch("name")
         ).resolve
-        {
-          project: project.fetch("name"), slug: task.slug,
-          source: task.stage_index == 9 ? "archive" : nil
-        }
+        self.class.destination_for(project, task)
       end
 
       def task_url(destination, row)

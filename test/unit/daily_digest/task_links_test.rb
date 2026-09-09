@@ -99,6 +99,16 @@ class DailyDigestTaskLinksTest < Minitest::Test
     refute row.key?("historical")
   end
 
+  def test_terminal_destination_uses_the_resolved_workflow_not_coding_stage_number
+    stage = Struct.new(:name)
+    workflow = Struct.new(:stages).new([ stage.new("inbox"), stage.new("done") ])
+    task = Struct.new(:slug, :stage_name, :workflow).new("article", "done", workflow)
+
+    destination = Hive::DailyDigest::TaskLinks.destination_for({ "name" => "content" }, task)
+
+    assert_equal({ project: "content", slug: "article", source: "archive" }, destination)
+  end
+
   def test_resolution_failures_make_the_task_historical
     current = { "project_id" => "project-1", "name" => "demo" }
     row = {

@@ -166,8 +166,9 @@ module Hive
       def missing(date, config)
         coverage = config["coverage_started_at"]
         precoverage = begin
-          date && coverage && Date.iso8601(date.to_s) < utc(coverage).to_date
-        rescue Date::Error, ArgumentError, TypeError
+          first_label = config.fetch("first_interval").fetch("local_date")
+          date && Date.iso8601(date.to_s) < Date.iso8601(first_label.to_s)
+        rescue Date::Error, KeyError, NoMethodError, TypeError
           false
         end
         {

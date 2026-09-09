@@ -23,6 +23,14 @@ class DailyDigestCoverageTest < Minitest::Test
     )
 
     assert_equal %w[/new /old], result.projects.map { |row| row.fetch("path") }.sort
+    old = result.projects.find { |row| row.fetch("path") == "/old" }
+    replacement = result.projects.find { |row| row.fetch("path") == "/new" }
+    assert_equal "2026-08-30T00:00:00.000000Z", old.fetch("membership_starts_at")
+    assert_equal "2026-08-30T12:00:00.000000Z", old.fetch("membership_ends_at")
+    assert_equal true, old.fetch("membership_end_exclusive")
+    assert_equal "2026-08-30T12:00:00.000000Z", replacement.fetch("membership_starts_at")
+    assert_equal "2026-08-31T00:00:00.000000Z", replacement.fetch("membership_ends_at")
+    assert_equal false, replacement.fetch("membership_end_exclusive")
     assert_empty result.gaps
     assert_includes result.recovery_scopes, "registry"
     assert_includes result.recovery_scopes, "registry:0"

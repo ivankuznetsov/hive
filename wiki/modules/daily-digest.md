@@ -52,10 +52,13 @@ daily-digest/v1/
 └── .store.lock
 ```
 
-One cross-process lock serializes open replacement, close, amendment, frontier,
-prune, and post-prune discard operations. JSON is canonicalized and identities
-are content-derived. Atomic writes use owner-private directories/files,
-same-directory rename, and directory fsync through `Hive::AtomicFile`.
+One cross-process lock serializes each coordinator read/collect/merge/commit
+transaction as well as open replacement, close, amendment, frontier, prune,
+and post-prune discard operations. A stale refresh therefore cannot replace a
+newer open projection or regress its frontier. JSON is canonicalized and
+identities are content-derived. Atomic writes use owner-private
+directories/files, same-directory rename, and directory fsync through
+`Hive::AtomicFile`.
 
 `intervals.json` is rebuildable navigation metadata updated with every base or
 tombstone mutation. Mutation owners repair missing, invalid, or valid-but-stale
@@ -87,7 +90,11 @@ No pre-feature history is synthesized. Coverage begins at the persisted
 frontier, and migration captures membership at that boundary. Later
 registration, unregistration, stale pruning, and replacement append ordered
 membership-history changes under the existing global config lock. Unprovable
-legacy membership becomes a scoped gap.
+legacy membership becomes a scoped gap. Collection clips each registration to
+its exact membership span within the interval; registrations removed before
+the observation or close boundary do not contribute boundary attention. Reader
+pre-coverage classification compares against the first interval's persisted
+local label rather than deriving a date from the UTC coverage instant.
 
 A logical `project_id` survives a same-name path replacement, but each distinct
 registered path has its own `registration_id` and `registered_at`. Facts, gaps,
@@ -102,11 +109,12 @@ and source health. `Materiality` owns the include/exclude matrix and stable
 fingerprints. A committed source frontier includes bounded file-stat and
 content fingerprints; unchanged task journals and creation receipts are not
 read or hashed again during the next refresh. Journal fingerprints retain their
-bounded scoped gaps, so an unchanged malformed or incomplete source cannot look
-healthy merely because its bytes were skipped. Activity without an event time
-uses its durable observation time. Changed and unavailable sources remain
-isolated per project, malformed journal diagnostics are aggregated per journal,
-and creation receipts have an explicit read bound. Material facts
+bounded scoped gaps and allowlisted boundary-attention fold. Their cache
+dependency also includes bounded `pr.md` publication evidence, so repaired PR
+metadata invalidates a stale gap without journal churn. Activity without an
+event time uses its durable observation time. Changed and unavailable sources
+remain isolated per project, malformed journal diagnostics are aggregated per
+journal, and creation receipts have an explicit read bound. Material facts
 include task creation, durable stage/state
 changes, answers, changed holds, failures/recoveries, PR/check/review/merge
 outcomes, completion, and archive. Polls, repeated snapshots, diagnostics, log
@@ -253,7 +261,8 @@ escaping, terminal rendering strips control/ANSI/OSC sequences and embedded
 newlines, and Telegram strips controls then escapes dynamic text for HTML parse
 mode. Structured delivery logs never include the destination, token, or payload
 text. Validated task links are rebuilt from the resolved destination, including
-the archive query route and the native unanswered-question anchor.
+the archive query route when the task is in its workflow's terminal stage and
+the native unanswered-question anchor.
 
 ## Backlinks
 

@@ -63,10 +63,12 @@ module Hive
           observed_at: @clock
         )
         selected.map do |interval|
-          materialize(
-            interval, config: config, coverage: coverage, now: now,
-            attempted_gap_ids: attempted_gap_ids
-          )
+          @store.transaction do
+            materialize(
+              interval, config: config, coverage: coverage, now: now,
+              attempted_gap_ids: attempted_gap_ids
+            )
+          end
         end
       rescue Date::Error
         raise DailyDigest::InvalidRecord, "invalid digest local date #{date.inspect}"

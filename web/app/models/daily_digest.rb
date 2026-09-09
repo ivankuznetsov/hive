@@ -152,11 +152,7 @@ class DailyDigest
     task = Hive::TaskResolver.new(
       row.fetch("task_slug"), project_filter: current.fetch("name")
     ).resolve
-    {
-      project: current.fetch("name"),
-      slug: task.slug,
-      source: task.stage_index == 9 ? "archive" : nil
-    }
+    Hive::DailyDigest::TaskLinks.destination_for(current, task)
   end
 
   def deep_copy(value)

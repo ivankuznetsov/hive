@@ -280,6 +280,99 @@ class DailyDigestProjectSourceTest < Minitest::Test
     end
   end
 
+  def test_unchanged_journal_cache_retains_boundary_attention_evidence
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "2-brainstorm", "waiting-task")
+      FileUtils.mkdir_p(task)
+      File.write(File.join(task, "brainstorm.md"), "# Brainstorm\n\n<!-- WAITING -->\n")
+      question = activity("question_asked", "question-open", "question_id" => "Q1")
+      question["task"] = { "id" => "42", "slug" => "waiting-task" }
+      File.write(
+        File.join(task, Hive::TaskJournal::JOURNAL_BASENAME), JSON.generate(question) + "\n"
+      )
+
+      first = build_source(project, known_stage_dirs: %w[2-brainstorm]).collect
+      cached = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project), starts_at: "2026-08-30T00:00:00Z",
+        ends_at: "2026-08-31T00:00:00Z", known_stage_dirs: %w[2-brainstorm],
+        prior_frontier: first.frontier,
+        observed_at: -> { Time.iso8601("2026-08-30T20:00:00Z") }
+      ).collect
+
+      assert_equal [ "unanswered" ], cached.attention.map { |item| item.fetch("kind") }
+      assert_equal 36_000, cached.attention.first.fetch("waiting_age_seconds")
+      assert_empty cached.gaps
+    end
+  end
+
+  def test_publication_metadata_change_invalidates_cached_pr_gap
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "5-open-pr", "pr-task")
+      FileUtils.mkdir_p(task)
+      event = activity("pr_observed", "event-pr", "pr_state" => "open")
+      event["task"] = { "id" => "9", "slug" => "pr-task" }
+      journal = File.join(task, Hive::TaskJournal::JOURNAL_BASENAME)
+      File.write(journal, JSON.generate(event) + "\n")
+      first = build_source(project, known_stage_dirs: %w[5-open-pr]).collect
+      assert_equal [ "pr_evidence_incomplete" ],
+                   first.gaps.map { |gap| gap.fetch("reason_code") }
+
+      File.write(File.join(task, "pr.md"), <<~MD)
+        ---
+        pr_url: https://github.com/acme/demo/pull/42
+        pr_number: 42
+        head_oid: #{"a" * 40}
+        ---
+      MD
+      recovered = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project), starts_at: "2026-08-30T00:00:00Z",
+        ends_at: "2026-08-31T00:00:00Z", known_stage_dirs: %w[5-open-pr],
+        prior_frontier: first.frontier
+      ).collect
+
+      assert_empty recovered.gaps
+      assert_equal 42, recovered.facts.first.dig("details", "pr_number")
+      refute_equal first.frontier.fetch("fingerprints"),
+                   recovered.frontier.fetch("fingerprints")
+    end
+  end
+
+  def test_removed_registration_contributes_only_membership_window_facts_not_attention
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "2-brainstorm", "retired-task")
+      FileUtils.mkdir_p(task)
+      File.write(File.join(task, "brainstorm.md"), "# Brainstorm\n\n<!-- WAITING -->\n")
+      before = activity("stage_transition", "before", "transition" => "advanced")
+      before["occurred_at"] = "2026-08-30T09:00:00Z"
+      question = activity("question_asked", "question", "question_id" => "Q1")
+      question["occurred_at"] = "2026-08-30T10:00:00Z"
+      after = activity("stage_transition", "after", "transition" => "advanced")
+      after["occurred_at"] = "2026-08-30T13:00:00Z"
+      [ before, question, after ].each do |row|
+        row["task"] = { "id" => "42", "slug" => "retired-task" }
+      end
+      File.write(
+        File.join(task, Hive::TaskJournal::JOURNAL_BASENAME),
+        [ before, question, after ].map { |row| JSON.generate(row) }.join("\n") + "\n"
+      )
+
+      result = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project), starts_at: "2026-08-30T00:00:00Z",
+        ends_at: "2026-08-30T12:00:00Z",
+        membership_starts_at: "2026-08-30T00:00:00Z",
+        membership_ends_at: "2026-08-30T12:00:00Z",
+        membership_end_exclusive: true,
+        attention_ends_at: "2026-08-31T00:00:00Z",
+        known_stage_dirs: %w[2-brainstorm],
+        observed_at: -> { Time.iso8601("2026-08-30T20:00:00Z") }
+      ).collect
+
+      assert_equal %w[question_asked stage_transition], result.facts.map { |row| row.fetch("kind") }.sort
+      assert_empty result.attention
+      assert_empty result.gaps
+    end
+  end
+
   def test_one_collection_uses_one_observation_instant_for_gaps_and_frontier
     with_tmp_dir do |project|
       task = File.join(project, ".hive-state", "stages", "4-execute", "bad-task")

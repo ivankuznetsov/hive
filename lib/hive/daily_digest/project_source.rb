@@ -22,10 +22,20 @@ module Hive
       class SourceUnavailable < DailyDigest::Error; end
 
       def initialize(project:, starts_at:, ends_at:, known_stage_dirs: nil, prior_frontier: nil,
+                     membership_starts_at: nil, membership_ends_at: ends_at,
+                     membership_end_exclusive: false, attention_ends_at: ends_at,
                      observed_at: -> { Time.now.utc })
         @project = stringify(project)
         @starts_at = normalize_time(starts_at)
         @ends_at = normalize_time(ends_at)
+        @membership_starts_at = if membership_starts_at
+          normalize_time(membership_starts_at)
+        else
+          Time.at(0).utc
+        end
+        @membership_ends_at = normalize_time(membership_ends_at)
+        @membership_end_exclusive = membership_end_exclusive
+        @attention_ends_at = normalize_time(attention_ends_at)
         @known_stage_dirs = Array(known_stage_dirs || default_stage_dirs).map(&:to_s).uniq.freeze
         @observed_at = observed_at
         @prior_fingerprints = stringify(prior_frontier || {}).fetch("fingerprints", {})
@@ -40,16 +50,25 @@ module Hive
 
         facts = []
         boundary_records = Hash.new { |hash, key| hash[key] = [] }
+        cached_attention = []
         gaps = unknown_stage_gaps(stages_root)
         fingerprints = {}
         task_folders = task_directories(stages_root, gaps)
         task_folders.each do |task_folder|
           boundary_records[task_folder]
           collect_creation(task_folder, facts, gaps, fingerprints)
-          collect_journal(task_folder, facts, gaps, fingerprints, boundary_records)
+          collect_journal(
+            task_folder, facts, gaps, fingerprints, boundary_records, cached_attention
+          )
         end
-        attention = boundary_attention(boundary_records)
-        gaps.concat(boundary_history_gaps(task_folders, attention))
+        attention = if membership_active_at_attention_boundary?
+          (boundary_attention(boundary_records) + cached_attention)
+            .uniq { |item| item.fetch("attention_id") }
+            .sort_by { |item| [ item.fetch("kind"), item.fetch("project"), item.fetch("task_slug") ] }
+        else
+          []
+        end
+        gaps.concat(boundary_history_gaps(task_folders, attention)) if membership_active_at_attention_boundary?
         facts = facts.uniq { |fact| fact.fetch("fact_id") }
                      .sort_by { |fact| [ fact.fetch("occurred_at"), fact.fetch("fact_id") ] }
         gaps = gaps.uniq { |gap| gap.fetch("gap_id") }
@@ -203,7 +222,8 @@ module Hive
                            task_slug: File.basename(task_folder))
       end
 
-      def collect_journal(task_folder, facts, gaps, fingerprints, boundary_records)
+      def collect_journal(task_folder, facts, gaps, fingerprints, boundary_records,
+                          cached_attention = [])
         path = File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
         return unless File.exist?(path) || File.symlink?(path)
         if File.symlink?(path)
@@ -218,15 +238,21 @@ module Hive
           return
         end
         key = fingerprint_key(task_folder, File.basename(path))
-        signature = file_signature(stat)
-        if unchanged_fingerprint?(key, signature) && (cached_gaps = cached_journal_gaps(key))
+        signature = file_signature(stat).merge(
+          "dependencies" => { "publication" => publication_signature(task_folder) }
+        )
+        if unchanged_fingerprint?(key, signature) &&
+           (cached_gaps = cached_journal_gaps(key)) &&
+           (boundary_attention = cached_boundary_attention(key))
           fingerprints[key] = @prior_fingerprints.fetch(key)
           gaps.concat(cached_gaps)
+          cached_attention.concat(boundary_attention.map { |item| attention_with_current_age(item) })
           return
         end
 
         bytes = File.binread(path, MAX_JOURNAL_BYTES + 1)
         journal_gaps = []
+        task_boundary_records = []
         malformed = false
         bytes.each_line.with_index(1) do |line, index|
           next if line.strip.empty?
@@ -243,7 +269,10 @@ module Hive
           end
 
           record = with_event_time(record)
-          boundary_records[task_folder] << record if before_boundary?(record["occurred_at"])
+          if before_boundary?(record["occurred_at"])
+            boundary_records[task_folder] << record
+            task_boundary_records << record
+          end
           record = enrich_pr_evidence(task_folder, record)
 
           result = Materiality.classify(
@@ -267,7 +296,8 @@ module Hive
           )
         end
         fingerprints[key] = signature.merge(
-          "sha256" => Digest::SHA256.hexdigest(bytes), "gaps" => journal_gaps
+          "sha256" => Digest::SHA256.hexdigest(bytes), "gaps" => journal_gaps,
+          "boundary_attention" => boundary_attention(task_folder => task_boundary_records)
         )
         gaps.concat(journal_gaps)
       rescue SystemCallError, IOError
@@ -370,7 +400,8 @@ module Hive
       end
 
       def before_boundary?(value)
-        normalize_time(value) < @ends_at
+        time = normalize_time(value)
+        time >= @membership_starts_at && time < [ @membership_ends_at, @attention_ends_at ].min
       rescue ArgumentError, TypeError
         false
       end
@@ -496,7 +527,21 @@ module Hive
       end
 
       def attention_boundary
-        [ @ends_at, observation_time ].min
+        [ @attention_ends_at, observation_time ].min
+      end
+
+      def membership_active_at_attention_boundary?
+        boundary = attention_boundary
+        ends_after_boundary = @membership_ends_at > boundary ||
+          (@membership_ends_at == boundary && !@membership_end_exclusive)
+        @membership_starts_at <= boundary && ends_after_boundary
+      end
+
+      def attention_with_current_age(item)
+        at = normalize_time(item.fetch("waiting_since"))
+        item.merge("waiting_age_seconds" => [ (attention_boundary - at).floor, 0 ].max)
+      rescue ArgumentError, KeyError, TypeError
+        item.merge("waiting_age_seconds" => nil)
       end
 
       def failed_boundary_session?(payload)
@@ -539,9 +584,7 @@ module Hive
 
       def unchanged_fingerprint?(key, signature)
         prior = @prior_fingerprints[key]
-        prior.is_a?(Hash) && prior["size"] == signature["size"] &&
-          prior["mtime_ns"] == signature["mtime_ns"] &&
-          prior["ctime_ns"] == signature["ctime_ns"] && prior["inode"] == signature["inode"] &&
+        prior.is_a?(Hash) && signature.all? { |field, value| prior[field] == value } &&
           prior["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
       end
 
@@ -550,6 +593,36 @@ module Hive
         return unless cached.is_a?(Array) && cached.all? { |gap| gap.is_a?(Hash) }
 
         cached
+      end
+
+      def cached_boundary_attention(key)
+        cached = @prior_fingerprints.dig(key, "boundary_attention")
+        return unless cached.is_a?(Array) && cached.all? { |item| item.is_a?(Hash) }
+
+        cached
+      end
+
+      def publication_signature(task_folder)
+        path = File.join(task_folder, "pr.md")
+        stat = File.lstat(path)
+        state = if stat.symlink?
+          "unsafe"
+        elsif !stat.file?
+          "not_file"
+        elsif stat.size > 128 * 1024
+          "too_large"
+        else
+          "file"
+        end
+        signature = file_signature(stat).merge("state" => state)
+        if state == "file"
+          signature["sha256"] = Digest::SHA256.hexdigest(File.binread(path, 128 * 1024 + 1))
+        end
+        signature
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        { "state" => "missing" }
+      rescue SystemCallError
+        { "state" => "unavailable" }
       end
 
       def directory_empty?(path)

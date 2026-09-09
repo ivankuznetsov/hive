@@ -99,6 +99,38 @@ class DailyDigestCollectorTest < Minitest::Test
     assert_equal %w[one:new one:old], collected.frontiers.keys.sort
   end
 
+  def test_each_registration_is_collected_only_within_its_membership_bounds
+    old = {
+      "project_id" => "one", "registration_id" => "old", "name" => "one",
+      "membership_starts_at" => "2026-08-30T00:00:00Z",
+      "membership_ends_at" => "2026-08-30T12:00:00Z"
+    }
+    replacement = old.merge(
+      "registration_id" => "new",
+      "membership_starts_at" => "2026-08-30T12:00:00Z",
+      "membership_ends_at" => "2026-08-31T00:00:00Z"
+    )
+    windows = []
+    factory = lambda do |project:, starts_at:, ends_at:, **|
+      windows << [ project.fetch("registration_id"), starts_at, ends_at ]
+      result = Hive::DailyDigest::ProjectSource::Result.new(
+        project: project, facts: [], attention: [], gaps: [], frontier: {},
+        health: Hive::DailyDigest::SourceHealth.healthy(source: "project_state", scope: "one")
+      )
+      Object.new.tap { |source| source.define_singleton_method(:collect) { result } }
+    end
+
+    Hive::DailyDigest::Collector.new(
+      projects: [ old, replacement ], starts_at: "2026-08-30T00:00:00Z",
+      ends_at: "2026-08-31T00:00:00Z", source_factory: factory
+    ).collect
+
+    assert_equal [
+      [ "old", Time.iso8601("2026-08-30T00:00:00Z"), Time.iso8601("2026-08-30T12:00:00Z") ],
+      [ "new", Time.iso8601("2026-08-30T12:00:00Z"), Time.iso8601("2026-08-31T00:00:00Z") ]
+    ], windows
+  end
+
   def test_frontier_lookup_handles_embedded_legacy_and_malformed_shapes
     embedded = {
       "opaque" => { "project_id" => "one", "registration_id" => "current", "cursor" => 3 }

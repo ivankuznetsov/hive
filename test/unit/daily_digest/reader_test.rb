@@ -193,6 +193,19 @@ class DailyDigestReaderTest < Minitest::Test
     assert_equal "2026-09-01", result.fetch("next_date")
   end
 
+  def test_precoverage_uses_first_persisted_local_label_west_of_utc
+    store = Object.new
+    store.define_singleton_method(:intervals) { [] }
+    config = {
+      "coverage_started_at" => "2026-08-31T03:00:00Z",
+      "first_interval" => { "local_date" => "2026-08-30" }
+    }
+    reader = Hive::DailyDigest::Reader.new(store: store, config_loader: -> { config })
+
+    assert_equal false, reader.send(:missing, "2026-08-30", config).fetch("precoverage")
+    assert_equal true, reader.send(:missing, "2026-08-29", config).fetch("precoverage")
+  end
+
 
   def test_default_dependencies_can_be_constructed_without_reading
     assert_instance_of Hive::DailyDigest::Reader, Hive::DailyDigest::Reader.new

@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/daily_digest/coordinator"
+require "timeout"
 
 class DailyDigestCoordinatorTest < Minitest::Test
   include HiveTestHelper
@@ -246,6 +247,44 @@ class DailyDigestCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_concurrent_refreshes_serialize_read_collect_merge_and_commit
+    with_tmp_dir do |dir|
+      root = File.join(dir, "digest")
+      now = Time.iso8601("2026-08-30T12:00:00Z")
+      slow_started = Queue.new
+      release_slow = Queue.new
+      fast_started = Queue.new
+      slow = Hive::DailyDigest::Coordinator.new(
+        config_loader: -> { config }, history_loader: -> { [] },
+        store: Hive::DailyDigest::Store.new(root: root), clock: -> { now },
+        collector_factory: lambda do |**|
+          slow_started << true
+          release_slow.pop
+          FakeCollector.new(batch([ fact("slow", "2026-08-30T09:00:00Z") ]))
+        end
+      )
+      fast = Hive::DailyDigest::Coordinator.new(
+        config_loader: -> { config }, history_loader: -> { [] },
+        store: Hive::DailyDigest::Store.new(root: root), clock: -> { now },
+        collector_factory: lambda do |**|
+          fast_started << true
+          FakeCollector.new(batch([ fact("fast", "2026-08-30T10:00:00Z") ]))
+        end
+      )
+
+      slow_thread = Thread.new { slow.refresh }
+      slow_started.pop
+      fast_thread = Thread.new { fast.refresh }
+      assert_raises(Timeout::Error) { Timeout.timeout(0.1) { fast_started.pop } }
+
+      release_slow << true
+      slow_thread.value
+      fast_thread.value
+      record = Hive::DailyDigest::Store.new(root: root).read("2026-08-30")
+      assert_equal %w[fact:fast fact:slow], record.fetch("items").map { |row| row.fetch("fact_id") }.sort
+    end
+  end
+
   def test_pruned_target_records_discard_and_frontier_without_recreation
     with_tmp_dir do |dir|
       now = Time.iso8601("2026-08-31T12:00:00Z")
@@ -477,6 +516,7 @@ class DailyDigestCoordinatorTest < Minitest::Test
     store = Object.new
     store.define_singleton_method(:intervals) { intervals }
     store.define_singleton_method(:read) { |date| records.fetch(date) }
+    store.define_singleton_method(:transaction) { |&block| block.call }
     coordinator = Hive::DailyDigest::Coordinator.new(
       config_loader: -> { config }, history_loader: -> { [] }, store: store, clock: -> { now }
     )

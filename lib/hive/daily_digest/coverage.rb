@@ -56,7 +56,7 @@ module Hive
         snapshot_valid = true
         Array(@config.fetch("initial_membership")).each do |project|
           normalized = normalize_project(project)
-          state[membership_key(normalized)] = normalized
+          activate!(state, normalized, coverage_started_at)
         rescue ArgumentError, KeyError, TypeError
           snapshot_valid = false
           gaps << registry_gap("registry_snapshot_invalid", "initial membership snapshot is invalid")
@@ -67,12 +67,20 @@ module Hive
         events.take_while { |event| event.fetch("occurred_at") <= starts_at }.each do |event|
           apply_event!(state, event, gaps)
         end
-        overlapping = state.values.dup
+        overlapping = state.values.map do |project|
+          bounded_membership(project, starts_at: starts_at, ends_at: ends_at)
+        end
         events.drop_while { |event| event.fetch("occurred_at") <= starts_at }
               .take_while { |event| event.fetch("occurred_at") < ends_at }
               .each do |event|
-          apply_event!(state, event, gaps)
-          overlapping << event.fetch("after") if event["after"]
+          removed = apply_event!(state, event, gaps)
+          close_membership!(overlapping, removed, event.fetch("occurred_at")) if removed
+          if event["after"]
+            overlapping << bounded_membership(
+              state.fetch(membership_key(event.fetch("after"))),
+              starts_at: event.fetch("occurred_at"), ends_at: ends_at
+            )
+          end
         end
 
         projects = overlapping.compact.uniq { |project| membership_key(project) }
@@ -115,6 +123,7 @@ module Hive
       def apply_event!(state, event, gaps)
         before = event["before"]
         after = event["after"]
+        removed = nil
         if before
           removed = state.delete(membership_key(before))
           unless removed
@@ -131,7 +140,33 @@ module Hive
             )
           end
         end
-        state[membership_key(after)] = after if after
+        activate!(state, after, event.fetch("occurred_at")) if after
+        removed
+      end
+
+      def activate!(state, project, started_at)
+        state[membership_key(project)] = project.merge(
+          "membership_starts_at" => started_at.utc.iso8601(6)
+        )
+      end
+
+      def bounded_membership(project, starts_at:, ends_at:)
+        project.merge(
+          "membership_starts_at" => utc(
+            project.fetch("membership_starts_at", starts_at)
+          ).iso8601(6),
+          "membership_ends_at" => ends_at.utc.iso8601(6),
+          "membership_end_exclusive" => false
+        )
+      end
+
+      def close_membership!(overlapping, removed, ended_at)
+        key = membership_key(removed)
+        row = overlapping.reverse.find { |candidate| membership_key(candidate) == key }
+        return unless row
+
+        row["membership_ends_at"] = ended_at.utc.iso8601(6)
+        row["membership_end_exclusive"] = true
       end
 
       def normalize_project(value)

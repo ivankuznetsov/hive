@@ -2057,6 +2057,24 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_grok_reads_a_large_prompt_through_its_prompt_file_option
+    with_tmp_dir do |dir|
+      fake = File.join(dir, "fake-grok")
+      received = File.join(dir, "prompt")
+      File.write(fake, "#!/usr/bin/env bash\npath=\"${1#--prompt-file=}\"\ncat \"$path\" > #{received}\n")
+      File.chmod(0o755, fake)
+      prompt = "p" * (256 * 1024)
+      with_env("HIVE_GROK_BIN" => fake) do
+        result = Hive::Agent.new(
+          task: make_task(dir), prompt: prompt, max_budget_usd: nil, timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:grok), status_mode: :exit_code_only
+        ).run!
+        assert_equal :ok, result[:status]
+        assert_equal prompt, File.binread(received)
+      end
+    end
+  end
+
   # Regression: claude's Edit/Write tools rewrite atomically (write tempfile
   # then rename), changing the file's inode. The earlier inode-tracking
   # heuristic falsely flagged that as a "concurrent edit". Verify hive does

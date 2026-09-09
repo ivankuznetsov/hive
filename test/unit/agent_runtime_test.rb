@@ -239,9 +239,9 @@ class AgentRuntimeTest < Minitest::Test
 
     grok_call = compile(grok, max_budget_usd: 2)
     assert_equal [
-      grok.bin, "-p", "do work", "--always-approve", *grok.output_format_flags
+      grok.bin, "--prompt-file=/dev/stdin", "--always-approve", *grok.output_format_flags
     ], grok_call.argv
-    assert_nil grok_call.stdin_data
+    assert_equal "do work", grok_call.stdin_data
   end
 
   def test_plain_text_consumer_can_omit_provider_output_flags

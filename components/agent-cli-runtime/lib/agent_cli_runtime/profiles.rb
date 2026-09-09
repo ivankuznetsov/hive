@@ -255,8 +255,9 @@ module AgentCliRuntime
       name: :grok,
       bin_default: "grok",
       env_bin_override_keys: %w[AGENT_CLI_RUNTIME_GROK_BIN HIVE_GROK_BIN],
-      headless_flag: "-p",
-      prompt_style: :headless_flag_value,
+      # Grok's Unix CLI reads a prompt file; stdin already has a managed lifetime.
+      headless_flag: "--prompt-file=/dev/stdin",
+      prompt_style: :piped_stdin,
       permission_skip_flag: "--always-approve",
       # Grok confines the filesystem natively, the same shape codex uses.
       # `workspace` limits writes to the working directory, `read-only`

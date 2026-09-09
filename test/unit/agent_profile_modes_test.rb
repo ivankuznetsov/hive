@@ -344,7 +344,7 @@ class AgentProfileModesTest < Minitest::Test
       )
 
       assert_equal [
-        profile.bin, "-p", "do work", "--always-approve",
+        profile.bin, "--prompt-file=/dev/stdin", "--always-approve",
         "--output-format", "streaming-json"
       ], agent.build_cmd
     end

@@ -41,6 +41,7 @@ ARGV_LOG="${LOG_DIR}/fake-claude-argv.log"
 prompt_blob=$(printf '%s\n' "$@")
 if [[ ! -t 0 ]]; then
   stdin_prompt=$(cat)
+  printf 'stdin=%s\n' "$stdin_prompt" >> "$ARGV_LOG"
   prompt_blob=$(printf '%s\n%s' "$prompt_blob" "$stdin_prompt")
 fi
 

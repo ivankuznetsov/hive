@@ -19,6 +19,9 @@ Claude print-mode prompts use the existing `piped_stdin` transport, like Pi
 and OpenCode. Hive supplies the complete prompt through its temporary stdin
 file rather than one process argument, avoiding `E2BIG` for large review diffs.
 The real-process regression sends 256 KiB and verifies byte-for-byte delivery.
+Grok also uses `piped_stdin`, with `--prompt-file=/dev/stdin`: its Unix CLI
+reads the managed stdin file instead of receiving a potentially oversized
+`-p` argument. Grok does not interpret `--prompt-file -` as stdin.
 
 ## Public surface
 
@@ -54,8 +57,8 @@ SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
 
 The prompt transport distinguishes stdin with an argv marker (`:stdin`, used
-by Codex) from a raw non-TTY pipe (`:piped_stdin`, used by Pi and OpenCode).
-Both CLIs construct the initial message from that pipe, so implementation-sized
+by Codex) from unmarked stdin (`:piped_stdin`, used by Claude, Pi, Grok and OpenCode).
+These CLIs read the initial message from stdin, so implementation-sized
 prompts never occupy one operating-system-limited argv element. This matters
 before the total `ARG_MAX` ceiling: Linux rejects one argument at roughly 128
 KiB, which a deeply reviewed plan can exceed on its own.

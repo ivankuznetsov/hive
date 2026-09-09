@@ -107,6 +107,28 @@ class ManagedGitTest < Minitest::Test
     end
   end
 
+  def test_oversized_index_record_fails_closed_when_git_exits_during_cancellation
+    with_tmp_git_repo do |repo|
+      records = 100.times.map { |i| "100644 #{'a' * 40}\t#{i}-#{'x' * 65_536}\n" }.join
+      _out, err, status = Open3.capture3(
+        "git", "-C", repo, "update-index", "--index-info", stdin_data: records
+      )
+      assert status.success?, err
+      original_kill = Process.method(:kill)
+      cancelled = false
+      exited = lambda do |signal, pid|
+        original_kill.call(signal, pid)
+        cancelled = true
+        raise Errno::ESRCH
+      end
+      with_replaced_singleton_method(Process, :kill, exited) do
+        error = assert_raises(ArgumentError) { Hive::ManagedGit.tracked_gitlinks(repo) }
+        assert_match(/index record exceeded the size limit/, error.message)
+        assert cancelled, "oversized output must cancel the Git process"
+      end
+    end
+  end
+
   def test_private_worktree_configuration_is_fixed_and_discoverable
     with_tmp_git_repo do |repo|
       Dir.mktmpdir("managed-git-private") do |root|

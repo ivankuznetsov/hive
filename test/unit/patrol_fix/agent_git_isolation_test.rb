@@ -125,6 +125,21 @@ class PatrolFixAgentGitIsolationTest < Minitest::Test
     end
   end
 
+  def test_missing_private_object_directory_blocks_adoption
+    with_isolated_repository do |repo, task_folder, _home, source|
+      isolation = Hive::PatrolFix::AgentGitIsolation.prepare!(
+        worktree_path: repo, task_folder: task_folder, writable_worktree: true
+      )
+      original_head = git(source, "rev-parse", "HEAD")
+      FileUtils.rm_rf(File.join(isolation.metadata.git_dir, "objects", "info"))
+      error = assert_raises(Hive::StageError) { isolation.adopt_if_changed! }
+      assert_match(/object directory is unavailable/, error.message)
+      assert_equal original_head, git(source, "rev-parse", "HEAD")
+    ensure
+      isolation&.cleanup!
+    end
+  end
+
   def test_controller_alternates_write_stays_bound_during_parent_swap
     with_isolated_repository do |repo, task_folder, _home, source|
       isolation = Hive::PatrolFix::AgentGitIsolation.prepare!(

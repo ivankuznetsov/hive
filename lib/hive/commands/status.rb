@@ -554,17 +554,25 @@ module Hive
         now = now.utc
         @next_retention_boundary = nil
         workflow_generations ||= capture_workflow_generations(projects)
-        # Dependency admission always sees the complete graph. Archive
-        # retention is presentation-only: an expired completed prerequisite
-        # must continue satisfying its dependants.
+        # Active frames load only reachable terminal prerequisites. Explicit
+        # archive reads retain the complete dependency graph.
         admission_context ||= build_admission_context(
-          projects, workflow_generations: workflow_generations
+          projects, exclude_archived: exclude_archived,
+          workflow_generations: workflow_generations
         )
+        projection_kind = if @archive
+          Hive::Schemas::StatusProjectionKind::ARCHIVE
+        elsif exclude_archived
+          Hive::Schemas::StatusProjectionKind::ACTIVE
+        else
+          Hive::Schemas::StatusProjectionKind::ORDINARY
+        end
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
           "generated_at" => now.iso8601(6),
+          "projection" => projection_kind,
           "projects" => projects.map do |p|
             project_payload_or_degraded(
               p,
@@ -580,6 +588,12 @@ module Hive
         }
       ensure
         @status_attempt_store = nil if owns_attempt_store
+      end
+
+      # Routine consumers omit terminal rows while dependency admission still
+      # resolves exact referenced prerequisites from history.
+      def active_payload(projects, **options)
+        json_payload(projects, **options, exclude_archived: true)
       end
 
       # Internal fast-tick payload. It resolves exact project/slug identities
@@ -601,6 +615,7 @@ module Hive
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
           "generated_at" => now.utc.iso8601(6),
+          "projection" => Hive::Schemas::StatusProjectionKind::PARTIAL,
           "partial" => true,
           "projects" => selected.map do |project|
             project_payload_or_degraded(
@@ -731,7 +746,7 @@ module Hive
             end
             projection = Hive::ArchiveFilter.project(
               rows, now: now,
-              apply_retention: !@archive
+              apply_retention: !@archive && !incremental
             )
             note_retention_boundary(projection.next_retention_boundary) unless @archive
             rows =
@@ -1740,10 +1755,15 @@ module Hive
       end
 
       def build_admission_context(projects, exclude_archived: false, workflow_generations: nil)
-        Hive::DependencySnapshot.admission_context(
-          projects, exclude_archived: exclude_archived,
-          workflow_generations: workflow_generations
-        )
+        if exclude_archived
+          Hive::DependencySnapshot.active_admission_context(
+            projects, workflow_generations: workflow_generations
+          )
+        else
+          Hive::DependencySnapshot.admission_context(
+            projects, workflow_generations: workflow_generations
+          )
+        end
       rescue Hive::UnsupportedProjectConfigError
         raise
       rescue StandardError => e

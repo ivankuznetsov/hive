@@ -711,6 +711,11 @@ class CommandsStatusTest < Minitest::Test
 
       assert_empty project.fetch("tasks")
       assert_equal 1, project.fetch("hidden_archived_task_count")
+      exact = Hive::Commands::Status.new(daemon_tasks: [ "demo:#{File.basename(folder)}" ])
+        .daemon_task_payload([ status_project(project_root, hive_state) ], now: now,
+                             authoritative_dependencies: true)
+      assert_equal "partial", exact.fetch("projection")
+      assert_equal [ File.basename(folder) ], exact.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
     end
   end
 
@@ -1031,6 +1036,37 @@ class CommandsStatusTest < Minitest::Test
     line = Hive::Commands::Status.new.send(:operational_row_line, row)
 
     assert_includes line, "routing no_eligible_provider_route"
+  end
+
+  def test_active_payload_exact_loads_only_referenced_terminal_dependencies
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "9-done", "base-task-260909-aaaa",
+                               state_file: "task.md", marker: "COMPLETE")
+      unrelated = write_status_task(hive_state, "9-done", "unrelated-task-260909-bbbb",
+                                    state_file: "task.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260909-cccc",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(unrelated, id: 2, slug: File.basename(unrelated), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 3, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: File.basename(base))
+      reads = []
+      original = Hive::TaskMeta.method(:read_for_admission)
+      reader = lambda do |folder|
+        reads << folder
+        original.call(folder)
+      end
+      payload = with_replaced_singleton_method(Hive::TaskMeta, :read_for_admission, reader) do
+        Hive::Commands::Status.new.active_payload([ status_project(project_root, hive_state) ])
+      end
+      rows = payload.fetch("projects").first.fetch("tasks")
+      assert_equal "active", payload.fetch("projection")
+      assert_equal [ File.basename(dependent) ], rows.map { |row| row.fetch("slug") }
+      refute rows.first.fetch("blocked")
+      assert_includes reads, base
+      refute_includes reads, unrelated
+    end
   end
 
   def test_json_payload_unblocks_dependency_at_gate_stage

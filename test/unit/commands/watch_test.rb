@@ -504,37 +504,29 @@ class CommandsWatchTest < Minitest::Test
   end
 
   def test_default_source_projects_one_collected_active_graph
-    projects = [ "/tmp/demo" ]
-    active_payload = { "ok" => true, "projects" => [] }
-    operational = { "ok" => true, "tasks" => [] }
-    calls = []
-    status = Object.new
-    status.define_singleton_method(:active_payload) do |received|
-      calls << [ :active_payload, received ]
-      active_payload
-    end
-    status.define_singleton_method(:operational_payload) do |received, status_payload:|
-      calls << [ :operational_payload, received, status_payload ]
-      operational
-    end
-
-    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
-      with_replaced_singleton_method(Hive::Commands::Status, :new, ->(json:) {
-        calls << [ :status_new, json ]
-        status
-      }) do
-        result = Hive::Commands::Watch::DefaultSource.new.fetch
-
-        assert_same active_payload, result.status_payload
-        assert_same operational, result.operational
+    with_tmp_global_config do
+      status = Hive::Commands::Status.new(json: true)
+      original = status.method(:operational_payload)
+      collected = nil
+      calls = 0
+      status.define_singleton_method(:operational_payload) do |projects, status_payload:|
+        calls += 1
+        collected = status_payload
+        original.call(projects, status_payload: status_payload)
       end
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do
+        with_replaced_singleton_method(Hive::Commands::Status, :new, ->(json:) { status }) do
+          source = Hive::Commands::Watch::DefaultSource.new
+          source.prepare(targets: [], project: "demo")
+          result = source.fetch
+          assert_same collected, result.status_payload
+          assert_equal "active", result.status_payload.fetch("projection")
+          assert_empty result.status_payload.fetch("projects")
+          assert result.operational.fetch("ok")
+        end
+      end
+      assert_equal 1, calls
     end
-
-    assert_equal [
-      [ :status_new, true ],
-      [ :active_payload, projects ],
-      [ :operational_payload, projects, active_payload ]
-    ], calls
   end
 
   def test_default_source_switches_to_exact_task_payload_after_selection

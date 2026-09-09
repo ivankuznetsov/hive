@@ -126,8 +126,8 @@ module Hive
       "hive-context-receipt" => 1
     }.freeze
 
-    # The internal v7 envelope survives temporarily while consumers are split,
-    # so every success document names the projection semantics it carries.
+    # The v8 producers name their projection semantics. The field remains
+    # optional for compatibility with earlier v8 success documents.
     # Keeping this compatibility marker in the daemon's code-fingerprint file
     # also forces an already-running daemon to re-exec before it observes the
     # active-only cutover from a freshly installed CLI.

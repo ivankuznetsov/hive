@@ -206,6 +206,10 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes dockerfile, 'io.hive.bench.hive-build-sha="${HIVE_BUILD_SHA}"'
     assert_includes dockerfile, "chmod -R go-rwx /opt/hb/control-bundle"
     assert_includes dockerfile, "rm -rf /usr/local/bundle/gems/hive-cli-*"
+    assert_includes dockerfile, "gem build agent-cli-runtime.gemspec"
+    assert_includes dockerfile, "gem install ./agent-cli-runtime-*.gem --no-document"
+    assert_includes dockerfile, "AgentCliRuntime.respond_to?(:extract_provider_error)"
+    assert_includes dockerfile, "defined?(AgentCliRuntime::OpenCode::Permissions)"
     assert_includes driver, "HB_REQUIRE_SEALED_AGENT_RUNTIME"
     assert_includes driver, 'runner image #{image} is not the sealed Hive build'
     assert_includes driver, '"--user", "0:0"'

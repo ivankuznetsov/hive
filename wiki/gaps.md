@@ -1478,3 +1478,7 @@ Automatic recovery requires successful process and open-file probes (`ps` and
 nonempty locks deliberately leave recovery to a later retry or operator.
 This is not general recovery of interrupted Git operations; preserved lock
 files may still require inspection on platforms without these probes.
+
+- PR #1331 integrated active-row reuse has a fresh classification-count regression
+  (two calls on the repaired parent, one after reuse), but no fresh fleet-scale
+  wall-clock measurement. Earlier percentage improvements are historical.

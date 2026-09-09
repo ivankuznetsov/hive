@@ -1608,6 +1608,53 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_active_preparation_failure_uses_project_local_admission_fallback
+    raising = Class.new(Hive::Commands::Status) do
+      def prepare_project(project, **)
+        raise "preparation failed" if project["name"] == "broken"
+
+        super
+      end
+    end
+
+    with_tmp_dir do |root|
+      projects = %w[broken healthy].map do |name|
+        path = File.join(root, name)
+        FileUtils.mkdir_p(path)
+        { "name" => name, "path" => path, "hive_state_path" => File.join(path, ".hive-state"),
+          "repository_identity" => "github.com/acme/#{name}" }
+      end
+      prerequisite = write_status_task(
+        projects.first.fetch("hive_state_path"), "4-execute", "base-task-260909-aaaa",
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+      dependent = write_status_task(
+        projects.last.fetch("hive_state_path"), "4-execute", "dependent-task-260909-bbbb",
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+      reference = "broken:#{File.basename(prerequisite)}"
+      Hive::TaskMeta.write(prerequisite, id: 1, slug: File.basename(prerequisite), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: reference)
+      payload = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(
+          Hive::RepositoryIdentity, :current,
+          ->(path) { "github.com/acme/#{File.basename(path)}" }
+        ) { payload = raising.new.active_payload(projects) }
+      end
+      broken, healthy = payload.fetch("projects")
+      assert_equal "project_load_failed", broken.fetch("error")
+      assert_empty broken.fetch("tasks")
+      row = healthy.fetch("tasks").first
+      assert_equal File.basename(dependent), row.fetch("slug")
+      assert_nil row.fetch("admission_error"), "fallback must resolve the existing prerequisite"
+      assert_equal true, row.fetch("blocked")
+      assert_equal "4-execute", row.fetch("dependency_stage")
+      assert_match(/preparation failed/, err)
+    end
+  end
+
   def test_active_payload_degrades_a_project_that_fails_during_completion
     raising = Class.new(Hive::Commands::Status) do
       def complete_project_payload(prepared, **)

@@ -1825,7 +1825,7 @@ module Hive
           case result.reason
           when "capacity", "capacity_saturated" then :attempt_capacity
           when "patrol_retry_delay" then :attempt_patrol_retry
-          when "transient_retry" then :attempt_transient_retry
+          when "transient_retry", "transition_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
           else :attempt_deferred
@@ -3790,7 +3790,7 @@ module Hive
           when :terminal_replay then :attempt_terminal_replay
           when :deferred
             case result.reason
-            when "transient_retry" then :attempt_transient_retry
+            when "transient_retry", "transition_retry" then :attempt_transient_retry
             when "patrol_retry_delay" then :attempt_patrol_retry_deferred
             else :attempt_capacity_deferred
             end

@@ -13,6 +13,7 @@ require "hive/artifacts/outcome_evidence/rework"
 require "hive/artifacts/outcome_evidence/store"
 require "hive/atomic_file"
 require "hive/markers"
+require "hive/terminal_outcome"
 require "hive/screenote/credential_store"
 require "hive/screenote/mcp_config"
 require "hive/screenote/oauth_client"
@@ -25,8 +26,10 @@ module Hive
 
       EVIDENCE_ROLES = %w[inference producer reviewer].freeze
       MAX_INFERENCE_ATTEMPTS = 2
+      MAX_PRODUCER_ATTEMPTS = 2
       MAX_REVIEWER_ATTEMPTS = 2
       class RoleOutputError < Hive::Artifacts::OutcomeEvidence::StoreError; end
+      class IntegrityError < Hive::Artifacts::OutcomeEvidence::StoreError; end
       class RoleAgentError < StandardError
         attr_reader :role, :profile, :result
 
@@ -43,6 +46,29 @@ module Hive
       }.freeze
 
       def run!(task, cfg)
+        marker = Hive::Markers.current(task.state_file)
+        return { commit: nil, status: :complete } if
+          marker.name == :complete && marker.attrs["evidence_status"] == "unavailable"
+
+        result = collect!(task, cfg)
+        return result unless result[:status] == :error
+
+        marker = Hive::Markers.current(task.state_file)
+        return result if %w[outcome_evidence_integrity_invalid outcome_evidence_reworks_exhausted].include?(marker.attrs["reason"]) ||
+                         Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs)
+
+        Hive::Markers.set(
+          task.state_file, :complete,
+          marker.attrs.merge(
+            "reason" => "evidence_best_effort", "evidence_status" => "unavailable",
+            "warning_reason" => marker.attrs["reason"]
+          )
+        )
+        warn "hive: evidence collection unavailable; continuing without accepted evidence (#{marker.attrs['reason']})"
+        { commit: "artifacts_best_effort", status: :complete }
+      end
+
+      def collect!(task, cfg)
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
         run_outcome_evidence!(task, cfg || {})
       rescue RoleAgentError => e
@@ -53,7 +79,9 @@ module Hive
              Hive::Artifacts::ManagedWebServer::ServerError,
              Hive::AgentError, Hive::ConfigError, KeyError => e
         Hive::Markers.set(
-          task.state_file, :error, reason: "outcome_evidence_invalid",
+          task.state_file, :error,
+          reason: e.is_a?(IntegrityError) || e.is_a?(Hive::Artifacts::OutcomeEvidence::ResolutionError) ||
+            e.is_a?(Hive::ArtifactFirewall::Error) ? "outcome_evidence_integrity_invalid" : "outcome_evidence_invalid",
           diagnostic: e.message.to_s.byteslice(0, 200).to_s.scrub
         )
         { commit: "error", status: :error }
@@ -228,6 +256,11 @@ module Hive
                 producer_profile: producer_profile
               )
             rescue Hive::ConfigError => e
+              begin
+                capture_toolkit.close if capture_toolkit.respond_to?(:close)
+              ensure
+                remove_producer_work!(task, writable_root)
+              end
               pointer = store.publish_blocked!(
                 generation: generation, reason: "capability_blocked",
                 failed_targets: revision.any? ? revision.map { |item| item.fetch("target_id") } :
@@ -240,30 +273,32 @@ module Hive
             end
             producer = nil
             replacements = begin
-              producer_prompt = render_role_prompt(
-                "artifacts_producer_prompt.md.erb", task,
-                requirement_json: JSON.pretty_generate(requirement),
-                prior_evidence_json: JSON.pretty_generate(prior ? prior.fetch("evidence") : []),
-                revision_json: JSON.pretty_generate(revision),
-                capture_tools_json: JSON.pretty_generate(capture_tools),
+              producer, retained = run_producer!(
+                task: task, cfg: cfg, identity: identity,
+                prompt_values: {
+                  requirement_json: JSON.pretty_generate(requirement),
+                  prior_evidence_json: JSON.pretty_generate(
+                    prior ? prior.fetch("evidence") : []
+                  ),
+                  revision_json: JSON.pretty_generate(revision),
+                  capture_tools_json: JSON.pretty_generate(capture_tools),
+                  writable_root: writable_root,
+                  writable_relative_root: writable_relative_root
+                },
                 writable_root: writable_root,
-                writable_relative_root: writable_relative_root
-              )
-              producer = run_role!(
-                role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
-                identity: identity, writable_root: writable_root,
                 launch_environment: capture_toolkit.launch_environment,
                 producer_add_dirs: capture_toolkit.producer_add_dirs,
                 producer_permission_arguments: capture_toolkit.producer_permission_arguments,
                 producer_runtime_policy: capture_toolkit.producer_runtime_policy
-              )
-              candidate = Array(producer.fetch(:output).fetch("evidence"))
-              capture_toolkit.verify_captures!(candidate)
-              ensure_producer_paths!(task, writable_root, candidate)
-              store.retain_candidate!(
-                generation: generation, attempt_id: attempt_id, evidence: candidate,
-                producer: producer.fetch(:actor)
-              )
+              ) do |candidate, actor|
+                capture_toolkit.verify_captures!(candidate)
+                ensure_producer_paths!(task, writable_root, candidate)
+                store.retain_candidate!(
+                  generation: generation, attempt_id: attempt_id,
+                  evidence: candidate, producer: actor
+                )
+              end
+              retained
             ensure
               begin
                 capture_toolkit.close if capture_toolkit.respond_to?(:close)
@@ -311,6 +346,57 @@ module Hive
             return rework_from_review!(
               task, store, requirement, history, attempt, rework_tracker
             )
+          end
+        end
+      end
+
+      # Capture may succeed while the producer's final descriptor contains a
+      # mechanical field owned by the controller, malformed JSON structure, or
+      # another correctable admission error. Inference and review already get
+      # one bounded fresh-context repair; without the same channel here, Hive
+      # discards useful private captures and turns a format typo into a whole
+      # daemon retry. The admission block remains the authority and must pass
+      # before anything reaches the independent reviewer.
+      def run_producer!(task:, cfg:, identity:, prompt_values:, writable_root:,
+                        launch_environment:, producer_add_dirs:,
+                        producer_permission_arguments:, producer_runtime_policy:)
+        repair = nil
+        MAX_PRODUCER_ATTEMPTS.times do |index|
+          producer_prompt = render_role_prompt(
+            "artifacts_producer_prompt.md.erb", task,
+            **prompt_values, repair_json: JSON.pretty_generate(repair || {})
+          )
+          producer = nil
+          begin
+            producer = run_role!(
+              role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
+              identity: identity, writable_root: writable_root,
+              launch_environment: launch_environment,
+              producer_add_dirs: producer_add_dirs,
+              producer_permission_arguments: producer_permission_arguments,
+              producer_runtime_policy: producer_runtime_policy
+            )
+            output = producer.fetch(:output)
+            unless output.keys == [ "evidence" ]
+              raise RoleOutputError, "producer output must contain only evidence"
+            end
+            candidate = Array(output.fetch("evidence"))
+            return [ producer, yield(candidate, producer.fetch(:actor)) ]
+          rescue RoleOutputError, Hive::Artifacts::OutcomeEvidence::StoreError, KeyError => e
+            # Store errors raised before run_role! returns describe a failed
+            # or unsafe launch, not a repairable descriptor. Once the role
+            # returned, however, store validation is exactly what this bounded
+            # repair turn exists to correct.
+            raise if e.is_a?(Hive::Artifacts::OutcomeEvidence::StoreError) &&
+              !e.is_a?(RoleOutputError) && !producer
+            raise if index + 1 >= MAX_PRODUCER_ATTEMPTS
+
+            repair = {
+              "validation_error" => e.message.to_s.byteslice(0, 1024).to_s.scrub,
+              "previous_output" => producer&.fetch(:output, nil),
+              "instruction" =>
+                "Reuse successful controller-issued captures when possible and return corrected JSON immediately."
+            }
           end
         end
       end
@@ -457,12 +543,17 @@ module Hive
             isolate_environment: true,
             launch_environment: launch_environment,
             agent_custody: agent_custody,
+            # CaptureToolkit owns the Pi evidence policy for the whole
+            # producer attempt. A bounded JSON-repair turn must reuse its
+            # still-live runtime home and capture mailbox; Base otherwise
+            # cleans a runtime policy after one spawn.
+            cleanup_runtime_policy: producer_runtime_policy.nil?,
             **security
           )
         rescue Hive::AgentError => e
           report = agent_custody.report
           if report && !report.valid?
-            raise Hive::Artifacts::OutcomeEvidence::StoreError,
+            raise IntegrityError,
                   "#{role} modified protected task state: #{report.diagnostic}"
           end
 
@@ -473,11 +564,11 @@ module Hive
         end
         report = agent_custody.report
         if !report && result.is_a?(Hash) && result[:status] == :ok
-          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+          raise IntegrityError,
                 "#{role} agent custody was not invoked"
         end
         if report && !report.valid?
-          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+          raise IntegrityError,
                 "#{role} modified protected task state: #{report.diagnostic}"
         end
         unless result && result[:status] == :ok
@@ -491,7 +582,7 @@ module Hive
           task: task, project: File.basename(task.project_root)
         ).resolve
         unless resolved == identity
-          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+          raise IntegrityError,
                 "#{role} changed the frozen implementation source"
         end
 
@@ -768,10 +859,14 @@ module Hive
         fenced = text.match(
           /\A(?<preamble>.*?)```json[ \t]*\r?\n(?<json>.*?)\r?\n```[ \t]*(?:\r?\n)?\z/m
         )
-        raise original_error unless fenced && !fenced[:preamble].include?("```")
+        trailing = text.match(
+          /\A(?<preamble>.*?)(?:\r?\n){2,}[ \t]*(?<json>\{.*\})[ \t]*(?:\r?\n)?\z/m
+        )
+        candidate = fenced || trailing
+        raise original_error unless candidate && !candidate[:preamble].include?("```")
 
         JSON.parse(
-          fenced[:json], object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
+          candidate[:json], object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
           allow_duplicate_key: false
         )
       end

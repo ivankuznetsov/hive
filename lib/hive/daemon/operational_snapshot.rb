@@ -221,7 +221,6 @@ module Hive
             [ [ task.dig("identity", "project"), task.dig("identity", "slug") ], task ]
           end
           holds = provider_holds(rows)
-          overlay_provider_dispositions!(task_index, holds)
           overlay_recovery_dispositions!(task_index, recoveries || {})
           record = base_record(phase: "complete", now: now).merge(
             "reason" => nil,
@@ -418,22 +417,6 @@ module Hive
               "reason" => receipt["reason"] || status.tr("_", " "),
               "recovery" => receipt,
               "routing" => entry["routing"]
-            }
-          end
-        end
-
-        def overlay_provider_dispositions!(task_index, holds)
-          holds.each do |hold|
-            task = find_task(task_index, hold)
-            next unless task && task.dig("disposition", "status") == "available"
-
-            provider = hold["provider"] || "provider"
-            suffix = hold["retry_after"] ? " until #{hold.fetch('retry_after')}" : ""
-            task["disposition"] = {
-              "status" => "available",
-              "decision" => "provider_hold",
-              "owner" => "provider",
-              "reason" => "#{provider} quota hold#{suffix}"
             }
           end
         end

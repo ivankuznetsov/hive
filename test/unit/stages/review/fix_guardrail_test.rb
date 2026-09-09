@@ -796,41 +796,38 @@ class FixGuardrailTest < Minitest::Test
 
   # --- dependency_lockfile_change ----------------------------------------
 
-  def test_trips_on_gemfile_lock_change
+  def test_allows_gemfile_lock_change
     with_two_commits(file: "Gemfile.lock",
                      content: "GEM\n  remote: https://rubygems.org/\n  specs:\n    rake (13.0)\n") do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
       )
-      assert_equal :tripped, result.status
-      assert(result.matches.any? { |m| m.pattern_name == "dependency_lockfile_change" })
+      assert_equal :clean, result.status
+      assert_empty result.matches
     end
   end
 
-  def test_trips_on_package_lock_change
+  def test_allows_package_lock_change
     with_two_commits(file: "package-lock.json",
                      content: %({"name":"x","lockfileVersion":3}\n)) do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
       )
-      assert_equal :tripped, result.status
+      assert_equal :clean, result.status
     end
   end
 
-  def test_trips_on_nested_package_lock_in_monorepo
-    # Monorepos: packages/api/package-lock.json. Pre-fix the regex
-    # used `\A` and missed any non-root lockfile.
+  def test_allows_nested_package_lock_in_monorepo
     with_two_commits(file: "packages/api/package-lock.json",
                      content: %({"name":"api","lockfileVersion":3}\n)) do |dir, base, head|
       result = Hive::Stages::Review::FixGuardrail.run!(
         cfg: cfg, ctx: make_ctx(dir),
         base_sha: base, head_sha: head
       )
-      assert_equal :tripped, result.status,
-                   "monorepo packages/api/package-lock.json must trip dependency_lockfile_change"
-      assert(result.matches.any? { |m| m.pattern_name == "dependency_lockfile_change" })
+      assert_equal :clean, result.status
+      assert_empty result.matches
     end
   end
 

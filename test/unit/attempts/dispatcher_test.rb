@@ -1343,6 +1343,27 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_failed_transition_uses_shared_backoff_without_changing_completed_source
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@id_generator, -> { SecureRandom.uuid })
+      File.write(task.state_file, "<!-- COMPLETE -->\n")
+      now = NOW
+      7.times do |index|
+        accepted = dispatch(dispatcher, task, request_id: "advance-#{index}", intended_stage: "5-open-pr", now: now)
+        assert_equal :accepted, accepted.status
+        assert_equal index, accepted.attempt["retry_charge"]
+        ended = now + 1
+        terminalize_attempt(store, launcher, accepted, outcome: "failed", exit_status: 1, now: ended)
+        delay = Hive::Recovery::RetryPolicy.delay_sec(index)
+        deferred = dispatch(dispatcher, task, request_id: "early-#{index}", intended_stage: "5-open-pr", now: ended + delay - 1)
+        assert_equal :deferred, deferred.status
+        assert_equal "transition_retry", deferred.reason
+        assert_equal "<!-- COMPLETE -->\n", File.read(task.state_file)
+        now = ended + delay
+      end
+    end
+  end
+
   def test_routing_collaborator_defaults
     with_dispatcher do |dispatcher, _launcher, task, _store|
       assert_match(

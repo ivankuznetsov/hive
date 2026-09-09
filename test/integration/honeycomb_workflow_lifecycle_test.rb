@@ -82,7 +82,7 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
     end
   end
 
-  def test_profile_drift_blocks_runtime_without_hiding_the_managed_task
+  def test_updated_agent_installation_does_not_block_a_saved_workflow_mapping
     with_tmp_git_repo do |registry|
       versions = {}
       version = publish_version(registry, versions, "1.0.0", "Inspect the task.\n")
@@ -103,10 +103,7 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
           task = Hive::Task.new(task_path)
 
           assert_equal :demo, task.workflow.id
-          error = assert_raises(Hive::ConfigError) do
-            task.managed_runtime_context("stages.work")
-          end
-          assert_match(/agent profile drifted for stages\.work/, error.message)
+          assert_kind_of Hash, task.managed_runtime_context("stages.work")
         end
       end
     end

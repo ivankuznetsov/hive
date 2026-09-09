@@ -5,6 +5,7 @@ require "open3"
 require "hive"
 require "hive/agent_git_gate"
 require "hive/betterleaks"
+require "hive/paths"
 
 module Hive
   # Betterleaks owns detection. Hive owns the exact input, trusted configuration,
@@ -34,13 +35,17 @@ module Hive
     end
 
     def git_match?(path, base_oid:, head_oid:)
+      !git_findings(path, base_oid: base_oid, head_oid: head_oid).empty?
+    end
+
+    def git_findings(path, base_oid:, head_oid:)
       # These closed reads validate exact OIDs, repository custody, and unsafe
       # local Git helpers before Betterleaks invokes Git itself.
       [ base_oid, head_oid ].each do |oid|
         read!(path, :commit_oid, oid: oid)
       end
-      !git_scan(path, "--log-opts",
-                "--full-history --diff-merges=separate --text --no-ext-diff --no-textconv #{base_oid}..#{head_oid} --").empty?
+      git_scan(path, "--log-opts",
+               "--full-history --diff-merges=separate --text --no-ext-diff --no-textconv #{base_oid}..#{head_oid} --")
     end
 
     def staged_findings(path, entries:, head_objects:)
@@ -59,6 +64,10 @@ module Hive
 
     def git_scan(path, *arguments)
       git_dir = read!(path, :git_dir).strip
+      # Use Betterleaks' native exact-fingerprint exceptions, owned by the
+      # operator outside task worktrees. Repository suppressions stay ignored.
+      ignore_path = File.join(Hive::Paths.config_home, "betterleaks.ignore")
+      arguments += [ "--gitleaks-ignore-path", ignore_path ] if File.file?(ignore_path)
       Dir.mktmpdir("hive-secret-scan-") do |directory|
         # An empty view of the existing object database prevents task-authored
         # config/ignore files from becoming scanner policy. No checkout/copy.
@@ -92,6 +101,7 @@ module Hive
         { name: record.fetch("RuleID"), snippet: "[REDACTED]",
           line: record.fetch("StartLine"), column: record.fetch("StartColumn"),
           path: record.fetch("File"),
+          fingerprint: record.fetch("Fingerprint", ""),
           sha256: Digest::SHA256.hexdigest(record.fetch("Secret")) }
       end
 

@@ -274,7 +274,7 @@ On failure, the harness writes a scenario bundle containing:
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
 | `incident_plan_only_dependency_gate` | Rejects a plan-only assertion, holds exact metadata below the gate, then proves one real dispatch after the prerequisite reaches `8-finalize`. |
-| `incident_provider_limit_retry` | Opens one account-scoped circuit from trusted transport evidence and proves one charged fallback successor under daemon recovery ownership. |
+| `incident_provider_limit_retry` | Opens one account-scoped circuit from trusted transport evidence and proves one charged fallback successor under daemon recovery ownership. Incident scenarios retain a twelve-second per-scenario ceiling and a thirty-second aggregate ceiling, leaving bounded headroom for normal hosted-runner subprocess variance. |
 | `provider_routing_durable_matrix` | Runs AE2-AE8 through `Attempts::Dispatcher`, durable attempt ownership and receipts, restart reopening, a real `Attempts::Supervisor`, recovery reuse, operator/corruption handling, and the real no-pool subscription `limits_reached` isolation path. |
 | `incident_repository_routing` | Rejects a cross-project dependency whose registered repository identity disagrees with its live origin and preserves the non-target task. |
 

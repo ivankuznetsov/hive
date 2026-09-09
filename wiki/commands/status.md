@@ -185,9 +185,10 @@ Dead process metadata is stale liveness only while the task's current action
 or marker still claims that a runner owns the step. A markerless controller
 task whose durable receipts already project `ready_to_run` or
 `ready_to_advance` reports `not_running` and keeps that workflow state even if
-an earlier attempt left a dead PID in `.lock`. For daemon-enrolled projects the
-next transition remains scheduler-owned, and ordinary task-lock acquisition
-reclaims the stale file without an operator repair step. A genuinely current
+an earlier attempt left dead process metadata in the runtime task lease. For
+daemon-enrolled projects the next transition remains scheduler-owned, and ordinary
+task-lock acquisition reclaims the dead holder with a higher fence without an
+operator repair step. A genuinely current
 `agent_running`, `AGENT_WORKING`, or `REVIEW_WORKING` claim with a dead runner
 continues to report `needs_repair`.
 

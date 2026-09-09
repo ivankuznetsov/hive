@@ -76,6 +76,23 @@ class RefactorPatrolFixAdmissionAdapterTest < Minitest::Test
     end
   end
 
+  def test_long_scheduled_identities_are_bounded_and_replay_idempotently
+    Dir.mktmpdir do |dir|
+      adapter = Hive::RefactorPatrol::FixAdmissionAdapter.new(root: dir)
+      source = aggregate.merge("job_id" => "scheduled-#{'a' * 64}")
+      item = disposition.merge("id" => "billing-boundary")
+
+      first = adapter.publish_disposition!(source, item, accepted_at: NOW)
+      replay = adapter.publish_disposition!(source, item, accepted_at: NOW)
+      assert_equal first, replay
+      assert_equal 1, adapter.store.pending.length
+      assert_equal "#{source.fetch('job_id')}:billing-boundary", first.dig("source", "identity")
+      different = adapter.publish_disposition!(source, item.merge("id" => "checkout-boundary"), accepted_at: NOW)
+      refute_equal first, different
+      assert_equal 2, adapter.store.pending.length
+    end
+  end
+
   private
 
   def aggregate

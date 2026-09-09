@@ -2,6 +2,7 @@ require "digest"
 require "securerandom"
 require "time"
 require "hive/agent_git_gate"
+require "hive/artifact_firewall"
 require "hive/patrol_fix/inbox_report"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/successor_materializer"
@@ -15,12 +16,12 @@ module Hive
         module_function
 
         REPORT_FILENAME = "patrol-fix-inbox-report.json".freeze
-        PROTECTED_FILES = [
+        PROTECTED_FILES = (Hive::ArtifactFirewall::ORCHESTRATOR_OWNED + [
           Hive::PatrolFix::TaskManifest::FILENAME,
           Hive::PatrolFix::ReceiptStore::FILENAME,
-          "meta.yml", "worktree.yml", "patrol-fix-worktree.json",
-          "patrol-fix-transition.jsonl", "handoff.yml", "pr.md"
-        ].freeze
+          "meta.yml", "patrol-fix-worktree.json",
+          "patrol-fix-transition.jsonl", "pr.md"
+        ]).uniq.freeze
 
         def run!(task, cfg = {}, agent_runner: nil, successor_materializer: nil)
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read

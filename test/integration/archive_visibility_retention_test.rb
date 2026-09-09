@@ -9,6 +9,8 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
   include HiveTestHelper
 
   FixedStatus = Data.define(:command, :project, :now) do
+    include Hive::Web::StatusCommand
+
     def json_payload(_registered_projects)
       command.json_payload([ project ], now: now)
     end
@@ -191,7 +193,8 @@ class ArchiveVisibilityRetentionTest < Minitest::Test
   def write_task(hive_state, stage, slug, state_file:, marker:, workflow: nil, completed_at: nil)
     folder = File.join(hive_state, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
-    File.write(File.join(folder, state_file), "<!-- #{marker} -->\n")
+    state_path = File.join(folder, state_file)
+    File.write(state_path, "<!-- #{marker} -->\n")
     Hive::TaskMeta.write(
       folder,
       id: nil,

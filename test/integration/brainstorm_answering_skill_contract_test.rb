@@ -72,7 +72,7 @@ class BrainstormAnsweringSkillContractTest < Minitest::Test
       assert_equal before, fleet_state(fleet)
       fleet.each_value do |project|
         project.fetch(:tasks).each_value do |task|
-          refute File.exist?(File.join(task.fetch(:folder), ".lock"))
+          refute Hive::Lock.task_lock_held?(task.fetch(:folder))
         end
       end
     end
@@ -504,6 +504,7 @@ class BrainstormAnsweringSkillContractTest < Minitest::Test
     FileUtils.mkdir_p(File.join(hive_state, "stages"))
     File.write(File.join(hive_state, "config.yml"), {}.to_yaml)
     Hive::Config.register_project(name: name, path: project_root)
+    prepare_test_runtime_project(project_root)
     { root: project_root, tasks: {} }
   end
 

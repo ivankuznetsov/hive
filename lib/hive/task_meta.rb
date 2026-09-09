@@ -3,6 +3,7 @@ require "securerandom"
 require "time"
 require "yaml"
 require "hive/dependencies"
+require "hive/warnings"
 
 module Hive
   module TaskMeta
@@ -82,10 +83,12 @@ module Hive
       # `workflow` selector (read as "use the project default"). Narrow the
       # rescue (matching Worktree.read_pointer) and log so the dropped fields
       # are observable instead of failing the gate open in silence.
-      warn "hive: task_meta: failed to read #{path(task_folder)} " \
-           "(#{e.class}: #{e.message}); treating meta as empty " \
-           "(depends_on, workflow, base_branch dropped; idempotency dropped; " \
-           "managed provenance dropped; completed_at and plan-review requirement dropped)"
+      Hive::Warnings.emit(
+        "hive: task_meta: failed to read #{path(task_folder)} " \
+        "(#{e.class}: #{e.message}); treating meta as empty " \
+        "(depends_on, workflow, base_branch dropped; idempotency dropped; " \
+        "managed provenance dropped; completed_at and plan-review requirement dropped)"
+      )
       empty
     end
 
@@ -243,29 +246,25 @@ module Hive
       raise InvalidMetadata, "invalid plan-review requirement metadata: #{result.error}"
     end
 
-    # First-writer-wins completion clock. The stable guard serializes metadata
-    # rewrites without using the task's process lock, so callers that already
-    # hold that lock (run/approve/backfill) can safely call this helper.
+    # First-writer-wins completion clock. Supported task mutations enter the
+    # shared task lease (or the project commit lock during bootstrap) before
+    # calling this helper, so metadata has no second mutex.
     def write_completed_at_once(task_folder, value = Time.now.utc)
-      with_rewrite_lock(task_folder) do
-        current = read_for_update!(task_folder)
-        return current[:completed_at] if current[:completed_at]
+      current = read_for_update!(task_folder)
+      return current[:completed_at] if current[:completed_at]
 
-        completed_at = normalize_completed_at(value, label: "completed_at", strict: true)
-        updated = current.merge(completed_at: completed_at)
-        updated[:slug] ||= File.basename(task_folder)
-        write(task_folder, **updated.slice(*WRITABLE_FIELDS))
-        completed_at
-      end
+      completed_at = normalize_completed_at(value, label: "completed_at", strict: true)
+      updated = current.merge(completed_at: completed_at)
+      updated[:slug] ||= File.basename(task_folder)
+      write(task_folder, **updated.slice(*WRITABLE_FIELDS))
+      completed_at
     end
 
     def rewrite(task_folder, changes)
-      with_rewrite_lock(task_folder) do
-        current = read_for_update!(task_folder)
-        updated = current.merge(changes)
-        updated[:slug] ||= File.basename(task_folder)
-        write(task_folder, **updated.slice(*WRITABLE_FIELDS))
-      end
+      current = read_for_update!(task_folder)
+      updated = current.merge(changes)
+      updated[:slug] ||= File.basename(task_folder)
+      write(task_folder, **updated.slice(*WRITABLE_FIELDS))
     end
 
     Snapshot = Data.define(:exists, :bytes)
@@ -356,7 +355,9 @@ module Hive
 
       raise ArgumentError, "#{label} must be true when present" if strict
 
-      warn "hive: task_meta: invalid plan_review_required in #{label}; treating metadata as legacy"
+      Hive::Warnings.emit(
+        "hive: task_meta: invalid plan_review_required in #{label}; treating metadata as legacy"
+      )
       nil
     end
 
@@ -372,12 +373,20 @@ module Hive
       return parsed.utc.iso8601 if parsed
 
       raise ArgumentError, "#{label} must be a UTC ISO 8601 timestamp" if strict
-      warn "hive: task_meta: invalid completed_at in #{label}; keeping task visible" if warn_on_invalid
+      if warn_on_invalid
+        Hive::Warnings.emit(
+          "hive: task_meta: invalid completed_at in #{label}; keeping task visible"
+        )
+      end
       nil
     rescue ArgumentError
       raise ArgumentError, "#{label} must be a UTC ISO 8601 timestamp" if strict
 
-      warn "hive: task_meta: invalid completed_at in #{label}; keeping task visible" if warn_on_invalid
+      if warn_on_invalid
+        Hive::Warnings.emit(
+          "hive: task_meta: invalid completed_at in #{label}; keeping task visible"
+        )
+      end
       nil
     end
 
@@ -397,18 +406,6 @@ module Hive
       nil
     rescue ArgumentError => e
       raise InvalidMetadata, "refusing to rewrite invalid task metadata: #{e.message}"
-    end
-
-    def with_rewrite_lock(task_folder)
-      FileUtils.mkdir_p(task_folder)
-      # Reuse the task-lock tempfile namespace already ignored by every
-      # hive/state worktree. A persistent stable inode is required for flock
-      # correctness, but it must never enter task-wide state commits.
-      guard_path = File.join(task_folder, ".lock.tmp.meta-guard")
-      File.open(guard_path, File::RDWR | File::CREAT, 0o644) do |guard|
-        guard.flock(File::LOCK_EX)
-        yield
-      end
     end
 
     def write_raw_atomic(task_folder, bytes)

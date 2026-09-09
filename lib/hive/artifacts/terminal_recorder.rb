@@ -23,11 +23,12 @@ module Hive
 
       class CaptureError < Hive::Error; end
 
-      def initialize(argv:, cwd:, cast_path:, review_path:, environment: {},
+      def initialize(argv:, cwd:, cast_path:, review_path:, environment: {}, display_argv: nil,
                      timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
                      width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT,
                      clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
         @argv = Array(argv).map(&:to_s)
+        @display_argv = Array(display_argv || @argv).map(&:to_s)
         @cwd = File.expand_path(cwd)
         @cast_path = File.expand_path(cast_path)
         @review_path = File.expand_path(review_path)
@@ -75,7 +76,7 @@ module Hive
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout_seconds + 1
         load_paths = [
           File.expand_path("../..", __dir__),
-          *agent_runtime_require_paths
+          *runtime_require_paths
         ].uniq
         worker_environment = {
           "PATH" => ENV.fetch("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -112,14 +113,17 @@ module Hive
       # RubyGems specification. The terminal custody worker still needs the
       # exact already-loaded runtime path after its environment is scrubbed, so
       # prefer the activated spec and fall back to the loaded feature itself.
-      def agent_runtime_require_paths
-        paths = Gem.loaded_specs["agent-cli-runtime"]&.full_require_paths.to_a
-        if paths.empty?
+      def runtime_require_paths
+        agent_paths = Gem.loaded_specs["agent-cli-runtime"]&.full_require_paths.to_a
+        if agent_paths.empty?
           feature = $LOADED_FEATURES.find do |path|
             File.basename(path) == "agent_cli_runtime.rb"
           end
-          paths << File.dirname(File.realpath(feature)) if feature
+          agent_paths << File.dirname(File.realpath(feature)) if feature
         end
+        raise CaptureError, "terminal capture runtime is unavailable" if agent_paths.empty?
+
+        paths = Gem.loaded_specs.values.flat_map(&:full_require_paths) + agent_paths
         paths.select! { |path| File.directory?(path) }
         return paths.uniq unless paths.empty?
 
@@ -131,6 +135,7 @@ module Hive
       def worker_request
         {
           "argv" => @argv,
+          "display_argv" => @display_argv,
           "cwd" => @cwd,
           "cast_path" => @cast_path,
           "review_path" => @review_path,
@@ -162,7 +167,9 @@ module Hive
       end
 
       def validate!
-        raise CaptureError, "terminal capture command is required" if @argv.empty? || @argv.first.empty?
+        if @argv.empty? || @argv.first.empty? || @display_argv.empty? || @display_argv.first.empty?
+          raise CaptureError, "terminal capture command is required"
+        end
         raise CaptureError, "terminal capture cwd is unavailable" unless File.directory?(@cwd)
         unless @timeout_seconds.positive? && @timeout_seconds <= 300
           raise CaptureError, "terminal capture timeout must be between 0 and 300 seconds"
@@ -258,7 +265,7 @@ module Hive
         plain = output.dup.force_encoding(Encoding::UTF_8).scrub
           .gsub(ANSI, "")
           .gsub(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/, "")
-        review = "$ #{Shellwords.join(@argv)}\n#{plain}"
+        review = "$ #{Shellwords.join(@display_argv)}\n#{plain}"
         review << "\n" unless review.end_with?("\n")
         review << "[exit #{exit_status}]\n"
         Hive::AtomicFile.write(@cast_path, cast, mode: 0o600)
@@ -286,6 +293,7 @@ module Hive
             argv: request.fetch("argv"), cwd: request.fetch("cwd"),
             cast_path: request.fetch("cast_path"), review_path: request.fetch("review_path"),
             environment: request.fetch("environment"),
+            display_argv: request.fetch("display_argv"),
             timeout_seconds: request.fetch("timeout_seconds"),
             width: request.fetch("width"), height: request.fetch("height")
           )

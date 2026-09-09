@@ -62,7 +62,8 @@ class StatusTest < Minitest::Test
         slug = "review-decision-260426-aaaa"
         folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
         FileUtils.mkdir_p(folder)
-        File.write(File.join(folder, "task.md"), "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n")
+        state_file = File.join(folder, "task.md")
+        File.write(state_file, "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n")
 
         out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
 
@@ -84,7 +85,8 @@ class StatusTest < Minitest::Test
         slug = "plan-decision-260426-aaaa"
         folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
         FileUtils.mkdir_p(folder)
-        File.write(File.join(folder, "plan.md"), "## Plan\n<!-- WAITING -->\n")
+        state_file = File.join(folder, "plan.md")
+        File.write(state_file, "## Plan\n<!-- WAITING -->\n")
 
         out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
 
@@ -107,7 +109,8 @@ class StatusTest < Minitest::Test
         folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
         FileUtils.mkdir_p(folder)
         Hive::TaskMeta.write(folder, id: 42, slug:, display_name: "Review status")
-        File.write(File.join(folder, "plan.md"), low_risk_review_plan)
+        state_file = File.join(folder, "plan.md")
+        File.write(state_file, low_risk_review_plan)
         task = Hive::Task.new(folder)
         Hive::PlanReview::Orchestrator.run!(
           task:, cfg: Hive::Config.load(dir),
@@ -154,7 +157,8 @@ class StatusTest < Minitest::Test
         slug = "finalize-decision-260426-aaaa"
         folder = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
         FileUtils.mkdir_p(folder)
-        File.write(File.join(folder, "pr.md"), "## PR\n<!-- WAITING -->\n")
+        state_file = File.join(folder, "pr.md")
+        File.write(state_file, "## PR\n<!-- WAITING -->\n")
 
         out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
 
@@ -187,18 +191,18 @@ class StatusTest < Minitest::Test
     end
   end
 
-  def test_status_read_does_not_create_condition_journal_or_snapshot_for_legacy_task
+  def test_status_read_does_not_create_persistent_task_history_caches
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "legacy status row").call }
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "legacy-status-row-*")].first
-
         out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
 
         refute File.exist?(File.join(folder, "events.jsonl"))
         refute File.exist?(File.join(folder, "task-projection.json"))
+        refute File.exist?(File.join(folder, "task-projection.checkpoint.json"))
         identity = JSON.parse(out).dig("projects", 0, "tasks", 0, "implementation_identity")
         assert_equal true, identity["pending"]
         assert_equal({}, identity["stages"])
@@ -336,7 +340,8 @@ class StatusTest < Minitest::Test
         slug = "stale-260424-aaaa"
         folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(folder)
-        File.write(File.join(folder, "task.md"), "<!-- AGENT_WORKING pid=99999999 claude_pid=99999998 -->\n")
+        state_file = File.join(folder, "task.md")
+        File.write(state_file, "<!-- AGENT_WORKING pid=99999999 claude_pid=99999998 -->\n")
         out, _err = capture_io { Hive::Commands::Status.new(full: true).call }
         assert_includes out, "⚠"
         assert_includes out, "stale lock"

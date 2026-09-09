@@ -8,11 +8,12 @@ require "hive/task_action/diagnostic"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/migration"
 require "hive/plan_frontmatter"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
+require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/planner_revision"
 require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
@@ -56,6 +57,11 @@ module Hive
         key: Hive::Schemas::TaskActionKind::READY_TO_DEVELOP,
         label: "Ready to develop",
         command: "develop"
+      },
+      artifacts_rework: {
+        key: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+        label: "Implementation rework required",
+        command: :outcome_evidence_rework
       },
       plan_reviewing: {
         key: Hive::Schemas::TaskActionKind::PLAN_REVIEWING,
@@ -265,7 +271,8 @@ module Hive
     # cannot drift from the command Hive actually reports for an action.
     READY_COMMANDS = ACTIONS.values.each_with_object({}) do |action, commands|
       key = action.fetch(:key)
-      commands[key] = action.fetch(:command) if key.start_with?("ready_")
+      command = action.fetch(:command)
+      commands[key] = command if key.start_with?("ready_") && command.is_a?(String)
     end.merge(
       Hive::Schemas::TaskActionKind::PLAN_REVIEW_DEGRADED => "develop"
     ).freeze
@@ -340,6 +347,8 @@ module Hive
       stage = workflow_stage
       return nil unless stage
       stage_ref = command_stage_dir(stage)
+
+      return outcome_evidence_rework_command(stage_ref) if verb == :outcome_evidence_rework
 
       parts = command_prefix(verb)
       if verb == "approve"
@@ -419,16 +428,17 @@ module Hive
 
     def patrol_fix_action
       return ACTIONS.fetch(:error) if patrol_fix["state"] == "invalid"
-      return ACTIONS.fetch(:done) if patrol_fix["archived"] == true
-
-      case patrol_fix.dig("outcome", "kind")
-      when "rejected" then ACTIONS.fetch(:patrol_fix_rejected)
-      when "blocked" then ACTIONS.fetch(:patrol_fix_blocked)
-      when "escalated" then ACTIONS.fetch(:patrol_fix_escalated)
-      else
-        return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
-        ACTIONS.fetch(:generic_ready_to_run)
+      outcome = patrol_fix.dig("outcome", "kind")
+      if patrol_fix["archived"] == true
+        return ACTIONS.fetch(:done).merge(label: outcome.capitalize) if
+          Hive::PatrolFix::Projection::TERMINAL_OUTCOMES.include?(outcome)
+        return ACTIONS.fetch(:done)
       end
+      return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
+
+      return ACTIONS.fetch(:patrol_fix_blocked) if outcome == "blocked"
+
+      ACTIONS.fetch(:generic_ready_to_run)
     end
 
     def universal_action
@@ -450,6 +460,10 @@ module Hive
       end
       if marker.name == :error && marker.attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
         return ACTIONS.fetch(:recover_draft_pr)
+      end
+      if marker.name == :error && Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs)
+        return outcome_evidence_rework_marker_valid? ?
+          ACTIONS.fetch(:artifacts_rework) : ACTIONS.fetch(:error)
       end
       if marker.name == :error && Hive::TerminalOutcome.blocked_error?(marker.attrs)
         return ACTIONS.fetch(:blocked)
@@ -658,7 +672,7 @@ module Hive
     def load_projection(marker)
       folder = task.respond_to?(:folder) && task.folder
       if folder
-        Hive::TaskProjection::Store.new(task_folder: folder).read(marker: marker)
+        Hive::TaskProjection::Reader.new(task_folder: folder, task: task).read(marker: marker)
       else
         Hive::TaskProjection.project(records: [], marker: marker)
       end
@@ -728,11 +742,15 @@ module Hive
       when "blocked"
         if recoverable_planner_identity_review?
           ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_transient_planner_revision?
+          ACTIONS.fetch(:plan_reviewing)
         elsif stale_planner_revision_contract?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_adversarial_identity_review?
+          ACTIONS.fetch(:plan_reviewing)
+        elsif recoverable_checkpoint_custody_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_selected_lenses_contract_review?
           ACTIONS.fetch(:plan_reviewing)
@@ -889,6 +907,27 @@ module Hive
       parts
     end
 
+    def outcome_evidence_rework_command(stage_ref)
+      return nil unless outcome_evidence_rework_marker_valid?
+
+      parts = [ "hive", "evidence", "rework", task.slug ]
+      parts.concat([ "--project", project_name ]) if project_name && @project_count > 1
+      parts.concat(
+        [
+          "--stage", stage_ref,
+          "--generation", marker.attrs.fetch("generation"),
+          "--recovery-digest", marker.attrs.fetch("recovery_digest")
+        ]
+      )
+      parts.shelljoin
+    end
+
+    def outcome_evidence_rework_marker_valid?
+      %w[generation recovery_digest].all? do |field|
+        marker.attrs[field].to_s.match?(/\A[0-9a-f]{64}\z/)
+      end
+    end
+
     def load_plan_review
       # Folderless tasks (a bare state file with no task directory) have no
       # place to keep review evidence, so they can never carry a projection.
@@ -946,6 +985,25 @@ module Hive
         Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
     rescue ArgumentError, TypeError
       true
+    end
+
+    # Older builds terminalized an exhausted transient planner-revision series.
+    # The orchestrator now owns opening cooled attempt series until that route
+    # recovers, so expose only the exact old planner-owned transient block as
+    # runnable. Invalid candidates and other terminal planner verdicts stay
+    # operator-owned.
+    def recoverable_transient_planner_revision?
+      route = Array(plan_review["routes"]).reverse.find do |entry|
+        entry["role"] == "planner_revision"
+      end
+      return false unless route
+      return false if route["attempt_id"].to_s.empty?
+      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
+
+      expected_reason = "planner_revision_#{route.fetch('outcome')}"
+      Array(plan_review["blockers"]).any? do |blocker|
+        blocker["owner"] == "planner" && blocker["reason"] == expected_reason
+      end
     end
 
     def recoverable_planner_identity_review?
@@ -1014,6 +1072,14 @@ module Hive
       !Hive::PlanReview::RouteResolver.recoverable_identity_route(
         routes:, planner_identity:
       ).nil?
+    end
+
+    # Builds that first protected the bounded projection checkpoint included
+    # Hive's own session write in reviewer custody. Surface only the adapter's
+    # exact runner-provenance false positive as runnable until the orchestrator
+    # records its versioned one-time reset.
+    def recoverable_checkpoint_custody_review?
+      Hive::PlanReview::CheckpointCustody.recoverable?(plan_review["routes"])
     end
 
     # The old selected-lens grammar rejected natural lowercase kebab-case

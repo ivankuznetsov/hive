@@ -108,9 +108,13 @@ first authoritative mutation; read-only queries do not create state.
 ## Scheduling and capacity
 
 Patrol is opt-in and coding-workflow-only. Ordinary and Architecture scheduled
-discovery have separate per-project, per-engine daily launch allowances.
-`UsageDb` is telemetry, not admission authority. Provider resource exhaustion
-parks only the affected lane.
+discovery have separate per-project, per-engine daily launch allowances. Each
+allowance is derived from unique `patrol_discovery_launch` reservations in
+`token_usage` for the current UTC date. One immediate transaction recognizes an
+existing session reservation before counting and inserting a new zero-token
+row, so retries are idempotent and concurrent daemon processes cannot
+oversubscribe the limit. The next UTC date resets naturally. Provider failures
+do not create lane holds or other durable usability state.
 
 The Patrol arbiter alternates ready ordinary and architecture candidates under
 `daemon.max_concurrent_patrol_scans`. Candidate discovery is read-only;
@@ -211,7 +215,12 @@ report and receive no shell permission when OpenCode is deliberately selected
 as the Patrol review agent. Fix may edit the owned worktree and its exact report
 and receives the explicit `Bash(*)` grant needed to reproduce, test, and commit
 the repair. This full-shell grant has the authority of the Hive OS user;
-artifact custody and Git validation remain the outcome boundary.
+artifact custody and Git validation remain the outcome boundary. The managed
+Inbox, Fix, and Review custody manifest includes the complete shared
+orchestrator-owned set, including `task.md`, the authoritative task journal,
+and both derived projection files, plus the Patrol-specific manifests and
+receipts. An agent cannot establish a trusted projection or journal state by
+rewriting those task-folder files during its run.
 
 Every managed Patrol Fix agent is also told to return its report as the exact
 final JSON object. If the agent exits successfully without creating the report,

@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-07-26
+updated: 2026-08-30
 tags: [command, bot, telegram, mobile, json, closure]
 ---
 
@@ -108,6 +108,8 @@ push-notification buttons):
 
 - `needs_input` + `2-brainstorm` + `waiting` → **✏️ answer** (`answer:` callback)
 - `ready_to_*` → **✅ approve** (`approve:<verb>:` callback)
+- `outcome_evidence_rework` → **✅ approve** (`rework:` callback carrying the
+  exact stage and resolving the live generation/recovery digest after fresh-row validation)
 - recovery row, retryable → **🔧 autofix** (`autofix:` callback)
 - recovery row, manual-only → **🔍 details** (`details:` callback)
 - anything else (e.g. in-flight `agent_running`) → no button

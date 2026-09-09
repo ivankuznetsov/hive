@@ -1,10 +1,10 @@
 # Generation-scoped condition rollout
 
 Generation-scoped conditions are an execute-stage safety system. The durable
-`task-journal.jsonl` journal is authoritative; `task-projection.json` is a validated,
-disposable materialized view; task markers remain a reversible compatibility
-surface. Inbox, brainstorm, plan, open-PR, review, artifacts, finalize, and
-archive transitions remain marker-authoritative in this increment.
+`task-journal.jsonl` journal is authoritative and Hive folds it directly in
+memory. Task markers remain a reversible compatibility surface. Inbox,
+brainstorm, plan, open-PR, review, artifacts, finalize, and archive transitions
+remain marker-authoritative in this increment.
 
 ## Authority modes
 
@@ -28,9 +28,9 @@ conditions:
 
 `markers` follows the legacy action. `shadow` evaluates both paths after the
 same reconciliation boundary, follows the marker action, and records any
-divergence. `conditions` follows the projected gate and still writes the
-compatibility marker. Changing mode never deletes the journal, snapshot,
-evidence, or marker history. Hive never changes this configuration itself.
+divergence. `conditions` follows the folded condition gate and still writes the
+compatibility marker. Changing mode never deletes the journal, evidence, or
+marker history. Hive never changes this configuration itself.
 
 A legacy task receives one generation-0 baseline only at a mutating execute
 boundary. Status reads do not create it. Even if configuration says `shadow`
@@ -52,8 +52,7 @@ hive task SLUG --project PROJECT --json
 
 Detailed condition arrays and generation joins remain scheduler internals; do
 not script them through Hive's hidden task-graph transport. If they need to
-become an operator contract, add them to a bounded, versioned task-local
-projection first.
+become an operator contract, add them to a bounded, versioned command response.
 
 `condition_gate.status` is `eligible`, `blocked`, or `reconcile_required`.
 Diagnostics distinguish `pending`, `unsatisfied`, and `unverifiable` facts.
@@ -61,17 +60,11 @@ Diagnostics distinguish `pending`, `unsatisfied`, and `unverifiable` facts.
 requirement. The current and historical condition arrays preserve the reason,
 attempt, generation, commit revision, evidence, and supersession provenance.
 
-Status is read-only: it validates the snapshot cursor/hash and revalidates the
-snapshot's unique current/predecessor attempt bindings against the durable
-attempt store. It replays and fully validates the journal in memory when the
-snapshot is missing, stale, corrupt, or from an unsupported schema, and fails
-closed if an authoritative attempt/lineage is missing, cyclic, or mismatched.
-After a durable snapshot or attempt-stamped `execute_*` marker proves condition
-handoff, a missing or empty journal is an error on both read and rebuild; the
-last snapshot is never replaced by an empty projection. Non-execute markers do
-not claim this execute-journal handoff.
-It does not inspect git/GitHub, append a baseline/audit, or publish a repaired
-snapshot.
+Status is read-only: it takes a shared lock, reads a bounded journal, validates
+each JSON line and the hash chain, and folds the records in memory. Historical
+replay never queries SQLite. A missing journal is an empty stream; malformed,
+oversized, or incomplete history fails that task closed.
+Status does not inspect git/GitHub or append a baseline/audit.
 
 Blocked condition rows carry a reason-specific `next_action` even when the
 compatibility marker is stale. A blocked `hive run --json`, `hive approve
@@ -81,27 +74,13 @@ records an idempotent `operator_action` before it advances; a failed audit
 append fails the override closed. Status exposes the latest 20 such overrides
 as `condition_overrides`, while the journal retains the complete history.
 
-## Repairing a snapshot
+## Invalid history
 
-Deleting a snapshot is safe because no authoritative state lives only there:
-
-```bash
-rm /absolute/task/folder/task-projection.json
-```
-
-The next mutating execute reconciliation republishes it. To rebuild immediately
-from the journal without observing live state, run from a Hive checkout:
-
-```bash
-bundle exec ruby -Ilib -rhive -rhive/task_projection/store \
-  -e 'Hive::TaskProjection::Store.new(task_folder: ARGV.fetch(0)).rebuild!' \
-  /absolute/task/folder
-```
-
-For `condition_unverifiable`, fix the named evidence source first (for example,
-restore the worktree or repair git access) and rerun the execute boundary. Hive
-performs one inline reconciliation; persistent missing/unverifiable evidence
-fails closed rather than looping or advancing.
+There is no derived snapshot to repair. For `task_history_invalid`, fix the
+named journal problem or restore `task-journal.jsonl` from source control or a
+backup. For `condition_unverifiable`, fix the named evidence source (for
+example, restore the worktree or repair git access) and rerun the execute
+boundary. Hive fails closed rather than inventing history or looping.
 
 ## Shadow audit and promotion
 

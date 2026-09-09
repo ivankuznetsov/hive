@@ -1,14 +1,8 @@
-require "digest"
-
 module Hive
-  # Shared regex set for credential/secret detection. Used by both:
-  # - PR-body/comment secret scans in OpenPr, Finalize, and GithubPublisher
-  # - lib/hive/stages/review/fix_guardrail.rb's post-fix diff guardrail (ADR-020)
-  #
-  # New patterns must come with at least one test in
-  # test/unit/secret_patterns_test.rb (or the consumer's tests).
+  # In-process diagnostic redaction only. This cannot approve publication:
+  # Betterleaks is the sole credential detector (see SecretScanner).
   module SecretPatterns
-    POLICY_VERSION = 1
+    REDACTION_VERSION = 1
 
     PATTERNS = {
       # AWS access key id (AKIA = long-term, ASIA = temporary session token)
@@ -44,7 +38,10 @@ module Hive
       # not mistaken for a credential.
       # Include conventional prefixes (`DB_PASSWORD`, `ADMIN_PASSWORD`) so a
       # dotted unquoted credential cannot hide behind the variable name.
-      password_assignment:   /\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
+      # A whole shell variable reference is not itself secret material. Exempt
+      # only `$NAME` / `${NAME}` (optionally quoted); mixed reference-plus-
+      # literal values remain fail-closed.
+      password_assignment:   /\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\b['"]?\s*[:=]\s*(?!['"]?\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)['"]?(?=[\s,;}\]]|$))['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
       password_sql:          /\bPASSWORD\s+['"][^\s'"]{6,}['"]/i,
       password_xml:          /<password>\s*[^<\s]{6,}\s*<\/password>/i,
       password_cli:          /--password\s+['"]?[^\s'"]{6,}['"]?(?=\s|$)/i,
@@ -68,34 +65,6 @@ module Hive
 
     module_function
 
-    # Scan `text` against every pattern. Returns an Array of
-    # `{name:, snippet:}` matches. The snippet is truncated to 80
-    # chars so callers can include it in error messages without
-    # leaking very long secrets to logs.
-    def scan(text)
-      return [] if text.nil? || text.empty?
-
-      text = normalized_utf8(text)
-      matches = []
-      PATTERNS.each do |name, regex|
-        text.scan(regex) do |_capture|
-          full = Regexp.last_match[0]
-          matches << {
-            name: name,
-            snippet: full.length > 80 ? "#{full[0, 80]}…" : full,
-            sha256: Digest::SHA256.hexdigest(full)
-          }
-        end
-      end
-      matches
-    end
-
-    def match?(text)
-      return false if text.nil? || text.empty?
-
-      PATTERNS.each_value.any? { |regex| regex.match?(text) }
-    end
-
     # Replace every PATTERNS match in `text` with a `[REDACTED:<name>]`
     # placeholder. Shared helper so consumers (TaskAction#diagnostic,
     # DiagnosisAgent#artifact_body, etc.) cannot diverge on which
@@ -115,6 +84,7 @@ module Hive
     def normalized_utf8(text)
       text.to_s.dup.force_encoding(Encoding::UTF_8).scrub("?")
     end
+
     private_class_method :normalized_utf8
   end
 end

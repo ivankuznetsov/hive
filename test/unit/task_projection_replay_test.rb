@@ -26,16 +26,14 @@ class TaskProjectionReplayTest < Minitest::Test
     assert_equal "eligible", result.canonical.dig("gate", "status")
   end
 
-  def test_missing_corrupt_and_stale_snapshots_replay_identically_without_live_observation
+  def test_direct_journal_replay_does_not_perform_live_observation
     sentinels = [
       [ Hive::GitOps, :new ],
       [ Hive::Gh, :pr_frontmatter ],
       [ Open3, :capture3 ]
     ]
     run = lambda do
-      expected = replay(TASK_1849).replay(snapshot: :missing).canonical
-      assert_equal expected, replay(TASK_1849).replay(snapshot: :corrupt).canonical
-      assert_equal expected, replay(TASK_1849).replay(snapshot: :stale).canonical
+      assert_equal "attempt-b", replay(TASK_1849).replay.canonical.dig("identity", "attempt_id")
     end
 
     with_sentinels(sentinels, 0, run)
@@ -78,7 +76,7 @@ class TaskProjectionReplayTest < Minitest::Test
     assert_equal "eligible", result.canonical.dig("gate", "status")
   end
 
-  def test_attempt_metadata_independently_rejects_forged_journal_task_identity
+  def test_live_attempt_metadata_is_not_an_authority_for_historical_replay
     with_tmp_dir do |dir|
       bundle = File.join(dir, "sample-current")
       FileUtils.cp_r(File.join(FIXTURES, "sample-current"), bundle)
@@ -91,7 +89,7 @@ class TaskProjectionReplayTest < Minitest::Test
       manifest.fetch("files")["attempts.json"] = ::Digest::SHA256.file(attempts_path).hexdigest
       File.write(manifest_path, JSON.pretty_generate(manifest))
 
-      assert_raises(Hive::TaskProjection::InvalidJournal) { replay(bundle).replay }
+      assert_equal "sample-attempt", replay(bundle).replay.canonical.dig("identity", "attempt_id")
     end
   end
 

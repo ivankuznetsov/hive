@@ -39,4 +39,50 @@ class ConditionsTransitionGuardTest < Minitest::Test
       assert_match(/absent, invalid, or stale/, error.message)
     end
   end
+
+  def test_identified_task_queries_only_its_exact_durable_attempt
+    calls = []
+    repository = Object.new
+    repository.define_singleton_method(:live_attempt_for) do |task_id:|
+      calls << task_id
+      { "attempt_id" => "attempt-1" }
+    end
+    repository.define_singleton_method(:active_attempts) do
+      flunk "transition guard performed a global attempt scan"
+    end
+    task = Struct.new(:id, keyword_init: true).new(id: "expected")
+
+    assert Hive::Conditions::TransitionGuard.send(
+      :admitted_attempt?, task, repository: repository
+    )
+    assert_equal [ "expected" ], calls
+  end
+
+  def test_unidentified_task_does_not_scan_attempts
+    repository = Object.new
+    repository.define_singleton_method(:live_attempt_for) { flunk "missing task id was queried" }
+    repository.define_singleton_method(:active_attempts) { flunk "global attempts were scanned" }
+    task = Struct.new(:id, keyword_init: true).new(id: nil)
+
+    refute Hive::Conditions::TransitionGuard.send(
+      :admitted_attempt?, task, repository: repository
+    )
+  end
+
+  def test_terminal_attempt_waits_for_task_journal_publication
+    projection = { "identity" => { "attempt_id" => "attempt-1" } }
+    repository = Object.new
+    journal_acknowledged = false
+    repository.define_singleton_method(:publication) do |_attempt_id|
+      { "consumers" => { "journal" => journal_acknowledged } }
+    end
+
+    assert Hive::Conditions::TransitionGuard.send(
+      :journal_publication_pending?, projection, repository: repository
+    )
+    journal_acknowledged = true
+    refute Hive::Conditions::TransitionGuard.send(
+      :journal_publication_pending?, projection, repository: repository
+    )
+  end
 end

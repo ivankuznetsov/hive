@@ -139,8 +139,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_operator all(".task-row").size, :>, row_count_before,
                     "the new row must arrive over the stream, not a reload"
 
-    # The task page must fail closed until exact attempt/resource evidence is
-    # available, even though the underlying force route remains a sharp tool.
+    # Canonical task creation publishes exact zero-history evidence, so the
+    # confirm-gated force route is available without a repair round trip.
     task_href = "/tasks/#{@project}/#{folder.basename}"
     assert_selector ".task-row a[href='#{task_href}']", text: "Browser test idea", wait: 5
     visit task_href
@@ -151,8 +151,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # Advanced section at the bottom, confirm-gated.
     assert_no_button "Approve", exact: true, wait: 0
     find(".advanced summary").click
-    within(".advanced") { assert_button "Force approve", disabled: true }
-    assert folder.directory?, "disabled controls must leave the inbox task in place"
+    within(".advanced") { assert_button "Force approve", disabled: false }
+    assert folder.directory?, "an untouched control must leave the inbox task in place"
   end
 
   test "plan review detail offers an exact decision but no force bypass" do
@@ -532,15 +532,13 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
   test "receipt-correlated log pane follows, pauses, resumes, and morphs in place" do
     slug = create_task!(@project, "Receipt log probe")
-    root = Dir.mktmpdir("hive-web-receipt-log")
-    previous_root = ENV["HIVE_ATTEMPT_STORE_ROOT"]
-    ENV["HIVE_ATTEMPT_STORE_ROOT"] = root
-    store = Hive::Attempts::Store.new(root: root)
-    writer = store.log_archive.open_writer("receipt-attempt")
+    store = Hive::Attempts::Repository.open_default
+    attempt_id = "receipt-attempt-#{SecureRandom.hex(4)}"
+    writer = store.log_archive.open_writer(attempt_id)
     writer.append("stdout", (1..120).map { |n| "line #{n}" }.join("\n") + "\n")
     writer.close
     reference = Hive::OutputReference.build(
-      store.log_archive.hot_path("receipt-attempt"), root: store.root
+      store.log_archive.hot_path(attempt_id), root: store.root
     )
     original = Hive::TaskWorkspace::Builder.instance_method(:semantic)
     replacement = lambda do
@@ -588,8 +586,6 @@ class PipelineFlowTest < ApplicationSystemTestCase
   ensure
     Hive::TaskWorkspace::Builder.define_method(:semantic, original) if original
     writer&.close unless writer&.closed?
-    ENV["HIVE_ATTEMPT_STORE_ROOT"] = previous_root
-    FileUtils.rm_rf(root) if root
   end
 
   test "artifact open state survives a pushed morph while content stays live" do

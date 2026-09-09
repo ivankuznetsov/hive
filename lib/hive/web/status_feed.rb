@@ -10,11 +10,39 @@ require "hive/tui/state_source"
 
 module Hive
   module Web
+    # The authoritative internal contract between StatusFeed and the status
+    # producer it polls. Every injected status command implements all three
+    # methods; the feed never probes collaborator shape. `json_payload` is
+    # the bounded scan seam, while the other two members are optional
+    # capabilities with explicit nil defaults: a producer without dependency
+    # context or a recovery overlay returns nil and the feed renders the
+    # plain projection instead of silently branching on what happens to be
+    # defined on the collaborator.
+    module StatusCommand
+      def json_payload(_projects)
+        raise NotImplementedError, "status commands must implement json_payload"
+      end
+
+      # Non-scanning read of the dependency context captured by the last
+      # refresh; nil when the producer owns no dependency context.
+      def dependency_context_snapshot
+        nil
+      end
+
+      # Canonical recovery receipts to join in memory against the supplied
+      # status payload; nil when the producer owns no recovery overlay.
+      def operational_recoveries(_projects, status_payload:)
+        nil
+      end
+    end
+
     # Adapts the bounded status projection source to StatusFeed's existing
     # command seam. Puma requests and the shared Cable poller can enter this
     # object concurrently, while StateSource intentionally has one projection
     # writer; serialize those synchronous refreshes here.
     class CachedStatusCommand
+      include StatusCommand
+
       ARCHIVE_REFRESH_FALLBACK_SECONDS = 300.0
 
       def initialize(
@@ -39,9 +67,7 @@ module Hive
       end
 
       def dependency_context_snapshot
-        @mutex.synchronize do
-          @source.dependency_context_snapshot if @source.respond_to?(:dependency_context_snapshot)
-        end
+        @mutex.synchronize { @source.dependency_context_snapshot }
       end
 
       # Keep the daemon-owned recovery receipt overlay available without
@@ -157,8 +183,6 @@ module Hive
       end
 
       def dependency_context_snapshot
-        return unless @status_command.respond_to?(:dependency_context_snapshot)
-
         @status_command.dependency_context_snapshot
       end
 
@@ -297,8 +321,6 @@ module Hive
       # a second fleet scan. The lean projection also avoids building the
       # complete operational envelope on every five-second web poll.
       def overlay_operational_recoveries(payload, projects)
-        return payload unless @status_command.respond_to?(:operational_recoveries)
-
         recovery_rows = @status_command.operational_recoveries(
           projects,
           status_payload: payload

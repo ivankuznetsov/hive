@@ -220,13 +220,44 @@ module Hive
         end
 
         # --- Pass loop: Phase 2 → 3 → branch → 4 ---
-        pass = next_pass_for(task, marker, cfg)
+        on_disk_pass = max_review_pass(task.folder, cfg)
+        pass = next_pass_for(task, marker, cfg, max_pass: on_disk_pass)
         max_passes = cfg.dig("review", "max_passes") || 4
         # A task can be intentionally rewound into review after exhausting its
         # configured pass cap. If the entry CI gate repairs that previously
         # reviewed head, admit exactly the next on-disk pass so the repair is
         # reviewed instead of immediately returning REVIEW_STALE.
         max_passes = [ max_passes, pass ].max if entry_ci_repaired
+
+        # A CI-fix commit can land immediately before the runner is stopped
+        # (daemon restart, host reboot, process loss). On the next invocation
+        # entry_ci_repaired is false because the repaired HEAD already exists,
+        # while the completed on-disk pass still points at the older HEAD. Do
+        # not turn that restart boundary into a false max-pass escalation.
+        #
+        # New sentinels bind pass completion to HEAD. A matching HEAD means
+        # the pass had already reached the browser boundary, so resume there.
+        # A different HEAD authorizes one fresh pass. Legacy sentinels have no
+        # head binding; fail safe by reviewing the current HEAD once rather
+        # than requiring an operator to clear a synthetic stale marker.
+        resume_browser = false
+        if !entry_ci_repaired && pass > max_passes &&
+           on_disk_pass == pass - 1 && completed_pass_receipt?(task.folder, on_disk_pass)
+          completed_head = fix_success_head(task.folder, on_disk_pass)
+          if !completed_head.nil? && completed_head == git_head(worktree_path)
+            pass = on_disk_pass
+            resume_browser = true
+          else
+            max_passes = pass
+          end
+        elsif !entry_ci_repaired && pass > max_passes &&
+              on_disk_pass == pass &&
+              pass_completion_status(task.folder, pass) != :complete &&
+              completed_pass_receipt?(task.folder, pass - 1)
+          # The widened pass itself had already started before interruption.
+          # Resume its incomplete reviewer/triage/fix artifacts in place.
+          max_passes = pass
+        end
 
         # When the runner is re-entering a pass whose Phase 4 fix did
         # not finish (REVIEW_ERROR phase=fix, or interrupted
@@ -240,6 +271,8 @@ module Hive
         fix_retry_pass = pass_completion_status(task.folder, pass) == :fix_incomplete ? pass : nil
 
         loop do
+          break if resume_browser
+
           if wall_clock_exceeded?(started_at, max_wall_clock)
             return finalize_wall_clock_stale(task, started_at, pass: pass)
           end
@@ -318,7 +351,7 @@ module Hive
                        status: :review_error }
             end
 
-            if fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches)
+            if fix_guardrail_approved?(ctx_pass, expected_matches: expected_matches, cfg: cfg)
               if worktree_dirty?(worktree_path)
                 Hive::Markers.set(task.state_file, :review_error,
                                   phase: :resume, reason: "approval_dirty_worktree", pass: pass)
@@ -571,6 +604,14 @@ module Hive
           pre_effect_routing_validation = false
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
+          # Bind the post-fix guardrail before CleanExit snapshots any residue.
+          # A recovery from fix_auto_commit_scope_failed re-enters with the
+          # rejected fix-agent edits still dirty. prepare_worktree_for_fix
+          # preserves those edits in a checkpoint commit before the retrying
+          # fix agent runs; capturing HEAD afterwards would omit that whole
+          # checkpoint from the guardrail diff and launder precisely the
+          # changes the scope check rejected.
+          before_fix_head = git_head(worktree_path)
           pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
           case pre_fix_status
           when :dirty
@@ -630,8 +671,6 @@ module Hive
             permitted_writable_roots: [ task.folder, worktree_path ]
           )
           agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
-          before_fix_head = git_head(worktree_path)
-
           fix_result = spawn_fix_agent(
             task, cfg, ctx_pass, accepted: accepted, identity: fix_identity,
             agent_custody: agent_custody
@@ -1318,8 +1357,8 @@ module Hive
 
       # Pass to start at on a fresh hive run. Falls back to 1 when no
       # reviewer files exist yet.
-      def next_pass_for(task, marker, cfg = nil)
-        max = max_review_pass(task.folder, cfg)
+      def next_pass_for(task, marker, cfg = nil, max_pass: nil)
+        max = max_pass || max_review_pass(task.folder, cfg)
         case marker.name
         when :review_waiting
           # Prefer the marker-recorded pass over the disk-derived max.
@@ -1423,6 +1462,18 @@ module Hive
         File.mtime(fix_success_path) >= File.mtime(escalations_path)
       rescue SystemCallError, IOError
         true
+      end
+
+      def completed_pass_receipt?(task_folder, pass)
+        File.exist?(fix_success_path(task_folder, pass)) &&
+          pass_completion_status(task_folder, pass) == :complete
+      end
+
+      def fix_success_head(task_folder, pass)
+        first_line = File.open(fix_success_path(task_folder, pass), &:gets).to_s
+        first_line[/\bhead=([0-9a-f]{40,64})\b/, 1]
+      rescue SystemCallError, IOError
+        nil
       end
 
       # Back-compat shim: PR #56 named the narrower predicate this. Now
@@ -1810,6 +1861,11 @@ module Hive
         end
 
         adapter = Hive::Reviewers.dispatch(spec, ctx, cfg: cfg)
+        failure_output_path = if adapter.respond_to?(:failure_output_path)
+          adapter.failure_output_path
+        else
+          adapter.output_path
+        end
         # Wrap adapter.run! so a single reviewer raising (spawn-time
         # SystemCallError, network timeout in a custom adapter, …)
         # doesn't abort the whole reviewers phase. Treat as :error,
@@ -1851,7 +1907,7 @@ module Hive
 
             Hive::Reviewers::Result.new(
               name: spec["name"],
-              output_path: adapter.output_path,
+              output_path: failure_output_path,
               status: :error,
               error_message: "#{e.class}: #{e.message}"
             )
@@ -1870,7 +1926,7 @@ module Hive
 
             Hive::Reviewers::Result.new(
               name: spec["name"],
-              output_path: adapter.output_path,
+              output_path: failure_output_path,
               status: :error,
               error_message: "#{e.class}: #{e.message}"
             )
@@ -2388,12 +2444,45 @@ module Hive
 
           body << "#{section_labels[severity]}\n\n"
           entries.each do |m|
-            body << "- [ ] #{m.pattern_name}: #{m.file}:#{m.line || '?'}: " \
-                    "#{m.snippet} (waiver sha256: #{m.match_sha256})\n"
+            # Control bytes in a decoded path or matched snippet (the
+            # guardrail's decode_git_path un-escapes C-quoted paths, so a
+            # rename target like ".github/workflows/de\nploy.yml" arrives
+            # with a literal newline) would split this checkbox line into
+            # several physical lines. fix_guardrail_approved? counts
+            # checkboxes line-by-line: a crafted path fragment such as
+            # "\n- [x] " renders checked boxes the user never ticked,
+            # and any count drift versus the marker's recorded matches
+            # deadlocks the approval round-trip entirely. Escape every
+            # control byte at the report boundary so one Match renders
+            # as exactly one checkbox line.
+            body << "- [ ] #{escape_control_bytes(m.pattern_name)}: #{escape_control_bytes(m.file)}:#{m.line || '?'}: " \
+                    "#{escape_control_bytes(m.snippet)} (waiver sha256: #{m.match_sha256})\n"
           end
           body << "\n"
         end
         File.write(path, body)
+      end
+
+      # Render control bytes as visible escapes so line-oriented
+      # consumers of orchestrator-owned reports (the checkbox-counting
+      # fix_guardrail_approved? reader, human reviewers) see one line
+      # per logical line. Printable non-ASCII bytes pass through
+      # untouched.
+      def escape_control_bytes(text)
+        text.to_s.gsub(/[[:cntrl:]]/) do |ch|
+          case ch
+          when "\n" then "\\n"
+          when "\t" then "\\t"
+          when "\r" then "\\r"
+          when "\f" then "\\f"
+          when "\v" then "\\v"
+          when "\e" then "\\e"
+          when "\b" then "\\b"
+          when "\a" then "\\a"
+          when "\0" then "\\0"
+          else format("\\x%02X", ch.ord)
+          end
+        end
       end
 
       def emit_guardrail_waivers(task, pass, matches)
@@ -2414,7 +2503,8 @@ module Hive
       end
 
       # U5 — check whether reviews/fix-guardrail-NN.md has been
-      # user-approved for the given pass. Approved = every checkbox
+      # ready to resume for the given pass. Active findings require approval;
+      # the retired default lockfile rule does not. Approved = every active checkbox
       # line is `[x]` AND (when `expected_matches:` is supplied) the
       # checkbox count matches what the runner originally wrote.
       # Returns false for: file absent, header-only file (zero
@@ -2440,7 +2530,7 @@ module Hive
       # `:review_waiting reason=fix_guardrail` for the same pass. The
       # helper itself does not check the marker — it is a pure file
       # inspector. The orchestrator guards the call site.
-      def fix_guardrail_approved?(ctx, expected_matches: nil)
+      def fix_guardrail_approved?(ctx, expected_matches: nil, cfg: {})
         path = File.join(
           ctx.task_folder,
           "reviews",
@@ -2450,9 +2540,11 @@ module Hive
 
         checkbox_re = /^\s*-\s+\[([ xX])\]\s+/
         checked_count = 0
+        lockfile_rule = FixGuardrail.resolve_patterns(cfg).key?(:dependency_lockfile_change)
         File.foreach(path) do |line|
           next unless (m = line.match(checkbox_re))
-          return false if m[1] == " "
+          retired_lockfile = !lockfile_rule && line[m.end(0)..].start_with?("dependency_lockfile_change:")
+          return false if m[1] == " " && !retired_lockfile
 
           checked_count += 1
         end
@@ -2469,8 +2561,10 @@ module Hive
       def write_fix_success(ctx)
         path = fix_success_path(ctx.task_folder, ctx.pass)
         FileUtils.mkdir_p(File.dirname(path))
+        head = git_head(ctx.worktree_path)
+        head_binding = head.to_s.match?(/\A[0-9a-f]{40,64}\z/) ? " head=#{head}" : ""
         body = +"<!-- HIVE: fix-success sentinel for pass " \
-               "#{format('%02d', ctx.pass)}; do not edit. " \
+               "#{format('%02d', ctx.pass)};#{head_binding} do not edit. " \
                "Removing this file makes the next markerless `hive run` " \
                "treat the pass as fix-incomplete and retry it. -->\n"
         body << "# Fix completed for pass #{format('%02d', ctx.pass)}\n\n"

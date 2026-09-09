@@ -8,7 +8,7 @@ class TaskMutationsTest < ActiveSupport::TestCase
 
   test "derives queueable actions from the canonical task action vocabulary" do
     expected = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
-      Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
+      Hive::RuntimeControlPlane::DispatchRepository::ALLOWED_VERBS.include?(verb)
     end
 
     assert_equal expected, TaskMutations::STAGE_VERB_BY_ACTION
@@ -37,6 +37,55 @@ class TaskMutationsTest < ActiveSupport::TestCase
     result = subject.run!(expected_action: "plan_reviewing", expected_stage: "3-plan")
 
     assert_equal %w[hive plan-review-run demo-task --project demo], result[:argv]
+  end
+
+  test "queues outcome evidence rework from the exact projected command" do
+    generation = "a" * 64
+    recovery_digest = "b" * 64
+    command = "hive evidence rework demo-task --project demo --stage 7-artifacts " \
+              "--generation #{generation} --recovery-digest #{recovery_digest}"
+    subject = task(
+      "stage" => "7-artifacts", "workflow" => "coding",
+      "marker" => "error",
+      "attrs" => {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => generation, "recovery_digest" => recovery_digest
+      },
+      "action" => Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      "suggested_command" => command
+    )
+
+    result = subject.run!(
+      expected_action: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      expected_stage: "7-artifacts"
+    )
+
+    assert_equal Shellwords.split(command) + [ "--json" ], result.fetch(:argv)
+    assert_equal "rework", subject.run_verb
+    assert_equal Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+                 subject.dispatch_action
+  end
+
+  test "rejects malformed outcome evidence rework commands before queueing" do
+    subject = task(
+      "stage" => "7-artifacts", "workflow" => "coding", "marker" => "error",
+      "attrs" => {
+        "reason" => "outcome_evidence_implementation_rework",
+        "generation" => "a" * 64, "recovery_digest" => "b" * 64
+      },
+      "action" => Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+      "suggested_command" => "hive artifacts demo-task --from 7-artifacts"
+    )
+
+    error = assert_raises(Hive::Error) do
+      subject.run!(
+        expected_action: Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK,
+        expected_stage: "7-artifacts"
+      )
+    end
+
+    assert_match(/reload the page/, error.message)
+    assert_empty queue_files
   end
 
   test "rejects unknown and non-queueable actions before writing" do
@@ -405,8 +454,24 @@ class TaskMutationsTest < ActiveSupport::TestCase
   private
 
   def reset_task_mutation_state
-    FileUtils.rm_rf(File.join(Hive::Paths.state_home, "dispatch_requests"))
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path
+    ).migrate!
+    now = Time.current.utc.iso8601(6)
+    database.transaction do |db|
+      db[:dispatch_requests].delete
+      installation = db[:installations].first.fetch(:installation_id)
+      db[:projects].insert_conflict.insert(
+        project_id: "web-test-demo", installation_id: installation,
+        registration_id: "web-test-demo", name: "demo",
+        observed_path: ENV.fetch("HIVE_TEST_HOME_ROOT"),
+        state_root_path: File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "demo-state"),
+        active: 1, registered_at: now, last_observed_at: now
+      )
+    end
     Hive::Workflows::Project.reset!
+  ensure
+    database&.disconnect
   end
 
   def task(attributes = {}, project: nil, slug: "demo-task", **extra_attributes)
@@ -455,7 +520,13 @@ class TaskMutationsTest < ActiveSupport::TestCase
   end
 
   def queue_files(request_id = nil)
-    pattern = request_id ? "*#{request_id}*" : "*"
-    Dir[File.join(Hive::Paths.state_home, "dispatch_requests", pattern)].select { |path| File.file?(path) }
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path
+    ).open!
+    requests = Hive::RuntimeControlPlane::DispatchRepository.new(database: database).pending
+    requests.select! { |request| request.request_id.include?(request_id) } if request_id
+    requests
+  ensure
+    database&.disconnect
   end
 end

@@ -4,14 +4,14 @@ require "openssl"
 require "time"
 require "uri"
 require "hive/atomic_file"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/config"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/markers"
 require "hive/paths"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_resolver"
 require "hive/task_closure_contract"
 require "hive/workflow_package/canonical_json"
@@ -28,10 +28,6 @@ module Hive
     INPUT_SCHEMA = "hive-task-closure-input".freeze
     INPUT_SCHEMA_VERSION = Hive::Schemas::SCHEMA_VERSIONS.fetch(INPUT_SCHEMA)
     RECEIPT_BASENAME = "closure.json".freeze
-    # Reuse the existing task-lock temporary namespace so both freshly
-    # initialized and older hive/state worktrees already ignore this private
-    # sidecar during StageAction's slug-scoped git add.
-    LOCK_BASENAME = ".lock.tmp.closure".freeze
     QUARANTINE_DIR = "closure-quarantine".freeze
     REASONS = Hive::TaskClosureContract::REASONS
     AUTHORITIES = %w[remote_merge operator_attestation].freeze
@@ -133,9 +129,11 @@ module Hive
         new.read(task, project: project, quarantine: quarantine)
       end
 
-      def projection(task, project: nil, attempt_store: nil)
+      def projection(task, project: nil, attempt_store: nil, task_projection: nil)
         service = new(attempt_store: attempt_store)
-        result = service.read(task, project: project)
+        result = service.read(
+          task, project: project, task_projection: task_projection
+        )
         return nil if result.absent?
         return result.receipt if result.valid?
 
@@ -194,7 +192,8 @@ module Hive
       end
 
       def task_generation(task, marker: Hive::Markers.current(task.state_file),
-                          attempt_store: nil)
+                          attempt_store: nil, projection: nil,
+                          condition_task_generation: nil, commit_generation: nil)
         markerless = if File.file?(task.state_file)
           Hive::Markers.without_markers(File.binread(task.state_file))
         else
@@ -203,9 +202,16 @@ module Hive
         meta = File.file?(task.meta_yml_path) ? File.binread(task.meta_yml_path) : ""
         pr_path = File.join(task.folder, "pr.md")
         pr_identity = File.file?(pr_path) ? File.binread(pr_path) : ""
-        store_options = { task_folder: task.folder }
-        store_options[:attempt_store] = attempt_store if attempt_store
-        projection = Hive::TaskProjection::Store.new(**store_options).read(marker: marker)
+        if projection
+          condition_task_generation = projection["identity"]["task_generation"]
+          commit_generation = projection["identity"]["commit_generation"]
+        elsif condition_task_generation.nil? || commit_generation.nil?
+          projection = Hive::TaskProjection::Reader.new(
+            task_folder: task.folder, task: task
+          ).read(marker: marker)
+          condition_task_generation = projection["identity"]["task_generation"]
+          commit_generation = projection["identity"]["commit_generation"]
+        end
         digest(
           "slug" => task.slug,
           "id" => task.id&.to_s,
@@ -213,8 +219,8 @@ module Hive
           "state_without_markers_sha256" => ::Digest::SHA256.hexdigest(markerless),
           "meta_sha256" => ::Digest::SHA256.hexdigest(meta),
           "pr_identity_sha256" => ::Digest::SHA256.hexdigest(pr_identity),
-          "condition_task_generation" => projection["identity"]["task_generation"],
-          "commit_generation" => projection["identity"]["commit_generation"]
+          "condition_task_generation" => condition_task_generation,
+          "commit_generation" => commit_generation
         )
       end
 
@@ -242,13 +248,14 @@ module Hive
         end.first
       end
 
-      def validate_active_cas!(task, receipt, attempt_store: nil)
+      def validate_active_cas!(task, receipt, attempt_store: nil, projection: nil)
         observation = receipt.fetch("observation")
         current_stage = "#{task.stage_index}-#{task.stage_name}"
         marker = Hive::Markers.current(task.state_file)
         unless observation.fetch("stage") == current_stage &&
                observation.fetch("task_generation") == task_generation(
-                 task, marker: marker, attempt_store: attempt_store
+                 task, marker: marker, attempt_store: attempt_store,
+                 projection: projection
                ) &&
                observation.fetch("marker_generation") == marker_generation(marker)
           raise InvalidReceipt, "closure receipt no longer matches the active task generation"
@@ -412,7 +419,7 @@ module Hive
       end
     end
 
-    def read(task, project: nil, quarantine: true)
+    def read(task, project: nil, quarantine: true, task_projection: nil)
       path = File.join(task.folder, RECEIPT_BASENAME)
       unless File.file?(path)
         quarantined = latest_quarantine(task)
@@ -425,7 +432,10 @@ module Hive
 
       bytes = File.binread(path)
       receipt = JSON.parse(bytes)
-      validate_receipt!(receipt, task: task, project: project)
+      validate_receipt!(
+        receipt, task: task, project: project,
+        task_projection: task_projection
+      )
       ReadResult.new(status: "valid", receipt: receipt, error: nil, quarantine_path: nil)
     rescue JSON::ParserError, InvalidReceipt, KeyError, TypeError, ArgumentError => e
       quarantine_path = quarantine ? quarantine!(task, bytes || safe_read(path), e.message) : nil
@@ -820,9 +830,10 @@ module Hive
     end
 
     def live_task_lock?(task)
-      return false unless File.file?(task.lock_file)
+      return false if Hive::Lock.task_lock_held?(task.folder)
 
-      holder = Hive::Lock.read_task_lock(task.lock_file)
+      holder = Hive::Lock.read_task_lock(task.folder)
+      return false unless holder
       return true unless holder.is_a?(Hash) && holder["pid"].is_a?(Integer)
 
       Process.kill(0, holder.fetch("pid"))
@@ -836,11 +847,7 @@ module Hive
     end
 
     def active_attempts(task, project)
-      scan = @attempt_store.scan
-      unless scan.invalid_records.empty?
-        raise VerificationFailed, "durable attempt store contains unreadable records"
-      end
-      scan.records.select do |attempt|
+      @attempt_store.active_attempts.select do |attempt|
         attempt.live? &&
           attempt["project"].to_s == project.to_s &&
           attempt["task_slug"].to_s == task.slug.to_s
@@ -864,8 +871,13 @@ module Hive
       return [ blocker("unique_worktree_changes", "owned worktree has uncommitted changes") ] unless status.empty?
 
       head = local_git(path, "rev-parse", "HEAD").strip.downcase
-      verified_heads = Array(delivered_heads).map { |oid| oid.to_s.downcase }
-      return [] if head.match?(FULL_OID_RE) && verified_heads.include?(head)
+      verified_heads = Array(delivered_heads).filter_map do |oid|
+        oid = oid.to_s.downcase
+        oid if oid.match?(FULL_OID_RE)
+      end
+      return [] if head.match?(FULL_OID_RE) && verified_heads.any? do |delivered_head|
+        worktree_head_delivered?(path, head, delivered_head)
+      end
 
       config = Hive::Config.load(task.project_root)
       branch = config["default_branch"].to_s.strip
@@ -888,6 +900,15 @@ module Hive
       unique ? [ blocker("unique_worktree_changes", "owned worktree has unique commits") ] : []
     rescue Hive::Error, KeyError, SystemCallError, IOError => e
       [ blocker("worktree_unverifiable", e.message) ]
+    end
+
+    def worktree_head_delivered?(path, head, delivered_head)
+      return true if head == delivered_head
+
+      _out, _err, status = local_git_capture(
+        path, "merge-base", "--is-ancestor", head, delivered_head
+      )
+      status.success?
     end
 
     def local_git(path, *args)
@@ -972,7 +993,7 @@ module Hive
       receipt
     end
 
-    def validate_receipt!(receipt, task:, project:)
+    def validate_receipt!(receipt, task:, project:, task_projection: nil)
       raise InvalidReceipt, "closure receipt must be an object" unless receipt.is_a?(Hash)
       unless receipt.keys.sort == RECEIPT_KEYS.sort
         raise InvalidReceipt, "closure receipt fields do not match the v1 contract"
@@ -1028,7 +1049,10 @@ module Hive
       end
       validate_receipt_semantics!(receipt)
       unless self.class.terminal_task?(task)
-        self.class.validate_active_cas!(task, receipt, attempt_store: @attempt_store)
+        self.class.validate_active_cas!(
+          task, receipt, attempt_store: @attempt_store,
+          projection: task_projection
+        )
       end
       receipt
     end
@@ -1303,16 +1327,16 @@ module Hive
     end
 
     def with_closure_lock(task)
-      path = File.join(task.folder, LOCK_BASENAME)
-      File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
-        lock.chmod(0o600)
-        lock.flock(File::LOCK_EX)
-        yield
-      ensure
-        lock&.flock(File::LOCK_UN)
+      Hive::Lock.with_commit_lock(task.hive_state_path) do
+        Hive::Lock.with_task_lock(
+          task.folder, slug: task.slug, op: "task-closure", create: false
+        ) do
+          yield
+        end
       end
-    rescue SystemCallError, IOError => e
-      raise Error, "closure lock is unavailable: #{e.message}"
+    rescue Hive::ConcurrentRunError, Hive::RuntimeControlPlane::Error,
+           SystemCallError, IOError => error
+      raise Error, "task closure lease is unavailable: #{error.message}"
     end
 
     def resolve_current_task(task, project)
@@ -1438,7 +1462,7 @@ module Hive
     end
 
     def default_attempt_store
-      Hive::Attempts::Store.runtime(create_directories: false)
+      Hive::Attempts::Repository.open_default(create_directories: false)
     end
   end
 end

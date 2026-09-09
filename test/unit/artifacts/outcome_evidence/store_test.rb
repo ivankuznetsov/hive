@@ -1,4 +1,5 @@
 require "test_helper"
+require "stringio"
 require "hive/artifacts/outcome_evidence/store"
 
 class OutcomeEvidenceStoreTest < Minitest::Test
@@ -197,6 +198,31 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
+  def test_diff_replay_rejects_bytes_appended_after_the_size_check
+    with_store do |store, task, _controller|
+      generation = store.open_generation!(**requirement_input).fetch("generation")
+      path = File.join(store.send(:generation_root, generation), "implementation.diff")
+      source = "x" * (16 * 1024)
+      store.send(:write_once_bytes, path, source, generation: generation)
+      original_stat = File.stat(path)
+      stream = StringIO.new(source + "appended bytes")
+      stream.define_singleton_method(:stat) { original_stat }
+      original_open = File.method(:open)
+      open_with_growth = lambda do |name, flags, *args, &block|
+        if name == path && flags == (File::RDONLY | File::NOFOLLOW)
+          block.call(stream)
+        else
+          original_open.call(name, flags, *args, &block)
+        end
+      end
+      with_replaced_singleton_method(File, :open, open_with_growth) do
+        assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+          store.send(:write_once_bytes, path, source, generation: generation)
+        end
+      end
+    end
+  end
+
   def test_retain_candidate_moves_producer_files_before_semantic_review
     with_store do |store, task, _controller|
       requirement = store.open_generation!(**requirement_input)
@@ -359,13 +385,118 @@ class OutcomeEvidenceStoreTest < Minitest::Test
           generation: generation, reason: "recaptures_exhausted",
           failed_targets: [ "claim-a" ],
           reviewer_reasons: [
-            "The review exposed api_key=abcdefghijklmnopqrstuvwxyz0123456789 in output."
+            "The review exposed ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"} in output."
           ],
           attempt_ids: [ attempt.fetch("attempt_id") ]
         )
       end
       assert_match(/secret-shaped/, error.message)
       refute_includes error.message, "abcdefghijklmnopqrstuvwxyz"
+    end
+  end
+
+  def test_rework_pointer_is_distinct_from_operator_blocking_and_binds_the_review
+    with_store do |store, task, controller|
+      requirement = store.open_generation!(**requirement_input)
+      review = accepted_review(task, actor("reviewer-rework"))
+      review.fetch("verdicts").first.merge!(
+        "verdict" => "rework",
+        "reason" => "The implementation must expose the completed state before evidence can prove it."
+      )
+      attempt = store.append_attempt!(
+        generation: requirement.fetch("generation"), attempt_id: "attempt-rework",
+        status: "rework", evidence: [ document_evidence(task) ],
+        producer: actor("producer-rework"), review: review,
+        diagnostic: "The implementation must expose the completed state before evidence can prove it."
+      )
+
+      pointer = store.publish_rework!(
+        generation: requirement.fetch("generation"),
+        failed_targets: [ "claim-a" ],
+        reviewer_reasons: [
+          "The implementation must expose the completed state before evidence can prove it."
+        ],
+        attempt_ids: [ attempt.fetch("attempt_id") ]
+      )
+
+      assert_equal "rework", pointer.fetch("status")
+      assert_equal "implementation_rework", pointer.fetch("reason")
+      assert store.rework_for_identity?(identity)
+      refute store.blocked_for_identity?(identity)
+      assert_equal "rework", store.package.dig("current", "status")
+
+      current_path = File.join(task.folder, "outcome-evidence", "current.json")
+      original = File.read(current_path)
+      contradicted = JSON.parse(original)
+      contradicted["reason"] = "review_blocked"
+      contradicted["recovery_digest"] = store.send(
+        :recovery_digest,
+        generation: contradicted.fetch("generation"),
+        reason: contradicted.fetch("reason"),
+        attempts: contradicted.fetch("attempts"),
+        failed_targets: contradicted.fetch("failed_targets"),
+        reviewer_reasons: contradicted.fetch("reviewer_reasons")
+      )
+      File.write(current_path, JSON.generate(contradicted) << "\n")
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { store.package }
+      assert_match(/rework package binding/, error.message)
+
+      File.write(current_path, original)
+      contradicted = JSON.parse(File.read(current_path))
+      contradicted["status"] = "blocked"
+      File.write(current_path, JSON.generate(contradicted) << "\n")
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { store.package }
+      assert_match(/blocked package reason/, error.message)
+
+      controller["task_generation"] = "controller-generation-2"
+      refute store.rework_for_identity?(identity)
+    end
+  end
+
+  def test_rework_pointer_retains_prior_revise_attempts
+    with_store do |store, task, _controller|
+      requirement = store.open_generation!(**requirement_input)
+      generation = requirement.fetch("generation")
+      revise = store.append_attempt!(
+        generation: generation, attempt_id: "attempt-revise", status: "revise",
+        evidence: [ document_evidence(task) ], producer: actor("producer-revise"),
+        review: revising_review(task, actor("reviewer-revise")),
+        diagnostic: "The retained proof needs a clearer user outcome demonstration."
+      )
+      error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
+        store.publish_rework!(
+          generation: generation, failed_targets: [ "claim-a" ],
+          reviewer_reasons: [
+            "The implementation must expose the completed state before proof can exist."
+          ],
+          attempt_ids: [ revise.fetch("attempt_id") ]
+        )
+      end
+      assert_match(/latest rework attempt/, error.message)
+      review = accepted_review(task, actor("reviewer-rework"))
+      review.fetch("verdicts").first.merge!(
+        "verdict" => "rework",
+        "reason" => "The implementation must expose the completed state before proof can exist."
+      )
+      rework = store.append_attempt!(
+        generation: generation, attempt_id: "attempt-rework", status: "rework",
+        evidence: [ document_evidence(task) ], producer: actor("producer-rework"),
+        review: review,
+        diagnostic: "The implementation must expose the completed state before proof can exist."
+      )
+
+      pointer = store.publish_rework!(
+        generation: generation, failed_targets: [ "claim-a" ],
+        reviewer_reasons: [
+          "The implementation must expose the completed state before proof can exist."
+        ],
+        attempt_ids: [ revise.fetch("attempt_id"), rework.fetch("attempt_id") ]
+      )
+
+      assert_equal %w[attempt-revise attempt-rework],
+                   pointer.fetch("attempts").map { |attempt| attempt.fetch("attempt_id") }
+      assert_equal "attempt-rework", pointer.fetch("attempt_id")
+      assert_equal "rework", store.package.dig("current", "status")
     end
   end
 
@@ -954,15 +1085,14 @@ class OutcomeEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_exact_diff_write_is_bounded_append_only_and_rejects_symlinks
+  def test_exact_diff_write_accepts_large_diffs_and_rejects_symlinks
     with_store do |store, _task, _controller|
       generation = store.open_generation!(**requirement_input).fetch("generation")
       root = store.send(:generation_root, generation)
-      oversized = "x" * (Hive::Artifacts::OutcomeEvidence::Store::MAX_DIFF_BYTES + 1)
-      assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
-        store.send(:write_once_bytes, File.join(root, "oversized.diff"), oversized,
-                   generation: generation)
-      end
+      large = "x" * (17 * 1024 * 1024)
+      large_path = File.join(root, "large.diff")
+      store.send(:write_once_bytes, large_path, large, generation: generation)
+      assert_equal Digest::SHA256.hexdigest(large), store.send(:secure_file_digest!, large_path, "diff", max_bytes: nil)
 
       target = File.join(root, "target")
       File.write(target, "target")

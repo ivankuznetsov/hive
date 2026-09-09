@@ -3,6 +3,7 @@
 # about methods provided by the DSL, see https://puma.io/puma/Puma/DSL.html.
 require "hive/web/request_limits"
 require "hive/web/puma_request_limits"
+require "hive/runtime_control_plane"
 #
 # Puma starts a configurable number of processes (workers) and each process
 # serves each request in a thread from an internal thread pool.
@@ -36,6 +37,13 @@ threads threads_count, threads_count
 # Content-Length; unbounded chunked bodies are rejected at the header boundary.
 http_content_length_limit Hive::Web::RequestLimits::MAX_BODY_BYTES
 Hive::Web::PumaRequestLimits.install!
+
+# Puma's cluster forks must not copy writable SQLite descriptors from the
+# master. The child starts with fresh synchronization state and reconnects
+# lazily on its first request.
+before_worker_fork { Hive::RuntimeControlPlane::ProcessGuard.before_fork! }
+after_worker_fork { Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent! }
+before_worker_boot { Hive::RuntimeControlPlane::ProcessGuard.after_fork_child! }
 
 # Specifies the `port` that Puma will listen on to receive requests; default is 3000.
 port ENV.fetch("PORT", 3000)

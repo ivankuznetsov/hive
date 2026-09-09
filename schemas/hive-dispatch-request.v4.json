@@ -8,7 +8,7 @@
   "required": [
     "schema", "schema_version", "request_id", "created_at", "project", "slug",
     "argv", "requestor", "chat_id", "update_id", "trigger", "task_generation",
-    "predecessor_attempt_id", "inherited_outputs", "recovery"
+    "inherited_outputs", "recovery"
   ],
   "properties": {
     "schema": { "const": "hive-dispatch-request" },
@@ -29,7 +29,6 @@
     "update_id": { "type": ["integer", "null"] },
     "trigger": { "type": ["string", "null"] },
     "task_generation": { "type": ["string", "null"] },
-    "predecessor_attempt_id": { "type": ["string", "null"] },
     "task_id": { "type": ["string", "integer", "null"] },
     "expected_stage": { "type": ["string", "null"] },
     "expected_marker_name": {

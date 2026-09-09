@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-25
+updated: 2026-08-30
 tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
 ---
 
@@ -27,6 +27,13 @@ Telegram validators from the gem. Red task recovery submits the fresh status
 observation through the neutral `Hive::Recovery::API` to the same
 `RecoveryCoordinator` used by Telegram, TUI, CLI/action, recorder, and daemon
 healing.
+
+The stage-action map has one typed exception: a fresh
+`outcome_evidence_rework` row at `7-artifacts` is not translated into the
+ordinary artifacts verb. Rails revalidates its exact canonical
+`hive evidence rework ... --stage 7-artifacts --generation ...
+--recovery-digest ...` command before queueing; malformed or stale bindings are
+rejected before any request write.
 
 ## CLI
 
@@ -248,9 +255,14 @@ Honeycomb projections.
   through the existing task controllers. The application shell and primary
   navigation use the full viewport width with fluid edge gutters; the project
   rail grows to a bounded desktop width while the status content receives all
-  remaining space. Kanban tracks grow beyond their comfortable minimum when a
-  large screen has room, and each band scrolls horizontally inside the page
-  when it does not. `Grid` retains the compact per-project task rows and gains
+  remaining space. Open Kanban columns keep a fixed 270px desktop width; unused space
+  stays empty instead of stretching cards when neighboring columns fold.
+  Mobile columns use `min(78vw, 290px)`, and each band scrolls horizontally
+  inside the page when it does not fit. Each column heading is a keyboard-accessible fold toggle.
+  Empty columns and the workflow's final Done column start folded, with the
+  count and vertical stage label still visible. Explicit choices persist in
+  browser local storage per project/workflow/stage across reloads and live
+  morphs. An untouched empty column opens when a task arrives. `Grid` retains the compact per-project task rows and gains
   the same fluid content area. Both ordinary views consume status's
   workflow-aware archive projection:
   expired archived rows are absent, and a positive project count renders

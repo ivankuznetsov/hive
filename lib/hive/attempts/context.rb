@@ -2,7 +2,7 @@ require "hive/attempts/capability"
 require "hive/attempts/command_progress"
 require "hive/attempts/diagnostic_channel"
 require "hive/attempts/evidence_channel"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/stringify_keys"
 
 module Hive
@@ -13,11 +13,9 @@ module Hive
     # fingerprint. Transport environment is scrubbed immediately afterwards.
     class Context
       ENV_PREFIX = "HIVE_ATTEMPT_"
-      EMPTY_ROUTING_VALUES = [].freeze
-
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
-                  :progress_token, :predecessor_attempt_id
+                  :progress_token
 
       class << self
         def current
@@ -34,9 +32,7 @@ module Hive
 
           {
             "attempt_id" => context.attempt_id,
-            # Compatibility consumers have always treated task_generation as
-            # the opaque durable owner token. Keep that wire meaning stable;
-            # the numeric condition epoch is additive and explicitly named.
+            # Ownership and the numeric task-input epoch are distinct.
             "task_generation" => context.ownership_generation,
             "ownership_generation" => context.ownership_generation,
             "task_input_epoch" => context.task_generation
@@ -52,16 +48,16 @@ module Hive
           scrub_environment!
           claim_capability = read_inherited(values["HIVE_ATTEMPT_CONTEXT_FD"], limit: 65)
           gate = read_inherited(values["HIVE_ATTEMPT_GATE_FD"], limit: 1)
-          raise StoreError, "durable attempt worker gate was not released" unless gate == "1"
+          raise RepositoryError, "durable attempt worker gate was not released" unless gate == "1"
 
           attempt_id = values["HIVE_ATTEMPT_ID"].to_s
-          raise StoreError, "durable attempt context is incomplete" if attempt_id.empty?
+          raise RepositoryError, "durable attempt context is incomplete" if attempt_id.empty?
 
           # The record store is selected by trusted Hive process configuration,
           # not by a dedicated attempt-context override. This prevents supported
           # launch/inheritance paths from redirecting context installation; it
           # is not privilege separation from hostile same-UID process state.
-          record = Store.new.fetch(attempt_id)
+          record = Repository.open_default.fetch(attempt_id)
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
           evidence_writer = if record["routing"]["mode"] == "explicit"
             EvidenceChannel::Writer.for_fd(
@@ -80,13 +76,12 @@ module Hive
             task_slug: record["task_slug"],
             intended_stage: record["intended_stage"],
             progress_token: record["progress_token"],
-            predecessor_attempt_id: record["predecessor_attempt_id"],
             routing: record["routing"],
             evidence_writer: evidence_writer,
             diagnostic_writer: diagnostic_writer
           )
         rescue Hive::Error, SystemCallError, IOError => e
-          raise StoreError, "durable attempt context rejected: #{e.message}"
+          raise RepositoryError, "durable attempt context rejected: #{e.message}"
         ensure
           scrub_environment!
         end
@@ -100,14 +95,14 @@ module Hive
         private
 
         def validate_record!(record, attempt_id:, argv:, claim_capability:)
-          raise StoreError, "attempt #{attempt_id} is unavailable" unless record
-          raise StoreError, "attempt identity mismatch" unless record.attempt_id == attempt_id
-          raise StoreError, "attempt is not running" unless record.state == "running"
+          raise RepositoryError, "attempt #{attempt_id} is unavailable" unless record
+          raise RepositoryError, "attempt identity mismatch" unless record.attempt_id == attempt_id
+          raise RepositoryError, "attempt is not running" unless record.state == "running"
           unless Capability.matches?(record["claim_capability_digest"], claim_capability)
-            raise StoreError, "attempt context capability is invalid"
+            raise RepositoryError, "attempt context capability is invalid"
           end
           unless record["worker_argv"] == argv
-            raise StoreError, "attempt worker argv does not match admission"
+            raise RepositoryError, "attempt worker argv does not match admission"
           end
           validate_process_identity!(record.worker)
           validate_task_binding!(record, argv)
@@ -121,7 +116,7 @@ module Hive
             "session_id" => Process.getsid(Process.pid),
             "process_group_id" => Process.getpgid(Process.pid)
           }
-          raise StoreError, "attempt worker process identity mismatch" unless expected == actual
+          raise RepositoryError, "attempt worker process identity mismatch" unless expected == actual
         end
 
         def validate_task_binding!(record, argv)
@@ -133,21 +128,22 @@ module Hive
           require "hive/task_resolver"
           require "hive/workflows"
           verb = argv[1].to_s
-          target = argv[2].to_s
-          raise StoreError, "attempt worker command has no task target" if verb.empty? || target.empty?
+          evidence_rework = verb == "evidence" && argv[2].to_s == "rework"
+          target = argv[evidence_rework ? 3 : 2].to_s
+          raise RepositoryError, "attempt worker command has no task target" if verb.empty? || target.empty?
 
           task = Hive::TaskResolver.new(target, project_filter: record["project"]).resolve
-          intended_stage = if %w[run approve plan-review-run].include?(verb)
+          intended_stage = if evidence_rework || %w[run approve plan-review-run].include?(verb)
             "#{task.stage_index}-#{task.stage_name}"
           else
             Hive::Workflows.for_verb(verb).fetch(:target)
           end
           same_task_id = record["task_id"].nil? || task.id.to_s == record["task_id"].to_s
           unless same_task_id && task.slug == record["task_slug"] && intended_stage == record["intended_stage"]
-            raise StoreError, "attempt task or intended stage does not match admission"
+            raise RepositoryError, "attempt task or intended stage does not match admission"
           end
         rescue KeyError, Hive::Error => e
-          raise StoreError, "attempt task binding could not be resolved: #{e.message}"
+          raise RepositoryError, "attempt task binding could not be resolved: #{e.message}"
         end
 
         def validate_module_hook_binding!(record, argv)
@@ -160,20 +156,20 @@ module Hive
                   options["--event-id"] == subject.fetch("event_id") &&
                   record["task_id"].nil? &&
                   record["intended_stage"] == "module-hook"
-          raise StoreError, "attempt module hook binding does not match admission" unless valid
+          raise RepositoryError, "attempt module hook binding does not match admission" unless valid
         rescue KeyError
-          raise StoreError, "attempt module hook binding is incomplete"
+          raise RepositoryError, "attempt module hook binding is incomplete"
         end
 
         def read_inherited(value, limit:)
           io = IO.for_fd(Integer(value), "r", autoclose: true)
           payload = io.read(limit)
           extra = io.read(1)
-          raise StoreError, "attempt context descriptor payload is invalid" unless extra.to_s.empty?
+          raise RepositoryError, "attempt context descriptor payload is invalid" unless extra.to_s.empty?
 
           payload
         rescue ArgumentError, TypeError, Errno::EBADF
-          raise StoreError, "attempt context descriptor is unavailable"
+          raise RepositoryError, "attempt context descriptor is unavailable"
         ensure
           io&.close unless io&.closed?
         end
@@ -187,16 +183,14 @@ module Hive
                      project: nil, task_slug: nil, intended_stage: nil,
                      routing: { "mode" => "legacy" }, evidence_writer: nil,
                      diagnostic_writer: nil,
-                     progress_token: nil, predecessor_attempt_id: nil)
+                     progress_token: nil)
         @attempt_id = attempt_id.to_s
-        @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
-        @legacy_opaque_generation = !bridged_ownership.nil? && ownership_generation.nil?
-        @ownership_generation = ownership_generation&.to_s || bridged_ownership
+        @task_generation = Integer(task_generation)
+        @ownership_generation = ownership_generation&.to_s
         @project = project&.to_s
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
         @progress_token = progress_token&.to_s
-        @predecessor_attempt_id = predecessor_attempt_id&.to_s
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
         @evidence_writer = evidence_writer
         @diagnostic_writer = diagnostic_writer
@@ -207,10 +201,7 @@ module Hive
       end
 
       def explicit_routing? = routing["mode"] == "explicit"
-      def routing_decision = explicit_routing? ? routing.fetch("decision") : nil
       def admitted_route = explicit_routing? ? routing.fetch("route") : nil
-      def circuit_generations = explicit_routing? ? routing.fetch("circuit_generations") : EMPTY_ROUTING_VALUES
-      def probe_bindings = explicit_routing? ? routing.fetch("probe_bindings") : EMPTY_ROUTING_VALUES
       def provider_account_id = admitted_route&.fetch("provider_account_id", nil)
       def adapter = admitted_route&.fetch("adapter", nil)
       def launch_binding_id = admitted_route&.fetch("launch_binding_id", nil)
@@ -258,12 +249,8 @@ module Hive
         end
         current = Generation.resolve(**generation_options)
         ownership_matches = current.ownership_generation == ownership_generation
-        successor_progress_matches = !predecessor_attempt_id.to_s.empty? &&
-                                     !progress_token.to_s.empty? &&
-                                     current.respond_to?(:progress_token) &&
-                                     current.progress_token == progress_token
-        epoch_matches = @legacy_opaque_generation || current.task_input_epoch == task_generation
-        unless (ownership_matches || successor_progress_matches) && epoch_matches
+        epoch_matches = current.task_input_epoch == task_generation
+        unless ownership_matches && epoch_matches
           raise Hive::ConcurrentRunError,
                 "durable attempt #{attempt_id} generation is stale; redispatch the current task state"
         end
@@ -283,15 +270,6 @@ module Hive
           value.freeze
         end
         value.freeze
-      end
-
-      def numeric_generation_or_legacy(value)
-        return [ Integer(value), nil ] if value.is_a?(Integer) || value.to_s.match?(/\A\d+\z/)
-
-        token = value.to_s
-        raise ArgumentError, "attempt context requires a task generation" if token.empty?
-
-        [ 0, token ]
       end
 
       private_class_method :new

@@ -18,6 +18,21 @@ module Hive::AgentSupport::OpenCode
   def configuration = (@configuration ||= Configuration.new)
   def handles_add_dirs? = true
 
+  # An OpenCode author must not inherit a project's broader shell/edit scope.
+  # Its only permitted write is the controller-consumed draft, and the draft's
+  # validated presence lets the process owner end a trailing detached turn.
+  def open_pr_launch_kwargs(expected_output:, completion_probe:)
+    {
+      permission_kwargs: {
+        explicit_permission_spec: {
+          "preset" => "scoped",
+          "tools" => [ "Edit(#{File.expand_path(expected_output)})" ]
+        }
+      },
+      agent_kwargs: { completion_probe: }
+    }
+  end
+
   def verify_launch_skill(profile:, invocation:, project_root:)
     status, evidence = profile.verify_skill(invocation, project_root:)
     return invocation if status == :present

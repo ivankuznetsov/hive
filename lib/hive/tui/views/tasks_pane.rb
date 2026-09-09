@@ -60,6 +60,7 @@ module Hive
           "ready_to_brainstorm" => "▶ ",
           "ready_to_plan"       => "▶ ",
           "ready_to_develop"    => "▶ ",
+          "outcome_evidence_rework" => "↻ ",
           "ready_to_open_pr"    => "▶ ",
           "ready_for_review"    => "▶ ",
           "ready_to_artifacts"  => "▶ ",

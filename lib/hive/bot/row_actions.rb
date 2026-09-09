@@ -171,6 +171,12 @@ module Hive
       end
 
       def ready_actions(row)
+        if outcome_evidence_rework?(row)
+          return Resolution.new(actions: [
+            action(:approve, rework_callback(row), primary: true)
+          ], kind: :stage_approval)
+        end
+
         verb = notification_builders.verb_for_action(row.action)
         return Resolution.new unless verb
 
@@ -217,7 +223,16 @@ module Hive
       # a workflow verb. (Every ready row's role is uniformly `:approve`, so
       # there is no separate role table to keep in sync.)
       def ready_action?(row)
-        !notification_builders.verb_for_action(row.action).nil?
+        outcome_evidence_rework?(row) ||
+          !notification_builders.verb_for_action(row.action).nil?
+      end
+
+      def outcome_evidence_rework?(row)
+        row.action.to_s == Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK
+      end
+
+      def rework_callback(row)
+        "rework:#{row.project}:#{row.slug}:#{row.stage}"
       end
 
       def coding_stage?(row, stage)

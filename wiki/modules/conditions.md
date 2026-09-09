@@ -1,10 +1,10 @@
 ---
 title: Generation-scoped task conditions
 type: module
-source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb
+source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/task_projection/reader.rb
 created: 2026-07-17
-updated: 2026-08-27
-tags: [conditions, projection, journal, execute, migration]
+updated: 2026-09-01
+tags: [conditions, projection, journal, execute, migration, bounded-storage]
 ---
 
 **TLDR**: Execute completion can be evaluated from versioned, generation-
@@ -21,6 +21,14 @@ for `4-execute`. `BranchPushed`, `ArtifactCurrent`, `BabysitterActive`, and
 stages yet. Observations use `pending`, `satisfied`, `unsatisfied`, or
 `unverifiable`; the projector alone adds `superseded` history.
 
+Transition membership has exactly one internal representation: the gate
+rules registered in `Conditions::Policy.default`. The registry owns only
+condition semantics (family, supersession family, scope, allowed evidence,
+gate role, authoritative stages) and carries no condition-to-transition
+membership; `Definition` exposes no `default_transitions` field. Policy
+descriptors are validated against registered vocabulary, so an unknown or
+wrong-role condition in a gate rule raises `InvalidPolicy`.
+
 Every condition observation has a durable attempt ID, numeric task input
 epoch, optional commit generation, explicit reason/time, typed evidence, and
 provenance. The numeric epoch is distinct from the opaque attempt ownership
@@ -30,71 +38,59 @@ Commit generation advances only when the exact observed HEAD changes.
 
 ## Write and read paths
 
-`Hive::TaskJournal::Writer` appends authoritative batches under a task-local
-flock to `<task>/task-journal.jsonl`, retries short writes, flushes/fsyncs, and
-restores the previous durable byte boundary if any write or sync step fails.
-First creation (including a retry over an empty file left by a failed first
-append) also fsyncs the task directory.
-The shared journal validator
-checks record shape, the exact supported schema version, and the task/stage/
-input-epoch/ownership identity against the durable attempt store on both write
-and projection replay. It walks the immutable predecessor chain, rejecting
-missing links, incompatible identity, and cycles. Legacy `Hive::Events.emit` remains fail-soft telemetry
-in the separate `<task>/events.jsonl` file and refuses authoritative event
-types. At an execute boundary the order is
-reconciliation, durable batch, snapshot publication, gate evaluation,
+`Hive::TaskJournal::Writer` appends authoritative batches under an exclusive
+task-local flock to `<task>/task-journal.jsonl`, retries short writes,
+flushes/fsyncs, and restores the previous byte boundary if a write fails. New
+events validate their task, stage, numeric input epoch, opaque ownership
+generation, and durable attempt before append. Legacy `Hive::Events.emit`
+remains separate fail-soft telemetry in `<task>/events.jsonl`.
+
+`Hive::TaskProjection::Reader` is a direct journal reader, not a store. It
+takes a shared lock, validates complete JSON lines, the hash chain, one task /
+workflow stream, and stable attempt bindings, then folds them in memory through
+`Hive::TaskProjection`. Routine scheduling reads cover the complete journal;
+only task-workspace presentation applies the 1 MiB / 2,000-event limits.
+Historical replay is self-contained: it performs no SQLite, git, GitHub, or
+subprocess lookup. The fold derives retry lineage from journal provenance, so
+causal order wins over wall-clock regression.
+
+Unchanged routine read results use a 512-entry process-local LRU keyed by canonical
+journal path, device/inode, size, nanosecond mtime/ctime, marker semantics, task
+identity, and projector identity. A cache lookup first acquires the same
+nonblocking shared journal lock as a miss, so writer contention returns `busy`
+instead of stale current state. Appended, replaced, or otherwise changed files
+miss. The cache is disposable memory only; it is neither a checkpoint nor a
+second history authority.
+
+A missing journal is an empty history stream. Invalid or over-limit workspace
+history yields a synthetic `condition_task_history_invalid` row for that task;
+unrelated work continues. Routine lock contention returns transient `busy`
+state and maps to scheduler-owned `condition_task_history_unavailable`. There
+is no persisted snapshot, checkpoint, repair command, repair queue, or
+background projection watcher. Restore or correct the authoritative JSONL
+itself.
+
+Execute-observation deduplication compares a fresh observation with the latest
+record in the same stream (`event_type` + attempt + condition). A state that
+changes away and later returns must append again; only an unchanged repeat of
+the current value is skipped. At an execute boundary the order is
+reconciliation, journal append, in-memory fold, gate evaluation, and
 compatibility marker.
 
-Execute-observation deduplication in the reconciler compares each fresh
-observation only against the most recent journal record of the same event
-stream (`event_type` + `attempt_id` + condition name), never against the whole
-history. Journal consumers apply last-event-wins semantics, so a re-transition
-back to a previously observed state (for example a worktree becoming dirty
-again at an unchanged HEAD) must append a new record even though an identical
-older one exists; only an unchanged re-observation of the latest stream state
-is skipped.
-
-Journal envelopes, idempotent journal appends, condition evidence, policy
-descriptors/options, execute-observation deduplication, and task-projection
-copies all normalize nested hash keys through `Hive::StringifyKeys`. The
-transform recurses through arrays, leaves scalar values unchanged, and returns
-new containers, so these durable surfaces cannot drift between shallow and
-deep symbol-key handling.
-
-`Hive::TaskProjection` is a pure journal fold. It performs no git, GitHub, or
-subprocess observation. The atomic `task-projection.json` stores journal
-cursor/event/hash, identity, current/history conditions, evidence, default
-gate diagnostics, provenance, compatibility, and shadow audit. A read accepts
-the snapshot only when its cursor/hash binding and every unique current or
-predecessor attempt binding still validate; otherwise it fully parses/replays
-the journal or fails closed. A missing/zero-byte journal after a snapshot or
-attempt-stamped `execute_*` marker proves durable condition handoff is invalid
-on read and rebuild, and rebuild cannot overwrite the last snapshot. Markers
-from non-execute stages do not claim this execute-journal handoff. Only
-mutating reconciliation republishes it.
-
-Full status scans have an exact-cache path over the separately bounded
-`task-projection.checkpoint.json`. It verifies the checkpoint against the
-current journal, refreshes mutable durable attempt fields, and reprojects from
-checkpoint seed facts when an attempt changed. It can avoid old-history replay
-only while the journal has not grown and the bounded source checks remain
-current. Otherwise status delegates to the ordinary authoritative read above;
-the bounded workspace API may report partial diagnostics, but status cannot
-turn those into a condition projection.
-
-Selection proceeds by current task generation, then latest compatible attempt
-within each registry family, then exact commit generation/HEAD for branch facts.
-Predecessor lineage outranks wall-clock timestamps, so a clock step backward
-cannot let an older lost attempt supersede its successful successor. Current
-`AgentHealthy` also reconciles directly from terminal/lost durable attempt
-state, closing the window before the daemon observer appends its lifecycle fact.
-Successful terminal attempts are satisfied and ordinary failed/cancelled/lost
-attempts fail closed. A terminal exit `75 (TEMPFAIL)` is instead pending with
-reason `attempt_terminal_retryable`: the scheduler owns that transient retry,
-so lock contention cannot be projected as an agent-health failure.
+Selection proceeds by numeric task epoch, then compatible attempt lineage,
+then exact commit generation for branch facts. Current `AgentHealthy` also
+reconciles terminal/lost SQLite attempt state before its journal observation is
+appended. Successful terminal attempts satisfy the condition; ordinary
+failed/cancelled/lost attempts fail closed. Exit 75 remains pending because it
+is scheduler contention rather than an agent verdict.
 Displaced facts stay in history. Required conditions pass only when satisfied.
 `AwaitingHuman=satisfied` blocks its named transition; an answered or
 superseding observation removes it from current gates.
+
+A terminal or lost attempt that still owes its journal publication temporarily
+fences the transition. Once that idempotent append is acknowledged, the JSONL
+fact alone decides the gate; SQLite never becomes a parallel historical
+authority.
 
 Condition failures produce one `RecoveryAction` across status and run/approve/
 workflow-verb error envelopes. Explicit forced overrides append an idempotent

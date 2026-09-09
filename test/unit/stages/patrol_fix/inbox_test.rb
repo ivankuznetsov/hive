@@ -7,6 +7,13 @@ require "hive/stages/patrol_fix/inbox"
 class PatrolFixInboxStageTest < Minitest::Test
   include HiveTestHelper
 
+  def test_every_orchestrator_owned_task_file_is_under_patrol_custody
+    assert_empty(
+      Hive::ArtifactFirewall::ORCHESTRATOR_OWNED -
+        Hive::Stages::PatrolFix::Inbox::PROTECTED_FILES
+    )
+  end
+
   def test_reinvestigates_current_head_and_records_a_controller_bound_reject_without_worktree
     with_task do |task, manifest|
       head = git(task.project_root, "rev-parse", "HEAD").strip

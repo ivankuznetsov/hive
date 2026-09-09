@@ -38,7 +38,7 @@ module HiveTuiScaleFixture
       active_counts.fetch(project_index).times do |task_index|
         stage = ACTIVE_STAGES[active_index % ACTIVE_STAGES.length]
         slug = slug_for(project_index, task_index, "active")
-        write_task(hive_state, stage, slug, id: id, marker: marker_for(stage), active_index: active_index)
+        write_task(hive_state, stage, slug, id: id, marker: marker_for(stage))
         id += 1
         active_index += 1
       end
@@ -67,7 +67,7 @@ module HiveTuiScaleFixture
     File.write(config_path, { "registered_projects" => projects }.to_yaml)
   end
 
-  def write_task(hive_state, stage, slug, id:, marker:, active_index: nil)
+  def write_task(hive_state, stage, slug, id:, marker:)
     folder = File.join(hive_state, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
     Hive::TaskMeta.write(
@@ -78,7 +78,6 @@ module HiveTuiScaleFixture
       completed_at: (Time.now.utc if stage == CODING_ARCHIVE_STAGE_DIR)
     )
     File.write(File.join(folder, state_file_for(stage)), state_body(stage, marker))
-    write_lock(folder) if active_index && (active_index % 5).zero?
     write_pr(folder) if stage_index(stage) >= stage_index(Hive::Commands::Status::OPEN_PR_STAGE_DIR)
     folder
   end
@@ -91,13 +90,6 @@ module HiveTuiScaleFixture
   def state_body(stage, marker)
     title = stage.split("-", 2).last.capitalize
     "# #{title}\n<!-- #{marker} -->\n"
-  end
-
-  def write_lock(folder)
-    File.write(File.join(folder, ".lock"), {
-      "pid" => Process.pid,
-      "process_start_time" => Hive::Lock.process_start_time(Process.pid)
-    }.to_yaml)
   end
 
   def write_pr(folder)

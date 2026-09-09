@@ -91,6 +91,13 @@ class TerminalOutcomeTest < Minitest::Test
     assert Hive::TerminalOutcome.semantic_error?(reason: "terminal_outcome_invalid")
     assert Hive::TerminalOutcome.semantic_error?(reason: "outcome_evidence_capability_blocked")
     assert Hive::TerminalOutcome.semantic_error?(reason: "outcome_evidence_review_blocked")
+    assert Hive::TerminalOutcome.semantic_error?(reason: "outcome_evidence_implementation_rework")
+    assert Hive::TerminalOutcome.outcome_evidence_rework?(
+      "reason" => "outcome_evidence_implementation_rework"
+    )
+    refute Hive::TerminalOutcome.blocked_error?(
+      "reason" => "outcome_evidence_implementation_rework"
+    )
     assert Hive::TerminalOutcome.semantic_error?(reason: "outcome_evidence_recaptures_exhausted")
     assert Hive::TerminalOutcome.blocked_error?(reason: "outcome_evidence_recaptures_exhausted")
     refute Hive::TerminalOutcome.semantic_error?("reason" => "terminal_outcome_future")

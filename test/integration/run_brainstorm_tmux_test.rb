@@ -214,6 +214,7 @@ class RunBrainstormTmuxTest < Minitest::Test
         ENV["HIVE_FAKE_INTERACTIVE_SCENARIO"] = "hang"
         folder = make_task_at_brainstorm(dir, timeout: 5)
         task = Hive::Task.new(folder)
+        prepare_test_task_run(folder)
         cfg = Hive::Config.load(dir)
         # Capture the original `module_function`-installed singleton
         # method as an `UnboundMethod` so we can rebind it verbatim in

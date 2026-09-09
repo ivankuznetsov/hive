@@ -8,6 +8,7 @@ require "hive/process_kill"
 require "hive/workflows"
 require "hive/daemon/recovery_coordinator"
 require "hive/attempts/lost_outcome"
+require "hive/task_projection"
 require "hive/terminal_outcome"
 
 module Hive
@@ -17,20 +18,20 @@ module Hive
     # rewrite the marker to ERROR / REVIEW_ERROR with a `reason` attribute
     # so the existing red-status surface in Hive::TaskAction kicks in; the
     # REVIEW_WORKING paths rewrite the marker to REVIEW_ERROR (and drop the
-    # stale .lock). The next tick submits that durable failure to the same
+    # stale lease). The next tick submits that durable failure to the same
     # RecoveryCoordinator used by every other retry surface.
     #
     # Two failure modes are healed, distinguished by the row's
     # `claude_pid_alive` field (populated by Hive::Commands::Status from
-    # the per-task .lock file's `claude_pid` field — NOT from the
+    # the task lease's `claude_pid` field — NOT from the
     # marker's `pid` attribute, which records the hive runner PID
     # instead):
     #
-    #   - `agent_died`     — the .lock recorded a claude_pid that's
+    #   - `agent_died`     — the lease recorded a claude_pid that's
     #                        no longer alive (claude_pid_alive == false).
     #                        Covers SIGKILL, OOM, crash, hard reboot
     #                        of an attached agent.
-    #   - `agent_orphaned` — no .lock claude_pid (claude_pid_alive ==
+    #   - `agent_orphaned` — no lease claude_pid (claude_pid_alive ==
     #                        nil) and the marker's state-file mtime is
     #                        older than the grace window. Either the
     #                        daemon never dispatched the stage (the bug
@@ -40,7 +41,7 @@ module Hive
     #
     # REVIEW_WORKING markers are healed on two analogous paths:
     #   - `review_agent_died` — the review parent still holds a
-    #                        verified-live .lock but its Claude child died
+    #                        verified-live lease but its Claude child died
     #                        (live_task_lock == true, claude_pid_alive ==
     #                        false) AND the holder has no live child
     #                        processes (the actual "wedged" signal).
@@ -53,8 +54,8 @@ module Hive
     #                        reboot — tore down the whole review tree
     #                        before it could write a terminal marker;
     #                        Stages::Review's in-process rescue never runs
-    #                        on a kill. Record REVIEW_ERROR + drop any stale
-    #                        lock so the sole recovery coordinator can retry.
+    #                        on a kill. Record REVIEW_ERROR so the sole
+    #                        recovery coordinator can retry.
     #
     # ERROR and REVIEW_ERROR are durable observations, not permanent workflow
     # terminals. Every reason uses the same shared cooldown, then this scheduler
@@ -69,7 +70,7 @@ module Hive
     #   - controller.running_task? returns true (an in-process dispatch
     #     is live; do not race it)
     #   - row.live_task_lock is true (an externally-spawned `hive run` is
-    #     holding the per-task .lock with a verified PID + start-time
+    #     holding the task lease with a verified PID + start-time
     #     match; the runner is still inside the task even if its
     #     claude_pid is not yet recorded — do not race it). Issue #144.
     #   - project's legacy_stage_dirs is non-empty (we never touch markers
@@ -91,6 +92,7 @@ module Hive
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      project_daemon_enabled: ->(_project) { true },
                      recovery_coordinator: nil,
+                     attempt_task_resolver: nil,
                      admission_open: -> { true })
         @controller = controller
         @logger = logger
@@ -101,114 +103,76 @@ module Hive
         @lost_outcome_processor = lost_outcome_processor
         @project_daemon_enabled = project_daemon_enabled
         @recovery_coordinator = recovery_coordinator
+        @attempt_task_resolver = attempt_task_resolver || method(:resolve_attempt_task)
         @admission_open = admission_open
       end
 
       # Lease-backed loss is processed independently of legacy marker rows.
-      # The durable retry charge and predecessor link survive daemon restart,
-      # while the outcome sidecar makes repeated ticks idempotent.
+      # The source attempt's recovery phase and deterministic request identity
+      # make repeated ticks idempotent without relating the replacement record.
       def heal_attempt_losses(attempts, now: Time.now.utc, admission_view: nil)
         return unless admission_open?
         return unless @attempt_store && @attempt_dispatcher &&
                       @lost_outcome_store && @lost_outcome_processor
 
+        unless admission_view&.respond_to?(:find)
+          @logger.event(
+            :marker_heal_failed,
+            stage: "attempt_loss", reason: "attempt_lost",
+            error: "bounded attempt-loss healing requires the current tick admission view"
+          )
+          return
+        end
+
         attempts = Array(attempts)
         return if attempts.empty?
-
-        successors = if admission_view
-          {}
-        else
-          @attempt_store.scan.records.each_with_object({}) do |candidate, index|
-            predecessor_id = candidate["predecessor_attempt_id"]
-            index[predecessor_id] ||= candidate if predecessor_id
-          end
-        end
 
         attempts.each do |attempt|
           break unless admission_open?
           next unless @project_daemon_enabled.call(attempt["project"])
 
           outcome = @lost_outcome_processor.process(attempt, now: now)
-          next unless outcome["status"] == "ready"
+          next unless outcome["phase"] == "ready"
 
-          existing = if admission_view
-            successor_id = @attempt_store.decision_index.successor_attempt_id(
-              predecessor_attempt_id: attempt.attempt_id
-            )
-            if successor_id
-              admission_view.respond_to?(:find) ? admission_view.find(successor_id) :
-                @attempt_store.fetch(successor_id)
-            end
-          else
-            successors[attempt.attempt_id]
-          end
-          if existing
-            @lost_outcome_store.update(
-              attempt, now: now, status: "successor_dispatched",
-              successor_attempt_id: existing.attempt_id,
-              diagnostic: nil
-            )
-            next
-          end
-
-          task = task_for_attempt(attempt, outcome)
-          unless task
-            diagnostic = "task could not be located for successor yet; retrying"
-            next if outcome["diagnostic"] == diagnostic
-
-            @lost_outcome_store.update(
-              attempt, now: now, status: "ready",
-              diagnostic: diagnostic
-            )
-            next
-          end
+          task = task_for_attempt(attempt)
+          next unless task
 
           next unless attempt_loss_retry_due?(attempt, outcome, now: now)
 
           outcome = @lost_outcome_store.update(
-            attempt,
-            now: now,
-            status: "ready",
-            last_retry_at: now.utc.iso8601(6),
-            diagnostic: nil
+            attempt, now: now, phase: "ready", cleanup: outcome["cleanup"],
+            request_id: outcome.fetch("request_id")
           )
           break unless admission_open?
 
-          result = @attempt_dispatcher.dispatch_successor(
-            predecessor: attempt,
+          result = @attempt_dispatcher.dispatch_recovery(
+            source_attempt: attempt,
             task: task,
             project: attempt["project"],
-            argv: successor_argv(attempt, task),
-            request_id: "attempt-loss-#{outcome.fetch('idempotency_key')[0, 24]}",
+            argv: recovery_argv(attempt, task),
+            request_id: outcome.fetch("request_id"),
             provider: attempt["provider"],
-            inherited_outputs: (attempt["inherited_outputs"] + attempt["current_outputs"]).uniq,
+            inherited_outputs: (
+              attempt["inherited_outputs"] + attempt["current_outputs"] +
+              outcome.fetch("capture_references", [])
+            ).uniq,
             retry_charge: attempt["retry_charge"] + 1,
             interactive: false,
             now: now,
             admission_view: admission_view
           )
-          if result.status == :deferred
-            @lost_outcome_store.update(
-              attempt,
-              now: now,
-              status: "ready",
-              diagnostic: "successor dispatch deferred#{": #{result.reason}" if result.reason}; retrying after cooldown"
-            )
-            next
-          end
+          next if result.status == :deferred
 
-          @lost_outcome_store.update(
-            attempt, now: now, status: "successor_dispatched",
-            successor_attempt_id: result.attempt&.attempt_id,
-            diagnostic: nil
-          )
-          successors[attempt.attempt_id] = result.attempt if result.attempt
+          completed = @lost_outcome_store.fetch(attempt.attempt_id)
+          next unless completed&.fetch("phase", nil) == "complete"
+
           @logger.event(
             :marker_healed,
             project: attempt["project"], slug: attempt["task_slug"],
             stage: attempt["intended_stage"], reason: "attempt_lost",
             attempt_id: attempt.attempt_id,
-            successor_attempt_id: result.attempt&.attempt_id,
+            recovery_request_id: completed.fetch("request_id"),
+            replacement_attempt_id: result.attempt&.attempt_id,
             attempts: attempt["retry_charge"] + 1
           )
         rescue StandardError => e
@@ -240,13 +204,20 @@ module Hive
 
         rows.each do |row|
           break unless admission_open?
+          next if task_history_invalid_row?(row)
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
-          if %w[error review_error].include?(row.marker.to_s)
-            heal_recoverable_error_if_auto_recoverable(row, now: now) if daemon_enabled_for_row?(
-              row, daemon_enabled_projects
-            )
+          # This semantic ERROR is a scheduler-owned backward transition, not
+          # a request to replay the same frozen artifacts generation.
+          next if Hive::TerminalOutcome.outcome_evidence_rework?(row.marker_attrs)
+
+          if Hive::Recovery.recoverable_marker?(row.marker)
+            heal_recoverable_error_if_auto_recoverable(row, now: now) if
+              daemon_enabled_for_row?(row, daemon_enabled_projects) &&
+              !Hive::Recovery.intervention_required?(
+                marker: row.marker, attrs: row.marker_attrs, folder: row.folder
+              )
             next
           end
 
@@ -256,7 +227,7 @@ module Hive
           end
 
           next unless row.marker.to_s == "agent_working"
-          # Externally-spawned `hive run` is holding the per-task .lock;
+          # Externally-spawned `hive run` is holding the task lease;
           # claude_pid_alive may still be nil because the runner has not
           # written its claude_pid yet (auto-rebase, etc.). Healing here
           # would race the live runner. Issue #144.
@@ -354,6 +325,10 @@ module Hive
         false
       end
 
+      def task_history_invalid_row?(row)
+        Hive::TaskProjection.history_invalid_row?(row)
+      end
+
       def controller_workflow?(row)
         workflow = Hive::Workflows::Registry.fetch(row.workflow.to_s.to_sym)
         workflow.controller?
@@ -362,8 +337,11 @@ module Hive
       end
 
       def attempt_loss_retry_due?(attempt, outcome, now:)
-        limited_at = parse_retry_time(outcome["last_retry_at"]) ||
-                     parse_retry_time(attempt["loss"].to_h["at"])
+        limited_at = if outcome.fetch("revision", 0) > 1
+          parse_retry_time(outcome["updated_at"])
+        else
+          parse_retry_time(attempt["loss"].to_h["at"])
+        end
         return false unless limited_at
 
         retry_count = attempt["retry_charge"].to_i
@@ -377,25 +355,25 @@ module Hive
         nil
       end
 
-      # No error reason is exempt from healing. Exempting one does not make it
-      # safe, it makes it stuck: it still needs the same retry, performed by
-      # hand at whatever delay someone happens to notice. Project scope still
-      # applies — a project the operator disabled is not worked on at all.
+      # Durable workflow errors are healed through the shared coordinator.
+      # Invalid task history never reaches this helper because another provider
+      # run cannot reconstruct authoritative journal events.
       def daemon_enabled_for_row?(row, projects)
         projects.nil? || projects.include?(row.project)
       end
 
-      def task_for_attempt(attempt, outcome)
-        folder = outcome["task_folder"]
-        return Hive::Task.new(folder) if folder && File.directory?(folder)
-
-        target = attempt["task_id"].to_s.empty? ? attempt["task_slug"] : attempt["task_id"]
-        Hive::TaskResolver.new(target, project_filter: attempt["project"]).resolve
+      def task_for_attempt(attempt)
+        @attempt_task_resolver.call(attempt)
       rescue Hive::Error, SystemCallError
         nil
       end
 
-      def successor_argv(attempt, task)
+      def resolve_attempt_task(attempt)
+        target = attempt["task_id"].to_s.empty? ? attempt["task_slug"] : attempt["task_id"]
+        Hive::TaskResolver.new(target, project_filter: attempt["project"]).resolve
+      end
+
+      def recovery_argv(attempt, task)
         argv = Array(attempt["worker_argv"]).dup
         return argv unless argv.first == "hive" && argv.length >= 3
 
@@ -510,7 +488,7 @@ module Hive
       end
 
       # Case A (issue #320): the review parent still holds a verified-live
-      # .lock but its Claude child died — terminate the wedged holder,
+      # task lease but its Claude child died — terminate the wedged holder,
       # claim the lock, and record a terminal failure for the coordinator.
       def heal_wedged_review_row(row)
         return unless row.claude_pid_alive == false
@@ -566,7 +544,7 @@ module Hive
       # dispatches) — claim the task lock, transition the marker, and release our
       # claim so the coordinator can recover review under normal concurrency
       # control. Claiming closes the stale-status race where an external run
-      # acquires a fresh .lock between the status snapshot and this heal.
+      # acquires a fresh lease between the status snapshot and this heal.
       def heal_orphaned_review_row(row, now:)
         mtime = row.state_file_mtime
         return unless mtime && (now - mtime) > @grace_sec
@@ -598,9 +576,7 @@ module Hive
       end
 
       def task_lock_holder(row)
-        lock_path = File.join(row.folder.to_s, ".lock")
-        data = YAML.safe_load(File.read(lock_path), permitted_classes: [ Time ]) || {}
-        data.is_a?(Hash) ? data : nil
+        Hive::Lock.read_task_lock(row.folder.to_s)
       rescue StandardError
         nil
       end

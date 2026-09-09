@@ -15,7 +15,7 @@
     "schema_version": { "const": 1 },
     "task": { "type": "string", "minLength": 1, "maxLength": 255 },
     "project": { "type": "string", "minLength": 1, "maxLength": 255 },
-    "status": { "enum": ["accepted", "blocked"] },
+    "status": { "enum": ["accepted", "rework", "blocked"] },
     "generation": { "$ref": "#/$defs/Digest" },
     "recovery_epoch": { "type": "integer", "minimum": 0 },
     "attempt_id": {
@@ -45,7 +45,7 @@
     "attempt_count": { "type": "integer", "minimum": 0, "maximum": 3 },
     "reason": {
       "oneOf": [
-        { "enum": ["capability_blocked", "review_blocked", "recaptures_exhausted"] },
+        { "enum": ["capability_blocked", "review_blocked", "recaptures_exhausted", "reworks_exhausted", "implementation_rework"] },
         { "type": "null" }
       ]
     },

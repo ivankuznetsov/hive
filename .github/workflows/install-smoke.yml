@@ -251,12 +251,7 @@ jobs:
           cp lib/hive/assets/qmd/package-lock.json "$gemroot/lib/hive/assets/qmd/package-lock.json"
           cat > "$gemroot/bin/hive" <<'SH'
           #!/usr/bin/env ruby
-          if ARGV == ["daemon", "install", "--json"]
-            File.write(ENV.fetch("HIVE_DAEMON_ENV_CAPTURE"), ENV["HIVE_INVOKED_BIN"].to_s)
-            puts '{"schema":"hive-daemon-install","schema_version":1,"ok":true,"outcome":"written","platform":"linux","target_path":"/tmp/hive-daemon.service","backup_path":null,"restarted":false,"messages":[]}'
-          else
-            puts "0.1.0"
-          end
+          puts "0.1.0"
           SH
           cat > "$gemroot/bin/hv" <<'SH'
           #!/usr/bin/env ruby
@@ -357,9 +352,8 @@ jobs:
           printf '/* fixture */\n' > "$node_prefix/include/node/node.h"
           printf '#!/usr/bin/env bash\necho "Apache Hive 3.1.0"\n' > "$apache_bin/hive"
           chmod +x "$apache_bin/hive"
-          FIXTURES="$fixtures" HIVE_DAEMON_ENV_CAPTURE="$fixtures/invoked-bin" HIVE_INSTALL_TEST_REAL_NPM="$real_npm" HIVE_INSTALL_TEST_REAL_NODE="$real_node" HIVE_INSTALL_TEST_NODE_HEADER_ROOT="$node_prefix" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0 >"$fixtures/install.out" 2>"$fixtures/install.err"
-          grep -q "daemon autostart enabled via hive daemon install (written)" "$fixtures/install.out"
-          grep -qx "$xdg_bin/hive" "$fixtures/invoked-bin"
+          FIXTURES="$fixtures" HIVE_INSTALL_TEST_REAL_NPM="$real_npm" HIVE_INSTALL_TEST_REAL_NODE="$real_node" HIVE_INSTALL_TEST_NODE_HEADER_ROOT="$node_prefix" XDG_BIN_HOME="$xdg_bin" XDG_DATA_HOME="$xdg_data" PATH="$fakebin:$apache_bin:$xdg_bin:$PATH" bash install.sh --version=v0.1.0 >"$fixtures/install.out" 2>"$fixtures/install.err"
+          grep -q "next: run 'hive --version', then 'hive setup --yes'" "$fixtures/install.out"
           test -L "$xdg_bin/hv"
           "$xdg_bin/hv" --version | grep -q '^0\.1\.0$'
           test -L "$xdg_bin/qmd"

@@ -13,7 +13,7 @@ module Hive
     module_function
 
     # A PID of 0 means the current process group when passed to
-    # Process.kill, and 1 is init. A malformed `.lock` or marker
+    # Process.kill, and 1 is init. A malformed task lease or marker
     # leaking either through would target ourselves (or PID 1) instead
     # of an agent — refuse outright.
     def valid_target_pid?(pid)

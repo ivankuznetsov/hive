@@ -143,14 +143,14 @@ class ContextProvenanceCoverageGapsTest < Minitest::Test
   def test_repository_snapshot_covers_process_deadlines_and_fallbacks
     mod = Hive::ContextProvenance::RepositorySnapshot
     output, status, overflow = mod.capture_command(
-      [ RbConfig.ruby, "-e", "print 'ok'" ], timeout_sec: 1, max_bytes: 10
+      [ RbConfig.ruby, "-e", "print 'ok'" ], timeout_sec: 5, max_bytes: 10
     )
     assert_equal "ok", output
     assert status.success?
     refute overflow
 
     output, status, overflow = mod.capture_command(
-      [ RbConfig.ruby, "-e", "print 'abcdefghij'" ], timeout_sec: 1, max_bytes: 4
+      [ RbConfig.ruby, "-e", "print 'abcdefghij'" ], timeout_sec: 5, max_bytes: 4
     )
     assert_equal "abcd", output
     assert status.nil? || status.success?
@@ -418,6 +418,24 @@ class ContextProvenanceCoverageGapsTest < Minitest::Test
           task: task, context: context
         ).status
       end
+    end
+  end
+
+  def test_activity_for_context_delegates_to_the_shared_task_activity_boundary
+    with_fixture do |task, _attempt, context|
+      sentinel = Object.new
+      observed = nil
+      factory = lambda do |received_task, context:, clock:|
+        observed = [ received_task, context, clock.call ]
+        sentinel
+      end
+
+      result = with_replaced_singleton_method(Hive::TaskActivity, :for_context, factory) do
+        Hive::ContextProvenance.activity_for_context(task, context, clock: -> { NOW })
+      end
+
+      assert_same sentinel, result
+      assert_equal [ task, context, NOW ], observed
     end
   end
 

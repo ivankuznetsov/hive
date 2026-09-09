@@ -97,6 +97,12 @@ class AdhocReviewCommandTest < Minitest::Test
       assert_equal "head-197", worktree.fetch("execute_base_head")
       assert_equal now.utc.iso8601, worktree.fetch("created_at")
       assert_empty Dir.children(File.join(task_folder, "reviews"))
+
+      assert_equal "current", Hive::TaskProjection::Reader.new(
+        task_folder: task_folder
+      ).read_routine(marker: Hive::Markers.current(File.join(task_folder, "task.md"))).state
+      refute File.exist?(File.join(task_folder, "task-projection.json"))
+      refute File.exist?(File.join(task_folder, "task-projection.checkpoint.json"))
     end
   end
 
@@ -252,9 +258,9 @@ class AdhocReviewCommandTest < Minitest::Test
     end
   end
 
-  def test_enqueue_tolerates_task_counter_contention_and_proceeds_with_null_id
-    # Mirror the patrol handoff: >30s commit-lock contention on
-    # TaskCounter.next! must NOT discard the completed fetch + worktree —
+  def test_enqueue_tolerates_task_counter_unavailability_and_proceeds_with_null_id
+    # A typed control-plane failure from TaskCounter.next! must NOT discard
+    # the completed fetch + worktree —
     # proceed with id: nil (the daemon backfills a real id later).
     with_registered_project do |_repo, hive_state, _worktree_root|
       pr_metadata = metadata
@@ -263,7 +269,10 @@ class AdhocReviewCommandTest < Minitest::Test
           FileUtils.mkdir_p(kwargs.fetch(:path))
           { path: kwargs.fetch(:path), branch: kwargs.fetch(:branch), head_sha: "head-197" }
         }) do
-          with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise Hive::ConcurrentRunError, "busy" }) do
+          unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+            "database busy", code: :database_busy
+          )
+          with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise unavailable }) do
             result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
 
             assert_equal "adhoc-review-pr-197", result.fetch(:slug)

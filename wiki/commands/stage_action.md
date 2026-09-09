@@ -51,6 +51,10 @@ Confirmation re-reads every mutable fact before writing `closure.json`.
 
 `already_delivered` requires at least one same-repository merged PR or full
 commit OID that is reachable from the repository default branch.
+An owned worktree may still contain commits after a squash merge: closure
+accepts it when the clean worktree HEAD is exactly the verified merged PR head
+or a local Git ancestor of that head. A different or unverifiable unique HEAD
+continues to block closure.
 `superseded` additionally requires exactly one registered `project:slug`
 successor and a non-empty operator attestation; cross-repository evidence is
 recorded under `operator_attestation` authority. Equal refs, a clean branch,

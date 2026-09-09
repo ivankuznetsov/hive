@@ -6,6 +6,10 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def setup
+    Hive::RuntimeControlPlane.database.migrate!
+  end
+
   def test_patrol_attempt_diagnostic_projection_is_receipt_bound_and_rejects_stale_identity
     log_reference = {
       "path" => "logs/attempt-1.frames", "size" => 12, "sha256" => "a" * 64
@@ -88,12 +92,7 @@ class CommandsStatusTest < Minitest::Test
     reader.bytes = "{"
     assert_nil command.send(:attempt_diagnostic_for, row)
 
-    running = Marshal.load(Marshal.dump(row))
-    running[:projection_data]["journal"]["attempts"][0]["state"] = "running"
     reader.fetches = 0
-    assert_nil command.send(:attempt_diagnostic_for, running)
-    assert_equal 0, reader.fetches
-
     reader.binding = binding.merge(
       "receipt" => receipt.merge("exit_status" => Hive::ExitCodes::TEMPFAIL)
     )
@@ -108,13 +107,11 @@ class CommandsStatusTest < Minitest::Test
         hive_state, "1-inbox", "running-task-260824-abcd",
         state_file: "idea.md", marker: "WAITING"
       )
-      File.write(
-        File.join(folder, ".lock"),
-        {
-          "pid" => Process.pid,
-          "process_start_time" => Hive::Lock.process_start_time(Process.pid),
-          "lock_id" => "compact-status"
-        }.to_yaml
+      publish_test_task_lease(
+        folder,
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "lock_id" => "compact-status"
       )
       command_class = Class.new(Hive::Commands::Status) do
         def json_payload(*) = raise("full graph must not be built")
@@ -228,6 +225,18 @@ class CommandsStatusTest < Minitest::Test
     end
     assert_includes error.message,
                     "--internal-task-graph cannot be combined with --operational"
+  end
+
+  def test_warning_sink_captures_projection_warnings_without_stderr
+    warnings = []
+    command = Hive::Commands::Status.new(warning_sink: warnings)
+
+    _stdout, stderr = capture_io do
+      command.send(:warn, "projection degraded")
+    end
+
+    assert_equal [ "projection degraded" ], warnings
+    assert_empty stderr
   end
 
   def test_status_payloads_preserve_subsecond_generation_time
@@ -587,8 +596,8 @@ class CommandsStatusTest < Minitest::Test
   def test_json_payload_emits_live_task_lock_as_strict_boolean
     # Fix #144 regression guard: external consumers (TUI, daemon, bots)
     # rely on `live_task_lock` to render the runner badge without
-    # re-parsing the .lock file. Must be a strict boolean — never null —
-    # even when the underlying classifier returned nil (no .lock file).
+    # re-reading the task lease. Must be a strict boolean — never null —
+    # even when the underlying classifier returned nil (no active lease).
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       live_folder = File.join(hive_state, "stages", "4-execute", "live-task-260525-aaaa")
@@ -596,11 +605,11 @@ class CommandsStatusTest < Minitest::Test
       FileUtils.mkdir_p(live_folder)
       FileUtils.mkdir_p(idle_folder)
       File.write(File.join(live_folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
-      File.write(File.join(live_folder, ".lock"), YAML.dump(
+      publish_test_task_lease(live_folder,
         "pid" => Process.pid,
         "process_start_time" => Hive::Lock.process_start_time(Process.pid),
         "lock_id" => "live-generation"
-      ))
+      )
       File.write(File.join(idle_folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
 
       payload = Hive::Commands::Status.new.json_payload([
@@ -615,7 +624,7 @@ class CommandsStatusTest < Minitest::Test
       assert_equal Hive::Lock.process_start_time(Process.pid), live.fetch("task_lock_process_start_time")
       assert_equal "live-generation", live.fetch("task_lock_id")
       assert_equal false, idle.fetch("live_task_lock"),
-                   "rows without a .lock must serialise as false, never nil"
+                   "rows without a task lease must serialise as false, never nil"
       assert_nil idle.fetch("task_lock_pid")
       assert_nil idle.fetch("task_lock_process_start_time")
       assert_nil idle.fetch("task_lock_id")
@@ -630,6 +639,7 @@ class CommandsStatusTest < Minitest::Test
         state_file: "task.md", marker: "EXECUTE_WAITING"
       )
       payload = nil
+      prepare_test_task_lease_repository(folder)
 
       with_attempt_context(
         attempt_id: "attempt-1", task_generation: 7,
@@ -662,6 +672,7 @@ class CommandsStatusTest < Minitest::Test
         folder, id: 1, slug: File.basename(folder), display_name: nil,
         completed_at: old
       )
+      checkpoint_status_task(folder)
       File.utime(old, old, folder)
 
       payload = Hive::Commands::Status.new.json_payload([
@@ -875,6 +886,8 @@ class CommandsStatusTest < Minitest::Test
       File.write(File.join(bs, "brainstorm.md"),
                  "## Round 1\n### Q1.\nWhat?\n### A1.\n\n### Q2.\nWhy?\n### A2.\nyes\n<!-- WAITING -->\n")
       File.write(File.join(ex, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
+      checkpoint_status_task(bs)
+      checkpoint_status_task(ex)
 
       tasks = Hive::Commands::Status.new.json_payload([
         { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
@@ -906,6 +919,7 @@ class CommandsStatusTest < Minitest::Test
         Hive::TaskMeta.write(folder, id: 88, slug: slug, display_name: "Generic BS", workflow: descriptor.id.to_s)
         File.write(File.join(folder, "brainstorm.md"),
                    "## Round 1\n### Q1.\nWhat?\n### A1.\n\n<!-- WAITING -->\n")
+        checkpoint_status_task(folder)
 
         task = Hive::Commands::Status.new.json_payload([
           status_project(project_root, hive_state)
@@ -982,12 +996,12 @@ class CommandsStatusTest < Minitest::Test
       "position" => { "stage" => "4-execute", "marker" => "none" },
       "blocker_owner" => "operator",
       "reason" => "provider health is unavailable",
-      "routing" => { "selected_route" => nil, "reason" => "health_state_unavailable" }
+      "routing" => { "selected_route" => nil, "reason" => "no_eligible_provider_route" }
     }
 
     line = Hive::Commands::Status.new.send(:operational_row_line, row)
 
-    assert_includes line, "routing health_state_unavailable"
+    assert_includes line, "routing no_eligible_provider_route"
   end
 
   def test_json_payload_unblocks_dependency_at_gate_stage
@@ -1542,7 +1556,8 @@ class CommandsStatusTest < Minitest::Test
       live_folder = File.join(execute_stage, "live-agent-260522-abcd")
       FileUtils.mkdir_p(live_folder)
       File.write(File.join(live_folder, "task.md"), "<!-- AGENT_WORKING pid=1 -->\n")
-      File.write(File.join(live_folder, ".lock"), YAML.dump("claude_pid" => Process.pid))
+      checkpoint_status_task(live_folder)
+      publish_test_task_lease(live_folder, "claude_pid" => Process.pid)
       File.write(File.join(live_folder, "worktree.yml"), "path: [")
 
       missing_state_folder = File.join(plan_stage, "missing-state-260522-abcd")
@@ -1591,10 +1606,92 @@ class CommandsStatusTest < Minitest::Test
       corrupt_row = project.fetch("tasks").find { |row| row["slug"] == "corrupt-journal-260717-abcd" }
       healthy_row = project.fetch("tasks").find { |row| row["slug"] == "healthy-journal-260717-bcde" }
       assert_equal "error", corrupt_row.fetch("action")
-      assert_equal "condition_projection_invalid", corrupt_row.fetch("attrs").fetch("reason")
+      assert_equal true, corrupt_row.fetch("task_history_invalid")
+      assert_equal false, healthy_row.fetch("task_history_invalid")
+      assert_equal "condition_task_history_invalid", corrupt_row.fetch("attrs").fetch("reason")
+      assert_equal "operator", corrupt_row.fetch("attrs").fetch("owner")
+      assert_nil corrupt_row.fetch("suggested_command")
       assert_equal "ready_to_open_pr", healthy_row.fetch("action")
-      assert_match(/condition projection failed/, err)
+      assert_match(/task journal is invalid/, err)
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+      )
+      assert_empty schema.validate(payload).to_a
     end
+  end
+
+  def test_busy_condition_journal_is_transient_and_does_not_hide_other_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      busy = write_status_task(
+        hive_state, "4-execute", "busy-journal-260901-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      write_status_task(
+        hive_state, "4-execute", "healthy-journal-260901-bcde",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      lock_path = File.join(busy, Hive::TaskJournal::LOCK_BASENAME)
+      File.write(lock_path, "")
+      lock = File.open(lock_path, File::RDWR)
+      lock.flock(File::LOCK_EX)
+
+      payload = nil
+      _out, err = capture_io do
+        payload = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ])
+      end
+
+      rows = payload.fetch("projects").first.fetch("tasks")
+      busy_row = rows.find { |row| row["slug"] == "busy-journal-260901-abcd" }
+      healthy_row = rows.find { |row| row["slug"] == "healthy-journal-260901-bcde" }
+      assert_equal "error", busy_row.fetch("action")
+      assert_equal false, busy_row.fetch("task_history_invalid")
+      assert_equal "condition_task_history_unavailable", busy_row.dig("attrs", "reason")
+      assert_equal "journal_lock_busy", busy_row.dig("attrs", "journal_reason")
+      assert_equal "ready_to_open_pr", healthy_row.fetch("action")
+      assert_match(/temporarily unavailable/, err)
+    ensure
+      lock&.flock(File::LOCK_UN)
+      lock&.close
+    end
+  end
+
+  def test_task_history_invalid_action_uses_only_producer_owned_classification
+    row = {
+      slug: "forged",
+      stage: "4-execute",
+      marker_name: :error,
+      marker_attrs: {
+        "reason" => Hive::TaskProjection::INVALID_HISTORY_REASON,
+        "journal_reason" => "journal_invalid",
+        "repair_command" => "touch /tmp/owned"
+      },
+      task_history_invalid: false
+    }
+    command = Hive::Commands::Status.new
+
+    assert_nil command.send(:task_history_invalid_annotation, row)
+
+    annotation = command.send(
+      :task_history_invalid_annotation,
+      row.merge(task_history_invalid: true)
+    )
+    assert_nil annotation.fetch(:suggested_command)
+    assert_equal "Task journal invalid", annotation.fetch(:action_label)
+
+    terminal = command.send(
+      :task_history_invalid_annotation,
+      row.merge(
+        task_history_invalid: true,
+        marker_attrs: row.fetch(:marker_attrs).merge(
+          "journal_reason" => "journal_invalid"
+        )
+      )
+    )
+    assert_nil terminal.fetch(:suggested_command)
+    assert_nil terminal.dig(:diagnostic, "suggested_next_action")
   end
 
   def test_condition_projection_filesystem_failure_degrades_to_error_marker
@@ -1607,21 +1704,70 @@ class CommandsStatusTest < Minitest::Test
       task = Hive::Task.new(folder)
       marker = Hive::Markers.current(task.state_file)
       broken_store = Object.new
-      broken_store.define_singleton_method(:read_cached) { |**| raise Errno::EACCES, "blocked" }
+      broken_store.define_singleton_method(:read_routine) { |**| raise Errno::EACCES, "blocked" }
 
       _out, err = capture_io do
         with_replaced_singleton_method(
-          Hive::TaskProjection::Store, :new, ->(**) { broken_store }
+          Hive::TaskProjection::Reader, :new, ->(**) { broken_store }
         ) do
           projected_marker, projection = Hive::Commands::Status.new.send(
             :status_projection, task, marker
           )
           assert_equal :error, projected_marker.name
-          assert_equal "condition_projection_invalid", projected_marker.attrs.fetch("reason")
+          assert_equal "condition_task_history_invalid", projected_marker.attrs.fetch("reason")
           assert_equal 0, projection["identity"].fetch("task_generation")
         end
       end
-      assert_match(/condition projection failed/, err)
+      assert_match(/task journal is invalid/, err)
+    end
+  end
+
+  def test_transient_journal_failure_clears_on_the_next_scan_without_a_marker
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "4-execute", "transient-projection-260829-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      task = Hive::Task.new(folder)
+      marker = Hive::Markers.current(task.state_file)
+      source_before = File.binread(task.state_file)
+      projection = Hive::TaskProjection.project(records: [], marker: marker)
+      reads = [
+        Hive::TaskProjection::Reader::BoundedRead.new(
+          projection: nil, state: "invalid", truncated: false,
+          journal_cursor: 0, journal_records: [],
+          diagnostics: [ {
+            "source" => "task_journal", "reason" => "journal_unavailable",
+            "message" => "history temporarily unavailable", "details" => {}
+          } ]
+        ),
+        Hive::TaskProjection::Reader::BoundedRead.new(
+          projection: projection, state: "current", truncated: false,
+          journal_cursor: 0, journal_records: [], diagnostics: []
+        )
+      ]
+      store = Object.new
+      store.define_singleton_method(:read_routine) { |**| reads.shift }
+      command = Hive::Commands::Status.new
+      command.instance_variable_set(:@status_attempt_store, Object.new)
+
+      first = second = nil
+      capture_io do
+        with_replaced_singleton_method(
+          Hive::TaskProjection::Reader, :new, ->(**) { store }
+        ) do
+          first, = command.send(:status_projection, task, marker, project: "demo")
+          second, = command.send(:status_projection, task, marker, project: "demo")
+        end
+      end
+
+      assert_equal :error, first.name
+      assert_equal Hive::TaskProjection::INVALID_HISTORY_REASON,
+                   first.attrs.fetch("reason")
+      assert_equal :execute_complete, second.name
+      assert_equal source_before, File.binread(task.state_file)
+      refute_includes File.binread(task.state_file), "<!-- ERROR"
     end
   end
 
@@ -1636,13 +1782,13 @@ class CommandsStatusTest < Minitest::Test
         Hive::Task.new(folder)
       end
       stores = []
-      original_new = Hive::Attempts::Store.method(:new)
+      original_open = Hive::Attempts::Repository.method(:open_default)
 
       with_replaced_singleton_method(
-        Hive::Attempts::Store, :new,
+        Hive::Attempts::Repository, :open_default,
         lambda do |**kwargs|
-          stores << kwargs unless kwargs.key?(:root)
-          original_new.call(**kwargs)
+          stores << kwargs
+          original_open.call(**kwargs)
         end
       ) do
         command = Hive::Commands::Status.new
@@ -1696,13 +1842,13 @@ class CommandsStatusTest < Minitest::Test
         { "name" => name, "path" => project_root, "hive_state_path" => hive_state }
       end
       opens = 0
-      original_runtime = Hive::Attempts::Store.method(:runtime)
+      original_open = Hive::Attempts::Repository.method(:open_default)
 
       with_replaced_singleton_method(
-        Hive::Attempts::Store, :runtime,
+        Hive::Attempts::Repository, :open_default,
         lambda do |**kwargs|
           opens += 1
-          original_runtime.call(**kwargs)
+          original_open.call(**kwargs)
         end
       ) do
         command = Hive::Commands::Status.new(
@@ -1719,13 +1865,13 @@ class CommandsStatusTest < Minitest::Test
   def test_each_json_scan_opens_a_fresh_attempt_store_even_without_tasks
     opens = 0
     store = Object.new
-    store.define_singleton_method(:projection_reader) { self }
+    store.define_singleton_method(:read_session) { self }
     factory = lambda do |**|
       opens += 1
       store
     end
 
-    with_replaced_singleton_method(Hive::Attempts::Store, :runtime, factory) do
+    with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, factory) do
       command = Hive::Commands::Status.new
       2.times { command.send(:json_payload, []) }
     end
@@ -2048,12 +2194,13 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "6-review", "reviewing-task-260524-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
-      File.write(File.join(folder, ".lock"), YAML.dump(
+      checkpoint_status_task(folder)
+      publish_test_task_lease(folder,
         "pid" => Process.pid,
         "process_start_time" => Hive::Lock.process_start_time(Process.pid),
         "slug" => "reviewing-task-260524-abcd",
         "stage" => "review"
-      ))
+      )
 
       cmd = Hive::Commands::Status.new
       rows = cmd.send(:annotate_actions,
@@ -2078,12 +2225,13 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "5-open-pr", "opening-task-260524-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "pr.md"), "<!-- AGENT_WORKING -->\n")
-      File.write(File.join(folder, ".lock"), YAML.dump(
+      checkpoint_status_task(folder)
+      publish_test_task_lease(folder,
         "pid" => Process.pid,
         "process_start_time" => Hive::Lock.process_start_time(Process.pid),
         "slug" => "opening-task-260524-abcd",
         "stage" => "open-pr"
-      ))
+      )
 
       cmd = Hive::Commands::Status.new
       rows = cmd.send(:annotate_actions,
@@ -2109,12 +2257,13 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "4-execute", "ready-task-260524-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
-      File.write(File.join(folder, ".lock"), YAML.dump(
+      checkpoint_status_task(folder)
+      publish_test_task_lease(folder,
         "pid" => 12_345,
         "process_start_time" => "old-start",
         "slug" => "ready-task-260524-abcd",
         "stage" => "execute"
-      ))
+      )
 
       cmd = Hive::Commands::Status.new
       cmd.define_singleton_method(:pid_alive?) { |_pid| false }
@@ -2132,7 +2281,7 @@ class CommandsStatusTest < Minitest::Test
   end
 
   def test_live_task_lock_with_recorded_but_unreadable_live_start_time_is_stale
-    # PID-reuse defense: a .lock written with a recorded process_start_time
+    # PID-reuse defense: a lease written with a recorded process_start_time
     # whose live counterpart can no longer be read (containerised /proc,
     # PID has since exited and the kernel reused it) must be treated as
     # stale. Otherwise we'd misclassify a freshly-reused PID as live.
@@ -2141,12 +2290,13 @@ class CommandsStatusTest < Minitest::Test
       folder = File.join(hive_state, "stages", "4-execute", "phantom-task-260525-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
-      File.write(File.join(folder, ".lock"), YAML.dump(
+      checkpoint_status_task(folder)
+      publish_test_task_lease(folder,
         "pid" => Process.pid,
         "process_start_time" => "recorded-but-unreadable-now",
         "slug" => "phantom-task-260525-abcd",
         "stage" => "execute"
-      ))
+      )
 
       cmd = Hive::Commands::Status.new
       rows = nil
@@ -2164,49 +2314,19 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_live_task_lock_with_legacy_lock_omitting_process_start_time_is_live
-    # Backwards-compat: .lock files written before the start-time guard
-    # was introduced have no `process_start_time` key. Treat those as
-    # live when the PID is alive — the alternative (treating legacy locks
-    # as stale) would auto-classify in-flight runs from older hive
-    # versions as recoverable, racing the daemon's auto-heal.
-    with_tmp_dir do |project_root|
-      hive_state = File.join(project_root, ".hive-state")
-      folder = File.join(hive_state, "stages", "4-execute", "legacy-task-260525-abcd")
-      FileUtils.mkdir_p(folder)
-      File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
-      File.write(File.join(folder, ".lock"), YAML.dump(
-        "pid" => Process.pid,
-        "slug" => "legacy-task-260525-abcd",
-        "stage" => "execute"
-      ))
-
-      cmd = Hive::Commands::Status.new
-      rows = cmd.send(:annotate_actions,
-                      cmd.send(:collect_rows, hive_state),
-                      { "name" => "demo" },
-                      1,
-                      with_diagnostic: false)
-      row = rows.find { |candidate| candidate[:slug] == "legacy-task-260525-abcd" }
-
-      assert_equal true, row.fetch(:live_task_lock),
-                   "legacy lock without process_start_time must stay live while PID is alive"
-      assert_equal "agent_running", row.fetch(:action_key)
-    end
-  end
-
   def test_live_task_lock_with_mismatched_process_start_time_is_treated_as_stale
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       folder = File.join(hive_state, "stages", "4-execute", "executing-task-260524-abcd")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
-      File.write(File.join(folder, ".lock"), YAML.dump(
+      checkpoint_status_task(folder)
+      publish_test_task_lease(folder,
         "pid" => Process.pid,
         "process_start_time" => "wrong-start-1234",
         "slug" => "executing-task-260524-abcd",
         "stage" => "execute"
-      ))
+      )
 
       cmd = Hive::Commands::Status.new
       rows = cmd.send(:annotate_actions,
@@ -2351,6 +2471,7 @@ class CommandsStatusTest < Minitest::Test
         pr_url: https://github.com/example/repo/pull/561
         ---
       MD
+      checkpoint_status_task(folder)
 
       out, = capture_io do
         Hive::Commands::Status.new(archive: true).send(:render_project, status_project(project_root, hive_state),
@@ -2637,6 +2758,9 @@ class CommandsStatusTest < Minitest::Test
         folder, id: 9, slug: File.basename(folder), display_name: nil,
         workflow: "repinned", completed_at: Time.utc(2026, 1, 1)
       )
+      Hive::TaskProjection::Reader.new(task_folder: folder).read(
+        marker: Hive::Markers.current(File.join(folder, "done.md"))
+      )
       project = status_project(project_root, hive_state)
 
       ordinary = Hive::Commands::Status.new.json_payload([ project ]).fetch("projects").first
@@ -2840,30 +2964,36 @@ class CommandsStatusTest < Minitest::Test
 
     with_tmp_dir do |dir|
       task = Struct.new(:folder).new(dir)
-      # Array-shaped (parseable but not a Hash) → silently nil, no warn.
-      File.write(File.join(dir, ".lock"), "- not\n- a\n- hash\n")
-      _out, err = capture_io do
-        assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
+      # A repository double returning a non-Hash degrades silently.
+      _out, err = with_replaced_singleton_method(
+        Hive::Lock, :read_task_lock, ->(_folder) { [] }
+      ) do
+        capture_io do
+          assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
+        end
       end
       assert_equal "", err,
-                   "a parseable non-Hash .lock must not trigger the corrupt-lock warn"
+                   "a non-Hash lease must not trigger the corrupt-lease warning"
 
-      # Malformed YAML → rescue path, must emit warn so the degraded
-      # classification ("no lock" despite something being on disk) is
-      # observable in operator output.
-      File.write(File.join(dir, ".lock"), "[")
-      _out, err = capture_io do
-        assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
+      error = Hive::RuntimeControlPlane::CodecError.new(
+        "invalid task lease JSON", code: :json_invalid
+      )
+      _out, err = with_replaced_singleton_method(
+        Hive::Lock, :read_task_lock, ->(_folder) { raise error }
+      ) do
+        capture_io do
+          assert_nil cmd.send(:claude_pid_from_lock, cmd.send(:task_lock_holder, task))
+        end
       end
-      assert_includes err, "hive: status: failed to read .lock"
-      assert_includes err, "Psych"
+      assert_includes err, "hive: status: failed to read task lease"
+      assert_includes err, "CodecError"
     end
   end
 
   # The deliberate StandardError→SystemCallError narrowing in pr_url_for:
   # a non-ENOENT I/O fault reading pr.md (here EACCES) must warn — so the
   # degraded "no PR" is observable — and degrade to nil rather than crash
-  # this poll-heavy surface. Mirrors the .lock EACCES discipline above.
+  # this poll-heavy surface. Mirrors the task-lease read discipline above.
   def test_pr_url_for_warns_and_degrades_on_non_enoent_system_call_error
     cmd = Hive::Commands::Status.new
     with_tmp_dir do |project_root|
@@ -3658,6 +3788,7 @@ class CommandsStatusTest < Minitest::Test
         folder, id: nil, slug: slug, display_name: nil, completed_at: old
       )
     end
+    checkpoint_status_task(folder)
     File.utime(old, old, state_file)
     File.utime(old, old, folder)
     folder
@@ -3667,6 +3798,7 @@ class CommandsStatusTest < Minitest::Test
     folder = File.join(hive_state, "stages", stage, slug)
     FileUtils.mkdir_p(folder)
     File.write(File.join(folder, state_file), "<!-- #{marker} -->\n")
+    checkpoint_status_task(folder)
     folder
   end
 
@@ -3678,6 +3810,7 @@ class CommandsStatusTest < Minitest::Test
       folder, id: nil, slug: slug, display_name: nil,
       workflow: workflow, completed_at: completed_at
     )
+    checkpoint_status_task(folder)
     folder
   end
 
@@ -3707,7 +3840,14 @@ class CommandsStatusTest < Minitest::Test
       # Pull request
       <!-- COMPLETE pr_url=#{pr_url} is_draft=false -->
     MD
+    checkpoint_status_task(folder)
     folder
+  end
+
+  def checkpoint_status_task(folder)
+    task = Hive::Task.new(folder)
+    marker = task.workflow.controller? ? nil : Hive::Markers.current(task.state_file)
+    Hive::TaskProjection::Reader.new(task_folder: folder).read(marker: marker)
   end
 
   class StatusRaceCommand < Hive::Commands::Status

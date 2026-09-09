@@ -17,9 +17,9 @@ require "hive/diagnostic_evidence"
 require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/patrol_fix/attempt_diagnostic"
-require "hive/task_projection/store"
+require "hive/task_projection/reader"
 require "hive/task_closure"
 require "hive/implementation_identity/resolver"
 require "hive/task_resolver"
@@ -35,6 +35,7 @@ require "hive/daemon/operational_snapshot"
 require "hive/terminal_text"
 require "hive/tui/views/hyperlink"
 require "hive/events"
+require "hive/warnings"
 
 module Hive
   module Commands
@@ -43,7 +44,6 @@ module Hive
       attr_reader :next_retention_boundary
 
       AUTO_SCHEDULER_SNAPSHOT = Object.new.freeze
-
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: unanswered-question count only parses coding brainstorm.md
@@ -104,7 +104,7 @@ module Hive
       ].freeze
 
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
-                     operational: false, full: false, daemon_tasks: nil)
+                     operational: false, full: false, daemon_tasks: nil, warning_sink: nil)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -115,8 +115,14 @@ module Hive
         @operational = operational
         @full = full
         @daemon_tasks = Array(daemon_tasks).compact
+        @warning_sink = warning_sink
         @next_retention_boundary = nil
       end
+
+      def warn(message)
+        Hive::Warnings.emit(message, sink: @warning_sink)
+      end
+      private :warn
 
       def call
         call_with_envelope do
@@ -189,6 +195,20 @@ module Hive
           @stdout_written = true
         else
           render_running(payload)
+        end
+      end
+
+      # Internal object boundary used by the long-lived daemon. It returns the
+      # exact task-graph document without spawning another Ruby process or
+      # serializing the graph through JSON only to parse it again.
+      def internal_task_graph_payload(now: Time.now.utc)
+        Hive::Warnings.with_sink(@warning_sink) do
+          projects = Hive::Config.registered_projects
+          if daemon_task_mode?
+            daemon_task_payload(projects, now: now)
+          else
+            json_payload(projects, now: now)
+          end
         end
       end
 
@@ -828,6 +848,7 @@ module Hive
           "pr_url" => row[:pr_url],
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
+          "task_history_invalid" => row[:task_history_invalid] == true,
           "mtime" => row[:mtime].utc.iso8601(6),
           "observation_mtime" => (row[:observation_mtime] || row[:mtime]).utc.iso8601(6),
           "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
@@ -835,7 +856,7 @@ module Hive
           "claude_pid" => row[:claude_pid],
           "claude_pid_alive" => row[:claude_pid_alive],
           # Coerced to boolean so nil never leaks into JSON: live_task_lock is
-          # a tri-state internally (nil = no .lock, true/false = liveness),
+          # a tri-state internally (nil = no lease, true/false = liveness),
           # but external consumers only need "is the runner still holding it"
           # and would have to handle JSON null otherwise. Additive field per
           # the SCHEMA_VERSIONS policy in lib/hive.rb — no version bump.
@@ -1447,7 +1468,7 @@ module Hive
               else
                 Hive::Markers.current(task.state_file)
               end
-              marker, projection = status_projection(
+              marker, projection, task_history_invalid = status_projection(
                 task, marker, project: project_name || project_name_for(task)
               )
               folder_mtime = File.mtime(entry)
@@ -1462,9 +1483,8 @@ module Hive
               # state-file/directory meaning because the daemon's dispatch
               # baseline relies on a stage move changing that value.
               #
-              # acquiring `.lock` changes the directory mtime and would make a
-              # freshly emitted operational action invalidate itself inside
-              # the command's lock.
+              # The runtime lease is outside the task tree, so it does not
+              # perturb the filesystem observation used by this action.
               observation_source = Hive::OperationalAction.observation_mtime_source(task)
               observation_mtime = observation_source == entry ? folder_mtime : File.mtime(observation_source)
               lock_holder = task_lock_holder(task)
@@ -1497,6 +1517,7 @@ module Hive
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
+                task_history_invalid: task_history_invalid == true,
                 projection: projection,
                 projection_data: projection.to_h,
                 icon: icon,
@@ -1519,7 +1540,7 @@ module Hive
             # :423 File.directory? guard already passed. The rescue wraps the
             # whole begin, so the ENOENT can surface from ANY in-folder read —
             # File.mtime(entry) at :433, Markers.current's File.exist?->File.read
-            # (markers.rb:59-61), or the .lock read in task_lock_holder — all of
+            # (markers.rb:59-61), or the lease read in task_lock_holder — all of
             # which behave identically here. We swallow it and `next`: on a
             # forward stage-move the task resurfaces under its new (higher-
             # numbered) stage later in this same scan, and
@@ -1569,28 +1590,61 @@ module Hive
         end
 
         attempt_store = status_attempt_store
-        projection = Hive::TaskProjection::Store.new(
-          task_folder: task.folder, attempt_store: attempt_store
-        ).read_cached(marker: marker)
+        bounded = Hive::TaskProjection::Reader.new(
+          task_folder: task.folder, task: task
+        ).read_routine(marker: marker)
         project ||= project_name_for(task)
-        closure = Hive::TaskClosure.projection(
-          task, project: project, attempt_store: attempt_store
-        )
-        projection = projection.with_closure(closure) if closure
-        [ marker, projection ]
+        case bounded.state
+        when "invalid"
+          task_history_invalid_status(task, bounded)
+        when "current"
+          projection = bounded.projection
+          closure = Hive::TaskClosure.projection(
+            task, project: project, attempt_store: attempt_store,
+            task_projection: projection
+          )
+          projection = projection.with_closure(closure) if closure
+          [ marker, projection, false ]
+        else
+          task_history_unavailable_status(task, bounded)
+        end
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              SystemCallError, IOError => e
-        warn "hive: status: #{task.folder} condition projection failed " \
-             "(#{e.class}: #{e.message}); surfaced as an Error row"
-        error_marker = Hive::Markers::State.new(
-          name: :error,
-          attrs: {
-            "reason" => "condition_projection_invalid",
-            "message" => e.message.to_s[0, 500]
-          },
-          raw: nil
+        project ||= project_name_for(task)
+        bounded = Hive::TaskProjection::Reader::BoundedRead.new(
+          projection: nil, state: "invalid", truncated: false,
+          journal_cursor: 0, journal_records: [],
+          diagnostics: [ {
+            "source" => "task_journal", "reason" => "journal_read_failed",
+            "message" => "task journal read failed",
+            "details" => { "error_class" => e.class.name }
+          } ]
         )
-        [ error_marker, Hive::TaskProjection.project(records: [], marker: error_marker) ]
+        task_history_invalid_status(task, bounded)
+      end
+
+      def task_history_invalid_status(task, bounded)
+        attrs = Hive::TaskProjection.invalid_journal_marker_attrs(bounded: bounded)
+        error_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
+        warn "hive: status: #{task.folder} task journal is invalid " \
+             "(#{attrs.fetch('journal_reason')}); surfaced as a task-local Error row"
+        [
+          error_marker,
+          Hive::TaskProjection.project(records: [], marker: error_marker),
+          true
+        ]
+      end
+
+      def task_history_unavailable_status(task, bounded)
+        attrs = Hive::TaskProjection.unavailable_journal_marker_attrs(bounded: bounded)
+        error_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
+        warn "hive: status: #{task.folder} task journal is temporarily unavailable " \
+             "(#{attrs.fetch('journal_reason')}); retrying on the next scan"
+        [
+          error_marker,
+          Hive::TaskProjection.project(records: [], marker: error_marker),
+          false
+        ]
       end
 
       def status_attempt_store
@@ -1607,9 +1661,9 @@ module Hive
       def acquire_status_attempt_store
         return false if @status_attempt_store
 
-        @status_attempt_store = Hive::Attempts::Store.runtime(
+        @status_attempt_store = Hive::Attempts::Repository.open_default(
           create_directories: false
-        ).projection_reader
+        ).read_session
         true
       end
 
@@ -1815,7 +1869,7 @@ module Hive
         nil
       rescue SystemCallError => e
         # Any other I/O fault reading pr.md (EACCES/ENOTDIR/ESTALE/…): warn so
-        # the inconsistency is visible (mirrors task_lock_holder's .lock
+        # the inconsistency is visible (mirrors task_lock_holder's lease
         # reader) but still degrade rather than crash this poll-heavy
         # surface, preserving the plan's never-crash-on-bad-pr.md contract.
         # Narrowed from a blanket `rescue StandardError` so genuine
@@ -1853,7 +1907,7 @@ module Hive
       def decorate(task, marker, lock_holder: nil, live_task_lock: false)
         if marker.name == :agent_working
           # Marker only carries the hive runner PID; the claude subprocess PID
-          # is recorded in the per-task .lock file by Hive::Agent.
+          # is recorded in the task's runtime lease by Hive::Agent.
           pid = claude_pid_from_lock(lock_holder) || marker.attrs["pid"]
           if pid && pid_alive?(pid.to_i)
             [ "🤖", "agent_working pid=#{pid}" ]
@@ -1918,6 +1972,7 @@ module Hive
           task: nil,
           marker_name: marker.name,
           marker_attrs: marker.attrs,
+          task_history_invalid: false,
           icon: icon,
           state_label: state_label,
           mtime: folder_mtime,
@@ -1970,7 +2025,7 @@ module Hive
             agent_marker_grace_sec: grace_sec,
             live_task_lock: row[:live_task_lock]
           )
-          row.merge(
+          annotation = row.merge(
             action_key: action.key,
             action_label: action.label,
             suggested_command: action.command,
@@ -1984,7 +2039,32 @@ module Hive
             patrol_fix: action.patrol_fix,
             state_label: condition_state_label(row, action)
           )
+          task_history_invalid_annotation(annotation) || annotation
         end
+      end
+
+      def task_history_invalid_annotation(row)
+        return nil unless Hive::TaskProjection.history_invalid_row?(row)
+
+        marker = marker_from_row(row)
+        row.merge(
+          action_key: Hive::Schemas::TaskActionKind::ERROR,
+          action_label: "Task journal invalid",
+          suggested_command: nil,
+          outcomes: [],
+          next_action: nil,
+          diagnostic: {
+            "summary" => "Task history is unreadable",
+            "detail" => row.dig(:marker_attrs, "message").to_s[0, 4_000],
+            "source" => "marker",
+            "source_path" => nil,
+            "artifact_paths" => [],
+            "generated_by" => "local",
+            "marker_signature" => Hive::TaskClosure.marker_generation(marker),
+            "suggested_next_action" => nil,
+            "updated_at" => Time.now.utc.iso8601
+          }
+        )
       end
 
       def attempt_diagnostic_for(row)
@@ -1993,12 +2073,6 @@ module Hive
         identity = row[:projection_data].is_a?(Hash) ? row[:projection_data]["identity"] : nil
         attempt_id = identity.is_a?(Hash) ? identity["attempt_id"].to_s : ""
         return nil if attempt_id.empty? || attempt_id == Hive::TaskJournal::LEGACY_ATTEMPT_ID
-
-        attempt = Array(row.dig(:projection_data, "journal", "attempts")).find do |candidate|
-          candidate.is_a?(Hash) && candidate["attempt_id"] == attempt_id
-        end
-        return nil unless attempt && attempt["state"] == "terminal" &&
-                          %w[failed cancelled].include?(attempt["outcome"])
 
         binding = status_attempt_store.fetch_terminal_diagnostic_binding(attempt_id)
         return nil unless binding.is_a?(Hash) && binding["attempt_id"] == attempt_id
@@ -2121,18 +2195,9 @@ module Hive
       end
 
       def task_lock_holder(task)
-        lock_file = File.join(task.folder, ".lock")
-        return nil unless File.exist?(lock_file)
-
-        data = YAML.safe_load(File.read(lock_file), permitted_classes: [ Time ]) || {}
-        data.is_a?(Hash) ? data : nil
+        Hive::Lock.read_task_lock(task.folder)
       rescue StandardError => e
-        # A corrupt or unparseable .lock used to silently drop us into the
-        # "no lock" branch; ops would then see a row classified as ready
-        # despite the disk state showing something was running. Emit a
-        # warn so the inconsistency is visible without changing classifier
-        # semantics (still returning nil).
-        warn "hive: status: failed to read .lock at #{File.join(task.folder, '.lock')}: #{e.class}: #{e.message}"
+        warn "hive: status: failed to read task lease for #{task.folder}: #{e.class}: #{e.message}"
         nil
       end
 

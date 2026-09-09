@@ -75,7 +75,9 @@ module Hive
         end
 
         notification =
-          if READY_ACTIONS.include?(row.action)
+          if row.action.to_s == Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK
+            outcome_evidence_rework(row)
+          elsif READY_ACTIONS.include?(row.action)
             stage_approval(row)
           elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
             needs_input(row)
@@ -180,6 +182,16 @@ module Hive
             [ button("Reject", "reject:#{row.project}:#{row.slug}") ]
           ],
           parse_mode: parse_mode
+        )
+      end
+
+      def outcome_evidence_rework(row)
+        resolution = Hive::Bot::RowActions.resolve(row)
+        return nil if resolution.actions.empty?
+
+        Notification.new(
+          text: "#{header(row)}\nReviewed implementation gaps are ready for automatic rework.",
+          keyboard: keyboard_for_actions(resolution.actions)
         )
       end
 

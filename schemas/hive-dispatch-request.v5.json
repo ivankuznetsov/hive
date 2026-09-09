@@ -8,7 +8,7 @@
   "required": [
     "schema", "schema_version", "request_id", "created_at", "project", "slug",
     "argv", "requestor", "chat_id", "update_id", "trigger", "task_generation",
-    "predecessor_attempt_id", "inherited_outputs", "recovery"
+    "inherited_outputs", "recovery"
   ],
   "properties": {
     "schema": { "const": "hive-dispatch-request" },
@@ -29,7 +29,6 @@
     "update_id": { "type": ["integer", "null"] },
     "trigger": { "type": ["string", "null"] },
     "task_generation": { "type": ["string", "null"] },
-    "predecessor_attempt_id": { "type": ["string", "null"] },
     "task_id": { "type": ["string", "integer", "null"] },
     "expected_stage": { "type": ["string", "null"] },
     "expected_marker_name": {
@@ -78,26 +77,8 @@
     "RoutingExclusionReason": {
       "type": "string",
       "enum": [
-        "hard_pin_mismatch", "requirements_incompatible", "manual_block",
-        "circuit_open", "circuit_cooldown", "half_open_probe_owned",
-        "provider_concurrency_saturated", "health_state_unavailable"
-      ]
-    },
-    "Scope": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "provider_account_id", "model"],
-      "properties": {
-        "kind": { "type": "string", "enum": ["provider_account", "model"] },
-        "provider_account_id": { "$ref": "#/$defs/RoutingIdentifier" },
-        "model": { "type": ["string", "null"], "maxLength": 128 }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "kind": { "const": "provider_account" } } },
-          "then": { "properties": { "model": { "type": "null" } } },
-          "else": { "properties": { "model": { "type": "string", "minLength": 1 } } }
-        }
+        "hard_pin_mismatch", "requirements_incompatible", "failed_route",
+        "provider_concurrency_saturated", "provider_capacity_unavailable"
       ]
     },
     "AdmissionPin": {
@@ -141,29 +122,11 @@
     "AdmissionExclusion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["route_id", "reason", "detail", "scope", "observation"],
+      "required": ["route_id", "reason", "detail"],
       "properties": {
         "route_id": { "type": "string", "minLength": 1, "maxLength": 128 },
         "reason": { "$ref": "#/$defs/RoutingExclusionReason" },
-        "detail": { "type": ["string", "null"], "maxLength": 240 },
-        "scope": {
-          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Scope" }]
-        },
-        "observation": {
-          "oneOf": [
-            { "type": "null" },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "generation": { "type": "integer", "minimum": 0 },
-                "journal_epoch": { "type": "integer", "minimum": 0 },
-                "observed": { "type": "integer", "minimum": 0 },
-                "max": { "type": "integer", "minimum": 0 }
-              }
-            }
-          ]
-        }
+        "detail": { "type": ["string", "null"], "maxLength": 240 }
       }
     },
     "AdmissionCandidate": {
@@ -171,7 +134,7 @@
       "additionalProperties": false,
       "required": [
         "route_id", "provider_account_id", "adapter", "model", "effort",
-        "eligible", "exclusions", "capacity", "circuits"
+        "eligible", "exclusions", "capacity"
       ],
       "properties": {
         "route_id": { "$ref": "#/$defs/RoutingIdentifier" },
@@ -201,48 +164,6 @@
               }
             }
           ]
-        },
-        "circuits": {
-          "type": "array",
-          "maxItems": 2,
-          "items": { "$ref": "#/$defs/AdmissionCircuit" }
-        }
-      }
-    },
-    "AdmissionProbe": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "scope", "journal_epoch", "observed_generation", "claim_generation",
-        "attempt_id", "task_generation", "ownership_fence"
-      ],
-      "properties": {
-        "scope": { "$ref": "#/$defs/Scope" },
-        "journal_epoch": { "type": "integer", "minimum": 0 },
-        "observed_generation": { "type": "integer", "minimum": 0 },
-        "claim_generation": { "type": "integer", "minimum": 1 },
-        "attempt_id": { "$ref": "#/$defs/RoutingIdentifier" },
-        "task_generation": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "ownership_fence": { "type": "string", "minLength": 1, "maxLength": 4096 }
-      }
-    },
-    "AdmissionCircuit": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "scope", "status", "generation", "journal_epoch", "state",
-        "manual_block", "eligible_at", "probe_owner"
-      ],
-      "properties": {
-        "scope": { "$ref": "#/$defs/Scope" },
-        "status": { "type": "string", "enum": ["available", "unavailable"] },
-        "generation": { "type": "integer", "minimum": 0 },
-        "journal_epoch": { "type": "integer", "minimum": 0 },
-        "state": { "type": "string", "enum": ["closed", "open", "half_open", "manual_block", "probe_owned", "health_state_unavailable"] },
-        "manual_block": { "type": ["boolean", "null"] },
-        "eligible_at": { "type": ["string", "null"], "format": "date-time" },
-        "probe_owner": {
-          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/AdmissionProbe" }]
         }
       }
     },
@@ -252,7 +173,7 @@
       "required": [
         "decision_id", "decided_at", "task_generation", "policy_digest",
         "status", "reason", "next_action_owner", "policy", "selected_route",
-        "candidates", "exclusions", "circuit_generations", "probe_requirements"
+        "candidates", "exclusions"
       ],
       "properties": {
         "decision_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -262,7 +183,7 @@
         "status": { "type": "string", "enum": ["capacity_saturated", "no_route"] },
         "reason": {
           "type": "string",
-          "enum": ["capacity_saturated", "health_state_unavailable", "no_eligible_provider_route"]
+          "enum": ["capacity_saturated", "no_eligible_provider_route"]
         },
         "next_action_owner": {
           "type": "string",
@@ -281,9 +202,7 @@
           "minItems": 1,
           "maxItems": 4096,
           "items": { "$ref": "#/$defs/AdmissionExclusion" }
-        },
-        "circuit_generations": { "type": "array", "maxItems": 0 },
-        "probe_requirements": { "type": "array", "maxItems": 0 }
+        }
       },
       "allOf": [
         {
@@ -292,7 +211,7 @@
           "else": {
             "properties": {
               "reason": {
-                "enum": ["health_state_unavailable", "no_eligible_provider_route"]
+                "const": "no_eligible_provider_route"
               }
             }
           }

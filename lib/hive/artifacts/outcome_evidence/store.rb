@@ -5,7 +5,7 @@ require "time"
 require "hive/atomic_file"
 require "hive/agent_git_gate"
 require "hive/attempts/context"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/contract"
 require "hive/artifacts/outcome_evidence/identity"
@@ -22,10 +22,12 @@ module Hive
       class Store
         ROOT = "outcome-evidence".freeze
         MAX_DOCUMENT_BYTES = 256 * 1024
-        MAX_DIFF_BYTES = 16 * 1024 * 1024
         SAFE_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
         DIGEST = Proof::DIGEST
-        BLOCK_REASONS = %w[capability_blocked review_blocked recaptures_exhausted].freeze
+        BLOCK_REASONS = %w[
+          capability_blocked review_blocked recaptures_exhausted reworks_exhausted
+        ].freeze
+        REWORK_REASON = "implementation_rework".freeze
         SCHEMAS = {
           requirement: "hive-outcome-evidence-requirement",
           candidate: "hive-outcome-evidence-candidate",
@@ -320,78 +322,22 @@ module Hive
 
         def publish_blocked!(generation:, reason:, failed_targets:, reviewer_reasons:,
                              attempt_ids:)
-          generation = validate_digest!(generation, "generation")
           reason = reason.to_s
           unless BLOCK_REASONS.include?(reason)
             raise StoreError, "outcome-evidence blocked reason is invalid"
           end
-          requirement_file = requirement_path(generation)
-          requirement = read_document(
-            requirement_file, schema: SCHEMAS.fetch(:requirement),
-            label: "outcome-evidence requirement"
+          publish_unaccepted!(
+            generation: generation, status: "blocked", reason: reason,
+            failed_targets: failed_targets, reviewer_reasons: reviewer_reasons,
+            attempt_ids: attempt_ids
           )
-          ids = Array(attempt_ids).map { |value| validate_id!(value, "attempt ID") }
-          if ids.uniq != ids || ids.length > 3
-            raise StoreError, "blocked outcome evidence has invalid attempt history"
-          end
-          attempts = ids.map do |attempt_id|
-            path = attempt_path(generation, attempt_id)
-            attempt = read_document(
-              path, schema: SCHEMAS.fetch(:attempt), label: "outcome-evidence attempt"
-            )
-            unless attempt.values_at("task", "project", "generation", "attempt_id") ==
-                   [ @task.slug.to_s, @project, generation, attempt_id ] &&
-                   attempt.fetch("status") != "accepted"
-              raise StoreError, "blocked pointer names a contradictory attempt"
-            end
-            {
-              "attempt_id" => attempt_id,
-              "attempt_sha256" => secure_file_digest!(
-                path, "outcome-evidence attempt"
-              )
-            }
-          end
-          if reason != "capability_blocked" && attempts.empty?
-            raise StoreError, "semantic review blocker requires an admitted attempt"
-          end
-          targets = Array(failed_targets).map do |target_id|
-            validate_claim_id!(target_id, "failed review target ID")
-          end.uniq.sort
-          rationales = Array(reviewer_reasons).map do |value|
-            text = value.to_s.strip
-            unless text.bytesize.between?(1, Contract::MAX_STATEMENT_BYTES)
-              raise StoreError, "reviewer blocker reason is empty or oversized"
-            end
-            Contract.secret_free!(text, "reviewer blocker reason")
-          end.uniq
-          unless reason == "capability_blocked" || targets.any?
-            raise StoreError, "semantic review blocker requires failed targets"
-          end
-          digest = recovery_digest(
-            generation: generation, reason: reason, attempts: attempts,
-            failed_targets: targets, reviewer_reasons: rationales
-          )
-          last = attempts.last
-          publish_pointer!(
-            "schema" => SCHEMAS.fetch(:current),
-            "schema_version" => 1,
-            "task" => @task.slug.to_s,
-            "project" => @project,
-            "status" => "blocked",
-            "generation" => generation,
-            "recovery_epoch" => requirement.fetch("recovery_epoch"),
-            "attempt_id" => last&.fetch("attempt_id"),
-            "requirement_sha256" => secure_file_digest!(
-              requirement_file, "outcome-evidence requirement"
-            ),
-            "attempt_sha256" => last&.fetch("attempt_sha256"),
-            "attempts" => attempts,
-            "attempt_count" => attempts.length,
-            "reason" => reason,
-            "failed_targets" => targets,
-            "reviewer_reasons" => rationales,
-            "recovery_digest" => digest,
-            "published_at" => iso_time(@clock.call)
+        end
+
+        def publish_rework!(generation:, failed_targets:, reviewer_reasons:, attempt_ids:)
+          publish_unaccepted!(
+            generation: generation, status: "rework", reason: REWORK_REASON,
+            failed_targets: failed_targets, reviewer_reasons: reviewer_reasons,
+            attempt_ids: attempt_ids
           )
         end
 
@@ -450,19 +396,11 @@ module Hive
         end
 
         def blocked_for_identity?(identity)
-          pointer = read_current!
-          return false unless pointer.fetch("status") == "blocked"
-          expected_generation = generation_for_identity(identity)
-          return false unless pointer.fetch("generation") == expected_generation
+          unaccepted_for_identity?(identity, status: "blocked")
+        end
 
-          requirement = read_document(
-            requirement_path(pointer.fetch("generation")), schema: SCHEMAS.fetch(:requirement),
-            label: "outcome-evidence requirement"
-          )
-          requirement.fetch("implementation") == canonical_identity(identity) &&
-            valid_pointer_digests?(pointer)
-        rescue StoreError, SystemCallError
-          false
+        def rework_for_identity?(identity)
+          unaccepted_for_identity?(identity, status: "rework")
         end
 
         def requirement_for_identity(identity)
@@ -482,12 +420,12 @@ module Hive
           canonical = canonical_identity(identity)
           generation, = current_generation(canonical)
           result = Hive::AgentGitGate.read(
-            source_root, :diff, max_stdout_bytes: MAX_DIFF_BYTES,
+            source_root, :diff,
             base_oid: canonical.fetch("implementation_base"),
             head_oid: canonical.fetch("implementation_head")
           )
           unless result.success?
-            raise StoreError, "exact implementation diff is unavailable or oversized"
+            raise StoreError, "exact implementation diff is unavailable"
           end
 
           path = File.join(generation_root(generation), "implementation.diff")
@@ -495,7 +433,7 @@ module Hive
           {
             "path" => Pathname.new(path).relative_path_from(Pathname.new(@task.folder)).to_s,
             "sha256" => secure_file_digest!(
-              path, "exact implementation diff", max_bytes: MAX_DIFF_BYTES
+              path, "exact implementation diff", max_bytes: nil
             ),
             "bytes" => File.size(path),
             "implementation_base" => canonical.fetch("implementation_base"),
@@ -516,7 +454,7 @@ module Hive
           {
             "path" => Pathname.new(path).relative_path_from(Pathname.new(@task.folder)).to_s,
             "sha256" => secure_file_digest!(
-              path, "exact implementation diff", max_bytes: MAX_DIFF_BYTES
+              path, "exact implementation diff", max_bytes: nil
             ),
             "bytes" => stat.size,
             "implementation_base" => canonical.fetch("implementation_base"),
@@ -573,6 +511,101 @@ module Hive
 
         private
 
+        def publish_unaccepted!(generation:, status:, reason:, failed_targets:,
+                                reviewer_reasons:, attempt_ids:)
+          generation = validate_digest!(generation, "generation")
+          requirement_file = requirement_path(generation)
+          requirement = read_document(
+            requirement_file, schema: SCHEMAS.fetch(:requirement),
+            label: "outcome-evidence requirement"
+          )
+          ids = Array(attempt_ids).map { |value| validate_id!(value, "attempt ID") }
+          if ids.uniq != ids || ids.length > 3
+            raise StoreError, "unaccepted outcome evidence has invalid attempt history"
+          end
+          attempt_documents = ids.map do |attempt_id|
+            path = attempt_path(generation, attempt_id)
+            attempt = read_document(
+              path, schema: SCHEMAS.fetch(:attempt), label: "outcome-evidence attempt"
+            )
+            unless attempt.values_at("task", "project", "generation", "attempt_id") ==
+                   [ @task.slug.to_s, @project, generation, attempt_id ] &&
+                   attempt.fetch("status") != "accepted"
+              raise StoreError, "outcome-evidence pointer names a contradictory attempt"
+            end
+            attempt
+          end
+          if status == "rework" && attempt_documents.last&.fetch("status") != "rework"
+            raise StoreError, "outcome-evidence rework pointer must name a latest rework attempt"
+          end
+          attempts = ids.map do |attempt_id|
+            {
+              "attempt_id" => attempt_id,
+              "attempt_sha256" => secure_file_digest!(
+                attempt_path(generation, attempt_id), "outcome-evidence attempt"
+              )
+            }
+          end
+          if reason != "capability_blocked" && attempts.empty?
+            raise StoreError, "semantic review blocker requires an admitted attempt"
+          end
+          targets = Array(failed_targets).map do |target_id|
+            validate_claim_id!(target_id, "failed review target ID")
+          end.uniq.sort
+          rationales = Array(reviewer_reasons).map do |value|
+            text = value.to_s.strip
+            unless text.bytesize.between?(1, Contract::MAX_STATEMENT_BYTES)
+              raise StoreError, "reviewer blocker reason is empty or oversized"
+            end
+            Contract.secret_free!(text, "reviewer blocker reason")
+          end.uniq
+          unless reason == "capability_blocked" || targets.any?
+            raise StoreError, "semantic review blocker requires failed targets"
+          end
+          digest = recovery_digest(
+            generation: generation, reason: reason, attempts: attempts,
+            failed_targets: targets, reviewer_reasons: rationales
+          )
+          last = attempts.last
+          publish_pointer!(
+            "schema" => SCHEMAS.fetch(:current),
+            "schema_version" => 1,
+            "task" => @task.slug.to_s,
+            "project" => @project,
+            "status" => status,
+            "generation" => generation,
+            "recovery_epoch" => requirement.fetch("recovery_epoch"),
+            "attempt_id" => last&.fetch("attempt_id"),
+            "requirement_sha256" => secure_file_digest!(
+              requirement_file, "outcome-evidence requirement"
+            ),
+            "attempt_sha256" => last&.fetch("attempt_sha256"),
+            "attempts" => attempts,
+            "attempt_count" => attempts.length,
+            "reason" => reason,
+            "failed_targets" => targets,
+            "reviewer_reasons" => rationales,
+            "recovery_digest" => digest,
+            "published_at" => iso_time(@clock.call)
+          )
+        end
+
+        def unaccepted_for_identity?(identity, status:)
+          pointer = read_current!
+          return false unless pointer.fetch("status") == status
+          expected_generation = generation_for_identity(identity)
+          return false unless pointer.fetch("generation") == expected_generation
+
+          requirement = read_document(
+            requirement_path(pointer.fetch("generation")), schema: SCHEMAS.fetch(:requirement),
+            label: "outcome-evidence requirement"
+          )
+          requirement.fetch("implementation") == canonical_identity(identity) &&
+            valid_pointer_digests?(pointer)
+        rescue StoreError, SystemCallError
+          false
+        end
+
         def build_package(validate_representations:)
           pointer = read_current!
           generation = pointer.fetch("generation")
@@ -611,7 +644,7 @@ module Hive
               requirement_document, active_attempt, generation,
               pointer.fetch("attempt_id")
             )
-          when "blocked"
+          when "blocked", "rework"
             expected = recovery_digest(
               generation: generation, reason: pointer.fetch("reason"),
               attempts: pointer.fetch("attempts"),
@@ -620,7 +653,16 @@ module Hive
             )
             unless pointer.fetch("recovery_digest") == expected &&
                    attempt_documents.none? { |attempt| attempt.fetch("status") == "accepted" }
-              raise StoreError, "blocked package recovery binding is invalid"
+              raise StoreError, "unaccepted package recovery binding is invalid"
+            end
+            if pointer.fetch("status") == "blocked" &&
+               !BLOCK_REASONS.include?(pointer.fetch("reason"))
+              raise StoreError, "blocked package reason is invalid"
+            end
+            if pointer.fetch("status") == "rework" &&
+               (pointer.fetch("reason") != REWORK_REASON ||
+                attempt_documents.last&.fetch("status") != "rework")
+              raise StoreError, "rework package binding is invalid"
             end
           else
             raise StoreError, "outcome-evidence package status is invalid"
@@ -841,7 +883,7 @@ module Hive
             raise StoreError,
                   "outcome evidence requires a controller-owned durable attempt context"
           end
-          store = @attempt_store || Hive::Attempts::Store.new(create_directories: false)
+          store = @attempt_store || Hive::Attempts::Repository.open_default(create_directories: false)
           record = store.fetch(context.attempt_id)
           unless record && record["project"] == @project &&
                  record["task_slug"] == @task.slug.to_s &&
@@ -880,9 +922,6 @@ module Hive
         end
 
         def write_once_bytes(path, source, generation:)
-          if source.bytesize > MAX_DIFF_BYTES
-            raise StoreError, "exact implementation diff exceeds #{MAX_DIFF_BYTES} bytes"
-          end
           ensure_generation_directories!(generation)
           begin
             File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |file|
@@ -892,15 +931,23 @@ module Hive
             end
             Hive::AtomicFile.fsync_directory(File.dirname(path))
           rescue Errno::EEXIST
-            existing = begin
+            matches = begin
               File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+                raise StoreError, "exact implementation diff must be a regular file" unless file.stat.file?
                 file.binmode
-                file.read
+                next false unless file.stat.size == source.bytesize
+
+                offset = 0
+                while (chunk = file.read(16 * 1024))
+                  break unless chunk == source.byteslice(offset, chunk.bytesize).b
+                  offset += chunk.bytesize
+                end
+                chunk.nil? && offset == source.bytesize
               end
             rescue Errno::ELOOP
               raise StoreError, "exact implementation diff must be a regular file"
             end
-            raise StoreError, "exact implementation diff is append-only and already differs" unless existing == source
+            raise StoreError, "exact implementation diff is append-only and already differs" unless matches
           end
         end
 
@@ -1017,7 +1064,7 @@ module Hive
             total = 0
             while (chunk = file.read(16 * 1024))
               total += chunk.bytesize
-              raise StoreError, "outcome-evidence document exceeds #{max_bytes} bytes" if total > max_bytes
+              raise StoreError, "outcome-evidence document exceeds #{max_bytes} bytes" if max_bytes && total > max_bytes
               digest << chunk
             end
             digest.hexdigest

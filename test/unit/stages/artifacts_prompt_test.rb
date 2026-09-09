@@ -70,7 +70,7 @@ class StagesArtifactsPromptTest < Minitest::Test
         requirement_json: "{}", prior_evidence_json: "[]", revision_json: "[]",
         capture_tools_json: '{"web":{"driver":"agent-browser"}}',
         writable_root: File.join(task.folder, "evidence"),
-        writable_relative_root: "evidence"
+        writable_relative_root: "evidence", repair_json: "{}"
       )
       reviewer = Hive::Stages::Artifacts.render_role_prompt(
         "artifacts_reviewer_prompt.md.erb", task,
@@ -103,6 +103,8 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_includes producer, "custom evidence script"
       assert_includes producer, "application/x-asciinema+json"
       assert_includes producer, "Video original/review media types"
+      assert_includes producer, "never list one document path twice"
+      assert_includes producer, "Use `evidence_write` to create a distinct"
       assert_match(/any nonempty\s+subset/, producer)
       assert_match(/preserves the last evidence/, producer)
       assert_includes producer, "same controller-issued path for both roles"
@@ -115,7 +117,9 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_match(/Reject generated\s+slides/, reviewer)
       assert_includes reviewer, "do not echo or calculate"
       refute_includes reviewer, "`review_scope_hashes`"
-      assert_includes reviewer, "accepted`, `revise`, or `blocked"
+      assert_includes reviewer, "accepted`, `revise`, `rework`, or `blocked"
+      assert_includes reviewer, "source, configuration, tests, or repository documentation"
+      assert_includes reviewer, "operator-owned credential, decision, or environment"
       assert_includes reviewer, "Reserve enough output for the final JSON"
       [ inference, producer, reviewer ].each { |prompt| assert_includes prompt, "untrusted data" }
     end

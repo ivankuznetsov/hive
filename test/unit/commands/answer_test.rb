@@ -7,8 +7,6 @@ class HiveCommandsAnswerTest < Minitest::Test
   include HiveTestHelper
 
   SLUG = "answer-task-260810-abcd"
-  TASK_ID = 41
-
   def sample
     <<~MARKDOWN
       ## Round 1
@@ -38,7 +36,7 @@ class HiveCommandsAnswerTest < Minitest::Test
         File.write(File.join(hive_state, "config.yml"), {}.to_yaml)
         Hive::TaskMeta.write(
           folder,
-          id: TASK_ID,
+          id: Digest::SHA256.hexdigest(File.expand_path(folder))[0, 12].to_i(16),
           slug: SLUG,
           display_name: "Answer Task",
           input_fingerprint: input_fingerprint,
@@ -47,6 +45,7 @@ class HiveCommandsAnswerTest < Minitest::Test
         path = File.join(folder, "brainstorm.md")
         File.write(path, content)
         Hive::Config.register_project(name: "demo", path: project)
+        prepare_test_task_lease_repository(folder)
         yield(project, folder, path)
       end
     end
@@ -89,7 +88,7 @@ class HiveCommandsAnswerTest < Minitest::Test
       assert_equal false, payload.fetch("complete")
       assert payload.fetch("slots").all? { |slot| slot.fetch("binding").match?(/\A[A-Za-z0-9_-]+\z/) }
       assert_equal before, File.binread(path)
-      refute File.exist?(File.join(folder, ".lock")), "read-only inventory must not publish a task lock"
+      refute Hive::Lock.task_lock_held?(folder), "read-only inventory must not publish a task lease"
       assert_schema(payload)
     end
   end
@@ -272,7 +271,7 @@ class HiveCommandsAnswerTest < Minitest::Test
       token = inventory.fetch("slots").first.fetch("binding")
       Hive::TaskMeta.write(
         folder,
-        id: TASK_ID,
+        id: Hive::TaskMeta.read(folder).fetch(:id),
         slug: SLUG,
         display_name: "Replacement task",
         input_fingerprint: "b" * 64,

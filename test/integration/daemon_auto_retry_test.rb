@@ -285,19 +285,19 @@ class DaemonAutoRetryTest < Minitest::Test
     end
   end
 
-  def test_global_kill_switch_and_project_disable_leave_markers_parked
-    [
-      dispatcher(auto_retry: false, project_enabled: true),
-      dispatcher(auto_retry: true, project_enabled: false)
-    ].each do |instance|
-      with_error_row(attrs: { "reason" => "claude_launch_failed" }) do |row, state_file|
-        set_status_rows([ row ])
-        stub_safe { instance.tick(now: T0) }
-
-        assert_equal :error, Hive::Markers.current(state_file).name
-      end
+  def test_global_auto_retry_key_is_inert_but_project_disable_parks_markers
+    with_error_row(attrs: { "reason" => "claude_launch_failed" }) do |row, state_file|
+      set_status_rows([ row ])
+      stub_safe { run_due_recovery(dispatcher(auto_retry: false), state_file, now: T0) }
     end
 
-    refute @logger.events.any? { |name, _attrs| name == :marker_healed }
+    with_error_row(attrs: { "reason" => "claude_launch_failed" }) do |row, state_file|
+      set_status_rows([ row ])
+      stub_safe { dispatcher(project_enabled: false).tick(now: T0) }
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+    end
+
+    assert_equal 1, @logger.events.count { |name, _attrs| name == :recovery_requested }
   end
 end

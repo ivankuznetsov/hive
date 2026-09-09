@@ -9,7 +9,7 @@ require "time"
 require "yaml"
 require "hive"
 require "hive/attempts/generation"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/web/capture_runtime"
 require "hive/worktree"
 
@@ -66,7 +66,8 @@ module Hive
         generation = Hive::Attempts::Generation.resolve(
           task: task,
           project: project,
-          intended_stage: "7-artifacts" # coding-scoped: capture applies to the coding artifact stage
+          intended_stage: "7-artifacts", # coding-scoped: capture applies to the coding artifact stage
+          task_input_epoch: 0
         ).task_generation
         new(
           task: task, project: project, changed_paths: [],
@@ -219,7 +220,7 @@ module Hive
           "port" => "released", "processes" => "clean", "runtime" => "cleaned"
         }
         return false unless valid_capture_times?(manifest)
-        return false if Hive::SecretPatterns.match?(JSON.generate(manifest))
+        return false if Hive::SecretScanner.match?(JSON.generate(manifest))
         evidence_valid = if version == 1
           valid_v1_capture_evidence?(manifest)
         else

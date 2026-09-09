@@ -28,9 +28,9 @@ module Hive
         end
       end
 
-      def self.validate(root, expected_name: nil, expected_manifest_digest: nil, managed: true)
+      def self.validate(root, expected_name: nil, expected_manifest_digest: nil, managed: true, scan_security: true)
         new(root, expected_name: expected_name, expected_manifest_digest: expected_manifest_digest,
-                  managed: managed).validate
+                  managed: managed, scan_security: scan_security).validate
       end
 
       def self.validate!(...)
@@ -40,11 +40,12 @@ module Hive
         result
       end
 
-      def initialize(root, expected_name:, expected_manifest_digest:, managed:)
+      def initialize(root, expected_name:, expected_manifest_digest:, managed:, scan_security: true)
         @root = File.expand_path(root)
         @expected_name = expected_name&.to_s
         @expected_manifest_digest = expected_manifest_digest&.to_s
         @managed = managed
+        @scan_security = scan_security
       end
 
       def validate
@@ -81,7 +82,7 @@ module Hive
           @root,
           paths: expected.map { |entry| entry.fetch("path") },
           permissions: manifest.permissions
-        ))
+        )) if @scan_security
         Result.new(manifest: manifest, workflow: workflow, manifest_digest: digest, diagnostics: diagnostics.freeze)
       rescue PackageError => e
         Result.new(manifest: nil, workflow: nil, manifest_digest: nil, diagnostics: [ e.diagnostic ].freeze)

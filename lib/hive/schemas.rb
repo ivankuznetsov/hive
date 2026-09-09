@@ -7,10 +7,10 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 7,
-      "hive-running-status" => 1,
+      "hive-status" => 8,
+      "hive-running-status" => 2,
       "hive-operational-status" => 4,
-      "hive-circuits" => 1,
+      "hive-runtime-maintenance" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
       "hive-init" => 2,
@@ -108,35 +108,22 @@ module Hive
       "hive-bot-install" => 1,
       "hive-pairing-list" => 1,
       "hive-pairing-approve" => 1,
-      # File-backed dispatch request the bot writes for the daemon to
-      # consume. One JSON file per pending request under the state-home
-      # `dispatch_requests/` directory. See
-      # `Hive::Daemon::DispatchRequestQueue` and
-      # `Hive::Bot::DispatchRequestWriter`.
+      # Dispatch request payload retained in the SQLite control plane and
+      # consumed by the daemon. See `Hive::Bot::DispatchRequestWriter`.
       "hive-dispatch-request" => 5,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
-      # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
+      # chat through the transactional dispatch outbox (ADV-1).
       "hive-dispatch-result" => 2,
-      # Internal source-of-truth record for durable task-stage ownership.
-      "hive-attempt" => 4,
-      # Admission-owned immutable provider-routing policy snapshots.
-      "hive-routing-policy" => 1,
-      # Owner-private provider-account and exact-model circuit projection and
-      # its authoritative scoped journal events.
-      "hive-provider-health" => 1,
-      "hive-provider-health-event" => 1,
       # Dedicated operator-confirmed task closure input/receipt. These are
       # task-local authorities, not agent-callable command envelopes.
       "hive-task-closure-input" => 1,
       "hive-task-closure" => 1,
       # Bounded, read-only detail projection shared by authenticated Web HTML
-      # and JSON. It is intentionally independent from fleet-wide status v7.
+      # and JSON. It is intentionally independent from fleet-wide status v8.
       "hive-task-workspace" => 2,
       # Forward-only controller and agent context provenance receipts.
-      "hive-context-receipt" => 1,
-      # Project-local daemon ledger for task-bound merged-PR reconciliation.
-      "hive-pr-merge-reconciliation" => 1
+      "hive-context-receipt" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the
@@ -235,6 +222,7 @@ module Hive
       READY_TO_BRAINSTORM = "ready_to_brainstorm".freeze
       READY_TO_PLAN       = "ready_to_plan".freeze
       READY_TO_DEVELOP    = "ready_to_develop".freeze
+      OUTCOME_EVIDENCE_REWORK = "outcome_evidence_rework".freeze
       READY_TO_OPEN_PR    = "ready_to_open_pr".freeze
       READY_FOR_REVIEW    = "ready_for_review".freeze
       READY_TO_ARTIFACTS  = "ready_to_artifacts".freeze

@@ -1,7 +1,10 @@
 require "fileutils"
+require "digest"
 require "json"
 require "rbconfig"
 require "shellwords"
+require "yaml"
+require "hive/task_meta"
 require_relative "paths"
 require_relative "path_safety"
 require_relative "sandbox_env"
@@ -186,10 +189,20 @@ module Hive
         slug = PathSafety.safe_basename!(slug, "seed_state slug")
         project_root = project_root_for(step.args["project"])
         folder = File.join(project_root, ".hive-state", "stages", stage, slug)
+        task_id = Digest::SHA256.hexdigest(
+          [ @scenario_name, step.position, step.args["project"], stage, slug ].join("\0")
+        )[0, 12].to_i(16)
         lines = [
           "# step #{step.position} seed_state: #{stage}/#{slug}",
           "mkdir -p #{Shellwords.escape(folder)}",
-          heredoc_write(contained_relative_path(folder, state_file, "seed_state state_file"), content)
+          heredoc_write(contained_relative_path(folder, state_file, "seed_state state_file"), content),
+          heredoc_write(
+            File.join(folder, Hive::TaskMeta::FILENAME),
+            {
+              "id" => task_id, "slug" => slug,
+              "display_name" => slug, "workflow" => "coding"
+            }.to_yaml
+          )
         ]
         Array(step.args["files"]).each do |spec|
           rel = expand_string(spec.fetch("path"))

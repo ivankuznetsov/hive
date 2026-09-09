@@ -58,6 +58,7 @@ module Hive
         ready_to_brainstorm
         ready_to_plan
         ready_to_develop
+        outcome_evidence_rework
         ready_to_open_pr
         ready_for_review
         ready_to_artifacts
@@ -92,7 +93,7 @@ module Hive
         wait_for_answers: [ "operator", "waiting for unanswered brainstorm questions" ],
         blocked_on_dependency: [ "scheduler", "waiting for a workflow dependency" ],
         poll_for_merge: [ "scheduler", "waiting for pull request merge observation" ],
-        markerless_stalled: [ "hive", "agent exited without a terminal marker" ],
+      markerless_stalled: [ "hive", "task attempt produced no observable progress" ],
         skip: [ "none", "no scheduler action is required" ]
       }.freeze
 

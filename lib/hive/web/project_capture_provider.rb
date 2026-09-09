@@ -9,6 +9,7 @@ require "hive"
 require "hive/invoked_binary"
 require "hive/process_kill"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module Web
@@ -226,7 +227,7 @@ module Hive
         result = primary_error = custody_error = nil
         begin
           reader, writer = IO.pipe
-          custody_pid = Process.fork do
+          custody_pid = Hive::RuntimeControlPlane::ProcessGuard.fork do
             reader.close
             payload = begin
               Process.setsid
@@ -316,7 +317,7 @@ module Hive
           parent_custody_active = true
 
           reader, writer = IO.pipe
-          supervisor_pid = Process.fork do
+          supervisor_pid = Hive::RuntimeControlPlane::ProcessGuard.fork do
             reader.close
             payload = begin
               Process.setsid
@@ -557,7 +558,8 @@ module Hive
           out: stdout_writer,
           err: stderr_writer,
           pgroup: true,
-          unsetenv_others: true
+          unsetenv_others: true,
+          close_others: true
         )
         [ stdin_reader, stdout_writer, stderr_writer ].each(&:close)
         stdin_writer.write("#{JSON.generate(request)}\n") if request
@@ -1127,7 +1129,7 @@ module Hive
       end
 
       def reject_secret_shaped_output!(*values)
-        hits = Hive::SecretPatterns.scan(values.join("\n"))
+        hits = Hive::SecretScanner.scan(values.join("\n"))
         return if hits.empty?
 
         names = hits.map { |hit| hit.fetch(:name) }.uniq.join(", ")

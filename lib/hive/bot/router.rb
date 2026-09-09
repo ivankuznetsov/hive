@@ -27,6 +27,7 @@ module Hive
         slash_help
         slash_start
         callback_approve
+        callback_rework
         callback_approve_plan
         callback_rerun
         callback_reject
@@ -261,6 +262,7 @@ module Hive
       def callback_intent(data)
         case data
         when /\Aapprove:/ then :callback_approve
+        when /\Arework:/ then :callback_rework
         when /\Aapprove_plan:/ then :callback_approve_plan
         when /\Arerun:/ then :callback_rerun
         when /\Areject:/ then :callback_reject

@@ -69,12 +69,11 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
         Hive::UsageDb.define_singleton_method(:record!, original_record)
       end
 
-      assert_equal 2, records.size
-      reservation, completed = records
-      assert_equal "claude", reservation.fetch(:agent)
-      assert_equal "refactor-patrol-review-unmetered", reservation.fetch(:stage)
+      assert_equal 1, records.size
+      completed = records.fetch(0)
+      assert_equal "claude", completed.fetch(:agent)
       assert_equal "refactor-patrol-review", completed.fetch(:stage)
-      assert_equal reservation.fetch(:session_id), completed.fetch(:session_id)
+      assert_equal "patrol_discovery_launch", completed.fetch(:source)
     end
   end
 
@@ -563,6 +562,14 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
   end
 
   private
+
+  def with_tmp_dir
+    super do |dir|
+      state_home = tracked_tmp_dir("hive-test-refactor-patrol-runtime")
+      prepare_test_runtime_project(dir, state_home: state_home)
+      with_env("HIVE_HOME" => state_home) { yield dir }
+    end
+  end
 
   def assert_discovery_allowance_available(project_root)
     snapshot = Hive::Patrol::LaunchBudget.new(

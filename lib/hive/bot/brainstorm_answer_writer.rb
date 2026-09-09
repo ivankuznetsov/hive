@@ -34,6 +34,7 @@ module Hive
       def append!(brainstorm_path:, question_n:, answer_text:, logger: nil)
         task_folder = File.dirname(brainstorm_path)
         raise Hive::InvalidTaskPath, "task folder does not exist: #{task_folder}" unless Dir.exist?(task_folder)
+        return :question_not_found unless File.exist?(brainstorm_path)
 
         deadline = Time.now + LOCK_RETRY_DEADLINE_SEC
         result = nil
@@ -63,7 +64,7 @@ module Hive
         if result.nil?
           # Emit a structured event so operators can grep the bot log to see
           # what was holding the per-task lock when the writer gave up.
-          # holder fields come from Hive::Lock's lock-file YAML — typically
+          # holder fields come from Hive::Lock's task lease payload — typically
           # {pid:, started_at:, host:, op:, slug:, stage:, bot: …}.
           logger&.event(:answer_lock_contention,
                         task_folder: task_folder,

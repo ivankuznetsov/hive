@@ -13,20 +13,21 @@ require "hive/task"
 require "hive/task_action"
 
 class PatrolFixTaskActionTest < Minitest::Test
+  include HiveTestHelper
+
   SLUG = "repair-login-260820-abcd"
   Marker = Hive::Markers::State
 
-  def test_rejected_and_blocked_outcomes_are_visible_non_runnable_and_never_dispatch
+  def test_rejection_advances_to_archive_while_blocked_remains_parked
     with_task("inbox") do |task, receipts|
       receipts.append!(decision_receipt(route: "reject", stage: "inbox"))
 
       action = Hive::TaskAction.for(task, marker)
 
-      assert_equal Hive::Schemas::TaskActionKind::PATROL_FIX_REJECTED, action.key
-      assert_equal "Rejected (parked)", action.label
-      assert_nil action.command
+      assert_equal Hive::Schemas::TaskActionKind::READY_TO_ADVANCE, action.key
+      assert_includes action.command, "hive approve"
       assert_equal "rejected", action.patrol_fix.dig("outcome", "kind")
-      assert_equal :skip, policy_decision(action)
+      assert_equal :dispatch, policy_decision(action)
     end
 
     with_task("review") do |task, receipts|
@@ -41,17 +42,17 @@ class PatrolFixTaskActionTest < Minitest::Test
     end
   end
 
-  def test_escalation_exposes_the_successor_without_archiving_the_origin
+  def test_escalation_dispatches_the_archive_transition
     with_task("inbox", successor: { "project" => "demo", "slug" => "coding-successor-260820-abcd" }) do |task, receipts|
       receipts.append!(decision_receipt(route: "escalate", stage: "inbox"))
 
       action = Hive::TaskAction.for(task, marker)
 
-      assert_equal Hive::Schemas::TaskActionKind::PATROL_FIX_ESCALATED, action.key
+      assert_equal Hive::Schemas::TaskActionKind::READY_TO_ADVANCE, action.key
       assert_equal({ "project" => "demo", "slug" => "coding-successor-260820-abcd" },
                    action.patrol_fix.fetch("successor"))
       refute action.patrol_fix.fetch("archived")
-      assert_equal :skip, policy_decision(action)
+      assert_equal :dispatch, policy_decision(action)
     end
   end
 
@@ -129,7 +130,8 @@ class PatrolFixTaskActionTest < Minitest::Test
         } ],
         "aliases" => [], "relations" => { "successor" => successor, "issues" => [] }
       )
-      yield Hive::Task.new(folder), Hive::PatrolFix::ReceiptStore.new(task_folder: folder), root
+      task = Hive::Task.new(folder)
+      yield task, Hive::PatrolFix::ReceiptStore.new(task_folder: folder), root
     end
   end
 

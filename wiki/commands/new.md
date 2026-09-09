@@ -104,14 +104,15 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
    Body is the original text, or `body_override:` for programmatic rich-input callers, plus a trailing marker. Coding keeps `<!-- WAITING -->` for the historical inbox path. Non-coding workflows remove the waiting marker; if the entry stage is `kind: :inert`, capture writes `<!-- COMPLETE -->` so the real `hive approve` safety gate can move it forward.
 6. If attachments were supplied, copy them into `assets/` beside the state file.
 7. Allocate a monotonic task id via `Hive::TaskCounter.next_or_nil` and write `meta.yml` via `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil, workflow: ...)`. Counter lock contention is fail-soft: id becomes null, but `meta.yml` is still written and the capture continues.
+8. Leave task history absent. The first authoritative event creates `task-journal.jsonl`; until then the absent journal is an empty history stream.
 
 Managed selection is resolved once under the store's stable-read lock. Project
 configuration is loaded lazily only for a legacy v1 selection that must derive
 its compatibility snapshot; current v2 locks and unmanaged workflows do not
 pay that validation cost.
-8. Take `Hive::Lock.with_commit_lock(hive_state_path)`, then run `Hive::GitOps#hive_commit(stage_name: entry_stage.dir, slug:, action: "captured")` on `hive/state`. The lock only covers the short `git add && git commit` window, serializing concurrent web/TUI/bot `hive new` captures so git's shared worktree index lock is not raced. Diff-empty commits are skipped silently.
-9. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; repair a remaining blank name with `hive generate-name <task_dir>` or the explicit [[commands/migrate]] command.
-10. Print `hive: captured <path>` and the descriptor-derived `mv ... && hive run ...` next-step hint.
+9. Take `Hive::Lock.with_commit_lock(hive_state_path)`, then run `Hive::GitOps#hive_commit(stage_name: entry_stage.dir, slug:, action: "captured")` on `hive/state`. The lock only covers the short `git add && git commit` window, serializing concurrent web/TUI/bot `hive new` captures so git's shared worktree index lock is not raced. Diff-empty commits are skipped silently.
+10. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; repair a remaining blank name with `hive generate-name <task_dir>` or the explicit [[commands/migrate]] command.
+11. Print `hive: captured <path>` and the descriptor-derived `mv ... && hive run ...` next-step hint.
 
 ## Task metadata
 
@@ -127,7 +128,14 @@ idempotency_key: workflow-creator:editorial:stable
 input_fingerprint: 3f...
 ```
 
-`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; status surfaces use the slug until name generation succeeds. `depends_on` is omitted when not supplied and remains the authoritative scheduling declaration when present. `workflow:` is omitted for plain coding captures, but set for explicit overrides and non-coding project defaults. `base_branch:` is omitted outside draft-PR workflows and is authoritative when present.
+`id` comes from the SQLite `installations.next_task_id` column through one
+immediate transaction; no counter file or counter lock remains. `display_name`
+starts nil; status surfaces use the slug until name generation succeeds.
+`depends_on` is omitted when not supplied and remains the authoritative
+scheduling declaration when present. `workflow:` is omitted for plain coding
+captures, but set for explicit overrides and non-coding project defaults.
+`base_branch:` is omitted outside draft-PR workflows and is authoritative when
+present.
 
 ## Tests
 

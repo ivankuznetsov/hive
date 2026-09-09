@@ -18,7 +18,6 @@ require "hive/commands/stage_action"
 require "hive/commands/adhoc_review"
 require "hive/commands/status"
 require "hive/commands/worktree"
-require "hive/commands/circuits"
 require "hive/commands/watch"
 require "hive/commands/act"
 require "hive/commands/approve"
@@ -100,33 +99,8 @@ class HiveCliTest < Minitest::Test
     assert_includes out, "never installs"
   end
 
-  def test_circuits_help_and_cli_wiring_require_explicit_operator_inputs
-    out, _err = capture_io { Hive::CLI.start([ "help", "circuits" ]) }
-
-    assert_includes out, "--expected-generation"
-    assert_includes out, "--reason"
-    assert_includes out, "--yes"
-    assert_includes out, "reset-intent"
-    assert_includes out, "--intent-file"
-    assert_includes out, "intentionally absent from `hive act`"
-
-    with_command_new_stub(Hive::Commands::Circuits) do |calls|
-      Hive::CLI.start([
-        "circuits", "block", "--provider", "account-a", "--model", "model-a",
-        "--reason", "planned maintenance", "--expected-generation", "7", "--yes", "--json"
-      ])
-
-      assert_equal [ "block" ], calls.first.fetch(:args)
-      assert_equal(
-        {
-          provider: "account-a", model: "model-a", reason: "planned maintenance",
-          expected_generation: 7, journal_epoch: nil, corruption_fingerprint: nil,
-          last_verified_generation: nil, intent_file: nil, yes: true, json: true
-        },
-        calls.first.fetch(:kwargs)
-      )
-      assert_equal :call, calls.last
-    end
+  def test_circuits_command_is_absent
+    refute Hive::CLI.tasks.key?("circuits")
   end
 
   CommandDouble = Struct.new(:return_value, :calls) do
@@ -243,7 +217,7 @@ class HiveCliTest < Minitest::Test
 
     with_command_new_stub(Hive::Commands::Update) do |calls|
       Hive::CLI.start([ "update", "--dry-run" ])
-      assert_equal({ dry_run: true }, calls.first.fetch(:kwargs))
+      assert_equal({ dry_run: true, confirm: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Connect) do |calls|
@@ -278,6 +252,13 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "migrate", "/tmp/project", "--all" ])
     end
     assert_match(/PROJECT_PATH and --all are mutually exclusive/, error.message)
+
+    require "hive/commands/runtime"
+    with_command_new_stub(Hive::Commands::Runtime) do |calls|
+      Hive::CLI.start([ "runtime", "resume", "--json" ])
+      assert_equal [ "resume" ], calls.first.fetch(:args)
+      assert_equal({ json: true }, calls.first.fetch(:kwargs))
+    end
   end
 
   def test_doctor_loads_project_config_and_exits_with_command_status

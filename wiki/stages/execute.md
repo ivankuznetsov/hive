@@ -3,11 +3,11 @@ title: 4-execute stage
 type: stage
 source: lib/hive/stages/execute.rb, templates/execute_prompt.md.erb
 created: 2026-04-25
-updated: 2026-08-28
+updated: 2026-08-30
 tags: [stage, execute, worktree, plan-review]
 ---
 
-**TLDR**: Implementation-only since U9 (ADR-014). Entry from built-in coding plan first requires a current [[modules/plan_review]] resolution; raw movement into execute revalidates existing review evidence and writes a compatibility receipt only for a task with no review root. First implementation entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes` unless `plan.md` opts into `execution_mode: research` and the agent produced a structured final answer. Provider quota walls write `ERROR reason=limits_reached`; typed non-limit provider failures and agent-owned dirty progress also become recoverable errors. The daemon submits each exact error generation to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No PR review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
+**TLDR**: Implementation-only since U9 (ADR-014). Entry from built-in coding plan first requires a current [[modules/plan_review]] resolution; raw movement into execute revalidates existing review evidence and writes a compatibility receipt only for a task with no review root. First implementation entry creates a feature worktree at `<worktree_root>/<slug>`, records its baseline HEAD in `worktree.yml`, spawns the implementation agent, captures its final message into `task.md`, and finalises with `EXECUTE_COMPLETE` only when the worktree stays on the task branch, descends from the baseline, has a new commit, and is clean. A reviewed `7-artifacts` implementation defect can also rearm the same owned worktree into execute with digest-bound reviewer feedback and protected evidence receipts. Clean no-change exits pause as `EXECUTE_WAITING reason=no_worktree_changes`; a rework whose reviewed-to-final repository diff is empty is a recoverable `ERROR`, never a fresh artifacts submission. Provider quota walls write `ERROR reason=limits_reached`; typed non-limit provider failures and agent-owned dirty progress also become recoverable errors. The daemon submits ordinary exact error generations to `RecoveryCoordinator` after the shared cooldown instead of hot-looping. The user `mv`s completed tasks to `6-review/` to enter the autonomous review loop. No PR review/iteration logic lives in 4-execute — that all moved to [[stages/review]].
 
 ## Condition boundary
 
@@ -78,15 +78,30 @@ snapshot that whole implementation even when planned files fall outside the
 review-fix filename allowlist, while retaining staged-symlink, secret-content,
 signing, ownership, branch, ancestry, and cleanliness gates.
 
+A task rearmed from outcome-evidence review retains the rejected evidence
+package as audit history. Execute validates the append-only rework receipt,
+adds its failed targets and reviewer reasons to the implementation prompt, and
+extends the artifact-firewall manifest with `current.json`, the exact
+requirement/diff/attempt documents, every representation and project-provider
+manifest named by those attempts, both bounded receipt slots, and all existing
+receipts. The agent is told to repair and test the repository rather than
+recapture evidence. Both future receipt slots are protected even before the
+first authorization exists, and non-receipt siblings cannot poison inventory
+reads. If the reviewed-to-final repository diff is empty, including when the
+agent creates only an empty descendant commit, Execute writes
+`ERROR reason=outcome_evidence_rework_unchanged`; the ordinary retry ladder may
+give the implementation agent another turn, but the unchanged source cannot
+consume another evidence generation or rework authorization.
+
 ## Implementation sub-agent (`spawn_implementation`)
 
 - **Prompt**: `templates/execute_prompt.md.erb` rendered with `project_name`, `worktree_path`, `task_folder`, `plan_text`. Plan is wrapped in `<user_supplied content_type="plan_md">`.
 - **cwd**: feature worktree (so `claude` picks up the project's CLAUDE.md from there).
-- **`--add-dir <task folder>`**: lets the agent read plan.md and append to `task.md` ("## Implementation" section).
+- **`--add-dir <task folder>`**: lets the agent read plan and rework context and, when offered, write only the exact optional context-receipt `.json.next` slot. Protected task artifacts remain read-only to the implementer; Hive captures the final message into `task.md` after custody closes.
 - **Budgets**: `cfg["budget_usd"]["execute_implementation"]` (100), `cfg["timeout_sec"]["execute_implementation"]` (2700).
 - **Log label**: `execute-impl`.
-- **Final message capture**: `Hive::Agent` records the last `result`, `item.completed agent_message`, `assistant` stream-json message, or plain stdout tail. `Stages::Execute` writes it to `task.md` before the terminal marker so investigation work is not trapped only in raw logs. A nil spawn result is treated as no final message, leaving the state file unchanged so the normal implementation-failure path can classify and recover the attempt. Only structured final messages count as research-mode output; plain stdout/stderr progress is preserved but does not complete research mode.
-- Agent must commit each logical unit in the worktree and run lint/tests as it goes. May only edit `task.md` inside the task folder; must not touch `plan.md` or `worktree.yml` (SHA-256 protected, ADR-013).
+- **Final message capture**: `Hive::Agent` records the last `result`, `item.completed agent_message`, `assistant` stream-json message, or plain stdout tail. After the implementer custody report closes cleanly, `Stages::Execute` writes that controller-owned output to `task.md` before the terminal marker so investigation work is not trapped only in raw logs. A nil spawn result is treated as no final message, leaving the state file unchanged so the normal implementation-failure path can classify and recover the attempt. Only structured final messages count as research-mode output; plain stdout/stderr progress is preserved but does not complete research mode.
+- Agent must commit each logical unit in the worktree and run lint/tests as it goes. Existing task-folder artifacts, including `task.md`, `plan.md`, and `worktree.yml`, are protected and read-only to the implementer; only an exact optional context-receipt `.json.next` slot supplied for the attempt may be created (ADR-013).
 - The firewall also protects the task journal/projection and every promoted
   `context-receipts` and `activity-operations` record. Because those immutable
   histories grow on retries, Execute partitions them into manifests of at most
@@ -102,7 +117,7 @@ signing, ownership, branch, ancestry, and cleanliness gates.
 ## Tests
 
 - `test/unit/agent_test.rb` — captures final messages from stream-json result lines.
-- `test/unit/stages/execute_test.rb` — pins execute's provider-limit classification via both `error_message` and raw `limit_text`, typed and exceptional `implementer_failed` markers, nil spawn-result output capture, tamper precedence, and bounded custody of growing controller-receipt history.
+- `test/unit/stages/execute_test.rb` — pins execute's provider-limit classification via both `error_message` and raw `limit_text`, typed and exceptional `implementer_failed` markers, nil spawn-result output capture, post-custody controller output capture, tamper precedence, and bounded custody of growing controller-receipt history.
 - `test/integration/run_execute_test.rb` — init pass produces `EXECUTE_COMPLETE`; no-change exits preserve `## Execute Output` and pause; research-mode no-change runs can complete with output; research-mode without output pauses; re-run announces 5-open-pr; tampering → `:error`; impl failure → `:error`; missing plan.md exits 1; no review files written.
 
 ## Backlinks

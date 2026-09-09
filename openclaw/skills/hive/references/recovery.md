@@ -1,5 +1,19 @@
 # Recovery
 
+## Runtime cutover recovery
+
+A `fleet_cutover_required` error is a controller-wide maintenance fence, not a
+task retry. Run the read-only `hive runtime status --json` first and report its
+`phase`, database status, `runtime_code`, and `next_action`. Do not run ordinary
+workflow commands while the fence is active.
+
+The SQLite cutover is irreversible. `hive migrate --all --yes` starts it and
+`hive runtime resume` advances an interrupted cutover; both change controller
+state and require explicit operator approval. There is no rollback, restore, or
+downgrade path. Never invent one or remove cutover evidence. After an approved
+resume, re-run `hive runtime status --json` and require `phase: active` with an
+`ok` database before returning to task operations.
+
 ## Diagnose before changing state
 
 Start with native evidence:
@@ -13,6 +27,19 @@ hive status --diagnose SLUG --project PROJECT --json
 Use the operational row’s liveness, reasons, scheduler freshness, provider hold, condition warning, and diagnostic artifact. Do not infer ownership from a process-name scan, and do not create a polling or repair script beside Hive.
 
 Preserve the task folder, worktree, attempt records, queue entries, locks, markers, and daemon snapshots while investigating. A stale physical lock, a stale durable attempt, and a provider or global-cap wait are different conditions.
+
+## Keep task-history recovery separate from workflow retry
+
+An operational row with `task_history_invalid: true` and reason
+`condition_task_history_invalid` is synthetic and operator-owned. Hive could
+not fold that task's authoritative `task-journal.jsonl`. This is not a persisted
+workflow failure, so `workflow.retry`, marker clearing, rerunning the stage, or
+restarting the daemon cannot repair it. Preserve the task folder, inspect the
+task-local journal diagnostic, and recover the JSONL only from verified task
+evidence or a trusted backup with explicit operator approval. Hive does not
+synthesize missing history and has no projection repair command. Refresh
+`hive status --operational --json` afterward. Hive isolates the row and
+continues unrelated work automatically.
 
 ## Respect recovery ownership
 

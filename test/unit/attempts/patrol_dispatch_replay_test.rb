@@ -88,7 +88,7 @@ class PatrolDispatchReplayTest < Minitest::Test
   end
 
   def test_normalizer_bounds_and_redacts_detail_and_omits_it_when_redaction_fails
-    token = "github" + "_pat_" + ("A" * 24)
+    token = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
     detail = "\e[31mprovider failed #{token} \xFF".b + ("x" * 8_000)
     diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
       {
@@ -101,12 +101,14 @@ class PatrolDispatchReplayTest < Minitest::Test
     )
 
     assert_equal "agent_exit_nonzero", diagnostic.fetch("code")
+    assert_equal 1, diagnostic.fetch("secret_policy_version"),
+                 "a scanner replacement must not invalidate existing diagnostic receipts"
     assert_operator diagnostic.fetch("detail").bytesize, :<=,
                     Hive::PatrolFix::AttemptDiagnostic::MAX_DETAIL_BYTES
     assert diagnostic.fetch("detail").valid_encoding?
     refute_includes diagnostic.fetch("detail"), "\e[31m"
     refute_includes diagnostic.fetch("detail"), token
-    assert_includes diagnostic.fetch("detail"), "[REDACTED:github_fine_grained_pat]"
+    assert_includes diagnostic.fetch("detail"), "[REDACTED:github_token]"
 
     failed = Hive::PatrolFix::AttemptDiagnostic.normalize(
       {
@@ -146,7 +148,7 @@ class PatrolDispatchReplayTest < Minitest::Test
   end
 
   def test_secret_shaped_metadata_invalidates_the_entire_diagnostic
-    secret = "github" + "_pat_" + ("A" * 24)
+    secret = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
     base = Hive::PatrolFix::AttemptDiagnostic.normalize(
       {
         "phase" => "managed_agent", "status" => "error", "exit_code" => 1,
@@ -391,7 +393,7 @@ class PatrolDispatchReplayTest < Minitest::Test
   end
 
   def test_secret_bearing_non_utf8_and_host_specific_fixtures_are_rejected
-    token = "github" + "_pat_" + ("A" * 24)
+    token = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
     error = fixture_error(JSON.generate("diagnostic" => token))
     assert_match(/secret-bearing/, error.message)
 

@@ -781,6 +781,7 @@ class HiveBotRouterTest < Minitest::Test
   def test_classifies_all_callback_prefixes
     cases = {
       "reject:anything" => :callback_reject,
+      "rework:hive:slug-260514-abcd:7-artifacts" => :callback_rework,
       "approve_plan:hive:slug-260514-abcd:3-plan" => :callback_approve_plan,
       "rerun:hive:slug-260514-abcd:4-execute:develop" => :callback_rerun,
       "autofix:hive:slug-260514-abcd:6-review:REVIEW_ERROR" => :callback_autofix,

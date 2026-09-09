@@ -19,7 +19,7 @@ module Hive
 
     # Files the orchestrator owns; sub-spawns must not modify them.
     ORCHESTRATOR_OWNED = %w[
-      plan.md worktree.yml handoff.yml task.md task-journal.jsonl task-projection.json
+      plan.md worktree.yml handoff.yml task.md task-journal.jsonl
     ].freeze
 
     module_function

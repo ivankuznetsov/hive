@@ -12,7 +12,7 @@ class TaskClosureTest < Minitest::Test
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         closure = Hive::TaskClosure.new
-        assert_equal File.join(root, "attempts", "v4"),
+        assert_equal File.join(root, "runtime-payloads"),
                      closure.instance_variable_get(:@attempt_store)
                             .instance_variable_get(:@root)
       end
@@ -65,9 +65,7 @@ class TaskClosureTest < Minitest::Test
   end
 
   EmptyAttempts = Struct.new(:unused) do
-    def scan
-      Hive::Attempts::Scan.new(records: [], invalid_records: [])
-    end
+    def active_attempts = []
   end
 
   Attempt = Struct.new(:attempt_id, :state, :payload, keyword_init: true) do
@@ -76,9 +74,7 @@ class TaskClosureTest < Minitest::Test
   end
 
   AttemptStore = Struct.new(:records, keyword_init: true) do
-    def scan
-      Hive::Attempts::Scan.new(records: records, invalid_records: [])
-    end
+    def active_attempts = records
   end
 
   def test_verified_same_repository_merge_closes_and_replays_idempotently
@@ -510,13 +506,17 @@ class TaskClosureTest < Minitest::Test
         :build_receipt, preview, operator: "tester", channel: "cli"
       )
       File.binwrite(File.join(task.folder, "closure.json"), JSON.generate(receipt))
+      task_projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read(
+        marker: Hive::Markers.current(task.state_file)
+      )
 
       with_replaced_singleton_method(
-        Hive::Attempts::Store, :new,
+        Hive::Attempts::Repository, :new,
         ->(**) { flunk "active closure projection rebuilt the attempt store" }
       ) do
         projection = Hive::TaskClosure.projection(
-          task, project: project, attempt_store: attempt_store
+          task, project: project, attempt_store: attempt_store,
+          task_projection: task_projection
         )
         assert_equal receipt.fetch("receipt_digest"), projection.fetch("receipt_digest")
       end
@@ -631,6 +631,7 @@ class TaskClosureTest < Minitest::Test
       run!("git", "-C", worktree.path, "add", "delivered.txt")
       run!("git", "-C", worktree.path, "commit", "-m", "delivered", "--quiet")
       head = Hive::GitOps.new(worktree.path).head_sha
+      assert_equal head, Hive::TaskClosure.local_pr_head_binding(task, frontmatter: { "head_oid" => "f" * 40 })
       service = service_for(gh: FakeGh.new(head_oid: head))
       input = input_for("acme/app#42")
       preview = service.preview(task: task, project: project, input: input)
@@ -739,6 +740,32 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  def test_owned_worktree_head_ancestor_of_verified_pr_head_allows_closure
+    with_closure_project do |task, project|
+      root = Hive::Worktree.canonical_root(task.project_root)
+      worktree = Hive::Worktree.new(task.project_root, task.slug, worktree_root: root)
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+
+      File.write(File.join(worktree.path, "task-change.txt"), "task work\n")
+      run!("git", "-C", worktree.path, "add", "task-change.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "task change", "--quiet")
+      task_head = Hive::GitOps.new(worktree.path).head_sha
+
+      File.write(File.join(worktree.path, "review-fix.txt"), "later PR fix\n")
+      run!("git", "-C", worktree.path, "add", "review-fix.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "review fix", "--quiet")
+      delivered_head = Hive::GitOps.new(worktree.path).head_sha
+      run!("git", "-C", worktree.path, "reset", "--hard", task_head)
+
+      preview = service_for(gh: FakeGh.new(head_oid: delivered_head)).preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+
+      assert preview.valid?, preview.to_h.inspect
+    end
+  end
+
   def test_public_helpers_and_fallbacks_fail_closed
     with_closure_project do |task, project|
       input = input_for("acme/app#42")
@@ -810,6 +837,24 @@ class TaskClosureTest < Minitest::Test
         assert_nil Hive::TaskClosure.transition_evidence(
           task, receipt_digest: "a" * 64, project: project
         )
+      end
+    end
+  end
+
+  def test_task_generation_accepts_an_already_projected_condition_generation
+    with_closure_project do |task, _project|
+      marker = Hive::Markers.current(task.state_file)
+      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read(marker: marker)
+      expected = Hive::TaskClosure.task_generation(task, marker: marker)
+
+      with_replaced_singleton_method(
+        Hive::TaskProjection::Reader, :new,
+        ->(**) { flunk "task generation rebuilt an accepted projection" }
+      ) do
+        assert_equal expected,
+                     Hive::TaskClosure.task_generation(
+                       task, marker: marker, projection: projection
+                     )
       end
     end
   end
@@ -936,7 +981,7 @@ class TaskClosureTest < Minitest::Test
   def test_ownership_and_storage_failures_become_blockers_or_invalid_reads
     with_closure_project do |task, project|
       failing_attempts = Object.new
-      failing_attempts.define_singleton_method(:scan) do
+      failing_attempts.define_singleton_method(:active_attempts) do
         raise Hive::Error, "attempt ledger unavailable"
       end
       preview = service_for(attempt_store: failing_attempts).preview(
@@ -946,25 +991,15 @@ class TaskClosureTest < Minitest::Test
         entry.fetch("code") == "ownership_unverifiable"
       end
 
-      invalid_attempts = Object.new
-      invalid_attempts.define_singleton_method(:scan) do
-        Hive::Attempts::Scan.new(
-          records: [], invalid_records: [ { "error" => "corrupt" } ]
-        )
-      end
-      invalid_preview = service_for(attempt_store: invalid_attempts).preview(
-        task: task, project: project, input: input_for("acme/app#42")
-      )
-      assert invalid_preview.blockers.any? do |entry|
-        entry.fetch("code") == "ownership_unverifiable"
-      end
-
-      File.write(
-        task.lock_file,
+      repository = Hive::Lock.task_lease_repository
+      held = repository.acquire(task.folder, { "op" => "closure-test" }, create: false)
+      repository.update(
+        task.folder,
         {
           "pid" => 2_000_000_000,
           "process_start_time" => "missing"
-        }.to_yaml
+        },
+        lock_id: held.fetch("lock_id")
       )
       refute service_for.send(:live_task_lock?, task)
 
@@ -974,7 +1009,7 @@ class TaskClosureTest < Minitest::Test
         assert service_for.send(:live_task_lock?, task)
       end
 
-      FileUtils.rm_f(task.lock_file)
+      repository.release(task.folder, lock_id: held.fetch("lock_id"))
       File.write(File.join(task.folder, "worktree.yml"), "---\npath: [\n")
       blockers = service_for.send(:worktree_blockers, task)
       assert_equal "worktree_unverifiable", blockers.first.fetch("code")
@@ -1383,10 +1418,26 @@ class TaskClosureTest < Minitest::Test
           ]
         }.to_yaml
       )
+      database = prepare_runtime_project(
+        state_home: home, name: "app", path: project, state_root_path: hive_state
+      )
+      prior_repository = Hive::Lock.task_lease_repository
+      Hive::Lock.task_lease_repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+        database: database,
+        process_start_time: Hive::Lock.method(:process_start_time),
+        process_alive: lambda { |pid, recorded_start_time:|
+          Hive::Lock.send(
+            :process_identity_alive?, pid, recorded_start_time: recorded_start_time
+          )
+        }
+      )
       attempts = File.join(home, "attempts")
       with_env("HIVE_ATTEMPT_STORE_ROOT" => attempts) do
         yield Hive::Task.new(folder), "app"
       end
+    ensure
+      Hive::Lock.task_lease_repository = prior_repository if prior_repository
+      database&.disconnect
     end
   end
 end

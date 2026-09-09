@@ -47,6 +47,7 @@ module Hive
       "Plan reviewer configuration required",
       "Plan review blocks execution",
       "Ready to develop",
+      "Implementation rework required",
       "Needs recovery",
       "Retry draft PR handoff manually",
       "Agent running",

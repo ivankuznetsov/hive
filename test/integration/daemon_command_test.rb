@@ -3,7 +3,9 @@ require "json"
 require "open3"
 require "tmpdir"
 require "rbconfig"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
+require "hive/commands/daemon"
+require "hive/commands/daemon/queue_command"
 
 # Integration test for `hive daemon` subcommands. Uses real bin/hive
 # subprocesses against a temporary HIVE_HOME so PID file / log file
@@ -17,6 +19,8 @@ class HiveDaemonCommandTest < Minitest::Test
   def with_isolated_hive_home(&block)
     Dir.mktmpdir("hive-daemon-test") do |home|
       env = ENV.to_h.merge("HIVE_HOME" => home, "HOME" => home)
+      activate_test_control_plane(home)
+      prepare_runtime_project(state_home: home, name: "hive", path: home).disconnect
       block.call(home, env)
     end
   end
@@ -1392,31 +1396,44 @@ class HiveDaemonCommandTest < Minitest::Test
 
   # ── queue: list / show / prune (AN-1/2/3) ─────────────────────────────
 
-  # Write a dispatch-request file straight into <home>/dispatch_requests/
-  # so the CLI command reads the same layout the daemon consumes.
+  # Write a dispatch-request row into the same runtime database the daemon
+  # and CLI consume.
   def write_dispatch_request(home, request_id:, created_at:, slug: "my-task",
                              argv: nil, project: "hive")
-    dir = File.join(home, "dispatch_requests")
-    FileUtils.mkdir_p(dir)
-    payload = {
-      "schema" => "hive-dispatch-request",
-      "schema_version" => Hive::Daemon::DispatchRequestQueue::SCHEMA_VERSION,
-      "request_id" => request_id,
-      "created_at" => created_at,
-      "project" => project,
-      "slug" => slug,
-      "argv" => argv || [ "hive", "review", slug, "--json" ],
-      "requestor" => "bot",
-      "chat_id" => 42,
-      "update_id" => 7,
-      "trigger" => "autofix",
-      "task_generation" => nil,
-      "predecessor_attempt_id" => nil,
-      "inherited_outputs" => [],
-      "recovery" => nil
-    }
-    File.write(File.join(dir, "#{created_at.tr(':', '')}-#{request_id}.json"),
-               JSON.generate(payload))
+    database = prepare_runtime_project(state_home: home, name: project, path: home)
+    repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
+    requested_argv = argv || [ "hive", "review", slug, "--json" ]
+    stored_argv = if repository.valid_argv?(requested_argv)
+      requested_argv
+    else
+      [ "hive", "review", slug, "--json" ]
+    end
+    repository.write_request!(
+      project: project, slug: slug, argv: stored_argv, requestor: "bot",
+      chat_id: 42, update_id: 7, trigger: "autofix", request_id: request_id,
+      now: Time.iso8601(created_at)
+    )
+    unless stored_argv == requested_argv
+      database.transaction do |db|
+        row = db[:dispatch_requests].where(request_id: request_id).first
+        payload = Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:payload_json))
+        payload["argv"] = requested_argv
+        db[:dispatch_requests].where(request_id: request_id).update(
+          payload_json: Hive::RuntimeControlPlane::Codec.dump_json(payload)
+        )
+      end
+    end
+  ensure
+    database&.disconnect
+  end
+
+  def pending_dispatch_requests(home)
+    database = Hive::RuntimeControlPlane::Database.new(
+      path: Hive::Paths.runtime_control_plane_path(home)
+    ).open!
+    Hive::RuntimeControlPlane::DispatchRepository.new(database: database).pending
+  ensure
+    database&.disconnect
   end
 
   def test_queue_list_empty_human_output
@@ -1486,9 +1503,9 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_equal 1, doc["pruned_count"], "only the expired request is pruned"
 
       # The fresh one survives.
-      remaining = Dir.glob(File.join(home, "dispatch_requests", "*.json"))
+      remaining = pending_dispatch_requests(home)
       assert_equal 1, remaining.length
-      assert_includes File.read(remaining.first), "fresh001"
+      assert_equal "fresh001", remaining.first.request_id
     end
   end
 
@@ -1510,23 +1527,22 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
-  def test_queue_list_human_output_with_flags_and_malformed
+  def test_queue_list_human_output_with_flags_for_validated_rows
     with_isolated_hive_home do |home, env|
-      # A normal fresh request, an expired one, a non-allowlisted one, and
-      # a malformed file — exercises every branch of the human list path.
+      # A normal fresh request, an expired one, and a tampered non-allowlisted
+      # payload exercise the human list flags. SQL row corruption fails the
+      # repository read closed rather than appearing as a queue entry.
       write_dispatch_request(home, request_id: "normal01", created_at: Time.now.utc.iso8601)
       write_dispatch_request(home, request_id: "expired1",
                              created_at: (Time.now.utc - 1200).iso8601, slug: "old-task")
       write_dispatch_request(home, request_id: "notallow", created_at: Time.now.utc.iso8601,
                              slug: "weird-task", argv: [ "hive", "doctor" ])
-      File.write(File.join(home, "dispatch_requests", "20260528-bad.json"), "{not json")
-
       out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "queue", "list")
       assert_equal 0, status.exitstatus
       assert_includes out, "normal01"
       assert_includes out, "EXPIRED"
       assert_includes out, "NOT-ALLOWLISTED"
-      assert_includes out, "(malformed)"
+      assert_includes out, "0 malformed"
       assert_includes out, "pending"
     end
   end
@@ -1609,20 +1625,42 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
-  def test_queue_internal_error_json_emits_envelope
+  def test_queue_corrupt_runtime_is_fenced_by_the_boot_contract
     with_isolated_hive_home do |home, env|
-      # A file where the queue dir should be makes mkdir_p raise → the
-      # internal-error rescue must still emit a structured envelope.
-      File.write(File.join(home, "dispatch_requests"), "not a directory")
+      # The activation gate runs before command dispatch, so a corrupt active
+      # database uses the runtime-maintenance contract rather than pretending
+      # the queue command reached its own repository.
+      File.write(Hive::Paths.runtime_control_plane_path(home), "not a sqlite database")
       out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
                                          "daemon", "queue", "list", "--json")
-      # #262: an internal queue failure exits 70 (SOFTWARE), matching the
-      # envelope's error_kind:"internal" — not a bare uncaught StandardError
-      # (exit 1 + stack trace).
-      assert_equal Hive::ExitCodes::SOFTWARE, status.exitstatus
+      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
       doc = JSON.parse(out)
       assert_equal false, doc["ok"]
-      assert_equal "internal", doc["error_kind"]
+      assert_equal "hive-runtime-maintenance", doc["schema"]
+      assert_equal "runtime", doc["error_kind"]
+      assert_equal "fleet_cutover_required", doc["runtime_code"]
+    end
+  end
+
+  def test_queue_wraps_typed_and_unexpected_repository_failures
+    [
+      Hive::RuntimeControlPlane::Unavailable.new("database unavailable", code: :unavailable),
+      IOError.new("database unreadable")
+    ].each do |failure|
+      repository = Object.new
+      repository.define_singleton_method(:pending) { |**| raise failure }
+      output, = capture_io do
+        error = assert_raises(Hive::InternalError) do
+          Hive::Commands::Daemon::QueueCommand.new(
+            queue_args: [ "list" ], json: true, hive_home: "/tmp/hive",
+            dispatch_repository: repository
+          ).call
+        end
+        assert_includes error.message, failure.class.name
+      end
+      payload = JSON.parse(output)
+      assert_equal false, payload.fetch("ok")
+      assert_equal "internal", payload.fetch("error_kind")
     end
   end
 end

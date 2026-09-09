@@ -927,6 +927,8 @@ module Hive
             event = case result && result[:status]
             when :closed
               :architecture_patrol_closed
+            when :skipped
+              :architecture_patrol_skipped
             when :classified, :action_pending
               :architecture_patrol_progress
             else

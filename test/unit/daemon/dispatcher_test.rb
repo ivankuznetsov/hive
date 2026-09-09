@@ -9,6 +9,7 @@ require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
+require "hive/daemon/scheduled_architecture_scheduler"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
 # these tests is the routing decisions: which Policy outcome maps to
@@ -1109,6 +1110,78 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, supervisor.spawned.size
   end
 
+
+  def test_periodic_architecture_scan_dispatches_and_reaps_through_real_schedulers
+    with_tmp_dir do |root|
+      entry = { "name" => "p1", "path" => root, "project_id" => "p1-id",
+                "hive_state_path" => File.join(root, ".hive-state") }
+      cfg = Hive::Config.merge_defaults(
+        "daemon" => { "enabled" => true }, "refactor_patrol" => { "enabled" => true }
+      )
+      scheduled = Hive::Daemon::ScheduledArchitectureScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { cfg }
+      )
+      architecture = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { cfg }, scheduled_scheduler: scheduled
+      )
+      arbiter = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil, architecture_scheduler: architecture,
+        state_path: File.join(root, "arbiter.json")
+      )
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+      )
+      remaining = 1
+      budget = Object.new
+      budget.define_singleton_method(:remaining_launches) { remaining }
+      with_replaced_singleton_method(Hive::Patrol::LaunchBudget, :new, ->(*) { budget }) do
+        dispatcher.tick(now: T0)
+        assert_equal 1, supervisor.spawned.size
+        child = supervisor.spawned.first
+        assert_includes child.fetch(:command), "refactor-patrol-scheduled"
+        token = child.fetch(:dispatch_token)
+        assert_equal :scheduled, token.fetch(:phase)
+        dispatcher.tick(now: T0 + 1)
+        assert_equal 1, supervisor.spawned.size, "live slice must not launch twice"
+        supervisor.next_exits = [ ChildExit.new(
+          pid: child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: child.fetch(:command), started_at: T0,
+          finished_at: T0 + 2, json_envelope: { "ok" => true }, dispatch_token: token
+        ) ]
+        dispatcher.tick(now: T0 + 2)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        assert_equal 1, supervisor.spawned.size, "completion must preserve cadence"
+        dispatcher.tick(now: T0 + 3600)
+        assert_equal 2, supervisor.spawned.size, "completed sweep must permit the next periodic dispatch"
+        second_child = supervisor.spawned.last
+        second_token = second_child.fetch(:dispatch_token)
+        assert_equal :scheduled, second_token.fetch(:phase)
+        refute_equal token.fetch(:job_id), second_token.fetch(:job_id)
+        supervisor.next_exits = [ ChildExit.new(
+          pid: second_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: second_child.fetch(:command), started_at: T0 + 3600,
+          finished_at: T0 + 3602, json_envelope: { "ok" => true }, dispatch_token: second_token
+        ) ]
+        dispatcher.tick(now: T0 + 3602)
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        dispatcher.tick(now: T0 + 7200)
+        third_child = supervisor.spawned.last
+        assert_equal 3, supervisor.spawned.size
+        supervisor.next_exits = [ ChildExit.new(
+          pid: third_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: third_child.fetch(:command), started_at: T0 + 7200,
+          finished_at: T0 + 7202, json_envelope: { "ok" => true, "reason" => "no_available_slice" },
+          dispatch_token: third_child.fetch(:dispatch_token)
+        ) ]
+        dispatcher.tick(now: T0 + 7202)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_skipped && attrs[:reason] == "no_available_slice" }
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        remaining = 0
+        dispatcher.tick(now: T0 + 10800)
+        assert_equal 3, supervisor.spawned.size, "exhausted discovery allowance must block another launch"
+      end
+    end
+  end
 
   def test_architecture_patrol_spawn_attaches_fence_then_commits_arbiter_and_routes_completion
     architecture = FakeRefactorPatrolScheduler.new

@@ -123,6 +123,37 @@ class HiveCommandsDaemonTest < Minitest::Test
   end
 
 
+  def test_daemon_composition_offers_a_periodic_architecture_scan_without_merged_jobs
+    captured = nil
+    with_global_start_config(daemon_config) do
+      with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+        captured = kwargs
+        FakeDispatcher.new([])
+      }) { daemon("start", dry_run: true).call }
+    end
+    entry = { "name" => "demo", "path" => @home, "project_id" => "demo-id",
+              "hive_state_path" => File.join(@home, ".hive-state") }
+    cfg = Hive::Config.merge_defaults(
+      "daemon" => { "enabled" => true }, "patrol" => { "enabled" => false },
+      "refactor_patrol" => { "enabled" => true }
+    )
+    budget = Object.new
+    budget.define_singleton_method(:remaining_launches) { 1 }
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ entry ] }) do
+      with_replaced_singleton_method(Hive::Config, :load, ->(*) { cfg }) do
+        with_replaced_singleton_method(Hive::Patrol::LaunchBudget, :new, ->(*) { budget }) do
+          candidate = captured.fetch(:patrol_arbiter).candidates(now: Time.now).find do |item|
+            item[:action_phase] == :scheduled
+          end
+          refute_nil candidate, "daemon must schedule current-main sweeps without any merged-PR jobs"
+          dispatch = captured.fetch(:refactor_patrol_scheduler).reserve(candidate, now: Time.now)
+          assert_includes dispatch.fetch(:command), "refactor-patrol-scheduled"
+          assert_equal :architecture_patrol, dispatch.dig(:dispatch_token, :kind)
+        end
+      end
+    end
+  end
+
   def test_start_daemon_writes_pid_loads_global_config_runs_dispatcher_and_cleans_pid
     command = daemon("start", dry_run: true)
     dispatcher = FakeDispatcher.new([])

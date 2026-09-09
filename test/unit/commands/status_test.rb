@@ -2712,6 +2712,14 @@ class CommandsStatusTest < Minitest::Test
         visible-forever-260610-abcd visible-seven-260610-abcd
       ], archived.fetch("tasks").map { |task| task.fetch("slug") }.sort
       refute archived.key?("hidden_archived_task_count")
+
+      indexed = Hive::Commands::Status.new.json_payload(
+        [ project ], now: now, include_archive_index: true
+      ).fetch("projects").first
+      assert_equal archived.fetch("tasks").map { |task| task.fetch("slug") }.sort,
+                   indexed.fetch("__archive_folders").map { |folder| File.basename(folder) }.sort
+      assert_predicate indexed.fetch("__archive_folders"), :frozen?
+      refute ordinary.key?("__archive_folders")
     ensure
       Hive::Workflows::Project.reset!
     end

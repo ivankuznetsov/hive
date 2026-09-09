@@ -310,11 +310,15 @@ status-issued tokens.
 
 Status captures every registered project's workflow/config generation before
 scanning rows and uses one UTC `now`. Active projections build dependency
-admission from active rows and their exact referenced prerequisites, so an
+admission from the already action-classified rows and their exact referenced prerequisites, so an
 expired completed dependency still satisfies its dependants. Ordinary and
 archive projections retain the complete dependency graph. Operational status
 uses the captured generation for each project's `daemon.enabled` context;
 callers supplying an existing payload keep the context-only config read.
+The producer prepares each project once and reuses selected folders for
+admission. A project that cannot prepare rows falls back to a disk admission
+scan without repeating healthy projects. Synthetic invalid rows retain
+archive membership from their captured workflow generation.
 
 Daemon, TUI, and Web consume active rows. The bot's CLI transport still consumes
 ordinary rows. The TUI separately loads a lossless archive payload on request;

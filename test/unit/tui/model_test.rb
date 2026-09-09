@@ -20,6 +20,7 @@ class HiveTuiModelTest < Minitest::Test
     assert_equal 0, model.scope
     assert_nil model.new_idea_project_name
     assert_equal 0, model.new_idea_project_cursor
+    assert_nil model.new_idea_project_resolution
     assert_equal "", model.new_idea_buffer
     assert_equal 0, model.new_idea_cursor
     assert_equal [], model.new_idea_attachments
@@ -148,7 +149,7 @@ class HiveTuiModelTest < Minitest::Test
   def test_model_carries_all_documented_fields
     # Schema-pinning test: catch accidental field renames or removals.
     expected = %i[mode snapshot cursor filter filter_buffer scope pane_focus new_idea_project_name
-                  new_idea_project_cursor new_idea_buffer new_idea_cursor
+                  new_idea_project_cursor new_idea_project_resolution new_idea_buffer new_idea_cursor
                   new_idea_attachments new_idea_staging_dir new_idea_staging_tmp_root new_idea_attachment_counter
                   new_idea_broken_labels info_panel_state flash flash_set_at
                   tail_state red_status_detail_state implementation_identity_detail_state token_stats_state

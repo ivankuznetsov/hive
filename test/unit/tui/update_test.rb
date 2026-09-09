@@ -42,6 +42,13 @@ class HiveTuiUpdateTest < Minitest::Test
     Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
   end
 
+  def new_idea_snapshot(projects)
+    Hive::Tui::Snapshot.from_payload(
+      "generated_at" => "2026-08-30T00:00:00Z",
+      "projects" => projects
+    )
+  end
+
   # Compact Snapshot::Row factory for slug-follow tests. Absorbs the 14-field
   # `Hive::Tui::Snapshot::Row.new` signature so adding a new field there only
   # touches this one helper instead of every test that builds rows by hand.
@@ -161,6 +168,179 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     assert_equal [ 0, 0 ], new_model.cursor,
       "first snapshot must seed cursor at first visible row instead of leaving it nil"
+  end
+
+  def test_snapshot_arrived_picker_follows_uniquely_admissible_project_name_after_reorder
+    original = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+    reordered = new_idea_snapshot([
+      { "name" => "beta", "tasks" => [] },
+      { "name" => "alpha", "tasks" => [] }
+    ])
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: original,
+      new_idea_project_cursor: 1
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: reordered)
+    )
+
+    assert_equal 0, new_model.new_idea_project_cursor
+    assert_equal "beta", reordered.new_idea_admission.projects.fetch(0).name
+  end
+
+  def test_snapshot_arrived_with_nil_snapshot_keeps_picker_state_unchanged
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: new_idea_snapshot([ { "name" => "alpha", "tasks" => [] } ]),
+      new_idea_project_cursor: 0
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: nil)
+    )
+
+    assert_nil new_model.snapshot
+    assert_equal 0, new_model.new_idea_project_cursor
+  end
+
+  def test_snapshot_arrived_picker_invalidates_removed_project_without_later_auto_highlight
+    original = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+    removed = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] }
+    ])
+    later = new_idea_snapshot([
+      { "name" => "gamma", "tasks" => [] },
+      { "name" => "alpha", "tasks" => [] }
+    ])
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: original,
+      new_idea_project_cursor: 1
+    )
+
+    invalidated, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: removed)
+    )
+    refreshed, _cmd = Hive::Tui::Update.apply(
+      invalidated,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: later)
+    )
+
+    assert_nil invalidated.new_idea_project_cursor
+    assert_nil refreshed.new_idea_project_cursor,
+      "refresh alone must not aim invalidated intent at the first admissible row"
+
+    moved, _cmd = Hive::Tui::Update.apply(
+      refreshed,
+      Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN
+    )
+    selected, _cmd = Hive::Tui::Update.apply(
+      moved,
+      Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED
+    )
+    assert_equal 0, moved.new_idea_project_cursor
+    assert_equal "gamma", selected.new_idea_project_name
+  end
+
+  def test_snapshot_arrived_picker_invalidates_unhealthy_or_ambiguous_identity
+    original = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+    unhealthy = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "error" => "not_initialised", "tasks" => [] }
+    ])
+    ambiguous = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+
+    [ unhealthy, ambiguous ].each do |snapshot|
+      starting = model.with(
+        mode: :new_idea_project,
+        snapshot: original,
+        new_idea_project_cursor: 1
+      )
+      new_model, _cmd = Hive::Tui::Update.apply(
+        starting,
+        Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot)
+      )
+
+      assert_nil new_model.new_idea_project_cursor
+    end
+  end
+
+  def test_first_admissible_snapshot_seeds_row_zero_from_loading_or_ordinary_empty_state
+    available = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+    empty = new_idea_snapshot([])
+
+    [ nil, empty ].each do |prior_snapshot|
+      starting = model.with(
+        mode: :new_idea_project,
+        snapshot: prior_snapshot,
+        new_idea_project_cursor: 0
+      )
+      new_model, _cmd = Hive::Tui::Update.apply(
+        starting,
+        Hive::Tui::Messages::SnapshotArrived.new(snapshot: available)
+      )
+
+      assert_equal 0, new_model.new_idea_project_cursor
+    end
+  end
+
+  def test_snapshot_arrived_preserves_active_composer_identity_and_work
+    attachment = Hive::Tui::Model::Attachment.new(
+      label: "image1", staging_path: "/tmp/image-1.png", ext: "png"
+    )
+    original = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+    refreshed = new_idea_snapshot([
+      { "name" => "beta", "tasks" => [] },
+      { "name" => "alpha", "tasks" => [] }
+    ])
+    starting = model.with(
+      mode: :new_idea,
+      snapshot: original,
+      scope: 2,
+      new_idea_project_name: "beta",
+      new_idea_buffer: "draft [image1]",
+      new_idea_cursor: 5,
+      new_idea_attachments: [ attachment ],
+      new_idea_staging_dir: "/tmp/composer",
+      new_idea_staging_tmp_root: "/tmp"
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: refreshed)
+    )
+
+    assert_equal :new_idea, new_model.mode
+    assert_equal "beta", new_model.new_idea_project_name
+    assert_equal "draft [image1]", new_model.new_idea_buffer
+    assert_equal 5, new_model.new_idea_cursor
+    assert_equal [ attachment ], new_model.new_idea_attachments
+    assert_equal "/tmp/composer", new_model.new_idea_staging_dir
+    assert_equal "/tmp", new_model.new_idea_staging_tmp_root
   end
 
   # The bug that motivated cursor_for_slug: with pure coord-preservation
@@ -1149,7 +1329,7 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
     assert_equal :new_idea, new_model.mode
-    assert_nil new_model.new_idea_project_name
+    assert_equal "alpha", new_model.new_idea_project_name
     assert_equal 0, new_model.new_idea_project_cursor
     assert_equal "", new_model.new_idea_buffer
     assert_equal 0, new_model.new_idea_cursor
@@ -1178,7 +1358,146 @@ class HiveTuiUpdateTest < Minitest::Test
     starting = model.with(snapshot: snap_with_two_projects_three_rows_each, scope: 2)
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT)
     assert_equal :new_idea, new_model.mode
-    assert_nil new_model.new_idea_project_name
+    assert_equal "beta", new_model.new_idea_project_name,
+      "numeric scope must pin its unique healthy identity exactly once on entry"
+  end
+
+  def test_open_new_idea_from_unhealthy_numeric_scope_requires_explicit_picker_choice
+    snapshot = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "error" => "not_initialised", "tasks" => [] }
+    ])
+    starting = model.with(snapshot: snapshot, scope: 2, cursor: [ 0, 0 ])
+
+    blocked, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT
+    )
+
+    assert_equal :new_idea_project, blocked.mode
+    assert_nil blocked.new_idea_project_name
+    assert_nil blocked.new_idea_project_cursor
+    assert_equal 2, blocked.scope
+    assert_equal [ 0, 0 ], blocked.cursor, "entry must not reset the dashboard cursor"
+    assert_match(/"beta".*not initialised.*choose/i, blocked.flash.to_s)
+
+    moved, _cmd = Hive::Tui::Update.apply(
+      blocked,
+      Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN
+    )
+    selected, _cmd = Hive::Tui::Update.apply(
+      moved,
+      Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED
+    )
+
+    assert_equal 0, moved.new_idea_project_cursor
+    assert_equal :new_idea, selected.mode
+    assert_equal "alpha", selected.new_idea_project_name
+    assert_nil selected.new_idea_project_resolution
+    assert_equal 2, selected.scope,
+      "the stale numeric scope may remain dashboard context but must not conflict with the pin"
+  end
+
+  def test_open_new_idea_from_ambiguous_or_invalid_numeric_scope_starts_unhighlighted
+    ambiguous = new_idea_snapshot([
+      { "name" => "duplicate", "tasks" => [] },
+      { "name" => "duplicate", "tasks" => [] },
+      { "name" => "alpha", "tasks" => [] }
+    ])
+
+    [
+      [ ambiguous, 1, /ambiguous/i ],
+      [ ambiguous, 9, /scope 9.*unavailable/i ]
+    ].each do |snapshot, scope, flash_pattern|
+      starting = model.with(snapshot: snapshot, scope: scope)
+      blocked, _cmd = Hive::Tui::Update.apply(
+        starting,
+        Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT
+      )
+
+      assert_equal :new_idea_project, blocked.mode
+      assert_nil blocked.new_idea_project_name
+      assert_nil blocked.new_idea_project_cursor
+      assert_equal(scope == 9 ? :invalid_scope : :ambiguous,
+        blocked.new_idea_project_resolution.state)
+      assert_match flash_pattern, blocked.flash.to_s
+    end
+  end
+
+  def test_new_idea_authority_feedback_is_closed_and_cause_specific
+    available = Hive::Tui::Snapshot::NewIdeaResolution.new(state: :available)
+    available_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :available,
+      projects: []
+    )
+    ambiguous_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :ambiguous,
+      projects: [],
+      ambiguous_names: [ "duplicate" ]
+    )
+    empty_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :no_projects,
+      projects: []
+    )
+    invalid_identity_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :invalid_identity,
+      projects: [],
+      recovery: :repair_registry
+    )
+    missing_admission = Hive::Tui::Snapshot::NewIdeaAdmission.new(
+      state: :unhealthy,
+      projects: [],
+      recovery: :prune_missing
+    )
+    unknown = Struct.new(:state).new(:unknown)
+
+    assert_nil Hive::Tui::Update.new_idea_resolution_flash(available)
+    assert_match(/choose a project/i,
+      Hive::Tui::Update.new_idea_admission_flash(available_admission))
+    assert_match(/duplicate project name.*"duplicate"/i,
+      Hive::Tui::Update.new_idea_admission_flash(ambiguous_admission))
+    assert_match(/no projects.*hive init/i,
+      Hive::Tui::Update.new_idea_admission_flash(empty_admission))
+    assert_match(/without names.*repair/i,
+      Hive::Tui::Update.new_idea_admission_flash(invalid_identity_admission))
+    assert_match(/hive prune/i,
+      Hive::Tui::Update.new_idea_admission_flash(missing_admission))
+    assert_raises(ArgumentError) do
+      Hive::Tui::Update.new_idea_admission_flash(
+        Hive::Tui::Snapshot::NewIdeaAdmission.new(state: :unhealthy, projects: [])
+      )
+    end
+    assert_raises(ArgumentError) do
+      Hive::Tui::Update.new_idea_resolution_flash(unknown)
+    end
+    assert_raises(ArgumentError) do
+      Hive::Tui::Update.new_idea_admission_flash(unknown)
+    end
+  end
+
+  def test_unresolved_numeric_entry_never_reuses_scope_after_snapshot_arrives
+    starting = model.with(snapshot: nil, scope: 2)
+    blocked, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::OPEN_NEW_IDEA_PROMPT
+    )
+    refreshed = new_idea_snapshot([
+      { "name" => "alpha", "tasks" => [] },
+      { "name" => "beta", "tasks" => [] }
+    ])
+
+    after_refresh, _cmd = Hive::Tui::Update.apply(
+      blocked,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: refreshed)
+    )
+
+    assert_equal :new_idea_project, blocked.mode
+    assert_nil blocked.new_idea_project_name
+    assert_nil blocked.new_idea_project_cursor
+    assert_match(/waiting for snapshot/i, blocked.flash.to_s)
+    assert_nil after_refresh.new_idea_project_name
+    assert_nil after_refresh.new_idea_project_cursor,
+      "refresh must not silently pin the new occupant of numeric scope 2"
   end
 
   def test_new_idea_project_picker_selects_project_without_changing_scope
@@ -1191,7 +1510,26 @@ class HiveTuiUpdateTest < Minitest::Test
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED)
     assert_equal :new_idea, new_model.mode
     assert_equal "beta", new_model.new_idea_project_name
+    assert_nil new_model.new_idea_project_resolution
     assert_equal 0, new_model.scope
+  end
+
+  def test_new_idea_project_picker_enter_requires_an_explicit_highlight
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: snap_with_two_projects_three_rows_each,
+      new_idea_project_cursor: nil
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::NEW_IDEA_PROJECT_SELECTED
+    )
+
+    assert_equal :new_idea_project, new_model.mode
+    assert_nil new_model.new_idea_project_name
+    assert_nil new_model.new_idea_project_cursor
+    assert_match(/choose a project.*j\/k/i, new_model.flash.to_s)
   end
 
   def test_new_idea_project_picker_enter_without_snapshot_flashes_waiting
@@ -1245,6 +1583,26 @@ class HiveTuiUpdateTest < Minitest::Test
     )
     new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_UP)
     assert_equal 0, new_model.new_idea_project_cursor
+  end
+
+  def test_new_idea_project_picker_movement_establishes_choice_from_no_highlight
+    starting = model.with(
+      mode: :new_idea_project,
+      snapshot: snap_with_two_projects_three_rows_each,
+      new_idea_project_cursor: nil
+    )
+
+    down, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_DOWN
+    )
+    up, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::NEW_IDEA_PROJECT_CURSOR_UP
+    )
+
+    assert_equal 0, down.new_idea_project_cursor
+    assert_equal 1, up.new_idea_project_cursor
   end
 
   def test_new_idea_project_picker_cursor_up_with_no_choices_is_noop

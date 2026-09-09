@@ -77,16 +77,14 @@ The invalid-history state is recomputed on every scan and is never a durable
 error marker. There is no daemon migration, automatic backfill, repair queue,
 or projection watcher.
 
-`StatusConsumer` passes through the additive condition projection fields and
-the project-level `hidden_archived_task_count` from the in-process internal
-task graph. Its result sums that count without copying hidden rows into daemon
-memory. Dispatch still consumes the canonical visible `action` and diagnostic
-calculated by `TaskAction`; dependency admission was evaluated against the
-complete graph before presentation filtering, so an expired completed
-dependency remains satisfied. Operational snapshots publish the same aggregate
-count, and a count-only change is material snapshot state. The daemon defines
-no condition family, supersession, archive-retention, or gate rule of its own.
-Valid snapshots keep polling cheap. See [[modules/conditions]].
+`StatusConsumer` receives the active in-process task graph. The producer reuses
+its action-classified rows for dependency admission and exact-loads their
+referenced terminal prerequisites, so completed dependencies remain satisfied
+without publishing archive history. Dispatch consumes the canonical action
+and diagnostic calculated by `TaskAction`; the daemon defines no separate
+condition, supersession, retention, or gate rules. The bot's CLI transport
+still requests the ordinary graph pending a separate residue-notification
+contract. See [[modules/conditions]].
 
 ## Module map
 

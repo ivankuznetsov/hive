@@ -153,13 +153,8 @@ module Hive
 
         projects = Hive::Config.registered_projects
         admission_context, payload = capture_status_io do
-          context = Hive::DependencySnapshot.active_admission_context(projects)
-          [
-            context,
-            Hive::Commands::Status.new.active_payload(
-              projects, admission_context: context, now: refresh_now
-            )
-          ]
+          projection = Hive::Commands::Status.new.active_projection(projects, now: refresh_now)
+          [ projection.admission_context, projection.payload ]
         end
         publish_active_snapshot(
           payload, admission_context: admission_context, generation: generation

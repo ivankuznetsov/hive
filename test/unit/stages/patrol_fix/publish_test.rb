@@ -631,6 +631,23 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_secret_removed_from_final_diff_still_parks_without_remote_effects
+    token = "ghp_aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
+    with_publish_task(intermediate_contents: "puts '#{token}'\n") do |task, worktree_root, _manifest, _review, _remote|
+      git = LocalGit.new
+      github = FakeGithub.new
+      result = Hive::Stages::PatrolFix::Publish.run!(
+        task, config, git_gateway: git, github_gateway: github,
+        worktree_root: worktree_root, cleanup: ->(*) { true }
+      )
+      assert_equal :parked, result.fetch(:status)
+      assert_equal [ "diff" ], result.dig(:receipt, "payload", "blocked_fields")
+      assert_equal 0, git.pushes
+      assert_equal 0, github.creates
+      refute_includes JSON.generate(result.fetch(:receipt)), token
+    end
+  end
+
   private
 
   def rewrite_receipts(task)
@@ -640,7 +657,7 @@ class PatrolFixPublishStageTest < Minitest::Test
   end
 
   def with_publish_task(review_rationale: "Independent review approved the exact patch.",
-                        source_evidence: "bug", fixed_contents: "puts :fixed\n")
+                        source_evidence: "bug", fixed_contents: "puts :fixed\n", intermediate_contents: nil)
     PatrolFixStageFixture.with_task(
       stage: "5-publish", source_evidence: source_evidence
     ) do |task, root, manifest|
@@ -659,6 +676,11 @@ class PatrolFixPublishStageTest < Minitest::Test
         generation: 1, evidence_digest: "a" * 64,
         base_revision: manifest.fetch("target_revision")
       )
+      if intermediate_contents
+        File.write(File.join(owner.fetch("worktree"), "app.rb"), intermediate_contents)
+        PatrolFixStageFixture.git(owner.fetch("worktree"), "add", "app.rb")
+        PatrolFixStageFixture.git(owner.fetch("worktree"), "commit", "-m", "Intermediate change")
+      end
       File.write(File.join(owner.fetch("worktree"), "app.rb"), fixed_contents)
       PatrolFixStageFixture.git(owner.fetch("worktree"), "add", "app.rb")
       PatrolFixStageFixture.git(owner.fetch("worktree"), "commit", "-m", "fix")

@@ -292,8 +292,7 @@ module Hive
         end
         common_identity = [ receipt.fetch("task"), receipt.fetch("evidence_revision") ]
         unless review&.values_at("task", "evidence_revision") == common_identity &&
-               fix&.values_at("task", "evidence_revision") == common_identity &&
-               validation&.values_at("task", "evidence_revision") == common_identity &&
+               publication_evidence_authorized?(rows, receipt, fix, validation) &&
                review.values_at("kind", "stage") == %w[decision review] &&
                review.dig("payload", "route") == "publish" &&
                fix.values_at("kind", "stage") == %w[fix fix] &&
@@ -313,6 +312,31 @@ module Hive
         end
       rescue KeyError
         raise InvalidTransition, "publication rework requires the exact current block receipt"
+      end
+
+      def publication_evidence_authorized?(rows, block, fix, validation)
+        return false unless fix && validation
+
+        identity = block.values_at("task", "evidence_revision")
+        return true if [ fix, validation ].all? do |row|
+          row.values_at("task", "evidence_revision") == identity
+        end
+
+        rows.any? do |row|
+          row["kind"] == "reopen" && row["stage"] == "publish" &&
+            row.values_at("task", "evidence_revision") == identity &&
+            row.dig("payload", "operator") == "operator:publication_policy" &&
+            row.dig("payload", "carried_receipts") == [ fix["receipt_id"], validation["receipt_id"] ] &&
+            rows.any? do |previous|
+              previous["receipt_id"] == row.dig("payload", "outcome_receipt_id") &&
+                previous["kind"] == "publication_block" && previous["stage"] == "publish" &&
+                previous.dig("task", "slug") == block.dig("task", "slug") &&
+                previous.dig("task", "generation") == block.dig("task", "generation") - 1 &&
+                previous.dig("payload", "rework_stage") == "review" &&
+                previous.dig("payload", "fix_receipt_id") == fix["receipt_id"] &&
+                previous.dig("payload", "validation_receipt_id") == validation["receipt_id"]
+            end
+        end
       end
 
       def current_task_folder

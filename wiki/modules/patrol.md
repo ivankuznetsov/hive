@@ -267,8 +267,13 @@ and a fixed summary; it never stores a match, snippet, or source byte. No push,
 authentication, or PR creation has occurred at this point. Status exposes the
 operator-only, receipt-bound `patrol_fix.rework_publication` action, including
 on daemon-enrolled projects. The action advances a new generation to Inbox,
-Fix, or Review according to the earliest authority that can change the blocked
-bytes. Its controller lock and task lease are identity-backed runtime-control-plane
+Fix, or Review using the recorded rework route. Review rework retains exact
+fix/validation receipts through the current operator reopen receipt and its
+adjacent prior publication block; a second rework validates that same lineage.
+The `diff` field covers the full commit range scanned by publication, including
+secrets absent from the final diff. Source/title correction and removal of
+history-only secrets still need an effective operator recovery path (see
+[[../gaps]]). Its controller lock and task lease are identity-backed runtime-control-plane
 leases, so the executor re-reads and releases the exact moved task identity rather
 than relying on a task-folder lock file. The Fix-stage authorization consumes the same current receipt rows as
 ordinary execution and returns the structured rework context expected by the

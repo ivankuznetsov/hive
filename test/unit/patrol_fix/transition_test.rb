@@ -543,6 +543,41 @@ class PatrolFixTransitionTest < Minitest::Test
     end
   end
 
+  def test_repeated_publication_rework_preserves_exact_carried_evidence
+    with_review_task(route: "publish") do |task, worktree_root, decision|
+      2.times do |index|
+        manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+        store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
+        if index.positive?
+          decision = receipt(manifest, "decision", "review", decision.fetch("payload"), "review-publish-#{index + 1}")
+          store.append!(decision)
+        end
+        block = publication_block(manifest, decision)
+        store.append!(block)
+        publish_folder = File.join(task.hive_state_path, "stages", "5-publish", task.slug)
+        FileUtils.mkdir_p(File.dirname(publish_folder))
+        File.rename(task.folder, publish_folder)
+        transition = Hive::PatrolFix::Transition.new(
+          Hive::Task.new(publish_folder), worktree_root: worktree_root, commit: ->(**) { }
+        )
+        if index.positive?
+          path = File.join(publish_folder, Hive::PatrolFix::ReceiptStore::FILENAME)
+          original = File.read(path)
+          rows = original.lines.map { |line| JSON.parse(line) }.reject { |row| row["kind"] == "reopen" }
+          File.write(path, rows.map { |row| JSON.generate(row) }.join("\n") + "\n")
+          assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+            transition.apply_publication_block!(block)
+          end
+          File.write(path, original)
+        end
+        result = transition.apply_publication_block!(block)
+        task = Hive::Task.new(result.fetch(:task_folder))
+        assert_equal "review", task.stage_name
+        assert_equal index + 2, result.fetch(:generation)
+      end
+    end
+  end
+
   private
 
   def with_review_task(route:)

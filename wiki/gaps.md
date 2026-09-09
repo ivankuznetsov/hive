@@ -7,6 +7,16 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Patrol publication recovery needs an operator correction decision (2026-09-09)
+
+PR #1295 can park publication safely, but routing source/title blocks to Inbox
+does not change the protected manifest or immutable slug rendered by Publish.
+A secret removed from the final diff also remains in commit history; adding a
+new commit cannot erase it. Keep this PR open until source correction and the
+operator recovery contract are resolved. Do not report a routed generation as
+proof that these bytes can be corrected. Review-text rework and exact carried
+receipt authorization are independently testable.
+
 ## Automatic outcome capture remains unreliable (2026-09-06)
 
 Dogfood producers can still fail to obtain controller screenshot receipts or

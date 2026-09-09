@@ -134,11 +134,15 @@ module Hive
         def build_publication_block(task, request, authority, snapshot)
           fields = {
             "title" => request.title,
-            "body" => request.published_body,
-            "diff" => snapshot.fetch("diff")
+            "body" => request.published_body
           }
           blocked_fields = fields.filter_map do |field, bytes|
             field if Hive::SecretScanner.match?(bytes)
+          end
+          if Hive::SecretScanner.git_match?(
+            request.worktree_path, base_oid: request.scan_base_oid, head_oid: request.head_oid
+          )
+            blocked_fields << "diff"
           end
           Hive::PatrolFix::PublicationBlockReceipt.build(
             task: { "slug" => task.slug, "generation" => authority.fetch("generation") },

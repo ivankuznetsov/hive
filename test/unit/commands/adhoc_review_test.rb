@@ -1,5 +1,7 @@
 require "test_helper"
 require "hive/commands/adhoc_review"
+require "hive/commands/stage_action"
+require "hive/stages/done"
 
 class AdhocReviewCommandTest < Minitest::Test
   include HiveTestHelper
@@ -20,7 +22,7 @@ class AdhocReviewCommandTest < Minitest::Test
       with_tmp_git_repo do |repo|
         hive_state = File.join(repo, ".hive-state")
         worktree_root = File.join(repo, "adhoc-worktrees")
-        FileUtils.mkdir_p(File.join(hive_state, "stages", "6-review"))
+        FileUtils.mkdir_p(File.join(hive_state, "stages", "1-review"))
         File.write(File.join(hive_state, "config.yml"), { "worktree_root" => worktree_root }.to_yaml)
         Hive::Config.register_project(name: "demo", path: repo)
         Dir.chdir(repo) { yield(repo, hive_state, worktree_root) }
@@ -63,17 +65,17 @@ class AdhocReviewCommandTest < Minitest::Test
         end
       end
 
-      task_folder = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")
+      task_folder = File.join(hive_state, "stages", "1-review", "adhoc-review-pr-197")
       assert_equal 1, calls.size, "reusing an existing ad-hoc task must not materialize or allocate again"
       assert_equal File.join(worktree_root, "adhoc-review-pr-197"), calls.first.fetch(:path)
-      assert_equal "hive/review/pr-197", calls.first.fetch(:branch)
+      assert_equal "adhoc-review-pr-197", calls.first.fetch(:branch)
       assert_equal 2, Hive::TaskCounter.peek, "second enqueue must not burn another task id"
 
       meta = YAML.safe_load(File.read(File.join(task_folder, "meta.yml")))
       assert_equal 1, meta.fetch("id")
       assert_equal "adhoc-review-pr-197", meta.fetch("slug")
       assert_equal "Ad-hoc review: PR #197", meta.fetch("display_name")
-      assert_equal "coding", meta.fetch("workflow")
+      assert_equal "pr-review", meta.fetch("workflow")
 
       idea = frontmatter(File.join(task_folder, "idea.md"))
       assert_equal "ad-hoc", idea.fetch("source")
@@ -93,7 +95,7 @@ class AdhocReviewCommandTest < Minitest::Test
 
       worktree = YAML.safe_load(File.read(File.join(task_folder, "worktree.yml")))
       assert_equal File.join(worktree_root, "adhoc-review-pr-197"), worktree.fetch("path")
-      assert_equal "hive/review/pr-197", worktree.fetch("branch")
+      assert_equal "adhoc-review-pr-197", worktree.fetch("branch")
       assert_equal "head-197", worktree.fetch("execute_base_head")
       assert_equal now.utc.iso8601, worktree.fetch("created_at")
       assert_empty Dir.children(File.join(task_folder, "reviews"))
@@ -103,6 +105,177 @@ class AdhocReviewCommandTest < Minitest::Test
       ).read_routine(marker: Hive::Markers.current(File.join(task_folder, "task.md"))).state
       refute File.exist?(File.join(task_folder, "task-projection.json"))
       refute File.exist?(File.join(task_folder, "task-projection.checkpoint.json"))
+    end
+  end
+
+  def test_native_import_worktree_passes_stage_ownership_validation_on_create_and_reuse
+    with_registered_project do |repo, _hive_state, worktree_root|
+      origin = "#{repo}.origin.git"
+      begin
+        run!("git", "clone", "--bare", repo, origin)
+        run!("git", "-C", origin, "update-ref", "refs/pull/197/head", "HEAD")
+        run!("git", "-C", repo, "remote", "add", "origin", origin)
+        head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+        pr_metadata = metadata(head: head)
+        with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(*) { pr_metadata }) do
+          2.times do
+            result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
+            pointer = Hive::Worktree.read_owned_pointer(
+              result.fetch(:task_folder), project_root: repo,
+              slug: result.fetch(:slug), expected_root: worktree_root
+            )
+            assert_equal "adhoc-review-pr-197", pointer.fetch("branch")
+            assert_equal head, run!("git", "-C", pointer.fetch("path"), "rev-parse", "HEAD").strip
+          end
+        end
+      ensure
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
+  def test_import_uses_review_only_workflow_and_completes_without_development_stages
+    with_registered_project do |_repo, _hive_state, _worktree_root|
+      pr_metadata = metadata
+      with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(*) { pr_metadata }) do
+        with_replaced_singleton_method(Hive::Worktree, :materialize_pr, lambda { |**kwargs|
+          FileUtils.mkdir_p(kwargs.fetch(:path))
+          { path: kwargs.fetch(:path), branch: kwargs.fetch(:branch), head_sha: "head-197" }
+        }) do
+          result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
+          task = Hive::Task.new(result.fetch(:task_folder))
+          assert_equal :"pr-review", task.workflow.id
+          assert_equal %w[1-review 2-done], task.workflow.stage_dirs
+          action = Hive::TaskAction.for(task, Hive::Markers.current(task.state_file))
+          assert_equal "ready_to_run", action.key
+          Hive::Markers.set(task.state_file, :review_complete)
+          action = Hive::TaskAction.for(task, Hive::Markers.current(task.state_file))
+          assert_equal "ready_to_advance", action.key
+          %w[develop open-pr artifacts finalize].each do |verb|
+            command = Hive::Commands::StageAction.new(verb, task.slug)
+            assert_raises(Hive::InvalidTaskPath) { command.send(:verb_config, task) }
+          end
+          command = Hive::Commands::StageAction.new("review", task.slug)
+          payload = command.send(:success_payload, task, "ran")
+          assert_equal "1-review", payload.fetch("from_stage_dir")
+          assert_equal "1-review", payload.fetch("to_stage_dir")
+          command = Hive::Commands::StageAction.new("archive", task.slug)
+          payload = command.send(:success_payload, task, "promoted_and_ran")
+          assert_equal "1-review", payload.fetch("from_stage_dir")
+          assert_equal "2-done", payload.fetch("to_stage_dir")
+          done_folder = File.join(task.hive_state_path, "stages", "2-done", task.slug)
+          FileUtils.mkdir_p(File.dirname(done_folder))
+          FileUtils.mv(task.folder, done_folder)
+          done = Hive::Task.new(done_folder)
+          assert_equal :complete, Hive::Stages::Done.run!(done, {}).fetch(:status)
+          assert command.send(:archive_noop?, done, "2-done")
+        end
+      end
+    end
+  end
+
+  def with_legacy_review
+    with_registered_project do |repo, hive_state, worktree_root|
+      slug = "adhoc-review-pr-197"
+      legacy = File.join(hive_state, "stages", "6-review", slug)
+      path = File.join(worktree_root, slug)
+      FileUtils.mkdir_p(legacy)
+      Hive::TaskMeta.write(legacy, id: 50, slug: slug, display_name: "Review", workflow: "coding")
+      write_frontmatter(File.join(legacy, "task.md"), "source" => "ad-hoc")
+      write_frontmatter(File.join(legacy, "pr.md"), "source" => "ad-hoc", "pr_number" => 197,
+                        "pr_url" => "https://github.com/o/r/pull/197",
+                        "head_ref_oid" => run!("git", "-C", repo, "rev-parse", "HEAD").strip)
+      run!("git", "-C", repo, "worktree", "add", "-b", "hive/review/pr-197", path, "HEAD")
+      File.write(File.join(legacy, "worktree.yml"), { "path" => path, "branch" => "hive/review/pr-197" }.to_yaml)
+      File.write(File.join(legacy, Hive::TaskJournal::JOURNAL_BASENAME), "historical evidence\n")
+      old_pr = File.binread(File.join(legacy, "pr.md"))
+      File.write(File.join(hive_state, ".gitignore"), ".commit-lock\n")
+      run!("git", "init", hive_state)
+      run!("git", "-C", hive_state, "config", "user.email", "test@example.com")
+      run!("git", "-C", hive_state, "config", "user.name", "Test")
+      run!("git", "-C", hive_state, "add", ".")
+      run!("git", "-C", hive_state, "commit", "-m", "legacy task")
+      yield repo, hive_state, legacy, path, old_pr, slug
+    end
+  end
+
+  def test_legacy_review_migrates_with_history_and_pr_preserved
+    with_legacy_review do |_repo, hive_state, legacy, path, old_pr, slug|
+      result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
+      task = Hive::Task.new(result.fetch(:task_folder))
+      assert_equal :"pr-review", task.workflow.id
+      refute_equal 50, task.id
+      assert_equal 50, Hive::TaskMeta.read(File.join(task.folder, "migration", "coding"))[:id]
+      assert_equal "1-review", "#{task.stage_index}-#{task.stage_name}"
+      assert_equal old_pr, File.binread(File.join(task.folder, "migration", "coding", "pr.md"))
+      assert_equal "historical evidence\n", File.binread(File.join(task.folder, "migration", "coding", Hive::TaskJournal::JOURNAL_BASENAME))
+      assert_equal slug, run!("git", "-C", path, "branch", "--show-current").strip
+      assert Hive::TaskProjection::Reader.new(task_folder: task.folder, task: task).read_routine.current?
+      Hive::Lock.with_task_lock(task.folder, op: "prove-migrated-admission") { assert true }
+      assert_includes run!("git", "-C", hive_state, "log", "-1", "--format=%s"), "migrate standalone PR review"
+      refute Dir.exist?(legacy)
+    end
+  end
+
+  def test_legacy_migration_preserves_an_untracked_task
+    with_legacy_review do |_repo, hive_state, legacy, _path, old_pr, slug|
+      run!("git", "-C", hive_state, "rm", "-r", "--cached", "--", "stages/6-review/#{slug}")
+      run!("git", "-C", hive_state, "commit", "-m", "leave legacy review untracked")
+
+      result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
+
+      assert_equal old_pr, File.binread(File.join(result.fetch(:task_folder), "migration", "coding", "pr.md"))
+      refute Dir.exist?(legacy)
+      assert_equal :"pr-review", Hive::Task.new(result.fetch(:task_folder)).workflow.id
+      assert_empty run!("git", "-C", hive_state, "status", "--porcelain")
+    end
+  end
+
+  def test_legacy_migration_preserves_remote_identity_when_local_fixes_are_ahead
+    with_legacy_review do |_repo, _state, legacy, path, _old_pr, _slug|
+      remote_head = frontmatter(File.join(legacy, "pr.md")).fetch("head_ref_oid")
+      run!("git", "-C", path, "commit", "--allow-empty", "-m", "unpublished review fix")
+      local_head = run!("git", "-C", path, "rev-parse", "HEAD").strip
+      refute_equal remote_head, local_head
+      result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
+      assert_equal remote_head, frontmatter(File.join(result.fetch(:task_folder), "pr.md")).fetch("head_oid")
+      assert_equal local_head, run!("git", "-C", path, "rev-parse", "HEAD").strip
+    end
+  end
+
+  def test_legacy_migration_refuses_dirty_worktree_or_existing_target_branch
+    [ :dirty, :branch_collision ].each do |condition|
+      with_legacy_review do |repo, hive_state, legacy, path, old_pr, slug|
+        if condition == :dirty
+          File.write(File.join(path, "uncommitted.txt"), "preserve me")
+        else
+          run!("git", "-C", repo, "branch", slug)
+        end
+        original_meta = File.binread(File.join(legacy, "meta.yml"))
+        assert_raises(Hive::WorktreeError) { Hive::Commands::AdhocReview.new(pr: "197").enqueue }
+        assert_equal original_meta, File.binread(File.join(legacy, "meta.yml"))
+        assert_equal old_pr, File.binread(File.join(legacy, "pr.md"))
+        assert_equal "hive/review/pr-197", run!("git", "-C", path, "branch", "--show-current").strip
+        refute Dir.exist?(File.join(hive_state, "stages", "1-review", slug))
+        assert_empty run!("git", "-C", hive_state, "status", "--porcelain")
+        assert_equal "preserve me", File.read(File.join(path, "uncommitted.txt")) if condition == :dirty
+      end
+    end
+  end
+
+  def test_legacy_migration_rolls_back_when_the_state_commit_fails
+    with_legacy_review do |_repo, hive_state, legacy, path, old_pr, slug|
+      hook = File.join(hive_state, ".git", "hooks", "pre-commit")
+      File.write(hook, "#!/bin/sh\nexit 1\n")
+      File.chmod(0o755, hook)
+      original_meta = File.binread(File.join(legacy, "meta.yml"))
+      assert_raises(Hive::Error) { Hive::Commands::AdhocReview.new(pr: "197").enqueue }
+      assert_equal original_meta, File.binread(File.join(legacy, "meta.yml"))
+      assert_equal old_pr, File.binread(File.join(legacy, "pr.md"))
+      assert_equal "historical evidence\n", File.binread(File.join(legacy, Hive::TaskJournal::JOURNAL_BASENAME))
+      assert_equal "hive/review/pr-197", run!("git", "-C", path, "branch", "--show-current").strip
+      refute Dir.exist?(File.join(hive_state, "stages", "1-review", slug))
+      assert_empty run!("git", "-C", hive_state, "diff", "--cached", "--name-only")
     end
   end
 
@@ -123,7 +296,7 @@ class AdhocReviewCommandTest < Minitest::Test
 
           assert_match(/owned by hive task owned-task at 5-open-pr/, err.message)
           assert_match(/hive review owned-task/, err.message)
-          refute Dir.exist?(File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197"))
+          refute Dir.exist?(File.join(hive_state, "stages", "1-review", "adhoc-review-pr-197"))
         end
       end
     end
@@ -156,7 +329,7 @@ class AdhocReviewCommandTest < Minitest::Test
           end
 
           assert_match(/GitHub reported head expected/, err.message)
-          refute Dir.exist?(File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197"))
+          refute Dir.exist?(File.join(hive_state, "stages", "1-review", "adhoc-review-pr-197"))
         end
       end
     end
@@ -175,7 +348,7 @@ class AdhocReviewCommandTest < Minitest::Test
   def test_enqueue_cleans_up_worktree_branch_and_ref_when_create_fails
     with_registered_project do |repo, hive_state, worktree_root|
       pr_metadata = metadata(head: "expected-head")
-      branch = "hive/review/pr-197"
+      branch = "adhoc-review-pr-197"
       worktree_path = File.join(worktree_root, "adhoc-review-pr-197")
 
       with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(_number, **_kwargs) { pr_metadata }) do
@@ -191,7 +364,7 @@ class AdhocReviewCommandTest < Minitest::Test
         end
       end
 
-      refute Dir.exist?(File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")),
+      refute Dir.exist?(File.join(hive_state, "stages", "1-review", "adhoc-review-pr-197")),
              "task folder must be removed on create failure"
       refute Dir.exist?(worktree_path), "orphaned worktree must be removed on create failure"
       refute Hive::Worktree.local_branch_ref_exists?(repo, branch),
@@ -211,7 +384,7 @@ class AdhocReviewCommandTest < Minitest::Test
       # A normal (non-ad-hoc) task happens to occupy the deterministic ad-hoc
       # slug; it must not be silently adopted and re-run as the ad-hoc review.
       write_frontmatter(
-        File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197", "pr.md"),
+        File.join(hive_state, "stages", "1-review", "adhoc-review-pr-197", "pr.md"),
         "pr_number" => 197,
         "pr_url" => "https://github.com/o/r/pull/197",
         "source" => "telegram"
@@ -235,7 +408,7 @@ class AdhocReviewCommandTest < Minitest::Test
     # refuse-to-shadow guard.
     with_registered_project do |_repo, hive_state, worktree_root|
       slug = "adhoc-review-pr-197"
-      folder = File.join(hive_state, "stages", "6-review", slug)
+      folder = File.join(hive_state, "stages", "1-review", slug)
       write_frontmatter(
         File.join(folder, "pr.md"),
         "pr_number" => 198, "source" => "ad-hoc",
@@ -244,7 +417,7 @@ class AdhocReviewCommandTest < Minitest::Test
       worktree_path = File.join(worktree_root, slug)
       FileUtils.mkdir_p(worktree_path)
       File.write(File.join(folder, "worktree.yml"),
-                 { "path" => worktree_path, "branch" => "hive/review/pr-197" }.to_yaml)
+                 { "path" => worktree_path, "branch" => "adhoc-review-pr-197" }.to_yaml)
 
       with_replaced_singleton_method(Hive::Worktree, :materialize_pr, ->(**_kwargs) { flunk "must not materialize" }) do
         err = assert_raises(Hive::Commands::AdhocReview::CollisionError) do
@@ -276,7 +449,7 @@ class AdhocReviewCommandTest < Minitest::Test
             result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
 
             assert_equal "adhoc-review-pr-197", result.fetch(:slug)
-            folder = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")
+            folder = File.join(hive_state, "stages", "1-review", "adhoc-review-pr-197")
             assert_nil Hive::TaskMeta.read(folder)[:id],
                        "lock contention must fall back to id: nil, not discard the completed task"
           end
@@ -290,13 +463,13 @@ class AdhocReviewCommandTest < Minitest::Test
     # as here): the diagnostic must blame the pointer, not a deleted worktree.
     with_registered_project do |_repo, hive_state, _worktree_root|
       slug = "adhoc-review-pr-197"
-      folder = File.join(hive_state, "stages", "6-review", slug)
+      folder = File.join(hive_state, "stages", "1-review", slug)
       write_frontmatter(
         File.join(folder, "pr.md"),
         "pr_number" => 197, "source" => "ad-hoc",
         "pr_url" => "https://github.com/o/r/pull/197"
       )
-      File.write(File.join(folder, "worktree.yml"), { "branch" => "hive/review/pr-197" }.to_yaml)
+      File.write(File.join(folder, "worktree.yml"), { "branch" => "adhoc-review-pr-197" }.to_yaml)
 
       with_replaced_singleton_method(Hive::Worktree, :materialize_pr, ->(**_kwargs) { flunk "must not materialize" }) do
         err = assert_raises(Hive::Commands::AdhocReview::CollisionError) do
@@ -316,7 +489,7 @@ class AdhocReviewCommandTest < Minitest::Test
     # remediation matches the real cause.
     with_registered_project do |_repo, hive_state, _worktree_root|
       slug = "adhoc-review-pr-197"
-      folder = File.join(hive_state, "stages", "6-review", slug)
+      folder = File.join(hive_state, "stages", "1-review", slug)
       write_frontmatter(
         File.join(folder, "pr.md"),
         "pr_number" => 197, "source" => "ad-hoc",
@@ -341,7 +514,7 @@ class AdhocReviewCommandTest < Minitest::Test
     # the reuse validator must agree, not reject it as "not an ad-hoc review".
     with_registered_project do |_repo, hive_state, worktree_root|
       slug = "adhoc-review-pr-197"
-      folder = File.join(hive_state, "stages", "6-review", slug)
+      folder = File.join(hive_state, "stages", "1-review", slug)
       write_frontmatter(
         File.join(folder, "pr.md"),
         "pr_number" => 197, "source" => "Ad-Hoc",
@@ -350,7 +523,7 @@ class AdhocReviewCommandTest < Minitest::Test
       worktree_path = File.join(worktree_root, slug)
       FileUtils.mkdir_p(worktree_path)
       File.write(File.join(folder, "worktree.yml"),
-                 { "path" => worktree_path, "branch" => "hive/review/pr-197" }.to_yaml)
+                 { "path" => worktree_path, "branch" => "adhoc-review-pr-197" }.to_yaml)
 
       with_replaced_singleton_method(Hive::Worktree, :materialize_pr, ->(**_kwargs) { flunk "reuse must not materialize" }) do
         result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
@@ -366,7 +539,7 @@ class AdhocReviewCommandTest < Minitest::Test
     # enqueue (pointing at `hive drop`) rather than deep in the review stage.
     with_registered_project do |_repo, hive_state, worktree_root|
       slug = "adhoc-review-pr-197"
-      folder = File.join(hive_state, "stages", "6-review", slug)
+      folder = File.join(hive_state, "stages", "1-review", slug)
       write_frontmatter(
         File.join(folder, "pr.md"),
         "pr_number" => 197, "source" => "ad-hoc",
@@ -374,7 +547,7 @@ class AdhocReviewCommandTest < Minitest::Test
       )
       # worktree.yml points at a directory that no longer exists.
       File.write(File.join(folder, "worktree.yml"),
-                 { "path" => File.join(worktree_root, slug), "branch" => "hive/review/pr-197" }.to_yaml)
+                 { "path" => File.join(worktree_root, slug), "branch" => "adhoc-review-pr-197" }.to_yaml)
 
       with_replaced_singleton_method(Hive::Worktree, :materialize_pr, ->(**_kwargs) { flunk "must not materialize" }) do
         err = assert_raises(Hive::Commands::AdhocReview::CollisionError) do
@@ -420,7 +593,7 @@ class AdhocReviewCommandTest < Minitest::Test
       with_tmp_git_repo do |repo|
         hive_state = File.join(repo, ".hive-state")
         worktree_root = File.join(repo, "adhoc-worktrees")
-        FileUtils.mkdir_p(File.join(hive_state, "stages", "6-review"))
+        FileUtils.mkdir_p(File.join(hive_state, "stages", "1-review"))
         File.write(File.join(hive_state, "config.yml"), { "worktree_root" => worktree_root }.to_yaml)
         File.write(
           File.join(home, "config.yml"),
@@ -441,7 +614,7 @@ class AdhocReviewCommandTest < Minitest::Test
               }) do
                 result = Hive::Commands::AdhocReview.new(pr: "197", project: "demo").enqueue
 
-                expected = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")
+                expected = File.join(hive_state, "stages", "1-review", "adhoc-review-pr-197")
                 assert_equal expected, result.fetch(:task_folder)
                 assert File.directory?(expected),
                        "relative hive_state_path must resolve against the project root"
@@ -468,7 +641,7 @@ class AdhocReviewCommandTest < Minitest::Test
 
           assert_equal "adhoc-review-pr-197", result.fetch(:slug)
           assert_match(/gh reported no head SHA for PR #197/, err)
-          assert Dir.exist?(File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")),
+          assert Dir.exist?(File.join(hive_state, "stages", "1-review", "adhoc-review-pr-197")),
                  "an empty gh head must skip the head check, not abort task creation"
         end
       end
@@ -532,7 +705,7 @@ class AdhocReviewCommandTest < Minitest::Test
   def test_enqueue_self_heals_an_orphan_worktree_on_the_first_try
     with_registered_project do |repo, _hive_state, worktree_root|
       slug = "adhoc-review-pr-197"
-      branch = "hive/review/pr-197"
+      branch = "adhoc-review-pr-197"
       worktree_path = File.join(worktree_root, slug)
 
       # Wedge the slot the way a SIGKILL would: a real worktree whose dir is
@@ -586,7 +759,7 @@ class AdhocReviewCommandTest < Minitest::Test
         _out, err = capture_io { cmd.send(:cleanup_failed_task!, repo, slug, 197, nil) }
 
         assert_match(/could not fully remove/, err)
-        assert_match(%r{branch hive/review/pr-197}, err)
+        assert_match(%r{branch adhoc-review-pr-197}, err)
         assert_match(/worktree prune/, err)
       end
     end

@@ -722,7 +722,7 @@ module Hive
         verb = Array(argv)[1].to_s
         return "#{task.stage_index}-#{task.stage_name}" if %w[run plan-review-run].include?(verb)
 
-        Hive::Workflows.for_verb(verb).fetch(:target)
+        Hive::Workflows.for_verb(verb, workflow: task.workflow).fetch(:target)
       rescue KeyError, Hive::Error
         "#{task.stage_index}-#{task.stage_name}"
       end

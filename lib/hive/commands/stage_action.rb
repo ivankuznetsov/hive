@@ -72,8 +72,12 @@ module Hive
 
       private
 
-      def durable_intended_stage(_task)
-        Hive::Workflows.for_verb(@verb).fetch(:target)
+      def durable_intended_stage(task)
+        verb_config(task).fetch(:target)
+      end
+
+      def verb_config(task)
+        Hive::Workflows.for_verb(@verb, workflow: task.workflow)
       end
 
       def durable_worker_argv(task)
@@ -84,8 +88,8 @@ module Hive
       end
 
       def do_call
-        config = Hive::Workflows.for_verb(@verb)
         task = resolve_task
+        config = verb_config(task)
         current_stage = stage_dir(task)
         target_stage = config.fetch(:target)
         source_stage = config.fetch(:source)
@@ -146,7 +150,7 @@ module Hive
       # so a future renumber doesn't silently disable the guard.
       def archive_noop?(task, current_stage)
         return false unless @verb == "archive"
-        return false unless current_stage == Hive::Stages::DIRS.last
+        return false unless current_stage == task.workflow.stages.last.dir
 
         Hive::Markers.current(task.state_file).name == :complete
       end
@@ -226,13 +230,13 @@ module Hive
                                              reason: "already_archived",
                                              marker: marker))
         elsif !@quiet
-          puts "hive: noop — #{task.slug} is already at #{Hive::Stages::DIRS.last}"
+          puts "hive: noop — #{task.slug} is already at #{task.workflow.stages.last.dir}"
         end
       end
 
       def success_payload(task, phase, noop: false, reason: nil, marker: nil)
         marker ||= Hive::Markers.current(task.state_file)
-        config = Hive::Workflows.for_verb(@verb)
+        config = verb_config(task)
         action = Hive::TaskAction.for(task, marker, config: Hive::Config.load(task.project_root))
         payload = {
           "schema" => "hive-stage-action",

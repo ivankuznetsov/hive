@@ -27,7 +27,7 @@ class AdhocReviewIntegrationTest < Minitest::Test
       with_tmp_git_repo do |repo|
         hive_state = File.join(repo, ".hive-state")
         worktree_root = File.join(repo, "adhoc-worktrees")
-        FileUtils.mkdir_p(File.join(hive_state, "stages", "6-review"))
+        FileUtils.mkdir_p(File.join(hive_state, "stages", "1-review"))
         File.write(
           File.join(hive_state, "config.yml"),
           {
@@ -35,7 +35,7 @@ class AdhocReviewIntegrationTest < Minitest::Test
             "rebase" => { "enabled" => false }
           }.to_yaml
         )
-        Hive::Config.register_project(name: "demo", path: repo)
+        Hive::Config.register_project(name: File.basename(repo), path: repo)
 
         Dir.chdir(repo) { yield(repo, hive_state, worktree_root) }
       end
@@ -88,12 +88,12 @@ class AdhocReviewIntegrationTest < Minitest::Test
         assert_includes out, "next:"
 
         slug = "adhoc-review-pr-197"
-        folder = File.join(hive_state, "stages", "6-review", slug)
+        folder = File.join(hive_state, "stages", "1-review", slug)
         assert_equal [ folder ], runs
         assert File.directory?(folder)
         assert File.directory?(File.join(folder, "reviews"))
         assert_equal File.join(worktree_root, slug), materialized.first.fetch(:path)
-        assert_equal "hive/review/pr-197", materialized.first.fetch(:branch)
+        assert_equal "adhoc-review-pr-197", materialized.first.fetch(:branch)
 
         pr = Hive::Gh.pr_frontmatter(File.join(folder, "pr.md"))
         assert_equal 197, pr.fetch("pr_number")
@@ -107,6 +107,36 @@ class AdhocReviewIntegrationTest < Minitest::Test
     end
   end
 
+  def test_completed_pr_review_archives_directly_without_development_stages
+    with_registered_project do |_repo, hive_state, _worktree_root|
+      run!("git", "init", hive_state)
+      run!("git", "-C", hive_state, "config", "user.email", "test@example.com")
+      run!("git", "-C", hive_state, "config", "user.name", "Test")
+      with_adhoc_review_stubs do
+        with_replaced_singleton_method(Hive::Stages::Review, :run!, lambda { |task, _cfg|
+          Hive::Markers.set(task.state_file, :review_complete)
+          { commit: nil, status: :review_complete }
+        }) do
+          _out, err, status = with_captured_exit { Hive::CLI.start([ "review", "--pr", "197" ]) }
+          assert_equal Hive::ExitCodes::SUCCESS, status, err
+        end
+        out, err, status = with_captured_exit do
+          Hive::CLI.start([ "archive", "adhoc-review-pr-197", "--json" ])
+        end
+        assert_equal Hive::ExitCodes::SUCCESS, status, "#{err}\n#{out}"
+        payload = JSON.parse(out)
+        assert_equal "1-review", payload.fetch("from_stage_dir")
+        assert_equal "2-done", payload.fetch("to_stage_dir")
+        assert_equal "complete", payload.fetch("marker_after")
+        task = Hive::Task.new(payload.fetch("task_folder"))
+        assert_equal :"pr-review", task.workflow.id
+        assert_equal "done", task.stage_name
+        refute Dir.exist?(File.join(hive_state, "stages", "4-execute"))
+        refute Dir.exist?(File.join(hive_state, "stages", "8-finalize"))
+      end
+    end
+  end
+
   def test_review_pr_reuses_existing_task_on_next_pass
     with_registered_project do |_repo, hive_state, _worktree_root|
       runs = []
@@ -115,10 +145,10 @@ class AdhocReviewIntegrationTest < Minitest::Test
         capture_io { Hive::CLI.start([ "review", "--pr", "https://github.com/o/r/pull/197" ]) }
 
         slug = "adhoc-review-pr-197"
-        folder = File.join(hive_state, "stages", "6-review", slug)
+        folder = File.join(hive_state, "stages", "1-review", slug)
         assert_equal [ folder, folder ], runs
         assert_equal 1, materialized.size, "second run must reuse the task/worktree instead of creating another"
-        assert_equal [ slug ], Dir.children(File.join(hive_state, "stages", "6-review"))
+        assert_equal [ slug ], Dir.children(File.join(hive_state, "stages", "1-review"))
       end
     end
   end
@@ -129,7 +159,7 @@ class AdhocReviewIntegrationTest < Minitest::Test
     # still reviewed against the first-run head (maintainer must `hive drop`).
     with_registered_project do |_repo, hive_state, _worktree_root|
       slug = "adhoc-review-pr-197"
-      folder = File.join(hive_state, "stages", "6-review", slug)
+      folder = File.join(hive_state, "stages", "1-review", slug)
 
       with_adhoc_review_stubs(head: "first-head", runs: []) do |_materialized|
         capture_io { Hive::CLI.start([ "review", "--pr", "197" ]) }
@@ -170,7 +200,7 @@ class AdhocReviewIntegrationTest < Minitest::Test
       end
 
       slug = "adhoc-review-pr-197"
-      folder = File.join(hive_state, "stages", "6-review", slug)
+      folder = File.join(hive_state, "stages", "1-review", slug)
       assert_equal [ folder ], runs, "the review stage must run end-to-end for a fork PR"
       pr = Hive::Gh.pr_frontmatter(File.join(folder, "pr.md"))
       assert_equal true, pr.fetch("is_cross_repository"),
@@ -224,6 +254,8 @@ class AdhocReviewIntegrationTest < Minitest::Test
         assert_equal "hive-stage-action", payload.fetch("schema")
         assert_equal "review", payload.fetch("verb")
         assert_equal "ran", payload.fetch("phase")
+        assert_equal "1-review", payload.fetch("from_stage_dir")
+        assert_equal "1-review", payload.fetch("to_stage_dir")
         assert_equal "adhoc-review-pr-197", payload.fetch("slug")
         assert_equal "review_waiting", payload.fetch("marker_after")
       end

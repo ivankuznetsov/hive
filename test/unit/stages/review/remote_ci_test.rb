@@ -4,7 +4,9 @@ require "hive/stages/review/remote_ci"
 class ReviewRemoteCiTest < Minitest::Test
   include HiveTestHelper
 
-  Task = Struct.new(:folder, :project_root, :slug, keyword_init: true)
+  Task = Struct.new(:folder, :project_root, :slug, keyword_init: true) do
+    def workflow = Hive::Workflows::Registry.default
+  end
 
   class Clock
     attr_accessor :now
@@ -54,6 +56,11 @@ class ReviewRemoteCiTest < Minitest::Test
     end
 
     def push_branch(path, branch, **kwargs)
+      @pushes << [ path, branch, kwargs ]
+      @push_result
+    end
+
+    def push_review_head(path, branch, **kwargs)
       @pushes << [ path, branch, kwargs ]
       @push_result
     end
@@ -209,6 +216,55 @@ class ReviewRemoteCiTest < Minitest::Test
         assert_equal 0, result.attempts
         assert_match(/disk unavailable/, result.error_message)
       end
+    end
+  end
+
+  def test_standalone_review_settles_and_publishes_to_the_original_pr_branch
+    with_fixture do |_repo, head, task, _ctx, gh, _clock, runner|
+      task.define_singleton_method(:workflow) { Hive::Workflows::Registry.fetch(:"pr-review") }
+      File.write(File.join(task.folder, "pr.md"), "---\nhead_oid: #{head}\n---\n")
+      gh.metadata = gh.metadata.with(head_ref_name: "original-feature")
+      gh.candidates.first["headRefName"] = "original-feature"
+      gh.rollups = Array.new(4) { rollup(head: head, checks: [ check ]) }
+      result = runner.call(max_bytes: 1024, timeout_sec: 5)
+      assert_equal 0, result.exit_code
+      assert_equal "original-feature", gh.pushes.first[1]
+      assert_equal head, gh.pushes.first.last.fetch(:expected_remote_oid)
+    end
+  end
+
+  def test_standalone_review_records_publication_before_failed_ci_and_allows_retry
+    with_fixture do |repo, head, task, _ctx, gh, _clock, runner|
+      task.define_singleton_method(:workflow) { Hive::Workflows::Registry.fetch(:"pr-review") }
+      pr_path = File.join(task.folder, "pr.md")
+      File.write(pr_path, "---\nhead_oid: #{head}\n---\n")
+      gh.metadata = gh.metadata.with(head_ref_name: "original-feature")
+      gh.candidates.first["headRefName"] = "original-feature"
+      run!("git", "-C", repo, "commit", "--allow-empty", "-m", "review fix")
+      fixed_head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      gh.rollups = [ rollup(head: head, checks: [ check ]),
+                    rollup(head: fixed_head, checks: [ check(conclusion: "FAILURE") ]) ]
+      result = runner.call(max_bytes: 1024, timeout_sec: 5)
+      refute_equal 0, result.exit_code
+      assert_equal fixed_head, Hive::Gh.pr_frontmatter(pr_path)["head_oid"]
+      gh.metadata = gh.metadata.with(head_ref_oid: fixed_head)
+      gh.rollups = Array.new(4) { rollup(head: fixed_head, checks: [ check ]) }
+      result = runner.call(max_bytes: 1024, timeout_sec: 5)
+      assert_equal 0, result.exit_code
+      assert_equal fixed_head, gh.pushes.last.last.fetch(:expected_remote_oid)
+    end
+  end
+
+  def test_standalone_review_refuses_to_overwrite_a_new_author_commit
+    with_fixture do |_repo, head, task, _ctx, gh, _clock, runner|
+      task.define_singleton_method(:workflow) { Hive::Workflows::Registry.fetch(:"pr-review") }
+      File.write(File.join(task.folder, "pr.md"), "---\nhead_oid: #{head}\n---\n")
+      gh.metadata = gh.metadata.with(head_ref_name: "original-feature", head_ref_oid: "b" * 40)
+      gh.candidates.first["headRefName"] = "original-feature"
+      gh.rollups = [ rollup(head: "b" * 40, checks: [ check ]) ]
+      result = runner.call(max_bytes: 1024, timeout_sec: 5)
+      assert_includes result.reason, "head changed since this review"
+      assert_empty gh.pushes
     end
   end
 

@@ -3,6 +3,7 @@ require "hive/workflows/bench"
 require "hive/workflows/coding"
 require "hive/workflows/content"
 require "hive/workflows/patrol_fix"
+require "hive/workflows/pr_review"
 
 module Hive
   module Workflows
@@ -34,7 +35,8 @@ module Hive
         coding: Coding::DESCRIPTOR,
         content: Content::DESCRIPTOR,
         bench: Bench::DESCRIPTOR,
-        Hive::PatrolFix::WORKFLOW_ID => PatrolFix::DESCRIPTOR
+        Hive::PatrolFix::WORKFLOW_ID => PatrolFix::DESCRIPTOR,
+        "pr-review": PrReview::DESCRIPTOR
       }.freeze
 
       module_function

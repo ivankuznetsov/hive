@@ -151,7 +151,7 @@ git -C <repo> worktree add -B <branch> <path> refs/<branch>
 git -C <path> rev-parse HEAD
 ```
 
-The caller chooses `path` and `branch`; ad-hoc review uses the normal `worktree_root/<slug>` path and branch `hive/review/pr-N`, while babysitter keeps its own babysitter worktree path. The returned `head_sha` lets callers compare the materialized checkout to GitHub's `headRefOid`. Failures raise `Hive::WorktreeError`.
+The caller chooses `path` and `branch`; ad-hoc review uses the normal `worktree_root/<slug>` path and branch `adhoc-review-pr-N`, while babysitter keeps its own babysitter worktree path. The returned `head_sha` lets callers compare the materialized checkout to GitHub's `headRefOid`. Failures raise `Hive::WorktreeError`.
 
 ## Exact detached analysis materialization
 
@@ -303,7 +303,7 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 - `Stages::OpenPr#run!` — uses the shared stage-entry pointer validator before `git push` runs in the worktree.
 - `Stages::Finalize#run!` — uses the same validator before verifying the final branch state.
 - `Stages::Done#run!` — reads pointer to print cleanup instructions.
-- `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
+- `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a standalone `pr-review` task at `1-review`.
 - `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
 - `Hive::Commands::Worktree` — inspects and repairs residue only through a strictly owned coding worktree pointer.
 

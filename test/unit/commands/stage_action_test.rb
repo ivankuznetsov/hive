@@ -38,7 +38,7 @@ class CommandsStageActionTest < Minitest::Test
   end
 
   def test_wrong_stage_reports_actual_stage_when_current_stage_is_not_source_or_target
-    task = Struct.new(:slug, :folder).new("some-slug", "/tmp/some-slug")
+    task = Struct.new(:slug, :folder, :workflow).new("some-slug", "/tmp/some-slug", Hive::Workflows::Registry.default)
     command = Hive::Commands::StageAction.new("plan", "some-slug")
     command.define_singleton_method(:resolve_task) { task }
     command.define_singleton_method(:stage_dir) { |_task| "4-execute" }
@@ -130,7 +130,7 @@ class CommandsStageActionTest < Minitest::Test
   end
 
   def test_durable_call_uses_attempts_api_without_promoting_in_caller
-    task = Struct.new(:folder).new("/tmp/task-folder")
+    task = Struct.new(:folder, :workflow).new("/tmp/task-folder", Hive::Workflows::Registry.default)
     result = Hive::Attempts::ClientResult.new(
       status: :terminal, exit_status: 0, outcome: "succeeded",
       receipt: {}, attempt_id: "attempt-1"
@@ -156,6 +156,7 @@ class CommandsStageActionTest < Minitest::Test
     task = Struct.new(:folder, :slug, :project_root, :project_name).new(
       "/tmp/task-folder", "some-slug", "/tmp/project", "demo"
     )
+    task.define_singleton_method(:workflow) { Hive::Workflows::Registry.default }
     attempt = Struct.new(:attempt_id).new("attempt-lost")
     dispatch_result = Hive::Attempts::DispatchResult.new(
       status: :accepted, attempt: attempt, receipt: nil,
@@ -220,7 +221,7 @@ class CommandsStageActionTest < Minitest::Test
 
 
   def test_failed_durable_json_attempt_without_stdout_emits_one_error_document
-    task = Struct.new(:folder).new("/tmp/task-folder")
+    task = Struct.new(:folder, :workflow).new("/tmp/task-folder", Hive::Workflows::Registry.default)
     result = Hive::Attempts::ClientResult.new(
       status: :terminal, exit_status: Hive::ExitCodes::SOFTWARE, outcome: "failed",
       receipt: {}, attempt_id: "attempt-empty", stdout_bytes: 0
@@ -246,7 +247,7 @@ class CommandsStageActionTest < Minitest::Test
   end
 
   def test_successful_durable_json_replay_with_expired_output_emits_error_document
-    task = Struct.new(:folder).new("/tmp/task-folder")
+    task = Struct.new(:folder, :workflow).new("/tmp/task-folder", Hive::Workflows::Registry.default)
     result = Hive::Attempts::ClientResult.new(
       status: :terminal, exit_status: 0, outcome: "succeeded",
       receipt: {}, attempt_id: "attempt-expired", stdout_bytes: 0,
@@ -270,7 +271,7 @@ class CommandsStageActionTest < Minitest::Test
   end
 
   def test_lost_durable_json_attempt_with_worker_stdout_does_not_duplicate_it
-    task = Struct.new(:folder).new("/tmp/task-folder")
+    task = Struct.new(:folder, :workflow).new("/tmp/task-folder", Hive::Workflows::Registry.default)
     result = Hive::Attempts::ClientResult.new(
       status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL, outcome: "lost",
       receipt: nil, attempt_id: "attempt-lost-output", stdout_bytes: 12
@@ -290,7 +291,7 @@ class CommandsStageActionTest < Minitest::Test
   end
 
   def test_failed_durable_json_attempt_with_worker_stdout_exits_without_duplicate_output
-    task = Struct.new(:folder).new("/tmp/task-folder")
+    task = Struct.new(:folder, :workflow).new("/tmp/task-folder", Hive::Workflows::Registry.default)
     result = Hive::Attempts::ClientResult.new(
       status: :terminal, exit_status: 7, outcome: "failed",
       receipt: {}, attempt_id: "attempt-failed-output", stdout_bytes: 12
@@ -310,7 +311,7 @@ class CommandsStageActionTest < Minitest::Test
   end
 
   def test_failed_durable_text_attempt_preserves_exit_without_json
-    task = Struct.new(:folder).new("/tmp/task-folder")
+    task = Struct.new(:folder, :workflow).new("/tmp/task-folder", Hive::Workflows::Registry.default)
     result = Hive::Attempts::ClientResult.new(
       status: :terminal, exit_status: 7, outcome: "failed",
       receipt: {}, attempt_id: "attempt-text", stdout_bytes: 0

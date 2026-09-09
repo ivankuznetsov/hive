@@ -11,7 +11,9 @@ require "hive/rebase"
 class HiveCommandsRunNoRebaseTest < Minitest::Test
   include HiveTestHelper
 
-  FakeWorkflow = Struct.new(:draft_pr_handoff?, :controller?)
+  FakeWorkflow = Struct.new(:draft_pr_handoff?, :controller?) do
+    def id = :coding
+  end
   FakeTask = Struct.new(:slug, :folder, :worktree_path, :stage_name, :project_root, :workflow)
 
   def fake_task(draft_pr_handoff: false, controller: false)
@@ -19,6 +21,16 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
       "demo-260514-bbbb", "/tmp/folder", "/tmp/wt", "4-execute", "/tmp/proj",
       FakeWorkflow.new(draft_pr_handoff, controller)
     )
+  end
+
+  def test_pr_review_never_rebases_the_borrowed_pr
+    task = fake_task
+    task.workflow = Hive::Workflows::Registry.fetch(:"pr-review")
+    with_replaced_singleton_method(Hive::Rebase, :perform, ->(*) { raise "must not rebase" }) do
+      result = Hive::Commands::Run.new(task.slug).send(:perform_rebase, task, {})
+      assert_equal :pr_review_workflow, result.reason
+      refute result.attempted
+    end
   end
 
   def test_no_rebase_short_circuits_with_cli_override_reason

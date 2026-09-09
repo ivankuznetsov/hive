@@ -2088,7 +2088,7 @@ class RunReviewersTest < Minitest::Test
 
   def test_exact_guardrail_waiver_emits_a_visible_fingerprint_event
     Dir.mktmpdir("hive-review-waiver-event") do |dir|
-      task = Struct.new(:folder, :slug).new(dir, "review-task")
+      task = Struct.new(:folder, :slug, :stage_index, :stage_name).new(dir, "review-task", 1, "review")
       match = Hive::Stages::Review::FixGuardrail::Match.new(
         pattern_name: "secrets_pattern_match.password_assignment",
         file: "config/example.rb", line: 1, snippet: "[REDACTED]",

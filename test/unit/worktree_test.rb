@@ -1745,6 +1745,35 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_owned_pointer_rejects_other_pr_branches_and_arbitrary_adhoc_names
+    with_initialized_project do |dir, root|
+      slug = "adhoc-review-pr-197"
+      task_folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
+      FileUtils.mkdir_p(task_folder)
+      worktree = Hive::Worktree.new(dir, slug, worktree_root: root)
+      worktree.create!("hive/review/pr-198", default_branch: "master")
+      pointer_path = File.join(task_folder, "worktree.yml")
+      [ "hive/review/pr-198", "feature/manual-review", "hive/review/pr-0197" ].each do |branch|
+        File.write(pointer_path, { "path" => worktree.path, "branch" => branch }.to_yaml)
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::Worktree.read_owned_pointer(
+            task_folder, project_root: dir, slug: slug, expected_root: root
+          )
+        end
+        assert_includes error.message, "branch does not belong to task"
+      end
+
+      # Even the correct pointer cannot authorize a different checked-out branch.
+      File.write(pointer_path, { "path" => worktree.path, "branch" => slug }.to_yaml)
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder, project_root: dir, slug: slug, expected_root: root
+        )
+      end
+      assert_includes error.message, "expected #{slug}"
+    end
+  end
+
   def test_owned_pointer_rejects_a_same_slug_worktree_from_another_repository
     with_initialized_project do |project, _project_root|
       with_initialized_project do |other_project, other_root|

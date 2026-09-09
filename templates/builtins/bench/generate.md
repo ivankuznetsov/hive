@@ -123,7 +123,6 @@ ruby -ryaml -e '
   puts data.fetch("campaign_id")
   puts HiveBench::CampaignContract.source(data, repo_root: repo)
   puts data.fetch("corpus_version")
-  require File.join(runtime, "harness/profiles/candidates")
   puts HiveBench::CampaignContract.campaign_requires_openrouter?(data)
 ' "$BENCH_ROOT" "$REPO_ROOT" >.generate-campaign.out 2>.generate-campaign.err || {
   write_waiting "$(cat .generate-campaign.err .generate-campaign.out)"

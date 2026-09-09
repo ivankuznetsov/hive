@@ -83,6 +83,7 @@ owner page, never as competing links here.
 | `hive plan-review` | [[modules/plan_review]] |
 | `hive plan-review-run` | [[modules/plan_review]] |
 | `hive prune` | [[commands/prune]] |
+| `hive publication-reconcile` | [[commands/publication-reconcile]] |
 | `hive rebase-status` | [[commands/rebase-status]] |
 | `hive refactor-patrol` | [[commands/refactor-patrol]] |
 | `hive reject-finding` | [[commands/findings]] |

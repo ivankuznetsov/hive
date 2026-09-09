@@ -183,9 +183,9 @@ creation-only workflow authoring never invokes `hive new`.
 Without an idempotency key, `hive new --json` retains its legacy text output.
 With `--idempotency-key KEY --json`, success and error output use `hive-new.v1`.
 The shared envelope emitter wraps success-serialization failures as internal
-errors. If encoding the error envelope also raises `JSON::GeneratorError`, it
-warns on stderr and emits no fallback document; the original typed error still
-controls the command exit. Programmatic `call!` callers receive exceptions.
+errors. If encoding the error envelope also raises `JSON::GeneratorError`, the command
+re-raises that encoding error and emits no fallback document. Programmatic
+`call!` callers receive exceptions.
 
 ## Exit codes
 

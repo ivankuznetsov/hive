@@ -247,6 +247,37 @@ class RuntimeControlPlaneMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_failed_lifecycle_command_and_web_installer_are_reported
+    with_tmp_dir do |root|
+      failed = Hive::RuntimeControlPlane::MaintenanceServices.new(
+        state_home: root,
+        home: root,
+        host_os: "linux",
+        runner: ->(_argv) { [ "", "manager failed", Status.new(false) ] }
+      )
+      error = assert_raises(Hive::RuntimeControlPlane::Error) do
+        failed.send(:run!, %w[systemctl --user daemon-reload])
+      end
+      assert_equal :service_lifecycle_failed, error.code
+      assert_match(/manager failed/, error.message)
+
+      available = Hive::RuntimeControlPlane::MaintenanceServices.new(
+        state_home: root,
+        home: root,
+        host_os: "linux",
+        runner: ->(_argv) { true }
+      )
+      installer = available.send(:service_installer, "hive-web")
+      assert_instance_of Hive::Commands::Web::ServiceInstaller, installer
+
+      error = assert_raises(Hive::RuntimeControlPlane::Error) do
+        available.send(:service_installer, "hive-unknown")
+      end
+      assert_equal :service_lifecycle_failed, error.code
+      assert_match(/unknown managed service hive-unknown/, error.message)
+    end
+  end
+
   private
 
   def write_service_files(home, names, platform:)

@@ -2928,6 +2928,28 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_remove_fails_closed_when_foreground_takeover_returns_false
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      takeover = Object.new
+      takeover.define_singleton_method(:stop!) { false }
+      service = build_service(
+        dir,
+        runner: ->(_argv) { true },
+        removal_takeover: takeover
+      )
+
+      result = service.remove(service.plan_remove)
+
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :foreground_stop_failed
+      assert File.exist?(path)
+      assert_empty pending_journals(dir)
+    end
+  end
+
   def test_pending_reconciliation_rejects_mismatched_ambiguous_and_regressed_files
     with_tmp_dir do |dir|
       service = build_service(dir, runner: ->(_argv) { false })
@@ -3171,6 +3193,171 @@ class UserServiceTest < Minitest::Test
       assert_equal :failed, result.kind
       assert_includes result.diagnostics, :daemon_reload_failed
       assert_includes result.diagnostics, :recovery_pending
+    end
+  end
+
+  def test_restart_replay_retains_missing_activation_identity_at_each_reload_boundary
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      desired_digest = Digest::SHA256.hexdigest("desired\n")
+      missing_identity = synthetic_status(
+        dir,
+        main_pid: 42,
+        process_start: ""
+      )
+      manager = Object.new
+      manager.define_singleton_method(:reload) do
+        Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: [])
+      end
+
+      unit_published = apply_document(
+        phase: "unit_published",
+        desired_digest: desired_digest,
+        prior_digest: desired_digest,
+        prior_content: "desired\n",
+        manager_intent: "restart",
+        prior_running: true,
+        prior_main_pid: 41,
+        prior_process_start: "prior"
+      )
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| missing_identity }
+      service.instance_variable_set(:@manager, manager)
+      result = service.send(
+        :complete_apply_transition,
+        unit_published,
+        fake_transition_transaction(unit_published),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_effect_ambiguous
+
+      manager_reloaded = unit_published.merge("phase" => "manager_reloaded")
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| missing_identity }
+      result = service.send(
+        :complete_apply_transition,
+        manager_reloaded,
+        fake_transition_transaction(manager_reloaded),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_effect_ambiguous
+
+      stale = synthetic_status(
+        dir,
+        definition_current: false,
+        main_pid: 42,
+        process_start: "prior"
+      )
+      observations = [ stale, missing_identity ]
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) do |manager:|
+        observations.shift || missing_identity
+      end
+      service.instance_variable_set(:@manager, manager)
+      result = service.send(
+        :complete_apply_transition,
+        manager_reloaded,
+        fake_transition_transaction(manager_reloaded),
+        replay: true
+      )
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_effect_ambiguous
+    end
+  end
+
+  def test_replayed_reload_records_the_process_boundary_before_restarting
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      stale = synthetic_status(dir, definition_current: false, main_pid: 42, process_start: "old")
+      current = synthetic_status(dir, main_pid: 42, process_start: "old")
+      restarted = synthetic_status(dir, main_pid: 43, process_start: "new")
+      observations = [ stale, current, restarted, restarted, restarted ]
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| observations.shift || restarted }
+      manager = Object.new
+      manager.define_singleton_method(:reload) do
+        Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: [])
+      end
+      manager.define_singleton_method(:activate) do |_intent|
+        Hive::UserService::Manager::Action.new(ok: true, restarted: true, diagnostics: [])
+      end
+      service.instance_variable_set(:@manager, manager)
+      document = apply_document(
+        phase: "manager_reloaded",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_content: "desired\n",
+        manager_intent: "restart",
+        prior_running: true,
+        prior_main_pid: 41,
+        prior_process_start: "prior"
+      )
+
+      result = service.send(
+        :complete_apply_transition,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert_equal :written, result.kind
+      assert result.restarted
+    end
+  end
+
+  def test_apply_replay_retains_an_ambiguous_activation_effect
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      status = synthetic_status(dir, main_pid: 42, process_start: "current")
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| status }
+      service.define_singleton_method(:activation_effect) { |*| :ambiguous }
+      document = apply_document(
+        phase: "manager_reloaded",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_content: "desired\n",
+        manager_intent: "restart",
+        activation_from_main_pid: 41,
+        activation_from_process_start: "prior"
+      )
+
+      result = service.send(
+        :complete_apply_transition,
+        document,
+        fake_transition_transaction(document),
+        replay: true
+      )
+
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :manager_effect_ambiguous
+    end
+  end
+
+  def test_activation_effect_fails_closed_for_an_internally_ambiguous_endpoint
+    with_tmp_dir do |dir|
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:desired_endpoint?) { |_status| true }
+      status = synthetic_status(dir, main_pid: 0, process_start: nil)
+      document = apply_document(
+        phase: "manager_reloaded",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_content: "desired\n",
+        manager_intent: "restart",
+        activation_from_main_pid: 41,
+        activation_from_process_start: "prior"
+      )
+
+      assert_equal :ambiguous, service.send(:activation_effect, status, document)
     end
   end
 
@@ -3496,6 +3683,48 @@ class UserServiceTest < Minitest::Test
       assert_equal 1, restore_calls
       assert_includes result.diagnostics, :recovery_pending
       refute_includes result.diagnostics, :prior_state_restored
+    end
+  end
+
+  def test_rollback_retains_a_running_manager_without_process_identity
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      prior_digest = Digest::SHA256.hexdigest("legacy\n")
+      status = synthetic_status(
+        dir,
+        content_state: :drifted,
+        digest: prior_digest,
+        enabled: true,
+        running: true,
+        main_pid: 42,
+        process_start: ""
+      )
+      service = build_service(dir, runner: ->(_argv) { true })
+      service.define_singleton_method(:inspect_status) { |manager:| status }
+      document = apply_document(
+        phase: "prior_file_restored",
+        direction: "rollback",
+        desired_digest: Digest::SHA256.hexdigest("desired\n"),
+        prior_digest: prior_digest,
+        prior_content: "legacy\n",
+        manager_intent: "restart",
+        prior_enabled: true,
+        prior_running: true,
+        prior_main_pid: 41,
+        prior_process_start: "prior"
+      )
+
+      result = service.send(
+        :rollback_apply,
+        document,
+        fake_transition_transaction(document),
+        diagnostics: []
+      )
+
+      assert_equal :failed, result.kind
+      assert_includes result.diagnostics, :rollback_manager_unverified
     end
   end
 

@@ -532,6 +532,20 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_stop_foreground_babysitter_translates_takeover_failures
+    takeover = Object.new
+    takeover.define_singleton_method(:stop!) { raise IOError, "unreadable pid" }
+    command = Hive::Commands::Uninstall.new(output: StringIO.new)
+    command.define_singleton_method(:babysitter_removal_takeover) { takeover }
+
+    error = assert_raises(Hive::Error) do
+      command.send(:stop_foreground_babysitter)
+    end
+
+    assert_match(/could not safely stop babysitter \(IOError: unreadable pid\)/, error.message)
+    assert_match(/no services or data were removed/, error.message)
+  end
+
   def test_unreadable_babysitter_pid_aborts_before_any_uninstall_mutation
     with_xdg_home do
       FileUtils.mkdir_p(Hive::Paths.state_home)
@@ -1069,6 +1083,43 @@ class UninstallCommandTest < Minitest::Test
 
     assert_match(/changed while its service was being disabled/, out.string)
     assert_match(/could not remove .* leaving it in place/, out.string)
+  end
+
+  def test_deregister_unit_renders_platform_disable_and_reload_warnings
+    out = StringIO.new
+    command = Hive::Commands::Uninstall.new(output: out)
+    installer = Struct.new(:target_path, :envelope_platform, :service_name, :results) do
+      def remove!(**_options) = results.shift
+    end.new(
+      "/tmp/hive-test.service",
+      "macos",
+      "hive-test",
+      [
+        Hive::UserService::Result.new(
+          :partial,
+          operation: :remove,
+          diagnostics: [ :manager_disable_failed ]
+        ),
+        Hive::UserService::Result.new(
+          :partial,
+          operation: :remove,
+          diagnostics: [ :manager_disable_failed ]
+        ),
+        Hive::UserService::Result.new(
+          :partial,
+          operation: :remove,
+          diagnostics: [ :daemon_reload_failed ]
+        )
+      ]
+    )
+
+    command.send(:deregister_unit, installer)
+    installer.envelope_platform = "linux"
+    2.times { command.send(:deregister_unit, installer) }
+
+    assert_match(/launchctl unload failed/, out.string)
+    assert_match(/systemctl --user disable failed for hive-test/, out.string)
+    assert_match(/systemctl --user daemon-reload failed/, out.string)
   end
 
   private

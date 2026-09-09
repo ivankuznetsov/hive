@@ -68,6 +68,53 @@ class UserServiceTransactionJournalTest < Minitest::Test
     assert_equal "after-reload", reloaded.fetch("activation_from_process_start")
   end
 
+  def test_process_recording_rejects_wrong_phases_and_duplicate_restore_identity
+    journal = fake_journal(writer: ->(*) { nil })
+    prepared = prepared_document(journal)
+
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      journal.advance(
+        prepared,
+        phase: :backup_stored,
+        activation_process: { main_pid: 42, process_start: "after-reload" }
+      )
+    end
+    assert_match(/only be recorded at manager reload/, error.message)
+
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      journal.record_activation_process(prepared, main_pid: 42, process_start: "after-reload")
+    end
+    assert_match(/cannot record activation process/, error.message)
+
+    document = journal.advance(prepared, phase: :backup_stored)
+    document = journal.advance(document, phase: :unit_published)
+    document = journal.advance(document, phase: :manager_reloaded)
+    activated = journal.record_activation_process(
+      document,
+      main_pid: 42,
+      process_start: "after-reload"
+    )
+    assert_equal 42, activated.fetch("activation_from_main_pid")
+
+    rollback = journal.advance(document, phase: :rollback_selected, direction: :rollback)
+    rollback = journal.advance(rollback, phase: :prior_file_restored)
+    rollback = rollback.merge(
+      "prior_enabled" => true,
+      "prior_running" => true,
+      "prior_main_pid" => 123,
+      "prior_process_start" => "before-reload"
+    )
+    restored = journal.record_restore_process(
+      rollback,
+      main_pid: 321,
+      process_start: "restored"
+    )
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      journal.record_restore_process(restored, main_pid: 654, process_start: "duplicate")
+    end
+    assert_match(/already recorded/, error.message)
+  end
+
   def test_prior_content_translates_a_non_string_payload
     encoded = Object.new
     encoded.define_singleton_method(:match?) { |_pattern| true }
@@ -240,6 +287,44 @@ class UserServiceTransactionJournalTest < Minitest::Test
         readable_journal(document).read
       end
     end
+  end
+
+  def test_restore_and_activation_process_identity_validation_is_exhaustive
+    journal = fake_journal(writer: ->(*) { nil })
+    base = prepared_document(journal)
+    invalid_restore = [
+      [ base.merge("restore_from_main_pid" => "42"), /restore-from main pid is invalid/ ],
+      [ base.merge("restore_from_process_start" => 42), /restore-from process start is invalid/ ],
+      [ base.merge("restore_from_main_pid" => 0,
+                   "restore_from_process_start" => "started"), /restore-from process identity is incoherent/ ],
+      [ base.merge("restore_from_main_pid" => 42,
+                   "restore_from_process_start" => "started"), /invalid in this state/ ]
+    ]
+    invalid_activation = [
+      [ base.merge("activation_from_main_pid" => "42"), /activation-from main pid is invalid/ ],
+      [ base.merge("activation_from_process_start" => 42), /activation-from process start is invalid/ ],
+      [ base.merge("activation_from_main_pid" => 0,
+                   "activation_from_process_start" => "started"), /activation-from process identity is incoherent/ ],
+      [ base.merge("activation_from_main_pid" => 42,
+                   "activation_from_process_start" => "started"), /invalid in this state/ ]
+    ]
+
+    (invalid_restore + invalid_activation).each do |document, message|
+      error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+        readable_journal(document).read
+      end
+      assert_match message, error.message
+    end
+  end
+
+  def test_read_rejects_unrecognized_fields
+    document = prepared_document(fake_journal(writer: ->(*) { nil })).merge("surprise" => true)
+
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      readable_journal(document).read
+    end
+
+    assert_match(/fields are not recognized/, error.message)
   end
 
   def test_rollback_records_the_process_identity_observed_before_manager_restore

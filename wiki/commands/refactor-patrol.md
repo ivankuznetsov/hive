@@ -83,8 +83,20 @@ classification, discovery, checkpointing, retries, and post-merge bookkeeping.
 Those manifests carry path/status/rename metadata rather than GitHub patch
 bodies; the pinned merge worktree is the source of code truth, and patch size
 does not gate reconciliation.
-Scheduled current-main scans use the Architecture Patrol launch lane and
-reserve their completed dispositions through the same source adapter.
+Scheduled current-main scans are wired into the daemon through
+`ScheduledArchitectureScheduler` and the shared Patrol arbiter. They become due
+independently of merged-PR jobs, using `patrol.poll_interval_sec` and the
+Architecture engine's daily discovery allowance. They use the existing patrol
+scan concurrency budget. The internal `refactor-patrol-scheduled` child claims
+one mapped slice at a frozen revision, runs the review, and durably admits the
+result before advancing its cursor. Failed or incomplete reviews release the
+slice for retry. Successful dispositions use the same source adapter as
+post-merge discovery.
+
+Daemon composition and dispatcher regression tests require a periodic launch
+when no merged-PR jobs exist. Command integration tests exercise the real slice
+producer through review and durable cursor advancement; provider failures must
+leave that cursor retryable.
 
 The runtime has no action candidate selection, action reservation, fixer,
 issue filer, branch creator, PR opener, or review handoff. Historical action

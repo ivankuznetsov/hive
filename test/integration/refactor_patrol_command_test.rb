@@ -5,6 +5,7 @@ require "yaml"
 require "digest"
 require "hive/cli"
 require "hive/commands/refactor_patrol"
+require "hive/commands/refactor_patrol_scheduled"
 require "hive/config"
 require "hive/patrol/feature"
 require "hive/refactor_patrol/thesis"
@@ -1415,6 +1416,62 @@ class RefactorPatrolCommandTest < Minitest::Test
         assert_equal [ "checkout" ], payload.fetch("feature_results").map { |item| item.fetch("feature_id") }
         refute_equal repo, observed.fetch(0).fetch(0)
         assert_equal sha, observed.fetch(0).fetch(1)
+      end
+    end
+  end
+
+  def test_periodic_child_completes_a_real_slice_and_advances_the_durable_cursor
+    with_refactor_patrol_project do |repo|
+      with_tmp_dir do |worktree_root|
+        entry = Hive::Config.find_project("demo")
+        sha = IO.popen([ "git", "-C", repo, "rev-parse", "HEAD" ], &:read).strip
+        cfg = Hive::Config.load(repo).merge("worktree_root" => worktree_root, "daemon" => { "enabled" => true })
+        producer = Hive::RefactorPatrol::ScheduledSliceProducer.new(
+          entry: entry, cfg: cfg, snapshotter: ->(**) {
+            Hive::RefactorPatrol::ScheduledSliceProducer::Snapshot.new(
+              analysis_sha: sha, feature_ids: %w[billing checkout]
+            )
+          }
+        )
+        reviewer = FakeReviewer.new(
+          { "billing" => [ thesis("billing-boundary", feature_id: "billing", fingerprint: "fp-billing") ] }
+        )
+        budget = Object.new
+        budget.define_singleton_method(:remaining_launches) { 1 }
+        path = File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "results",
+                         "scheduled-#{'a' * 32}.json")
+        command = Hive::Commands::RefactorPatrolScheduled.new(
+          "demo", result_file: path, config_loader: ->(*) { cfg },
+          producer_factory: ->(*) { producer }, budget_factory: ->(*) { budget },
+          command_factory: ->(project, **options) {
+            Hive::Commands::RefactorPatrol.new(
+              project, **options,
+              mapper_factory: ->(*) { FakeMapper.new([ feature("billing"), feature("checkout") ]) },
+              reviewer_factory: ->(*) { reviewer }
+            )
+          }
+        )
+        payload = nil
+        output, = capture_io { payload = command.call }
+        assert payload.fetch("ok")
+        assert_equal payload, JSON.parse(output), "supervised child must emit one final JSON receipt"
+        assert_equal payload, JSON.parse(File.read(path))
+        assert_equal [ "billing" ], reviewer.seen_feature_ids
+        assert_equal sha, payload.dig("report", "last_scanned_sha")
+        records = producer.each_result.to_a
+        assert_equal 1, records.size
+        assert_equal [ "billing-boundary" ], records.first.dig("dispositions", "fix").map { |item| item.fetch("id") }
+        admissions = Hive::RefactorPatrol::FixAdmissionAdapter.for_project(
+          project_root: repo, hive_state_path: entry.fetch("hive_state_path")
+        ).store.pending
+        assert_equal 1, admissions.size, "completed findings must reach durable fix admission"
+        source = admissions.first.fetch("source")
+        assert_equal "architecture_patrol", source.fetch("engine")
+        assert_equal sha, source.fetch("target_revision")
+        assert_equal "#{records.first.fetch('job_id')}:billing-boundary", source.fetch("identity")
+        next_claim = producer.claim
+        assert_equal "checkout", next_claim.fetch("feature_id")
+        producer.release(claim_id: next_claim.fetch("id"))
       end
     end
   end

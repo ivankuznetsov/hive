@@ -1,5 +1,4 @@
 require "hive/completion_time"
-require "hive/workflows"
 
 module Hive
   # Shared projection for ordinary and dedicated archive surfaces. Archive
@@ -95,13 +94,12 @@ module Hive
       end.min
     end
 
-    # A malformed/unknown workflow cannot be action-classified. If its folder
-    # sits in a terminal directory known to the current generation, include the
-    # synthetic Error row in the dedicated archive so the defect is observable;
+    # The status producer captures invalid rows' terminal membership from the
+    # project's workflow generation. Keep those rows in the dedicated archive
+    # without consulting mutable global workflow state;
     # it is never eligible for retention hiding or the hidden count.
     def invalid_terminal_row?(row)
-      row[:invalid] == true &&
-        (row[:archive_member] == true || Hive::Workflows.all_terminal_stage_dirs.include?(row[:stage]))
+      row[:invalid] == true && row[:archive_member] == true
     end
   end
 end

@@ -850,6 +850,87 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_active_payload_keeps_an_unfinished_generic_terminal_agent
+    descriptor = dispatch_workflow
+
+    with_registered_workflow(descriptor) do
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        active_slug = "active-terminal-agent-260828-abcd"
+        active = File.join(hive_state, "stages", "3-report", active_slug)
+        archived_slug = "complete-terminal-agent-260828-bcde"
+        archived = File.join(hive_state, "stages", "3-report", archived_slug)
+        FileUtils.mkdir_p(active)
+        FileUtils.mkdir_p(archived)
+        Hive::TaskMeta.write(
+          active, id: 77, slug: active_slug, display_name: nil,
+          workflow: descriptor.id.to_s
+        )
+        Hive::TaskMeta.write(
+          archived, id: 78, slug: archived_slug, display_name: nil,
+          workflow: descriptor.id.to_s
+        )
+        File.write(File.join(active, "report.md"), "<!-- WAITING -->\n")
+        File.write(File.join(archived, "report.md"), "report\n<!-- COMPLETE -->\n")
+
+        calls = Hash.new(0)
+        original_for = Hive::TaskAction.method(:for)
+        payload = with_replaced_singleton_method(
+          Hive::TaskAction, :for,
+          lambda do |task, *args, **kwargs|
+            calls[task.folder] += 1
+            original_for.call(task, *args, **kwargs)
+          end
+        ) do
+          Hive::Commands::Status.new.active_payload([
+            status_project(project_root, hive_state)
+          ])
+        end
+        tasks = payload.fetch("projects").first.fetch("tasks")
+
+        assert_equal [ active_slug ], tasks.map { |task| task.fetch("slug") },
+                     tasks.map { |task| task.slice("slug", "action", "marker", "attrs") }.inspect
+        assert_equal "needs_input", tasks.first.fetch("action")
+        assert_equal 1, calls.fetch(active), "the active terminal row must reuse its status classification"
+        assert_equal 1, calls.fetch(archived), "the archived terminal row must not be classified by a pre-scan"
+      end
+    end
+  end
+
+  def test_active_payload_matches_the_legacy_active_envelope_for_errors
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "dependency-error-260829-abcd"
+      folder = write_status_task(
+        hive_state, "4-execute", slug,
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 1, slug: slug, display_name: nil, depends_on: "missing-prerequisite"
+      )
+      missing_root = File.join(project_root, "missing")
+      projects = [
+        { "name" => "missing", "path" => missing_root,
+          "hive_state_path" => File.join(missing_root, ".hive-state") },
+        { "name" => "healthy", "path" => project_root, "hive_state_path" => hive_state }
+      ]
+      now = Time.utc(2026, 8, 29, 12, 0, 0)
+
+      legacy = active = nil
+      capture_io do
+        legacy = Hive::Commands::Status.new.json_payload(
+          projects, exclude_archived: true, now: now
+        )
+        active = Hive::Commands::Status.new.active_payload(projects, now: now)
+      end
+
+      assert_equal legacy, active
+      assert_equal "missing_project_path", active.dig("projects", 0, "error")
+      assert_equal "dependency_task_missing",
+                   active.dig("projects", 1, "tasks", 0, "admission_error", "reason_code")
+    end
+  end
+
   def test_json_payload_populates_pr_url_from_pr_md_frontmatter_in_review_stage
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -1523,6 +1604,38 @@ class CommandsStatusTest < Minitest::Test
       assert_equal [], exploded.fetch("tasks"), "the exploding project degrades to no tasks"
       assert_equal "project_load_failed", exploded.fetch("error")
       refute_empty healthy.fetch("tasks"), "the healthy project is unaffected"
+      assert_match(/payload failed/, err)
+    end
+  end
+
+  def test_active_payload_degrades_a_project_that_fails_during_completion
+    raising = Class.new(Hive::Commands::Status) do
+      def complete_project_payload(prepared, **)
+        raise "boom in #{prepared.project['name']}" if prepared.project["name"] == "explodes"
+
+        super
+      end
+    end
+
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(
+        hive_state, "4-execute", "healthy-active-260829-abcd",
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+
+      payload = nil
+      _out, err = capture_io do
+        payload = raising.new.active_payload([
+          { "name" => "explodes", "path" => project_root, "hive_state_path" => hive_state },
+          { "name" => "healthy", "path" => project_root, "hive_state_path" => hive_state }
+        ])
+      end
+
+      exploded, healthy = payload.fetch("projects")
+      assert_equal "project_load_failed", exploded.fetch("error")
+      assert_empty exploded.fetch("tasks")
+      assert_equal [ "healthy-active-260829-abcd" ], healthy.fetch("tasks").map { |task| task.fetch("slug") }
       assert_match(/payload failed/, err)
     end
   end
@@ -2667,6 +2780,12 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_archive_mode_active_payload_keeps_the_archive_projection_label
+    payload = Hive::Commands::Status.new(archive: true).active_payload([])
+
+    assert_equal "archive", payload.fetch("projection")
+  end
+
   def test_mixed_workflow_retention_projects_one_ordinary_set_and_lossless_archive
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -2694,8 +2813,11 @@ class CommandsStatusTest < Minitest::Test
       )
       project = status_project(project_root, hive_state)
 
-      ordinary = Hive::Commands::Status.new.json_payload([ project ], now: now)
+      command = Hive::Commands::Status.new
+      ordinary = command.json_payload([ project ], now: now, include_archive_index: true)
         .fetch("projects").first
+      assert_equal now, command.next_retention_boundary
+      assert_equal 4, ordinary.fetch("__archive_folders").size
       archived = Hive::Commands::Status.new(archive: true).json_payload([ project ], now: now)
         .fetch("projects").first
 
@@ -3354,7 +3476,7 @@ class CommandsStatusTest < Minitest::Test
     command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
       snapshot.fetch("status_cache")
     end
-    command.define_singleton_method(:json_payload) do |*|
+    command.define_singleton_method(:active_payload) do |*|
       raise "concise status must not rescan task folders when the daemon cache is current"
     end
 
@@ -3435,7 +3557,7 @@ class CommandsStatusTest < Minitest::Test
     }
     command = Hive::Commands::Status.new(operational: true)
     scans = 0
-    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+    command.define_singleton_method(:active_payload) do |*_args, **_kwargs|
       scans += 1
       fresh_payload
     end
@@ -3466,7 +3588,7 @@ class CommandsStatusTest < Minitest::Test
     fresh_payload = cached_payload.merge("generated_at" => now.iso8601(6))
     command = Hive::Commands::Status.new(operational: true)
     scans = 0
-    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+    command.define_singleton_method(:active_payload) do |*_args, **_kwargs|
       scans += 1
       fresh_payload
     end
@@ -3501,7 +3623,7 @@ class CommandsStatusTest < Minitest::Test
       snapshot.fetch("status_cache")
     end
     scans = 0
-    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+    command.define_singleton_method(:active_payload) do |*_args, **_kwargs|
       scans += 1
       fresh_payload
     end
@@ -3539,7 +3661,7 @@ class CommandsStatusTest < Minitest::Test
     command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
       snapshot.fetch("status_cache")
     end
-    command.define_singleton_method(:json_payload) do |*|
+    command.define_singleton_method(:active_payload) do |*|
       raise "a valid prior graph must remain cheap during the next full scan"
     end
 
@@ -3581,7 +3703,7 @@ class CommandsStatusTest < Minitest::Test
       snapshot.fetch("status_cache")
     end
     scans = 0
-    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+    command.define_singleton_method(:active_payload) do |*_args, **_kwargs|
       scans += 1
       fresh_payload
     end

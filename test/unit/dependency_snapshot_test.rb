@@ -323,6 +323,53 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_active_admission_context_uses_prepared_inputs_by_registry_position
+    with_tmp_dir do |root|
+      first = write_task_meta(root, "4-execute", "first-task", id: 1)
+      second = write_task_meta(root, "4-execute", "second-task", id: 2)
+      entries = [ "first", "second" ].map do |name|
+        { "name" => name, "path" => root, "repository_identity" => nil }
+      end
+      inputs = [
+        Hive::DependencySnapshot::ActiveProjectInput.new(task_folders: [ first ]),
+        Hive::DependencySnapshot::ActiveProjectInput.new(task_folders: [ second ])
+      ]
+
+      context = Hive::DependencySnapshot.active_admission_context(
+        entries, project_inputs: inputs
+      )
+      projects = context.project_snapshot_layers.first.to_h { |project| [ project.name, project ] }
+
+      assert_equal [ "first-task" ], projects.fetch("first").tasks.map(&:slug)
+      assert_equal [ "second-task" ], projects.fetch("second").tasks.map(&:slug)
+    end
+  end
+
+  def test_active_admission_context_falls_back_to_disk_for_an_unprepared_project
+    with_tmp_dir do |first_root|
+      with_tmp_dir do |second_root|
+        first = write_task_meta(first_root, "4-execute", "first-task", id: 1)
+        write_task_meta(second_root, "4-execute", "second-task", id: 2)
+        entries = [
+          { "name" => "first", "path" => first_root, "repository_identity" => nil },
+          { "name" => "second", "path" => second_root, "repository_identity" => nil }
+        ]
+        inputs = [
+          Hive::DependencySnapshot::ActiveProjectInput.new(task_folders: [ first ]),
+          nil
+        ]
+
+        context = Hive::DependencySnapshot.active_admission_context(
+          entries, project_inputs: inputs
+        )
+        projects = context.project_snapshot_layers.first.to_h { |project| [ project.name, project ] }
+
+        assert_equal [ "first-task" ], projects.fetch("first").tasks.map(&:slug)
+        assert_equal [ "second-task" ], projects.fetch("second").tasks.map(&:slug)
+      end
+    end
+  end
+
   def test_active_admission_context_loads_only_the_referenced_terminal_closure
     with_tmp_dir do |root|
       dependent = write_task_meta(root, "4-execute", "dependent-task", id: 3)

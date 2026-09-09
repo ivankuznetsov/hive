@@ -1296,3 +1296,9 @@ provider replays and timing remain separate verification gates.
 - [[modules/task_workspace]]
 - [[e2e]]
 - [[gaps]]
+
+Active-row reuse regressions in `commands/status_test.rb`,
+`dependency_snapshot_test.rb`, and `tui/state_source_test.rb` cover one action
+classification per candidate, prepared-folder admission, project-local fallback,
+captured invalid-row membership, and matching TUI admission context. Status
+tests also preserve retention-boundary and internal archive-index contracts.

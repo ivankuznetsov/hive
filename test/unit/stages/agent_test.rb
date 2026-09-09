@@ -1632,21 +1632,28 @@ class StagesAgentTest < Minitest::Test
       task = task_for(project, "fix", descriptor: worktree_workflow)
       profile = Struct.new(:name).new("codex")
 
-      # The generic stage (Hive::Stages::Agent) classifies an error_message
-      # quota envelope as limits_reached even without limit_text; the worktree
-      # stage must route through the same classifier and stamp the same
-      # provider/retry_after quota metadata.
-      result = Hive::Stages::AgentWorktree.send(
-        :managed_failure_result, task, result: {
-          status: :error,
-          error_message: "limits reached for claude: You've hit your session limit"
-        }, profile: profile
-      )
-      marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
-      assert_equal "limits_reached", result.fetch(:commit)
-      assert_equal "limits_reached", marker.attrs.fetch("reason")
-      assert_equal "codex", marker.attrs.fetch("provider")
-      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+      now = Time.utc(2026, 7, 12, 20)
+      reset = "Try again at Jul 18th, 2026 7:50 AM (UTC)."
+      cases = [
+        [ { error_message: "limits reached for claude: You've hit your session limit" },
+          "2026-07-12T21:00:00Z" ],
+        [ { limit_text: "", error_message: "You've hit your usage limit. #{reset}" },
+          "2026-07-18T07:51:00Z" ],
+        [ { limit_text: "budget exhausted. #{reset}", error_message: "profile unavailable" },
+          "2026-07-18T07:51:00Z" ]
+      ]
+      with_replaced_singleton_method(Time, :now, -> { now }) do
+        cases.each do |envelope, expected_retry|
+          result = Hive::Stages::AgentWorktree.send(
+            :managed_failure_result, task, result: envelope.merge(status: :error), profile: profile
+          )
+          marker = Hive::Markers.current(File.join(task.folder, "fix-report.md"))
+          assert_equal "limits_reached", result.fetch(:commit)
+          assert_equal "limits_reached", marker.attrs.fetch("reason")
+          assert_equal "codex", marker.attrs.fetch("provider")
+          assert_equal expected_retry, marker.attrs.fetch("retry_after")
+        end
+      end
 
       # Non-limit failures keep the typed fallback reason and must not gain
       # quota metadata.

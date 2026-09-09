@@ -157,11 +157,6 @@ module Hive
 
       def managed_failure_result(task, result: nil, error: nil, context: nil, profile: nil)
         result = result.is_a?(Hash) ? result : {}
-        # Route failure classification through the shared spawn-failure
-        # classifier so the worktree stage recognizes the same provider-limit
-        # envelopes as the generic agent stage, and stamps the same
-        # provider/retry_after quota metadata the daemon and status surfaces
-        # expect on a `limits_reached` marker.
         limit_envelope = Hive::Stages::Agent.limit_error_envelope?(result)
         reason = if limit_envelope
           "limits_reached"

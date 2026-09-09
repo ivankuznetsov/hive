@@ -160,25 +160,15 @@ module Hive
         end.join("\n\n")[0, 8000]
       end
 
-      # Single internal classifier for a provider-limit failure envelope on a
-      # typed spawn result. Both the generic agent stage (`run!`) and the
-      # worktree agent stage (`AgentWorktree.managed_failure_result`) route
-      # their failure classification through this one predicate so a quota wall
-      # can never be recognized differently by the two spawn surfaces. A typed
-      # non-empty `limit_text` is the authoritative runtime signal (the agent
-      # runtime only populates it from a detected provider wall); the
-      # `error_message` clauses catch the formatted "limits reached[ for
-      # <provider>]:" envelopes and raw provider wall text that arrive without
-      # the typed field.
+      # The runtime's nonempty limit_text is authoritative; formatted and raw
+      # error messages cover results that omit that typed provider-wall signal.
       def limit_error_envelope?(result)
         !result[:limit_text].to_s.empty? ||
           Hive::AgentLimit.from_limit?(result[:error_message].to_s) ||
           Hive::AgentLimit.limit_reached?(result[:error_message].to_s)
       end
 
-      # The envelope text retry metadata is computed from: the raw provider
-      # wall when present (it can carry an adjacent reset date), otherwise the
-      # error message that carried the envelope.
+      # Prefer provider-wall text because it can carry the reset date.
       def limit_error_text(result)
         text = result[:limit_text].to_s
         text.empty? ? result[:error_message].to_s : text

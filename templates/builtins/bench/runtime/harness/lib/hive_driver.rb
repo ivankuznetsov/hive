@@ -32,6 +32,7 @@ module HiveBench
     IMAGE = ENV.fetch("HB_RUNNER_IMAGE", "hive-bench-runner:latest")
     OPENCODE_IMAGE = ENV.fetch("HB_OPENCODE_RUNNER_IMAGE", "hive-bench-runner:opencode")
     STAGES_SH = File.expand_path("hive_stages.sh", __dir__)
+    CONTROLLER_GIT = File.expand_path("controller_git.sh", __dir__)
     RESUME_EXECUTE_SH = File.expand_path("hive_resume_execute.sh", __dir__)
     OPENCODE_BENCH_RUNTIME = File.expand_path("opencode_bench_runtime.rb", __dir__)
     OPENCODE_BENCH_LAUNCHER = File.expand_path("opencode_bench_launcher.sh", __dir__)
@@ -404,6 +405,7 @@ module HiveBench
              "-v", "#{STAGES_SH}:/hive_stages.sh:ro",
              "-v", "#{RESUME_EXECUTE_SH}:/hive_resume_execute.sh:ro",
              "-v", "#{work}:/work",
+             *(sealed_agent_runtime? ? ["-v", "#{CONTROLLER_GIT}:/opt/hb/controller-git:ro"] : []),
              *hive_runtime_args(hive_runtime),
              *opencode_runtime_args(candidate),
              *auth_mounts(candidate, out_dir),

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "lib/campaign_contract"
 
 module HiveBench
   # Owns the configured judge-slate contract shared by the judge stage's
@@ -35,9 +36,12 @@ module HiveBench
       cells = data.fetch("cells", [])
       by_key = cells.to_h { |cell| [ [ cell["task_id"].to_s, cell["agent_id"].to_s ], cell ] }
       judge_configs = campaign.fetch("judges").reject { |_backend, config| config.nil? || config == false }
-      judge_slate = judge_configs.map { |backend, config| judge_name(backend, config) }
+      judge_slate = judge_configs.map do |backend, config|
+        CampaignContract.judge_name(backend, config)
+      end
       expected_efforts = judge_configs.to_h do |backend, config|
-        [ judge_name(backend, config), backend == "codex" ? config.fetch("reasoning_effort") : "unspecified" ]
+        [ CampaignContract.judge_name(backend, config),
+          backend == "codex" ? config.fetch("reasoning_effort") : "unspecified" ]
       end
       manual = []
       retryable = []
@@ -135,10 +139,5 @@ module HiveBench
         !limits.empty? && limits.all?
       end
     end
-
-    def judge_name(backend, config)
-      backend == "claude" ? config.fetch("model").sub(/\Aclaude-/, "") : config.fetch("model").split("/").last
-    end
-    private_class_method :judge_name
   end
 end

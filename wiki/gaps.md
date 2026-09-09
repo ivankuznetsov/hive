@@ -1399,6 +1399,16 @@ published branches, while the existing remote-CI gate rejects local repository
 identity before that expected-head path. Setup proof does not establish that
 these older offline lifecycle limitations are solved.
 
+## Benchmark egress preflight awaits a live Docker bypass canary (2026-08-27)
+
+Focused tests inject Docker network metadata and prove that strict topology is
+checked before the parallel campaign matrix starts. The 2026-09-09 sweep also
+ran real Docker network inspection: an internal network with only the named
+proxy container was admitted, and adding a peer was rejected. That proof used
+inert containers; it did not run the packaged CONNECT proxy or attempt direct
+HTTPS from a candidate. Keep this gap open until the packaged CI gate proves direct egress
+fails while the allowlisted proxy route still succeeds end to end.
+
 ## Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
 
 Backward `hive approve --to` now rearms descriptor-owned state files across the

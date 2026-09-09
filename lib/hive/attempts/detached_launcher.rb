@@ -129,10 +129,9 @@ module Hive
             # The wrapper re-enters Hive itself. It must not inherit the
             # caller's Bundler loader, which can point at a different checkout
             # or an ephemeral test HOME before the supervisor reports ready.
-            # A bare Ruby self-reentry still needs the already-activated Hive
-            # dependencies. Build that path from RubyGems instead of inheriting
-            # the caller's RUBYLIB or Bundler configuration, either of which
-            # can select a different checkout.
+            # Preserve the interpreter's resolved dependency paths, including
+            # dependencies loaded without RubyGems activation. bin/hive puts
+            # its own source first; do not re-read ambient RUBYLIB or Bundler.
             "RUBYLIB" => trusted_runtime_load_path,
             "RUBYOPT" => nil,
             "BUNDLE_GEMFILE" => nil, "BUNDLE_BIN_PATH" => nil,
@@ -163,7 +162,7 @@ module Hive
       end
 
       def trusted_runtime_load_path
-        Gem.loaded_specs.values.flat_map(&:full_require_paths)
+        $LOAD_PATH
           .select { |path| File.directory?(path) }
           .map { |path| File.realpath(path) }
           .uniq

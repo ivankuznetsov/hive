@@ -27,6 +27,11 @@ detached supervisor; callers may attach or observe but do not own the worker's
 lifetime.
 The API does not own or reap child processes after handoff.
 
+Supervisor self-reentry preserves canonical directories from the running Ruby
+interpreter's resolved load path. This includes dependencies loaded without
+RubyGems activation, as in the isolated CLI scenario harness. It does not re-read
+ambient `RUBYLIB`; `bin/hive` places its own source directories first.
+
 The private supervisor route is selected before public CLI dispatch. Its detached
 wrapper removes inherited Bundler and Ruby toolchain variables before it re-enters
 Hive, anchoring startup to the invoked Hive checkout rather than a caller bundle

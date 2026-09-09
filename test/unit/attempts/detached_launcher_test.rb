@@ -191,6 +191,24 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     writer&.close unless writer&.closed?
   end
 
+  def test_self_reentry_preserves_dependencies_loaded_without_gem_activation
+    with_tmp_dir do |root|
+      dependency = "hive_unactivated_dependency_fixture"
+      File.write(File.join(root, "#{dependency}.rb"), "puts 'dependency available'\n")
+      launcher = Hive::Attempts::DetachedLauncher.new(store: launcher_store)
+      $LOAD_PATH.unshift(root)
+      refute Gem.loaded_specs.key?(dependency)
+      output, status = Open3.capture2e(
+        { "RUBYLIB" => launcher.send(:trusted_runtime_load_path), "RUBYOPT" => nil },
+        RbConfig.ruby, "--disable-gems", "-r", dependency, "-e", ""
+      )
+      assert status.success?, output
+      assert_equal "dependency available\n", output
+    ensure
+      $LOAD_PATH.delete(root)
+    end
+  end
+
   def test_disappearing_dependency_path_does_not_restore_ambient_rubylib
     launcher = Hive::Attempts::DetachedLauncher.new(store: launcher_store)
     unavailable = ->(*) { raise Errno::ENOENT, "dependency removed" }

@@ -162,7 +162,7 @@ module Hive
       # there is one concept to reason about rather than a provider window
       # and a separate marker window that happened to disagree. Steps climb
       # and then hold; the last step is the ceiling.
-      RETRY_BACKOFF_SEC = [ 5, 10, 60, 300, 900, 3600 ].freeze
+      RETRY_BACKOFF_SEC = Hive::Recovery::RetryPolicy::BACKOFF_SEC
       DETERMINISTIC_FAILURE_THRESHOLD = 3
       FAILURE_HISTORY_LIMIT = 64
       INERT_BLOCK_REASONS = %w[
@@ -176,10 +176,7 @@ module Hive
       OPERATOR_REQUESTORS = %w[action cli bot web].freeze
 
       def retry_delay_sec(retry_count)
-        index = retry_count.to_i
-        return RETRY_BACKOFF_SEC.first if index.negative?
-
-        RETRY_BACKOFF_SEC[[ index, RETRY_BACKOFF_SEC.length - 1 ].min]
+        Hive::Recovery::RetryPolicy.delay_sec(retry_count)
       end
 
       # Requests carry their own charge; a request without one is its first.
@@ -191,7 +188,12 @@ module Hive
       def assessment(row, now: Time.now.utc, retry_count: nil)
         retry_count = durable_retry_count(row) if retry_count.nil?
         observed_at = value(row, :state_file_mtime)
-        eligible_at = observed_at && observed_at + retry_delay_sec(retry_count)
+        delay = if marker_attrs(row)["reason"] == "limits_reached"
+          Hive::AgentLimit.retry_cooldown_sec
+        else
+          retry_delay_sec(retry_count)
+        end
+        eligible_at = observed_at && observed_at + delay
         safe, safety_reason = @safety.call(row)
         {
           due: !eligible_at.nil? && now.utc >= eligible_at,
@@ -1147,7 +1149,8 @@ module Hive
           "fingerprint" => fingerprint,
           "count" => count,
           "attempts" => attempts,
-          "deterministic" => at_ceiling && count >= DETERMINISTIC_FAILURE_THRESHOLD
+          "deterministic" => marker_attrs["reason"] != "limits_reached" &&
+            at_ceiling && count >= DETERMINISTIC_FAILURE_THRESHOLD
         }
       end
 
@@ -1685,12 +1688,16 @@ module Hive
         recovery = request.recovery || {}
         return request unless recovery["phase"] == "admitted"
         return request unless recovery["blocked_reason"] == "deterministic_failure"
-        return request if recovery["runtime_digest"] == @runtime_digest
+        provider_limit = recovery["failure_origin"] == "limits_reached"
+        return request if !provider_limit && recovery["runtime_digest"] == @runtime_digest
+
+        changes = deterministic_rearm_changes(now:)
+        changes["next_eligible_at"] = recovery["next_eligible_at"] if provider_limit
 
         transitioned = @request_queue.update_recovery!(
           request.request_id,
           expected_phase: "admitted",
-          changes: deterministic_rearm_changes(now:),
+          changes: changes,
           state_home: @state_home
         )
         refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)

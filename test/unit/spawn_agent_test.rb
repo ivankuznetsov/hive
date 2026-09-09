@@ -1219,8 +1219,7 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--max-budget-usd", "1",
         "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence",
-        "PROMPT"
+        "--verbose", "--no-session-persistence"
       ]
       assert_equal expected_headless, agent.send(:build_cmd),
                    "yolo headless argv must carry no tool-scope flags"
@@ -1291,8 +1290,7 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--max-budget-usd", "1",
         "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence",
-        "PROMPT"
+        "--verbose", "--no-session-persistence"
       ]
       assert_equal expected_headless, agent.send(:build_cmd),
                    "yolo headless execute argv must carry no tool-scope flags"
@@ -1359,8 +1357,7 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--max-budget-usd", "1",
         "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence",
-        "PROMPT"
+        "--verbose", "--no-session-persistence"
       ]
       assert_equal expected_headless, agent.send(:build_cmd),
                    "yolo headless brainstorm argv must carry no tool-scope flags"

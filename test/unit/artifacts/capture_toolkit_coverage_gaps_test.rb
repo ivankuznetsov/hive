@@ -106,21 +106,9 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
       profile = fake_profile(bin)
       assert_equal [ root ], policy.runtime_roots(profile)
 
-      script = File.join(root, "script")
-      File.write(script, "#!/bin/sh\n")
-      FileUtils.chmod(0o755, script)
-      assert_raises(Hive::ConfigError) do
-        policy.runtime_roots(fake_profile(script))
-      end
-
-      path_profile = fake_profile("codex")
-      with_env("PATH" => "#{root}#{File::PATH_SEPARATOR}") do
-        assert_equal [ root ], policy.runtime_roots(path_profile)
-      end
-
-      realpath = File.method(:realpath)
+      runtime = Hive::AgentSupport.for(:codex)::Runtime
       with_replaced_singleton_method(
-        File, :realpath, ->(path) { path == bin ? raise(Errno::EACCES) : realpath.call(path) }
+        runtime, :executable, ->(**) { raise Hive::ConfigError, "runtime unavailable" }
       ) do
         assert_raises(Hive::ConfigError) do
           policy.runtime_roots(profile)
@@ -140,6 +128,26 @@ class ArtifactsCaptureToolkitCoverageGapsTest < Minitest::Test
       policy.runtime_roots(incompatible)
     end
     assert_includes error.message, "#{policy::MINIMUM_VERSION}+"
+  end
+
+  def test_capture_uses_the_launched_runtime_not_an_unrelated_binary_on_path
+    policy = Hive::AgentSupport.for(:codex)::ArtifactPolicy
+    runtime = Hive::AgentSupport.for(:codex)::Runtime
+    Dir.mktmpdir("hive-codex-wrapper") do |root|
+      native = File.join(root, "npm", "vendor", "bin", "codex")
+      FileUtils.mkdir_p(File.dirname(native))
+      File.binwrite(native, "ELF fixture")
+      FileUtils.chmod(0o755, native)
+      unrelated = File.join(root, "codex")
+      File.binwrite(unrelated, "ELF other installation")
+      FileUtils.chmod(0o755, unrelated)
+      profile = fake_profile("codex")
+      with_replaced_singleton_method(runtime, :executable, ->(**) { native }) do
+        with_env("PATH" => root) do
+          assert_equal [ File.dirname(native) ], policy.runtime_roots(profile)
+        end
+      end
+    end
   end
 
   def test_native_browser_command_reports_failure_timeout_and_missing_binary

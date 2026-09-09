@@ -7,6 +7,7 @@ require "hive/git_ops"
 require "hive/patrol_fix/publication_receipt"
 require "hive/patrol_fix/publication_block_receipt"
 require "hive/patrol_fix/receipt_store"
+require "hive/patrol_fix/transition"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/worktree_snapshot"
 require "hive/patrol_fix/worktree_receipt"
@@ -26,6 +27,11 @@ module Hive
 
         def run!(task, cfg = {}, git_gateway: nil, github_gateway: nil,
                  worktree_root: nil, controller: nil, cleanup: nil)
+          transition = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root)
+          recovered = transition.reconcile!
+          if recovered && recovered[:task_folder] != task.folder
+            return { status: :complete, commit: nil, moved_task_folder: recovered.fetch(:task_folder) }
+          end
           store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
           if (existing = current_publication(store, task.folder))
             Hive::PatrolFix::PublicationReceipt.validate_payload!(existing.fetch("payload"))
@@ -42,9 +48,14 @@ module Hive
 
           git_gateway ||= default_git_gateway(cfg)
           github_gateway ||= Hive::GithubPublication::GithubGateway.new(cfg: cfg)
-          request, authority, snapshot = publication_context(
-            task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
-          )
+          request, authority, snapshot = begin
+            publication_context(
+              task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
+            )
+          rescue Hive::PatrolFix::WorktreeSnapshot::StaleValidation
+            moved = transition.revalidate!
+            return { status: :complete, commit: nil, moved_task_folder: moved.fetch(:task_folder) }
+          end
           controller ||= Hive::GithubPublication::Controller.new(
             state_path: publication_state_path(task, authority.fetch("generation")),
             git_gateway: git_gateway, github_gateway: github_gateway

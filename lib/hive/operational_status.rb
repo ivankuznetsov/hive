@@ -391,9 +391,13 @@ module Hive
           scheduler_disposition.fetch("reason", "scheduler disposition is unavailable"),
           "scheduler"
         )
-        reasons.unshift(scheduler_reason) if material_scheduler_disposition?(scheduler_disposition)
+        controller_failure = scheduler_disposition["decision"] == "markerless_stalled" &&
+          typed_attempt_diagnostic(row)
+        if material_scheduler_disposition?(scheduler_disposition)
+          controller_failure ? reasons.push(scheduler_reason) : reasons.unshift(scheduler_reason)
+        end
         scheduler_state, scheduler_owner = classify_scheduler_disposition(scheduler_disposition)
-        unless running?(row) || scheduler_state.nil?
+        unless running?(row) || scheduler_state.nil? || controller_failure
           state = scheduler_state
           owner = scheduler_owner
         end

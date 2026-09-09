@@ -216,7 +216,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       "retry_after" => (NOW + 3 * 3600).iso8601
     }, mtime: NOW - 3600) do |coordinator, row, state_home|
       write_terminal_recovery_history(
-        row: row, state_home: state_home, retry_count: 25
+        row: row, state_home: state_home, retry_count: 25,
+        failure_fingerprint: coordinator.send(:failure_fingerprint, row, row.marker_attrs),
+        identical_failure_count: 25
       )
       receipt = coordinator.request(
         row: row, requestor: "healer", request_id: "auto-26",
@@ -231,6 +233,42 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal (NOW + 3 * 3600).iso8601,
                    request.recovery.dig("provider_hint", "retry_after")
       assert_equal true, request.recovery.dig("provider_hint", "display_only")
+    end
+  end
+
+  def test_first_provider_limit_waits_an_hour_instead_of_using_crash_backoff
+    with_fixture(marker_attrs: { "reason" => "limits_reached", "marker_id" => "marker-1" },
+                 mtime: NOW - 1800) do |coordinator, row, state_home|
+      receipt = coordinator.request(row:, requestor: "healer", now: NOW)
+      assert_equal "cooldown", receipt.status
+      assert_equal (NOW + 1800).iso8601(6), receipt.next_eligible_at
+      assert_empty Q.pending(state_home:)
+    end
+  end
+
+  def test_previously_parked_provider_limit_rearms_without_skipping_hourly_cooldown
+    with_fixture(marker_attrs: { "reason" => "limits_reached", "marker_id" => "marker-1" },
+                 mtime: NOW - 3600) do |coordinator, row, state_home|
+      coordinator.request(row:, requestor: "healer", request_id: "quota", now: NOW)
+      Q.update_recovery!(
+        "quota", expected_phase: "admitted", changes: {
+          "blocked_reason" => "deterministic_failure", "owner" => "operator",
+          "next_eligible_at" => (NOW + 1800).iso8601(6)
+        }, state_home:
+      )
+
+      receipt = coordinator.request(row:, requestor: "healer", now: NOW)
+
+      assert_equal "cooldown", receipt.status
+      assert_equal "scheduler", receipt.owner
+      assert_equal (NOW + 1800).iso8601(6), receipt.next_eligible_at
+      request = Q.fetch("quota", state_home:)
+      assert_nil request.recovery.fetch("blocked_reason")
+      early = coordinator.resume(request:, row:, now: NOW + 1799)
+      assert_equal "admitted", early.phase
+      assert_equal "error", Hive::Markers.current(row.state_file).name.to_s
+      due = coordinator.resume(request: Q.fetch("quota", state_home:), row:, now: NOW + 1800)
+      assert_equal "cleared", due.phase
     end
   end
 

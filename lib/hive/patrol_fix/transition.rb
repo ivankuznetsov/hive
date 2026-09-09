@@ -18,7 +18,7 @@ module Hive
       SCHEMA_VERSION = 1
       INTENT_FILENAME = "route-intent.json".freeze
       MAX_INTENT_BYTES = 32 * 1024
-      ROUTES = %w[rework publication_rework].freeze
+      ROUTES = %w[rework revalidate publication_rework].freeze
       class InvalidTransition < Hive::Error; end
 
       def initialize(task, worktree_root: nil, commit: nil, clock: -> { Time.now.utc })
@@ -80,6 +80,28 @@ module Hive
         apply_intent(intent)
       end
 
+      def revalidate!
+        folder = current_task_folder
+        manifest = TaskManifest.new(task_folder: folder).read
+        fix = ReceiptStore.new(task_folder: folder).read_all.find do |row|
+          row["kind"] == "fix" && row["task"] == manifest["task"] && row["evidence_revision"] == manifest["evidence_revision"]
+        end
+        raise InvalidTransition, "revalidation requires current fix evidence" unless fix
+        custody = WorktreeReceipt.new(task_folder: folder, project_root: @task.project_root,
+                                      slug: @task.slug, worktree_root: @worktree_root)
+        captured = custody.capture!(generation: manifest.dig("task", "generation"),
+                                    evidence_digest: manifest.dig("evidence_revision", "digest"))
+        unless %w[worktree branch base_revision].all? { |key| captured[key] == fix.dig("payload", key) }
+          raise InvalidTransition, "revalidation worktree custody changed"
+        end
+        intent = begin_intent(
+          action_id: "revalidate-#{captured.fetch('head_revision')}", route: "revalidate",
+          stage: "review", destination: "3-validate", operator: "controller:revalidation",
+          carried_receipts: [ fix.fetch("receipt_id") ]
+        )
+        apply_intent(intent)
+      end
+
       private
 
       def begin_intent(action_id:, route:, stage:, destination:, operator:, carried_receipts:)
@@ -135,6 +157,7 @@ module Hive
 
         rotate_worktree!(folder, intent)
         append_generation_receipt!(folder, intent)
+        refresh_fix_receipt!(folder, intent) if intent.fetch("route") == "revalidate"
         folder = move_if_needed!(folder, intent)
         write_intent(intent.merge("status" => "completed"))
         commit_intent!(intent)
@@ -155,6 +178,28 @@ module Hive
             File.join("patrol-fix", "transitions", @task.slug, INTENT_FILENAME)
           ].uniq
         )
+      end
+
+      def refresh_fix_receipt!(folder, intent)
+        store = ReceiptStore.new(task_folder: folder)
+        manifest = TaskManifest.new(task_folder: folder).read
+        receipts = store.read_all
+        return if receipts.any? { |row| row["kind"] == "fix" && row["task"] == manifest["task"] }
+
+        previous = receipts.find { |row| row["receipt_id"] == intent.fetch("carried_receipts").first }
+        raise InvalidTransition, "revalidation source fix is missing" unless previous&.fetch("kind") == "fix"
+        custody = WorktreeReceipt.new(task_folder: folder, project_root: @task.project_root,
+                                      slug: @task.slug, worktree_root: @worktree_root)
+        payload = custody.capture!(generation: intent.fetch("to_generation"), evidence_digest: intent.fetch("to_digest"))
+        unless intent.fetch("action_id") == "revalidate-#{payload.fetch('head_revision')}"
+          raise InvalidTransition, "worktree changed during revalidation transition"
+        end
+        payload = payload.merge("validation_commands" => previous.dig("payload", "validation_commands"))
+        store.append!(previous.merge(
+          "receipt_id" => "fix-#{Digest::SHA256.hexdigest(PatrolFix.canonical_json(payload))[0, 24]}",
+          "task" => manifest.fetch("task"), "evidence_revision" => manifest.fetch("evidence_revision"),
+          "recorded_at" => intent.fetch("recorded_at"), "payload" => payload
+        ))
       end
 
       def rotate_worktree!(folder, intent)
@@ -329,6 +374,14 @@ module Hive
           intent["stage"] == "review" && intent["from"] == stage_dir("review") &&
             intent["to"] == stage_dir("fix") && intent["operator"] == "controller:review" &&
             intent["carried_receipts"].empty?
+        elsif intent["route"] == "revalidate"
+          intent["stage"] == "review" && intent["from"] == stage_dir("publish") &&
+            intent["to"] == stage_dir("validate") &&
+            intent["operator"] == "controller:revalidation" &&
+            intent["carried_receipts"].length == 1 &&
+            intent["carried_receipts"].first.is_a?(String) &&
+            !intent["carried_receipts"].first.empty? &&
+            intent["carried_receipts"].first.bytesize <= 128
         else
           destinations = {
             stage_dir("inbox") => 0,

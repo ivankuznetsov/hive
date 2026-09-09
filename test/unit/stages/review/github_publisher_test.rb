@@ -138,23 +138,6 @@ class ReviewGithubPublisherTest < Minitest::Test
     end
   end
 
-  def test_validated_pr_url_requires_an_exact_persisted_head
-    with_tmp_dir do |dir|
-      task = make_task(dir)
-
-      with_replaced_singleton_method(
-        Hive::Worktree, :canonical_root, ->(_root) { "/owned" }
-      ) do
-        with_replaced_singleton_method(
-          Hive::Worktree, :read_owned_pointer,
-          ->(*_args, **_kwargs) { { "path" => "/owned/task", "branch" => task.slug } }
-        ) do
-          assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
-        end
-      end
-    end
-  end
-
   def test_validated_pr_url_fails_closed_when_repository_identity_cannot_be_read
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -173,7 +156,7 @@ class ReviewGithubPublisherTest < Minitest::Test
     end
   end
 
-  def test_validated_pr_url_binds_task_branch_and_persisted_head
+  def test_validated_pr_url_binds_the_live_pr_not_a_saved_commit
     with_tmp_dir do |dir|
       task = make_task(dir)
       head = "a" * 40
@@ -219,8 +202,17 @@ class ReviewGithubPublisherTest < Minitest::Test
                 Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
               )
               candidates = [ observed.merge("headRefOid" => "b" * 40) ]
-              assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
-              candidates = [ observed.merge("headRefName" => "other-branch") ]
+              assert_equal observed.fetch("url"),
+                           Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+              File.write(File.join(task.folder, "pr.md"), "---\npr_url: #{observed.fetch('url')}\n---\n")
+              assert_equal observed.fetch("url"),
+                           Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+              [ { "headRefName" => "other-branch" }, { "number" => 43 },
+                { "state" => "CLOSED" }, { "url" => "https://github.com/acme/app/pull/43" } ].each do |change|
+                candidates = [ observed.merge(change) ]
+                assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+              end
+              candidates = [ observed, observed ]
               assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
             end
           end

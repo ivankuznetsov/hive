@@ -1486,6 +1486,7 @@ class TuiStateSourceTest < Minitest::Test
       # holds a task folder.
       FileUtils.mkdir_p(File.join(archive_dir, "done-260626-abcd"))
       archived_task = Hive::DependencyAdmission::TaskSnapshot.new(
+        cancelled: false,
         project: "demo", slug: "done-260626-abcd", id: 1, stage: "9-done",
         workflow_stages: Hive::Stages::DIRS, depends_on: nil, metadata_status: :ok,
         metadata_error: nil, plan_status: :absent, plan_dependency: nil, plan_error: nil,

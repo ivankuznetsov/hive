@@ -18,7 +18,7 @@
       "additionalProperties": false,
       "required": ["reason", "evidence", "successor", "attestation"],
       "properties": {
-        "reason": { "type": ["string", "null"], "enum": ["already_delivered", "superseded", null] },
+        "reason": { "type": ["string", "null"], "enum": ["already_delivered", "superseded", "cancelled", null] },
         "evidence": {
           "type": "array",
           "maxItems": 16,
@@ -32,6 +32,8 @@
     "task_repository": {
       "oneOf": [
         { "type": "null" },
+        { "type": "object", "additionalProperties": false, "required": ["path"],
+          "properties": { "path": { "type": "string", "minLength": 1 } } },
         { "type": "object", "additionalProperties": false,
           "required": ["host", "repository", "identity", "default_branch"],
           "properties": {

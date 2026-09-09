@@ -84,6 +84,22 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal input, calls.first.fetch(:input)
   end
 
+  test "cancellation previews without delivery evidence and offers confirmation" do
+    get "/tasks/#{@project}/#{@slug}/closure"
+    assert_response :success
+    assert_select "option[value=cancelled]", text: "Cancelled"
+    assert_select "textarea[required]", 0
+
+    post "/tasks/#{@project}/#{@slug}/closure", params: {
+      reason: "cancelled", attestation: "No longer wanted", evidence: [ "" ]
+    }
+    assert_response :success
+    assert_select ".closure-preview", text: /cancelled/
+    assert_select "form input[name=preview_digest]", 1
+    assert_select "form input[name=reason][value=cancelled]", 1
+    assert_select ".closure-evidence li", 0
+  end
+
   test "closure confirmation uses the authenticated web operator" do
     calls = []
     confirmer = lambda do |**kwargs|

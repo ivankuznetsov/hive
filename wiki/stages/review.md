@@ -206,6 +206,10 @@ global `bypass` key has no release authority, and an already parked
 `REVIEW_WAITING reason=fix_guardrail` still requires checked findings plus the
 existing count, HEAD, and clean-tree validations.
 
+Pre-fix residue checkpoints and post-fix guardrails use the same
+`GuardrailWaivers.resolve` parser, preserving identical validation and exact
+fingerprint matching at both gates.
+
 If `marker.attrs["matches"]` is missing or malformed (not a positive Integer string) on a `fix_guardrail` marker, the runner refuses approval with `REVIEW_ERROR phase=resume reason=malformed_marker_matches` — disables a silent count-blind bypass.
 
 ## Phase 5 — browser test (`Hive::Stages::Review::BrowserTest`)

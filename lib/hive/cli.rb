@@ -743,6 +743,18 @@ module Hive
     end
     map "rebase-status" => :rebase_status
 
+    desc "publication-reconcile TARGET", "Adopt an inspected PR revision into the local publication record (no push)"
+    option :project, type: :string, desc: "scope lookup to one registered project"
+    option :pr, type: :string, required: true, desc: "verified task PR URL"
+    option :head, type: :string, required: true, desc: "full inspected current PR HEAD"
+    def publication_reconcile(target)
+      require "hive/commands/publication_reconcile"
+      Hive::Commands::PublicationReconcile.new(
+        target, project: options[:project], pr: options[:pr], head: options[:head], json: options[:json]
+      ).call
+    end
+    map "publication-reconcile" => :publication_reconcile
+
     desc "worktree SUBCOMMAND TARGET", "Inspect or repair task-owned worktree residue"
     long_desc <<~DESC
       Subcommands:
@@ -788,6 +800,7 @@ module Hive
         recover TARGET --generation SHA256 --recovery-digest SHA256
         rework TARGET --generation SHA256 --recovery-digest SHA256
         terminal NAME -- COMMAND...
+        server COMMAND -- ARGS...
         browser COMMAND [ARG...]
 
       Recovery is admitted only when both values match the current immutable
@@ -806,6 +819,10 @@ module Hive
       `browser` is the controller-scoped agent-browser gateway. It exposes the
       issued origin and a closed interaction vocabulary while Hive confines
       screenshot and recording output to the current attempt.
+
+      `server` starts one repository executable on the issued application port
+      inside an attempt-owned credential-free sandbox and tears it down with
+      the capture session.
     DESC
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :stage, type: :string,
@@ -1148,6 +1165,17 @@ module Hive
         cursor: options[:cursor],
         full: options[:full]
       ).call
+    end
+
+    desc "refactor-patrol-scheduled PROJECT",
+         "Review one periodic current-main architecture slice (daemon/internal)", hide: true
+    option :result_file, type: :string, required: true
+    def refactor_patrol_scheduled(project)
+      require "hive/commands/refactor_patrol_scheduled"
+      result = Hive::Commands::RefactorPatrolScheduled.new(
+        project, result_file: options[:result_file]
+      ).call
+      exit 1 unless result.fetch("ok")
     end
 
     desc "refactor-patrol-classify PROJECT",

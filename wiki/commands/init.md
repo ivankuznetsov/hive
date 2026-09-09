@@ -168,6 +168,12 @@ This branch is what the orphan worktree is initially based on, and what feature 
 | `already initialized` (exit 2) | `hive/state` already exists | nothing to do |
 | `partial init failed` warning | disk-side-effect step raised after orphan-state creation | rerun after automatic rollback; if rollback was incomplete, inspect stderr and run the printed `git worktree remove ... && git branch -D hive/state` recovery command |
 
+## Serialization fallback
+
+The `hive-init.v2` and `hive-init-preview.v1` documents are encoded directly.
+A JSON serialization failure propagates and no prose or fallback JSON document
+is emitted.
+
 ## Tests
 
 - `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including workflow-authoring `hints`, non-default answer mirroring, and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, rendered stage-agent/runtime blocks, managed llm-wiki bootstrap, prompt behavior, workflow authoring, and post-init agent-skill offer/decline/non-TTY delegation boundaries.

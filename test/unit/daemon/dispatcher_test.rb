@@ -9,6 +9,7 @@ require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
+require "hive/daemon/scheduled_architecture_scheduler"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
 # these tests is the routing decisions: which Policy outcome maps to
@@ -1109,6 +1110,78 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, supervisor.spawned.size
   end
 
+
+  def test_periodic_architecture_scan_dispatches_and_reaps_through_real_schedulers
+    with_tmp_dir do |root|
+      entry = { "name" => "p1", "path" => root, "project_id" => "p1-id",
+                "hive_state_path" => File.join(root, ".hive-state") }
+      cfg = Hive::Config.merge_defaults(
+        "daemon" => { "enabled" => true }, "refactor_patrol" => { "enabled" => true }
+      )
+      scheduled = Hive::Daemon::ScheduledArchitectureScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { cfg }
+      )
+      architecture = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { cfg }, scheduled_scheduler: scheduled
+      )
+      arbiter = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil, architecture_scheduler: architecture,
+        state_path: File.join(root, "arbiter.json")
+      )
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+      )
+      remaining = 1
+      budget = Object.new
+      budget.define_singleton_method(:remaining_launches) { remaining }
+      with_replaced_singleton_method(Hive::Patrol::LaunchBudget, :new, ->(*) { budget }) do
+        dispatcher.tick(now: T0)
+        assert_equal 1, supervisor.spawned.size
+        child = supervisor.spawned.first
+        assert_includes child.fetch(:command), "refactor-patrol-scheduled"
+        token = child.fetch(:dispatch_token)
+        assert_equal :scheduled, token.fetch(:phase)
+        dispatcher.tick(now: T0 + 1)
+        assert_equal 1, supervisor.spawned.size, "live slice must not launch twice"
+        supervisor.next_exits = [ ChildExit.new(
+          pid: child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: child.fetch(:command), started_at: T0,
+          finished_at: T0 + 2, json_envelope: { "ok" => true }, dispatch_token: token
+        ) ]
+        dispatcher.tick(now: T0 + 2)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        assert_equal 1, supervisor.spawned.size, "completion must preserve cadence"
+        dispatcher.tick(now: T0 + 3600)
+        assert_equal 2, supervisor.spawned.size, "completed sweep must permit the next periodic dispatch"
+        second_child = supervisor.spawned.last
+        second_token = second_child.fetch(:dispatch_token)
+        assert_equal :scheduled, second_token.fetch(:phase)
+        refute_equal token.fetch(:job_id), second_token.fetch(:job_id)
+        supervisor.next_exits = [ ChildExit.new(
+          pid: second_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: second_child.fetch(:command), started_at: T0 + 3600,
+          finished_at: T0 + 3602, json_envelope: { "ok" => true }, dispatch_token: second_token
+        ) ]
+        dispatcher.tick(now: T0 + 3602)
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        dispatcher.tick(now: T0 + 7200)
+        third_child = supervisor.spawned.last
+        assert_equal 3, supervisor.spawned.size
+        supervisor.next_exits = [ ChildExit.new(
+          pid: third_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: third_child.fetch(:command), started_at: T0 + 7200,
+          finished_at: T0 + 7202, json_envelope: { "ok" => true, "reason" => "no_available_slice" },
+          dispatch_token: third_child.fetch(:dispatch_token)
+        ) ]
+        dispatcher.tick(now: T0 + 7202)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_skipped && attrs[:reason] == "no_available_slice" }
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        remaining = 0
+        dispatcher.tick(now: T0 + 10800)
+        assert_equal 3, supervisor.spawned.size, "exhausted discovery allowance must block another launch"
+      end
+    end
+  end
 
   def test_architecture_patrol_spawn_attaches_fence_then_commits_arbiter_and_routes_completion
     architecture = FakeRefactorPatrolScheduler.new
@@ -3038,20 +3111,76 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def test_dispatch_priority_order_is_later_stage_first_and_stable
     rows = [
-      row(slug: "a", stage: "2-brainstorm"),
-      row(slug: "b", stage: "7-artifacts"),
-      row(slug: "c", stage: "6-review"),
-      row(slug: "d", stage: "7-artifacts"),
-      row(slug: "e", stage: "9-done")
+      row(slug: "a", stage: "2-brainstorm", action: "ready_to_run"),
+      row(slug: "b", stage: "7-artifacts", action: "ready_to_run"),
+      row(slug: "c", stage: "6-review", action: "ready_to_run"),
+      row(slug: "d", stage: "7-artifacts", action: "ready_to_run"),
+      row(slug: "e", stage: "9-done", action: "ready_to_run"),
+      row(slug: "accepted", stage: "2-brainstorm", workflow: "patrol-fix", action: "ready_to_advance")
     ]
     dispatcher, = make_dispatcher
 
     ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
 
-    assert_equal %w[9-done 7-artifacts 7-artifacts 6-review 2-brainstorm],
-                 ordered.map(&:stage), "later stages first"
+    assert_equal %w[e b d c accepted a], ordered.map(&:slug),
+                 "stage rank remains primary and terminal work wins within a stage"
     assert_equal %w[b d], ordered.select { |r| r.stage == "7-artifacts" }.map(&:slug),
-                 "stable within a stage — original status order preserved"
+                 "stable within the same stage and action class"
+  end
+
+  def test_terminal_advance_claims_a_scarce_slot_before_new_work_in_the_same_stage
+    rows = [
+      row(
+        slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_run", command: "hive run new-finding --project p1"
+      ),
+      row(
+        slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_advance",
+        command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+      )
+    ]
+    dispatcher, supervisor, controller, = make_dispatcher(rows: rows)
+    controller.update_limits(
+      max_concurrent_runs: 1, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] },
+                 "terminal work must drain before another agent starts in the shared stage"
+  end
+
+  def test_terminal_priority_precedes_a_queued_fresh_request
+    Dir.mktmpdir("hive-dispatch-priority") do |state_home|
+      accepted = row(
+        slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_advance",
+        command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+      )
+      dispatcher, supervisor, controller, logger, = make_dispatcher(
+        rows: [ accepted ], dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(state_home, slug: "new-finding", request_id: "FRESH")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+        assert_equal [ "FRESH" ], Q.pending(state_home: state_home).map(&:request_id)
+        assert logger.events.any? { |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "FRESH" &&
+            attrs[:reason] == "global_cap"
+        }
+      ensure
+        restore_find_project!
+      end
+    end
   end
 
   def test_dispatch_priority_ages_waiting_rows_past_fresh_later_stage_work
@@ -5131,6 +5260,22 @@ def test_incremental_row_removal_resets_an_empty_probe_cursor
   assert_equal 0, dispatcher.instance_variable_get(:@tracked_state_file_cursor)
 end
 
+def test_incremental_status_replacement_keeps_a_terminal_advance_row_prioritized
+  dispatcher, = make_dispatcher(rows: [])
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance"
+  )
+  fresh = row(slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix")
+
+  dispatcher.send(
+    :replace_incremental_status_rows, [ [ "p1", "accepted-finding" ] ], [ accepted ]
+  )
+
+  assert_equal [ "accepted-finding", "new-finding" ],
+               dispatcher.send(:incremental_dispatch_rows, [ fresh ]).map(&:slug)
+end
+
 def test_changed_task_ticks_do_not_delay_the_periodic_full_repair_scan
   status_row = row(action: nil, command: nil)
   dispatcher, = make_dispatcher(rows: [ status_row ], clock: -> { T0 })
@@ -5223,6 +5368,140 @@ def test_changed_task_ticks_leave_global_schedulers_to_the_full_scan
   assert dispatcher.tick_changed(task_keys: [ [ "p1", "s1" ] ], now: T0)
 end
 
+def test_changed_task_tick_considers_cached_terminal_advances_before_fresh_work
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance",
+    command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+  )
+  fresh = row(
+    slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_run", command: "hive run new-finding --project p1"
+  )
+  dispatcher, supervisor, controller = make_dispatcher(rows: [ accepted ])
+  controller.update_limits(
+    max_concurrent_runs: 1, max_concurrent_per_project: 1,
+    max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+  )
+  with_replaced_singleton_method(controller, :can_dispatch?, ->(**) { :cooldown }) do
+    dispatcher.tick(now: T0)
+  end
+  assert_empty supervisor.spawned
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ fresh ]
+  )
+
+  assert dispatcher.tick_changed(
+    task_keys: [ [ "p1", "new-finding" ] ], now: T0 + 1
+  )
+
+  assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+  assert_equal 1, status.fetch_count, "incremental priority must not trigger another full status scan"
+  assert_equal 1, status.fetch_task_count
+end
+
+def test_changed_task_tick_does_not_replay_cached_coding_advance
+  coding_advance = row(
+    slug: "ready-for-pr", stage: "5-open-pr", workflow: "coding",
+    action: "ready_to_open_pr",
+    command: "hive open-pr ready-for-pr --from 5-open-pr"
+  )
+  fresh = row(
+    slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_run", command: "hive run new-finding --project p1"
+  )
+  dispatcher, supervisor = make_dispatcher(rows: [ coding_advance ])
+  dispatcher.send(:refresh_status_index, [ coding_advance ])
+  dispatcher.send(:cache_terminal_advances, [ coding_advance ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ fresh ]
+  )
+
+  assert dispatcher.tick_changed(
+    task_keys: [ [ "p1", "new-finding" ] ], now: T0 + 1
+  )
+
+  assert_equal [ "new-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
+def test_changed_task_tick_does_not_replay_cached_non_patrol_generic_advance
+  generic = row(
+    slug: "content-ready", stage: "1-inbox", workflow: "content",
+    action: "ready_to_advance", command: "hive approve content-ready --from 1-inbox"
+  )
+  fresh = row(slug: "fresh", action: "ready_to_run")
+  dispatcher, supervisor = make_dispatcher(rows: [ generic ])
+  dispatcher.send(:refresh_status_index, [ generic ])
+  dispatcher.send(:cache_terminal_advances, [ generic ])
+  dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+    Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+
+  dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+  assert_equal [ "fresh" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
+def test_durable_advance_ownership_consumes_the_cached_row_before_an_unrelated_tick
+  %i[accepted existing_live terminal_replay].each do |initial_status|
+    accepted = row(
+      slug: "accepted", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve accepted --project p1 --from 1-inbox --force"
+    )
+    fresh = row(slug: "fresh", action: "ready_to_run")
+    requests = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **|
+      requests << request.slug
+      Hive::Attempts::DispatchResult.new(
+        status: requests.length == 1 ? initial_status : :accepted,
+        attempt: nil, receipt: nil, attach_descriptor: nil, reason: nil
+      )
+    end
+    dispatcher, = make_dispatcher(rows: [ accepted ], attempt_dispatcher: attempt_dispatcher)
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    dispatcher.tick(now: T0)
+
+    # Durable workers never enter the local child supervisor. With no active
+    # capacity remaining, the old approval must not be admitted a second time.
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+    dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+    assert_equal [ "accepted", "fresh" ], requests, initial_status.to_s
+  end
+end
+
+def test_cached_advance_yields_to_a_pending_same_task_request_after_cooldown
+  with_tmp_dir do |state_home|
+    accepted = row(
+      slug: "accepted", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve accepted --project p1 --from 1-inbox --force"
+    )
+    fresh = row(slug: "fresh", action: "ready_to_run")
+    dispatcher, supervisor, controller = make_dispatcher(
+      rows: [ accepted ], dispatch_request_state_home: state_home
+    )
+    write_request_file(state_home, slug: "accepted", request_id: "EXPLICIT")
+    stub_find_project!(dispatcher, "p1")
+    begin
+      with_replaced_singleton_method(controller, :can_dispatch?, ->(**) { :cooldown }) do
+        dispatcher.tick(now: T0)
+      end
+      assert_empty supervisor.spawned
+      dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+        Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+
+      dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+      assert_equal [ "fresh" ], supervisor.spawned.map { |entry| entry[:slug] }
+      refute_nil Q.fetch("EXPLICIT", state_home: state_home)
+    ensure
+      restore_find_project!
+    end
+  end
+end
+
 def test_failed_changed_task_status_keeps_cached_external_capacity
   running = row(
     slug: "external", action: "agent_running", command: nil,
@@ -5291,15 +5570,28 @@ def test_live_heartbeat_tick_does_not_reconcile_attempt_history
     slug: "external", action: "agent_running", command: nil,
     claude_pid_alive: true
   )
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance",
+    command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+  )
   reconciler = Object.new
   reconciler.define_singleton_method(:reconcile) do |now:|
     raise "heartbeat tick scanned attempt history"
   end
-  dispatcher, = make_dispatcher(rows: [ running ], attempt_reconciler: reconciler)
+  dispatcher, supervisor = make_dispatcher(
+    rows: [ running ], attempt_reconciler: reconciler
+  )
+  dispatcher.send(:refresh_status_index, [ running, accepted ])
+  dispatcher.send(:cache_terminal_advances, [ running, accepted ])
+  dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+    Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ running ])
 
   assert dispatcher.tick_changed(
     task_keys: [ [ "p1", "external" ] ], now: T0 + 1
   )
+  assert_empty supervisor.spawned,
+               "heartbeat-only ticks must not dispatch cached advance rows"
 end
 
 def test_changed_task_tick_stops_when_attempt_reconciliation_fails

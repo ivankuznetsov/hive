@@ -358,5 +358,4 @@ class ProcessKillTest < Minitest::Test
 
     { result: result, calls: calls, remaining: remaining }
   end
-
 end

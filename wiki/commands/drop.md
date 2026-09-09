@@ -69,7 +69,9 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
    `AGENT_WORKING pid=...`,
    guarded by process start time when one was recorded. Exact PID/start-time
    duplicates collapse, but different recorded start times for a reused PID
-   remain separate candidates across task folders. A readable initial
+   remain separate candidates across task folders. A record without a start
+   time is omitted when that PID also has a recorded identity, so a marker
+   cannot bypass a recorded ownership check. A readable initial
    mismatch returns `pid_reuse_guard` without signalling. After TERM, a
    readable replacement proves the recorded process exited and completes
    without KILL; an unavailable identity, including an identity-source I/O
@@ -117,7 +119,7 @@ was skipped or only received incomplete cleanup. A
 `process_tree_unavailable` reason means the recorded root cleanup was attempted
 but descendant discovery could not be completed.
 
-Marker-only and older records without a usable process start time retain the
+Marker-only and older records without any usable process start time for that PID retain the
 legacy liveness-only TERM-to-KILL path. They are outside the replacement-PID
 suppression guarantee. `claude_pid` candidates continue through
 `terminate_process_group`, whose initial unavailable-lookup compatibility and

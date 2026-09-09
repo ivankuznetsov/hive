@@ -407,7 +407,12 @@ module Hive
             group: false
           )
         end
-        by_identity.values
+        # A marker without a start time must not reopen the legacy signal path
+        # after a recorded identity for the same PID refused a replacement.
+        known_pids = by_identity.keys.filter_map { |pid, start| pid unless start.empty? }
+        by_identity.reject do |(pid, start), _candidate|
+          start.empty? && known_pids.include?(pid)
+        end.values
       end
 
       # Exact PID/start-time duplicates collapse and `group: true` always wins —

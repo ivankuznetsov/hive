@@ -62,7 +62,9 @@ cleanup commands use the recorded start time as a best-effort identity signal.
 The single-PID cleanup path has the post-grace fail-closed matrix below; records
 without a usable start time retain the legacy PID-only behavior. Drop
 deduplicates exact PID/start-time records but retains distinct start identities
-when one numeric PID appears in multiple task folders.
+when one numeric PID appears in multiple task folders. If that PID has a
+recorded identity, Drop omits records without a start time so they cannot
+reopen the unguarded signal path after an ownership refusal.
 
 ## Liveness
 

@@ -211,6 +211,41 @@ class DropCommandTest < Minitest::Test
     end
   end
 
+  def test_drop_does_not_signal_unknown_duplicate_of_a_recorded_identity
+    [ false, true ].each do |unknown_first|
+      with_drop_project do |dir, _ops, project|
+        slug = "mixed-identities-260909-abcd"
+        recorded_folder = create_task(dir, "3-plan", slug)
+        unknown_folder = create_task(dir, "4-execute", slug)
+        reused_pid = 81_205
+        locks = {
+          recorded_folder => { "pid" => reused_pid, "process_start_time" => "recorded-start" },
+          unknown_folder => {}
+        }
+        folders = [ recorded_folder, unknown_folder ]
+        folders.reverse! if unknown_first
+        signals = []
+        marker = Struct.new(:name, :attrs).new(:agent_working, { "pid" => reused_pid.to_s })
+        drop = Hive::Commands::Drop.new(slug, project: project, json: true)
+        drop.define_singleton_method(:marker_for) { |_folder| marker }
+
+        with_replaced_singleton_method(Hive::Lock, :read_task_lock, ->(folder) { locks.fetch(folder) }) do
+          with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+            with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, ->(_pid) { "replacement" }) do
+              with_replaced_singleton_method(Hive::ProcessKill, :safe_kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+                with_replaced_singleton_method(Hive::ProcessKill, :wait_until_dead, ->(*) { true }) do
+                  drop.send(:kill_recorded_agents, folders.map { |folder| { folder: folder } })
+                end
+              end
+            end
+          end
+        end
+
+        assert_empty signals, "unknown identity must not bypass recorded ownership (unknown_first=#{unknown_first})"
+      end
+    end
+  end
+
   def test_drop_keeps_replacement_cleanup_in_v2_success_pid_list
     with_drop_project do |dir, _ops, project|
       slug = "replacement-success-260902-abcd"
@@ -241,5 +276,4 @@ class DropCommandTest < Minitest::Test
       refute File.directory?(folder), "successful recorded-identity cleanup must preserve Drop behavior"
     end
   end
-
 end

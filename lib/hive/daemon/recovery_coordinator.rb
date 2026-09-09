@@ -3,11 +3,12 @@ require "json"
 require "shellwords"
 require "time"
 require "hive/agent_limit"
+require "hive/artifacts/runtime_residue_recovery"
 require "hive/attempts/generation"
 require "hive/attempts/command_progress"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/daemon/auto_retry_safety"
-require "hive/daemon/dispatch_request_queue"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/lock"
 require "hive/markers"
 require "hive/provider_routing/decision"
@@ -137,32 +138,35 @@ module Hive
       end
 
       def initialize(state_home: Hive::Paths.state_home,
-                     request_queue: Hive::Daemon::DispatchRequestQueue,
+                     dispatch_repository: nil,
                      task_resolver: nil,
                      safety: Hive::Daemon::AutoRetrySafety.method(:safe_to_retry?),
                      generation_resolver: nil, attempt_store: nil,
                      attempt_store_factory: nil,
-                     runtime_digest: Hive::RuntimeIdentity.source_digest)
+                     runtime_digest: Hive::RuntimeIdentity.source_digest,
+                      runtime_residue_recovery: nil)
         @state_home = state_home
-        @request_queue = request_queue
         @task_resolver = task_resolver || method(:resolve_task)
         @safety = safety.respond_to?(:call) ? safety : safety.method(:safe_to_retry?)
         @generation_resolver = generation_resolver || method(:resolve_generation)
         @attempt_store = attempt_store
         @attempt_store_factory = attempt_store_factory || lambda do
-          Hive::Attempts::Store.open_default(state_home: @state_home)
+          Hive::Attempts::Repository.open_default(state_home: @state_home)
         end
         @runtime_digest = runtime_digest.to_s
         unless @runtime_digest.match?(/\A[0-9a-f]{64}\z/)
           raise ArgumentError, "recovery runtime digest is invalid"
         end
+        @request_queue = dispatch_repository
+        @runtime_residue_recovery = runtime_residue_recovery ||
+          Hive::Artifacts::RuntimeResidueRecovery.new.method(:recover)
       end
 
       # The single retry ladder. Every retry in Hive is paced by this, so
       # there is one concept to reason about rather than a provider window
       # and a separate marker window that happened to disagree. Steps climb
       # and then hold; the last step is the ceiling.
-      RETRY_BACKOFF_SEC = [ 5, 10, 60, 300, 900, 3600 ].freeze
+      RETRY_BACKOFF_SEC = Hive::Recovery::RetryPolicy::BACKOFF_SEC
       DETERMINISTIC_FAILURE_THRESHOLD = 3
       FAILURE_HISTORY_LIMIT = 64
       INERT_BLOCK_REASONS = %w[
@@ -176,10 +180,7 @@ module Hive
       OPERATOR_REQUESTORS = %w[action cli bot web].freeze
 
       def retry_delay_sec(retry_count)
-        index = retry_count.to_i
-        return RETRY_BACKOFF_SEC.first if index.negative?
-
-        RETRY_BACKOFF_SEC[[ index, RETRY_BACKOFF_SEC.length - 1 ].min]
+        Hive::Recovery::RetryPolicy.delay_sec(retry_count)
       end
 
       # Requests carry their own charge; a request without one is its first.
@@ -189,9 +190,14 @@ module Hive
       end
 
       def assessment(row, now: Time.now.utc, retry_count: nil)
-        retry_count = durable_retry_count(row) if retry_count.nil?
+        retry_count = retry_count_for_failure(row, marker_attrs(row)) if retry_count.nil?
         observed_at = value(row, :state_file_mtime)
-        eligible_at = observed_at && observed_at + retry_delay_sec(retry_count)
+        delay = if marker_attrs(row)["reason"] == "limits_reached"
+          Hive::AgentLimit.retry_cooldown_sec
+        else
+          retry_delay_sec(retry_count)
+        end
+        eligible_at = observed_at && observed_at + delay
         safe, safety_reason = @safety.call(row)
         {
           due: !eligible_at.nil? && now.utc >= eligible_at,
@@ -211,15 +217,14 @@ module Hive
                   now: Time.now.utc)
         now = now.utc
         failure_origin = marker_attrs(row)["reason"].to_s
-        if projection_repair_row?(row)
+        if task_history_invalid_row?(row)
           return receipt(
             "blocked", failure_origin: failure_origin, owner: "operator",
-            reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-            remediation: value(row, :suggested_command) ||
-              "repair the exact task projection before retrying"
+            reason: Hive::TaskProjection::INVALID_HISTORY_REASON,
+            remediation: value(row, :suggested_command)
           )
         end
-        retry_count = durable_retry_count(row)
+        retry_count = retry_count_for_failure(row, marker_attrs(row))
         assessment = assessment(row, now: now, retry_count: retry_count)
         operator_request = OPERATOR_REQUESTORS.include?(requestor.to_s)
         unless assessment[:retry_at]
@@ -327,7 +332,23 @@ module Hive
             )
           end
 
-          existing = @request_queue.find_recovery(
+          if value(row, :stage) == "7-artifacts" # coding-scoped: runtime residue recovery owns coding artifacts cleanup
+            begin
+              @runtime_residue_recovery.call(
+                task: locked_task, marker: current,
+                intended_stage: value(row, :stage)
+              )
+            rescue Hive::Artifacts::RuntimeResidueRecovery::RecoveryError => e
+              return receipt(
+                "blocked", failure_origin: failure_origin, owner: "hive",
+                reason: "runtime_residue_recovery_failed",
+                remediation: e.message, retry_count: retry_count,
+                provider_hint: provider_hint(row)
+              )
+            end
+          end
+
+          existing = request_queue.find_recovery(
             project: value(row, :project),
             slug: value(row, :slug),
             observed_marker_generation: expected_generation,
@@ -412,7 +433,7 @@ module Hive
               "owner" => "operator"
             )
           end
-          @request_queue.write_request!(
+          request_queue.write_request!(
             project: value(row, :project),
             slug: value(row, :slug),
             argv: retry_argv(row),
@@ -422,7 +443,6 @@ module Hive
             trigger: "recovery",
             request_id: canonical_request_id,
             task_generation: generation.task_generation,
-            predecessor_attempt_id: source_receipt&.fetch("attempt_id", nil),
             task_id: locked_task.id,
             expected_stage: value(row, :stage),
             expected_marker_name: current.name.to_s,
@@ -431,7 +451,7 @@ module Hive
             state_home: @state_home,
             now: now
           )
-          @request_queue.remove_terminal_recoveries(
+          request_queue.remove_terminal_recoveries(
             project: value(row, :project),
             slug: value(row, :slug),
             expected_stage: value(row, :stage),
@@ -439,7 +459,7 @@ module Hive
             state_home: @state_home
           )
           if failure_evidence.fetch("deterministic")
-            persisted = @request_queue.fetch(canonical_request_id, state_home: @state_home)
+            persisted = request_queue.fetch(canonical_request_id, state_home: @state_home)
             return receipt_for_request(persisted, now: now)
           end
           receipt(
@@ -516,7 +536,7 @@ module Hive
             )
           end
 
-          existing = @request_queue.find_admission_recovery(
+          existing = request_queue.find_admission_recovery(
             project: project, slug: slug,
             task_generation: generation.task_generation,
             policy_digest: decision.policy_digest,
@@ -530,7 +550,6 @@ module Hive
             policy_digest: decision.policy_digest
           )
           observation = admission_observation(decision)
-          operator_blocked = decision.reason == "health_state_unavailable"
           recovery = {
             "variant" => "admission_failure",
             "phase" => "admitted",
@@ -541,10 +560,9 @@ module Hive
             "dispatch_generation" => generation.task_generation,
             "failure_origin" => decision.reason,
             "next_eligible_at" => (now + request_retry_delay_sec(request)).iso8601(6),
-            "owner" => operator_blocked ? "operator" : "scheduler",
-            "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
-            "blocked_remediation" => operator_blocked ?
-              "inspect and repair the unavailable provider-health scope" : nil,
+            "owner" => "scheduler",
+            "blocked_reason" => nil,
+            "blocked_remediation" => nil,
             "retry_count" => durable_retry_count_for(
               project: project, slug: slug, expected_stage: task_stage(locked_task)
             ) + 1,
@@ -554,24 +572,23 @@ module Hive
             "source_receipt" => nil,
             "admission_observation" => observation
           }
-          @request_queue.write_request!(
+          request_queue.write_request!(
             project: project, slug: slug, argv: request.argv,
             requestor: request.requestor || "daemon",
             chat_id: request.chat_id, update_id: request.update_id,
             trigger: "recovery/admission_failure", request_id: request_id,
             task_generation: generation.task_generation,
-            predecessor_attempt_id: request.predecessor_attempt_id,
             inherited_outputs: request.inherited_outputs || [],
             task_id: locked_task.id, expected_stage: task_stage(locked_task),
             expected_marker_name: nil, expected_marker_id: nil,
             recovery: recovery, state_home: @state_home, now: now
           )
-          @request_queue.remove_terminal_recoveries(
+          request_queue.remove_terminal_recoveries(
             project: project, slug: slug, except_request_id: request_id,
             expected_stage: task_stage(locked_task),
             state_home: @state_home
           )
-          persisted = @request_queue.fetch(request_id, state_home: @state_home)
+          persisted = request_queue.fetch(request_id, state_home: @state_home)
           persisted ? receipt_for_request(persisted, now: now) :
             unavailable_request(request, "request_disappeared_after_admission")
         end
@@ -645,7 +662,7 @@ module Hive
           generation = current_generation(
             locked_task, project: project, intended_stage: value(row, :stage)
           )
-          existing = @request_queue.find_markerless_recovery(
+          existing = request_queue.find_markerless_recovery(
             project: project, slug: value(row, :slug),
             task_generation: generation.task_generation,
             failure_origin: failure_origin, state_home: @state_home
@@ -698,7 +715,7 @@ module Hive
               "owner" => "operator"
             )
           end
-          @request_queue.write_request!(
+          request_queue.write_request!(
             project: project, slug: value(row, :slug), argv: markerless_retry_argv(row),
             requestor: requestor, trigger: "recovery/markerless_failure",
             request_id: request_id, task_generation: generation.task_generation,
@@ -706,12 +723,12 @@ module Hive
             expected_marker_name: nil, expected_marker_id: nil,
             recovery: recovery, state_home: @state_home, now: now
           )
-          @request_queue.remove_terminal_recoveries(
+          request_queue.remove_terminal_recoveries(
             project: project, slug: value(row, :slug),
             expected_stage: value(row, :stage), except_request_id: request_id,
             state_home: @state_home
           )
-          persisted = @request_queue.fetch(request_id, state_home: @state_home)
+          persisted = request_queue.fetch(request_id, state_home: @state_home)
           persisted ? receipt_for_request(persisted, now: now) :
             receipt(
               "unavailable", failure_origin: failure_origin, owner: "hive",
@@ -744,34 +761,30 @@ module Hive
         decision = result.respond_to?(:decision) ? result.decision : nil
         expected = result.status == :deferred ? :capacity_saturated : :no_route
         validate_admission_decision!(decision, expected_status: expected)
-        @request_queue.with_request_lock(request.request_id, state_home: @state_home) do
-          current = @request_queue.fetch(request.request_id, state_home: @state_home) || request
-          recovery = current.recovery || {}
-          unless %w[admitted cleared].include?(recovery["phase"])
-            return receipt_for_request(current, now: now)
-          end
-
-          operator_blocked = decision.reason == "health_state_unavailable"
-          changes = {
-            "admission_observation" => admission_observation(decision),
-            "owner" => operator_blocked ? "operator" : "scheduler",
-            "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
-            "blocked_remediation" => operator_blocked ?
-              "inspect and repair the unavailable provider-health scope" : nil
-          }
-          unless decision.capacity_saturated?
-            changes["next_eligible_at"] =
-              (now.utc + request_retry_delay_sec(request)).iso8601(6)
-          end
-          transitioned = @request_queue.update_recovery!(
-            current.request_id, expected_phase: recovery["phase"], changes: changes,
-            state_home: @state_home, request_locked: true
-          )
-          refreshed = @request_queue.fetch(current.request_id, state_home: @state_home)
-          return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
-
-          receipt_for_request(refreshed, now: now)
+        current = request_queue.fetch(request.request_id, state_home: @state_home) || request
+        recovery = current.recovery || {}
+        unless %w[admitted cleared].include?(recovery["phase"])
+          return receipt_for_request(current, now: now)
         end
+
+        changes = {
+          "admission_observation" => admission_observation(decision),
+          "owner" => "scheduler",
+          "blocked_reason" => nil,
+          "blocked_remediation" => nil
+        }
+        unless decision.capacity_saturated?
+          changes["next_eligible_at"] =
+            (now.utc + request_retry_delay_sec(request)).iso8601(6)
+        end
+        transitioned = request_queue.update_recovery!(
+          current.request_id, expected_phase: recovery["phase"], changes: changes,
+          state_home: @state_home
+        )
+        refreshed = request_queue.fetch(current.request_id, state_home: @state_home)
+        return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
+
+        receipt_for_request(refreshed, now: now)
       rescue Hive::Error, SystemCallError, IOError, ArgumentError => e
         unavailable_request(request, "#{e.class}: #{e.message}")
       end
@@ -785,13 +798,12 @@ module Hive
         request = rearm_changed_runtime(request, now:)
         recovery = request.recovery
         return unavailable_request(request, "request_has_no_recovery_transition") unless recovery.is_a?(Hash)
-        if projection_repair_row?(row)
+        if task_history_invalid_row?(row)
           return receipt(
             "blocked", request_id: request.request_id,
             phase: recovery["phase"], failure_origin: recovery["failure_origin"],
-            owner: "operator", reason: Hive::TaskProjection::REPAIR_REQUIRED_REASON,
-            remediation: value(row, :suggested_command) ||
-              "repair the exact task projection before retrying",
+            owner: "operator", reason: Hive::TaskProjection::INVALID_HISTORY_REASON,
+            remediation: value(row, :suggested_command),
             retry_count: recovery["retry_count"]
           )
         end
@@ -803,148 +815,131 @@ module Hive
 
         task = resolve_task_for(row)
         Hive::Lock.with_task_lock(task.folder, "operation" => "recovery_transition") do
-          @request_queue.with_request_lock(request.request_id, state_home: @state_home) do
-            current_request = @request_queue.fetch(request.request_id, state_home: @state_home)
-            return unavailable_request(request, "request_disappeared_before_transition") unless current_request
+          current_request = request_queue.fetch(request.request_id, state_home: @state_home)
+          return unavailable_request(request, "request_disappeared_before_transition") unless current_request
 
-            recovery = current_request.recovery
-            return receipt_for_request(current_request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
-            return receipt_for_request(current_request, now: now) if
-              INERT_BLOCK_REASONS.include?(recovery["blocked_reason"])
-            return receipt_for_request(current_request, now: now) if
-              recovery["blocked_reason"].nil? && !recovery_due?(recovery, now: now)
+          recovery = current_request.recovery
+          return receipt_for_request(current_request, now: now) if %w[dispatched terminal].include?(recovery["phase"])
+          return receipt_for_request(current_request, now: now) if
+            INERT_BLOCK_REASONS.include?(recovery["blocked_reason"])
+          return receipt_for_request(current_request, now: now) if
+            recovery["blocked_reason"].nil? && !recovery_due?(recovery, now: now)
 
-            locked_task = resolve_task_for(row)
-            unless same_task_identity?(task, locked_task) &&
-                   observed_task_identity_matches?(row, locked_task) &&
-                   request_task_identity_matches?(current_request, locked_task)
-              return block_request(
-                current_request,
-                "task_identity_conflict",
-                owner: "operator",
-                remediation: "refresh status; the canonical task identity or stage changed",
-                request_locked: true
-              )
-            end
-
-            unless source_health_acknowledged?(recovery["source_receipt"])
-              return receipt(
-                "queued", request_id: current_request.request_id,
-                phase: recovery["phase"],
-                failure_origin: recovery["failure_origin"], owner: "hive",
-                reason: "provider_health_pending",
-                remediation: "wait for provider health to acknowledge the terminal receipt",
-                retry_count: recovery["retry_count"]
-              )
-            end
-
-            marker = Hive::Markers.current(locked_task.state_file)
-            safety_marker = recovery_safety_marker(current_request, marker)
-            locked_safe, locked_safety_reason = @safety.call(
-              safety_observation(row, locked_task, safety_marker)
-            )
-            unless locked_safe == true
-              assessment = { safety_reason: locked_safety_reason.to_s }
-              return block_request(
-                current_request,
-                "safety_blocked",
-                owner: safety_owner(assessment),
-                remediation: locked_safety_reason.to_s,
-                request_locked: true
-              )
-            end
-
-            generation = generation_for_current(
-              locked_task, current_request, admission_context: admission_context
-            )
-            if recovery["phase"] == "admitted"
-              if admission_failure_recovery?(recovery)
-                return block_request(
-                  current_request, "generation_conflict",
-                  owner: "operator", request_locked: true
-                ) if recoverable_marker?(marker) || !generation_matches?(generation, recovery)
-              elsif markerless_failure_recovery?(recovery)
-                return block_request(
-                  current_request, "generation_conflict",
-                  owner: "operator", request_locked: true
-                ) unless marker.none? && generation_matches?(generation, recovery)
-              elsif marker.none?
-                return block_request(
-                  current_request, "generation_conflict",
-                  owner: "operator", request_locked: true
-                ) unless generation_matches?(generation, recovery)
-              else
-                return block_request(
-                  current_request, "generation_conflict",
-                  owner: "operator", request_locked: true
-                ) unless
-                  marker.name.to_s == current_request.expected_marker_name.to_s &&
-                  marker_generation(marker) == recovery["observed_marker_generation"].to_s &&
-                  expected_attrs_match?(marker, recovery.fetch("expected_marker_attrs"))
-
-                markerless = Hive::Markers.without_markers(File.binread(locked_task.state_file))
-                predicted = call_generation_resolver(
-                  locked_task, project: current_request.project,
-                  intended_stage: current_request.expected_stage,
-                  state_file_content: markerless,
-                  admission_context: admission_context
-                )
-                return block_request(
-                  current_request, "generation_conflict",
-                  owner: "operator", request_locked: true
-                ) unless generation_matches?(predicted, recovery)
-
-                cleared = clear_recoverable_marker(
-                  locked_task.state_file,
-                  expected_name: current_request.expected_marker_name,
-                  match_attrs: recovery.fetch("expected_marker_attrs")
-                )
-                return block_request(
-                  current_request, "generation_conflict",
-                  owner: "operator", request_locked: true
-                ) unless cleared
-                generation = generation_for_current(
-                  locked_task, current_request, admission_context: admission_context
-                )
-                return block_request(
-                  current_request, "generation_conflict",
-                  owner: "operator", request_locked: true
-                ) unless generation_matches?(generation, recovery)
-              end
-
-              transitioned = @request_queue.update_recovery!(
-                current_request.request_id,
-                expected_phase: "admitted",
-                changes: {
-                  "phase" => "cleared",
-                  "owner" => "scheduler",
-                  "blocked_reason" => nil,
-                  "blocked_remediation" => nil
-                },
-                state_home: @state_home,
-                request_locked: true
-              )
-              refreshed = @request_queue.fetch(current_request.request_id, state_home: @state_home)
-              return block_request(
-                current_request,
-                "transition_conflict",
-                owner: "hive",
-                request_locked: true
-              ) unless transitioned && refreshed
-              return receipt_for_request(refreshed, now: now)
-            end
-
+          locked_task = resolve_task_for(row)
+          unless same_task_identity?(task, locked_task) &&
+                 observed_task_identity_matches?(row, locked_task) &&
+                 request_task_identity_matches?(current_request, locked_task)
             return block_request(
-              current_request, "generation_conflict",
-              owner: "operator", request_locked: true
-            ) unless
-              recovery["phase"] == "cleared" &&
-              cleared_marker_state_valid?(marker, recovery) &&
-              generation_matches?(generation, recovery)
-
-            refreshed = clear_resolved_block(current_request, request_locked: true)
-            receipt_for_request(refreshed, now: now)
+              current_request,
+              "task_identity_conflict",
+              owner: "operator",
+              remediation: "refresh status; the canonical task identity or stage changed"
+            )
           end
+
+          marker = Hive::Markers.current(locked_task.state_file)
+          safety_marker = recovery_safety_marker(current_request, marker)
+          locked_safe, locked_safety_reason = @safety.call(
+            safety_observation(row, locked_task, safety_marker)
+          )
+          unless locked_safe == true
+            assessment = { safety_reason: locked_safety_reason.to_s }
+            return block_request(
+              current_request,
+              "safety_blocked",
+              owner: safety_owner(assessment),
+              remediation: locked_safety_reason.to_s
+            )
+          end
+
+          generation = generation_for_current(
+            locked_task, current_request, admission_context: admission_context
+          )
+          if recovery["phase"] == "admitted"
+            if admission_failure_recovery?(recovery)
+              return block_request(
+                current_request, "generation_conflict",
+                owner: "operator"
+              ) if recoverable_marker?(marker) || !generation_matches?(generation, recovery)
+            elsif markerless_failure_recovery?(recovery)
+              return block_request(
+                current_request, "generation_conflict",
+                owner: "operator"
+              ) unless marker.none? && generation_matches?(generation, recovery)
+            elsif marker.none?
+              return block_request(
+                current_request, "generation_conflict",
+                owner: "operator"
+              ) unless generation_matches?(generation, recovery)
+            else
+              return block_request(
+                current_request, "generation_conflict",
+                owner: "operator"
+              ) unless
+                marker.name.to_s == current_request.expected_marker_name.to_s &&
+                marker_generation(marker) == recovery["observed_marker_generation"].to_s &&
+                expected_attrs_match?(marker, recovery.fetch("expected_marker_attrs"))
+
+              markerless = Hive::Markers.without_markers(File.binread(locked_task.state_file))
+              predicted = call_generation_resolver(
+                locked_task, project: current_request.project,
+                intended_stage: current_request.expected_stage,
+                state_file_content: markerless,
+                admission_context: admission_context
+              )
+              return block_request(
+                current_request, "generation_conflict",
+                owner: "operator"
+              ) unless generation_matches?(predicted, recovery)
+
+              cleared = clear_recoverable_marker(
+                locked_task.state_file,
+                expected_name: current_request.expected_marker_name,
+                match_attrs: recovery.fetch("expected_marker_attrs")
+              )
+              return block_request(
+                current_request, "generation_conflict",
+                owner: "operator"
+              ) unless cleared
+              generation = generation_for_current(
+                locked_task, current_request, admission_context: admission_context
+              )
+              return block_request(
+                current_request, "generation_conflict",
+                owner: "operator"
+              ) unless generation_matches?(generation, recovery)
+            end
+
+            transitioned = request_queue.update_recovery!(
+              current_request.request_id,
+              expected_phase: "admitted",
+              changes: {
+                "phase" => "cleared",
+                "owner" => "scheduler",
+                "blocked_reason" => nil,
+                "blocked_remediation" => nil
+              },
+              state_home: @state_home
+            )
+            refreshed = request_queue.fetch(current_request.request_id, state_home: @state_home)
+            return block_request(
+              current_request,
+              "transition_conflict",
+              owner: "hive"
+            ) unless transitioned && refreshed
+            return receipt_for_request(refreshed, now: now)
+          end
+
+          return block_request(
+            current_request, "generation_conflict",
+            owner: "operator"
+          ) unless
+            recovery["phase"] == "cleared" &&
+            cleared_marker_state_valid?(marker, recovery) &&
+            generation_matches?(generation, recovery)
+
+          refreshed = clear_resolved_block(current_request)
+          receipt_for_request(refreshed, now: now)
         end
       rescue Hive::ConcurrentRunError => e
         holder = e.respond_to?(:holder) ? e.holder : nil
@@ -961,43 +956,40 @@ module Hive
 
       def mark_dispatched(request, attempt_id:, terminal: false, outcome: nil,
                           now: Time.now.utc)
-        @request_queue.with_request_lock(request.request_id, state_home: @state_home) do
-          current = @request_queue.fetch(request.request_id, state_home: @state_home) || request
-          recovery = current.recovery || {}
-          return receipt_for_request(current, attempt_id: attempt_id) if recovery["phase"] == "terminal"
-          if !terminal && recovery["phase"] == "dispatched"
-            return receipt_for_request(current, attempt_id: attempt_id)
-          end
-
-          valid_source = terminal ? %w[cleared dispatched] : [ "cleared" ]
-          unless valid_source.include?(recovery["phase"])
-            return unavailable_request(current, "transition_conflict")
-          end
-
-          phase = terminal ? "terminal" : "dispatched"
-          changes = {
-            "phase" => phase,
-            "attempt_id" => attempt_id,
-            "owner" => terminal ? "none" : "agent",
-            "blocked_reason" => nil,
-            "blocked_remediation" => nil
-          }
-          if terminal
-            changes["terminal_outcome"] = outcome
-            changes["terminal_at"] = now.utc.iso8601(6)
-          end
-          transitioned = @request_queue.update_recovery!(
-            request.request_id,
-            expected_phase: recovery["phase"],
-            changes: changes,
-            state_home: @state_home,
-            request_locked: true
-          )
-          refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
-          return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
-
-          receipt_for_request(refreshed, attempt_id: attempt_id)
+        current = request_queue.fetch(request.request_id, state_home: @state_home) || request
+        recovery = current.recovery || {}
+        return receipt_for_request(current, attempt_id: attempt_id) if recovery["phase"] == "terminal"
+        if !terminal && recovery["phase"] == "dispatched"
+          return receipt_for_request(current, attempt_id: attempt_id)
         end
+
+        valid_source = terminal ? %w[cleared dispatched] : [ "cleared" ]
+        unless valid_source.include?(recovery["phase"])
+          return unavailable_request(current, "transition_conflict")
+        end
+
+        phase = terminal ? "terminal" : "dispatched"
+        changes = {
+          "phase" => phase,
+          "attempt_id" => attempt_id,
+          "owner" => terminal ? "none" : "agent",
+          "blocked_reason" => nil,
+          "blocked_remediation" => nil
+        }
+        if terminal
+          changes["terminal_outcome"] = outcome
+          changes["terminal_at"] = now.utc.iso8601(6)
+        end
+        transitioned = request_queue.update_recovery!(
+          request.request_id,
+          expected_phase: recovery["phase"],
+          changes: changes,
+          state_home: @state_home
+        )
+        refreshed = request_queue.fetch(request.request_id, state_home: @state_home)
+        return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
+
+        receipt_for_request(refreshed, attempt_id: attempt_id)
       end
 
       RETRYABLE_TERMINAL_OUTCOMES = %w[failed cancelled lost].freeze
@@ -1010,7 +1002,7 @@ module Hive
       # newer marker/attempt wins and is never overwritten.
       def repair_failed_terminal_marker(request, refresh: true)
         current = if refresh
-          @request_queue.fetch(request.request_id, state_home: @state_home) || request
+          request_queue.fetch(request.request_id, state_home: @state_home) || request
         else
           request
         end
@@ -1059,28 +1051,25 @@ module Hive
       # and schedule the next admission with the same shared hourly cadence.
       def defer_dispatch_failure(request, now: Time.now.utc)
         now = now.utc
-        @request_queue.with_request_lock(request.request_id, state_home: @state_home) do
-          current = @request_queue.fetch(request.request_id, state_home: @state_home) || request
-          recovery = current.recovery || {}
-          return receipt_for_request(current, now: now) unless recovery["phase"] == "cleared"
+        current = request_queue.fetch(request.request_id, state_home: @state_home) || request
+        recovery = current.recovery || {}
+        return receipt_for_request(current, now: now) unless recovery["phase"] == "cleared"
 
-          transitioned = @request_queue.update_recovery!(
-            request.request_id,
-            expected_phase: "cleared",
-            changes: {
-              "next_eligible_at" => (now + request_retry_delay_sec(request)).iso8601(6),
-              "owner" => "scheduler",
-              "blocked_reason" => nil,
-              "blocked_remediation" => nil
-            },
-            state_home: @state_home,
-            request_locked: true
-          )
-          refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
-          return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
+        transitioned = request_queue.update_recovery!(
+          request.request_id,
+          expected_phase: "cleared",
+          changes: {
+            "next_eligible_at" => (now + request_retry_delay_sec(request)).iso8601(6),
+            "owner" => "scheduler",
+            "blocked_reason" => nil,
+            "blocked_remediation" => nil
+          },
+          state_home: @state_home
+        )
+        refreshed = request_queue.fetch(request.request_id, state_home: @state_home)
+        return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
 
-          receipt_for_request(refreshed, now: now)
-        end
+        receipt_for_request(refreshed, now: now)
       end
 
       def receipt_for_request(request, attempt_id: nil, replay: false,
@@ -1139,6 +1128,12 @@ module Hive
 
       private
 
+      def request_queue
+        @request_queue ||= Hive::RuntimeControlPlane::DispatchRepository.open_default(
+          state_home: @state_home
+        )
+      end
+
       def durable_retry_count(row)
         durable_retry_count_for(
           project: value(row, :project), slug: value(row, :slug),
@@ -1147,15 +1142,30 @@ module Hive
       end
 
       def durable_retry_count_for(project:, slug:, expected_stage:)
-        @request_queue.recovery_retry_count(
+        request_queue.recovery_retry_count(
           project: project, slug: slug, expected_stage: expected_stage,
           runtime_digest: @runtime_digest, state_home: @state_home
         )
       end
 
+      def retry_count_for_failure(row, attrs)
+        durable = durable_retry_count(row)
+        return durable unless @request_queue
+
+        previous = request_queue.latest_terminal_recovery(
+          project: value(row, :project), slug: value(row, :slug),
+          expected_stage: value(row, :stage), state_home: @state_home
+        )
+        previous_fingerprint = previous&.recovery&.fetch("failure_fingerprint", nil).to_s
+        return durable if previous_fingerprint.empty?
+        return durable if previous_fingerprint == failure_fingerprint(row, attrs)
+
+        0
+      end
+
       def failure_evidence_for(row, retry_count:, marker_attrs:)
         fingerprint = failure_fingerprint(row, marker_attrs)
-        previous = @request_queue.latest_terminal_recovery(
+        previous = request_queue.latest_terminal_recovery(
           project: value(row, :project), slug: value(row, :slug),
           expected_stage: value(row, :stage), state_home: @state_home
         )
@@ -1174,7 +1184,8 @@ module Hive
           "fingerprint" => fingerprint,
           "count" => count,
           "attempts" => attempts,
-          "deterministic" => at_ceiling && count >= DETERMINISTIC_FAILURE_THRESHOLD
+          "deterministic" => marker_attrs["reason"] != "limits_reached" &&
+            at_ceiling && count >= DETERMINISTIC_FAILURE_THRESHOLD
         }
       end
 
@@ -1186,7 +1197,8 @@ module Hive
           "provider" => (attrs["provider"] || attrs["provider_account_id"] ||
             value(row, :provider)).to_s,
           "status_code" => (attrs["status_code"] || attrs["status"]).to_s,
-          "message_digest" => Digest::SHA256.hexdigest(normalized_message)
+          "message_digest" => Digest::SHA256.hexdigest(normalized_message),
+          "progress_revision" => dirty_progress_revision(row, attrs)
         ))
       end
 
@@ -1217,11 +1229,47 @@ module Hive
           "terminal_outcome" => nil,
           "terminal_at" => nil
         }
-        @request_queue.requeue_recovery!(
-          request.request_id, expected_phase: "terminal", changes: changes,
-          state_home: @state_home
+        retry_request_id = deterministic_markerless_retry_request_id(
+          request, retry_count: changes.fetch("retry_count")
         )
-        @request_queue.fetch(request.request_id, state_home: @state_home) || request
+        request_queue.write_request!(
+          project: request.project, slug: request.slug, argv: request.argv,
+          requestor: request.requestor, chat_id: request.chat_id,
+          update_id: request.update_id, trigger: request.trigger,
+          request_id: retry_request_id, task_generation: request.task_generation,
+          inherited_outputs: request.inherited_outputs || [], task_id: request.task_id,
+          expected_stage: request.expected_stage,
+          expected_marker_name: request.expected_marker_name,
+          expected_marker_id: request.expected_marker_id,
+          recovery: recovery.merge(changes), state_home: @state_home, now: now
+        )
+        request_queue.remove_terminal_recoveries(
+          project: request.project, slug: request.slug,
+          expected_stage: request.expected_stage,
+          except_request_id: retry_request_id, state_home: @state_home
+        )
+        request_queue.fetch(retry_request_id, state_home: @state_home) || request
+      end
+
+      # A dirty-worktree stop is a clean Pi handoff, not proof that the same
+      # work failed again. Bind that failure class to Hive's observed commit
+      # evidence so a newly committed checkpoint starts the short retry ladder
+      # again, while repeated stops at the same revision still converge on the
+      # deterministic-failure park.
+      def dirty_progress_revision(row, attrs)
+        return "" unless attrs["reason"].to_s == "dirty_worktree"
+
+        Array(value(row, :evidence)).reverse_each do |item|
+          next unless item.is_a?(Hash)
+          next unless (item["type"] || item[:type]).to_s == "commit"
+          next unless (item["observation"] || item[:observation]).to_s ==
+                      "dirty_worktree"
+
+          sha = (item["sha"] || item[:sha]).to_s
+          return sha.downcase if sha.match?(/\A[0-9a-f]{40,64}\z/i)
+        end
+
+        ""
       end
 
       def source_receipt_for(marker:, task:, project:)
@@ -1255,25 +1303,8 @@ module Hive
           "terminal_lease_version" => terminal["terminal_lease_version"]
         }
         source_receipt_matches?(record, identity) ? identity.freeze : nil
-      rescue Hive::Attempts::StoreError
+      rescue Hive::Attempts::RepositoryError
         nil
-      end
-
-      def source_health_acknowledged?(source_receipt)
-        return true if source_receipt.nil?
-
-        hot = attempts_store.fetch_hot(source_receipt.fetch("attempt_id"))
-        if hot
-          return false unless source_receipt_matches?(hot, source_receipt)
-
-          pending = attempts_store.pending_finalizations.fetch(hot.attempt_id)
-          return pending&.dig("consumers", "provider_health") == true
-        end
-
-        proof = attempts_store.permanent_proofs.fetch(source_receipt.fetch("attempt_id"))
-        source_receipt_matches?(proof, source_receipt)
-      rescue KeyError, Hive::Attempts::StoreError
-        false
       end
 
       def source_receipt_matches?(record, source_receipt)
@@ -1292,9 +1323,7 @@ module Hive
       def validate_admission_decision!(decision, expected_status:)
         unless decision.is_a?(Hive::ProviderRouting::Decision) &&
                decision.status == expected_status &&
-               %w[
-                 capacity_saturated health_state_unavailable no_eligible_provider_route
-               ].include?(decision.reason)
+               %w[capacity_saturated no_eligible_provider_route].include?(decision.reason)
           raise ArgumentError, "invalid provider-routing admission decision"
         end
       end
@@ -1375,8 +1404,8 @@ module Hive
         attrs.is_a?(Hash) ? attrs.to_h.transform_keys(&:to_s) : {}
       end
 
-      def projection_repair_row?(row)
-        Hive::TaskProjection.repair_required_row?(row)
+      def task_history_invalid_row?(row)
+        Hive::TaskProjection.history_invalid_row?(row)
       end
 
       def observed_marker_generation(row)
@@ -1588,7 +1617,7 @@ module Hive
 
         command = value(row, :suggested_command).to_s
         argv = Shellwords.split(command)
-        return argv if @request_queue.valid_argv?(argv) && argv[1] != "markers"
+        return argv if request_queue.valid_argv?(argv) && argv[1] != "markers"
 
         if verb != "run"
           [ "hive", verb, slug, "--project", project, "--from", stage, "--json" ]
@@ -1601,7 +1630,7 @@ module Hive
 
       def markerless_retry_argv(row)
         argv = Shellwords.split(value(row, :suggested_command).to_s)
-        return argv if @request_queue.valid_argv?(argv) && argv[1] != "markers"
+        return argv if request_queue.valid_argv?(argv) && argv[1] != "markers"
 
         raise Hive::Error, "markerless recovery requires the current runnable command"
       rescue ArgumentError
@@ -1635,6 +1664,15 @@ module Hive
         )[0, 32]
       end
 
+      def deterministic_markerless_retry_request_id(request, retry_count:)
+        ::Digest::SHA256.hexdigest(
+          [
+            "hive-markerless-recovery-retry-v1", request.request_id,
+            retry_count
+          ].join("\0")
+        )[0, 32]
+      end
+
       def deterministic_admission_request_id(project:, task:, dispatch_generation:,
                                              policy_digest:)
         ::Digest::SHA256.hexdigest(
@@ -1656,8 +1694,7 @@ module Hive
         assessment[:safety_reason].start_with?("inspection failed:") ? "hive" : "operator"
       end
 
-      def block_request(request, reason, owner:, remediation: nil,
-                        request_locked: false)
+      def block_request(request, reason, owner:, remediation: nil)
         recovery = request.recovery
         resolved_remediation = remediation || remediation_for(reason)
         if recovery["blocked_reason"].to_s == reason.to_s &&
@@ -1666,7 +1703,7 @@ module Hive
           return receipt_for_request(request)
         end
 
-        transitioned = @request_queue.update_recovery!(
+        transitioned = request_queue.update_recovery!(
           request.request_id,
           expected_phase: recovery["phase"],
           changes: {
@@ -1674,22 +1711,21 @@ module Hive
             "blocked_remediation" => resolved_remediation,
             "owner" => owner
           },
-          state_home: @state_home,
-          request_locked: request_locked
+          state_home: @state_home
         )
-        refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
+        refreshed = request_queue.fetch(request.request_id, state_home: @state_home)
         return unavailable_request(request, "transition_conflict") unless transitioned && refreshed
 
         receipt_for_request(refreshed)
       end
 
-      def clear_resolved_block(request, request_locked:)
+      def clear_resolved_block(request)
         recovery = request.recovery || {}
         return request if recovery["blocked_reason"].nil? &&
                           recovery["blocked_remediation"].nil? &&
                           recovery["owner"].to_s == "scheduler"
 
-        transitioned = @request_queue.update_recovery!(
+        transitioned = request_queue.update_recovery!(
           request.request_id,
           expected_phase: recovery["phase"],
           changes: {
@@ -1697,10 +1733,9 @@ module Hive
             "blocked_remediation" => nil,
             "owner" => "scheduler"
           },
-          state_home: @state_home,
-          request_locked: request_locked
+          state_home: @state_home
         )
-        refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
+        refreshed = request_queue.fetch(request.request_id, state_home: @state_home)
         return refreshed if transitioned && refreshed
 
         request
@@ -1710,12 +1745,16 @@ module Hive
         recovery = request.recovery || {}
         return request unless recovery["phase"] == "admitted"
         return request unless recovery["blocked_reason"] == "deterministic_failure"
-        return request if recovery["runtime_digest"] == @runtime_digest
+        provider_limit = recovery["failure_origin"] == "limits_reached"
+        return request if !provider_limit && recovery["runtime_digest"] == @runtime_digest
+
+        changes = deterministic_rearm_changes(now:)
+        changes["next_eligible_at"] = recovery["next_eligible_at"] if provider_limit
 
         transitioned = @request_queue.update_recovery!(
           request.request_id,
           expected_phase: "admitted",
-          changes: deterministic_rearm_changes(now:),
+          changes: changes,
           state_home: @state_home
         )
         refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
@@ -1737,13 +1776,13 @@ module Hive
         if blocked_reason == "deterministic_failure"
           changes = deterministic_rearm_changes(now:)
         end
-        transitioned = @request_queue.update_recovery!(
+        transitioned = request_queue.update_recovery!(
           request.request_id,
           expected_phase: "admitted",
           changes: changes,
           state_home: @state_home
         )
-        refreshed = @request_queue.fetch(request.request_id, state_home: @state_home)
+        refreshed = request_queue.fetch(request.request_id, state_home: @state_home)
         return refreshed if transitioned && refreshed
 
         request

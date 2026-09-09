@@ -255,9 +255,14 @@ Honeycomb projections.
   through the existing task controllers. The application shell and primary
   navigation use the full viewport width with fluid edge gutters; the project
   rail grows to a bounded desktop width while the status content receives all
-  remaining space. Kanban tracks grow beyond their comfortable minimum when a
-  large screen has room, and each band scrolls horizontally inside the page
-  when it does not. `Grid` retains the compact per-project task rows and gains
+  remaining space. Open Kanban columns keep a fixed 270px desktop width; unused space
+  stays empty instead of stretching cards when neighboring columns fold.
+  Mobile columns use `min(78vw, 290px)`, and each band scrolls horizontally
+  inside the page when it does not fit. Each column heading is a keyboard-accessible fold toggle.
+  Empty columns and the workflow's final Done column start folded, with the
+  count and vertical stage label still visible. Explicit choices persist in
+  browser local storage per project/workflow/stage across reloads and live
+  morphs. An untouched empty column opens when a task arrives. `Grid` retains the compact per-project task rows and gains
   the same fluid content area. Both ordinary views consume status's
   workflow-aware archive projection:
   expired archived rows are absent, and a positive project count renders
@@ -387,24 +392,42 @@ Honeycomb projections.
   filesystem broadcast from aborting the mutation. The app-owned Action Cable
   source stays permanent across morphs and performs the version comparison
   only from its confirmed subscription callback; there is no reconnect DOM
-  observer, timer, or fresh-navigation refresh. Async Cable setup is
-  generation-guarded: a handle whose DOM owner disconnects before confirmation
-  waits for the current transport's confirmation, rejection, or disconnect
-  before release, so an abandoned page cannot keep the server poller alive or
-  race unsubscribe ahead of subscribe—even during reconnect. If no callback
-  arrives within five seconds, Hive closes the otherwise-unowned Cable transport
-  to force server cleanup before dropping the local handle. The server checks
-  teardown before deferred adapter registration and again when registration
-  completes, immediately removing any handler that landed after the first
-  cleanup. A deferred adapter exception releases the shared lease and closes
-  the socket with reconnect enabled. If turbo-rails' lazy
-  consumer promise rejects, Hive clears the
-  poisoned cached promise before retrying at a bounded five-second cadence;
-  if subscription creation throws after Action Cable registration, Hive removes
-  the partial registration, disconnects that failed consumer, and creates a
-  fresh one. A server-side poller startup failure rejects the subscription, and
-  the rejected callback schedules the same bounded retry. Detaching the source
-  cancels the retry. The task-page owner encloses every
+  observer, timer, or fresh-navigation refresh. One internal owner contains the
+  current attempt, retry and pending-release timers, pending disposition, and
+  catch-up state. Each application setup or five-second retry creates a
+  dedicated consumer without touching turbo-rails' shared consumer. Action
+  Cable transport reconnect stays on that attempt; setup, registration,
+  rejection, and non-reconnecting disconnect failures retire it into
+  `retry_wait` so the next retry uses a fresh consumer.
+
+  The dedicated connection's `open`/`reopen` paths and every async continuation
+  are fenced by owner and attempt identity. A handle whose DOM owner disconnects
+  before confirmation waits for that attempt's confirmation, rejection, or
+  disconnect before release, so an abandoned page cannot race unsubscribe ahead
+  of subscribe—even during reconnect. If no callback arrives within five
+  seconds, Hive closes the dedicated transport before dropping the local
+  subscription handle. The server checks teardown before deferred adapter
+  registration and again when registration completes, immediately removing any
+  handler that landed after the first cleanup. A deferred adapter exception
+  releases the shared lease and reconnects the same transport.
+
+  Disconnect remains best-effort under failures: confirmed subscriptions
+  unsubscribe first, consumer disconnect is the primary transport close, and
+  reconnect-disabled connection/raw-socket fallbacks run only while the
+  captured socket remains `OPEN` or `CONNECTING`. The owner attempts all
+  applicable cleanup and ends `disconnected`; the internal boundary preserves
+  the first thrown value, while DOM and async entry paths warn only after
+  cleanup, Turbo, and successor work completes. Attribute supersession always
+  installs or leaves a fresh owner retrying. This ownership allocates one Cable
+  transport per live source, with at most one bounded retiring predecessor
+  overlapping its successor; two simultaneous sources intentionally use two
+  isolated transports. Cross-URL Turbo navigation still runs the permanent
+  source's disconnect/connect callbacks, so it replaces the dedicated
+  transport and pays a fresh WebSocket plus Action Cable subscription handshake
+  before `connected` and catch-up complete; it does not reuse turbo-rails'
+  cached consumer. A server-side poller startup failure rejects the
+  subscription and the rejected callback schedules the same bounded retry.
+  Detaching the source cancels the retry. The task-page owner encloses every
   mutation form, so those submissions cross the same refresh guard as Board
   actions. A
   failed Turbo broadcast also remains pending across last-subscriber shutdown
@@ -1097,3 +1120,7 @@ ffmpeg, ffprobe, and Tesseract. The separate Playwright dependency in
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].
+
+Live-status setup uses one error boundary for consumer creation, installation,
+and subscription registration. It routes failure by current attempt identity;
+retired attempts dispose their own resources and cannot affect the successor.

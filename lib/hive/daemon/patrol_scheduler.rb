@@ -35,10 +35,12 @@ module Hive
 
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
-                     git: GitHelper.new, state_store_factory: nil)
+                     git: GitHelper.new, state_store_factory: nil,
+                     database: Hive::RuntimeControlPlane.database)
         @registry = registry
         @config_loader = config_loader
         @git = git
+        @database = database
         @state_store_factory = state_store_factory || lambda do |entry|
           Hive::Patrol::StateStore.new(
             entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path")
@@ -137,11 +139,9 @@ module Hive
       end
 
       def complete(project:, exit_code:, envelope: nil, now: Time.now)
-        pending = @pending.fetch(project, nil)
         @pending.delete(project)
         if exit_code == Hive::ExitCodes::SUCCESS
           @failures.delete(project)
-          allowance_budget(pending.fetch(:entry), now).clear_park! if pending
         else
           count = @failures.dig(project, :count).to_i + 1
           interval = FAILURE_BACKOFF_SCHEDULE[
@@ -154,9 +154,6 @@ module Hive
             fallback: interval
           )
           @failures[project] = { count: count, next_eligible_at: now + interval }
-          persist_provider_hold(
-            pending.fetch(:entry), exhaustions, now: now, fallback: interval
-          ) if pending
         end
       end
 
@@ -213,26 +210,8 @@ module Hive
           entry.fetch("path"), cfg: cfg || @config_loader.call(entry.fetch("path")),
           project_id: entry.fetch("project_id"),
           project_name: entry.fetch("name"), engine: :ordinary,
+          database: @database,
           clock: -> { now }
-        )
-      end
-
-      def persist_provider_hold(entry, exhaustions, now:, fallback:)
-        exhaustion = exhaustions.find do |item|
-          reason = item.fetch("reason")
-          !reason.empty? && reason != "daily_agent_spawn_limit" &&
-            reason != "legacy_attribution_ambiguous"
-        end
-        return unless exhaustion
-
-        retry_at = parse_retry_time(exhaustion["retry_at"] || exhaustion["retry_after"])
-        retry_at ||= now + Integer(exhaustion["retry_after_sec"] || fallback)
-        allowance_budget(entry, now).park!(
-          retry_at: retry_at, reason: exhaustion.fetch("reason")
-        )
-      rescue ArgumentError, TypeError
-        allowance_budget(entry, now).park!(
-          retry_at: now + fallback, reason: exhaustion.fetch("reason")
         )
       end
 

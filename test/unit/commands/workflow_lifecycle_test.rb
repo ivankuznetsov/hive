@@ -183,14 +183,12 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       )
       assert_equal "demo-work-v2", reconfirmed.mappings.fetch(0).fetch("mapping_contract")
 
-      error = assert_raises(Hive::ConfigError) do
-        Hive::Commands::Workflow::ConfigurationResolver.new(
-          validated: validated, resolution: resolution,
-          cfg: { "agents" => { "claude" => { "bin" => "/tmp/drifted-claude" } } },
-          previous: previous
-        )
-      end
-      assert_match(/profile drifted/, error.message)
+      refreshed = Hive::Commands::Workflow::ConfigurationResolver.new(
+        validated: validated, resolution: resolution,
+        cfg: { "agents" => { "claude" => { "bin" => "/tmp/drifted-claude" } } },
+        previous: previous
+      )
+      assert_equal "claude", refreshed.mappings.fetch(0).fetch("agent")
     end
   end
 
@@ -616,6 +614,7 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       hive_state = File.join(project, ".hive-state")
       FileUtils.mkdir_p(File.join(hive_state, "stages"))
       File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state").to_yaml)
+      prepare_test_runtime_project(project)
       package = File.join(dir, "package")
       resolution = write_package(package, permission_spec: permission_spec)
       yield project, package, resolution

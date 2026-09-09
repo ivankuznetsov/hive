@@ -7,7 +7,13 @@ updated: 2026-07-22
 tags: [command, task, cleanup, json, tui, web]
 ---
 
-**TLDR**: `hive drop TARGET [--project NAME] [--from STAGE] [--json]` hard-deletes an active task. It identity-checks the recorded agent with `.lock` start-time metadata (including `claude_pid_start_time`), kills that process plus descendant tool processes present in a successful process-tree snapshot, closes the draft PR best-effort, removes the task's worktree and branch, deletes the task folder from every active stage, removes per-slug logs, and records an audit commit on `hive/state`. There is no dropped bucket, archive, undo, reason prompt, or confirmation.
+**TLDR**: `hive drop TARGET [--project NAME] [--from STAGE] [--json]`
+hard-deletes an active task. It identity-checks the agent recorded in the typed
+task lease, kills that process plus identity-stable descendants, fences the
+remaining destructive work with the project commit lock and deterministic
+task leases, closes the draft PR best-effort, removes worktree/branch/folders/
+logs, and records an audit commit on `hive/state`. There is no dropped bucket,
+archive, undo, reason prompt, or confirmation.
 
 ## Usage
 
@@ -40,6 +46,7 @@ Tasks at `9-done` are archive records — drop refuses them and leaves the folde
 | Worktree operation failed (e.g. `worktree remove`) | 70 | `worktree` |
 | Internal failure | 70 | `internal` |
 | `hive/state` commit lock contention | 75 | `error` |
+| Replacement task runner wins the cleanup race | 75 | `error` |
 | Malformed project / global config | 78 | `config` |
 
 `--from` only raises `wrong_stage` when the slug resolves unambiguously to a single project. For a cross-project slug collision with a mismatched `--from`, the user gets `ambiguous_slug` (or `invalid_task_path` when no project matches) — `--from` is asserted only after the project is pinned.
@@ -52,15 +59,26 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
 
 `Hive::Commands::Drop#call` runs the cleanup in a fixed, idempotent order:
 
-1. Resolve the task target (`TaskResolver` for paths/ids, Drop's project/stage scan for slugs).
-2. Refuse archived-only tasks in `9-done`.
-3. Kill recorded agent PIDs from `.lock` and `AGENT_WORKING pid=...`, guarded by process start time when available. In particular, `.lock`'s `claude_pid_start_time` verifies the recorded `claude_pid` identity before cleanup. Before signalling that root PID, snapshot its descendants, take a second full snapshot, and retain only PIDs whose parent, process group, and start-time identity match across both reads. This prevents PID reuse between process-table and identity reads from combining an old process's ancestry with a replacement process's identity. If either process-tree discovery fails, cleanup falls back to the recorded root PID only and reports `process_tree_unavailable` instead of claiming a complete tree cleanup.
-4. Close `pr_url` from `pr.md` frontmatter with `gh pr close <url> --comment "task dropped"` best-effort.
-5. Remove the task worktree from `worktree.yml` or the derived path, retrying with force when needed, then prune stale git worktree metadata.
-6. Delete the task branch (`branch name == slug`) best-effort.
-7. Remove the task folder from each active stage it was found in (`from_stages`), not a fixed `1-inbox`–`8-finalize` coding range — generic workflows have their own active stages.
-8. Remove `.hive-state/logs/<slug>/`.
-9. Commit an audit record on `hive/state` as `hive: dropped/<slug> dropped`.
+1. Resolve the target and refuse archived-only tasks.
+2. Enter the project `.commit-lock`, then read the current typed lease and
+   marker identities.
+3. Kill recorded agent roots from the lease and `AGENT_WORKING pid=...`,
+   guarded by process start time. Descendants are retained only when parent,
+   group, and start identity match across two process snapshots. Failed tree
+   discovery falls back to the verified root and reports
+   `process_tree_unavailable`.
+4. Acquire every observed task lease in deterministic folder order. A runner
+   that starts after process cleanup but before this claim wins the lease and
+   aborts Drop before deletion.
+5. Re-resolve and revalidate folder/stage context while the commit lock and
+   task leases are held.
+6. Close `pr_url` best-effort; remove owned worktree and branch; delete every
+   active-stage folder and `.hive-state/logs/<slug>/`; then commit
+   `hive: dropped/<slug> dropped`.
+
+The logical leases remain held across this external work, but no SQLite
+transaction remains open while GitHub, process, filesystem, or Git operations
+run.
 
 Re-running after an interrupted cleanup converges: already-missing processes, folders, worktrees, PRs, and branches are treated as complete.
 

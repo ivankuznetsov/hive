@@ -2,7 +2,7 @@ require "base64"
 require "json"
 require "fileutils"
 require "time"
-require "hive/attempts/output_reference"
+require "hive/output_reference"
 
 module Hive
   module Attempts

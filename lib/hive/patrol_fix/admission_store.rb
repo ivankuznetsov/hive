@@ -6,6 +6,7 @@ require "hive/managed_directory"
 require "hive/patrol_fix"
 require "hive/patrol_fix/source_snapshot"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module PatrolFix
@@ -1127,7 +1128,7 @@ module Hive
 
       def reject_secret!(value)
         conflict!("admission decision contains secret-like material") if
-          Hive::SecretPatterns.match?(PatrolFix.canonical_json(value))
+          Hive::SecretScanner.match?(PatrolFix.canonical_json(value))
       end
 
       def conflict!(message)

@@ -27,6 +27,24 @@ class CompletionTimeTest < Minitest::Test
     assert_includes err, "invalid completed_at for /task/meta.yml"
   end
 
+  def test_parse_routes_warning_through_active_warning_sink
+    warnings = []
+    value = :not_set
+
+    _out, err = capture_io do
+      Hive::Warnings.with_sink(warnings) do
+        value = Hive::CompletionTime.parse(
+          "2026-99-99T00:00:00Z", warn_context: "/task/meta.yml"
+        )
+      end
+    end
+
+    assert_nil value
+    assert_equal 1, warnings.length
+    assert_includes warnings.first, "invalid completed_at for /task/meta.yml"
+    assert_empty err
+  end
+
   def test_discover_falls_back_from_state_file_mtime_to_folder_mtime
     with_tmp_dir do |folder|
       state_file = File.join(folder, "done.md")

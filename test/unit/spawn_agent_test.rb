@@ -48,6 +48,7 @@ class SpawnAgentTest < Minitest::Test
   def make_task(dir, stage = "2-brainstorm", slug = "spawn-test-260425-aaaa")
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
+    prepare_test_task_run(folder)
     Hive::Task.new(folder)
   end
 
@@ -489,6 +490,46 @@ class SpawnAgentTest < Minitest::Test
       assert_equal "managed_output_invalid", result[:error_reason]
       assert_includes result[:error_message], "invalid structured output"
       refute File.exist?(output)
+    end
+  end
+
+  def test_caller_can_retain_runtime_policy_across_bounded_spawns
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      runtime_home = File.join(dir, "runtime-home")
+      FileUtils.mkdir_p(runtime_home)
+      policy = Hive::WorkflowPackage::RuntimePolicy::Policy.new(
+        permission_mode: nil,
+        allowed_tools: [].freeze, disallowed_tools: [].freeze,
+        directories: [].freeze, commands: [].freeze, domains: [].freeze,
+        executables: {}.freeze, environment: {}.freeze,
+        settings_path: nil, mcp_config_path: nil, policy_path: nil,
+        cli_flags: [].freeze, permission_flags: [].freeze,
+        agent_add_dirs: [].freeze, command_prefix: [].freeze,
+        executable: FAKE_BIN, task_root: task.folder,
+        output_paths: {}.freeze, cleanup_paths: [ runtime_home ].freeze
+      ).freeze
+      fake_agent = Object.new
+      fake_agent.define_singleton_method(:run!) do
+        { status: :ok, final_message: "{}", final_message_truncated: false }
+      end
+
+      with_replaced_singleton_method(Hive::Agent, :new, ->(**) { fake_agent }) do
+        result = Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "repair",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          runtime_policy: policy,
+          cleanup_runtime_policy: false
+        )
+        assert_equal :ok, result.fetch(:status)
+      end
+
+      assert Dir.exist?(runtime_home),
+             "caller-owned policy must survive until the enclosing attempt closes"
+      policy.cleanup!
+      refute Dir.exist?(runtime_home)
     end
   end
 
@@ -1218,8 +1259,7 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--max-budget-usd", "1",
         "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence",
-        "PROMPT"
+        "--verbose", "--no-session-persistence"
       ]
       assert_equal expected_headless, agent.send(:build_cmd),
                    "yolo headless argv must carry no tool-scope flags"
@@ -1290,8 +1330,7 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--max-budget-usd", "1",
         "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence",
-        "PROMPT"
+        "--verbose", "--no-session-persistence"
       ]
       assert_equal expected_headless, agent.send(:build_cmd),
                    "yolo headless execute argv must carry no tool-scope flags"
@@ -1358,8 +1397,7 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--max-budget-usd", "1",
         "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence",
-        "PROMPT"
+        "--verbose", "--no-session-persistence"
       ]
       assert_equal expected_headless, agent.send(:build_cmd),
                    "yolo headless brainstorm argv must carry no tool-scope flags"

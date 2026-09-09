@@ -1,4 +1,4 @@
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/attempts/supervisor"
 
 module Hive
@@ -7,7 +7,7 @@ module Hive
     # not a Thor workflow verb or advertised in help.
     class AttemptSupervise
       VALUE_OPTIONS = %w[
-        --store-root --heartbeat-sec --stale-sec --first-heartbeat-timeout-sec
+        --store-root --database-path --heartbeat-sec --stale-sec --first-heartbeat-timeout-sec
         --timeout-sec --kill-grace-sec
       ].freeze
 
@@ -30,6 +30,7 @@ module Hive
         new(
           attempt_id: attempt_id,
           store_root: options.fetch("--store-root"),
+          database_path: options.fetch("--database-path"),
           heartbeat_sec: Float(options.fetch("--heartbeat-sec", 5)),
           stale_sec: Float(options.fetch("--stale-sec", 30)),
           first_heartbeat_timeout_sec: Float(options.fetch("--first-heartbeat-timeout-sec", 30)),
@@ -40,11 +41,12 @@ module Hive
         raise Hive::InvalidTaskPath, "invalid attempt supervisor invocation: #{e.message}"
       end
 
-      def initialize(attempt_id:, store_root:, heartbeat_sec:,
+      def initialize(attempt_id:, store_root:, database_path:, heartbeat_sec:,
                      stale_sec:, first_heartbeat_timeout_sec:, timeout_sec:,
                      kill_grace_sec:)
         @attempt_id = attempt_id
         @store_root = store_root
+        @database_path = database_path
         @heartbeat_sec = heartbeat_sec
         @stale_sec = stale_sec
         @first_heartbeat_timeout_sec = first_heartbeat_timeout_sec
@@ -55,7 +57,10 @@ module Hive
       def call
         ready_io = ready_io_from_env
         Hive::Attempts::Supervisor.new(
-          store: Hive::Attempts::Store.new(root: @store_root),
+          store: Hive::Attempts::Repository.new(
+            root: @store_root,
+            database: Hive::RuntimeControlPlane::Database.new(path: @database_path)
+          ),
           attempt_id: @attempt_id,
           claim_io: claim_io_from_env,
           ready_io: ready_io,

@@ -41,6 +41,10 @@ class DropCommandIntegrationTest < Minitest::Test
   def create_task(dir, stage, slug)
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(
+      folder, id: Digest::SHA256.hexdigest(slug)[0, 12].to_i(16),
+      slug: slug, display_name: nil
+    )
     state_name = Hive::Task::STATE_FILES.fetch(stage.split("-", 2).last)
     File.write(File.join(folder, state_name), "# #{slug}\n<!-- WAITING -->\n")
     folder
@@ -128,40 +132,32 @@ class DropCommandIntegrationTest < Minitest::Test
     end
   end
 
-  # Leading-zero numeric inputs are parsed with Ruby's Integer(), which reads a
-  # leading zero as octal. `010` therefore parses to decimal 8 (octal 010), so
-  # it does NOT resolve to the decimal id 10. Lock the current behavior: the
-  # id-10 task is preserved and drop refuses with invalid_task_path. (If the
-  # parse is ever switched to base-10, this test will flag the contract change.)
-  def test_bin_hive_drop_leading_zero_id_010_does_not_resolve_to_decimal_id_10
+  # Leading-zero numeric inputs are decimal task IDs. `010` must select task 10,
+  # rather than Ruby's legacy octal interpretation (decimal 8).
+  def test_bin_hive_drop_leading_zero_id_010_resolves_to_decimal_id_10
     with_cli_project do |home, dir, project|
       slug = "leading-zero-010-260622-aaaa"
       folder = create_task_with_id(dir, "2-brainstorm", slug, 10)
 
       out, _err, status = run_hive(home, "drop", "010", "--project", project, "--json")
 
-      refute status.success?, "drop 010 must not succeed against a decimal id-10 task"
-      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
-      assert_equal "invalid_task_path", JSON.parse(out)["error_kind"]
-      assert File.directory?(folder), "id-10 task folder must survive `drop 010`"
+      assert status.success?, out
+      assert_equal slug, JSON.parse(out)["slug"]
+      refute File.directory?(folder), "id-10 task folder must be dropped by `drop 010`"
     end
   end
 
-  # `08` is not a valid octal literal, so Integer("08") raises before any
-  # lookup. Lock the current behavior: drop fails with an internal-error
-  # envelope (exit 70) and drops nothing, rather than treating `08` as
-  # decimal id 8.
-  def test_bin_hive_drop_leading_zero_id_08_errors_and_preserves_task
+  # `08` is likewise a decimal task ID, rather than an invalid octal literal.
+  def test_bin_hive_drop_leading_zero_id_08_resolves_to_decimal_id_8
     with_cli_project do |home, dir, project|
       slug = "leading-zero-08-260622-aaaa"
       folder = create_task_with_id(dir, "2-brainstorm", slug, 8)
 
       out, _err, status = run_hive(home, "drop", "08", "--project", project, "--json")
 
-      refute status.success?, "drop 08 must not succeed against a decimal id-8 task"
-      assert_equal Hive::ExitCodes::SOFTWARE, status.exitstatus
-      assert_equal "internal", JSON.parse(out)["error_kind"]
-      assert File.directory?(folder), "id-8 task folder must survive `drop 08`"
+      assert status.success?, out
+      assert_equal slug, JSON.parse(out)["slug"]
+      refute File.directory?(folder), "id-8 task folder must be dropped by `drop 08`"
     end
   end
 

@@ -208,6 +208,8 @@ class PatrolFixFixStageTest < Minitest::Test
 end
 
 module PatrolFixStageFixture
+  extend HiveTestHelper
+
   module_function
   def with_task(stage:)
     Dir.mktmpdir do |dir|
@@ -218,7 +220,10 @@ module PatrolFixStageFixture
       head = git(repo, "rev-parse", "HEAD").strip
       folder = File.join(repo, ".hive-state", "stages", stage, "repair-one")
       FileUtils.mkdir_p(folder)
-      File.write(File.join(folder, "meta.yml"), { "slug" => "repair-one", "workflow" => "patrol-fix" }.to_yaml)
+      File.write(File.join(folder, "meta.yml"), {
+        "id" => 42, "slug" => "repair-one", "workflow" => "patrol-fix"
+      }.to_yaml)
+      prepare_test_task_lease_repository(folder, state_home: File.join(dir, "runtime"))
       manifest = { "schema" => "hive-patrol-fix-task-manifest", "schema_version" => 1,
         "task" => { "slug" => "repair-one", "generation" => 1 }, "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 }, "target_revision" => head,
         "sources" => [ { "engine" => "ordinary_patrol", "identity" => "finding-1", "target_revision" => head,
@@ -226,6 +231,8 @@ module PatrolFixStageFixture
           "discovery_run" => "run-1", "semantic_lineage" => [ "root-1" ] } ], "aliases" => [], "relations" => { "successor" => nil, "issues" => [] } }
       Hive::PatrolFix::TaskManifest.new(task_folder: folder).write!(manifest)
       yield Hive::Task.new(folder), dir, manifest
+    ensure
+      cleanup_test_task_leases
     end
   end
   def add_origin(repo, root)

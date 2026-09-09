@@ -21,7 +21,7 @@ class PatrolFixSourceSnapshotTest < Minitest::Test
       build_snapshot(affected_code: Array.new(257) { |index| "lib/file#{index}.rb" })
     end
 
-    secret = "github_pat_#{'a' * 30}"
+    secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     error = assert_raises(Hive::PatrolFix::SourceSnapshot::InvalidSnapshot) do
       build_snapshot(evidence: [ "observed #{secret}" ])
     end

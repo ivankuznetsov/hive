@@ -34,6 +34,7 @@ COPY --chown=hive:hive . /app
 # Prewarm the exact native agent-browser + Chrome payload in an image path
 # that is not hidden by Hivebox's runtime /data volume.
 RUN bundle install --without development test \
+    && ruby packaging/betterleaks.rb \
     && gem build hive.gemspec \
     && gem install hive-cli-*.gem \
     && mkdir -p "$HIVE_CAPTURE_TOOLS_CACHE" \

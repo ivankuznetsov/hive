@@ -101,7 +101,11 @@ class WorkflowCreatorProcessSupervisorTest < Minitest::Test
         chunk = "x" * 8_192
         loop { STDOUT.write(chunk); STDOUT.flush }
       RUBY
-      supervisor = build_supervisor(timeout: 0.1, term_grace: 0.03, kill_grace: 0.2,
+      # Ruby startup can exceed 100 ms on a loaded test runner. The behavior
+      # under proof is that continuous output cannot starve the deadline, not
+      # interpreter startup latency; keep the outer two-second assertion as
+      # the bounded liveness contract.
+      supervisor = build_supervisor(timeout: 0.5, term_grace: 0.03, kill_grace: 0.2,
                                     output_limit: 4_096)
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       receipt = supervisor.run_command(

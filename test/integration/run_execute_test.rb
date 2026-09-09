@@ -104,6 +104,7 @@ class RunExecuteTest < Minitest::Test
     slug = "feat-x-260424-aaaa"
     folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
     FileUtils.mkdir_p(folder)
+    ensure_test_task_identity(folder)
     File.write(File.join(folder, "plan.md"), <<~PLAN)
       #{plan_header}
       # plan
@@ -466,6 +467,7 @@ class RunExecuteTest < Minitest::Test
         slug = "no-plan-260424-aaaa"
         folder = File.join(dir, ".hive-state", "stages", "4-execute", slug)
         FileUtils.mkdir_p(folder)
+        ensure_test_task_identity(folder)
         _, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
         assert_equal 1, status
         assert_includes err, "plan.md missing"

@@ -44,7 +44,7 @@ class AttemptsEvidenceChannelTest < Minitest::Test
     mismatch["scope"]["model"] = "other"
     reader, writer_io = IO.pipe
     writer = Hive::Attempts::EvidenceChannel::Writer.new(io: writer_io, route: ROUTE)
-    assert_raises(Hive::Attempts::StoreError) { writer.write(mismatch) }
+    assert_raises(Hive::Attempts::RepositoryError) { writer.write(mismatch) }
   ensure
     reader&.close unless reader&.closed?
     writer_io&.close unless writer_io&.closed?
@@ -76,7 +76,7 @@ class AttemptsEvidenceChannelTest < Minitest::Test
     assert_equal SIGNAL, Hive::Attempts::EvidenceChannel.read(reader, route: ROUTE)
     assert_nil writer.close
 
-    assert_raises(Hive::Attempts::StoreError) do
+    assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::EvidenceChannel::Writer.for_fd("invalid", route: ROUTE)
     end
 
@@ -108,11 +108,11 @@ class AttemptsEvidenceChannelTest < Minitest::Test
       SIGNAL.merge("scope" => { "kind" => "model" })
     ]
     invalid.each do |signal|
-      assert_raises(Hive::Attempts::StoreError) do
+      assert_raises(Hive::Attempts::RepositoryError) do
         Hive::Attempts::EvidenceChannel.validate_signal(signal, route: ROUTE)
       end
     end
-    assert_raises(Hive::Attempts::StoreError) do
+    assert_raises(Hive::Attempts::RepositoryError) do
       Hive::Attempts::EvidenceChannel.validate_signal(
         SIGNAL, route: ROUTE.reject { |key, _| key == "model" }
       )
@@ -130,5 +130,30 @@ class AttemptsEvidenceChannelTest < Minitest::Test
       SIGNAL, record: record, source_reference: reference
     )
     assert_equal "model_capacity", evidence.fetch("failure_class")
+  end
+
+  def test_scope_route_and_materialization_identity_errors_are_typed
+    invalid_scope = SIGNAL.merge(
+      "scope" => {
+        "kind" => "future", "provider_account_id" => "account-a", "model" => "model-a"
+      }
+    )
+    assert_raises(Hive::Attempts::RepositoryError) do
+      Hive::Attempts::EvidenceChannel.validate_signal(invalid_scope, route: ROUTE)
+    end
+    assert_raises(Hive::Attempts::RepositoryError) do
+      Hive::Attempts::EvidenceChannel.validate_signal(
+        SIGNAL, route: ROUTE.merge("route_id" => "")
+      )
+    end
+
+    record = Object.new
+    record.define_singleton_method(:[]) { |_key| {} }
+    assert_raises(Hive::Attempts::RepositoryError) do
+      Hive::Attempts::EvidenceChannel.materialize(
+        SIGNAL, record: record,
+        source_reference: { "path" => "log", "size" => 1, "sha256" => "a" * 64 }
+      )
+    end
   end
 end

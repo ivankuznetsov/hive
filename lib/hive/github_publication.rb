@@ -8,7 +8,7 @@ require "hive/agent_git_gate"
 require "hive/gh"
 require "hive/git_ref"
 require "hive/managed_directory"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   # Lower-level, deterministic branch and pull-request publication. Product
@@ -22,7 +22,6 @@ module Hive
     MAX_RECORDS = 5_000
     MAX_TITLE_BYTES = 512
     MAX_BODY_BYTES = 32 * 1024
-    MAX_DIFF_BYTES = 4 * 1024 * 1024
     MAX_INVENTORY_BYTES = 16 * 1024 * 1024
     OID = /\A[0-9a-f]{40}\z/
     DIGEST = /\A[0-9a-f]{64}\z/
@@ -41,11 +40,11 @@ module Hive
     Request = Data.define(
       :worktree_path, :host, :repository, :base_branch,
       :creation_base_oid, :branch, :head_oid, :diff_digest,
-      :title, :body, :diff, :draft
+      :title, :body, :draft, :scan_base_oid
     ) do
       def initialize(worktree_path:, host:, repository:, base_branch:,
                      creation_base_oid:, branch:, head_oid:, diff_digest:,
-                     title:, body:, diff: "", draft: true)
+                     title:, body:, diff: nil, draft: true, scan_base_oid: creation_base_oid)
         worktree = File.expand_path(bounded_string(worktree_path, "worktree path", 4_096))
         normalized_host = Hive::Gh::RepositoryIdentity.validated_github_host(host)
         normalized_repository = Hive::Gh::RepositoryIdentity.validated_repository_slug(repository)
@@ -58,8 +57,7 @@ module Hive
         normalized_diff_digest = digest(diff_digest, "diff digest")
         normalized_title = bounded_utf8(title, "title", MAX_TITLE_BYTES, control_free: true)
         normalized_body = bounded_utf8(body, "body", MAX_BODY_BYTES)
-        normalized_diff = bounded_utf8(diff, "diff", MAX_DIFF_BYTES, allow_empty: true)
-        unless Digest::SHA256.hexdigest(normalized_diff) == normalized_diff_digest
+        if diff && Digest::SHA256.hexdigest(diff) != normalized_diff_digest
           raise ArgumentError, "diff digest does not match publication bytes"
         end
         unless draft == true || draft == false
@@ -71,7 +69,8 @@ module Hive
           creation_base_oid: base_oid.freeze, branch: normalized_branch.freeze,
           head_oid: normalized_head.freeze, diff_digest: normalized_diff_digest.freeze,
           title: normalized_title.freeze, body: normalized_body.freeze,
-          diff: normalized_diff.freeze, draft: draft
+          draft: draft,
+          scan_base_oid: oid(scan_base_oid, "scan base OID").freeze
         )
       end
 
@@ -154,6 +153,18 @@ module Hive
           "oid" => observation.oid,
           "remote_fingerprint" => observation.remote_fingerprint
         }.freeze
+      end
+
+      def ancestor?(worktree_path:, ancestor_oid:, head_oid:)
+        result = Hive::AgentGitGate.read(
+          worktree_path, :ancestor,
+          base_oid: ancestor_oid, head_oid: head_oid
+        )
+        return true if result.success?
+        return false if result.exitstatus == 1 && !result.overflow
+
+        raise Hive::AgentGitGate::PublicationFailed,
+              "publication ancestry could not be verified"
       end
 
       def push_exact(worktree_path:, branch:, head_oid:, expected_remote_oid:)
@@ -302,7 +313,40 @@ module Hive
         @clock = clock
       end
 
-      def publish!(request, revalidate:)
+      def creation_base_oid
+        read_state&.fetch("creation_base_oid")
+      end
+
+      # Git and the local record cannot commit together. Persist the exact
+      # permitted rewrite before pushing; ordinary publication replays it after
+      # a lost response, but never adopts an unrecorded external rewrite.
+      def publish_rebase!(worktree_path:, branch:, before_oid:, after_oid:)
+        @directory.with_lock(".#{@state_name}.lock") do
+          state = read_state
+          return yield unless state && state["pr"]
+
+          if state.dig("pending_rewrite", "after_oid") == before_oid
+            state = record_published_head(state, before_oid)
+          end
+
+          unless state["branch"] == branch && after_oid.to_s.match?(OID) &&
+                 @git.ancestor?(worktree_path: worktree_path,
+                                ancestor_oid: state.fetch("published_head_oid", state.fetch("head_oid")),
+                                head_oid: before_oid).equal?(true)
+            blocked!("revision_history_rewritten", "rebase does not contain the recorded publication")
+          end
+          if state["pending_rewrite"] && state["pending_rewrite"] != { "before_oid" => before_oid, "after_oid" => after_oid }
+            blocked!("revision_history_rewritten", "another publication rewrite requires reconciliation")
+          end
+          state = write_state(state.merge("pending_rewrite" => { "before_oid" => before_oid, "after_oid" => after_oid }))
+          result = yield
+          remote = @git.observe(worktree_path: worktree_path, branch: branch)
+          record_published_head(state, after_oid) if remote.fetch("oid") == after_oid
+          result
+        end
+      end
+
+      def publish!(request, revalidate:, existing_pr_url: nil)
         unless request.is_a?(Request) && revalidate.respond_to?(:call)
           raise ArgumentError, "publication requires a strict request and revalidator"
         end
@@ -310,6 +354,12 @@ module Hive
           ensure_secret_free!(request)
           authenticate(request)
           state = read_state || initialize_state(request, revalidate)
+          if state.fetch("phase") == "prepared" && !existing_pr_url.to_s.empty?
+            state = adopt_recorded_pr(request, existing_pr_url, revalidate)
+          end
+          return reconcile_revision(request, state, revalidate) if
+            observed_publication_revision?(state, request)
+
           validate_request!(state, request)
           reconcile(request, state, revalidate)
         end
@@ -317,7 +367,62 @@ module Hive
         raise Blocked.new("unsafe_state", "publication state is unavailable or unsafe")
       end
 
+      # Explicit operator recovery after inspecting an external rewrite. The
+      # supplied HEAD is a concurrency guard, not a permanent PR identity.
+      def reconcile_inspected!(request, pr_url:, inspected_head:, revalidate:)
+        @directory.with_lock(".#{@state_name}.lock") do
+          unless request.head_oid == inspected_head && observe(request).fetch("oid") == inspected_head
+            blocked!("stale_authority", "inspected publication HEAD is no longer current")
+          end
+          ensure_secret_free!(request)
+          authenticate(request)
+          record = recorded_pr(request, pr_url)
+          blocked!("stale_authority", "inspected PR HEAD changed") unless record.fetch("head_oid") == inspected_head
+          state = read_state
+          if state && state["pr"]
+            unless observed_publication_revision?(state, request) && revision_owned?(record, state, request)
+              blocked!("revision_identity_conflict", "inspected PR does not match the task publication")
+            end
+          else
+            state = initialize_state(request, revalidate)
+            state = observe_pr(state, request, record)
+          end
+          revalidate!(revalidate, :final)
+          revision_observation(state, request, record, head_oid: inspected_head)
+        end
+      end
+
       private
+
+      # Import the task's previously recorded PR, never an arbitrary same-name
+      # branch. URL, repository and branch must all agree with live inventory.
+      def adopt_recorded_pr(request, url, revalidate)
+        record = recorded_pr(request, url)
+        remote_oid = observe(request).fetch("oid")
+        unless remote_oid == record.fetch("head_oid") && revision_ancestor?(request, remote_oid, request.head_oid)
+          blocked!("revision_history_rewritten", "recorded task PR history requires inspection before adoption")
+        end
+        imported = Request.new(**request.to_h.merge(
+          head_oid: remote_oid,
+          diff_digest: Hive::AgentGitGate.diff_digest(
+            request.worktree_path, base_oid: request.scan_base_oid, head_oid: remote_oid
+          )
+        ))
+        revalidate!(revalidate, :adopt)
+        observe_pr(initialize_state(imported, revalidate), imported, record)
+      end
+
+      def recorded_pr(request, url)
+        candidates = complete_inventory(request).select { |row| row.fetch("head_branch") == request.branch }
+        record = candidates.first
+        unless candidates.one? && record.fetch("url") == url &&
+               record.fetch("head_repository")&.casecmp?(request.repository) &&
+               record.fetch("base_repository").casecmp?(request.repository) &&
+               record.fetch("base_branch") == request.base_branch
+          blocked!("pr_identity_conflict", "recorded task PR does not match repository and branch inventory")
+        end
+        record
+      end
 
       def authenticate(request)
         @github.authenticate!(host: request.host, repository: request.repository)
@@ -350,10 +455,6 @@ module Hive
             revalidate!(revalidate, :final)
             return state.fetch("pr")
           end
-          if state.fetch("phase") == "pr_observed"
-            blocked!("pr_observation_missing", "the observed pull request is absent from the complete inventory")
-          end
-
           case state.fetch("phase")
           when "prepared", "push_intent"
             state = reconcile_push(request, state, revalidate)
@@ -363,6 +464,146 @@ module Hive
             blocked!("invalid_phase", "publication state phase is invalid")
           end
         end
+      end
+
+      # PR identity is stable across edits to its title, body and commits.
+      # Branch ancestry is checked separately before publishing new content.
+      def reconcile_revision(request, state, revalidate)
+        record = revision_pull_request(request, state)
+        hosted_state = hosted_state(record)
+        if %w[closed merged].include?(hosted_state)
+          unless record.fetch("head_oid") == request.head_oid
+            blocked!(
+              "revision_hosted_terminal",
+              "pull request became terminal before the publication revision was hosted"
+            )
+          end
+          revalidate!(revalidate, :final)
+          return revision_observation(state, request, record, head_oid: request.head_oid)
+        end
+
+        remote = observe(request)
+        remote_oid = remote.fetch("oid")
+        unless remote_oid == record.fetch("head_oid")
+          blocked!(
+            "revision_remote_conflict",
+            "controller-owned pull-request head does not match the remote branch"
+          )
+        end
+        pending = state["pending_rewrite"]
+        if pending && remote_oid == pending.fetch("after_oid")
+          state = record_published_head(state, remote_oid)
+        end
+        unless revision_ancestor?(request, state.fetch("published_head_oid", state.fetch("head_oid")), remote_oid)
+          blocked!(
+            "revision_history_rewritten",
+            "hosted pull-request head no longer contains the owned publication"
+          )
+        end
+        authorized_rewrite = pending && pending["before_oid"] == remote_oid && pending["after_oid"] == request.head_oid
+        unless authorized_rewrite || revision_ancestor?(request, remote_oid, request.head_oid)
+          blocked!(
+            "revision_non_fast_forward",
+            "local publication revision does not contain the hosted pull-request head"
+          )
+        end
+
+        if remote_oid != request.head_oid
+          revalidate!(revalidate, :before_push)
+          begin
+            receipt = @git.push_exact(
+              worktree_path: request.worktree_path, branch: request.branch,
+              head_oid: request.head_oid, expected_remote_oid: remote_oid
+            )
+            validate_push_receipt!(
+              receipt, remote_oid, request, code: "revision_push_outcome_unknown"
+            )
+          rescue Blocked
+            raise
+          rescue StandardError
+            after_failure = observe(request)
+            unless after_failure.fetch("oid") == request.head_oid
+              blocked!(
+                "revision_push_outcome_unknown",
+                "publication revision push outcome requires reconciliation"
+              )
+            end
+          end
+          after = observe(request)
+          unless after.fetch("oid") == request.head_oid
+            blocked!(
+              "revision_push_not_observed",
+              "publication revision was not observed at the reviewed head"
+            )
+          end
+        end
+
+        revalidate!(revalidate, :final)
+        revision_observation(state, request, record, head_oid: request.head_oid)
+      end
+
+      def observed_publication_revision?(state, request)
+        return false unless state.fetch("phase") == "pr_observed" && state.fetch("pr")
+
+        expected = identity(request)
+        %w[host repository base_branch creation_base_oid branch draft].all? do |key|
+          state[key] == expected[key]
+        end
+      end
+
+      def revision_pull_request(request, state)
+        records = complete_inventory(request)
+        candidates = records.select { |record| record.fetch("head_branch") == request.branch }
+        exact = candidates.select { |record| revision_owned?(record, state, request) }
+        return exact.first if candidates.one? && exact.one?
+
+        blocked!(
+          "revision_identity_conflict",
+          "controller-owned pull-request revision identity requires operator reconciliation"
+        )
+      end
+
+      def revision_owned?(record, state, request)
+        prior = state.fetch("pr")
+        record.fetch("number") == prior.fetch("number") &&
+          record.fetch("url") == prior.fetch("url") &&
+          record.fetch("head_branch") == request.branch &&
+          record.fetch("head_repository")&.casecmp?(request.repository) &&
+          record.fetch("base_branch") == request.base_branch &&
+          record.fetch("base_repository").casecmp?(request.repository)
+      end
+
+      def revision_ancestor?(request, ancestor_oid, head_oid)
+        @git.ancestor?(
+          worktree_path: request.worktree_path,
+          ancestor_oid: ancestor_oid, head_oid: head_oid
+        ).equal?(true)
+      rescue StandardError
+        blocked!(
+          "revision_ancestry_unavailable",
+          "publication revision ancestry could not be verified"
+        )
+      end
+
+      def revision_observation(state, request, record, head_oid:)
+        record_published_head(state, head_oid)
+        state.fetch("pr").merge(
+          "head_oid" => head_oid,
+          "hosted_state" => hosted_state(record),
+          "observed_at" => timestamp,
+          "diff_digest" => request.diff_digest
+        )
+      end
+
+      def record_published_head(state, head_oid)
+        return state if state["published_head_oid"] == head_oid && !state.key?("pending_rewrite")
+        write_state(state.except("pending_rewrite").merge("published_head_oid" => head_oid, "updated_at" => timestamp))
+      end
+
+      def hosted_state(record)
+        return record.fetch("state").downcase unless record.fetch("state") == "OPEN"
+
+        record.fetch("draft") ? "draft" : "open"
       end
 
       def reconcile_push(request, state, revalidate)
@@ -405,7 +646,7 @@ module Hive
             head_oid: request.head_oid,
             expected_remote_oid: state.fetch("expected_remote_oid")
           )
-          validate_push_receipt!(receipt, state, request)
+          validate_push_receipt!(receipt, state.fetch("expected_remote_oid"), request)
         rescue Blocked
           raise
         rescue StandardError
@@ -572,18 +813,13 @@ module Hive
       end
 
       def observe_pr(state, request, record)
-        hosted = if record.fetch("state") == "OPEN"
-          record.fetch("draft") ? "draft" : "open"
-        else
-          record.fetch("state").downcase
-        end
         pr = identity(request).slice(
           "publication_id", "host", "repository", "base_branch",
           "creation_base_oid", "branch", "head_oid", "diff_digest",
           "title_digest", "body_digest", "marker_digest"
         ).merge(
           "number" => record.fetch("number"), "url" => record.fetch("url"),
-          "hosted_state" => hosted, "observed_at" => timestamp
+          "hosted_state" => hosted_state(record), "observed_at" => timestamp
         )
         write_state(state.merge(
           "phase" => "pr_observed", "pr" => pr, "updated_at" => timestamp
@@ -607,11 +843,18 @@ module Hive
       end
 
       def ensure_secret_free!(request)
-        fields = { "title" => request.title, "body" => request.published_body, "diff" => request.diff }
-        detected = fields.keys.select { |key| Hive::SecretPatterns.match?(fields.fetch(key)) }
+        fields = { "title" => request.title, "body" => request.published_body }
+        detected = fields.keys.select { |key| Hive::SecretScanner.match?(fields.fetch(key)) }
+        if Hive::SecretScanner.git_match?(
+          request.worktree_path, base_oid: request.scan_base_oid, head_oid: request.head_oid
+        )
+          detected << "commits"
+        end
         return if detected.empty?
 
         blocked!("secret_detected", "publication secret policy blocked #{detected.join(', ')} bytes")
+      rescue Hive::SecretScanner::Unavailable => e
+        blocked!("secret_scan_unavailable", e.message)
       end
 
       def revalidate!(callable, phase)
@@ -662,7 +905,7 @@ module Hive
       end
 
       def validate_state(state)
-        unless state.is_a?(Hash) && state.keys.sort == STATE_FIELDS.sort &&
+        unless state.is_a?(Hash) && (state.keys - %w[published_head_oid pending_rewrite]).sort == STATE_FIELDS.sort &&
                state["schema"] == SCHEMA && state["schema_version"] == SCHEMA_VERSION &&
                PHASES.include?(state["phase"]) && state["publication_id"].to_s.match?(PUBLICATION_ID) &&
                state["creation_base_oid"].to_s.match?(OID) &&
@@ -675,6 +918,16 @@ module Hive
                state["expected_remote_oid"].nil? &&
                state["create_attempts"].is_a?(Integer) && state["create_attempts"] >= 0
           blocked!("state_corrupt", "publication state contract is invalid")
+        end
+        if state.key?("published_head_oid") && (!state["published_head_oid"].to_s.match?(OID) || !state["pr"])
+          blocked!("state_corrupt", "publication head is invalid")
+        end
+        if state.key?("pending_rewrite")
+          rewrite = state["pending_rewrite"]
+          unless rewrite.is_a?(Hash) && rewrite.keys.sort == %w[after_oid before_oid] &&
+                 rewrite.values.all? { |oid| oid.is_a?(String) && oid.match?(OID) } && state["pr"]
+            blocked!("state_corrupt", "publication rewrite is invalid")
+          end
         end
         %w[host repository base_branch branch].each do |key|
           blocked!("state_corrupt", "publication state contract is invalid") unless
@@ -738,14 +991,14 @@ module Hive
           value["remote_fingerprint"].to_s.match?(DIGEST)
       end
 
-      def validate_push_receipt!(value, state, request)
+      def validate_push_receipt!(value, expected_oid, request, code: "push_outcome_unknown")
         fields = %w[expected_oid before_oid after_oid remote_fingerprint]
         unless value.is_a?(Hash) && value.keys.sort == fields.sort &&
-               value["expected_oid"] == state.fetch("expected_remote_oid") &&
-               value["before_oid"] == state.fetch("expected_remote_oid") &&
+               value["expected_oid"] == expected_oid &&
+               value["before_oid"] == expected_oid &&
                value["after_oid"] == request.head_oid &&
                value["remote_fingerprint"].to_s.match?(DIGEST)
-          blocked!("push_outcome_unknown", "remote push outcome requires reconciliation")
+          blocked!(code, "remote push outcome requires reconciliation")
         end
       end
 

@@ -1037,6 +1037,43 @@ class CurrentMainCoverageGapTest < Minitest::Test
     assert_includes violations[1].reason, "denied path pattern"
   end
 
+  def test_auto_commit_scope_defaults_allow_framework_config_and_database_source
+    cfg = { "review" => {} }
+
+    violations = Hive::Stages::Review.send(
+      :auto_commit_scope_violations,
+      cfg,
+      [
+        "config/ci.rb",
+        "config/environments/production.rb",
+        "config/initializers/encryption.rb",
+        "config/routes.rb",
+        "db/migrate/20260822000500_add_recipient_to_messages.rb",
+        "db/schema.rb"
+      ]
+    )
+
+    assert_empty violations
+  end
+
+  def test_auto_commit_scope_defaults_still_block_rails_credentials
+    cfg = { "review" => {} }
+
+    violations = Hive::Stages::Review.send(
+      :auto_commit_scope_violations,
+      cfg,
+      [
+        "config/master.key",
+        "config/credentials/production.yml.enc",
+        "config/routes.rb"
+      ]
+    )
+
+    assert_equal [ "config/master.key", "config/credentials/production.yml.enc" ],
+                 violations.map(&:path)
+    assert violations.all? { |violation| violation.reason.include?("denied path pattern") }
+  end
+
   def test_staged_auto_commit_paths_include_both_sides_of_denied_rename
     with_tmp_dir do |root|
       worktree = File.join(root, "worktree")

@@ -26,7 +26,7 @@ module Hive
 
     CapturedProcess = Data.define(
       :pid, :pgid, :stdout, :stderr, :stdout_truncated, :stderr_truncated,
-      :termination
+      :termination, :output_completed
     )
 
     # Hive runs under its own bundle, while native agent launches inherit the
@@ -68,7 +68,8 @@ module Hive
                    permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
                    edit_patterns: [], bash_patterns: [],
-                   isolate_environment: false, terminate_on_parent_signal: true)
+                   completion_probe: nil, isolate_environment: false,
+                   terminate_on_parent_signal: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -87,6 +88,10 @@ module Hive
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
       @edit_patterns = Array(edit_patterns).map(&:to_s).freeze
       @bash_patterns = Array(bash_patterns).map(&:to_s).freeze
+      unless completion_probe.nil? || completion_probe.respond_to?(:call)
+        raise ArgumentError, "completion_probe must be callable"
+      end
+      @completion_probe = completion_probe
       @runtime_policy = runtime_policy
       if runtime_policy && permission_arguments
         raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
@@ -131,9 +136,16 @@ module Hive
           SCRUBBED_CHILD_ENV
         end
       end
+      support = Hive::AgentSupport.for(@profile)
+      controller_environment_scrub = if support&.respond_to?(:controller_environment_scrub)
+        support.controller_environment_scrub
+      else
+        {}
+      end
       @child_environment = @child_environment
         .merge(@launch_environment)
         .merge(@profile.subscription_environment)
+        .merge(controller_environment_scrub)
         .freeze
       @launch_arguments = normalize_launch_arguments(launch_arguments)
       supplied_identity_arguments =
@@ -278,12 +290,7 @@ module Hive
         pid
       end
 
-      child_start_time = Hive::Lock.process_start_time(pid)
-      Hive::Lock.update_task_lock(
-        @task.folder,
-        "claude_pid" => pid,
-        "claude_pid_start_time" => child_start_time
-      )
+      child_start_time = record_spawned_agent(pid)
 
       old_int = install_chained_signal_trap("INT") { kill_group(pgid) if @terminate_on_parent_signal }
       old_term = install_chained_signal_trap("TERM") { kill_group(pgid) if @terminate_on_parent_signal }
@@ -612,12 +619,25 @@ module Hive
       file.unlink
     end
 
+    def record_spawned_agent(pid)
+      return unless Hive::Lock.task_lock_held?(@task.folder)
+
+      child_start_time = Hive::Lock.process_start_time(pid)
+      Hive::Lock.update_task_lock(
+        @task.folder,
+        "claude_pid" => pid,
+        "claude_pid_start_time" => child_start_time
+      )
+      child_start_time
+    end
+
     # Provider transactions decide which commands to run; Hive retains child
     # process custody, bounded capture, cancellation, and timeout cleanup.
     def capture_process(argv:, environment:, stdout_limit:, stderr_limit:,
                         stdin_data: nil, timeout_sec: @timeout_sec,
                         record_spawn: false, forward_signals: false,
-                        drain_timeout: 2)
+                        drain_timeout: 2, completion_probe: nil,
+                        completion_grace_seconds: 5, after_exit: nil)
       pid = nil
       child_start_time = nil
       child_finished = false
@@ -640,14 +660,7 @@ module Hive
       rescue Errno::ESRCH
         pid
       end
-      if record_spawn
-        child_start_time = Hive::Lock.process_start_time(pid)
-        Hive::Lock.update_task_lock(
-          @task.folder,
-          "claude_pid" => pid,
-          "claude_pid_start_time" => child_start_time
-        )
-      end
+      child_start_time = record_spawned_agent(pid) if record_spawn
       cancellation = { cancelled: false }
       signals_installed = false
       if forward_signals
@@ -656,8 +669,11 @@ module Hive
         old_term = install_chained_signal_trap("TERM", &handler)
         signals_installed = true
       end
-      timed_out, status = wait_for_process(pid, pgid, timeout_sec)
+      timed_out, status, output_completed = wait_for_process(
+        pid, pgid, timeout_sec, completion_probe:, completion_grace_seconds:
+      )
       child_finished = !status.nil?
+      after_exit&.call
       finish_capture_thread(
         stdout_thread, stdout_reader, timeout: drain_timeout, capture: stdout
       )
@@ -671,7 +687,7 @@ module Hive
         termination: Hive::AgentRuntime::TerminationEvidence.new(
           exit_code: process_exit_code(status), timed_out:,
           cancelled: cancellation.fetch(:cancelled), signal: process_signal(status)
-        )
+        ), output_completed:
       )
     ensure
       trap("INT", old_int || "DEFAULT") if signals_installed
@@ -717,7 +733,7 @@ module Hive
             termination: Hive::AgentRuntime::TerminationEvidence.new(
               exit_code: process_exit_code(status), timed_out:, cancelled: false,
               signal: process_signal(status)
-            )
+            ), output_completed: false
           )
         end
       end
@@ -753,8 +769,10 @@ module Hive
       thread.kill if thread&.alive?
     end
 
-    def wait_for_process(pid, pgid, timeout_sec)
+    def wait_for_process(pid, pgid, timeout_sec, completion_probe: nil,
+                         completion_grace_seconds: 5)
       deadline = Time.now + timeout_sec
+      completion_deadline = nil
       loop do
         remaining = deadline - Time.now
         if remaining <= 0
@@ -765,15 +783,31 @@ module Hive
           rescue Errno::ECHILD
             nil
           end
-          return [ true, status ]
+          return [ true, status, false ]
         end
         captured = Process.wait2(pid, Process::WNOHANG)
-        return [ false, captured.last ] if captured
+        return [ false, captured.last, false ] if captured
+
+        if completion_probe&.call
+          completion_deadline ||= Time.now + completion_grace_seconds
+          if Time.now >= completion_deadline
+            kill_group(pgid)
+            sleep_grace_then_kill(pgid, pid)
+            status = begin
+              Process.wait2(pid).last
+            rescue Errno::ECHILD
+              nil
+            end
+            return [ false, status, true ]
+          end
+        else
+          completion_deadline = nil
+        end
 
         sleep [ remaining, 0.1 ].min
       end
     rescue Errno::ECHILD
-      [ false, nil ]
+      [ false, nil, false ]
     end
 
     def process_exit_code(status)
@@ -857,6 +891,18 @@ module Hive
     #   = :ok. Used by reviewer/triage spawns where a structured artifact
     #   is the success criterion.
     def handle_exit(result)
+      if result[:process_cleanup_completed] == false
+        if effective_status_mode == :state_file_marker
+          Hive::Markers.set(
+            @task.state_file, :error, reason: "process_cleanup_failed"
+          )
+        end
+        result[:status] = :error
+        result[:error_reason] = "process_cleanup_failed"
+        result[:error_message] = result[:process_cleanup_error]
+        return
+      end
+
       if result[:provider_signal]
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(

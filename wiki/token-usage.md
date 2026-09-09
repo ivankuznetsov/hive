@@ -3,7 +3,7 @@ title: Token Usage Stats
 type: observability
 source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/billing_evidence.rb, lib/hive/model_pricing.rb, lib/hive/task_workspace/resources.rb, lib/hive/task_workspace/usage.rb, config/model-pricing.v1.yml, lib/hive/patrol/launch_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-08-20
+updated: 2026-08-30
 tags: [observability, usage, pricing, billing, tui, sqlite, agent]
 ---
 
@@ -24,7 +24,7 @@ Usage is captured at the same boundary that runs stage agents:
 1. `Hive::Agent#spawn_and_wait` reads every stdout/stderr line from the child process, writes it to the stage log, parses JSON once, and passes decoded records through `Hive::AgentRuntime.extract_usage`, which delegates provider decoding to `agent-cli-runtime`.
 2. The last non-nil usage hash normally becomes `result[:usage]`; `result[:model]` is kept as a best-effort model field. When `max_tokens` is present, `Hive::Agent::StreamTokenMeter` also derives a monotonic live input-plus-output total; cached tokens remain in telemetry but do not advance the stop meter. Reaching the limit sends TERM, escalates to KILL after a three-second grace independently of the wall-clock timeout, returns `resource_exhaustion.reason: token_limit`, and records the meter's aggregate usage. Patrol Claude reviews stop after their expected output or four completed turns, with the fourth reserved for emergency finalization. Ordinary fixes also treat a completed `fix.json` as the agent-phase boundary; Hive still independently parses and validates its proof and edits. Because Claude can emit `Write` and the same turn's final usage delta in either order, Hive allows up to three seconds for the missing protocol event, captures it when present, and terminates before another model turn. A completed artifact remains subject to the caller's schema and evidence validation.
 3. `Hive::Stages::Base.spawn_agent` calls `Hive::UsageDb.record!` after `agent.run!` returns, even when the spawn exits non-zero, as long as a usage event was captured.
-4. Patrol is not a stage runner, so `Hive::Patrol::LaunchBudget` records scheduled ordinary review launches as `patrol-review-unmetered` and scheduled current-main Architecture launches as `refactor-patrol-review-unmetered` before the provider child starts, with `project_slug` set to the registered project name. Normal completion updates that same session row with final telemetry and removes the `-unmetered` suffix only when positive usage is present. Fix stages write completion telemetry without requesting discovery admission; merged-PR Architecture reviews use a non-discovery telemetry source. An abandoned scheduled reservation is an observed launch, not a claim that the provider consumed zero tokens.
+4. Patrol is not a stage runner, so `Hive::Patrol::LaunchBudget` records scheduled ordinary review launches as `patrol-review-unmetered` and scheduled current-main Architecture launches as `refactor-patrol-review-unmetered` before the provider child starts, with `project_slug` set to the registered project name. These standalone launches keep a durable `session_id` but no `attempt_id`: Hive never invents an Attempts row merely to satisfy telemetry attribution. Normal completion updates that same session row with final telemetry and removes the `-unmetered` suffix only when positive usage is present. Fix stages write completion telemetry without requesting discovery admission; merged-PR Architecture reviews use a non-discovery telemetry source. An abandoned scheduled reservation is an observed launch, not a claim that the provider consumed zero tokens.
 
 That placement deliberately excludes sessions launched outside Hive and avoids scraping `~/.claude/projects/*.jsonl` or any on-disk agent log after the fact. See [[modules/agent]], [[modules/agent_profile]], [[modules/patrol]], and [[stages/index]].
 
@@ -47,13 +47,18 @@ runtime observed zero; `nil` means it could not establish the value.
 
 ## Storage
 
-`Hive::UsageDb.path` defaults to:
+`Hive::UsageDb` uses the installation-wide runtime control plane at:
 
 ```ruby
-File.join(Hive::Paths.data_home, "usage.db")
+Hive::Paths.runtime_control_plane_path
 ```
 
-On a normal Linux desktop that resolves to `~/.local/share/hive/usage.db`. Tests and operators can override it with `Hive::UsageDb.path=` or `HIVE_USAGE_DB_PATH`.
+On a normal Linux desktop that resolves to
+`~/.local/state/hive/runtime-control-plane.sqlite3`. Normal reads and writes
+open the exact activated schema through the shared Sequel owner; they never
+create or migrate it. `Hive::UsageDb.database=` is the test seam for an
+explicitly migrated fixture. The retired `HIVE_USAGE_DB_PATH` variable and
+standalone `usage.db` are migration inputs only, not runtime configuration.
 
 Schema:
 
@@ -77,20 +82,24 @@ Schema:
 | `billing_route` / `billing_evidence_source` | Launch-bound `subscription`, `api`, or `unknown`, with `provider_account_config`, `agent_profile_contract`, or `unavailable` evidence. |
 | `input_includes_cache_read` / `input_includes_cache_write` / `output_includes_reasoning` | Nullable inclusion semantics used to prevent overlapping token charges. |
 
-Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug,
-started_at)`. Schema v4 evolves the existing database transactionally through
-`PRAGMA user_version`, retains every legacy row, and uses a busy timeout plus
-bounded retry for concurrent migration/writes. Legacy rows remain explicitly
-unattributed: Hive never joins them to an attempt from similar timestamps.
-Session writes are idempotent upserts, and an exact attributed read failure is
-`available: false`, not zero usage.
+Indexes cover `started_at`, `(project_slug, started_at)`, `(task_slug,
+started_at)`, and exact attempt/generation attribution. The fleet cutover owns
+legacy import and schema migration; `UsageDb` contains no raw SQLite schema or
+self-migration path. Legacy rows remain explicitly unattributed: Hive never
+joins them to an attempt from similar timestamps. Session writes are
+idempotent upserts in bounded immediate transactions. An exact attributed read
+failure is `available: false`, not zero usage, while an authoritative write
+failure raises a typed runtime-control-plane error and cannot be acknowledged
+as successful accounting.
 
 Conflicting non-unknown billing routes, attempt/generation ownership, or token
-inclusion flags cannot overwrite an existing exact session. Direct Claude,
-Codex, and Grok profiles can prove subscription semantics from their profile
-contract. Pi and OpenCode remain `unknown` unless an admitted provider-account
-configuration explicitly declares the route. Harness identity is never used as
-the billing provider.
+inclusion flags cannot overwrite an existing exact session. A profile that
+declares `subscription_backed` in its contract (Claude, Codex, Grok, and Pi)
+proves subscription semantics from that profile contract; OpenCode stays
+`unknown` unless an admitted provider-account configuration explicitly
+declares the route. `Hive::BillingEvidence.for_profile` reads only the declared
+profile contract and never re-derives admission from the adapter name. Harness
+identity is never used as the billing provider.
 
 ## Semantic task usage
 
@@ -174,7 +183,7 @@ The aggregate also returns `:patrol` buckets by summing rows whose `stage` start
 `Hive::UsageDb.patrol_activity` remains the current-UTC-day telemetry source for
 input/output/cached totals, aggregate Patrol launches, engine attribution, and
 unmetered counts. Admission instead uses the bounded owner-private Patrol
-allowance ledger next to UsageDb. Its independent ordinary and Architecture
+allowance rows in the same control plane. Their independent ordinary and Architecture
 lanes are keyed by stable project ID and UTC date and follow the selected mode's
 16/8/4/2 ceiling. An atomic pre-spawn reservation survives controller loss.
 Daily exhaustion resets at the next UTC date; provider retry holds are durable

@@ -109,7 +109,7 @@ module Hive
                                              holder: { pid: existing_pid }, lock_path: pid_file)
         end
 
-        Process.daemon(true, true) unless @foreground
+        Hive::RuntimeControlPlane::ProcessGuard.daemonize(true, true) unless @foreground
         lock_file.rewind
         lock_file.truncate(0)
         lock_file.write({ "pid" => Process.pid, "started_at" => Time.now.utc.iso8601 }.to_yaml)

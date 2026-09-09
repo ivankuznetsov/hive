@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-09-04
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Workflow and attempt state are filesystem records plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable independent attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Authored task and workflow documents remain files, while the activated SQLite runtime control plane owns machine-local attempt lifecycle, live capacity, request/result delivery, leases, payload references, PR reconciliation, and token history. Provider order stays in current configuration.
 
 ## Layer cake
 
@@ -26,7 +26,7 @@ Top-down, each layer only depends on the ones below it. There are no cycles. Sta
 
 ## Two filesystem trees per project
 
-1. **`<project>/.hive-state/`** — a worktree of the orphan branch `hive/state`. Holds task folders, configs, locks, logs. Never appears in master because master's `.gitignore` excludes it.
+1. **`<project>/.hive-state/`** — a worktree of the orphan branch `hive/state`. Holds task folders, configs, task evidence, and the short-lived Git commit lock. Never appears in master because master's `.gitignore` excludes it. Runtime leases and admission state live in the installation SQLite control plane.
 2. **`<worktree_root>/<slug>/`** (default `~/Dev/<project>.worktrees/<slug>/`) — the feature worktree. Contains actual code, branched off `<default_branch>`. Created by `4-execute/`.
 
 Master is never modified by Hive (apart from one initial `chore: ignore .hive-state worktree` commit). All hive metadata lives on `hive/state` so master `git log` stays code-only.
@@ -36,15 +36,15 @@ Master is never modified by Hive (apart from one initial `chore: ignore .hive-st
 Every accepted task-stage launch resolves through one durable admission
 protocol: a generation-scoped lease claimed by a detached supervisor wrapper
 that starts the ordinary Hive command as its worker. CLI calls admit locally
-and attach; bot/web requests remain file-backed deliveries consumed by the
+and attach; bot/web requests are durable SQL deliveries consumed by the
 daemon when present; daemon auto-advance and coordinator-owned recovery call
-the same dispatcher; attempt-loss healing is a separate ledger successor
-admission. A daemon is optional after acceptance. Every surface attaches to
+the same dispatcher; attempt-loss healing creates one deterministic recovery
+request and an independent replacement attempt. A daemon is optional after acceptance. Every surface attaches to
 or observes the durable attempt instead of owning agent lifetime.
 
 ```text
 CLI ───────────────────────────────┐
-bot/web → request queue → daemon ──┼→ Attempts::Dispatcher
+bot/web → request rows → daemon ───┼→ Attempts::Dispatcher
 daemon auto-advance / recovery ────┘          │
                                       generation lock + lease
                                                │
@@ -55,9 +55,30 @@ daemon auto-advance / recovery ────┘          │
                                       provider agent group
 ```
 
-Attempt custody, wrapper ownership, successor healing, and lease durability
+Attempt custody, wrapper ownership, lost recovery, and lease durability
 are owned by [[modules/attempts]]; delivery scheduling, reconciliation
 policy, and non-task ancillary children are owned by [[modules/daemon]].
+
+The installation runtime database is a private Sequel/SQLite authority. Every
+query is materialized inside `RuntimeControlPlane::Database#read` or a short
+transaction; no lazy dataset may outlive the process-wide fork barrier. Puma
+cluster hooks and Hive fork/daemonize seams disconnect all registered pools
+before process creation. Repository facades reuse an already validated
+process-owned connection; the first open and every reopen after disconnect or
+fork still perform the complete capability, custody, integrity, and schema
+checks. A missing database path also forces those checks so a live connection
+cannot hide a removed database. Explicit `Database#open!` remains the
+force-validation path.
+Content-addressed attempt payloads use digest-sharded
+custody locks across both SQL reference publication and expiry, so expiring one
+attempt cannot unlink bytes while another attempt publishes the same digest.
+
+Project and task source files remain authoritative. Registration YAML is
+project discovery authority and synchronizes stable project lineage into SQL;
+deregistering and re-registering the same project reuses that inactive lineage.
+The irreversible fleet cutover imports only validated token-usage history,
+rebuilds project/task identity from files, and discards other legacy runtime
+state after proving services, attempts, and leases are quiescent.
 
 ## Scheduled architecture-patrol boundary
 
@@ -334,7 +355,11 @@ solid_cable. `StatusFeed` serializes concurrent Puma callers through
 `CachedStatusCommand`, which reuses a visible-only `StateSource`: its
 five-second hot path is active-task proportional, its missed-signal backstop is
 five minutes, and the complete archive producer runs only for an explicit
-archive request. Each accepted channel acquires one poller lease and releases it
+archive request. The status producer fulfills the authoritative
+`Hive::Web::StatusCommand` contract (`json_payload`, plus optional
+dependency-context and recovery-overlay members with explicit nil defaults);
+`StatusFeed` invokes the contract directly instead of probing collaborator
+shape with `respond_to?`. Each accepted channel acquires one poller lease and releases it
 exactly once; a per-channel synchronized pending/active/closed transition
 prevents socket teardown from racing stream verification into a leak or double
 release without serializing unrelated browser connections. A failed first
@@ -379,19 +404,59 @@ property, so restoring a page after a source-less route cannot revive it.
 Later confirmations on that connection are bounded to one
 reconciliation GET instead of a refresh loop, while navigation cannot revive
 an old URL's latch. A real socket disconnect releases the connection-local
-latch so a later missed update can recover. Rejected lazy Action
-Cable consumer promises are removed from turbo-rails' cache before a bounded
-retry. A synchronous create failure also removes any partially registered
-subscription and replaces its failed consumer; detaching the source cancels
-the retry. A pre-confirmation detach waits for the current transport's
-confirmation, rejection, or disconnect before releasing the handle, preserving
-server subscribe/unsubscribe order across reconnects. A five-second fallback
-closes an otherwise-unowned transport that produces none of those callbacks,
-giving the server a connection-cleanup edge before local release. The channel
-also fences Action Cable's deferred adapter subscribe both before registration
-and at its completion; if teardown wins either race, no handler remains. A
-raising deferred adapter releases the broadcaster lease and reconnects the
-transport, so it cannot strand an active, unconfirmed channel. On task pages
+latch so a later missed update can recover. One `StatusStreamOwner` owns the
+current identity-bearing application attempt, retry timer, pending-release
+timer and disposition, catch-up attempt, and explicit lifecycle state. Each
+application setup or retry creates a dedicated consumer with
+`cable.createConsumer()`; an Action Cable transport reconnect remains on that
+consumer, subscription, and attempt, while setup, registration, rejection, or
+non-reconnecting transport failure fully retires the attempt, enters
+`retry_wait`, and starts a fresh attempt after the existing five-second bound.
+The owner never reads or mutates turbo-rails' shared consumer cache and never
+uses its subscription registry to decide whether cleanup is safe.
+
+The dedicated connection's `open` and `reopen` entry points, every callback,
+both timers, and asynchronous setup continuations are fenced by owner and
+attempt identity. Retiring an attempt first makes those entry points inert, so
+already-queued visibility-monitor work cannot open another socket or mutate a
+successor. A pre-confirmation detach leaves the disconnected owner as the sole
+bounded custodian until confirmation, rejection, or disconnect establishes the
+subscription's disposition. Confirmation still releases only after server
+registration; if none of those callbacks arrives within five seconds, timeout
+cleanup closes the dedicated transport before locally unsubscribing or
+forgetting the handle. This preserves server subscribe/unsubscribe order
+without a shared-registry scan. The element records that bounded custodian on
+plain DOM detach as well as attribute supersession, so a later detach/attach
+cycle force-retires the older predecessor before allocating beyond the two-
+transport overlap bound. The channel also fences Action Cable's deferred
+adapter subscribe both before registration and at its completion; if teardown
+wins either race, no handler remains. A raising deferred adapter releases the
+broadcaster lease and reconnects the same transport, so it cannot strand an
+active, unconfirmed channel.
+
+Owner disconnect is an ordered best-effort transaction. It detaches private
+slots first, cancels the retry timer, attempts every applicable cleanup, and
+commits terminal `disconnected` even if an operation throws. Unsubscribe runs
+before transport cleanup for confirmed subscriptions. Consumer disconnect is
+the primary shutdown; reconnect-disabled connection close and captured-socket
+close are attempted only while that socket remains `OPEN` or `CONNECTING`, and
+the connection monitor is stopped even after earlier failures. The internal
+boundary rethrows the exact first thrown value after finalization, while custom-
+element disconnect, async-failure, and attribute-supersession paths warn only
+after their DOM and successor obligations finish. Repeated disconnect is a
+no-op, and supersession installs or retains a retrying successor even when old
+cleanup fails. Dedicated ownership intentionally allocates one Cable transport
+per simultaneously live status source; an unconfirmed retiring predecessor can
+briefly overlap one successor until the bounded pending release settles, and a
+detached source returns to zero transports after any bounded pending release.
+Although the source is `data-turbo-permanent`, a cross-URL Turbo move invokes
+its disconnect/connect callbacks. Dedicated ownership therefore replaces the
+transport on every such navigation instead of reusing turbo-rails' cached
+consumer: the next `connected` state and catch-up wait for a fresh WebSocket
+and Action Cable subscription handshake. Repeated supersession force-retires
+the older pending predecessor before allocating another successor, so this
+navigation and retry cost never expands the two-transport overlap bound.
+On task pages
 the status-refresh owner
 wraps the mutation forms as well as the stream source, so every task action
 crosses the same native submission guard before a filesystem broadcast can

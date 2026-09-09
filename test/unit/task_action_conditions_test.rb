@@ -178,7 +178,7 @@ class TaskActionConditionsTest < Minitest::Test
       broken_store = Object.new
       broken_store.define_singleton_method(:read) { |**| raise Errno::EACCES, "blocked" }
       with_replaced_singleton_method(
-        Hive::TaskProjection::Store, :new, ->(**) { broken_store }
+        Hive::TaskProjection::Reader, :new, ->(**) { broken_store }
       ) do
         assert_raises(Errno::EACCES) do
           Hive::TaskAction.new(task, marker(:execute_waiting))

@@ -77,6 +77,10 @@ native child environment, and run/export interpretation while using
 one `opencode run` process with the prompt on owner-private
 file-backed stdin, captures bounded stdout and stderr, and records timeout or
 cancellation before parsing.
+Each run also carries a random invocation-custody ID. After the run exits,
+Hive terminates only same-user processes carrying that exact ID, closing a
+`setsid` escape without affecting another invocation. A custody-cleanup
+failure overrides an otherwise successful transcript.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that
@@ -106,8 +110,8 @@ unchanged.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
 usage only after their artifact-firewall snapshot validates. This keeps
-`task-journal.jsonl` and `task-projection.json` controller-owned: the agent
-cannot modify them, while Hive's own post-spawn observation append is not
+`task-journal.jsonl` controller-owned: the agent cannot modify it, while Hive's
+own post-spawn observation append is not
 mistaken for agent tampering. Direct/manual execute runs without a durable
 attempt context still resolve `models.execute_implementation` for launch, but
 do not claim durable observed identity without an admitted attempt.

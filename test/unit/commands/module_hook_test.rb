@@ -1,7 +1,7 @@
 require "test_helper"
 require_relative "../../support/module_helpers"
 require "hive/attempts/dispatcher"
-require "hive/attempts/store"
+require "hive/attempts/repository"
 require "hive/commands/module_hook"
 require "hive/module_package/managed_store"
 require "hive/module_package/preview"
@@ -58,7 +58,12 @@ class CommandsModuleHookTest < Minitest::Test
           occurred_at: NOW, source: { type: "task", id: "task-1" },
           idempotency_key: "task-1", payload: {}, recorded_at: NOW
         ).event
-        attempt_store = Hive::Attempts::Store.new(root: File.join(project, "attempts"))
+        attempt_store = Hive::Attempts::Repository.new(root: File.join(project, "attempts"), migrate: true)
+        register_runtime_project(
+          database: attempt_store.database, name: "demo", path: project,
+          state_root_path: state, project_id: entry.fetch("project_id"),
+          registration_id: entry.fetch("registration_id")
+        )
         launcher = Launcher.new
         attempts = Hive::Attempts::Dispatcher.new(
           store: attempt_store, launcher: launcher,

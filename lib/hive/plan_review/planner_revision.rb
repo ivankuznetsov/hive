@@ -84,14 +84,16 @@ module Hive
           end
           output_valid = report.required_outputs_valid?
           complete_candidate = output_valid && Hive::Markers.current(output_path).name == :complete
-          artifact_override = result[:status] != :ok && complete_candidate
-          unless (result[:status] == :ok && output_valid) || artifact_override
+          # A complete custody-validated candidate is durable evidence even when
+          # the provider's terminal status is lost. `read_candidate!` repeats
+          # the marker validation before accepting the candidate.
+          unless complete_candidate
             return { "status" => "retryable_failure", "diagnostic" => result[:error_message] }
           end
 
           diagnostic = if result[:timed_out]
                          "salvaged complete candidate after planner timeout"
-          elsif artifact_override
+          elsif result[:status] != :ok
                          "salvaged complete candidate after planner telemetry failure"
           end
 
@@ -149,17 +151,21 @@ module Hive
         @runner = runner
       end
 
-      def call(review_id:, plan_bytes:, findings:, planner_identity:, timeout_sec:)
+      def call(review_id:, plan_bytes:, findings:, planner_identity:, timeout_sec:,
+               planner_authority: planner_identity)
         DisposableWorktree.open(
           project_root: @task.project_root,
           prefix: "hive-plan-revision-worktree-"
         ) do |workspace|
           input_path = File.join(workspace, "input-plan.md")
           output_path = File.join(workspace, "candidate-output.md")
-          File.binwrite(input_path, Hive::SecretPatterns.redact(plan_bytes.to_s))
+          redacted_plan = Hive::SecretPatterns.redact(plan_bytes.to_s)
+          File.binwrite(input_path, redacted_plan)
           File.chmod(0o600, input_path)
+          seed_candidate!(output_path, redacted_plan)
           prompt = render_prompt(
-            input_path:, output_path:, findings:, review_id:, planner_identity:
+            input_path:, output_path:, findings:, review_id:, planner_identity:,
+            planner_authority:
           )
           observed = stringify(@runner.call(
             prompt:, workspace:, output_path:, planner_identity:, timeout_sec:
@@ -177,14 +183,31 @@ module Hive
 
       private
 
-      def render_prompt(input_path:, output_path:, findings:, review_id:, planner_identity:)
+      # A planner revision is another long-form Pi workload. Starting with no
+      # output recreates the ordinary plan-stage failure: the provider can
+      # spend minutes reasoning, then lose the stream before its first full
+      # write. Seed the candidate from the immutable input without its terminal
+      # marker so the agent can make bounded edits in place. The checkpoint can
+      # never be accepted or salvaged as a completed revision on its own.
+      def seed_candidate!(path, plan_bytes)
+        text = plan_bytes.to_s.dup.force_encoding(Encoding::UTF_8)
+        raise InvalidRecord, "planner revision input is invalid UTF-8" unless text.valid_encoding?
+
+        checkpoint = text.sub(/(?:\r?\n)?<!-- COMPLETE -->\r?\n?\z/, "\n")
+        File.binwrite(path, checkpoint)
+        File.chmod(0o600, path)
+      end
+
+      def render_prompt(input_path:, output_path:, findings:, review_id:, planner_identity:,
+                        planner_authority:)
         source = File.read(File.expand_path("../../../templates/plan_revision_prompt.md.erb", __dir__))
         ERB.new(source, trim_mode: "-").result_with_hash(
           nonce: SecureRandom.hex(24), input_path:, output_path:, review_id:,
           findings_json: JSON.pretty_generate(Array(findings).map do |finding|
             finding.respond_to?(:to_h) ? finding.to_h : finding
           end),
-          planner_identity_json: JSON.generate(planner_identity)
+          planner_identity_json: JSON.generate(planner_identity),
+          planner_authority_json: JSON.generate(planner_authority)
         )
       end
 

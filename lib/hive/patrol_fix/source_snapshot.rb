@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "hive/patrol_fix"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/patrol_fix/publication_receipt"
 
 module Hive
@@ -132,7 +133,7 @@ module Hive
           validate_pull_request!(entry, index)
         end
         timestamp!(document.fetch("accepted_at"), "accepted_at")
-        if Hive::SecretPatterns.match?(PatrolFix.canonical_json(document))
+        if Hive::SecretScanner.match?(PatrolFix.canonical_json(document))
           invalid!("snapshot contains secret-like material")
         end
         PatrolFix.deep_freeze(document)

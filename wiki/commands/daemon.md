@@ -3,9 +3,13 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-09-02
+updated: 2026-09-09
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
+
+Quota reset estimates are display-only hints. Operational status preserves the
+scheduler's actual hourly cooldown, next retry time, and safety decision rather
+than replacing them with a provider's later estimated reset date.
 
 **TLDR**: `hive daemon SUBCOMMAND` is the operator surface for the
 auto-advancing dispatcher (ADR-024). One long-running process wakes

@@ -161,7 +161,7 @@ class HiveStagesExecuteTest < Minitest::Test
         store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
         policy = Hive::Workflows::Coding::DESCRIPTOR.stage_named("execute").condition_policy.to_h
         attempt = store.create_launching(
-          attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+          attempt_id: "attempt-1", request_id: "request-1",
           task_id: task.id.to_s, project: "demo", task_slug: task.slug,
           intended_stage: "4-execute", task_generation: "owner-1",
           ownership_generation: "owner-1", task_input_epoch: 1,

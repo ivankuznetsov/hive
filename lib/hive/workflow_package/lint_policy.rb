@@ -14,7 +14,7 @@ module Hive
       ).freeze
       FIXTURE_FILES = %w[benign.md malicious.md safe_yaml_cases.json].freeze
       EXPECTED_FILE = "expected.json".freeze
-      CONTRACT_SHA256 = "c132a3d494d83f3376a53bdaff8841a86e63078824d72b8386f0736718defcc7".freeze
+      CONTRACT_SHA256 = "b11b02507c511f961b0635c008795a716e7e0030b277242e0c11d97a3e8f0cab".freeze
       KEYS = %w[
         schema version upstream_commit upstream_policy_sha256 fixture_corpus_sha256
         expected_output_sha256 baseline_network_hosts limits known_rules

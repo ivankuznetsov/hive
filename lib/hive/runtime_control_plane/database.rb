@@ -9,12 +9,13 @@ require "hive/atomic_file"
 
 module Hive
   module RuntimeControlPlane
-    EXPECTED_SCHEMA_SHA256 = "34e12e7c8303f7b6f21c00cd0019fe96aaf80bc4679db90034b2a0b931ae1355".freeze
+    EXPECTED_SCHEMA_SHA256 = "f237684b17dfd8f7ded175a5e3c7a1b0445c4a7bee109fca4f2f51e498ead0a7".freeze
 
     class Database
       MIGRATE_ACTION = "stop Hive and run hive migrate --all".freeze
       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
       MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
+      REQUEST_FOREIGN_KEY_SCHEMA = "24f43b9a0ac27f015b9a4321b9ff3ac2034cd109f354a30abf50f181a8748935".freeze
       attr_reader :path, :owner_pid
 
       def initialize(path: Hive::Paths.runtime_control_plane_path, migrations_dir: MIGRATIONS_DIR,
@@ -49,6 +50,7 @@ module Hive
           FileUtils.mkdir_p(File.dirname(path))
           prepare_storage!
           connect!
+          upgrade_request_provenance!
           Sequel::IntegerMigrator.new(@connection, @migrations_dir, table: :schema_info,
                                       column: :version, use_transactions: true).run
           ensure_installation_identity!
@@ -250,7 +252,7 @@ module Hive
       def ensure_installation_identity!
         return unless @connection[:installations].empty?
         identity = @uuid_generator.call
-        @connection[:installations].insert(installation_id: identity, lineage_id: identity,
+        @connection[:installations].insert(installation_id: identity,
                                            activation_epoch: 0,
                                            created_at: Codec.dump_time(@clock.call))
       end
@@ -262,13 +264,40 @@ module Hive
         true
       end
 
-      def exact_schema?(database)
+      def exact_schema?(database, expected: EXPECTED_SCHEMA_SHA256)
         rows = database[:sqlite_master].where(type: %w[table index])
           .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
           .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
-        Digest::SHA256.hexdigest(Codec.dump_json(rows)) == EXPECTED_SCHEMA_SHA256
+        Digest::SHA256.hexdigest(Codec.dump_json(rows)) == expected
       rescue Sequel::Error
         false
+      end
+
+      # Explicit migration only: queue retention must not rewrite immutable attempts.
+      # Rebuild from the canonical schema: SQLite's generic ALTER emulation loses
+      # CHECK constraints. Foreign keys are disabled outside the transaction so
+      # dropping the old table cannot cascade into receipts, leases or usage.
+      def upgrade_request_provenance!
+        return unless exact_schema?(@connection, expected: REQUEST_FOREIGN_KEY_SCHEMA)
+
+        template = Sequel.sqlite
+        Sequel::Migrator.run(template, @migrations_dir)
+        definitions = template[:sqlite_master].where(tbl_name: "attempts")
+          .exclude(sql: nil).order(Sequel.desc(:type), :name).select_map(:sql)
+        @connection.run("PRAGMA foreign_keys = OFF")
+        @connection.transaction(mode: :exclusive, rollback: :reraise) do
+          @connection.run("CREATE TEMP TABLE attempt_provenance_upgrade AS SELECT * FROM attempts")
+          @connection.drop_table(:attempts)
+          definitions.each { |sql| @connection.run(sql) }
+          @connection.run("INSERT INTO attempts SELECT * FROM attempt_provenance_upgrade")
+          @connection.run("DROP TABLE temp.attempt_provenance_upgrade")
+          unless exact_schema?(@connection) && pragma_rows(@connection, "foreign_key_check").empty?
+            raise Sequel::Error, "attempt provenance upgrade failed schema or foreign-key validation"
+          end
+        end
+      ensure
+        @connection.run("PRAGMA foreign_keys = ON") if template
+        template&.disconnect
       end
 
       def prepare_storage!

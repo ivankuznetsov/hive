@@ -9,7 +9,6 @@ require "hive/attempts/contracts"
 require "hive/attempts/command_progress"
 require "hive/patrol_fix/receipt_store"
 require "hive/workflows/patrol_fix"
-require "hive/provider_health/evidence"
 require "hive/provider_routing/candidate"
 require "hive/lock"
 require "hive/markers"
@@ -217,7 +216,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       "retry_after" => (NOW + 3 * 3600).iso8601
     }, mtime: NOW - 3600) do |coordinator, row, state_home|
       write_terminal_recovery_history(
-        row: row, state_home: state_home, retry_count: 25
+        row: row, state_home: state_home, retry_count: 25,
+        failure_fingerprint: coordinator.send(:failure_fingerprint, row, row.marker_attrs),
+        identical_failure_count: 25
       )
       receipt = coordinator.request(
         row: row, requestor: "healer", request_id: "auto-26",
@@ -232,6 +233,42 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal (NOW + 3 * 3600).iso8601,
                    request.recovery.dig("provider_hint", "retry_after")
       assert_equal true, request.recovery.dig("provider_hint", "display_only")
+    end
+  end
+
+  def test_first_provider_limit_waits_an_hour_instead_of_using_crash_backoff
+    with_fixture(marker_attrs: { "reason" => "limits_reached", "marker_id" => "marker-1" },
+                 mtime: NOW - 1800) do |coordinator, row, state_home|
+      receipt = coordinator.request(row:, requestor: "healer", now: NOW)
+      assert_equal "cooldown", receipt.status
+      assert_equal (NOW + 1800).iso8601(6), receipt.next_eligible_at
+      assert_empty Q.pending(state_home:)
+    end
+  end
+
+  def test_previously_parked_provider_limit_rearms_without_skipping_hourly_cooldown
+    with_fixture(marker_attrs: { "reason" => "limits_reached", "marker_id" => "marker-1" },
+                 mtime: NOW - 3600) do |coordinator, row, state_home|
+      coordinator.request(row:, requestor: "healer", request_id: "quota", now: NOW)
+      Q.update_recovery!(
+        "quota", expected_phase: "admitted", changes: {
+          "blocked_reason" => "deterministic_failure", "owner" => "operator",
+          "next_eligible_at" => (NOW + 1800).iso8601(6)
+        }, state_home:
+      )
+
+      receipt = coordinator.request(row:, requestor: "healer", now: NOW)
+
+      assert_equal "cooldown", receipt.status
+      assert_equal "scheduler", receipt.owner
+      assert_equal (NOW + 1800).iso8601(6), receipt.next_eligible_at
+      request = Q.fetch("quota", state_home:)
+      assert_nil request.recovery.fetch("blocked_reason")
+      early = coordinator.resume(request:, row:, now: NOW + 1799)
+      assert_equal "admitted", early.phase
+      assert_equal "error", Hive::Markers.current(row.state_file).name.to_s
+      due = coordinator.resume(request: Q.fetch("quota", state_home:), row:, now: NOW + 1800)
+      assert_equal "cleared", due.phase
     end
   end
 
@@ -507,6 +544,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal "queued", receipt.status
       request = Q.fetch("changed", state_home: state_home)
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, request.recovery.fetch("retry_count")
       assert_equal 1, request.recovery.fetch("identical_failure_count")
       refute_equal "f" * 64, request.recovery.fetch("failure_fingerprint")
     end
@@ -537,6 +576,79 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal Hive::RuntimeIdentity.source_digest, recovery.fetch("runtime_digest")
       assert_equal 1, recovery.fetch("identical_failure_count")
       assert_equal [ "attempt-3" ], recovery.fetch("failure_attempt_history")
+    end
+  end
+
+  def test_dirty_worktree_progress_starts_a_fresh_failure_series
+    attrs = {
+      "reason" => "dirty_worktree", "marker_id" => "marker-progress",
+      "provider" => "pi", "message" => "agent left uncommitted changes",
+      "attempt_id" => "attempt-current"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 6) do |coordinator, row, state_home|
+      old_row = row.to_h.merge("evidence" => [ dirty_commit_evidence("a" * 40) ])
+      old_fingerprint = coordinator.send(:failure_fingerprint, old_row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:, retry_count: 4,
+        failure_fingerprint: old_fingerprint, identical_failure_count: 4,
+        failure_attempt_history: %w[attempt-1 attempt-2 attempt-3 attempt-4]
+      )
+      progressed_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("b" * 40) ]
+      )
+      invalid_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("not-a-revision") ]
+      )
+
+      assessment = coordinator.assessment(progressed_row, now: NOW)
+
+      assert_equal "", coordinator.send(:dirty_progress_revision, invalid_row, attrs)
+      receipt = coordinator.request(
+        row: progressed_row, requestor: "healer", request_id: "progressed", now: NOW
+      )
+
+      assert assessment.fetch(:due)
+      assert_equal NOW - 1, assessment.fetch(:retry_at)
+      assert_equal "queued", receipt.status
+      request = Q.fetch("progressed", state_home: state_home)
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, request.recovery.fetch("retry_count")
+      assert_equal 1, request.recovery.fetch("identical_failure_count")
+      assert_equal [ "attempt-current" ],
+                   request.recovery.fetch("failure_attempt_history")
+      refute_equal old_fingerprint, request.recovery.fetch("failure_fingerprint")
+    end
+  end
+
+  def test_dirty_worktree_without_progress_remains_an_identical_failure
+    attrs = {
+      "reason" => "dirty_worktree", "marker_id" => "marker-same",
+      "provider" => "pi", "message" => "agent left uncommitted changes",
+      "attempt_id" => "attempt-current"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - 3600) do |coordinator, row, state_home|
+      observed_row = row.to_h.merge(
+        "evidence" => [ dirty_commit_evidence("a" * 40) ]
+      )
+      fingerprint = coordinator.send(:failure_fingerprint, observed_row, attrs)
+      write_terminal_recovery_history(
+        row:, state_home:, retry_count: 2,
+        failure_fingerprint: fingerprint, identical_failure_count: 1,
+        failure_attempt_history: [ "attempt-previous" ]
+      )
+
+      receipt = coordinator.request(
+        row: observed_row, requestor: "healer", request_id: "unchanged", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      request = Q.fetch("unchanged", state_home: state_home)
+      assert_equal 3, receipt.retry_count
+      assert_equal 3, request.recovery.fetch("retry_count")
+      assert_equal 2, request.recovery.fetch("identical_failure_count")
+      assert_equal %w[attempt-previous attempt-current],
+                   request.recovery.fetch("failure_attempt_history")
+      assert_equal fingerprint, request.recovery.fetch("failure_fingerprint")
     end
   end
 
@@ -857,7 +969,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         purge_history: true
       )
       File.open(row.state_file, "a") do |file|
-        file.write("\napi_key=abcdefghijklmnopqrstuvwxyz123456\n")
+        file.write("\nghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       end
 
       resumed = coordinator.resume(request: request, row: row)
@@ -987,6 +1099,45 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "recovery_unavailable", receipt.reason
       assert_includes receipt.remediation, "resolver offline"
       assert_empty Q.pending(state_home: state_home)
+    end
+  end
+
+  def test_artifact_recovery_runs_before_admission_and_fails_closed
+    calls = []
+    recovery = lambda do |task:, marker:, intended_stage:|
+      calls << [ task, marker, intended_stage ]
+    end
+    artifacts_resolver = lambda do |task, _dir|
+      ->(**_kwargs) { task.with(stage_index: 7, stage_name: "artifacts") }
+    end
+    with_fixture(runtime_residue_recovery: recovery, task_resolver_builder: artifacts_resolver) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row.with(stage: "7-artifacts"), requestor: "web",
+        request_id: "recover-artifacts", now: NOW
+      )
+
+      assert_equal "queued", receipt.status
+      assert_equal [ [ row.folder, :error, "7-artifacts" ] ],
+                   calls.map { |task, marker, stage| [ task.folder, marker.name, stage ] }
+      assert Q.fetch("recover-artifacts", state_home:).recovery
+    end
+
+    failing_recovery = lambda do |**_kwargs|
+      raise Hive::Artifacts::RuntimeResidueRecovery::RecoveryError, "quarantine failed"
+    end
+    with_fixture(
+      runtime_residue_recovery: failing_recovery,
+      task_resolver_builder: artifacts_resolver
+    ) do |coordinator, row, state_home|
+      receipt = coordinator.request(
+        row: row.with(stage: "7-artifacts"), requestor: "web",
+        request_id: "recover-artifacts-failure", now: NOW
+      )
+
+      assert_equal "blocked", receipt.status
+      assert_equal "runtime_residue_recovery_failed", receipt.reason
+      assert_equal "quarantine failed", receipt.remediation
+      assert_empty Q.pending(state_home:)
     end
   end
 
@@ -1749,56 +1900,6 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
-  def test_markerless_admission_persists_both_blockers_for_each_health_scope
-    with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
-      route = routing_route
-      exclusions = [
-        Hive::ProviderHealth::Scope.provider_account(account_id: route.account),
-        Hive::ProviderHealth::Scope.model(account_id: route.account, model_id: route.model)
-      ].flat_map do |scope|
-        %w[circuit_open circuit_cooldown].map do |reason|
-          Hive::ProviderRouting::Decision::Exclusion.new(
-            route_id: route.id,
-            reason: reason,
-            scope: scope.to_h,
-            observation: { "generation" => 2, "journal_epoch" => 0 }
-          )
-        end
-      end
-      candidate = Hive::ProviderRouting::Candidate.new(
-        route: route,
-        exclusions: exclusions,
-        observed_concurrency: 0,
-        max_concurrency: 1
-      )
-      request = Hive::ProviderRouting::Request.new(
-        policy: routing_policy,
-        task_generation: fixture_task_generation(row),
-        health: {},
-        capacity: {}
-      )
-      decision = Hive::ProviderRouting::Decision.no_route(
-        request: request,
-        considered: [ route ],
-        exclusions: exclusions,
-        candidates: [ candidate ],
-        decided_at: NOW,
-        reason: "no_eligible_provider_route"
-      )
-
-      receipt = coordinator.request_admission_failure(
-        request: admission_request(row), decision: decision, now: NOW
-      )
-      persisted = Q.pending(state_home: state_home).fetch(0)
-
-      assert_equal "cooldown", receipt.status
-      assert_equal 4,
-                   persisted.recovery.dig("admission_observation", "candidates", 0, "exclusions").length
-      assert_equal 4,
-                   persisted.recovery.dig("admission_observation", "exclusions").length
-    end
-  end
-
   def test_provider_and_marker_recovery_charge_once_with_the_same_due_time
     provider = nil
     with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
@@ -1901,66 +2002,6 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
-  def test_provider_failure_waits_for_exact_health_consumer_acknowledgement
-    Dir.mktmpdir("hive-provider-recovery") do |dir|
-      folder = File.join(dir, ".hive-state", "stages", "4-execute", "demo-task")
-      FileUtils.mkdir_p(folder)
-      Hive::TaskMeta.write(
-        folder, id: 817, slug: "demo-task", display_name: nil, workflow: "coding"
-      )
-      prepare_test_task_lease_repository(
-        folder, state_home: File.join(dir, "lease-runtime")
-      )
-      state_file = File.join(folder, "task.md")
-      task = FakeTask.new(
-        id: 817, slug: "demo-task", folder: folder, state_file: state_file,
-        stage_index: 4, stage_name: "execute"
-      )
-      attempts = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
-      terminal = terminal_provider_attempt(attempts)
-      maintenance = Hive::Attempts::FinalizationMaintenance.new(store: attempts)
-      assert maintenance.prepare(terminal)
-      attrs = {
-        "reason" => "provider_route_failed", "marker_id" => "provider-marker",
-        "attempt_id" => terminal.attempt_id,
-        "task_generation" => terminal.task_generation,
-        "ownership_generation" => terminal.ownership_generation,
-        "task_input_epoch" => terminal.task_input_epoch,
-        "provider_account_id" => "account-a",
-        "route_id" => "account-a/model-a"
-      }
-      File.write(state_file, "# Task\n\n#{Hive::Markers.build_marker("ERROR", attrs)}\n")
-      File.utime(NOW - 3600, NOW - 3600, state_file)
-      row = fixture_row(
-        task, marker: "error", attrs: Hive::Markers.current(state_file).attrs,
-        mtime: NOW - 3600
-      )
-      coordinator = fixture_coordinator(
-        dir: dir, task: task, attempt_store: attempts
-      )
-
-      queued = coordinator.request(
-        row: row, requestor: "healer", request_id: "ignored-provider-id", now: NOW
-      )
-      request = Q.fetch(queued.request_id, state_home: dir)
-      refute_nil request, queued.inspect
-      blocked = coordinator.resume(request: request, row: row, now: NOW)
-
-      assert_equal "queued", blocked.status
-      assert_equal "provider_health_pending", blocked.reason
-      assert_equal "error", Hive::Markers.current(state_file).name.to_s
-      assert_equal terminal.attempt_id,
-                   request.recovery.dig("source_receipt", "attempt_id")
-
-      attempts.acknowledge_publication(terminal.attempt_id, consumer: "provider_health")
-      resumed = coordinator.resume(request: request, row: row, now: NOW + 1)
-
-      assert_equal "queued", resumed.status
-      assert_equal "cleared", resumed.phase
-      assert Hive::Markers.current(state_file).none?
-    end
-  end
-
   def test_default_attempt_store_factory_is_host_state_scoped
     with_tmp_dir do |state_home|
       opened = Object.new
@@ -1991,6 +2032,115 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal "blocked", result.status
       assert_equal "provider_receipt_unavailable", result.reason
+    end
+  end
+
+  def test_provider_marker_binds_to_its_exact_terminal_receipt
+    marker_attrs = {
+      "reason" => "provider_route_failed", "attempt_id" => "attempt-1",
+      "task_generation" => "generation-1", "ownership_generation" => "owner-1",
+      "provider_account_id" => "account-a", "route_id" => "account-a/model-a"
+    }
+    marker = Struct.new(:attrs).new(marker_attrs)
+    task = FakeTask.new(
+      id: 817, slug: "demo-task", folder: "/project/task", state_file: "/project/task.md",
+      stage_index: 4, stage_name: "execute"
+    )
+    values = {
+      "project" => "hive", "task_slug" => task.slug, "task_id" => task.id.to_s,
+      "intended_stage" => "4-execute",
+      "routing" => {
+        "mode" => "explicit",
+        "route" => {
+          "provider_account_id" => "account-a", "route_id" => "account-a/model-a"
+        }
+      }
+    }
+    terminal = Object.new
+    terminal.define_singleton_method(:state) { "terminal" }
+    terminal.define_singleton_method(:explicit_routing?) { true }
+    terminal.define_singleton_method(:task_generation) { "generation-1" }
+    terminal.define_singleton_method(:ownership_generation) { "owner-1" }
+    terminal.define_singleton_method(:attempt_id) { "attempt-1" }
+    terminal.define_singleton_method(:final?) { true }
+    terminal.define_singleton_method(:[]) { |key| values[key] }
+    terminal.define_singleton_method(:receipt) do
+      {
+        "outcome" => "failed", "provider_evidence" => {},
+        "receipt_version" => 1, "terminal_lease_version" => 3
+      }
+    end
+    store = Object.new
+    store.define_singleton_method(:fetch) { |_attempt_id| terminal }
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      state_home: Dir.tmpdir, attempt_store: store, dispatch_repository: Object.new
+    )
+
+    identity = coordinator.send(
+      :source_receipt_for, marker: marker, task: task, project: "hive"
+    )
+    assert_equal(
+      { "attempt_id" => "attempt-1", "receipt_version" => 1,
+        "terminal_lease_version" => 3 },
+      identity
+    )
+    row = Struct.new(:project, :stage).new("hive", "4-execute")
+    assert_equal 32, coordinator.send(
+      :deterministic_request_id, row, task, "marker-generation", "dispatch-generation",
+      source_receipt: identity
+    ).length
+
+    store.define_singleton_method(:fetch) do |_attempt_id|
+      raise Hive::Attempts::RepositoryError, "unavailable"
+    end
+    assert_nil coordinator.send(
+      :source_receipt_for, marker: marker, task: task, project: "hive"
+    )
+  end
+
+  def test_provider_recovery_derives_its_request_from_the_terminal_receipt
+    attrs = {
+      "reason" => "provider_route_failed", "marker_id" => "provider-marker",
+      "attempt_id" => "attempt-1", "task_generation" => "generation-1",
+      "ownership_generation" => "owner-1", "provider_account_id" => "account-a",
+      "route_id" => "account-a/model-a"
+    }
+    terminal = nil
+    store = Object.new
+    store.define_singleton_method(:fetch) { |_attempt_id| terminal }
+    with_fixture(marker_attrs: attrs, attempt_store: store) do |coordinator, row, state_home|
+      values = {
+        "project" => "hive", "task_slug" => row.slug, "task_id" => "817",
+        "intended_stage" => "4-execute",
+        "routing" => {
+          "mode" => "explicit", "route" => {
+            "provider_account_id" => "account-a", "route_id" => "account-a/model-a"
+          }
+        }
+      }
+      terminal = Object.new
+      terminal.define_singleton_method(:state) { "terminal" }
+      terminal.define_singleton_method(:explicit_routing?) { true }
+      terminal.define_singleton_method(:task_generation) { "generation-1" }
+      terminal.define_singleton_method(:ownership_generation) { "owner-1" }
+      terminal.define_singleton_method(:attempt_id) { "attempt-1" }
+      terminal.define_singleton_method(:final?) { true }
+      terminal.define_singleton_method(:[]) { |key| values[key] }
+      terminal.define_singleton_method(:receipt) do
+        {
+          "outcome" => "failed", "provider_evidence" => {},
+          "receipt_version" => 1, "terminal_lease_version" => 3
+        }
+      end
+
+      result = coordinator.request(
+        row: row, requestor: "healer", request_id: "ignored", now: NOW
+      )
+
+      assert_equal "queued", result.status
+      request = Q.pending(state_home: state_home).fetch(0)
+      assert_equal "attempt-1", request.recovery.dig("source_receipt", "attempt_id")
+      refute_equal "ignored", request.request_id
     end
   end
 
@@ -2039,32 +2189,6 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         now: NOW
       )
       assert_equal "generation_conflict", result.reason
-    end
-  end
-
-  def test_unavailable_health_admission_is_operator_owned_and_explainable
-    with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
-      decision = routing_decision(
-        row, status: :no_route, exclusion_reason: "health_state_unavailable"
-      )
-      result = coordinator.request_admission_failure(
-        request: admission_request(row), decision: decision, now: NOW
-      )
-      persisted = Q.fetch(result.request_id, state_home: state_home)
-
-      assert_equal "operator", persisted.recovery.fetch("owner")
-      assert_equal "health_state_unavailable", persisted.recovery.fetch("blocked_reason")
-      assert_includes persisted.recovery.fetch("blocked_remediation"), "repair"
-
-      observation = Hive::Attempts::DispatchResult.new(
-        status: :no_route, attempt: nil, receipt: nil,
-        attach_descriptor: nil, reason: decision.reason, decision: decision
-      )
-      coordinator.observe_admission_result(
-        request: persisted, result: observation, now: NOW + 1
-      )
-      updated = Q.fetch(result.request_id, state_home: state_home)
-      assert_includes updated.recovery.fetch("blocked_remediation"), "repair"
     end
   end
 
@@ -2149,52 +2273,6 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     ).phase
   end
 
-  def test_source_receipt_proof_fallback_and_storage_errors_are_fail_closed
-    with_tmp_dir do |root|
-      store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
-      terminal = terminal_provider_attempt(store)
-      maintenance = Hive::Attempts::FinalizationMaintenance.new(store: store)
-      assert maintenance.prepare(terminal)
-      store.publication(terminal.attempt_id).fetch("consumers").each_key do |consumer|
-        store.acknowledge_publication(terminal.attempt_id, consumer: consumer)
-      end
-      assert maintenance.promote(terminal)
-      identity = {
-        "attempt_id" => terminal.attempt_id,
-        "receipt_version" => terminal.receipt.fetch("receipt_version"),
-        "terminal_lease_version" => terminal.receipt.fetch("terminal_lease_version")
-      }
-      assert_nil store.fetch_hot(terminal.attempt_id)
-      coordinator = Hive::Daemon::RecoveryCoordinator.new(
-        attempt_store: store, dispatch_repository: Object.new
-      )
-      assert coordinator.send(:source_health_acknowledged?, identity)
-
-      failing = Object.new
-      failing.define_singleton_method(:fetch_hot) do |_id|
-        raise Hive::Attempts::RepositoryError, "unavailable"
-      end
-      coordinator = Hive::Daemon::RecoveryCoordinator.new(
-        attempt_store: failing, dispatch_repository: Object.new
-      )
-      refute coordinator.send(:source_health_acknowledged?, identity)
-
-      failing.define_singleton_method(:fetch) do |_id|
-        raise Hive::Attempts::RepositoryError, "unavailable"
-      end
-      marker = Struct.new(:attrs).new({
-        "reason" => "provider_route_failed", "attempt_id" => terminal.attempt_id
-      })
-      task = FakeTask.new(
-        id: 817, slug: "demo-task", folder: root, state_file: File.join(root, "task.md"),
-        stage_index: 4, stage_name: "execute"
-      )
-      assert_nil coordinator.send(
-        :source_receipt_for, marker: marker, task: task, project: "hive"
-      )
-    end
-  end
-
   def test_markerless_clear_validation_and_invalid_decisions_are_closed
     coordinator = Hive::Daemon::RecoveryCoordinator.new(
       attempt_store: Object.new, dispatch_repository: Object.new
@@ -2212,6 +2290,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
 
   private
+
+  def dirty_commit_evidence(sha)
+    { "type" => "commit", "observation" => "dirty_worktree", "sha" => sha }
+  end
 
   def request_for_helpers(recovery: nil)
     Q::Request.new(
@@ -2237,7 +2319,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       argv: %w[hive run demo-task --stage 4-execute --project hive --json],
       requestor: "daemon", chat_id: nil, update_id: nil,
       trigger: "auto_advance", task_generation: nil,
-      predecessor_attempt_id: nil, inherited_outputs: [], task_id: 817,
+      inherited_outputs: [], task_id: 817,
       expected_stage: nil, expected_marker_name: nil, expected_marker_id: nil,
       recovery: nil, schema_version: Q::SCHEMA_VERSION
     )
@@ -2249,15 +2331,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     reason = exclusion_reason || (
       status == :capacity_saturated ? "provider_concurrency_saturated" : "manual_block"
     )
-    observation = status == :capacity_saturated ?
-      { "observed" => 1, "max" => 1 } : { "generation" => 2, "journal_epoch" => 0 }
     exclusion = Hive::ProviderRouting::Decision::Exclusion.new(
       route_id: route.id, reason: reason,
-      scope: {
-        "kind" => "provider_account", "provider_account_id" => route.account,
-        "model" => nil
-      },
-      observation: observation
+      detail: status == :capacity_saturated ? "1/1 live attempts" : nil
     )
     candidate = Hive::ProviderRouting::Candidate.new(
       route: route, exclusions: [ exclusion ],
@@ -2267,7 +2343,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     generation = task_generation || fixture_task_generation(row)
     request = Hive::ProviderRouting::Request.new(
       policy: routing_policy, task_generation: generation,
-      health: {}, capacity: {}
+      capacity: { route.account => { "observed" => 1, "max" => 1 } }
     )
     if status == :capacity_saturated
       Hive::ProviderRouting::Decision.capacity_saturated(
@@ -2278,8 +2354,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       Hive::ProviderRouting::Decision.no_route(
         request: request, considered: [ route ], exclusions: [ exclusion ],
         candidates: [ candidate ], decided_at: decided_at,
-        reason: exclusion_reason == "health_state_unavailable" ?
-          "health_state_unavailable" : "no_eligible_provider_route"
+        reason: "no_eligible_provider_route"
       )
     end
   end
@@ -2314,69 +2389,6 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       [ row.state_file, File.binread(row.state_file) ].join("\0")
     )
     Digest::SHA256.hexdigest([ row.project, row.stage, progress ].join("\0"))
-  end
-
-  def terminal_provider_attempt(store)
-    capability = "c" * 64
-    generation = "provider-generation"
-    route = {
-      "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
-      "adapter" => "codex", "launch_binding_id" => "binding-a",
-      "model" => "model-a", "effort" => "high"
-    }
-    provider_scope = Hive::ProviderHealth::Scope.provider_account(account_id: "account-a")
-    scope = Hive::ProviderHealth::Scope.model(
-      account_id: "account-a", model_id: "model-a"
-    )
-    routing = {
-      "mode" => "explicit", "policy_digest" => "a" * 64,
-      "decision" => {
-        "decision_id" => "provider-decision", "policy_digest" => "a" * 64,
-        "decided_at" => NOW.iso8601(6), "exclusions" => []
-      },
-      "route" => route,
-      "circuit_generations" => [
-        { "scope" => provider_scope.to_h, "journal_epoch" => 0, "observed_generation" => 0 },
-        { "scope" => scope.to_h, "journal_epoch" => 0, "observed_generation" => 0 }
-      ],
-      "probe_bindings" => []
-    }
-    launching = store.create_launching(
-      attempt_id: "provider-attempt", request_id: "provider-request",
-      predecessor_attempt_id: nil, task_id: "817", project: "hive",
-      task_slug: "demo-task", intended_stage: "4-execute",
-      task_generation: generation, ownership_generation: generation,
-      task_input_epoch: 1, progress_token: "progress", provider: "codex",
-      routing: routing, worker_argv: %w[hive run demo-task],
-      claim_capability_digest: Hive::Attempts::Capability.digest(capability),
-      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
-      launch_timeout_sec: 30, now: NOW - 30
-    )
-    claimed = store.claim(
-      launching, owner: { "pid" => Process.pid }, claim_capability: capability,
-      first_heartbeat_timeout_sec: 30, now: NOW - 29
-    )
-    running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW - 28)
-    writer = store.log_archive.open_writer(launching.attempt_id, clock: -> { NOW })
-    writer.close
-    reference = Hive::OutputReference.build(writer.path, root: store.root)
-    identity = Hive::ProviderHealth::RouteIdentity.new(
-      route_id: route.fetch("route_id"), account_id: route.fetch("provider_account_id"),
-      adapter: route.fetch("adapter"), launch_binding_id: route.fetch("launch_binding_id"),
-      model_id: route.fetch("model")
-    )
-    evidence = Hive::ProviderHealth::Evidence.new(
-      scope: scope, failure_class: "model_capacity",
-      provenance: "codex_jsonl_transport", route: identity,
-      reset_hint_seconds: 30, source_reference: reference,
-      attempt_id: launching.attempt_id
-    )
-    store.terminalize(
-      running, outcome: "failed", exit_status: 70,
-      final_checkpoint: running.checkpoint, output_references: [],
-      log_reference: reference, provider_evidence: evidence.to_h,
-      now: NOW - 27
-    )
   end
 
   def fixture_row(task, marker:, attrs:, mtime:)
@@ -2495,7 +2507,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
   def with_fixture(marker_attrs: nil, marker_name: "ERROR", mtime: NOW - 3600,
                    safety: nil, task_resolver_builder: nil, task_id: 817,
-                   generation_resolver: nil)
+                   generation_resolver: nil, attempt_store: nil,
+                   runtime_residue_recovery: nil)
     Dir.mktmpdir("hive-recovery-coordinator") do |dir|
       project_root = File.join(dir, "project")
       folder = File.join(
@@ -2532,8 +2545,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       coordinator = Hive::Daemon::RecoveryCoordinator.new(
         state_home: dir,
         dispatch_repository: Q.repository(dir),
+        attempt_store: attempt_store,
         task_resolver: task_resolver,
         safety: safety || ->(_row) { [ true, "safe" ] },
+        runtime_residue_recovery:,
         generation_resolver: generation_resolver || lambda do |resolved_task, project:, intended_stage:, state_file_content:|
           progress = Digest::SHA256.hexdigest(
             [ resolved_task.state_file, state_file_content ].join("\0")

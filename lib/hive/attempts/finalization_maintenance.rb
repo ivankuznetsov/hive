@@ -1,5 +1,4 @@
 require "hive/attempts/lost_outcome"
-require "hive/attempts/failure_cohort_reconciler"
 require "hive/attempts/repository"
 require "hive/attempts/storage_status"
 require "hive/task_projection/reader"
@@ -9,32 +8,23 @@ require "time"
 
 module Hive
   module Attempts
-    # Two-phase publication of final attempt authority. The final row and
-    # bounded consumer ledger are durable before acknowledgements can publish
-    # content-addressed payloads and remove the attempt from the hot view.
+    # Two-phase publication of final attempt authority. The final row carries
+    # the fixed consumer acknowledgements; no one-to-one publication ledger is
+    # created or removed.
     class FinalizationMaintenance
-      TERMINAL_CONSUMERS = %w[accounting journal request_delivery].freeze
-      LOST_CONSUMERS = (TERMINAL_CONSUMERS + [ "loss" ]).freeze
       MAINTENANCE_INTERVAL_SEC = 60 * 60
       LOG_RETENTION_SEC = 3 * 24 * 60 * 60
       COLD_SWEEP_LIMIT = 512
+      MAINTENANCE_TIME_BUDGET_SEC = 5
       MaintenanceStatus = Data.define(:attempt, :classification, :owner_status, :evidence)
 
       def self.runtime(store:, state_home: Hive::Paths.state_home, **options)
         require "hive/conditions/attempt_observer"
         require "hive/runtime_control_plane/dispatch_repository"
-        require "hive/provider_health/attempt_observer"
-        require "hive/provider_health/repository"
         observer = Hive::Conditions::AttemptObserver.new(store: store)
         new(
           store: store,
           condition_observer: observer,
-          provider_health_observer_factory: lambda do
-            health_store = Hive::ProviderHealth::Repository.new(
-              database: store.database
-            )
-            Hive::ProviderHealth::AttemptObserver.new(store: health_store)
-          end,
           delivery_pending: lambda do |record|
             Hive::RuntimeControlPlane::DispatchRepository.new(
               database: store.database
@@ -46,26 +36,29 @@ module Hive
 
       def initialize(store:, condition_observer: nil, delivery_pending: nil,
                      task_archived: nil, logger: nil,
-                     provider_health_observer_factory: nil)
+                     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                     maintenance_time_budget_sec: MAINTENANCE_TIME_BUDGET_SEC)
         @store = store
         @condition_observer = condition_observer
         @delivery_pending = delivery_pending
         @task_archived = task_archived
         @logger = logger
-        @provider_health_observer_factory = provider_health_observer_factory
-        @failure_cohort_reconciler = FailureCohortReconciler.new(store: store)
+        @monotonic_clock = monotonic_clock
+        @maintenance_time_budget_sec = Float(maintenance_time_budget_sec)
+        raise ArgumentError, "maintenance time budget must be positive" unless @maintenance_time_budget_sec.positive?
+
+        @last_started_at = nil
+        @last_completed_at = nil
+        @last_result = nil
+        @last_error = nil
+        @cursor_after = nil
       end
 
       def prepare(record)
         return false unless record.is_a?(Record) && record.final?
         return false if record.state == "lost" && !resolved_loss?(record)
 
-        consumers = record.state == "lost" ? LOST_CONSUMERS : TERMINAL_CONSUMERS
-        consumers = consumers + [ "provider_health" ] if record.explicit_routing?
-        @store.prepare_publication(
-          attempt_id: record.attempt_id,
-          consumers: consumers
-        )
+        @store.prepare_publication(attempt_id: record.attempt_id)
         true
       end
 
@@ -76,23 +69,6 @@ module Hive
         true
       end
 
-      def acknowledge_provider_health(record)
-        return true unless record.explicit_routing?
-        return false unless @provider_health_observer_factory
-
-        @provider_health_observer ||= @provider_health_observer_factory.call
-        result = @provider_health_observer.observe(record)
-        return false unless %i[acknowledged not_applicable].include?(result)
-
-        entry = @store.publication(record.attempt_id)
-        if entry&.fetch("consumers", {})&.key?("provider_health")
-          @store.acknowledge_publication(record.attempt_id, consumer: "provider_health")
-        end
-        true
-      rescue Hive::ProviderHealth::Error, Hive::ManagedDirectory::UnsafeError
-        false
-      end
-
       # Advances only consumers that are downstream of the task-authoritative
       # terminal receipt. Every operation is idempotent so daemon
       # reconciliation can retry this boundary without another agent dispatch.
@@ -100,10 +76,8 @@ module Hive
         entry = @store.publication(record.attempt_id)
         return false unless entry&.dig("consumers", "journal") == true
 
-        acknowledge(record, :loss) if record.state == "lost"
         publish_indexes(record)
         acknowledge(record, :accounting)
-        acknowledge_provider_health(record)
       end
 
       def promote(record)
@@ -117,17 +91,11 @@ module Hive
         log_result = @store.log_archive.archive(record.attempt_id)
         return false if log_result == :busy
 
-        current = @store.fetch_hot(record.attempt_id)
-        return true unless current
-        unless current.final? && current.to_h == proof.to_h
-          raise RepositoryError, "hot attempt changed after final proof publication"
+        current = @store.fetch(record.attempt_id)
+        unless current&.final? && current.to_h == proof.to_h
+          raise RepositoryError, "attempt changed after final proof publication"
         end
 
-        reservation = @store.reservation_metadata(current.attempt_id)
-        @failure_cohort_reconciler.reconcile(
-          record: current, admission: reservation&.fetch("admission", nil)
-        )
-        @store.release_live(attempt_id: record.attempt_id)
         @store.finish_publication(record.attempt_id)
         true
       end
@@ -137,14 +105,8 @@ module Hive
         return false unless acknowledge_journal(record, now: now)
         return false unless publish_after_journal(record)
 
-        acknowledge(record, :request_delivery) unless delivery_pending?(record)
+        acknowledge(record, :dispatch) unless delivery_pending?(record)
         promote(record)
-      end
-
-      def run_if_due(now: Time.now.utc)
-        maintain(now) do
-          @store.active_attempts.count { |record| finalize(record, now: now) }
-        end
       end
 
       def sweep_if_due(now: Time.now.utc)
@@ -153,43 +115,52 @@ module Hive
 
       def sweep_logs(now: Time.now.utc)
         deleted = 0
-        checkpoint = @store.maintenance_checkpoint
+        errors = 0
+        examined = 0
+        last_examined = nil
+        deadline = @monotonic_clock.call + @maintenance_time_budget_sec
         page = @store.log_archive.cold_attempt_ids_page(
-          cursor: { "after" => checkpoint && checkpoint.fetch(:cursor_after) },
+          cursor: { "after" => @cursor_after },
           limit: COLD_SWEEP_LIMIT
         )
         page.attempt_ids.each do |attempt_id|
-          record = @store.fetch(attempt_id)
-          next unless record&.final?
-          next if recovery_pinned?(record)
-          next unless retention_expired?(record, now: now) ||
-                      task_archived?(record)
+          break if @monotonic_clock.call >= deadline
 
-          deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
+          last_examined = attempt_id
+          examined += 1
+          begin
+            record = @store.fetch(attempt_id)
+            next unless record&.final?
+            next if recovery_pinned?(record)
+            next unless retention_expired?(record, now: now) ||
+                        task_archived?(record)
+
+            deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
+          rescue StandardError => error
+            errors += 1
+            record_maintenance_error(error, now: now, attempt_id: attempt_id)
+          end
         end
-        @store.advance_maintenance_cursor(page.cursor)
-        { deleted: deleted, cold_examined: page.attempt_ids.size }
+        @cursor_after = last_examined || page.cursor.fetch("after") if
+          last_examined || page.attempt_ids.empty?
+        { deleted: deleted, cold_examined: examined, errors: errors }
       end
 
       def storage_snapshot(hot_count:, invalid_hot_count:)
         diagnosis = @store.database.diagnostics
-        checkpoint = @store.maintenance_checkpoint
         database_error = !diagnosis.ok? && {
           "operation" => "status", "class" => diagnosis.error&.class&.name || "IntegrityError"
         }
-        maintenance_error = checkpoint&.fetch(:error_class) && {
-          "operation" => "maintenance", "class" => checkpoint.fetch(:error_class),
-          "observed_at" => checkpoint.fetch(:error_observed_at)
-        }
+        maintenance_error = @last_error
         error = maintenance_error || database_error
         status = StorageStatus.unknown
-        status["status"] = error ? "degraded" : (checkpoint&.fetch(:last_started_at) ? "healthy" : "unknown")
+        status["status"] = error ? "degraded" : (@last_started_at ? "healthy" : "unknown")
         status["layout"]["migration"] = diagnosis.ok? ? "complete" : "failed"
         status["hot"] = { "records" => hot_count, "invalid" => invalid_hot_count }
         status["maintenance"].merge!(
-          "last_started_at" => checkpoint&.fetch(:last_started_at),
-          "last_completed_at" => checkpoint&.fetch(:last_completed_at),
-          "last_result" => maintenance_result(checkpoint)
+          "last_started_at" => timestamp(@last_started_at),
+          "last_completed_at" => timestamp(@last_completed_at),
+          "last_result" => @last_result
         )
         status["last_error"] = error
         status["degraded_reason"] = maintenance_error ? "maintenance_failed" :
@@ -205,12 +176,19 @@ module Hive
       private
 
       def maintain(now)
-        return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
+        now = normalize_time(now)
+        empty = { ran: false, promoted: 0, deleted: 0, cold_examined: 0, errors: 0 }
+        return empty unless maintenance_due?(now)
+
+        @last_started_at = now
+        @last_error = nil
         result = sweep_logs(now: now).merge(ran: true, promoted: yield)
-        @store.complete_maintenance(now: now, result: result)
+        @last_completed_at = now
+        @last_result = result.slice(:promoted, :deleted, :cold_examined, :errors)
+          .transform_keys(&:to_s)
         result
       rescue StandardError => error
-        @store.fail_maintenance(error: error, now: now)
+        record_maintenance_error(error, now: now)
         raise
       end
 
@@ -237,24 +215,37 @@ module Hive
         true
       end
 
-      def claim_due(now)
-        @store.claim_maintenance(now: now, interval_sec: MAINTENANCE_INTERVAL_SEC)
+      def maintenance_due?(now)
+        !@last_started_at || now >= @last_started_at + MAINTENANCE_INTERVAL_SEC
       end
 
-      def maintenance_result(checkpoint)
-        return nil unless checkpoint&.fetch(:last_completed_at)
-
-        %i[promoted deleted cold_examined].to_h do |key|
-          [ key.to_s, checkpoint.fetch(key) ]
-        end
+      def record_maintenance_error(error, now:, attempt_id: nil)
+        @last_error = {
+          "operation" => "maintenance", "class" => error.class.name,
+          "observed_at" => timestamp(normalize_time(now))
+        }
+        @last_error["attempt_id"] = attempt_id.to_s if attempt_id
+        @logger&.event(
+          :attempt_maintenance_failed,
+          error_class: error.class.name, attempt_id: attempt_id
+        )
+      rescue StandardError
+        nil
       end
+
+      def normalize_time(value)
+        value.respond_to?(:utc) ? value.utc : Time.iso8601(value.to_s).utc
+      end
+
+      def timestamp(value) = value && Record.iso8601(value)
 
       def recovery_pinned?(record)
-        hot = @store.fetch_hot(record.attempt_id)
-        return false unless hot
+        publication = @store.publication(record.attempt_id)
+        return false unless publication
+        return true unless publication.is_a?(Hash)
 
-        !@store.publication_complete?(record.attempt_id)
-      rescue RepositoryError
+        publication.fetch("promoted") != true
+      rescue RepositoryError, KeyError
         true
       end
 
@@ -317,29 +308,11 @@ module Hive
       end
 
       def resolved_loss?(record)
-        !resolved_loss_successor(record).nil?
+        outcome = LostOutcomeTransition.new(store: @store).fetch(record.attempt_id)
+        LostOutcomeTransition::FINAL_PHASES.include?(outcome&.fetch("phase", nil)) &&
+          LostOutcomeTransition::SAFE_CLEANUPS.include?(outcome["cleanup"])
       rescue RepositoryError
         false
-      end
-
-      def resolved_loss_successor(record)
-        outcome = LostOutcomeTransition.new(store: @store).fetch(record.attempt_id)
-        return nil unless LostOutcomeTransition::FINAL_STATUSES.include?(outcome&.fetch("status", nil))
-        return nil unless LostOutcomeTransition::SAFE_CLEANUPS.include?(outcome["cleanup"])
-
-        successor_id = outcome["successor_attempt_id"].to_s
-        return nil if successor_id.empty? || successor_id == record.attempt_id
-        indexed_id = @store.successor_attempt_id(
-          predecessor_attempt_id: record.attempt_id
-        )
-        return nil unless indexed_id == successor_id
-
-        successor = @store.fetch(successor_id)
-        return nil unless successor && successor["predecessor_attempt_id"] == record.attempt_id
-        return nil unless successor.task_generation == record.task_generation
-        return nil unless successor.subject == record.subject
-
-        successor
       end
     end
   end

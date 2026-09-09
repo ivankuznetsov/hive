@@ -68,7 +68,8 @@ module Hive
                      lease_sec: 7200, dry_run: false,
                      classifier_factory: nil, manifest_resolver_factory: nil,
                      post_merge_batch_store_factory: nil,
-                     post_merge_slice_mapper: nil)
+                     post_merge_slice_mapper: nil, scheduled_scheduler: nil)
+        @scheduled_scheduler = scheduled_scheduler
         @registry = registry
         @config_loader = config_loader
         @job_store_factory = job_store_factory
@@ -115,6 +116,7 @@ module Hive
 
       def candidates(now: Time.now)
         @events.clear
+        scheduled = @scheduled_scheduler ? @scheduled_scheduler.candidates(now: now) : []
         managed = managed_entries
         stores_by_project = {}
         block_configuration_errors(now)
@@ -150,7 +152,7 @@ module Hive
                  discovery.map { |job| { aggregate: job, phase: :discovery } }
           [ entry.fetch("name"), work ]
         end
-        return [] if due_by_project.values.all?(&:empty?)
+        return scheduled if due_by_project.values.all?(&:empty?)
 
         ownership_snapshot = if @repository_ownership.respond_to?(:snapshot)
           @repository_ownership.snapshot
@@ -158,7 +160,7 @@ module Hive
           @repository_ownership
         end
 
-        managed.flat_map do |entry|
+        scheduled + managed.flat_map do |entry|
           project = entry.fetch("name")
           work = due_by_project.fetch(project)
           next [] if work.empty?
@@ -192,12 +194,13 @@ module Hive
       end
 
       def drain_events
-        drained = @events.dup
+        drained = @events.dup + (@scheduled_scheduler ? @scheduled_scheduler.drain_events : [])
         @events.clear
         drained
       end
 
       def reserve(candidate, now: Time.now)
+        return @scheduled_scheduler.reserve(candidate, now: now) if candidate[:action_phase] == :scheduled
         entry = candidate.fetch(:entry)
         phase = candidate.fetch(:action_phase, :discovery).to_sym
         store = %i[classification post_merge].include?(phase) ? nil : store_for(entry)
@@ -330,7 +333,7 @@ module Hive
       end
 
       def spawned(dispatch, pid:, process_start_time:, pgid:, now: Time.now)
-        return dispatch if @dry_run
+        return dispatch if @dry_run || dispatch.dig(:dispatch_token, :phase) == :scheduled
         return dispatch if dispatch.dig(:dispatch_token, :phase) == :classification
 
         @claim_maintenance_transitions.attach_discovery(
@@ -345,6 +348,8 @@ module Hive
       end
 
       def cancel(dispatch, reason:, now: Time.now)
+        return @scheduled_scheduler.cancel(dispatch, reason: reason, now: now) if
+          dispatch.dig(:dispatch_token, :phase) == :scheduled
         token = dispatch[:dispatch_token]
         return unless token
         return dispatch if @dry_run || token[:dry_run]
@@ -368,6 +373,11 @@ module Hive
       end
 
       def complete(dispatch_token:, exit_code:, envelope:, now: Time.now)
+        if dispatch_token[:phase] == :scheduled
+          return @scheduled_scheduler.complete(
+            dispatch_token: dispatch_token, exit_code: exit_code, envelope: envelope, now: now
+          )
+        end
         return completion_result(:dry_run, dispatch_token, envelope) if @dry_run || dispatch_token[:dry_run]
         return complete_classification(dispatch_token, exit_code, now) if
           dispatch_token[:phase] == :classification

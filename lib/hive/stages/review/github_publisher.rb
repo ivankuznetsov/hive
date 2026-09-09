@@ -3,7 +3,7 @@ require "open3"
 require "tempfile"
 require "hive/gh"
 require "hive/reviewers"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/worktree"
 
 module Hive
@@ -36,7 +36,7 @@ module Hive
 
           header = "### Reviewer: #{reviewer_name} - Pass #{format('%02d', pass)}"
           body = "#{header}\n\n#{file_body}"
-          if (hits = Hive::SecretPatterns.scan(body)).any?
+          if (hits = Hive::SecretScanner.scan(body)).any?
             warn "hive: review GitHub publish skipped for pass=#{format('%02d', pass)} reviewer=#{reviewer_name}; " \
                  "secret patterns=#{hits.map { |h| h[:name].to_s }.uniq.first(3).join(',')}"
             return :secret
@@ -106,12 +106,6 @@ module Hive
           )
           worktree_path = pointer.fetch("path")
           branch = pointer.fetch("branch")
-          persisted_head = frontmatter["head_oid"].to_s.downcase
-          unless persisted_head.match?(/\A[a-f0-9]{40,64}\z/)
-            warn "hive: review GitHub publish skipped; pr.md has no exact controller head identity"
-            return nil
-          end
-
           identity = Hive::Gh.repository_identity(worktree_path, cfg: cfg)
           unless parsed.fetch("host") == identity.fetch("host").downcase &&
                  parsed.fetch("repository") == identity.fetch("repository").downcase
@@ -124,7 +118,6 @@ module Hive
           ).one? do |candidate|
             candidate["state"].to_s.upcase == "OPEN" &&
               candidate["headRefName"].to_s == branch &&
-              candidate["headRefOid"].to_s.downcase == persisted_head &&
               candidate["number"].to_i == parsed.fetch("number") &&
               Hive::Gh.parse_pull_request_url(candidate["url"]) == parsed
           end

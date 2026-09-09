@@ -59,7 +59,7 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
 
   def lost_attempt(store)
     attempt = store.create_launching(
-      attempt_id: "lost-1", request_id: "request-1", predecessor_attempt_id: nil,
+      attempt_id: "lost-1", request_id: "request-1",
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-1",
       progress_token: "progress", provider: "codex",

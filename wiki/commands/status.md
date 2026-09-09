@@ -22,7 +22,7 @@ terminal history. The former public full-fleet status surface is removed.
 | `hive status` | Bounded human daemon/liveness snapshot. |
 | `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
 | `hive status --operational` | Concise human active-work and blocker view. |
-| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
+| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable stateless routing decision; superseded v1-v3 are removed. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |
@@ -206,6 +206,17 @@ not corruption; the next scan retries it while other tasks remain visible.
 Confirmation-free operational actions repeat this routine read under the task
 lock. If history changes or becomes invalid between status and `hive act`, the
 observation token is rejected without mutation.
+
+Dead process metadata is stale liveness only while the task's current action
+or marker still claims that a runner owns the step. A markerless controller
+task whose durable receipts already project `ready_to_run` or
+`ready_to_advance` reports `not_running` and keeps that workflow state even if
+an earlier attempt left dead process metadata in the runtime task lease. For
+daemon-enrolled projects the next transition remains scheduler-owned, and ordinary
+task-lock acquisition reclaims the dead holder with a higher fence without an
+operator repair step. A genuinely current
+`agent_running`, `AGENT_WORKING`, or `REVIEW_WORKING` claim with a dead runner
+continues to report `needs_repair`.
 
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and
@@ -697,3 +708,12 @@ task/commit locks and committed before the clock can hide a row.
 
 - [[cli]] · [[commands/run]] · [[commands/approve]] · [[commands/watch]]
 - [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/task_dependencies]] · [[modules/config]] · [[modules/plan_review]]
+
+## Historical terminal recovery
+
+The operational projection retains terminal recovery receipts for diagnostics,
+but `attempt_terminal_replay` does not override the current task state, blocker
+owner, or reason. For example, a Patrol fix now parked in review keeps its
+`Escalated (parked)` reason instead of becoming idle with reason `terminal`
+because an earlier recovery succeeded. Active recovery dispositions still
+participate in scheduling classification.

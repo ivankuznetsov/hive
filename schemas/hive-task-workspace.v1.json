@@ -259,7 +259,7 @@
     },
     "AttemptRecord": {
       "type": "object", "additionalProperties": false,
-      "required": ["attempt_id", "project_slug", "task_slug", "current", "stage", "task_generation", "ownership_generation", "predecessor_attempt_id", "state", "outcome", "accepted_at", "started_at", "ended_at", "requested_provider", "sessions"],
+      "required": ["attempt_id", "project_slug", "task_slug", "current", "stage", "task_generation", "ownership_generation", "state", "outcome", "accepted_at", "started_at", "ended_at", "requested_provider", "sessions"],
       "properties": {
         "attempt_id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "project_slug": { "$ref": "#/$defs/StringOrNull" },
@@ -268,7 +268,6 @@
         "stage": { "type": "string", "maxLength": 256 },
         "task_generation": { "type": ["integer", "string", "null"] },
         "ownership_generation": { "$ref": "#/$defs/StringOrNull" },
-        "predecessor_attempt_id": { "$ref": "#/$defs/StringOrNull" },
         "state": { "$ref": "#/$defs/StringOrNull" },
         "outcome": { "$ref": "#/$defs/StringOrNull" },
         "accepted_at": { "$ref": "#/$defs/DateTimeOrNull" },

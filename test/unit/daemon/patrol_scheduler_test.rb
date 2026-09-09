@@ -351,7 +351,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     Hive::UsageDb.database = old_database
   end
 
-  def test_provider_retry_hold_survives_scheduler_restart_without_parking_architecture
+  def test_provider_retry_backoff_is_process_local_and_not_retained_after_restart
     old_database = Hive::UsageDb.database
     with_tmp_dir do |dir|
       entry = project_entry(dir)
@@ -373,7 +373,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       )
 
       restarted = scheduler(entry, cfg)
-      assert_empty restarted.tick(now: T0 + 20)
+      assert_equal 1, restarted.tick(now: T0 + 20).size
       architecture = Hive::Patrol::LaunchBudget.new(
         dir, cfg: cfg, project_id: entry.fetch("project_id"),
         project_name: entry.fetch("name"), engine: :architecture,
@@ -381,7 +381,6 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
         clock: -> { T0 + 20 }
       )
       assert_equal 4, architecture.remaining_launches
-      assert_equal 1, restarted.tick(now: retry_at).size
     end
   ensure
     Hive::UsageDb.database = old_database
@@ -491,7 +490,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_event_drain_reservation_failure_and_malformed_provider_retry_are_bounded
+  def test_event_drain_reservation_failure_and_provider_retry_are_bounded_in_process
     with_tmp_dir do |dir|
       entry = project_entry(dir)
       sched = Hive::Daemon::PatrolScheduler.new(
@@ -506,10 +505,6 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_raises(RuntimeError) { sched.reserve(candidate, now: T0) }
       refute sched.pending?("p1")
 
-      parks = []
-      budget = Object.new
-      budget.define_singleton_method(:park!) { |**values| parks << values }
-      sched.define_singleton_method(:allowance_budget) { |*args, **kwargs| budget }
       sched.instance_variable_set(:@pending, "p1" => { entry: entry, started_at: T0 })
       sched.complete(
         project: "p1", exit_code: 1, now: T0,
@@ -517,7 +512,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
           "reason" => "provider_quota", "retry_after_sec" => "invalid"
         } } } ] }
       )
-      assert_equal T0 + 60, parks.fetch(0).fetch(:retry_at)
+      assert_equal T0 + 60,
+                   sched.instance_variable_get(:@failures).dig("p1", :next_eligible_at)
       assert_nil sched.send(:parse_retry_time, "not-a-time")
     end
   end

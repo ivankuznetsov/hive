@@ -743,6 +743,18 @@ module Hive
     end
     map "rebase-status" => :rebase_status
 
+    desc "publication-reconcile TARGET", "Adopt an inspected PR revision into the local publication record (no push)"
+    option :project, type: :string, desc: "scope lookup to one registered project"
+    option :pr, type: :string, required: true, desc: "verified task PR URL"
+    option :head, type: :string, required: true, desc: "full inspected current PR HEAD"
+    def publication_reconcile(target)
+      require "hive/commands/publication_reconcile"
+      Hive::Commands::PublicationReconcile.new(
+        target, project: options[:project], pr: options[:pr], head: options[:head], json: options[:json]
+      ).call
+    end
+    map "publication-reconcile" => :publication_reconcile
+
     desc "worktree SUBCOMMAND TARGET", "Inspect or repair task-owned worktree residue"
     long_desc <<~DESC
       Subcommands:
@@ -788,6 +800,7 @@ module Hive
         recover TARGET --generation SHA256 --recovery-digest SHA256
         rework TARGET --generation SHA256 --recovery-digest SHA256
         terminal NAME -- COMMAND...
+        server COMMAND -- ARGS...
         browser COMMAND [ARG...]
 
       Recovery is admitted only when both values match the current immutable
@@ -806,6 +819,10 @@ module Hive
       `browser` is the controller-scoped agent-browser gateway. It exposes the
       issued origin and a closed interaction vocabulary while Hive confines
       screenshot and recording output to the current attempt.
+
+      `server` starts one repository executable on the issued application port
+      inside an attempt-owned credential-free sandbox and tears it down with
+      the capture session.
     DESC
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :stage, type: :string,
@@ -1150,6 +1167,17 @@ module Hive
       ).call
     end
 
+    desc "refactor-patrol-scheduled PROJECT",
+         "Review one periodic current-main architecture slice (daemon/internal)", hide: true
+    option :result_file, type: :string, required: true
+    def refactor_patrol_scheduled(project)
+      require "hive/commands/refactor_patrol_scheduled"
+      result = Hive::Commands::RefactorPatrolScheduled.new(
+        project, result_file: options[:result_file]
+      ).call
+      exit 1 unless result.fetch("ok")
+    end
+
     desc "refactor-patrol-classify PROJECT",
          "Run one queued merge classifier (daemon/internal)", hide: true
     option :occurrence_id, type: :string, required: true
@@ -1345,46 +1373,6 @@ module Hive
       require "hive/commands/task"
       Hive::Commands::Task.new(
         target, project: options[:project], json: options[:json], log: options[:log]
-      ).call
-    end
-
-    desc "circuits [ACTION]", "Inspect or administer provider-account/model circuits"
-    long_desc <<~DESC
-      `hive circuits` (or `hive circuits inspect`) renders the sanitized,
-      durable provider-routing projection: account capacity, provider and
-      exact-model circuit state/generation, probe ownership, protected evidence
-      references, and recent deterministic route decisions.
-
-      Administrative actions are `block`, `unblock`, and `reset`. Circuit actions require
-      an exact configured --provider, optional exact --model, a bounded
-      single-line --reason, a fresh --expected-generation, and explicit --yes.
-      SQLite integrity failures are repaired through the runtime-control-plane
-      recovery workflow, not a per-circuit file quarantine. Actor identity
-      comes from the trusted local execution context; it cannot be supplied on
-      the command line.
-
-      These commands mutate provider health only. They never clear a task
-      marker, schedule a retry, change a retry charge, create a successor, or
-      dispatch work. Provider administration is intentionally absent from
-      `hive act`.
-    DESC
-    option :provider, type: :string, desc: "configured provider-account ID"
-    option :model, type: :string, desc: "exact configured model within --provider"
-    option :reason, type: :string, desc: "required bounded reason for a mutation"
-    option :expected_generation, type: :numeric,
-                                 desc: "fresh circuit generation from inspection"
-    option :yes, type: :boolean, default: false,
-                 desc: "approve one generation-fenced administrative mutation"
-    def circuits(action = "list")
-      require "hive/commands/circuits"
-      Hive::Commands::Circuits.new(
-        action,
-        provider: options[:provider],
-        model: options[:model],
-        reason: options[:reason],
-        expected_generation: options[:expected_generation],
-        yes: options[:yes],
-        json: options[:json]
       ).call
     end
 

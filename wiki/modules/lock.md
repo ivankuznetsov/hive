@@ -19,11 +19,13 @@ Sequel transaction, runs the block, then clears only the row whose random
 `holder_id` still matches. There is no task-folder `.lock`, tempfile guard,
 filesystem compatibility reader, or runtime backfill.
 
-The row contains typed holder identity, generation, monotonic `lease_version`,
-source fingerprint, acquire/expiry/release timestamps, and a bounded JSON
+The row contains typed holder identity, monotonic `lease_version`, and a bounded JSON
 payload. The payload projects operation detail plus runner and optional agent
 PID/start-time identities. JSON is canonicalized and bounded to 16 KiB before
 both claim and update; an oversized write cannot make its own row unreadable.
+
+Reclamation checks PID/start-time liveness, not elapsed lease time. Task source
+generation and fingerprints belong to task admission, not the lock row.
 
 Acquisition uses compare-and-swap against the observed lease version and
 holder. A live exact PID/start-time holder raises `Hive::ConcurrentRunError`.
@@ -108,6 +110,14 @@ transaction.
 and holds the descriptor while yielding. It is same-thread reentrant but
 process-scoped; forked children must contend normally. The kernel releases it
 on close or process death.
+
+While holding that commit lock, Hive checks for an abandoned Git `index.lock`.
+It only quarantines an unchanged, empty, regular file owned by the current user
+and older than a minute, after `ps` finds no Git process and `fuser` finds no
+open holder. Age alone is never sufficient. Missing/inaccessible inspection
+tools, live writers, nonempty locks, and symlinks are preserved. The quarantined
+file remains beside the index with a `.hive-stale-<nonce>` suffix. This recovery
+is limited to Hive state-repository commit windows, not arbitrary agent Git use.
 
 The commit lock serializes the shared hive-state Git index and brief commit
 window. It does not serialize long agents on different tasks. `.markers-lock`

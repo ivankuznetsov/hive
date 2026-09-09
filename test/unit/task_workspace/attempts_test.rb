@@ -25,7 +25,7 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
   def test_projection_binding_selects_one_current_attempt_and_keeps_concurrent_sessions_distinct
     store = ExactStore.new(
       "attempt-a" => attempt("attempt-a", state: "terminal", outcome: "failed"),
-      "attempt-b" => attempt("attempt-b", predecessor: "attempt-a")
+      "attempt-b" => attempt("attempt-b")
     )
     projection = projection(current: "attempt-b")
     panel = Hive::TaskWorkspace::Attempts.new(
@@ -42,8 +42,8 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
 
     assert_equal "current", panel.fetch("state")
     attempts = panel.fetch("records")
-    assert_equal 2, attempts.length
-    assert_equal [ false, true ], attempts.map { |row| row.fetch("current") }
+    assert_equal 1, attempts.length
+    assert_equal [ true ], attempts.map { |row| row.fetch("current") }
     current = attempts.find { |row| row.fetch("current") }
     assert_equal "attempt-b", current.fetch("attempt_id")
     assert_equal 2, current.fetch("sessions").length
@@ -52,7 +52,7 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
                  current.fetch("sessions").first.dig("actual_model", "value")
     assert_equal "unavailable",
                  current.fetch("sessions").last.dig("actual_model", "state")
-    assert_equal %w[attempt-b attempt-a], store.fetches
+    assert_equal %w[attempt-b], store.fetches
   end
 
   def test_missing_history_binding_does_not_scan_live_attempts
@@ -92,23 +92,21 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
     assert_equal "old-session", old.fetch("sessions").first.fetch("session_id")
   end
 
-  def test_predecessor_lookup_is_exact_bounded_and_missing_nodes_are_partial
-    limits = Hive::TaskWorkspace::Limits.new(predecessor_fetches: 1)
+  def test_attempt_projection_does_not_follow_or_expose_lineage
     store = ExactStore.new(
-      "attempt-c" => attempt("attempt-c", predecessor: "attempt-b"),
-      "attempt-b" => attempt("attempt-b", predecessor: "attempt-a"),
+      "attempt-c" => attempt("attempt-c").merge("predecessor_attempt_id" => "attempt-b"),
+      "attempt-b" => attempt("attempt-b"),
       "attempt-a" => attempt("attempt-a")
     )
     panel = Hive::TaskWorkspace::Attempts.new(
       projection: projection(current: "attempt-c"),
-      attempt_store: store, activities: [], limits: limits
+      attempt_store: store, activities: []
     ).call
 
-    assert_equal "partial", panel.fetch("state")
-    assert panel.fetch("truncated")
-    assert_equal %w[attempt-c attempt-b], store.fetches
-    assert_includes panel.fetch("diagnostics").map { |row| row.fetch("reason") },
-                    "predecessor_fetches_exhausted"
+    assert_equal "current", panel.fetch("state")
+    refute panel.fetch("truncated")
+    assert_equal %w[attempt-c], store.fetches
+    refute_includes panel.fetch("records").first.keys, "predecessor_attempt_id"
   end
 
   def test_oversized_seed_attempt_exhausts_the_byte_budget_before_projection
@@ -134,9 +132,9 @@ class TaskWorkspaceAttemptsTest < Minitest::Test
     }
   end
 
-  def attempt(id, predecessor: nil, state: "running", outcome: nil)
+  def attempt(id, state: "running", outcome: nil)
     {
-      "attempt_id" => id, "predecessor_attempt_id" => predecessor,
+      "attempt_id" => id,
       "intended_stage" => "4-execute", "task_input_epoch" => 3,
       "ownership_generation" => "owner-3", "provider" => "codex",
       "routing" => { "mode" => "legacy" }, "state" => state,

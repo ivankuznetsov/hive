@@ -57,7 +57,6 @@ owner page, never as competing links here.
 | `hive bench` | [[commands/bench-submit]] |
 | `hive bot` | [[commands/bot]] |
 | `hive brainstorm` | [[commands/stage_action]] |
-| `hive circuits` | [[commands/circuits]] |
 | `hive connect` | [[commands/screenote]] |
 | `hive daemon` | [[commands/daemon]] |
 | `hive decide` | [[commands/workflow]] |

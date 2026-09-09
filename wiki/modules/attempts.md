@@ -24,7 +24,8 @@ Retries use deterministic dispatch-request identity, not an attempt graph.
 `Hive::Attempts::API` is the public admission facade. The CLI, bot, web, daemon,
 and module-hook paths use the same dispatcher. A successful admission starts a
 detached supervisor; callers may attach or observe but do not own the worker's
-lifetime. The API does not own or reap child processes after handoff.
+lifetime.
+The API does not own or reap child processes after handoff.
 
 The private supervisor route is selected before public CLI dispatch. Its detached
 wrapper removes inherited Bundler and Ruby toolchain variables before it re-enters
@@ -92,8 +93,9 @@ written; accounting and publication acknowledgements remain independent.
 
 ## Lost recovery
 
-A lost attempt never projects a recovery marker; its row remains the recovery
-authority. Recovery stays direct without adding an event bus.
+A lost attempt never
+projects a recovery marker; its row remains the recovery authority.
+Recovery stays direct without adding an event bus.
 
 A proven-lost attempt advances through a monotonic recovery phase. Recovery
 creates or finds one deterministic dispatch request. When that request admits a

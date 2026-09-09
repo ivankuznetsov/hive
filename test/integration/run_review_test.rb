@@ -621,7 +621,7 @@ class RunReviewTest < Minitest::Test
             echo "2.1.118 (Claude Code)"
             exit 0
           fi
-          prompt="${@: -1}"
+          prompt="$(cat)"
           output_path="$(printf '%s' "$prompt" | sed -n 's/^.*Output structured findings to \\(.*\\)$/\\1/p' | head -n 1)"
           mkdir -p "$(dirname "$output_path")"
           printf '## High\\n- [ ] needs human review: reason\\n' > "$output_path"

@@ -909,8 +909,7 @@ class AgentTest < Minitest::Test
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
-        "--no-session-persistence",
-        "test"
+        "--no-session-persistence"
       ], claude_agent.send(:build_cmd)
     end
   end
@@ -1109,7 +1108,7 @@ class AgentTest < Minitest::Test
       assert_includes argv_log, "arg=--max-budget-usd"
       assert_includes argv_log, "arg=5"
       assert_includes argv_log, "arg=--no-session-persistence"
-      assert_includes argv_log, "arg=do work"
+      refute_includes argv_log, "arg=do work"
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end
@@ -2016,6 +2015,25 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_claude_profile_pipes_large_prompt_without_an_argv_placeholder
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      fake = File.join(dir, "fake-claude")
+      received = File.join(dir, "prompt")
+      File.write(fake, "#!/usr/bin/env bash\ncat > #{received}\n")
+      File.chmod(0o755, fake)
+      prompt = "p" * (256 * 1024)
+      with_env("HIVE_CLAUDE_BIN" => fake) do
+        result = Hive::Agent.new(
+          task: task, prompt: prompt, max_budget_usd: nil, timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:claude), status_mode: :exit_code_only
+        ).run!
+        assert_equal :ok, result[:status]
+        assert_equal prompt, File.binread(received)
+      end
+    end
+  end
+
   def test_pi_profile_pipes_large_prompt_without_an_argv_placeholder
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -2053,6 +2071,24 @@ class AgentTest < Minitest::Test
       assert_equal :ok, result[:status]
       assert_equal [ "-p" ], File.read(argv_log).lines.map(&:chomp)
       assert_equal prompt, File.binread(stdin_log)
+    end
+  end
+
+  def test_grok_reads_a_large_prompt_through_its_prompt_file_option
+    with_tmp_dir do |dir|
+      fake = File.join(dir, "fake-grok")
+      received = File.join(dir, "prompt")
+      File.write(fake, "#!/usr/bin/env bash\npath=\"${1#--prompt-file=}\"\ncat \"$path\" > #{received}\n")
+      File.chmod(0o755, fake)
+      prompt = "p" * (256 * 1024)
+      with_env("HIVE_GROK_BIN" => fake) do
+        result = Hive::Agent.new(
+          task: make_task(dir), prompt: prompt, max_budget_usd: nil, timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:grok), status_mode: :exit_code_only
+        ).run!
+        assert_equal :ok, result[:status]
+        assert_equal prompt, File.binread(received)
+      end
     end
   end
 

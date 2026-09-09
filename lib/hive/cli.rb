@@ -743,6 +743,18 @@ module Hive
     end
     map "rebase-status" => :rebase_status
 
+    desc "publication-reconcile TARGET", "Adopt an inspected PR revision into the local publication record (no push)"
+    option :project, type: :string, desc: "scope lookup to one registered project"
+    option :pr, type: :string, required: true, desc: "verified task PR URL"
+    option :head, type: :string, required: true, desc: "full inspected current PR HEAD"
+    def publication_reconcile(target)
+      require "hive/commands/publication_reconcile"
+      Hive::Commands::PublicationReconcile.new(
+        target, project: options[:project], pr: options[:pr], head: options[:head], json: options[:json]
+      ).call
+    end
+    map "publication-reconcile" => :publication_reconcile
+
     desc "worktree SUBCOMMAND TARGET", "Inspect or repair task-owned worktree residue"
     long_desc <<~DESC
       Subcommands:

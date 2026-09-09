@@ -254,6 +254,9 @@ module Hive
           directories = (directories + trusted_actor_read_roots(base_add_dirs)).uniq
         end
         child_environment = actor_environment(environment)
+        # Trusted packages run with the same environment as an ordinary agent.
+        # Keep explicit input bindings, but do not isolate installed tools/auth.
+        child_environment = ENV.to_h.merge(child_environment).freeze if scope.yolo?
         if runtime&.respond_to?(:compile_direct_actor)
           return runtime.compile_direct_actor(
             host: ProviderHost, scope:, task_root:, directories:, profile:,

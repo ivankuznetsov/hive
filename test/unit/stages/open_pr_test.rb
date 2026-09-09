@@ -16,7 +16,7 @@ class HiveStagesOpenPrTest < Minitest::Test
   end
 
   class FakeController
-    attr_reader :request, :phases
+    attr_reader :request, :phases, :existing_pr_url
     attr_accessor :creation_base_oid
 
     def initialize(publication)
@@ -24,8 +24,9 @@ class HiveStagesOpenPrTest < Minitest::Test
       @phases = []
     end
 
-    def publish!(request, revalidate:)
+    def publish!(request, revalidate:, existing_pr_url: nil)
       @request = request
+      @existing_pr_url = existing_pr_url
       %i[prepare before_push before_create final].each do |phase|
         @phases << phase
         raise "stale request" unless revalidate.call(phase)

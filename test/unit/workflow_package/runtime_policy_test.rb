@@ -892,6 +892,29 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_trusted_actors_use_normal_environment_and_direct_file_output_for_every_provider
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      with_env("TRUSTED_WORKFLOW_TEST_VALUE" => "inherited") do
+        %i[claude codex grok pi opencode].each do |name|
+          policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            "yolo", task_folder: task, package_root: package,
+            profile: Hive::AgentProfiles.lookup(name),
+            managed_outputs: [ File.join(task, "review.md") ]
+          )
+          assert_equal "inherited", policy.environment["TRUSTED_WORKFLOW_TEST_VALUE"], name
+          assert_empty policy.command_prefix, name
+          assert_empty policy.cli_flags, name
+          assert_nil policy.allowed_tools, name
+          assert_nil policy.disallowed_tools, name
+          refute policy.host_outputs?, name
+        end
+      end
+    end
+  end
+
   def test_yolo_actor_rejects_unavailable_or_non_directory_trusted_caller_roots
     with_tmp_dir do |dir|
       task = File.join(dir, "task")

@@ -43,13 +43,9 @@ module Hive
     class CachedStatusCommand
       include StatusCommand
 
-      ARCHIVE_REFRESH_FALLBACK_SECONDS = 300.0
-
       def initialize(
         source: Hive::Tui::StateSource.new(
-          poll_interval_seconds: 60,
-          archive_cache_mode: :visible,
-          archive_refresh_fallback_seconds: ARCHIVE_REFRESH_FALLBACK_SECONDS
+          poll_interval_seconds: 60
         ),
         recovery_status_command: Hive::Commands::Status.new(json: true),
         scheduler_snapshot_reader: Hive::Daemon::OperationalSnapshot::Reader.new,

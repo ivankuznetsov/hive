@@ -150,6 +150,30 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_default_source_keeps_archive_out_of_routine_transport
+    with_tmp_global_config do |home|
+      root = File.join(home, "demo")
+      hive_state = File.join(root, ".hive-state")
+      folder = File.join(hive_state, "stages", "9-done", "completed-task")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.to_yaml)
+      File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "completed-task", display_name: nil, completed_at: Time.now.utc)
+      project = { "name" => "demo", "path" => root, "hive_state_path" => hive_state }
+      File.write(File.join(home, "config.yml"), { "registered_projects" => [ project ] }.to_yaml)
+      feed = Hive::Web::StatusFeed.new
+
+      ordinary = feed.snapshot.fetch("projects").fetch(0)
+      assert_empty ordinary.fetch("tasks")
+      assert_equal 0, ordinary.fetch("hidden_archived_task_count", 0)
+      archive = feed.archive_snapshot.fetch("projects").fetch(0)
+      assert_equal [ "completed-task" ], archive.fetch("tasks").map { |row| row.fetch("slug") }
+      assert_empty feed.snapshot.fetch("projects").fetch(0).fetch("tasks")
+    ensure
+      feed&.stop
+    end
+  end
+
   def test_default_feed_uses_the_bounded_status_command
     feed = Hive::Web::StatusFeed.new
 

@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/publication_reconcile"
+require "hive/cli"
 
 class PublicationReconcileTest < Minitest::Test
   include HiveTestHelper
@@ -36,9 +37,8 @@ class PublicationReconcileTest < Minitest::Test
       ]
       run_with_replacements(replacements) do
         output, = capture_io do
-          Hive::Commands::PublicationReconcile.new(
-            "repair", project: "demo", pr: "https://github.com/acme/demo/pull/42", head: "a" * 40, json: true
-          ).call
+          Hive::CLI.start([ "publication-reconcile", "repair", "--project", "demo",
+                            "--pr", "https://github.com/acme/demo/pull/42", "--head", "a" * 40, "--json" ])
         end
         assert_equal "a" * 40, JSON.parse(output).fetch("head_oid")
         output, = capture_io do

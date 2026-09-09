@@ -220,9 +220,9 @@ class AgentRuntimeTest < Minitest::Test
       "--add-dir", "/workspace/extra",
       "--allowedTools", "Read", "--disallowedTools", "Write",
       "--max-budget-usd", "2",
-      *claude.output_format_flags, "do work"
+      *claude.output_format_flags
     ], claude_call.argv
-    assert_nil claude_call.stdin_data
+    assert_equal "do work", claude_call.stdin_data
 
     codex_call = compile(codex, add_dirs: [ "/workspace/extra" ], max_budget_usd: 2)
     assert_equal [

@@ -139,6 +139,8 @@ module AgentCliRuntime
       bin_default: "claude",
       env_bin_override_keys: %w[AGENT_CLI_RUNTIME_CLAUDE_BIN HIVE_CLAUDE_BIN],
       headless_flag: "-p",
+      # Print mode reads stdin; keep large review prompts out of exec arguments.
+      prompt_style: :piped_stdin,
       permission_skip_flag: "--dangerously-skip-permissions",
       add_dir_flag: "--add-dir",
       tool_scope_flags: {

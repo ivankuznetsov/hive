@@ -455,10 +455,6 @@ module Hive
             revalidate!(revalidate, :final)
             return state.fetch("pr")
           end
-          if state.fetch("phase") == "pr_observed"
-            blocked!("pr_observation_missing", "the observed pull request is absent from the complete inventory")
-          end
-
           case state.fetch("phase")
           when "prepared", "push_intent"
             state = reconcile_push(request, state, revalidate)

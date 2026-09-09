@@ -90,13 +90,15 @@ module Hive
           tag = "untrusted_patrol_review_#{token}"
           context = {
             "finding" => manifest, "fix_receipt" => fix,
-            "validation_receipt" => validation, "diff" => snapshot.fetch("diff")
+            "validation_receipt" => validation, "diff_digest" => snapshot.fetch("diff_digest")
           }
           <<~PROMPT
             Independently review one controller-selected Patrol patch.
             Controller task=#{task.slug} generation=#{manifest.dig('task', 'generation')}
             Controller evidence digest=#{manifest.dig('evidence_revision', 'digest')}
             Controller worktree HEAD=#{snapshot.fetch('head_revision')}
+            Inspect the patch in your current checkout with:
+            git diff #{fix.dig('payload', 'base_revision')} #{snapshot.fetch('head_revision')}
             Allowed routes: #{allowed.join(', ')}
             Run dependency setup and verification only in your current disposable checkout.
             Do not modify the source worktree referenced by the receipts.

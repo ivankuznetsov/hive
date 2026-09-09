@@ -53,11 +53,13 @@ class PatrolFixReviewStageTest < Minitest::Test
     end
   end
 
-  def test_valid_utf8_diff_from_bounded_git_capture_reaches_independent_review
-    with_review_task(source: "puts \"fixed — now\"\n") do |task, worktree_root, _manifest, _fix, _validation|
+  def test_review_reads_the_exact_utf8_patch_from_checkout_instead_of_embedding_it
+    with_review_task(source: "puts \"fixed — now\"\n") do |task, worktree_root, _manifest, fix, _validation|
       captured = nil
       runner = lambda do |**values|
         captured = values
+        diff = PatrolFixStageFixture.git(values.fetch(:worktree), "diff", fix.dig("payload", "base_revision"), "HEAD")
+        assert_includes diff, "fixed — now"
         File.write(values.fetch(:output_path), JSON.generate(
           "schema" => "hive-patrol-fix-review-report", "schema_version" => 1,
           "route" => "publish", "rationale" => "The UTF-8 patch is bounded and correct.",
@@ -72,7 +74,9 @@ class PatrolFixReviewStageTest < Minitest::Test
       )
 
       assert_equal :complete, result.fetch(:status)
-      assert_includes captured.fetch(:prompt), "fixed — now"
+      refute_includes captured.fetch(:prompt), "fixed — now"
+      assert_includes captured.fetch(:prompt), "git diff #{fix.dig('payload', 'base_revision')} #{fix.dig('payload', 'head_revision')}"
+      assert_includes captured.fetch(:prompt), fix.dig("payload", "diff_digest")
     end
   end
 

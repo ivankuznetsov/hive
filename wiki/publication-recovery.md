@@ -31,7 +31,10 @@ workflow retry and validation remain responsible for subsequent advancement.
 ## Patrol Fix
 
 Independent review uses the same disposable exact-HEAD materialization as
-validation. Dependency installation cannot dirty the authoritative fix worktree;
+validation. The prompt carries the exact base, head and digest, not the whole
+diff; the reviewer reads the patch from Git in that checkout. This avoids
+embedding megabytes of dependency deletions in the launch prompt. Dependency
+installation cannot dirty the authoritative fix worktree;
 the source snapshot is still checked after review to reject concurrent changes.
 
 A clean changed HEAD detected before review or publication returns the same

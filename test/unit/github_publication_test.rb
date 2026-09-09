@@ -519,6 +519,72 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  def test_second_rebase_finishes_a_previous_unacknowledged_push
+    with_published_revision do |repo, remote, original, revised, controller, _github|
+      assert_raises(IOError) do
+        controller.publish_rebase!(worktree_path: repo, branch: original.branch,
+                                   before_oid: original.head_oid, after_oid: revised.head_oid) do
+          capture("git", "-C", repo, "push", "origin", "#{revised.head_oid}:#{original.branch}")
+          raise IOError, "lost acknowledgement"
+        end
+      end
+      next_head = commit(repo, "next.txt", "next\n", "Next revision")
+      controller.publish_rebase!(worktree_path: repo, branch: original.branch,
+                                 before_oid: revised.head_oid, after_oid: next_head) do
+        capture("git", "-C", repo, "push", "origin", "#{next_head}:#{original.branch}")
+      end
+      assert_equal next_head, JSON.parse(File.read(state_path(repo))).fetch("published_head_oid")
+      assert_equal next_head, remote_oid(remote, original.branch)
+    end
+  end
+
+  def test_inspection_can_import_an_unrecorded_pr_but_cannot_change_its_identity
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      github = FakeGithub.new
+      github.records << github.owned_pr(request)
+      capture("git", "-C", repo, "push", "origin", "HEAD:#{request.branch}")
+      controller = controller_for(repo, remote, github)
+      url = github.records.first.fetch("url")
+      result = controller.reconcile_inspected!(request, pr_url: url, inspected_head: head, revalidate: ->(*) { true })
+      assert_equal 42, result.fetch("number")
+      github.records.first.merge!("number" => 43, "url" => "https://github.com/acme/demo/pull/43")
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.reconcile_inspected!(request, pr_url: github.records.first.fetch("url"),
+                                        inspected_head: head, revalidate: ->(*) { true })
+      end
+      assert_equal "revision_identity_conflict", error.code
+      github.records.clear
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.publish!(request, revalidate: ->(*) { true })
+      end
+      assert_equal "revision_identity_conflict", error.code
+    end
+  end
+
+  def test_recorded_pr_adoption_rejects_foreign_urls_and_divergent_history
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      github = FakeGithub.new
+      github.records << github.owned_pr(request)
+      capture("git", "-C", repo, "push", "origin", "HEAD:#{request.branch}")
+      controller = controller_for(repo, remote, github)
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.publish!(request, revalidate: ->(*) { true }, existing_pr_url: "https://github.com/acme/demo/pull/999")
+      end
+      assert_equal "pr_identity_conflict", error.code
+      later = commit(repo, "remote.txt", "remote\n", "Remote change")
+      capture("git", "-C", repo, "push", "origin", "HEAD:#{request.branch}")
+      github.records.first["head_oid"] = later
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.publish!(request, revalidate: ->(*) { true }, existing_pr_url: github.records.first.fetch("url"))
+      end
+      assert_equal "revision_history_rewritten", error.code
+      assert_equal later, remote_oid(remote, request.branch)
+      assert_equal 0, github.creates
+    end
+  end
+
   def test_unknown_rewrite_requires_explicit_current_head_inspection
     with_published_revision do |repo, remote, original, revised, controller, github|
       rewritten = capture("git", "-C", repo, "commit-tree", "#{revised.head_oid}^{tree}",

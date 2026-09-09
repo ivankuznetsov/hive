@@ -96,8 +96,9 @@ class AgentCliRuntimeRuntimeTest < Minitest::Test
     assert_equal [
       "claude", "-p", "--dangerously-skip-permissions",
       "--output-format", "stream-json", "--include-partial-messages",
-      "--verbose", "--no-session-persistence", "hello"
+      "--verbose", "--no-session-persistence"
     ], compile(:claude).argv
+    assert_equal "hello", compile(:claude).stdin_data
 
     codex = compile(:codex)
     assert_equal [

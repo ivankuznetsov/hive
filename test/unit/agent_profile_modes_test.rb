@@ -248,8 +248,7 @@ class AgentProfileModesTest < Minitest::Test
         profile: Hive::AgentProfiles.lookup(:claude)
       ).run!
       argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
-      # Same flags the pre-refactor test asserts against — claude profile
-      # must reproduce today's argv exactly.
+      # Claude retains the launch flags but receives the prompt through stdin.
       assert_includes argv, "arg=-p"
       assert_includes argv, "arg=--dangerously-skip-permissions"
       assert_includes argv, "arg=--add-dir"
@@ -261,7 +260,7 @@ class AgentProfileModesTest < Minitest::Test
       assert_includes argv, "arg=--include-partial-messages"
       assert_includes argv, "arg=--verbose"
       assert_includes argv, "arg=--no-session-persistence"
-      assert_includes argv, "arg=do work"
+      refute_includes argv, "arg=do work"
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end

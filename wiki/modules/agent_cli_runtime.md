@@ -15,6 +15,11 @@ can add, switch, and upgrade agent CLIs behind one request and result
 vocabulary. It is the first independently versioned gem kept in the Hive
 monorepo, with Hive as its primary consumer and orchestration policy owner.
 
+Claude print-mode prompts use the existing `piped_stdin` transport, like Pi
+and OpenCode. Hive supplies the complete prompt through its temporary stdin
+file rather than one process argument, avoiding `E2BIG` for large review diffs.
+The real-process regression sends 256 KiB and verifies byte-for-byte delivery.
+
 ## Public surface
 
 The package lives at `components/agent-cli-runtime/`, loads with

@@ -1386,10 +1386,12 @@ unchanged installed plugin observes the matching status identity.
 
 ## Active-only status projections still need installed dogfood and Patrol decoupling (2026-08-28)
 
-Routine daemon, bot, TUI, Web, and watch consumers now request an active-only
-projection, while archive history is loaded only on demand. Focused tests and a
-read-only source-checkout run against the live registry prove that completed
-Patrol history is absent and per-project projection errors remain isolated.
+As repaired during the 2026-09-09 PR sweep, in-process daemon, operational
+status, TUI, Web, and watch use the active projection; TUI/Web archive history
+is loaded on demand. The bot's internal CLI graph retains ordinary rows while
+its terminal notification recovery policy is unresolved. Focused source tests
+cover exact dependency loading and archive separation. Earlier live-registry
+measurements below predate these repairs and have not been repeated.
 This has not yet been installed or dogfooded through the managed daemon, Web,
 bot, and TUI runtimes, so do not treat source-checkout evidence as rollout
 proof.

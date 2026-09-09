@@ -86,7 +86,8 @@ class KanbanBoardTest < ApplicationSystemTestCase
       find_button("Expand Done column").send_keys(:enter)
       assert_selector "button[aria-expanded='true'][aria-label='Fold Done column']"
     end
-    assert_selector "#{band} [data-stage='9-done'] .kanban-card", text: "Completed card"
+    assert_no_selector "#{band} [data-stage='9-done'] .kanban-card"
+    assert_no_selector "#{band} .kanban-card", text: "Completed card"
     find("#{band} [data-stage='1-inbox'] button.kanban-column-toggle").click
     assert_no_selector "#{band} [data-stage='1-inbox'] .kanban-card"
 
@@ -97,7 +98,8 @@ class KanbanBoardTest < ApplicationSystemTestCase
     assert_selector "#{band} [data-stage='9-done']:not(.is-folded)"
     visit board_path(project: project)
     assert_selector "#{band} [data-stage='1-inbox'].is-folded"
-    assert_selector "#{band} [data-stage='9-done']:not(.is-folded) .kanban-card"
+    assert_selector "#{band} [data-stage='9-done']:not(.is-folded)"
+    assert_no_selector "#{band} [data-stage='9-done'] .kanban-card"
 
     # An untouched empty column opens when a live task arrives.
     new_slug = create_task!(project, "New brainstorm card")

@@ -207,7 +207,7 @@ module Hive
           if daemon_task_mode?
             daemon_task_payload(projects, now: now)
           else
-            json_payload(projects, now: now)
+            active_payload(projects, now: now)
           end
         end
       end
@@ -485,7 +485,7 @@ module Hive
         )
         source = status_payload || cache&.fetch("payload", nil)
         workflow_generations = capture_workflow_generations(projects) unless source
-        source ||= json_payload(
+        source ||= active_payload(
           projects, now: now, workflow_generations: workflow_generations
         )
         project_context = operational_project_context(
@@ -753,7 +753,7 @@ module Hive
               if @archive
                 projection.archive_rows
               elsif exclude_archived
-                projection.ordinary_rows.reject { |row| Hive::ArchiveFilter.archived_action?(row) }
+                projection.ordinary_rows.reject { |row| row[:task] && Hive::ArchiveFilter.archive_member?(row) }
               else
                 projection.ordinary_rows
               end
@@ -1818,11 +1818,7 @@ module Hive
       end
 
       def workflow_active_stage_dirs(generation)
-        return generation.active_stage_dirs if generation
-
-        Hive::Workflows::Registry.all
-          .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
-          .uniq
+        generation ? generation.active_stage_dirs : Hive::Workflows.all_active_stage_dirs
       end
 
       def workflow_terminal_stage_dirs(generation)

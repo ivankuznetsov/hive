@@ -1066,6 +1066,13 @@ class CommandsStatusTest < Minitest::Test
       refute rows.first.fetch("blocked")
       assert_includes reads, base
       refute_includes reads, unrelated
+
+      projects = [ status_project(project_root, hive_state) ]
+      frame = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        Hive::Commands::Status.new.internal_task_graph_payload
+      end
+      assert_equal "active", frame.fetch("projection")
+      assert_equal [ File.basename(dependent) ], frame.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
     end
   end
 
@@ -3750,10 +3757,10 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_nil cmd.send(:workflow_generation_for, {}, {})
-    expected_active = Hive::Workflows::Registry.all
-      .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
-      .uniq
-    assert_equal expected_active, cmd.send(:workflow_active_stage_dirs, nil)
+    active_dirs = cmd.send(:workflow_active_stage_dirs, nil)
+    assert_equal Hive::Workflows.all_active_stage_dirs, active_dirs
+    assert_includes active_dirs, "6-done", "content terminal still has work"
+    refute_includes active_dirs, "9-done", "coding terminal is inert"
   end
 
   def test_status_generation_capture_records_unexpected_project_failures

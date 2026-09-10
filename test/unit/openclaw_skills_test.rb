@@ -83,14 +83,32 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "Never publish externally"
   end
 
-  def test_projection_excludes_retired_daily_activity_surface
+  def test_projection_routes_daily_activity_through_the_persisted_json_record
     reference = ROOT.join("hive", "references", "daily-digest.md")
 
-    refute reference.exist?
+    assert reference.file?
     text = projection_text
-    refute_includes text, "what happened today, yesterday"
-    refute_includes text, "hive digest --json"
-    refute_includes text, "hive answer-digest"
+    assert_includes text, "what happened today, yesterday"
+    assert_includes text, "hive digest --json"
+    assert_includes text, "hive digest --date YYYY-MM-DD --project PROJECT --json"
+    assert_includes text, "previous_date"
+    assert_match(/A partial record with\s+no known items is `unknown`/, text)
+    assert_includes text, "Never reconstruct a daily record"
+    assert_includes text, "Never invoke `hive digest refresh`"
+    assert_includes text, "Never use the sendful `hive answer-digest`"
+    assert_includes text, "Do not run the current operational-status loop first"
+    assert_includes text, "Agents do not configure recap schedules"
+    assert_includes text, "No MCP-specific digest wrapper exists in V1"
+    assert_includes text, "does not add team identities, team ACLs, or per-project reader ACLs"
+    assert_includes text, "does not authorize a release, version choice, publication, or deployment"
+
+    scenarios = text[/\| Operator request \| Read sequence \|.*?(?=\n\n)/m]
+    refute_nil scenarios
+    assert_includes scenarios, "| What happened today? | `hive digest --json` |"
+    assert_includes scenarios, "| What happened yesterday? | `hive digest --json`, then `hive digest --date PREVIOUS_DATE --json`"
+    assert_includes scenarios, "| What happened in one project today? | `hive digest --project PROJECT --json` |"
+    assert_includes scenarios, "| Is a persisted day partial? | `hive digest --date YYYY-MM-DD --json` |"
+    assert_includes scenarios, "| Show a persisted day's late amendments. | `hive digest --date YYYY-MM-DD --json` |"
   end
 
   def test_projection_carries_the_guided_and_yolo_brainstorm_answering_contract

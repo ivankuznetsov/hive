@@ -21,6 +21,15 @@ brainstorm-answering slice pairs filesystem-level parser/writer/command tests
 with transcript-state integration fixtures, so conversational assertions never
 stand in for atomic write/no-write proof.
 
+Runtime simplification guards assert the contract, not historical source lengths:
+`runtime_control_plane/deletion_contract_test.rb` checks that retired stores,
+schemas, constants and environment inputs stay absent, while retained file
+authorities and clean bootstrap remain intact. The upgrade test still exercises
+every legacy writer and path override listed in `affected_production.yml`.
+Exact per-file line counts and Git-based net-deletion accounting were a one-time
+refactor receipt; they are no longer a recurring CI gate. Source-size comparison
+belongs in the PR diff, not a fixture updated by every unrelated edit.
+
 The natural-language workflow creator has a hermetic primary acceptance gate
 in `test/integration/workflow_creator_e2e_test.rb`. It exercises AE1–AE5 through
 the real CLI collaborators: exact editorial approve/reject semantics,

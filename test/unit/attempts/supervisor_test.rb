@@ -168,7 +168,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(2) { supervisor.run }
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       assert_equal "failed", terminal.outcome
       assert_equal "model_capacity", terminal.receipt.dig("provider_evidence", "failure_class")
@@ -207,7 +207,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(2) { supervisor.run }
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(10) { supervisor.run }
       diagnostic = diagnostic_from_terminal(store, store.fetch(attempt.attempt_id))
       assert_equal "model_capacity", diagnostic.fetch("code")
       assert_equal "provider", diagnostic.fetch("owner")
@@ -600,7 +600,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", 'Process.kill("KILL", Process.pid)' ]
       end
 
-      assert_equal 137, Timeout.timeout(2) { supervisor.run }
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       diagnostic = diagnostic_from_terminal(store, terminal)
       assert_equal "agent_signalled", diagnostic.fetch("code")

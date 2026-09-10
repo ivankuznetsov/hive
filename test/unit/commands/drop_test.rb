@@ -915,3 +915,5 @@ class DropCommandTest < Minitest::Test
                  drop.send(:error_kind_for, Hive::InternalError.new("boom"))
   end
 end
+
+require_relative "drop_agent_cleanup_cases"

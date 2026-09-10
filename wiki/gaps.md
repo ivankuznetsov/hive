@@ -731,6 +731,8 @@ integrity.
 
 56. **Stateless merge-watcher rollout is not yet live-evidenced.** The former reconciliation ledger, durable cursor, and remote/intake checkpoints are removed. Candidate reconstruction and process-local oldest-polled selection now provide bounded fair polling; idempotent architecture intake and durable `TaskClosure` receipts own restart safety at the side-effect boundaries. A later authorized deployment must demonstrate restart rediscovery and show that one failing repository or deferred intake does not block a healthy merged task. No retained per-task watcher ledger is expected.
 
+57. **Single-PID TERM-to-KILL escalation still has an identity-check-to-signal race.** `Hive::ProcessKill.terminate_process` now verifies the recorded start identity immediately before escalating to KILL, but the matching process can exit and its PID can be reused between that check and `Process.kill`. The later identity classification cannot undo a signal already delivered to a replacement process. Fully closing this race requires a durable OS process handle such as a pidfd (or an equivalent cross-platform lifetime boundary); repeated start-time checks can narrow but cannot eliminate the window.
+
 ## 2026-06-16/17 refresh uncertainty
 
 The 2026-06-17 audit rechecked recent source, tests, git history, project wiki
@@ -1463,3 +1465,10 @@ Automatic recovery requires successful process and open-file probes (`ps` and
 nonempty locks deliberately leave recovery to a later retry or operator.
 This is not general recovery of interrupted Git operations; preserved lock
 files may still require inspection on platforms without these probes.
+
+## Hive Web readable logs depend on persisted messages (2026-09-04)
+
+Durable logs deliberately omit some structured provider messages for secret
+safety. The readable log view cannot recover message text that was never
+persisted; it hides omission markers instead of presenting them as errors.
+Plain output and safely available supported message records remain readable.

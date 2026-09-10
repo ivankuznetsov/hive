@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
 ---
 
@@ -103,11 +103,11 @@ intact. Source-checkout dogfood must set `HIVE_WEB_BUNDLE_URL` to that checkout'
 authoritative and suppresses both managed installation and refresh, including
 when combined with `--force`.
 
-`hive web start --detach` starts that service and reloads
-systemd-user first on Linux so a unit written while systemd-user was unavailable
-becomes visible. Foreground
-`hive web start` is equivalent to `hive web`. `status --json` emits
-`hive-web-status.v1`; `install --json` emits `hive-web-install.v1`. Both carry
+`hive web start --detach` starts that service and reloads systemd-user first on
+Linux so a unit written while systemd-user was unavailable becomes visible.
+Foreground `hive web start` is equivalent to `hive web`. `hive web status --json`
+emits `hive-web-status.v1`; `hive web install --json` emits
+`hive-web-install.v1`. Both carry
 `mode: "managed_service"`, deduplicated environment migration warnings, and
 separate installed, enabled, running, manager availability, URL, and readiness
 state on success and pre-dispatch/runtime errors. Readiness probes the local
@@ -131,6 +131,18 @@ this status-specific runtime field. Bootstrap and service-install exceptions fro
 `install --json` likewise emit
 exactly one versioned install error envelope, distinguished by
 `bootstrap_failed` and `service_install_failed`.
+
+Pre-dispatch argv failures distinguish `web status` from `web install` and use
+the matching versioned envelope with `error_kind: "invalid_task_path"`.
+
+## Output exceptions, serialization, and exit codes
+
+Foreground `hive web` is human-readable. Machine lifecycle modes emit
+`hive-web-status.v1` or `hive-web-install.v1`, including their matching typed
+error arms. Those documents are encoded directly: a JSON serialization failure
+propagates and no prose or fallback JSON document is emitted. Success exits `0`;
+an unready service or ordinary bootstrap/service failure exits `1`, invalid
+arguments exit `64`, and invalid web configuration exits `78`.
 
 ## Environment compatibility
 
@@ -1124,3 +1136,40 @@ Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 Live-status setup uses one error boundary for consumer creation, installation,
 and subscription registration. It routes failure by current attempt identity;
 retired attempts dispose their own resources and cannot affect the successor.
+
+## Task views focused on current work
+
+Board and Grid show a plain-language state separately from the current stage.
+`TaskDisplay` translates the existing task projection for display only; it does
+not change scheduling or action eligibility. Ready work is not labelled running,
+a completed intermediate stage is not labelled a completed task, and stale
+active rows do not claim current liveness. Rejected Patrol findings remain
+paused even when the versioned action key is normalized to `needs_input`.
+State links count and filter the selected project and survive ordinary GET and
+Turbo refreshes. Running work and decisions sort before ready, waiting, paused
+and completed tasks; the Running count remains visible at zero.
+
+Task pages lead with step/state and the selected workflow document. Existing
+workflow-declared primary result selection remains authoritative. Missing usage
+is omitted; recorded usage and failure diagnostics are disclosed on demand.
+Dependency panels require an actual relationship; code panels require a real
+worktree or PR. Closure receipt digests, duplicate action/quality fields and
+repeated slugs are omitted from ordinary content. Document outlines and review
+metadata, routes and audit documents are collapsed; review findings and actions
+remain available. Structured primary files are disclosed on demand instead of
+showing raw JSON as the page body. Task references and manual
+closure remain under Advanced. Bounded publication and mutation guards remain
+unchanged.
+
+The task log view extracts readable provider messages, results, errors and tool
+names, with category and text filters. It preserves bounded reads, safe escaping,
+receipt-bound failure logs, polling pauses while reading and filter selections
+across frame replacement. Unrecognized envelopes, reasoning and tool input/output
+payloads are not displayed as log messages.
+
+Task display completion follows explicit archive context or the canonical archived
+action. A workflow’s final directory can still contain an active agent stage.
+State filtering retains unavailable-project warnings; query values remain URL
+query data. Missing artifact or publication evidence is presented as unavailable,
+not as proof that work or publication never happened. Log filter results are
+announced through a polite status region and persist through frame reloads.

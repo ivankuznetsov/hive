@@ -122,6 +122,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ %w[forget project extra], "forget", 1, "usage" ],
       [ %w[metrics rollback-rate extra], "metrics-rollback-rate", 1, "error" ],
       [ %w[answer-digest extra], "answer-digest", 1, "usage" ],
+      [ %w[digest extra], "digest", 1, "usage" ],
       [ %w[answer], "answer", 1, "usage" ],
       [ %w[workflow validate editorial extra], "workflow-validate", 1, "usage", { "valid" => false, "id" => "editorial" } ],
       [ %w[worktree status demo extra], "worktree", 1, "invalid_arguments" ],

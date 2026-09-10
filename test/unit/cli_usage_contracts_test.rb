@@ -19,6 +19,7 @@ class CliUsageContractsTest < Minitest::Test
   def test_single_shape_commands_resolve_from_their_boundary_declarations
     [
       [ %w[run], { schema: "hive-run", error_kind: "invalid_task_path" } ],
+      [ %w[digest], { schema: "hive-digest", error_kind: "usage" } ],
       [ %w[approve], { schema: "hive-approve", error_kind: "invalid_task_path" } ],
       [ %w[brainstorm], { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "brainstorm" } } ],
       [ %w[metrics], { schema: "hive-metrics-rollback-rate", error_kind: "error", omit_error_class: true } ],

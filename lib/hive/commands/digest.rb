@@ -6,6 +6,9 @@ require "hive/daily_digest/public_view"
 require "hive/daily_digest/reader"
 require "hive/daily_digest/task_links"
 require "hive/tui/text"
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("digest", { schema: "hive-digest", error_kind: "usage" })
 
 module Hive
   module Commands

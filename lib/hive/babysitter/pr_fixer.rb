@@ -1,4 +1,5 @@
 require "fileutils"
+require "shellwords"
 require "hive/agent_profiles"
 require "hive/babysitter/context_builder"
 require "hive/babysitter/dry_run_env"
@@ -287,11 +288,21 @@ module Hive
       end
 
       def render_prompt(worktree_path, context)
+        head_ref = @pr.fetch("headRefName")
+        base_ref = @pr.fetch("baseRefName")
         bindings = Hive::Stages::Base::TemplateBindings.new(
           pr_number: number,
           pr_url: @pr["url"],
-          head_ref: @pr.fetch("headRefName"),
-          base_ref: @pr.fetch("baseRefName"),
+          head_ref: head_ref,
+          base_ref: base_ref,
+          # Git ref names may contain shell metacharacters (`$`, `(`, `)` are
+          # all legal in refs and `git check-ref-format` accepts them), and the
+          # template interpolates the head ref into an executable shell recipe
+          # (fetch/rev-parse/push). Bind a shell-escaped form for those
+          # positions so an adversarial headRefName like `review$(printf-owned)`
+          # is passed to Git as a literal argument instead of being evaluated
+          # by the shell. Display-only lines keep the raw name.
+          head_ref_sh: Shellwords.escape(head_ref),
           failing_jobs: context.failing_jobs,
           mergeable_state: context.mergeable_state,
           dry_run: @dry_run,

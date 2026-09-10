@@ -336,6 +336,49 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_render_prompt_shell_escapes_head_ref_in_executable_positions
+    # This exact ref is accepted by `git check-ref-format refs/heads/<ref>`
+    # and, once pasted into a shell, runs command substitution before Git.
+    hostile_ref = "review$(printf-owned)"
+    hostile_pr = pr.merge("headRefName" => hostile_ref)
+    worktree_path = "/tmp/nonexistent-wt"
+    context = Hive::Babysitter::ContextBuilder::Context.new(
+      status_rollup: {},
+      failing_jobs: [],
+      diff_stat: "",
+      mergeable_state: "CLEAN",
+      base_ref: "main",
+      head_ref: hostile_ref
+    )
+
+    prompt = nil
+    with_replaced_singleton_method(Hive::Babysitter::ContextBuilder, :build, ->(**_kwargs) { context }) do
+      fixer = Hive::Babysitter::PrFixer.new(
+        hostile_pr,
+        { "name" => "demo", "path" => "/tmp", "hive_state_path" => "/tmp/.hive-state" },
+        cfg,
+        dry_run: false,
+        logger: nil,
+        inflight: Set.new
+      )
+      prompt = fixer.send(:render_prompt, worktree_path, context)
+    end
+
+    escaped = Shellwords.escape(hostile_ref)
+    # Every executable position (fetch, rev-parse, push, prose backticks) must
+    # use the shell-escaped form so the ref reaches Git as a literal argument.
+    assert_includes prompt, "git fetch origin #{escaped}"
+    assert_includes prompt, "git rev-parse origin/#{escaped}"
+    assert_includes prompt, "git push --force-with-lease origin HEAD:#{escaped}"
+    # The raw ref must never appear in an executable shell position; here the
+    # unescaped form would run `$(printf owned)` as command substitution.
+    refute_includes prompt, "git fetch origin #{hostile_ref}"
+    refute_includes prompt, "git rev-parse origin/#{hostile_ref}"
+    refute_includes prompt, "git push --force-with-lease origin HEAD:#{hostile_ref}"
+    # Display-only lines keep the human-readable name.
+    assert_includes prompt, "Head branch: #{hostile_ref}"
+  end
+
   def green_behind_status
     {
       "mergeable" => "MERGEABLE",

@@ -164,7 +164,7 @@ GEM
       rubocop-rails (>= 2.30)
     ruby-progressbar (1.13.0)
     securerandom (0.4.1)
-    sequel (5.107.0)
+    sequel (5.108.0)
       bigdecimal
     simpleidn (0.2.3)
     sqlite3 (2.9.6-aarch64-linux-gnu)

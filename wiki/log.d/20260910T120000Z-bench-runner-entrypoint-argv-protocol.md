@@ -20,3 +20,12 @@ bash so the image environment matches the string protocol.
 (`test_packaged_runner_entrypoint_honors_both_command_protocols`) simulates
 Docker's ENTRYPOINT+CMD argv assembly and asserts both protocols, including
 argument-boundary preservation.
+
+The image build must install the entrypoint while still root: COPYing it after
+`USER runner` leaves a root-owned file in the root-owned /usr/local/bin that the
+unprivileged runner user cannot chmod (`chmod: changing permissions of
+/usr/local/bin/hb-entrypoint: Operation not permitted`), so the image build
+dies. `Dockerfile.runner` therefore COPYs and chmods `/usr/local/bin/hb-entrypoint`
+before `useradd`/`USER runner`, and
+`test_runner_dockerfile_installs_entrypoint_before_dropping_to_runner_user`
+asserts that ordering.

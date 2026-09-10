@@ -16,6 +16,10 @@
         "schema_version": { "const": 8 },
         "ok": { "const": true },
         "generated_at": { "type": "string", "format": "date-time" },
+        "projection": {
+          "type": "string",
+          "enum": ["ordinary", "active", "archive", "partial"]
+        },
         "partial": { "type": "boolean" },
         "projects": { "type": "array", "items": { "$ref": "#/$defs/Project" } }
       }

@@ -7,10 +7,7 @@ class Board
     def folded_by_default? = tasks.empty? || terminal
   end
 
-  Band = Data.define(
-    :project, :workflow_id, :columns, :daemon_enabled, :error,
-    :hidden_archived_task_count
-  ) do
+  Band = Data.define(:project, :workflow_id, :columns, :daemon_enabled, :error) do
     def task_count = columns.sum { |column| column.tasks.size }
 
     def unavailable? = error.present?
@@ -42,7 +39,7 @@ class Board
     workflow_ids = tasks_by_workflow.keys.sort
     workflows = workflows_for(project, workflow_ids)
 
-    workflow_ids.map.with_index do |workflow_id, index|
+    workflow_ids.map do |workflow_id|
       tasks = tasks_by_workflow.fetch(workflow_id)
       workflow = workflows[workflow_id]
       Band.new(
@@ -50,10 +47,7 @@ class Board
         workflow_id:,
         columns: columns_for(workflow, tasks),
         daemon_enabled:,
-        error: project["error"].presence || ("workflow_unavailable" unless workflow),
-        # The count is project-scoped, so attach it to exactly one band. A
-        # mixed-workflow project must render one summary, not one per band.
-        hidden_archived_task_count: index.zero? ? project.hidden_archived_task_count : 0
+        error: project["error"].presence || ("workflow_unavailable" unless workflow)
       )
     end
   end

@@ -183,7 +183,7 @@ class DaemonAutoRetryTest < Minitest::Test
       marker:, marker_attrs: attrs, folder: dir, state_file:,
       state_file_mtime: observed_at,
       action:, suggested_command: nil, claude_pid_alive: nil,
-      live_task_lock: nil, diagnostic: nil
+      live_task_lock: nil
     )
   end
 

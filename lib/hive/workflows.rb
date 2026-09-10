@@ -169,6 +169,10 @@ module Hive
       @all_stage_dirs ||= Registry.all.flat_map(&:stage_dirs).uniq.freeze
     end
 
+    def all_active_stage_dirs
+      @all_active_stage_dirs ||= Registry.all.flat_map(&:active_stage_dirs).uniq.freeze
+    end
+
     def all_stage_names
       @all_stage_names ||= Registry.all.flat_map(&:stage_names).uniq.freeze
     end
@@ -184,6 +188,7 @@ module Hive
 
     def reset_union_cache!
       @all_stage_dirs = nil
+      @all_active_stage_dirs = nil
       @all_stage_names = nil
       @all_terminal_stage_dirs = nil
     end

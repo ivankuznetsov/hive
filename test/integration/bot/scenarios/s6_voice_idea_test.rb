@@ -154,7 +154,6 @@ class HiveBotScenarioVoiceIdeaTest < Minitest::Test
     Hive::Bot::StatusWatcher::Row.new(
       project: project,
       project_path: project_root,
-      hive_state_path: File.join(project_root, ".hive-state"),
       slug: slug,
       stage: "2-brainstorm",
       workflow: "coding",

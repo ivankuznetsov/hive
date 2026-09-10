@@ -333,6 +333,35 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_daemon_task_payload_checks_dependencies_when_authoritative
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = "dependent-task-260823-abcd"
+      folder = write_status_task(
+        hive_state, "1-inbox", dependent, state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 2, slug: dependent, display_name: nil,
+        depends_on: "prerequisite-task-260823-abcd"
+      )
+      write_status_task(
+        hive_state, "9-done", "prerequisite-task-260823-abcd",
+        state_file: "done.md", marker: "COMPLETE"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{dependent}" ]
+      )
+
+      payload = command.daemon_task_payload(
+        [ status_project(project_root, hive_state) ], authoritative_dependencies: true
+      )
+
+      row = payload.dig("projects", 0, "tasks", 0)
+      assert_equal dependent, row.fetch("slug")
+      assert_equal false, row.fetch("blocked")
+    end
+  end
+
   def test_daemon_task_payload_fails_closed_when_dependency_projection_raises
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -682,6 +711,11 @@ class CommandsStatusTest < Minitest::Test
 
       assert_empty project.fetch("tasks")
       assert_equal 1, project.fetch("hidden_archived_task_count")
+      exact = Hive::Commands::Status.new(daemon_tasks: [ "demo:#{File.basename(folder)}" ])
+        .daemon_task_payload([ status_project(project_root, hive_state) ], now: now,
+                             authoritative_dependencies: true)
+      assert_equal "partial", exact.fetch("projection")
+      assert_equal [ File.basename(folder) ], exact.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
     end
   end
 
@@ -1002,6 +1036,44 @@ class CommandsStatusTest < Minitest::Test
     line = Hive::Commands::Status.new.send(:operational_row_line, row)
 
     assert_includes line, "routing no_eligible_provider_route"
+  end
+
+  def test_active_payload_exact_loads_only_referenced_terminal_dependencies
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "9-done", "base-task-260909-aaaa",
+                               state_file: "task.md", marker: "COMPLETE")
+      unrelated = write_status_task(hive_state, "9-done", "unrelated-task-260909-bbbb",
+                                    state_file: "task.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260909-cccc",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(unrelated, id: 2, slug: File.basename(unrelated), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 3, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: File.basename(base))
+      reads = []
+      original = Hive::TaskMeta.method(:read_for_admission)
+      reader = lambda do |folder|
+        reads << folder
+        original.call(folder)
+      end
+      payload = with_replaced_singleton_method(Hive::TaskMeta, :read_for_admission, reader) do
+        Hive::Commands::Status.new.active_payload([ status_project(project_root, hive_state) ])
+      end
+      rows = payload.fetch("projects").first.fetch("tasks")
+      assert_equal "active", payload.fetch("projection")
+      assert_equal [ File.basename(dependent) ], rows.map { |row| row.fetch("slug") }
+      refute rows.first.fetch("blocked")
+      assert_includes reads, base
+      refute_includes reads, unrelated
+
+      projects = [ status_project(project_root, hive_state) ]
+      frame = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        Hive::Commands::Status.new.internal_task_graph_payload
+      end
+      assert_equal "active", frame.fetch("projection")
+      assert_equal [ File.basename(dependent) ], frame.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
+    end
   end
 
   def test_json_payload_unblocks_dependency_at_gate_stage
@@ -2638,6 +2710,14 @@ class CommandsStatusTest < Minitest::Test
         visible-forever-260610-abcd visible-seven-260610-abcd
       ], archived.fetch("tasks").map { |task| task.fetch("slug") }.sort
       refute archived.key?("hidden_archived_task_count")
+
+      indexed = Hive::Commands::Status.new.json_payload(
+        [ project ], now: now, include_archive_index: true
+      ).fetch("projects").first
+      assert_equal archived.fetch("tasks").map { |task| task.fetch("slug") }.sort,
+                   indexed.fetch("__archive_folders").map { |folder| File.basename(folder) }.sort
+      assert_predicate indexed.fetch("__archive_folders"), :frozen?
+      refute ordinary.key?("__archive_folders")
     ensure
       Hive::Workflows::Project.reset!
     end
@@ -3195,7 +3275,7 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_includes output,
-                    "SNAPSHOT COMPLETE — 0 active · 0 archived · task graph cached 32s ago"
+                    "SNAPSHOT COMPLETE — 0 active · archive on demand · task graph cached 32s ago"
   end
 
   def test_operational_project_context_fails_closed_when_config_is_unreadable
@@ -3683,10 +3763,10 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_nil cmd.send(:workflow_generation_for, {}, {})
-    expected_active = Hive::Workflows::Registry.all
-      .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
-      .uniq
-    assert_equal expected_active, cmd.send(:workflow_active_stage_dirs, nil)
+    active_dirs = cmd.send(:workflow_active_stage_dirs, nil)
+    assert_equal Hive::Workflows.all_active_stage_dirs, active_dirs
+    assert_includes active_dirs, "6-done", "content terminal still has work"
+    refute_includes active_dirs, "9-done", "coding terminal is inert"
   end
 
   def test_status_generation_capture_records_unexpected_project_failures

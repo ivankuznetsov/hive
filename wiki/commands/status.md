@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-09-02
+updated: 2026-09-09
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal]
 ---
 
@@ -352,18 +352,17 @@ cover workflow stage actions plus generic `run` and `approve` branches from
 status-issued tokens.
 
 Status captures every registered project's workflow/config generation before
-scanning any project's rows, captures one UTC `now`, and then publishes either
-the ordinary or dedicated archive projection. Dependency admission uses those
-same captured generations and is built from the complete
-graph before presentation filtering, so an expired completed dependency still
-satisfies its dependants. When concise operational status builds that graph, it
-also derives each project's `daemon.enabled` context from the captured
-generation instead of parsing the project config a second time. Callers that
-provide an existing status payload retain the context-only config read and do
-not trigger a new workflow-generation scan. Daemon, bot, TUI, and web consume
-the ordinary projection. The TUI separately caches a fresh archive-mode
-payload for its dedicated archive pane and dependency context; it never
-reconstructs ordinary visibility from row timestamps.
+scanning rows and uses one UTC `now`. Active projections build dependency
+admission from active rows and their exact referenced prerequisites, so an
+expired completed dependency still satisfies its dependants. Ordinary and
+archive projections retain the complete dependency graph. Operational status
+uses the captured generation for each project's `daemon.enabled` context;
+callers supplying an existing payload keep the context-only config read.
+
+Daemon, TUI, and Web consume active rows. The bot's CLI transport still consumes
+ordinary rows. The TUI separately loads a lossless archive payload on request;
+archive history is not merged back into the active feed or used to derive its
+dependency context.
 
 The JSON envelope isolates project-local failures. Missing roots report
 `error: missing_project_path`, missing state roots report
@@ -492,15 +491,18 @@ durable per-project cursor under Hive's state home rotates past persistent
 failures across one-shot CLI processes, and the path-only backfill commit
 preserves unrelated staged operator changes.
 
-Operational status, daemon snapshots, TUI, web, and Hivebox omit expired
-archived rows. Every
-successful ordinary project JSON object carries the non-negative
-`hidden_archived_task_count` (including `0`); task objects do not expose
-`completed_at`, retention, hidden details, or hidden reasons. Operational
-status and daemon snapshots aggregate the same key without copying hidden
-rows. Human CLI and TUI surfaces render
-`… and 1 older archived task (hive archive to view)` or
-`… and N older archived tasks (hive archive to view)`.
+Operational status, in-process daemon snapshots, TUI, Web, and watch use the
+active projection. TUI and Web load archive history only when requested,
+through a separate archive producer. Named task reads remain exact, including
+retention-hidden terminal tasks. Non-inert terminal stages remain eligible for
+active scanning; canonical archive membership excludes completed rows even
+when a dependency annotation changes their action label.
+
+The internal CLI graph (`hive status --internal-task-graph --json`), still
+used by the bot, retains ordinary retention-filtered rows pending a separate
+notification recovery contract. Its successful project objects carry
+`hidden_archived_task_count`; task objects do not expose retention details.
+This exception preserves the bot's existing terminal-row notification source.
 
 `hive archive` with no target reuses Status in archive mode
 (`Hive::Commands::Status.new(archive: true)`). It lists every workflow-aware

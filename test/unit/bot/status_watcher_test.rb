@@ -76,11 +76,6 @@ class HiveBotStatusWatcherTest < Minitest::Test
   def test_fetch_parses_status_rows
     status_task = task(slug: "s1")
     status_task["pr_url"] = "https://github.com/example/repo/pull/561"
-    status_task["condition_task_generation"] = 4
-    status_task["commit_generation"] = 2
-    status_task["current_attempt"] = "attempt-b"
-    status_task["conditions"] = [ { "condition" => "ChangesPresent", "state" => "satisfied" } ]
-    status_task["condition_migration"] = { "effective" => "conditions" }
     status_task["auto_residue"] = {
       "commits" => 1, "path_count" => 1, "paths" => [ "wiki/a.md" ],
       "latest_head" => "abc", "latest_reason" => "stage_exit",
@@ -101,17 +96,15 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal "waiting", row.marker
       assert_equal "needs_input", row.action
       assert_nil row.diagnostic
-      assert_equal 4, row.condition_task_generation
-      assert_equal 2, row.commit_generation
-      assert_equal "attempt-b", row.current_attempt
-      assert_equal "conditions", row.condition_migration.fetch("effective")
+      refute_respond_to row, :conditions
+      refute_respond_to row, :condition_migration
       assert_equal [ "wiki/a.md" ], row.auto_residue.fetch("paths")
     end
   end
 
   def test_tick_fetches_status_rows
     with_fake_status(JSON.generate(envelope([ task(slug: "tick-task") ]))) do |bin|
-      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).tick(now: Time.utc(2026, 1, 1))
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).tick
 
       assert result.ok, result.error
       assert_equal [ "tick-task" ], result.rows.map(&:slug)
@@ -352,35 +345,24 @@ class HiveBotStatusWatcherTest < Minitest::Test
     end
   end
 
-  def test_fetch_skips_project_errors_and_uses_mtime_fallbacks
-    with_tmp_dir do |dir|
-      now = Time.utc(2026, 1, 1, 12, 0, 0)
-      file_time = Time.utc(2026, 1, 1, 10, 0, 0)
-      state_file = File.join(dir, "brainstorm.md")
-      File.write(state_file, "state")
-      File.utime(file_time, file_time, state_file)
-      file_task = task(slug: "file-mtime").merge("mtime" => "", "state_file" => state_file)
-      fallback_task = task(slug: "fallback-mtime").merge(
-        "mtime" => "not-a-time",
-        "state_file" => File.join(dir, "missing.md")
-      )
-      payload = envelope([ file_task, fallback_task ])
-      payload["projects"] << {
-        "name" => "broken",
-        "path" => "/tmp/broken",
-        "hive_state_path" => "/tmp/broken/.hive-state",
-        "error" => "unreadable",
-        "tasks" => [ task(slug: "skip-me") ]
-      }
+  def test_fetch_skips_project_errors_and_drops_unused_transport_fields
+    payload = envelope([ task(slug: "active") ])
+    payload["projects"] << {
+      "name" => "broken",
+      "path" => "/tmp/broken",
+      "hive_state_path" => "/tmp/broken/.hive-state",
+      "error" => "unreadable",
+      "tasks" => [ task(slug: "skip-me") ]
+    }
 
-      with_fake_status(JSON.generate(payload)) do |bin|
-        result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch(now: now)
+    with_fake_status(JSON.generate(payload)) do |bin|
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
 
-        assert result.ok, result.error
-        assert_equal [ "file-mtime", "fallback-mtime" ], result.rows.map(&:slug)
-        assert_equal file_time.to_i, result.rows.first.state_file_mtime.to_i
-        assert_equal now, result.rows.last.state_file_mtime
-      end
+      assert result.ok, result.error
+      assert_equal [ "active" ], result.rows.map(&:slug)
+      refute_respond_to result.rows.first, :hive_state_path
+      refute_respond_to result.rows.first, :state_file_mtime
+      refute_respond_to result.rows.first, :age_seconds
     end
   end
 

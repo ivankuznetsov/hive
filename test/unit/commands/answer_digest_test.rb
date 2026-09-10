@@ -41,7 +41,6 @@ class HiveCommandsAnswerDigestTest < Minitest::Test
     Row.new(
       project: "hive",
       project_path: project_path,
-      hive_state_path: File.join(project_path, ".hive-state"),
       slug: slug,
       id: id,
       display_name: display_name,

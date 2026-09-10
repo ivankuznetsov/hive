@@ -301,6 +301,95 @@ class WorkflowsBenchTest < Minitest::Test
     refute args.any? { |arg| arg.include?("/host/hive") || arg.include?("/host/gems") }
   end
 
+  def test_packaged_runner_entrypoint_honors_both_command_protocols
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+    entrypoint = File.join(runtime, "hb-entrypoint.sh")
+    dockerfile = File.read(File.join(runtime, "Dockerfile.runner"))
+    dockerignore = File.read(File.join(runtime, ".dockerignore"))
+
+    # The image must ship the dispatching entrypoint, and the build context
+    # must admit it (the .dockerignore excludes everything but the pinned
+    # hive snapshot by default).
+    assert_path_exists entrypoint
+    assert File.executable?(entrypoint)
+    assert_includes dockerfile, "COPY hb-entrypoint.sh /usr/local/bin/hb-entrypoint"
+    assert_includes dockerfile, 'ENTRYPOINT ["/usr/local/bin/hb-entrypoint"]'
+    assert_includes dockerignore, "!hb-entrypoint.sh"
+
+    Dir.mktmpdir("hive-bench-entrypoint") do |root|
+      # Docker runs the container argv as ENTRYPOINT-args + CMD-args; simulate
+      # that assembly by exec'ing the script with the CMD arguments appended.
+      # HOME is pointed at the temp dir so the login shell (-l) stays hermetic,
+      # and the host bundler env is scrubbed — the runner image has none of it.
+      container_env = {
+        "HOME" => root,
+        "PATH" => ENV.fetch("PATH")
+      }
+      ENV.each_key do |key|
+        next unless key.start_with?("BUNDLE", "BUNDLER", "GEM_", "RUBY")
+
+        container_env[key] = nil
+      end
+      run_container = lambda do |*cmd_args|
+        Open3.capture3(container_env, entrypoint, *cmd_args, stdin_data: "")
+      end
+
+      # exec-style argv protocol (the previously broken case): every argument
+      # must survive as its own argv element — bash's `-c` used to swallow only
+      # the first word and discard the rest as positional parameters.
+      proof = File.join(root, "proof")
+      out, err, status = run_container.call(
+        "sh", "-c", "printf passed > #{proof}"
+      )
+      assert status.success?, "argv protocol failed: #{out}#{err}"
+      assert_equal "passed", File.read(proof)
+
+      # The argv protocol preserves argument boundaries (no shell re-parsing).
+      split_proof = File.join(root, "split-proof")
+      out, err, status = run_container.call(
+        "sh", "-c", 'printf "%s|%s" "$1" "$2" > ' + split_proof,
+        "placeholder", "first", "second arg"
+      )
+      assert status.success?, "argv splitting failed: #{out}#{err}"
+      assert_equal "first|second arg", File.read(split_proof)
+
+      # Single shell-command-string protocol (isolation.sh gen/gate callers):
+      # must keep working under the login shell.
+      string_proof = File.join(root, "string-proof")
+      out, err, status = run_container.call(
+        "printf stringed > #{string_proof}"
+      )
+      assert status.success?, "command-string protocol failed: #{out}#{err}"
+      assert_equal "stringed", File.read(string_proof)
+    end
+  end
+
+  def test_runner_dockerfile_installs_entrypoint_before_dropping_to_runner_user
+    dockerfile = File.read(
+      File.join(Hive::Workflows::Bench::RUNTIME_DIR, "Dockerfile.runner")
+    )
+    lines = dockerfile.lines
+
+    user_runner = lines.index { |line| line.start_with?("USER runner") }
+    assert user_runner, "Dockerfile.runner must switch to USER runner"
+
+    # /usr/local/bin is root-owned, so every build instruction touching the
+    # entrypoint (COPY, chmod) must run while the build is still root. After
+    # `USER runner`, the COPY succeeds but RUN chmod fails with
+    # "chmod: changing permissions of /usr/local/bin/hb-entrypoint: Operation
+    # not permitted" and the image never builds.
+    installs = lines.each_index.select do |i|
+      lines[i].include?("hb-entrypoint") &&
+        (lines[i].start_with?("COPY") || lines[i].start_with?("RUN chmod"))
+    end
+    assert installs.any?, "Dockerfile.runner must install /usr/local/bin/hb-entrypoint"
+    installs.each do |i|
+      assert_operator i, :<, user_runner,
+        "entrypoint install at Dockerfile line #{i + 1} must precede USER runner " \
+        "at line #{user_runner + 1}: the runner user cannot chmod the root-owned copy"
+    end
+  end
+
   def test_sealed_controller_git_ignores_candidate_hooks_and_push_redirects
     wrapper = File.join(
       Hive::Workflows::Bench::RUNTIME_DIR,

@@ -180,6 +180,15 @@ and reset its gem path. The driver omits all host Hive source/gem mounts and
 refuses model spend when the image label does not match the active immutable
 dogfood deployment. Runtime visibility joins base history and egress in the
 generation identity, so unsealed artifacts cannot satisfy a sealed campaign.
+The runner entrypoint (`templates/builtins/bench/runtime/hb-entrypoint.sh`,
+COPYed into the image) dispatches Docker's appended container argv: a single
+argument runs as a login-shell command string (the gen/gate harness protocol),
+while two or more arguments exec as a verbatim argv array — isolation.sh's
+`hb_isolated <mode> <work> <cmd...>` forwards `$@`, so multi-argument commands
+must not be truncated by a bare `bash -lc` entrypoint. The image installs the
+entrypoint into root-owned `/usr/local/bin` before `USER runner`; the
+unprivileged runner user cannot chmod the root-owned copy, so COPY/chmod after
+the user switch would break the build.
 The root controller uses root-owned binary/state directories. Its root-owned
 Git wrapper pins the offline origin, disables candidate hooks and executable
 helpers, and drops every repository Git command to uid 1000. Candidate files

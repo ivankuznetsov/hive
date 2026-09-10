@@ -3,3 +3,6 @@
 # runs/ alone is 13GB. Start by excluding all, then re-include the one artifact.
 *
 !hive-src.tar
+# The entrypoint is a real file (COPYed, not printf'd) so tests can execute its
+# dispatch logic directly — see test_packaged_runner_entrypoint_honors_both_command_protocols.
+!hb-entrypoint.sh

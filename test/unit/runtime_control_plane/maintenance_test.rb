@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/runtime_control_plane/maintenance"
+require "hive/user_service"
 
 class RuntimeControlPlaneMaintenanceTest < Minitest::Test
   include HiveTestHelper

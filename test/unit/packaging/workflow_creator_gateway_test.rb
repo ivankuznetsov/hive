@@ -194,7 +194,7 @@ class WorkflowCreatorGatewayTest < Minitest::Test
       # Coverage-instrumented custody children flush a sparse result before
       # exit!, so a short process deadline is not stable under full-suite host
       # contention. Production keeps the supervisor's 120-second default.
-      timeout: 15, term_grace: 0.05, kill_grace: 0.2
+      timeout: 30, term_grace: 0.05, kill_grace: 0.2
     )
     Gateway.new(
       root:, candidate_executable: candidate, candidate_identity: identity,

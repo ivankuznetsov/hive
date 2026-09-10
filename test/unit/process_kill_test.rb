@@ -38,6 +38,13 @@ class ProcessKillTest < Minitest::Test
     assert_equal "invalid_pid", result.skipped_reason
   end
 
+  def test_terminate_process_returns_invalid_pid_for_non_integer_argument
+    result = Hive::ProcessKill.terminate_process("not-a-pid")
+    assert_nil result.pid
+    refute result.killed
+    assert_equal "invalid_pid", result.skipped_reason
+  end
+
   def test_terminate_process_returns_not_alive_for_dead_pid
     # PID space is finite but a very large number is almost certainly
     # not currently allocated to a live process.
@@ -167,6 +174,7 @@ class ProcessKillTest < Minitest::Test
   def test_process_start_time_returns_nil_for_malformed_pid
     assert_nil Hive::ProcessKill.process_start_time("not-a-pid")
   end
+
 
   def test_terminate_process_escalates_to_kill_when_term_does_not_stop_process
     alive_sequence = [ true, true, false ]
@@ -682,3 +690,5 @@ class ProcessKillTest < Minitest::Test
     mod.send(:define_method, :process_start_time, original) if original
   end
 end
+
+require_relative "process_kill_identity_escalation_cases"

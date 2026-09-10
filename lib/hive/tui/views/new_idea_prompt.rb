@@ -13,14 +13,9 @@ module Hive
       # the resulting `hive new <project> "<title>"` will land in before
       # pressing Enter.
       #
-      # Project resolution for the label:
-      # - `model.new_idea_project_name` → explicit target chosen from the
-      #   project picker opened by ★ All projects.
-      # - `model.scope == 0` (★ All projects) → unresolved; the picker
-      #   must choose a project before this prompt can submit.
-      # - `model.scope == n` → the nth registered project.
-      # - No registered projects → `(no projects)`; submission flashes an
-      #   error in U6's BubbleModel handler instead of dispatching.
+      # Project resolution for the label comes only from Snapshot's
+      # exact-name authority. Numeric scope is consumed before this prompt
+      # opens and is never reinterpreted here after refresh or reorder.
       module NewIdeaPrompt
         PROMPT_PREFIX = "New idea (project=".freeze
 
@@ -185,45 +180,18 @@ module Hive
           " · [#{count} #{count == 1 ? "image" : "images"}]"
         end
 
-        # Resolve which project an idea would land in. Pure read of the
-        # snapshot; never raises (falls through to "(no projects)").
+        # Format Snapshot's typed exact-name resolution. This view exposes
+        # no resolver for submission; BubbleModel performs its own preflight
+        # against the latest installed snapshot.
         def project_label(model)
-          name = resolve_project_name(model)
-          if name.nil?
-            projects = Array(model.snapshot&.projects)
-            return "(choose project)" if model.scope.zero? && projects.any? { |p| p.error.nil? }
-
-            return "(no projects)"
-          end
-
-          name
-        end
-
-        def resolve_project_name(model)
           snap = model.snapshot
-          return nil if snap.nil? || snap.projects.empty?
+          return "(no projects)" unless snap
 
-          chosen = model.new_idea_project_name.to_s
-          unless chosen.empty?
-            project = snap.projects.find { |p| p.name == chosen }
-            return project.name if project && project.error.nil?
+          resolution = snap.resolve_new_idea_project(name: model.new_idea_project_name)
+          return resolution.name if resolution.available?
+          return "(no projects)" if resolution.state == :no_projects
 
-            return nil
-          end
-
-          return nil if model.scope.zero?
-          return nil unless model.scope.between?(1, snap.projects.size)
-
-          project = snap.projects[model.scope - 1]
-          # An explicit scope onto an unhealthy project also returns nil;
-          # `submit_new_idea` then surfaces the per-project recovery hint
-          # produced by `BubbleModel#new_idea_resolution_flash` rather than
-          # dispatching against a doomed directory. The TUI's left pane
-          # still shows the project (with its name) so the operator can
-          # navigate elsewhere.
-          return nil if project.error
-
-          project.name
+          "(choose project)"
         end
       end
     end

@@ -204,6 +204,18 @@ and reset its gem path. The driver omits all host Hive source/gem mounts and
 refuses model spend when the image label does not match the active immutable
 dogfood deployment. Runtime visibility joins base history and egress in the
 generation identity, so unsealed artifacts cannot satisfy a sealed campaign.
+The root controller uses root-owned binary/state directories. Its root-owned
+Git wrapper pins the offline origin, disables candidate hooks and executable
+helpers, and drops every repository Git command to uid 1000. Candidate files
+and Git config therefore cannot replace `hive`/`gh`, execute Git extension
+points as root, or redirect a review push. Pi's explicit `HIVE_PI_BIN` launcher
+is the single wrapper for non-version calls and always loads the GLM 5.2/5.3
+tool-stream extension before dropping privileges; the unreachable PATH wrapper
+is gone. The wrapper keeps its sealed origin available after ManagedGit scrubs
+the environment and refuses repository URL rewriting before a push. Offline
+origin initialization ignores candidate templates and global configuration,
+accepts the deliberately shallow base history, and registers the ordinary
+unsealed origin on both initial and resumed setup.
 When the control plane is invoked through the dogfood wrapper, the packaged
 driver resolves the exact immutable deployment named by
 `HIVE_RUNTIME_DEPLOYMENT_ID` and verifies its full commit against
@@ -213,7 +225,17 @@ an explicit `HB_HIVE_BIN` override still takes precedence and fails closed.
 Generate and judge quota markers likewise load `Hive::Markers` (and the judge
 cooldown helper) from the campaign's immutable `source/lib`, so a scrubbed
 stage-agent shell cannot silently fall back to an older installed hive-cli gem
-with a different marker API.
+with a different marker API. `HiveBench::CampaignContract` owns the validation
+and argv mapping those two stages share. It resolves a relative `source`
+against the benchmark project root before either stage changes directory,
+requires the marker runtime before generation, and compiles the same Codex
+provider route for initial generation and judge backfill. Judge validation is
+limited to the durable fields it consumes, so a paid historical campaign does
+not become invalid when the current corpus or candidate catalog changes.
+Generate's OpenRouter preflight covers selected Pi and OpenCode candidates, so
+a missing key parks the campaign before any cell starts. A strict campaign also
+inspects its internal Docker network once before launching the parallel matrix;
+only the named CONNECT proxy may already be attached at that boundary.
 
 
 `hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those initial files to `hive/state`. After editing, the natural-language creator validates and invokes `hive workflow commit ID`, which commits the populated descriptor/instruction directory under the shared state commit lock before it reports success or creates a task. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.

@@ -2,6 +2,7 @@ require "json"
 require "fileutils"
 require "time"
 require "hive/paths"
+require "hive/atomic_file"
 
 module Hive
   module Daemon
@@ -13,25 +14,9 @@ module Hive
     # answer written before the restart stops looking "newer than baseline").
     # Persisting it across restarts is the fix.
     #
-    # JSON on disk, atomic write (tempfile + fsync + rename + dir fsync),
-    # fail-closed load (a corrupt/torn/newer file degrades to an empty map
-    # rather than raising — a baseline file must never block daemon boot).
-    # Mirrors Hive::UpdateCheck::State's persistence discipline.
-    #
-    # Unlike UpdateCheck::State, only ONE process writes this file (the single
-    # daemon, enforced by `.daemon.pid`), so `write` persists the daemon's
-    # whole map rather than doing a per-key read-modify-write. The sibling
-    # `<path>.lock` flock is kept as defense in depth; a leftover lock is
-    # harmless (flock is advisory and released on process death).
-    #
-    # mtimes are serialized with `iso8601(6)` — microsecond resolution. That
-    # preserves the daemon's local `File.mtime` baseline precision; the public
-    # The internal task-graph payload is still whole-second ISO8601, but
-    # `StatusConsumer` re-stats local state files before `Policy#decide_edit`
-    # compares them. If baseline precision ever needs nanoseconds, move this
-    # field to two integers (`tv_sec` + `tv_nsec`) to stay strictly faithful.
-    # The comparison is mtime-to-mtime, never wall-clock — no clock-skew class
-    # of bug.
+    # The daemon owns the complete map and is the only writer. AtomicFile
+    # supplies crash-safe replacement; a second per-file lock adds no custody.
+    # Mtimes retain microseconds so same-second operator edits stay visible.
     class DispatchBaselines
       SCHEMA_VERSION = 1
       STALE_TMP_SEC = 60 # only sweep orphan tmp files older than this
@@ -103,20 +88,13 @@ module Hive
         {}
       end
 
-      # Persist the daemon's full baseline map atomically. No-op when there
-      # is no path (tests / in-memory mode) or when writes are suspended
-      # because the on-disk file is from a newer hive. If the sibling
-      # `<path>.lock` flock cannot be acquired (exotic filesystem / EMFILE),
-      # the write still proceeds best-effort and a
-      # `:daemon_dispatch_baselines_lock_error` event is logged — single-
-      # writer is enforced by `.daemon.pid` so there is no concurrent-
-      # corruption window, only a lost durability guarantee for this one
-      # write (and atomic rename still prevents a torn destination file).
+      # A failed write must not stop task advancement; the previous persisted
+      # baseline remains usable and the failure is visible in the daemon log.
       def write(map)
         return unless @path
         return if @suspend_writes
 
-        with_lock { persist!(map) }
+        persist!(map)
       rescue StandardError => e
         # Defense in depth against everything `persist!`'s narrower
         # `SystemCallError/IOError` rescue doesn't catch — programmer errors
@@ -155,78 +133,12 @@ module Hive
                                                             error_class: error.class.name, message: error.message)
       end
 
-      # Hold an exclusive cross-process lock around the write. The block runs
-      # exactly once whether or not the lock was acquired — a lock failure
-      # logs and degrades to best-effort rather than crashing a tick.
-      def with_lock
-        return yield unless @path
-
-        lock = acquire_lock
-        begin
-          yield
-        ensure
-          release_lock(lock)
-        end
-      end
-
-      def acquire_lock
-        FileUtils.mkdir_p(File.dirname(@path))
-        handle = File.open("#{@path}.lock", File::RDWR | File::CREAT, 0o600)
-        handle.flock(File::LOCK_EX)
-        handle
-      rescue SystemCallError, IOError => e
-        # If File.open succeeded but a subsequent step (typically flock on a
-        # filesystem that rejects it — FUSE/NFS without lockd) raised, close
-        # the open handle before returning nil. Otherwise one FD leaks per
-        # failed acquire and the daemon runs out of descriptors over its
-        # lifetime. Symmetric to release_lock's split close.
-        begin
-          handle&.close
-        rescue StandardError
-          nil
-        end
-        @logger&.event(:daemon_dispatch_baselines_lock_error, path: @path,
-                                                              error_class: e.class.name, message: e.message)
-        nil
-      end
-
-      def release_lock(handle)
-        return unless handle
-
-        begin
-          handle.flock(File::LOCK_UN)
-        rescue StandardError
-          nil
-        end
-        # `close` runs in its own rescue so a flock failure can't bypass the
-        # close and leak an FD over the daemon's lifetime (one write per
-        # task-lifecycle event accumulates fast if flock starts misbehaving).
-        begin
-          handle.close
-        rescue StandardError
-          nil
-        end
-      end
-
       def persist!(map)
-        FileUtils.mkdir_p(File.dirname(@path))
-        tmp_path = File.join(File.dirname(@path), ".#{File.basename(@path)}.#{$$}.#{Thread.current.object_id}.tmp")
-        File.open(tmp_path, "w") do |f|
-          # Compact JSON — this file is machine-only (no operator hand-edits),
-          # so pretty-printing just spends bytes and fsync time for nothing.
-          f.write(JSON.generate(envelope(map)))
-          f.fsync
-        end
-        File.rename(tmp_path, @path)
-        fsync_dir(File.dirname(@path))
+        Hive::AtomicFile.write(@path, JSON.generate(envelope(map)))
+        Hive::AtomicFile.fsync_directory(File.dirname(@path))
       rescue SystemCallError, IOError => e
-        # A broken/read-only/full state dir must not crash a daemon tick. Log
-        # and degrade — the in-memory map still serves this process, and the
-        # only cost of a lost write is one task being re-baselined on restart.
         @logger&.event(:daemon_dispatch_baselines_write_error, path: @path,
-                                                               error_class: e.class.name, message: e.message)
-      ensure
-        FileUtils.rm_f(tmp_path) if tmp_path && File.exist?(tmp_path)
+                       error_class: e.class.name, message: e.message)
       end
 
       def envelope(map)
@@ -245,7 +157,7 @@ module Hive
         dir = File.dirname(@path)
         return unless File.directory?(dir)
 
-        Dir.glob(File.join(dir, ".#{File.basename(@path)}.*.tmp")).each do |orphan|
+        Dir.glob(File.join(dir, ".#{File.basename(@path)}.{*.tmp,tmp.*}")).each do |orphan|
           FileUtils.rm_f(orphan) if (Time.now - File.mtime(orphan)) > STALE_TMP_SEC
         rescue SystemCallError
           next
@@ -253,17 +165,6 @@ module Hive
       rescue StandardError => e
         @logger&.event(:daemon_dispatch_baselines_tmp_sweep_error, path: @path,
                                                                    error_class: e.class.name, message: e.message)
-      end
-
-      # Directory fsync after rename so the rename is durable on journaled
-      # filesystems. Best-effort — non-POSIX / FUSE / tmpfs can return EINVAL
-      # for `dirfd.fsync`; durability of the write itself was already done in
-      # `persist!`'s `f.fsync` before rename, so a missing dir-fsync at worst
-      # loses the rename's durability bit on an unusual crash.
-      def fsync_dir(dir)
-        Dir.open(dir) { |d| d.fsync }
-      rescue StandardError
-        nil
       end
 
       # Microsecond resolution. See class doc for why persisted baselines keep

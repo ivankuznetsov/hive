@@ -35,6 +35,7 @@ module Hive
       push_observed
       pr_observed
       check_observed
+      review_observed
       merge_observed
       operator_action
       correction

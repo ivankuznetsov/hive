@@ -3,8 +3,8 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-09-02
-tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
+updated: 2026-09-10
+tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
@@ -26,7 +26,9 @@ reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
 Telegram validators from the gem. Red task recovery submits the fresh status
 observation through the neutral `Hive::Recovery::API` to the same
 `RecoveryCoordinator` used by Telegram, TUI, CLI/action, recorder, and daemon
-healing.
+healing. The selected-day Digest view is a thin authenticated adapter over the
+same pure persisted `Hive::DailyDigest::Reader` used by the CLI; GET never
+collects activity or calls GitHub/PRDigest.
 
 The stage-action map has one typed exception: a fresh
 `outcome_evidence_rework` row at `7-artifacts` is not translated into the
@@ -84,7 +86,8 @@ repeat native web preparation at container startup.
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
 service using the invoked user-facing binary path. Its thin Hive installer owns
 web environment rendering and output policy while `Hive::UserService` owns
-file drift, plan revalidation, atomic replacement, and manager application.
+file drift, exclusive mutation, replay, and verified manager application; see
+[[modules/user_service]] for the shared transition and recovery contract.
 `--force` also forces an authenticated, rollback-safe managed-bundle
 reprovision before replacing the
 service, even when the installed bundle has a current version stamp and healthy
@@ -93,7 +96,8 @@ without a Hive version bump; ordinary foreground/start bootstrap remains a
 no-op for a healthy current bundle. If the service was already running, a
 successful refresh restarts it exactly once even when the unit file itself is
 unchanged. A service-unit upgrade that already restarted it is not restarted a
-second time.
+second time. The refresh restart is part of the recorded install intent, so the
+command does not release and reacquire service ownership between those effects.
 
 The default managed source is the signed release bundle, so a forced refresh can
 require network access and `cosign`; verification or preparation failure occurs
@@ -103,9 +107,12 @@ intact. Source-checkout dogfood must set `HIVE_WEB_BUNDLE_URL` to that checkout'
 authoritative and suppresses both managed installation and refresh, including
 when combined with `--force`.
 
-`hive web start --detach` starts that service and reloads systemd-user first on
-Linux so a unit written while systemd-user was unavailable becomes visible.
-Foreground `hive web start` is equivalent to `hive web`. `hive web status --json`
+`hive web start --detach` starts that service and reloads
+systemd-user first on Linux so a unit written while systemd-user was unavailable
+becomes visible. Managed start and stop failures retain the shared UserService
+contention or recovery guidance in the raised CLI error, so callers can tell
+whether to retry shortly or preserve and inspect pending evidence. Foreground
+`hive web start` is equivalent to `hive web`. `hive web status --json`
 emits `hive-web-status.v1`; `hive web install --json` emits
 `hive-web-install.v1`. Both carry
 `mode: "managed_service"`, deduplicated environment migration warnings, and
@@ -132,6 +139,11 @@ this status-specific runtime field. Bootstrap and service-install exceptions fro
 exactly one versioned install error envelope, distinguished by
 `bootstrap_failed` and `service_install_failed`.
 
+The local Rails service starts without a network-readiness dependency. Remote
+GitHub, clone, and provider operations report their own failures to the caller;
+local readiness and an active unit do not claim that those dependencies are
+healthy.
+
 Pre-dispatch argv failures distinguish `web status` from `web install` and use
 the matching versioned envelope with `error_kind: "invalid_task_path"`.
 
@@ -143,6 +155,48 @@ error arms. Those documents are encoded directly: a JSON serialization failure
 propagates and no prose or fallback JSON document is emitted. Success exits `0`;
 an unready service or ordinary bootstrap/service failure exits `1`, invalid
 arguments exit `64`, and invalid web configuration exits `78`.
+
+## Daily activity digest
+
+The authenticated read-only route is:
+
+```text
+GET /digests/:date                 # :date is today or YYYY-MM-DD
+GET /digests/:date?project=NAME    # filtered view, same global identity
+```
+
+`DailyDigest.find` delegates to `Hive::DailyDigest::Reader`. It does not use
+`StatusBroadcaster`, scan registered projects for activity, materialize a
+record, or make a live GitHub/PRDigest request. Consequently every GET leaves
+bases, amendments, frontiers, and `last_materialized_at` unchanged.
+
+The page leads with persisted date/zone and distinct lifecycle, completeness,
+and content badges. Navigation follows the record's `previous_date` and
+`next_date` sequence links, including across time-zone cutovers; `today`
+resolves the persisted interval containing now. Filter choices come from the
+selected historical record rather than the current registry. A project filter
+hides only other projects' facts and retains applicable global/source gaps.
+
+The content hierarchy is attention first, then grouped project changes and
+clearly labeled late amendments/resolved gaps. Complete-empty, partial,
+stale, missing, pre-coverage, and pruned states use separate accessible copy.
+Missing feature-era pages name `hive digest refresh --date ...`; pre-coverage
+pages state that V1 does not reconstruct history, and pruned pages preserve the
+tombstone outcome.
+
+Waiting attention is reduced in the Rails model to the privacy allowlist before
+ERB receives it: identity, stage/state, waiting age, and a resolved task
+destination. No question, answer, prompt, excerpt, or opaque binding can reach
+the template. A task link targets `#task-questions` only when the stored project
+still matches the current registration identity and the active/archive task
+route resolves at read time. Removed or replaced projects remain filterable and
+are labeled historical without a dead action link. PR links pass the shared
+strict HTTP(S) validator.
+
+The view uses semantic article/section/navigation landmarks, labeled date and
+project controls, text as well as color for state, visible focus, and the
+existing responsive touch-target/navigation containment. The primary Digest
+link targets `/digests/today`.
 
 ## Environment compatibility
 
@@ -798,6 +852,17 @@ rendered while a plan review applies, and task mutations independently invoke
 
 ## Tests
 
+`web/test/models/daily_digest_test.rb` and
+`web/test/integration/digests_test.rb` pin the thin-reader boundary, historical
+project identity/link resolution, privacy allowlist, complete/partial/stale/
+missing/pruned rendering, interval-sequence navigation, filtering, global-gap
+retention, and authenticated read-only behavior. The matching CLI fixture is
+used to compare identity, ordering, links, and counts.
+`web/test/system/digest_flow_test.rb` uses Playwright at desktop and mobile
+widths to prove attention-first hierarchy, accessible landmarks/labels,
+keyboard focus, filter/date navigation, native `#task-questions` handoff, and
+back navigation without losing selected-day context.
+
 `web/test/integration/` drives the real GithubAuth through the device-flow
 routes via the `http:` DI seam (no API stubbing), including ownerless
 first-login claim, persisted `web.github.owner`, request-time owner-change
@@ -1136,3 +1201,40 @@ Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 Live-status setup uses one error boundary for consumer creation, installation,
 and subscription registration. It routes failure by current attempt identity;
 retired attempts dispose their own resources and cannot affect the successor.
+
+## Task views focused on current work
+
+Board and Grid show a plain-language state separately from the current stage.
+`TaskDisplay` translates the existing task projection for display only; it does
+not change scheduling or action eligibility. Ready work is not labelled running,
+a completed intermediate stage is not labelled a completed task, and stale
+active rows do not claim current liveness. Rejected Patrol findings remain
+paused even when the versioned action key is normalized to `needs_input`.
+State links count and filter the selected project and survive ordinary GET and
+Turbo refreshes. Running work and decisions sort before ready, waiting, paused
+and completed tasks; the Running count remains visible at zero.
+
+Task pages lead with step/state and the selected workflow document. Existing
+workflow-declared primary result selection remains authoritative. Missing usage
+is omitted; recorded usage and failure diagnostics are disclosed on demand.
+Dependency panels require an actual relationship; code panels require a real
+worktree or PR. Closure receipt digests, duplicate action/quality fields and
+repeated slugs are omitted from ordinary content. Document outlines and review
+metadata, routes and audit documents are collapsed; review findings and actions
+remain available. Structured primary files are disclosed on demand instead of
+showing raw JSON as the page body. Task references and manual
+closure remain under Advanced. Bounded publication and mutation guards remain
+unchanged.
+
+The task log view extracts readable provider messages, results, errors and tool
+names, with category and text filters. It preserves bounded reads, safe escaping,
+receipt-bound failure logs, polling pauses while reading and filter selections
+across frame replacement. Unrecognized envelopes, reasoning and tool input/output
+payloads are not displayed as log messages.
+
+Task display completion follows explicit archive context or the canonical archived
+action. A workflow’s final directory can still contain an active agent stage.
+State filtering retains unavailable-project warnings; query values remain URL
+query data. Missing artifact or publication evidence is presented as unavailable,
+not as proof that work or publication never happened. Log filter results are
+announced through a polite status region and persist through frame reloads.

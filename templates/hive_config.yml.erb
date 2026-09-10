@@ -57,3 +57,35 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 # answer_digest:
 #   enabled: false
 #   hour: 9
+
+# Daemon-owned digest children have positive safety bounds even when ordinary
+# task children keep the historical unbounded default. Stage overrides keep
+# refresh, close/recovery, and opt-in Telegram delivery independently bounded.
+#
+# daemon:
+#   child_timeout_sec: 0
+#   child_kill_grace_sec: 30
+#   child_verb_timeouts:
+#     answer-digest: 3600
+#     digest: 3600
+#   child_stage_timeouts:
+#     daily_digest_refresh: 900
+#     daily_digest_close: 3600
+#     daily_digest_delivery: 300
+
+# Hive-owned durable cross-project activity record. Disabled by default. Run
+# `hive migrate --all` before enabling so the IANA zone and coverage frontier
+# are persisted. Telegram recap delivery is a separate opt-in.
+#
+# daily_digest:
+#   enabled: false
+#   materialization_interval_sec: 300
+#   freshness_budget_sec: 900
+#   # Migration-owned identity; `hive migrate --all` writes these atomically.
+#   time_zone: Europe/London
+#   coverage_started_at: 2026-08-30T12:00:00.000000Z
+#   initial_membership: []
+#   first_interval: {} # persisted interval identity and UTC boundaries
+#   telegram:
+#     enabled: false
+#     hour: 9

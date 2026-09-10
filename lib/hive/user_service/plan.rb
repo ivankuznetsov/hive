@@ -8,7 +8,8 @@ module Hive
       :status,
       :manager_observed,
       :autostart,
-      :force
+      :force,
+      :restart_if_running
     ) do
       ACTIONS = {
         apply: %i[unsupported unsafe refuse_drift write replace noop],
@@ -16,7 +17,8 @@ module Hive
       }.freeze
 
       def initialize(operation:, action:, definition_fingerprint:, expected_observation:,
-                     status:, manager_observed: false, autostart: false, force: false)
+                     status:, manager_observed: false, autostart: false, force: false,
+                     restart_if_running: false)
         operation = operation.to_sym
         action = action.to_sym
         allowed_actions = ACTIONS[operation]
@@ -39,7 +41,8 @@ module Hive
           status: status,
           manager_observed: !!manager_observed,
           autostart: !!autostart,
-          force: !!force
+          force: !!force,
+          restart_if_running: !!restart_if_running
         )
       end
     end

@@ -24,6 +24,7 @@ require "English"
 require_relative "support/tmp_cleanup"
 
 HIVE_TEST_SUITE_TMP_DIRS = []
+HIVE_TEST_PARENT_GEM_PATH = Gem.path.join(File::PATH_SEPARATOR).freeze
 
 # Never let a normal test subprocess inherit the operator's Hive state, home,
 # XDG roots, agent configuration, GitHub configuration, or global Git config.
@@ -59,12 +60,21 @@ if allow_real_user_env
 else
   test_home = File.join(HIVE_TEST_USER_ROOT, "home")
   FileUtils.mkdir_p(test_home)
+  # Bundler is activated before tests isolate HOME. Ruby subprocess fixtures
+  # inherit that activation, so preserve the parent's already-resolved locked
+  # gem path instead of making them rediscover gems beneath the throwaway HOME.
+  ENV["GEM_PATH"] = HIVE_TEST_PARENT_GEM_PATH if ENV["BUNDLE_GEMFILE"]
   ENV["HOME"] = test_home
   %w[
     HIVE_HOME
     HIVE_RUNTIME_CHANNEL
     HIVE_RUNTIME_BUILD_SHA
     HIVE_RUNTIME_DEPLOYMENT_ID
+    HIVE_CLAUDE_BIN
+    HIVE_CODEX_BIN
+    HIVE_PI_BIN
+    HIVE_GROK_BIN
+    HIVE_OPENCODE_BIN
     XDG_CONFIG_HOME
     XDG_DATA_HOME
     XDG_STATE_HOME
@@ -406,6 +416,7 @@ module HiveTestHelper
     project_root, state_home: nil, state_root_path: File.join(project_root, ".hive-state")
   )
     require "digest"
+    require "hive/runtime_control_plane/task_lease_repository"
     require "hive/task_counter"
     state_home ||= (@hive_test_runtime_state_home ||= tracked_tmp_dir("hive-test-runtime"))
     project_name = "test-#{Digest::SHA256.hexdigest(project_root)[0, 16]}"
@@ -735,6 +746,7 @@ module HiveTestHelper
       keys = %w[HOME HIVE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_BIN_HOME]
       old = keys.to_h { |key| [ key, ENV.fetch(key, nil) ] }
       ENV["HOME"] = File.join(dir, "home")
+      FileUtils.mkdir_p(ENV.fetch("HOME"))
       ENV.delete("HIVE_HOME")
       ENV["XDG_CONFIG_HOME"] = File.join(dir, "config")
       ENV["XDG_DATA_HOME"] = File.join(dir, "data")

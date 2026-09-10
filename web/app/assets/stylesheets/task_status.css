@@ -1,0 +1,16 @@
+/* Task pages answer step, state and result before exposing supporting detail. */
+.task-summary { grid-template-columns: minmax(0, 1fr); margin-bottom: 14px; padding: 18px 22px; box-shadow: none; }
+.task-summary p { max-width: 90ch; overflow-wrap: anywhere; }
+.task-summary.task-state-attention { border-left-color: var(--red, #b74735); }
+.task-state-detail { color: var(--ink-muted); font-size: .86rem; font-weight: 400; margin: 6px 0 0; overflow-wrap: anywhere; }
+.task-secondary { margin: 16px 0; border-block: 1px solid var(--line); padding: 12px 0; }
+.task-secondary > summary { cursor: pointer; min-height: 28px; color: var(--ink-muted); }
+.task-secondary[open] > summary { margin-bottom: 16px; }
+.task-state-filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 20px; }
+.task-state-filter { display: inline-flex; align-items: center; gap: 9px; padding: 8px 12px; min-height: 36px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--ink-muted); font-size: .85rem; }
+.task-state-filter.active { background: var(--panel); color: var(--ink); border-color: var(--ink-muted); }
+.task-state-filter strong { font-variant-numeric: tabular-nums; }
+.task-state-filter:hover { border-color: var(--ink-muted); }
+@media (max-width: 600px) { .task-summary { padding: 14px; } .task-state-filters { gap: 6px; } }
+
+.plan-review { min-width: 0; overflow-wrap: anywhere; }

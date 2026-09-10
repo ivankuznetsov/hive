@@ -1,0 +1,72 @@
+<% content_for(:title, "#{web_product_name} — digest #{@digest.local_date}") %>
+
+<article class="digest-page" aria-labelledby="digest-heading"
+         <% if @digest.record_reference %>data-record-id="<%= @digest.record_reference %>"<% end %>>
+  <%= render "digests/header", digest: @digest %>
+
+  <% if @digest.missing? %>
+    <section class="digest-state digest-state-missing" aria-labelledby="digest-missing-heading">
+      <h2 id="digest-missing-heading">No digest is saved for this day</h2>
+      <% if @digest.attributes["precoverage"] %>
+        <p>Digest collection had not started on this date. Earlier activity cannot be reconstructed.</p>
+      <% else %>
+        <p>To collect this day’s available activity, run <code><%= @digest.refresh_command %></code>.</p>
+      <% end %>
+      <%= render "digests/nearest", digest: @digest %>
+    </section>
+  <% elsif @digest.pruned? %>
+    <section class="digest-state digest-state-pruned" aria-labelledby="digest-pruned-heading">
+      <h2 id="digest-pruned-heading">This digest was pruned</h2>
+      <p>The pruning record remains. Hive will not recreate this digest or its updates.</p>
+      <% if @digest.attributes["pruned_at"] %>
+        <p class="digest-meta">Pruned <%= digest_time_tag(@digest.attributes["pruned_at"]) %></p>
+      <% end %>
+      <%= render "digests/nearest", digest: @digest %>
+    </section>
+  <% else %>
+    <% if @digest.stale? %>
+      <div class="digest-state digest-state-stale" role="status">
+        <strong>This digest is out of date.</strong> Collection has not finished recently.
+        Run <code>hive digest refresh</code> to update it.
+      </div>
+    <% end %>
+    <% if @digest.completeness == "partial" %>
+      <div class="digest-state digest-state-partial" role="status">
+        <strong>Incomplete data.</strong> Healthy sources remain visible; source gaps below name what could not be established.
+      </div>
+    <% end %>
+
+    <%= render "digests/attention", digest: @digest %>
+
+    <section class="digest-activity" aria-labelledby="digest-activity-heading">
+      <div class="digest-section-heading">
+        <div>
+          <h2 id="digest-activity-heading">Project activity</h2>
+          <p>Task and project changes recorded for this day.</p>
+        </div>
+        <span class="digest-count"><%= pluralize(@digest.items.length, "change") %></span>
+      </div>
+
+      <% if @digest.content == "empty" %>
+        <div class="digest-empty">
+          <strong>No task or project changes.</strong>
+          <p>All sources were checked successfully. No changes or tasks needing attention were found.</p>
+        </div>
+      <% elsif @digest.content == "unknown" && @digest.items.empty? %>
+        <div class="digest-state digest-state-partial">
+          No changes were found in the available data. Some sources could not be checked.
+        </div>
+      <% elsif @digest.grouped_items.empty? %>
+        <div class="digest-empty"><p>No changes match this project filter.</p></div>
+      <% else %>
+        <div class="digest-projects">
+          <% @digest.grouped_items.each do |project, items| %>
+            <%= render "digests/project", digest: @digest, project: project, items: items %>
+          <% end %>
+        </div>
+      <% end %>
+    </section>
+
+    <%= render "digests/amendments", digest: @digest %>
+  <% end %>
+</article>

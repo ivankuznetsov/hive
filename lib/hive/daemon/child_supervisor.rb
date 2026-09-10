@@ -42,6 +42,7 @@ module Hive
                      dry_run: false,
                      default_timeout_sec: 0,
                      verb_timeouts: {},
+                     stage_timeouts: {},
                      kill_grace_sec: DEFAULT_KILL_GRACE_SEC)
         @hive_bin = hive_bin
         @dry_run = dry_run
@@ -61,6 +62,9 @@ module Hive
         @verb_timeouts = (verb_timeouts || {}).each_with_object({}) do |(verb, secs), acc|
           acc[verb.to_s] = secs.to_i
         end
+        @stage_timeouts = (stage_timeouts || {}).each_with_object({}) do |(stage, secs), acc|
+          acc[stage.to_s] = secs.to_i
+        end
         @kill_grace_sec = kill_grace_sec.to_i
         # pid → { project, slug, stage, command, started_at, log_path, pgid,
         #         timeout_sec, terminating_at, killed }
@@ -75,14 +79,22 @@ module Hive
         @verb_timeouts.fetch(verb.to_s, @default_timeout_sec)
       end
 
+      def timeout_for_stage(stage, verb: nil)
+        @stage_timeouts.fetch(stage.to_s) { timeout_for_verb(verb) }
+      end
+
       # Re-read the timeout knobs after a SIGHUP config reload. Only
       # affects children spawned AFTER the reload — in-flight children
       # keep the timeout frozen on their running entry at spawn time, so
       # a reload never retroactively kills (or reprieves) a live run.
-      def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
+      def update_timeouts(default_timeout_sec:, verb_timeouts:, stage_timeouts:,
+                          kill_grace_sec:)
         @default_timeout_sec = default_timeout_sec.to_i
         @verb_timeouts = (verb_timeouts || {}).each_with_object({}) do |(verb, secs), acc|
           acc[verb.to_s] = secs.to_i
+        end
+        @stage_timeouts = (stage_timeouts || {}).each_with_object({}) do |(stage, secs), acc|
+          acc[stage.to_s] = secs.to_i
         end
         @kill_grace_sec = kill_grace_sec.to_i
       end
@@ -113,7 +125,7 @@ module Hive
         # can swap in a fixture path via HIVE_BIN.
         argv[0] = @hive_bin
 
-        timeout_sec = timeout_for_verb(argv_verb(argv))
+        timeout_sec = timeout_for_stage(stage, verb: argv_verb(argv))
 
         if effective_dry_run
           @running[next_dry_pid] = {

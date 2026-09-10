@@ -53,7 +53,7 @@ class UninstallCommandTest < Minitest::Test
       Hive::Commands::Uninstall.new(
         purge: true,
         output: StringIO.new,
-        runner: ->(argv) { calls << argv; true },
+        runner: successful_manager_runner(calls),
         host_os: "darwin"
       ).call
 
@@ -72,16 +72,17 @@ class UninstallCommandTest < Minitest::Test
       File.write(plist, "plist\n")
       out = StringIO.new
 
-      Hive::Commands::Uninstall.new(
-        purge: true,
-        output: out,
-        runner: ->(_argv) { false },
-        host_os: "darwin"
-      ).call
+      assert_raises(Hive::Error) do
+        Hive::Commands::Uninstall.new(
+          purge: true,
+          output: out,
+          runner: manager_disable_failure_runner,
+          host_os: "darwin"
+        ).call
+      end
 
       assert File.exist?(plist)
-      assert_match(/launchctl unload failed/, out.string)
-      assert_match(/leaving it in place/, out.string)
+      assert_match(/preserving UserService coordination evidence/, out.string)
     end
   end
 
@@ -484,7 +485,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: StringIO.new,
-        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+        runner: successful_manager_runner(calls), host_os: "linux"
       ).call
 
       assert_includes calls, %w[systemctl --user disable --now hive-bot]
@@ -501,7 +502,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: StringIO.new,
-        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+        runner: successful_manager_runner(calls), host_os: "linux"
       ).call
 
       assert_includes calls, %w[systemctl --user disable --now hive-babysitter]
@@ -511,6 +512,8 @@ class UninstallCommandTest < Minitest::Test
 
   def test_stop_foreground_babysitter_reuses_safe_stop_lifecycle
     with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      File.write(File.join(Hive::Paths.state_home, ".babysitter.pid"), "pending\n")
       captured = nil
       stopper = Object.new
       stopper.define_singleton_method(:call) { true }
@@ -527,6 +530,20 @@ class UninstallCommandTest < Minitest::Test
       assert_equal Hive::Paths.state_home, captured.last.fetch(:hive_home)
       assert_equal true, captured.last.fetch(:quiet)
     end
+  end
+
+  def test_stop_foreground_babysitter_translates_takeover_failures
+    takeover = Object.new
+    takeover.define_singleton_method(:stop!) { raise IOError, "unreadable pid" }
+    command = Hive::Commands::Uninstall.new(output: StringIO.new)
+    command.define_singleton_method(:babysitter_removal_takeover) { takeover }
+
+    error = assert_raises(Hive::Error) do
+      command.send(:stop_foreground_babysitter)
+    end
+
+    assert_match(/could not safely stop babysitter \(IOError: unreadable pid\)/, error.message)
+    assert_match(/no services or data were removed/, error.message)
   end
 
   def test_unreadable_babysitter_pid_aborts_before_any_uninstall_mutation
@@ -557,7 +574,8 @@ class UninstallCommandTest < Minitest::Test
 
       assert_includes error.message, "no services or data were removed"
       assert File.exist?(unit)
-      assert_empty calls
+      refute calls.any? { |argv| %w[disable stop restart].include?(argv[2]) }
+      refute_includes calls, %w[systemctl --user daemon-reload]
     end
   end
 
@@ -570,7 +588,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: StringIO.new,
-        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+        runner: successful_manager_runner(calls), host_os: "linux"
       ).call
 
       assert_includes calls, %w[systemctl --user disable --now hive-web]
@@ -578,7 +596,7 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
-  def test_linux_web_deregistration_ignores_malformed_web_config_and_failure_does_not_abort_cleanup
+  def test_linux_web_deregistration_ignores_malformed_web_config_and_fails_closed
     with_xdg_home do
       unit = File.expand_path("~/.config/systemd/user/hive-web.service")
       FileUtils.mkdir_p(File.dirname(unit))
@@ -590,22 +608,22 @@ class UninstallCommandTest < Minitest::Test
       with_replaced_singleton_method(Hive::Config, :load_global_web, lambda {
         raise Hive::ConfigError, "malformed web config"
       }) do
-        status = Hive::Commands::Uninstall.new(
-          purge: true, output: out,
-          runner: ->(_argv) { false }, host_os: "linux"
-        ).call
-
-        assert_equal 0, status
+        assert_raises(Hive::Error) do
+          Hive::Commands::Uninstall.new(
+            purge: true, output: out,
+            runner: manager_disable_failure_runner, host_os: "linux"
+          ).call
+        end
       end
 
       assert File.exist?(unit), "a failed systemd deregistration must preserve the web unit"
-      refute File.exist?(Hive::Paths.cache_home), "later uninstall cleanup must still run"
-      assert_match(/systemctl --user disable failed for hive-web/, out.string)
-      assert_match(/core uninstall cleanup complete/, out.string)
+      assert File.exist?(Hive::Paths.cache_home), "unverified removal must stop later cleanup"
+      assert_match(/preserving UserService coordination evidence/, out.string)
+      refute_match(/core uninstall cleanup complete/, out.string)
     end
   end
 
-  def test_macos_web_deregistration_ignores_malformed_web_config_and_failure_does_not_abort_cleanup
+  def test_macos_web_deregistration_ignores_malformed_web_config_and_fails_closed
     with_xdg_home do
       plist = File.expand_path("~/Library/LaunchAgents/local.hive-web.plist")
       FileUtils.mkdir_p(File.dirname(plist))
@@ -617,18 +635,18 @@ class UninstallCommandTest < Minitest::Test
       with_replaced_singleton_method(Hive::Config, :load_global_web, lambda {
         raise Hive::ConfigError, "malformed web config"
       }) do
-        status = Hive::Commands::Uninstall.new(
-          purge: true, output: out,
-          runner: ->(_argv) { false }, host_os: "darwin"
-        ).call
-
-        assert_equal 0, status
+        assert_raises(Hive::Error) do
+          Hive::Commands::Uninstall.new(
+            purge: true, output: out,
+            runner: manager_disable_failure_runner, host_os: "darwin"
+          ).call
+        end
       end
 
       assert File.exist?(plist), "a failed launchd deregistration must preserve the web plist"
-      refute File.exist?(Hive::Paths.cache_home), "later uninstall cleanup must still run"
-      assert_match(/launchctl unload failed for #{Regexp.escape(plist)}/, out.string)
-      assert_match(/core uninstall cleanup complete/, out.string)
+      assert File.exist?(Hive::Paths.cache_home), "unverified removal must stop later cleanup"
+      assert_match(/preserving UserService coordination evidence/, out.string)
+      refute_match(/core uninstall cleanup complete/, out.string)
     end
   end
 
@@ -639,13 +657,15 @@ class UninstallCommandTest < Minitest::Test
       File.write(unit, "unit\n")
       out = StringIO.new
 
-      Hive::Commands::Uninstall.new(
-        purge: true, output: out,
-        runner: ->(argv) { argv.include?("hive-bot") ? false : true }, host_os: "linux"
-      ).call
+      assert_raises(Hive::Error) do
+        Hive::Commands::Uninstall.new(
+          purge: true, output: out,
+          runner: manager_disable_failure_runner(service_name: "hive-bot"), host_os: "linux"
+        ).call
+      end
 
       assert File.exist?(unit)
-      assert_match(/systemctl --user disable failed for hive-bot/, out.string)
+      assert_match(/preserving UserService coordination evidence/, out.string)
     end
   end
 
@@ -658,7 +678,7 @@ class UninstallCommandTest < Minitest::Test
 
       Hive::Commands::Uninstall.new(
         purge: true, output: StringIO.new,
-        runner: ->(argv) { calls << argv; true }, host_os: "darwin"
+        runner: successful_manager_runner(calls), host_os: "darwin"
       ).call
 
       assert_includes calls, [ "launchctl", "unload", plist ]
@@ -673,13 +693,15 @@ class UninstallCommandTest < Minitest::Test
       File.write(plist, "plist\n")
       out = StringIO.new
 
-      Hive::Commands::Uninstall.new(
-        purge: true, output: out,
-        runner: ->(_argv) { false }, host_os: "darwin"
-      ).call
+      assert_raises(Hive::Error) do
+        Hive::Commands::Uninstall.new(
+          purge: true, output: out,
+          runner: manager_disable_failure_runner, host_os: "darwin"
+        ).call
+      end
 
       assert File.exist?(plist), "a failed launchctl unload must leave the bot plist in place"
-      assert_match(/launchctl unload failed for #{Regexp.escape(plist)}/, out.string)
+      assert_match(/preserving UserService coordination evidence/, out.string)
     end
   end
 
@@ -760,11 +782,9 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
-  def test_stop_foreground_bot_warns_but_continues_on_eperm
-    # EPERM means the bot is alive but owned by another uid. Unlike the
-    # dead/corrupt cases this must NOT be a silent no-op: the operator's bot
-    # may keep running against state we're about to delete, so it warns
-    # (without aborting the destructive uninstall).
+  def test_stop_foreground_bot_reports_failure_on_eperm
+    # A live bot that cannot be signalled must keep uninstall from deleting
+    # the state it may still be using.
     with_xdg_home do
       FileUtils.mkdir_p(Hive::Paths.state_home)
       File.write(File.join(Hive::Paths.state_home, ".bot.pid"),
@@ -772,7 +792,7 @@ class UninstallCommandTest < Minitest::Test
       out = StringIO.new
 
       with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
-        Hive::Commands::Uninstall.new(output: out).send(:stop_foreground_bot)
+        refute Hive::Commands::Uninstall.new(output: out).send(:stop_foreground_bot)
       end
 
       assert_match(/bot pid 999 is alive but could not be signalled \(EPERM\)/, out.string)
@@ -962,15 +982,17 @@ class UninstallCommandTest < Minitest::Test
       File.write(unit, "unit\n")
       out = StringIO.new
 
-      Hive::Commands::Uninstall.new(
-        purge: true,
-        output: out,
-        runner: ->(_argv) { false },
-        host_os: "linux"
-      ).call
+      assert_raises(Hive::Error) do
+        Hive::Commands::Uninstall.new(
+          purge: true,
+          output: out,
+          runner: manager_disable_failure_runner,
+          host_os: "linux"
+        ).call
+      end
 
       assert File.exist?(unit)
-      assert_match(/leaving .* in place/, out.string)
+      assert_match(/preserving UserService coordination evidence/, out.string)
     end
   end
 
@@ -982,19 +1004,131 @@ class UninstallCommandTest < Minitest::Test
       calls = []
       out = StringIO.new
 
-      Hive::Commands::Uninstall.new(
-        purge: true,
-        output: out,
-        runner: lambda do |argv|
-          calls << argv
-          argv != %w[systemctl --user daemon-reload]
-        end,
-        host_os: "linux"
-      ).call
+      assert_raises(Hive::Error) do
+        Hive::Commands::Uninstall.new(
+          purge: true,
+          output: out,
+          runner: successful_manager_runner(calls, fail_reload: true),
+          host_os: "linux"
+        ).call
+      end
 
       refute File.exist?(unit)
       assert_includes calls, %w[systemctl --user daemon-reload]
-      assert_match(/daemon-reload failed/, out.string)
+      assert_match(/preserving UserService coordination evidence/, out.string)
+    end
+  end
+
+  def test_force_purge_stops_before_state_cleanup_for_busy_or_retained_removal
+    [ [ :operation_busy ], [ :remove_failed ], %i[remove_failed recovery_pending] ].each do |diagnostics|
+      with_xdg_home do |dir|
+        project = File.join(dir, "project")
+        setup_install_tree(project)
+        evidence = File.join(Hive::Paths.state_home, "user-service", "pending.journal.json")
+        FileUtils.mkdir_p(File.dirname(evidence))
+        File.write(evidence, "retained\n")
+        out = StringIO.new
+        installer = Object.new
+        installer.define_singleton_method(:target_path) { "/tmp/hive-test.service" }
+        installer.define_singleton_method(:remove!) do |**_options|
+          Hive::UserService::Result.new(
+            :failed,
+            operation: :remove,
+            diagnostics: diagnostics
+          )
+        end
+        command = Hive::Commands::Uninstall.new(
+          purge: true,
+          force_purge_state: true,
+          output: out
+        )
+        command.define_singleton_method(:deregister_babysitter) { nil }
+        command.define_singleton_method(:deregister_daemon) do
+          deregister_unit(installer)
+        end
+        command.define_singleton_method(:deregister_bot) { flunk "cleanup continued after failure" }
+
+        assert_raises(Hive::Error) { command.call }
+
+        assert_equal "retained\n", File.read(evidence)
+        assert File.exist?(Hive::Paths.config_home)
+        assert File.exist?(File.join(project, ".hive-state"))
+        refute_match(/core uninstall cleanup complete/, out.string)
+      end
+    end
+  end
+
+  def test_force_purge_preserves_state_when_foreground_bot_cannot_be_signalled
+    with_xdg_home do |dir|
+      project = File.join(dir, "project")
+      setup_install_tree(project)
+      pid_path = File.join(Hive::Paths.state_home, ".bot.pid")
+      File.write(pid_path, { "pid" => 999 }.to_yaml)
+      out = StringIO.new
+      command = Hive::Commands::Uninstall.new(
+        purge: true, force_purge_state: true, output: out,
+        runner: ->(_argv) { true }, host_os: "linux"
+      )
+
+      with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+        raise Errno::EPERM if signal == "TERM" && pid == 999
+
+        1
+      }) do
+        assert_raises(Hive::Error) { command.call }
+      end
+
+      assert File.exist?(pid_path)
+      assert File.exist?(Hive::Config.global_config_path)
+      assert File.directory?(Hive::Paths.data_home)
+      assert File.directory?(File.join(project, ".hive-state"))
+      refute_match(/core uninstall cleanup complete/, out.string)
+    end
+  end
+
+  def test_force_purge_preserves_pending_apply_after_raw_backup_write_failure
+    with_xdg_home do |dir|
+      project = File.join(dir, "project")
+      setup_install_tree(project)
+      path = File.expand_path("~/.config/systemd/user/hive-daemon.service")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      definition = Hive::UserService::Definition.new(
+        platform: :linux, service_name: "hive-daemon", target_path: path,
+        content: "desired\n"
+      )
+      service = Hive::UserService.new(
+        definition: definition, runner: ->(_argv) { true }, home: ENV.fetch("HOME"),
+        event_handler: lambda do |event, _definition|
+          raise "interrupted" if event == :after_journal_prepared
+        end
+      )
+      assert service.apply(service.plan(autostart: false, force: true)).failed?
+      journal = service.inspect_recovery.fetch("journal_path")
+      recorded = File.binread(journal)
+      service.define_singleton_method(:write_backup_exclusive) do |*_args, **_options|
+        raise Errno::ENOSPC
+      end
+      installer = Object.new
+      installer.define_singleton_method(:target_path) { path }
+      installer.define_singleton_method(:remove!) do |**_options|
+        service.remove(service.plan_remove)
+      end
+      out = StringIO.new
+      command = Hive::Commands::Uninstall.new(
+        purge: true, force_purge_state: true, output: out
+      )
+      command.define_singleton_method(:deregister_babysitter) { nil }
+      command.define_singleton_method(:deregister_daemon) { deregister_unit(installer) }
+
+      assert_raises(Hive::Error) { command.call }
+
+      assert_equal recorded, File.binread(journal)
+      assert_equal "legacy\n", File.read(path)
+      assert File.exist?(Hive::Config.global_config_path)
+      assert File.directory?(Hive::Paths.data_home)
+      assert File.directory?(File.join(project, ".hive-state"))
+      refute_match(/core uninstall cleanup complete/, out.string)
     end
   end
 
@@ -1012,14 +1146,94 @@ class UninstallCommandTest < Minitest::Test
       Hive::UserService::Result.new(
         :failed,
         operation: :remove,
-        diagnostics: [ :remove_failed ]
+        diagnostics: [ :unexpected_removal_failure ]
       )
     ]
-    installer.define_singleton_method(:remove!) { results.shift }
+    installer.define_singleton_method(:remove!) { |**_options| results.shift }
 
     2.times { command.send(:deregister_unit, installer) }
 
     assert_match(/changed while its service was being disabled/, out.string)
     assert_match(/could not remove .* leaving it in place/, out.string)
+  end
+
+  def test_deregister_unit_renders_platform_disable_and_reload_warnings
+    out = StringIO.new
+    command = Hive::Commands::Uninstall.new(output: out)
+    installer = Struct.new(:target_path, :envelope_platform, :service_name, :results) do
+      def remove!(**_options) = results.shift
+    end.new(
+      "/tmp/hive-test.service",
+      "macos",
+      "hive-test",
+      [
+        Hive::UserService::Result.new(
+          :partial,
+          operation: :remove,
+          diagnostics: [ :manager_disable_failed ]
+        ),
+        Hive::UserService::Result.new(
+          :partial,
+          operation: :remove,
+          diagnostics: [ :manager_disable_failed ]
+        ),
+        Hive::UserService::Result.new(
+          :partial,
+          operation: :remove,
+          diagnostics: [ :daemon_reload_failed ]
+        )
+      ]
+    )
+
+    command.send(:deregister_unit, installer)
+    installer.envelope_platform = "linux"
+    2.times { command.send(:deregister_unit, installer) }
+
+    assert_match(/launchctl unload failed/, out.string)
+    assert_match(/systemctl --user disable failed for hive-test/, out.string)
+    assert_match(/systemctl --user daemon-reload failed/, out.string)
+  end
+
+  private
+
+  def successful_manager_runner(calls, fail_reload: false)
+    enabled = Hash.new(true)
+    running = Hash.new(true)
+    loaded = Hash.new(true)
+    lambda do |argv|
+      calls << argv
+      case argv
+      when [ "systemctl", "--user", "daemon-reload" ]
+        !fail_reload
+      else
+        if argv[0, 3] == %w[systemctl --user is-enabled]
+          enabled[argv.last]
+        elsif argv[0, 3] == %w[systemctl --user is-active]
+          running[argv.last]
+        elsif argv[0, 3] == %w[systemctl --user disable]
+          enabled[argv.last] = false
+          running[argv.last] = false
+          true
+        elsif argv[0, 2] == %w[launchctl list]
+          loaded[argv.last]
+        elsif argv[0, 2] == %w[launchctl unload]
+          label = File.basename(argv.last, ".plist")
+          loaded[label] = false
+          true
+        else
+          true
+        end
+      end
+    end
+  end
+
+  def manager_disable_failure_runner(service_name: nil)
+    lambda do |argv|
+      target_matches = service_name.nil? || argv.include?(service_name)
+      return false if target_matches && argv[0..2] == %w[systemctl --user disable]
+      return false if target_matches && argv[0..1] == %w[launchctl unload]
+
+      true
+    end
   end
 end

@@ -93,7 +93,7 @@ module Hive
             raw_cli_arguments: @cli_flags,
             trusted_cli_arguments: [ *@runtime_cli_flags, "--dir", @cwd ],
             executable:,
-            command_prefix: @runtime_policy&.command_prefix || []
+            command_prefix: effective_command_prefix
           ))
           NativeLaunch.new(
             invocation:,
@@ -214,7 +214,10 @@ module Hive
 
           parsed = Hive::AgentRuntime.parse_run(@profile, stdout: run.stdout)
           inspection = Hive::AgentRuntime::InspectionCommand.new(
-            argv: [ launch.executable, "export", parsed.session_id, "--sanitize" ],
+            argv: [
+              *effective_command_prefix,
+              launch.executable, "export", parsed.session_id, "--sanitize"
+            ],
             environment: launch.environment,
             credential_environment_keys: [],
             session_id: parsed.session_id,

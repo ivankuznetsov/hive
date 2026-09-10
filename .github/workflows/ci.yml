@@ -39,6 +39,15 @@ jobs:
         with:
           # Baseline-catalog tests verify reviewed dependency locks at release tags.
           fetch-depth: 0
+      - name: Install Patrol sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          # Ubuntu 24.04's AppArmor user-namespace restriction prevents
+          # bubblewrap from writing its UID map on hosted runners.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:

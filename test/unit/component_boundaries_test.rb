@@ -134,6 +134,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::PatrolFix", patrol_fix.dig("entrypoint", "constant")
     assert_equal %w[
       Hive::PatrolFix::AdmissionStore
+      Hive::PatrolFix::AgentGitIsolation
       Hive::PatrolFix::AttemptDiagnostic
       Hive::PatrolFix::FixReport
       Hive::PatrolFix::InboxReport
@@ -240,6 +241,8 @@ class ComponentBoundariesTest < Minitest::Test
                  git_gate.dig("entrypoint", "constant")
     assert_equal(
       %w[
+        Hive::AgentGitGate::AdoptionReceipt
+        Hive::AgentGitGate::IsolatedMetadata
         Hive::AgentGitGate::MaterializationReceipt
         Hive::AgentGitGate::PublicationReceipt
         Hive::AgentGitGate::ReadResult
@@ -249,7 +252,7 @@ class ComponentBoundariesTest < Minitest::Test
     )
     assert_includes git_gate.dig("public_contract", "errors"),
                     "Hive::AgentGitGate::RemoteConflict"
-    assert_equal [ "Hive::ManagedGit" ],
+    assert_equal [ "Hive::AtomicFile", "Hive::ManagedGit" ],
                  git_gate.fetch("internal_collaborators")
     assert_empty git_gate.fetch("migration_exceptions")
 

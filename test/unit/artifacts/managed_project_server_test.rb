@@ -365,7 +365,7 @@ class ArtifactsManagedProjectServerTest < Minitest::Test
       FileUtils.mkdir_p([ File.join(source, "bin"), File.join(source, "tmp") ])
       executable = File.join(source, "bin", "server")
       File.write(executable, <<~RUBY)
-        #!/usr/bin/ruby
+        #!#{RbConfig.ruby}
         require "socket"
         begin
           File.write("forbidden.txt", "must not escape the runtime boundary")

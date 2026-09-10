@@ -1,9 +1,9 @@
-require "open3"
 require "json"
 require "hive/atomic_file"
 require "hive/artifact_firewall"
 require "hive/attempts/context"
 require "hive/patrol_fix/attempt_diagnostic"
+require "hive/patrol_fix/agent_git_isolation"
 require "hive/stages/base"
 
 module Hive
@@ -14,13 +14,19 @@ module Hive
     module ManagedAgentCustody
       module_function
 
-      def manifest(root:, worktree_path:, protected_task_paths:, required_outputs:)
+      def manifest(root:, worktree_path:, protected_task_paths:, required_outputs:,
+                   git_control_paths: nil)
+        controls = git_control_paths || self.git_control_paths!(worktree_path)
         Hive::ArtifactFirewall::Manifest.new(
           root: root,
-          protected_anchors: protected_task_paths.merge(git_control_paths!(worktree_path)),
+          protected_anchors: protected_task_paths.merge(controls),
           permitted_writable_roots: [ root, worktree_path ],
           required_outputs: required_outputs
         )
+      end
+
+      def git_control_paths!(worktree_path)
+        Hive::PatrolFix::AgentGitIsolation.git_control_paths!(worktree_path)
       end
 
       def launch_agent(task:, cfg:, prompt:, output_path:, protected_files:,
@@ -35,6 +41,10 @@ module Hive
         profile = Hive::Stages::Base.stage_profile(
           cfg, "patrol", explicit_agent: fixing ? fix_agent : nil
         )
+        admitted_launch_context = Hive::Stages::Base.admitted_launch_context(
+          cfg: cfg, profile: profile
+        )
+        profile = admitted_launch_context.fetch(:profile)
         model_actor = fixing ? "patrol_fix" : actor
         model_current = if fixing
           fix_model_routing_current(cfg, fix, fix_agent)
@@ -64,29 +74,49 @@ module Hive
         protected_task_paths = protected_files.to_h do |name|
           [ name, File.join(task.folder, name) ]
         end
+        git_controls = git_control_paths!(cwd)
         custody = Hive::ArtifactFirewall::AgentCustody.new(
           manifest(
             root: task.folder, worktree_path: cwd,
             protected_task_paths: protected_task_paths,
-            required_outputs: { output_label => output_path }
+            required_outputs: { output_label => output_path },
+            git_control_paths: git_controls
           ),
           before_validation: lambda { |result|
             materialize_exact_final_json(result, output_path)
           }
         )
-        result = Hive::Stages::Base.spawn_agent(
-          task, prompt: prompt, add_dirs: scope.fetch(:add_dirs), cwd: cwd,
-          **Hive::Stages::Base.stage_resource_limits(
-            cfg, task.workflow.stage_named(stage)
-          ),
-          log_label: log_label, profile: profile,
-          **Hive::Stages::Base.model_launch_arguments(
-            cfg, model_actor, profile, current: model_current
-          ),
-          **Hive::Stages::Base.tool_scope_kwargs(scope),
-          status_mode: :exit_code_only, cfg: cfg, agent_custody: custody
+        isolation = Hive::PatrolFix::AgentGitIsolation.prepare!(
+          worktree_path: cwd, task_folder: task.folder,
+          writable_worktree: fixing, profile: profile,
+          git_control_paths: git_controls,
+          provider_environment: admitted_launch_context.fetch(:launch_binding)&.environment || {}
         )
-        report = custody.report
+        begin
+          result = Hive::Stages::Base.spawn_agent(
+            task, prompt: prompt, add_dirs: scope.fetch(:add_dirs), cwd: cwd,
+            **Hive::Stages::Base.stage_resource_limits(
+              cfg, task.workflow.stage_named(stage)
+            ),
+            log_label: log_label, profile: profile,
+            **Hive::Stages::Base.model_launch_arguments(
+              cfg, model_actor, profile, current: model_current
+            ),
+            **Hive::Stages::Base.tool_scope_kwargs(scope),
+            status_mode: :exit_code_only, cfg: cfg, agent_custody: custody,
+            command_prefix: isolation.command_prefix,
+            launch_environment: isolation.environment,
+            admitted_launch_context: admitted_launch_context
+          )
+          report = custody.report
+          provisional_status = result.is_a?(Hash) ? result[:status] : :error
+          provisional_status = :ok if recovered_provider_retry?(result, report)
+          if fixing && provisional_status == :ok && report&.valid?
+            isolation.adopt_if_changed!
+          end
+        ensure
+          isolation.cleanup!
+        end
         custody_status = if report&.tampered?
           :tampered
         elsif report&.required_outputs_valid? == false
@@ -311,51 +341,6 @@ module Hive
       rescue SystemCallError, IOError => e
         raise Hive::StageError, "could not prepare #{label}: #{e.class}: #{e.message}"
       end
-
-      def git_control_paths!(worktree_path)
-        common = git_path!(worktree_path, "--path-format=absolute", "--git-common-dir")
-        git_dir = git_path!(worktree_path, "--absolute-git-dir")
-        paths = {
-          "worktree .git pointer" => File.join(worktree_path, ".git"),
-          "repository config" => File.join(common, "config"),
-          "worktree config" => File.join(git_dir, "config.worktree")
-        }
-        home = ENV["HOME"].to_s
-        unless home.empty?
-          paths["global Git config"] = File.join(home, ".gitconfig")
-          paths["XDG Git config"] = File.join(home, ".config", "git", "config")
-        end
-        xdg = ENV["XDG_CONFIG_HOME"].to_s
-        paths["explicit XDG Git config"] = File.join(xdg, "git", "config") unless xdg.empty?
-        global = ENV["GIT_CONFIG_GLOBAL"].to_s
-        paths["global Git config override"] = global unless global.empty?
-        system = ENV["GIT_CONFIG_SYSTEM"].to_s
-        paths["system Git config override"] = system unless system.empty?
-        unique_paths(paths, worktree_path)
-      end
-
-      def unique_paths(paths, root)
-        seen = {}
-        paths.each_with_object({}) do |(label, path), unique|
-          expanded = File.expand_path(path, root)
-          next if seen[expanded]
-
-          seen[expanded] = true
-          unique[label] = expanded
-        end
-      end
-      private_class_method :unique_paths
-
-      def git_path!(worktree_path, *args)
-        out, err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", *args)
-        unless status.success?
-          detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
-          raise Hive::StageError, "managed worktree Git control path is unavailable: #{detail[0, 200]}"
-        end
-
-        File.expand_path(out.to_s.strip, worktree_path)
-      end
-      private_class_method :git_path!
     end
   end
 end

@@ -39,6 +39,7 @@ Hive::Agent.new(
   expected_output: nil, # required regular artifact for :output_file_exists
   status_mode: nil,     # per-spawn override
   permission_mode: nil, # profile-owned override; nil uses profile default/config caller
+  command_prefix: [],   # trusted outer controller wrapper, composed with RuntimePolicy
   allowed_tools: nil,   # Claude-only --allowedTools CSV source
   disallowed_tools: nil,# Claude-only --disallowedTools CSV source
   cli_flags: [],        # per-run Claude argv extras (model/effort or verified capabilities)
@@ -100,6 +101,15 @@ There is **no inode-tracking concurrent-edit detection.** It was tried in early 
 `build_cmd` delegates a provider-neutral `AgentRuntime::Request` to
 `AgentRuntime.compile`; it no longer assembles provider argv itself. The
 selected `AgentProfile` remains the provider adapter:
+
+A trusted controller may supply `command_prefix:` to place the compiled
+provider invocation behind an execution boundary such as Patrol's bubblewrap
+namespace. Empty arguments and control characters are rejected at
+construction. The controller prefix remains the outer wrapper and composes
+with any selected `AgentRuntime::Policy` prefix as the inner wrapper; an empty
+policy prefix cannot discard controller containment. OpenCode applies the same
+composed prefix to both its run and sanitized session-export subprocesses, so
+evidence inspection cannot escape the namespace used for the model launch.
 
 ```
 <profile.bin> [<profile-routed global arguments>] <profile.headless_flag>

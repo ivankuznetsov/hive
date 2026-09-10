@@ -10,6 +10,19 @@ class ManagedAgentCustodyTest < Minitest::Test
 
   PROTECTED_FILES = %w[meta.yml worktree.yml].freeze
 
+  def test_git_control_path_compatibility_seam_delegates_to_isolation
+    paths = { "repository config" => "/tmp/repository/config" }.freeze
+    resolver = ->(path) { path == "/tmp/worktree" ? paths : flunk("unexpected path") }
+
+    result = with_replaced_singleton_method(
+      Hive::PatrolFix::AgentGitIsolation, :git_control_paths!, resolver
+    ) do
+      Hive::Stages::ManagedAgentCustody.git_control_paths!("/tmp/worktree")
+    end
+
+    assert_same paths, result
+  end
+
   def test_launch_agent_forwards_stage_parameters_and_classifies_clean_custody
     with_task do |task|
       output = File.join(task.folder, "patrol-fix-inbox-report.json")
@@ -35,6 +48,49 @@ class ManagedAgentCustodyTest < Minitest::Test
       assert_includes captured.fetch(:add_dirs), task.folder
       assert_includes captured.fetch(:prompt),
                       "Return that same JSON object as your complete final response"
+    end
+  end
+
+  def test_launch_agent_reuses_admitted_binding_for_isolation_and_spawn
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-inbox-report.json")
+      profile = Hive::AgentProfiles.lookup(:claude)
+      binding = Data.define(:environment).new(
+        { "HIVE_TEST_PROVIDER_HOME" => File.join(task.folder, "provider-state") }.freeze
+      )
+      admitted = { profile: profile, launch_binding: binding }.freeze
+      isolation = Struct.new(:command_prefix, :environment) do
+        def cleanup! = :removed
+      end.new([ "/usr/bin/bwrap", "--" ], { "TMPDIR" => task.folder })
+      prepared = nil
+      captured = nil
+      prepare = lambda do |**kwargs|
+        prepared = kwargs
+        isolation
+      end
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        kwargs.fetch(:agent_custody).call do
+          File.write(output, "{}")
+          { status: :ok }
+        end
+      end
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :admitted_launch_context, ->(**_) { admitted }
+      ) do
+        with_replaced_singleton_method(
+          Hive::PatrolFix::AgentGitIsolation, :prepare!, prepare
+        ) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+            launch(task, output)
+          end
+        end
+      end
+
+      assert_equal binding.environment, prepared.fetch(:provider_environment)
+      assert_same admitted, captured.fetch(:admitted_launch_context)
+      assert_same profile, captured.fetch(:profile)
     end
   end
 
@@ -403,6 +459,47 @@ class ManagedAgentCustodyTest < Minitest::Test
     end
   end
 
+  def test_fix_launch_adopts_a_commit_created_with_private_git_metadata
+    with_task do |task|
+      output = File.join(task.folder, "patrol-fix-fix-report.json")
+      base = git_output(task.project_root, "rev-parse", "HEAD").strip
+      spawn = lambda do |_task, agent_custody:, command_prefix:,
+                         launch_environment:, **|
+        agent_custody.call do
+          script = <<~SH
+            set -eu
+            printf 'puts :isolated\n' > app.rb
+            git add app.rb
+            git commit -m 'Fix through private metadata'
+            printf '{}\n' > "$REPORT_PATH"
+          SH
+          _out, error, status = Open3.capture3(
+            launch_environment.merge("REPORT_PATH" => output),
+            *command_prefix, "/bin/sh", "-c", script,
+            chdir: task.project_root
+          )
+          raise error unless status.success?
+
+          { status: :ok }
+        end
+      end
+
+      result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        launch(
+          task, output, actor: "patrol_fix", stage: "fix",
+          log_label: "patrol-fix-fix"
+        )
+      end
+
+      head = git_output(task.project_root, "rev-parse", "HEAD").strip
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :clean, result.fetch(:custody)
+      refute_equal base, head
+      assert_empty git_output(task.project_root, "status", "--porcelain")
+      assert_equal "puts :isolated\n", File.binread(File.join(task.project_root, "app.rb"))
+    end
+  end
+
   def test_launch_agent_classifies_non_hash_runner_result_as_error
     with_task do |task|
       output = File.join(task.folder, "patrol-fix-inbox-report.json")
@@ -536,8 +633,9 @@ class ManagedAgentCustodyTest < Minitest::Test
       git(repo, "init", "-b", "main")
       git(repo, "config", "user.email", "test@example.com")
       git(repo, "config", "user.name", "Test")
+      File.write(File.join(repo, ".gitignore"), ".hive-state/\n")
       File.write(File.join(repo, "app.rb"), "puts :ok\n")
-      git(repo, "add", "app.rb")
+      git(repo, "add", ".gitignore", "app.rb")
       git(repo, "commit", "-m", "Initial")
       folder = File.join(repo, ".hive-state", "stages", "1-inbox", "repair-one")
       FileUtils.mkdir_p(folder)
@@ -552,5 +650,12 @@ class ManagedAgentCustodyTest < Minitest::Test
   def git(path, *args)
     _out, error, status = Open3.capture3("git", "-C", path, *args)
     raise error unless status.success?
+  end
+
+  def git_output(path, *args)
+    out, error, status = Open3.capture3("git", "-C", path, *args)
+    raise error unless status.success?
+
+    out
   end
 end

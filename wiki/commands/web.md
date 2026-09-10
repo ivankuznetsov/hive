@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
 ---
 
@@ -84,7 +84,8 @@ repeat native web preparation at container startup.
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
 service using the invoked user-facing binary path. Its thin Hive installer owns
 web environment rendering and output policy while `Hive::UserService` owns
-file drift, plan revalidation, atomic replacement, and manager application.
+file drift, exclusive mutation, replay, and verified manager application; see
+[[modules/user_service]] for the shared transition and recovery contract.
 `--force` also forces an authenticated, rollback-safe managed-bundle
 reprovision before replacing the
 service, even when the installed bundle has a current version stamp and healthy
@@ -93,7 +94,8 @@ without a Hive version bump; ordinary foreground/start bootstrap remains a
 no-op for a healthy current bundle. If the service was already running, a
 successful refresh restarts it exactly once even when the unit file itself is
 unchanged. A service-unit upgrade that already restarted it is not restarted a
-second time.
+second time. The refresh restart is part of the recorded install intent, so the
+command does not release and reacquire service ownership between those effects.
 
 The default managed source is the signed release bundle, so a forced refresh can
 require network access and `cosign`; verification or preparation failure occurs
@@ -105,9 +107,12 @@ when combined with `--force`.
 
 `hive web start --detach` starts that service and reloads
 systemd-user first on Linux so a unit written while systemd-user was unavailable
-becomes visible. Foreground
-`hive web start` is equivalent to `hive web`. `status --json` emits
-`hive-web-status.v1`; `install --json` emits `hive-web-install.v1`. Both carry
+becomes visible. Managed start and stop failures retain the shared UserService
+contention or recovery guidance in the raised CLI error, so callers can tell
+whether to retry shortly or preserve and inspect pending evidence. Foreground
+`hive web start` is equivalent to `hive web`. `hive web status --json`
+emits `hive-web-status.v1`; `hive web install --json` emits
+`hive-web-install.v1`. Both carry
 `mode: "managed_service"`, deduplicated environment migration warnings, and
 separate installed, enabled, running, manager availability, URL, and readiness
 state on success and pre-dispatch/runtime errors. Readiness probes the local
@@ -131,6 +136,23 @@ this status-specific runtime field. Bootstrap and service-install exceptions fro
 `install --json` likewise emit
 exactly one versioned install error envelope, distinguished by
 `bootstrap_failed` and `service_install_failed`.
+
+The local Rails service starts without a network-readiness dependency. Remote
+GitHub, clone, and provider operations report their own failures to the caller;
+local readiness and an active unit do not claim that those dependencies are
+healthy.
+
+Pre-dispatch argv failures distinguish `web status` from `web install` and use
+the matching versioned envelope with `error_kind: "invalid_task_path"`.
+
+## Output exceptions, serialization, and exit codes
+
+Foreground `hive web` is human-readable. Machine lifecycle modes emit
+`hive-web-status.v1` or `hive-web-install.v1`, including their matching typed
+error arms. Those documents are encoded directly: a JSON serialization failure
+propagates and no prose or fallback JSON document is emitted. Success exits `0`;
+an unready service or ordinary bootstrap/service failure exits `1`, invalid
+arguments exit `64`, and invalid web configuration exits `78`.
 
 ## Environment compatibility
 
@@ -392,24 +414,42 @@ Honeycomb projections.
   filesystem broadcast from aborting the mutation. The app-owned Action Cable
   source stays permanent across morphs and performs the version comparison
   only from its confirmed subscription callback; there is no reconnect DOM
-  observer, timer, or fresh-navigation refresh. Async Cable setup is
-  generation-guarded: a handle whose DOM owner disconnects before confirmation
-  waits for the current transport's confirmation, rejection, or disconnect
-  before release, so an abandoned page cannot keep the server poller alive or
-  race unsubscribe ahead of subscribe—even during reconnect. If no callback
-  arrives within five seconds, Hive closes the otherwise-unowned Cable transport
-  to force server cleanup before dropping the local handle. The server checks
-  teardown before deferred adapter registration and again when registration
-  completes, immediately removing any handler that landed after the first
-  cleanup. A deferred adapter exception releases the shared lease and closes
-  the socket with reconnect enabled. If turbo-rails' lazy
-  consumer promise rejects, Hive clears the
-  poisoned cached promise before retrying at a bounded five-second cadence;
-  if subscription creation throws after Action Cable registration, Hive removes
-  the partial registration, disconnects that failed consumer, and creates a
-  fresh one. A server-side poller startup failure rejects the subscription, and
-  the rejected callback schedules the same bounded retry. Detaching the source
-  cancels the retry. The task-page owner encloses every
+  observer, timer, or fresh-navigation refresh. One internal owner contains the
+  current attempt, retry and pending-release timers, pending disposition, and
+  catch-up state. Each application setup or five-second retry creates a
+  dedicated consumer without touching turbo-rails' shared consumer. Action
+  Cable transport reconnect stays on that attempt; setup, registration,
+  rejection, and non-reconnecting disconnect failures retire it into
+  `retry_wait` so the next retry uses a fresh consumer.
+
+  The dedicated connection's `open`/`reopen` paths and every async continuation
+  are fenced by owner and attempt identity. A handle whose DOM owner disconnects
+  before confirmation waits for that attempt's confirmation, rejection, or
+  disconnect before release, so an abandoned page cannot race unsubscribe ahead
+  of subscribe—even during reconnect. If no callback arrives within five
+  seconds, Hive closes the dedicated transport before dropping the local
+  subscription handle. The server checks teardown before deferred adapter
+  registration and again when registration completes, immediately removing any
+  handler that landed after the first cleanup. A deferred adapter exception
+  releases the shared lease and reconnects the same transport.
+
+  Disconnect remains best-effort under failures: confirmed subscriptions
+  unsubscribe first, consumer disconnect is the primary transport close, and
+  reconnect-disabled connection/raw-socket fallbacks run only while the
+  captured socket remains `OPEN` or `CONNECTING`. The owner attempts all
+  applicable cleanup and ends `disconnected`; the internal boundary preserves
+  the first thrown value, while DOM and async entry paths warn only after
+  cleanup, Turbo, and successor work completes. Attribute supersession always
+  installs or leaves a fresh owner retrying. This ownership allocates one Cable
+  transport per live source, with at most one bounded retiring predecessor
+  overlapping its successor; two simultaneous sources intentionally use two
+  isolated transports. Cross-URL Turbo navigation still runs the permanent
+  source's disconnect/connect callbacks, so it replaces the dedicated
+  transport and pays a fresh WebSocket plus Action Cable subscription handshake
+  before `connected` and catch-up complete; it does not reuse turbo-rails'
+  cached consumer. A server-side poller startup failure rejects the
+  subscription and the rejected callback schedules the same bounded retry.
+  Detaching the source cancels the retry. The task-page owner encloses every
   mutation form, so those submissions cross the same refresh guard as Board
   actions. A
   failed Turbo broadcast also remains pending across last-subscriber shutdown
@@ -1102,3 +1142,44 @@ ffmpeg, ffprobe, and Tesseract. The separate Playwright dependency in
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].
+
+Live-status setup uses one error boundary for consumer creation, installation,
+and subscription registration. It routes failure by current attempt identity;
+retired attempts dispose their own resources and cannot affect the successor.
+
+## Task views focused on current work
+
+Board and Grid show a plain-language state separately from the current stage.
+`TaskDisplay` translates the existing task projection for display only; it does
+not change scheduling or action eligibility. Ready work is not labelled running,
+a completed intermediate stage is not labelled a completed task, and stale
+active rows do not claim current liveness. Rejected Patrol findings remain
+paused even when the versioned action key is normalized to `needs_input`.
+State links count and filter the selected project and survive ordinary GET and
+Turbo refreshes. Running work and decisions sort before ready, waiting, paused
+and completed tasks; the Running count remains visible at zero.
+
+Task pages lead with step/state and the selected workflow document. Existing
+workflow-declared primary result selection remains authoritative. Missing usage
+is omitted; recorded usage and failure diagnostics are disclosed on demand.
+Dependency panels require an actual relationship; code panels require a real
+worktree or PR. Closure receipt digests, duplicate action/quality fields and
+repeated slugs are omitted from ordinary content. Document outlines and review
+metadata, routes and audit documents are collapsed; review findings and actions
+remain available. Structured primary files are disclosed on demand instead of
+showing raw JSON as the page body. Task references and manual
+closure remain under Advanced. Bounded publication and mutation guards remain
+unchanged.
+
+The task log view extracts readable provider messages, results, errors and tool
+names, with category and text filters. It preserves bounded reads, safe escaping,
+receipt-bound failure logs, polling pauses while reading and filter selections
+across frame replacement. Unrecognized envelopes, reasoning and tool input/output
+payloads are not displayed as log messages.
+
+Task display completion follows explicit archive context or the canonical archived
+action. A workflow’s final directory can still contain an active agent stage.
+State filtering retains unavailable-project warnings; query values remain URL
+query data. Missing artifact or publication evidence is presented as unavailable,
+not as proof that work or publication never happened. Log filter results are
+announced through a polite status region and persist through frame reloads.

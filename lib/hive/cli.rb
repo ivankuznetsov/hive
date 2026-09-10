@@ -1167,6 +1167,17 @@ module Hive
       ).call
     end
 
+    desc "refactor-patrol-scheduled PROJECT",
+         "Review one periodic current-main architecture slice (daemon/internal)", hide: true
+    option :result_file, type: :string, required: true
+    def refactor_patrol_scheduled(project)
+      require "hive/commands/refactor_patrol_scheduled"
+      result = Hive::Commands::RefactorPatrolScheduled.new(
+        project, result_file: options[:result_file]
+      ).call
+      exit 1 unless result.fetch("ok")
+    end
+
     desc "refactor-patrol-classify PROJECT",
          "Run one queued merge classifier (daemon/internal)", hide: true
     option :occurrence_id, type: :string, required: true

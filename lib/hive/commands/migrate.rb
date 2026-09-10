@@ -1194,31 +1194,28 @@ module Hive
       # config, not Ruby constants).
       #
       # Best-effort: skip when no daemon pid file, no live process, or
-      # `HIVE_MIGRATE_SKIP_DAEMON_RESTART` is set. On Linux with
-      # systemd-user available, restart via systemctl. Anywhere else,
-      # print a load-bearing warning so the operator restarts manually.
+      # `HIVE_MIGRATE_SKIP_DAEMON_RESTART` is set. Restart through the shared
+      # service owner so migration cannot race install, removal, or another
+      # lifecycle action for the same unit.
       def restart_daemon_if_running!
         return if ENV["HIVE_MIGRATE_SKIP_DAEMON_RESTART"] == "1"
 
         pid = read_daemon_pid
         return if pid.nil? || !daemon_alive?(pid)
 
-        if systemctl_available?
-          ok = system("systemctl", "--user", "restart", "hive-daemon",
-                      out: File::NULL, err: File::NULL)
-          if ok
-            puts "hive: restarted hive-daemon (pid #{pid}) so its in-memory stage layout matches the migrated on-disk layout"
-            return
-          end
-
-          warn "hive: migrate detected a running hive-daemon (pid #{pid}) but " \
-               "`systemctl --user restart hive-daemon` failed; restart the daemon " \
-               "manually before its next archive dispatch (e.g., `hive daemon stop && hive daemon start`)"
+        installer = daemon_service_installer
+        unless installer.service_lifecycle_state["service_manager_available"]
+          warn "hive: migrate detected a running hive-daemon (pid #{pid}); restart it " \
+               "manually so its in-memory stage layout refreshes from the new Hive::Workflows::VERBS " \
+               "(e.g., `hive daemon stop && hive daemon start`)"
           return
         end
 
-        warn "hive: migrate detected a running hive-daemon (pid #{pid}); restart it " \
-             "manually so its in-memory stage layout refreshes from the new Hive::Workflows::VERBS " \
+        installer.restart!
+        puts "hive: restarted hive-daemon (pid #{pid}) so its in-memory stage layout matches the migrated on-disk layout"
+      rescue Hive::Error
+        warn "hive: migrate detected a running hive-daemon (pid #{pid}) but its owned restart failed; " \
+             "restart the daemon manually before its next archive dispatch " \
              "(e.g., `hive daemon stop && hive daemon start`)"
       end
 
@@ -1229,16 +1226,17 @@ module Hive
         pid = read_daemon_pid
         return false if pid.nil? || !daemon_alive?(pid)
 
-        unless systemctl_available?
+        installer = daemon_service_installer
+        unless installer.service_lifecycle_state["service_manager_available"]
           raise Hive::Error,
                 "hive: migrate must replace the running hive-daemon before the Patrol Fix " \
                 "admission index cutover; run `hive daemon stop`, rerun `hive migrate`, " \
                 "then run `hive daemon start`"
         end
 
-        ok = system("systemctl", "--user", "restart", "hive-daemon",
-                    out: File::NULL, err: File::NULL)
-        unless ok
+        begin
+          installer.restart!
+        rescue Hive::Error
           raise Hive::Error,
                 "hive: migrate could not restart hive-daemon for the Patrol Fix admission " \
                 "index cutover; run `hive daemon stop`, rerun `hive migrate`, then run " \
@@ -1264,11 +1262,9 @@ module Hive
         Hive::ProcessKill.pid_alive?(pid)
       end
 
-      def systemctl_available?
-        system("systemctl", "--user", "--version",
-               out: File::NULL, err: File::NULL)
-      rescue SystemCallError
-        false
+      def daemon_service_installer
+        require "hive/commands/daemon/service_installer"
+        Hive::Commands::Daemon::ServiceInstaller.new
       end
     end
   end

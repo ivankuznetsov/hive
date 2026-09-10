@@ -60,8 +60,9 @@ module Hive
                      heartbeat_clock: -> { Time.now },
                      heartbeat_resolver: Hive::RefactorPatrol::ClaimLivenessResolver.new,
                      project_entry: nil, capability_context: nil,
-                     scheduled_slice: nil,
+                     scheduled_slice: nil, output: nil,
                      config_loader: ->(path) { Hive::Config.load(path) })
+        @output = output
         @project = project
         @json = json
         @dry_run = dry_run
@@ -1061,7 +1062,7 @@ module Hive
           )
         end
         if @json
-          puts JSON.generate(payload)
+          (@output || $stdout).puts JSON.generate(payload)
         else
           puts query.text(payload)
         end
@@ -1086,7 +1087,7 @@ module Hive
           job: result.fetch(:job)
         )
         if @json
-          puts JSON.generate(payload)
+          (@output || $stdout).puts JSON.generate(payload)
         else
           puts "hive refactor-patrol archive: #{result.fetch(:status)} " \
                "archived_actions=#{result.fetch(:archived_actions)}"
@@ -1222,9 +1223,9 @@ module Hive
       def emit(payload, theses)
         write_result_file(payload)
         if @json
-          puts JSON.generate(payload)
+          (@output || $stdout).puts JSON.generate(payload)
         else
-          puts @reporter.text(payload, theses)
+          (@output || $stdout).puts @reporter.text(payload, theses)
         end
         payload
       end
@@ -1255,7 +1256,7 @@ module Hive
         rescue StandardError
           nil
         end
-        puts JSON.generate(payload)
+        (@output || $stdout).puts JSON.generate(payload)
       end
 
       def validate_result_file!(entry, project_root = nil)

@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-09-09
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -168,7 +168,7 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 |-----|---------|---------|
 | `minitest` | `~> 6.0` (locked 6.0.6) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
-| `rubocop` | `~> 1.88` (locked 1.88.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
+| `rubocop` | `~> 1.90` (locked 1.90.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 | `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | Rails/Omakase lint rules layered onto RuboCop. Declared in the root dev/test bundle and mirrored in the web bundle. |
 | `brakeman` | `~> 8.0` (locked 8.0.5 in the root bundle; 8.0.4 in the web bundle) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |
 | `bundler-audit` | `~> 0.9` (locked 0.9.3) | Gem vulnerability audit tool. `CONTRIBUTING.md` lists `bundle exec bundler-audit check --update`; the web app also wraps it with `web/bin/bundler-audit`. |

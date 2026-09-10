@@ -1637,52 +1637,57 @@ class MigrateTest < Minitest::Test
     end
   end
 
-  def test_restart_daemon_uses_systemctl_when_available
+  def test_restart_daemon_uses_the_shared_service_owner_when_available
     migrate = migrate_command("/tmp/project")
     calls = []
+    installer = fake_daemon_service_installer(available: true) { calls << :restart }
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
-    migrate.define_singleton_method(:systemctl_available?) { true }
-    migrate.define_singleton_method(:system) do |*args, **kwargs|
-      calls << [ args, kwargs ]
-      true
-    end
+    migrate.define_singleton_method(:daemon_service_installer) { installer }
 
     out, err = capture_io { migrate.send(:restart_daemon_if_running!) }
 
-    assert_equal [ [ [ "systemctl", "--user", "restart", "hive-daemon" ], { out: File::NULL, err: File::NULL } ] ], calls
+    assert_equal [ :restart ], calls
     assert_includes out, "restarted hive-daemon (pid 1234)"
     assert_empty err
   end
 
-  def test_restart_daemon_warns_when_systemctl_restart_fails
+  def test_default_daemon_service_installer_uses_the_shared_adapter
+    installer = migrate_command("/tmp/project").send(:daemon_service_installer)
+
+    assert_instance_of Hive::Commands::Daemon::ServiceInstaller, installer
+  end
+
+  def test_restart_daemon_warns_when_the_owned_restart_fails
     migrate = migrate_command("/tmp/project")
+    installer = fake_daemon_service_installer(available: true) { raise Hive::Error, "busy" }
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
-    migrate.define_singleton_method(:systemctl_available?) { true }
-    migrate.define_singleton_method(:system) { |*_args, **_kwargs| false }
+    migrate.define_singleton_method(:daemon_service_installer) { installer }
 
     _out, err = capture_io { migrate.send(:restart_daemon_if_running!) }
 
-    assert_includes err, "systemctl --user restart hive-daemon` failed"
+    assert_includes err, "owned restart failed"
   end
 
-  def test_restart_daemon_warns_when_systemctl_is_unavailable
+  def test_restart_daemon_warns_when_the_service_manager_is_unavailable
     migrate = migrate_command("/tmp/project")
+    installer = fake_daemon_service_installer(available: false)
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
-    migrate.define_singleton_method(:systemctl_available?) { false }
+    migrate.define_singleton_method(:daemon_service_installer) { installer }
 
     _out, err = capture_io { migrate.send(:restart_daemon_if_running!) }
 
     assert_includes err, "restart it manually so its in-memory stage layout refreshes"
   end
 
-  def test_patrol_index_cutover_restart_fails_closed_without_systemctl
+  def test_patrol_index_cutover_restart_fails_closed_without_a_service_manager
     migrate = migrate_command("/tmp/project")
+    installer = fake_daemon_service_installer(available: false)
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
-    migrate.define_singleton_method(:systemctl_available?) { false }
+    migrate.define_singleton_method(:daemon_service_installer) { installer }
 
     error = assert_raises(Hive::Error) do
       migrate.send(:restart_daemon_for_patrol_index_cutover!)
@@ -1695,13 +1700,10 @@ class MigrateTest < Minitest::Test
   def test_patrol_index_cutover_restart_is_synchronous
     migrate = migrate_command("/tmp/project")
     calls = []
+    installer = fake_daemon_service_installer(available: true) { calls << :restart }
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
-    migrate.define_singleton_method(:systemctl_available?) { true }
-    migrate.define_singleton_method(:system) do |*args, **kwargs|
-      calls << [ args, kwargs ]
-      true
-    end
+    migrate.define_singleton_method(:daemon_service_installer) { installer }
 
     restarted = nil
     out, err = capture_io do
@@ -1709,10 +1711,7 @@ class MigrateTest < Minitest::Test
     end
 
     assert restarted
-    assert_equal [
-      [ [ "systemctl", "--user", "restart", "hive-daemon" ],
-        { out: File::NULL, err: File::NULL } ]
-    ], calls
+    assert_equal [ :restart ], calls
     assert_includes out, "Patrol Fix admission index cutover"
     assert_empty err
   end
@@ -1731,10 +1730,10 @@ class MigrateTest < Minitest::Test
 
   def test_patrol_index_cutover_restart_failure_is_actionable
     migrate = migrate_command("/tmp/project")
+    installer = fake_daemon_service_installer(available: true) { raise Hive::Error, "busy" }
     migrate.define_singleton_method(:read_daemon_pid) { 1234 }
     migrate.define_singleton_method(:daemon_alive?) { |_pid| true }
-    migrate.define_singleton_method(:systemctl_available?) { true }
-    migrate.define_singleton_method(:system) { |*_args, **_kwargs| false }
+    migrate.define_singleton_method(:daemon_service_installer) { installer }
 
     error = assert_raises(Hive::Error) do
       migrate.send(:restart_daemon_for_patrol_index_cutover!)
@@ -1799,13 +1798,6 @@ class MigrateTest < Minitest::Test
     with_replaced_singleton_method(Process, :kill, lambda { |_signal, _pid| raise Errno::EPERM }) do
       assert migrate.send(:daemon_alive?, 1234)
     end
-  end
-
-  def test_systemctl_available_returns_false_when_system_call_cannot_spawn
-    migrate = migrate_command("/tmp/project")
-    migrate.define_singleton_method(:system) { |*_args, **_kwargs| raise Errno::ENOENT }
-
-    refute migrate.send(:systemctl_available?)
   end
 
   def test_managed_workflow_cleanup_commits_each_unique_workflow_path
@@ -2003,6 +1995,17 @@ class MigrateTest < Minitest::Test
 
   def activate_control_plane(home)
     activate_test_control_plane(home)
+  end
+
+  def fake_daemon_service_installer(available:, &restart)
+    installer = Object.new
+    installer.define_singleton_method(:service_lifecycle_state) do
+      { "service_manager_available" => available }
+    end
+    installer.define_singleton_method(:restart!) do
+      restart ? restart.call : true
+    end
+    installer
   end
 
   def patrol_fix_source_snapshot

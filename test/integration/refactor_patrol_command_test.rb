@@ -1539,6 +1539,64 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_periodic_child_runs_default_mapping_and_admits_a_real_feature
+    with_refactor_patrol_project do |repo|
+      with_tmp_dir do |scratch|
+        FileUtils.mkdir_p(File.join(repo, "bin"))
+        File.write(File.join(repo, "bin", "checkout"), "# entrypoint\nputs 'checkout'\n")
+        run!("git", "-C", repo, "add", "bin/checkout")
+        run!("git", "-C", repo, "commit", "-qm", "Add checkout command")
+        origin = File.join(scratch, "origin.git")
+        run!("git", "clone", "--bare", repo, origin)
+        run!("git", "-C", repo, "remote", "add", "origin", origin)
+        sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+        entry = Hive::Config.find_project("demo")
+        cfg = Hive::Config.deep_merge(
+          Hive::Config.load(repo), "daemon" => { "enabled" => true },
+          "worktree_root" => File.join(scratch, "worktrees")
+        )
+        item = thesis("checkout-boundary", feature_id: "command-bin-checkout",
+                      boundary_files: [ "bin/checkout" ])
+        launches = 0
+        fake_agent = lambda do |**options|
+          agent = Object.new
+          agent.define_singleton_method(:run!) do
+            launches += 1
+            File.write(options.fetch(:expected_output), JSON.generate("theses" => [ item.to_h ]))
+            { status: :ok, usage: { input: 10, output: 5, cached: 0 } }
+          end
+          agent
+        end
+        command = Hive::Commands::RefactorPatrolScheduled.new(
+          "demo", config_loader: ->(*) { cfg },
+          result_file: File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "results",
+                                 "scheduled-#{'c' * 32}.json")
+        )
+        with_replaced_singleton_method(Hive::Agent, :new, fake_agent) do
+          capture_io do
+            result = command.call
+            assert_equal "completed", result.fetch("reason"), result.inspect
+          end
+        end
+        assert_equal 1, launches
+        producer = Hive::RefactorPatrol::ScheduledSliceProducer.new(entry: entry, cfg: cfg)
+        record = producer.each_result.to_a.fetch(0)
+        assert_equal "command-bin-checkout", record.fetch("feature_id")
+        assert_equal sha, record.fetch("analysis_sha")
+        assert record.fetch("consumed_at")
+        feature_path = File.join(entry.fetch("hive_state_path"), "refactor_patrol", "features",
+                                 "command-bin-checkout.json")
+        assert_equal [ "bin/checkout" ], JSON.parse(File.read(feature_path)).fetch("owned_files")
+        admissions = Hive::RefactorPatrol::FixAdmissionAdapter.for_project(
+          project_root: repo, hive_state_path: entry.fetch("hive_state_path")
+        ).store.pending
+        assert_equal 1, admissions.size, record.inspect
+        assert_equal sha, admissions.first.dig("source", "target_revision")
+        refute Dir.exist?(File.join(entry.fetch("hive_state_path"), "patrol", "features"))
+      end
+    end
+  end
+
   def test_scheduled_slice_rejects_malformed_or_incomplete_identity
     entry = { "project_id" => "project-1" }
     valid = {

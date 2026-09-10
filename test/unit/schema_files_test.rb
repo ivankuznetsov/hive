@@ -110,6 +110,54 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  # The dispatch queue writer guard (`DispatchRepository.valid_argv?`) enforces
+  # argv[0] == "hive" and a closed verb allowlist at argv[1]; the published
+  # schemas must enforce the same positional contract so external validators
+  # reject payloads the writer would raise on (e.g. ["curl", "anything"]).
+  def test_dispatch_request_schemas_enforce_positional_argv_allowlist
+    repository = Hive::RuntimeControlPlane::DispatchRepository
+
+    base = {
+      "schema" => "hive-dispatch-request", "schema_version" => nil,
+      "request_id" => "abc12345", "created_at" => "2026-09-09T00:00:00Z",
+      "project" => "proj", "slug" => "my-task",
+      "requestor" => "bot", "chat_id" => nil, "update_id" => nil,
+      "trigger" => nil, "task_generation" => nil,
+      "inherited_outputs" => [], "recovery" => nil
+    }
+    accepted = {
+      %w[hive run my-task --json] => true,
+      %w[hive markers] => true,
+      %w[hive daemon install --force] => true,
+      %w[hive evidence rework my-task --json] => true,
+      %w[curl anything] => false,
+      %w[not-hive delete-everything] => false,
+      %w[hive status] => false,
+      %w[hive daemon status] => false,
+      %w[hive daemon install --force extra] => false,
+      %w[hive evidence] => false,
+      %w[hive evidence recover my-task] => false
+    }
+    accepted.each { |argv, expected| assert_equal expected, repository.valid_argv?(argv), argv.inspect }
+    [ 4, 5 ].each do |version|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(
+        "hive-dispatch-request", version: version
+      )))
+      argv_schema = document.dig("properties", "argv")
+      assert_equal (repository::ALLOWED_VERBS + [ "evidence" ]).sort,
+                   argv_schema.dig("prefixItems", 1, "enum").sort
+      assert_equal repository::EVIDENCE_VERBS,
+                   [ argv_schema.dig("allOf", 1, "then", "prefixItems", 2, "const") ]
+      schemer = JSONSchemer.schema(document)
+      base["schema_version"] = version
+      accepted.each do |argv, expected|
+        errors = schemer.validate(base.merge("argv" => argv)).to_a
+        assert_equal expected, errors.empty?,
+                     "v#{version} argv #{argv.inspect}: #{errors.map { |e| e["error"] }.inspect}"
+      end
+    end
+  end
+
   def test_provider_routing_public_schemas_bound_candidate_diagnostics
     {
       "hive-dispatch-request.v5.json" => [ "AdmissionCandidate", "AdmissionObservation" ],

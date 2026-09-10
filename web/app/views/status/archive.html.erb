@@ -7,7 +7,7 @@
     <div class="status-view-toolbar">
       <div>
         <h1>Archive</h1>
-        <p class="muted">The complete terminal task record, unaffected by ordinary visibility retention.</p>
+        <p class="muted">Finished tasks and their results.</p>
       </div>
       <%= link_to "Back to status",
             board_path(project: @selected_project&.name),
@@ -43,12 +43,11 @@
                     <div class="task-name">
                       <%= link_to task.title,
                             task_path(project.name, task.slug, source: "archive") %>
-                      <span class="task-slug"><%= task.slug %></span>
                     </div>
                     <%= stage_badge(task["stage"]) %>
                     <span class="task-meta">
-                      <%= status_dot(task) %>
-                      <%= task.status_label %>
+                      <%= status_dot(task, archived: true) %>
+                      <%= TaskDisplay.new(task, archived: true).label %>
                     </span>
                     <span class="task-meta faint"><%= relative_age(task["age_seconds"]) %></span>
                   </article>

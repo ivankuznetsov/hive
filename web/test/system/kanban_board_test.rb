@@ -57,7 +57,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     JS
     click_status_view("Grid")
     assert_current_path grid_path, wait: 10
-    assert_selector "#status-grid .task-row", text: slug
+    assert_selector "#status-grid .task-row a[href='#{task_path(project, slug)}']"
     assert_status_redirect_guard_cleared
 
     visit root_path
@@ -65,7 +65,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
     click_status_view("Board")
     assert_current_path board_path, wait: 10
-    assert_selector "#status-board .kanban-card", text: slug
+    assert_selector "#status-board .kanban-card[data-task-slug='#{slug}']"
   end
 
   test "columns fold empty and done stages by default and retain operator choices" do

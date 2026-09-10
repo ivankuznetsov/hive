@@ -21,6 +21,15 @@ brainstorm-answering slice pairs filesystem-level parser/writer/command tests
 with transcript-state integration fixtures, so conversational assertions never
 stand in for atomic write/no-write proof.
 
+Runtime simplification guards assert the contract, not historical source lengths:
+`runtime_control_plane/deletion_contract_test.rb` checks that retired stores,
+schemas, constants and environment inputs stay absent, while retained file
+authorities and clean bootstrap remain intact. The upgrade test still exercises
+every legacy writer and path override listed in `affected_production.yml`.
+Exact per-file line counts and Git-based net-deletion accounting were a one-time
+refactor receipt; they are no longer a recurring CI gate. Source-size comparison
+belongs in the PR diff, not a fixture updated by every unrelated edit.
+
 The natural-language workflow creator has a hermetic primary acceptance gate
 in `test/integration/workflow_creator_e2e_test.rb`. It exercises AE1–AE5 through
 the real CLI collaborators: exact editorial approve/reject semantics,
@@ -105,6 +114,26 @@ launching the `ruby` selected by `PATH`. That matters when `bin/test` is itself
 called from a bundled parent: the fallback must not re-enter the parent's bundle
 under a different system Ruby. Set `HIVE_TEST_REQUIRE_BUNDLE=1` for authoritative
 coverage or CI checks, where an unlocked fallback must fail closed instead.
+
+### Generated configuration defaults reference
+
+`Hive::Config::DEFAULTS` is the sole owner of the values in the managed block
+of `wiki/modules/config.md`. Maintainers refresh it and verify the focused
+contract with:
+
+```bash
+script/generate-config-defaults-doc
+bundle exec ruby -Itest test/unit/config_defaults_doc_test.rb
+bundle exec rake coverage
+```
+
+The script is the only mutating path. It binary-reads the complete page,
+requires one exact ordered pair of standalone LF-terminated markers, calls the
+shared full-page renderer, and binary-writes only when bytes changed. A second
+invocation reports `already current` without touching file metadata. The unit
+test's committed-page guard calls the same renderer and compares the entire
+page without invoking regeneration, so stale content and every malformed or
+duplicate marker structure fail closed without modifying the checkout.
 
 Known flakes are measured before they are masked. The nightly seed sweep
 (`.github/workflows/nightly-flake-sweep.yml`) runs the exact default-suite

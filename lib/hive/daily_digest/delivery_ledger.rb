@@ -35,7 +35,7 @@ module Hive
           [ Process.pid, Hive::Lock.process_start_time(Process.pid) ]
         end
         @process_alive = process_alive || method(:matching_process_alive?)
-        @preparer_ids = ObjectSpace::WeakMap.new
+        @preparer_ids = ObjectSpace::WeakKeyMap.new
       end
 
       def prepare(local_date:, record_id:, amendment_frontier:, payload_hash:,

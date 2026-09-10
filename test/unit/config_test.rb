@@ -376,6 +376,25 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registry_backfill_repairs_missing_epoch_with_existing_project_identity
+    with_tmp_global_config do
+      project_id = SecureRandom.uuid
+      registered_at = "2026-01-01T00:00:00Z"
+      row = { "name" => "old", "path" => "/missing/old", "project_id" => project_id,
+              "registered_at" => registered_at }
+      File.write(Hive::Config.global_config_path, { "registered_projects" => [ row ] }.to_yaml)
+
+      assert Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 22))
+      persisted = YAML.safe_load_file(Hive::Config.global_config_path)
+      repaired = persisted.fetch("registered_projects").first
+      assert_equal project_id, repaired.fetch("project_id")
+      assert_equal "legacy:#{project_id}", repaired.fetch("registration_id")
+      assert_equal registered_at, repaired.fetch("registered_at")
+      refute persisted.key?("project_membership_history")
+      refute Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 23))
+    end
+  end
+
   def test_registry_backfill_adds_canonical_path_even_when_project_id_exists
     with_tmp_global_config do |home|
       project = Dir.mktmpdir("hive-registry-real-path")

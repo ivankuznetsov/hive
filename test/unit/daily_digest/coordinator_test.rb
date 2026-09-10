@@ -619,6 +619,54 @@ class DailyDigestCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_ended_registration_removes_retained_attention_without_journal_changes
+    with_tmp_dir do |dir|
+      now = Time.iso8601("2026-08-30T10:00:00Z")
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      waiting = { "attention_id" => "attention:waiting", "kind" => "unanswered", "project_id" => "project-1", "registration_id" => "registration-1", "project" => "demo", "task_slug" => "task" }
+      incoming = batch([]).with(attention: [ waiting ], frontiers: { "project-1:registration-1" => { "project_id" => "project-1", "registration_id" => "registration-1", "fingerprints" => { "2-brainstorm/task/task-journal.jsonl" => { "sha256" => "a" * 64 } } } })
+      membership = Struct.new(:projects, :gaps).new([ project ], [])
+      coverage = Object.new
+      coverage.define_singleton_method(:projects_for) { |**| membership }
+      coordinator = Hive::DailyDigest::Coordinator.new(store: store, collector_factory: ->(**) { FakeCollector.new(incoming) })
+      interval = config.fetch("first_interval")
+      coordinator.send(:materialize, interval, config: config, coverage: coverage, now: now)
+      membership.projects = [ project.merge("membership_ends_at" => "2026-08-30T12:00:00Z", "membership_end_exclusive" => true) ]
+      incoming = incoming.with(attention: [])
+      coordinator.send(:materialize, interval, config: config, coverage: coverage, now: Time.iso8601("2026-08-30T11:00:00Z"))
+      assert_equal [ "attention:waiting" ], store.read("2026-08-30").fetch("attention").map { |item| item.fetch("attention_id") }
+      now = Time.iso8601("2026-08-30T13:00:00Z")
+      coordinator.send(:materialize, interval, config: config, coverage: coverage, now: now)
+      assert_empty store.read("2026-08-30").fetch("attention")
+      coordinator.send(:materialize, interval, config: config, coverage: coverage, now: Time.iso8601("2026-08-31T01:00:00Z"))
+      assert_empty store.read("2026-08-30").fetch("attention")
+    end
+  end
+
+  def test_late_registration_end_amends_closed_attention_without_removing_replacement
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      waiting = { "attention_id" => "attention:old", "kind" => "unanswered", "project_id" => "project-1", "registration_id" => "registration-1", "project" => "demo", "task_slug" => "task" }
+      replacement = waiting.merge("attention_id" => "attention:new", "registration_id" => "registration-2")
+      incoming = batch([]).with(attention: [ waiting, replacement ], frontiers: {})
+      membership = Struct.new(:projects, :gaps).new([ project ], [])
+      coverage = Object.new
+      coverage.define_singleton_method(:projects_for) { |**| membership }
+      coordinator = Hive::DailyDigest::Coordinator.new(store: store, collector_factory: ->(**) { FakeCollector.new(incoming) })
+      interval = config.fetch("first_interval")
+      now = Time.iso8601("2026-08-31T01:00:00Z")
+      coordinator.send(:materialize, interval, config: config, coverage: coverage, now: now)
+      original = File.binread(store.base_path("2026-08-30"))
+      membership.projects = [ project.merge("membership_ends_at" => "2026-08-30T12:00:00Z", "membership_end_exclusive" => true), project.merge("registration_id" => "registration-2") ]
+      incoming = incoming.with(attention: [ replacement ])
+      coordinator.send(:materialize, interval, config: config, coverage: coverage, now: now + 60)
+      assert_equal [ "attention:new" ], store.read("2026-08-30").fetch("attention").map { |item| item.fetch("attention_id") }
+      coordinator.send(:materialize, interval, config: config, coverage: coverage, now: now + 120)
+      assert_equal 1, store.read("2026-08-30").fetch("amendments").length
+      assert_equal original, File.binread(store.base_path("2026-08-30"))
+    end
+  end
+
   private
 
   FakeCollector = Struct.new(:result) do

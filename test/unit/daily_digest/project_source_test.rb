@@ -205,6 +205,32 @@ class DailyDigestProjectSourceTest < Minitest::Test
     end
   end
 
+  def test_retains_multiple_waiting_tasks_across_fresh_and_cached_journals
+    with_tmp_dir do |project|
+      %w[waiting-a waiting-b].each do |slug|
+        folder = File.join(project, ".hive-state", "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(folder)
+        asked = activity("question_asked", "question-#{slug}", "question_id" => "Q1")
+        asked["task"] = { "id" => slug, "slug" => slug }
+        asked["stage"] = "2-brainstorm"
+        File.write(File.join(folder, "task-journal.jsonl"), JSON.generate(asked) + "\n")
+      end
+      first = build_source(project, known_stage_dirs: %w[2-brainstorm]).collect
+      assert_equal %w[waiting-a waiting-b], first.attention.map { |item| item.fetch("task_slug") }
+      journal = File.join(project, ".hive-state", "stages", "2-brainstorm", "waiting-a", "task-journal.jsonl")
+      File.open(journal, "a") { |file| file.puts }
+      second = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project),
+        starts_at: Time.iso8601("2026-08-30T00:00:00Z"),
+        ends_at: Time.iso8601("2026-08-31T00:00:00Z"),
+        known_stage_dirs: %w[2-brainstorm], prior_frontier: first.frontier,
+        observed_at: -> { Time.iso8601("2026-08-31T02:00:00Z") }
+      ).collect
+      assert_equal first.attention, second.attention
+      assert_equal 2, second.attention.map { |item| item.fetch("attention_id") }.uniq.length
+    end
+  end
+
   def test_pr_fact_uses_hive_owned_document_and_names_missing_required_evidence
     with_tmp_dir do |project|
       task_folder = File.join(project, ".hive-state", "stages", "5-open-pr", "pr-task")
@@ -662,6 +688,83 @@ class DailyDigestProjectSourceTest < Minitest::Test
         )
       ]
       assert_empty source.send(:boundary_attention, { task => completed })
+    end
+  end
+
+  def test_dated_activity_gaps_belong_only_to_their_half_open_interval
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "4-execute", "digest-task")
+      FileUtils.mkdir_p(task)
+      rows = [ "2026-08-29T23:59:59Z", "2026-08-30T00:00:00Z", "2026-08-31T00:00:00Z", "invalid", nil ].each_with_index.map do |time, i|
+        activity("activity_gap", "gap-#{i}", "reason_code" => "gap-#{i}").merge("occurred_at" => time)
+      end
+      File.write(File.join(task, "task-journal.jsonl"), rows.map { |row| JSON.generate(row) }.join("\n") + "\n")
+      result = build_source(project, known_stage_dirs: %w[4-execute]).collect
+      assert_equal %w[gap-1 gap-3 gap-4], result.gaps.map { |g| g.fetch("reason_code") }.sort
+      legacy_frontier = Marshal.load(Marshal.dump(result.frontier))
+      legacy_frontier.fetch("fingerprints").each_value do |fingerprint|
+        fingerprint.delete("gap_window")
+        fingerprint["gaps"] << Hive::DailyDigest::Materiality.classify(rows.first, project: project_entry(project)).value
+      end
+      recovered = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project), starts_at: "2026-08-30T00:00:00Z",
+        ends_at: "2026-08-31T00:00:00Z", known_stage_dirs: %w[4-execute],
+        prior_frontier: legacy_frontier
+      ).collect
+      assert_equal %w[gap-1 gap-3 gap-4], recovered.gaps.map { |g| g.fetch("reason_code") }.sort
+    end
+  end
+
+  def test_invalid_cached_waiting_time_preserves_attention_with_unknown_age
+    with_tmp_dir do |project|
+      task = File.join(project, ".hive-state", "stages", "2-brainstorm", "waiting-task")
+      FileUtils.mkdir_p(task)
+      File.write(File.join(task, "task-journal.jsonl"), JSON.generate(activity("question_asked", "question", "question_id" => "Q1")) + "\n")
+      first = build_source(project, known_stage_dirs: %w[2-brainstorm]).collect
+      frontier = Marshal.load(Marshal.dump(first.frontier))
+      frontier.fetch("fingerprints").each_value do |fingerprint|
+        Array(fingerprint["boundary_attention"]).each { |item| item["waiting_since"] = "invalid" }
+      end
+      result = Hive::DailyDigest::ProjectSource.new(
+        project: project_entry(project), starts_at: "2026-08-30T00:00:00Z",
+        ends_at: "2026-08-31T00:00:00Z", known_stage_dirs: %w[2-brainstorm],
+        prior_frontier: frontier, observed_at: -> { Time.iso8601("2026-08-31T01:00:00Z") }
+      ).collect
+      assert_equal [ "unanswered" ], result.attention.map { |item| item.fetch("kind") }
+      assert_nil result.attention.first.fetch("waiting_age_seconds")
+    end
+  end
+
+  def test_unusable_publication_metadata_is_fingerprinted_without_claiming_pr_evidence
+    %w[unsafe not_file too_large unavailable].each do |state|
+      with_tmp_dir do |project|
+        task = File.join(project, ".hive-state", "stages", "5-open-pr", "digest-task")
+        FileUtils.mkdir_p(task)
+        publication = File.join(task, "pr.md")
+        case state
+        when "unsafe"
+          target = File.join(project, "outside.md")
+          File.write(target, "---\npr_url: https://github.com/acme/demo/pull/42\n---\n")
+          File.symlink(target, publication)
+        when "not_file" then FileUtils.mkdir_p(publication)
+        when "too_large" then File.write(publication, "x" * (128 * 1024 + 1))
+        else File.write(publication, "unreadable")
+        end
+        File.write(File.join(task, "task-journal.jsonl"), JSON.generate(activity("pr_observed", "pr", "pr_state" => "open")) + "\n")
+        original = File.method(:binread)
+        replacement = lambda do |path, *args|
+          raise Errno::EACCES if path == publication && state == "unavailable"
+          original.call(path, *args)
+        end
+        result = nil
+        with_replaced_singleton_method(File, :binread, replacement) do
+          result = build_source(project, known_stage_dirs: %w[5-open-pr]).collect
+        end
+        signature = result.frontier.fetch("fingerprints").values.first
+        assert_equal state, signature.dig("dependencies", "publication", "state")
+        assert_equal [ "pr_evidence_incomplete" ], result.gaps.map { |g| g.fetch("reason_code") }
+        assert_nil result.facts.first.dig("pr", "url")
+      end
     end
   end
 

@@ -3,7 +3,7 @@ title: Daily activity digest
 type: module
 source: lib/hive/daily_digest.rb, lib/hive/daily_digest/, lib/hive/daemon/daily_digest_*.rb, schemas/hive-digest*.json
 created: 2026-08-30
-updated: 2026-09-07
+updated: 2026-09-10
 tags: [digest, activity, projection, calendar, amendments, gaps, telegram, retention]
 ---
 
@@ -75,7 +75,11 @@ orthogonal. `empty` requires complete observation.
 `daily_digest.time_zone` is an IANA identifier resolved through TZInfo. Setup
 and `hive migrate` / `hive migrate --all` idempotently persist the zone,
 coverage-start instant, initial membership snapshot, and first interval in one
-global-config transaction. Failed or ambiguous host-zone detection leaves the
+global-config transaction. Legacy project identities and registration epochs are
+initialized in that same transaction before taking the membership snapshot.
+Existing epochs, registration times, history, and initialized coverage snapshots
+are preserved; the upgrade does not invent membership events. Failed or
+ambiguous host-zone detection leaves the
 feature disabled and does not stop unrelated daemon work.
 
 Intervals are half-open UTC ranges. Normal calendar days can therefore be 23,
@@ -183,10 +187,14 @@ replacement.
 Facts with a known event time are assigned to the persisted interval containing
 that instant; otherwise `observed_at` owns assignment. A fact discovered after
 its day closes becomes a separately immutable amendment with event,
-observation, and amendment time. Corrections reference the corrected identity.
+observation, and amendment time. Dated activity gaps belong only to their event
+interval; gaps with unparseable times remain conservative source-health
+evidence. Corrections reference the corrected identity.
 Gap recovery appends recovered facts and the exact resolved gap ID. Effective
 completeness can improve, but the closed base bytes, lifecycle, and close time
-remain unchanged.
+remain unchanged. Amendment identity includes its position in the persisted
+history, so a repeated outage after recovery can append a new observation
+without colliding with the first outage. Unchanged replay adds no amendment.
 
 Boundary attention can also be corrected without rewriting the close. When a
 changed journal fingerprint for the exact registration proves that a formerly
@@ -195,7 +203,9 @@ both `resolved_attention_ids` and the allowlisted prior attention rows. A
 different replacement registration is never accepted as that proof. A task or
 registry health gap keeps the prior attention visible until the corresponding
 registration-scoped evidence is complete; a changed but malformed journal is
-not treated as recovery.
+not treated as recovery. Explicit registry history ending a registration before
+the attention boundary removes its retained attention even when the task journal
+has not changed; a source outage alone does not.
 
 ### Executable persisted-state trace
 
@@ -238,7 +248,8 @@ ledger, and all underlying evidence. Late input aimed at a tombstone is audited
 and its source frontier advances atomically, preventing either reconstruction
 or an endless replay loop. Collection resumes from the tombstone's retained
 source frontiers; a recovered gap gets one stable discard acknowledgement and
-is then removed from the tombstone's effective gaps.
+is then removed from the tombstone's effective gaps. Re-observing the same late
+evidence does not append another discard merely because observation time changed.
 
 Refresh/close and Telegram delivery are separate daemon children, scheduler
 states, capacity identities, and positive timeouts. The close path runs whenever

@@ -30,6 +30,78 @@ class DailyDigestMigrationTest < Minitest::Test
     end
   end
 
+  def test_initializes_legacy_registry_identity_before_snapshotting_coverage
+    assert_legacy_registry_coverage({})
+  end
+
+  def test_initializes_missing_registration_epoch_without_replacing_project_identity
+    assert_legacy_registry_coverage("project_id" => "12345678-1234-4234-a234-123456789012")
+  end
+
+  def assert_legacy_registry_coverage(identity)
+    with_tmp_global_config do
+      row = { "name" => "legacy", "path" => "/missing/legacy" }.merge(identity)
+      File.write(Hive::Config.global_config_path, { "registered_projects" => [ row ] }.to_yaml)
+      migration = Hive::DailyDigest::Migration.new(detector: -> { "UTC" }, now: -> { NOW })
+      result = migration.call
+      persisted = YAML.safe_load_file(Hive::Config.global_config_path)
+      registered = persisted.fetch("registered_projects").first
+      member = result.fetch("initial_membership").first
+      refute_nil registered["registration_id"]
+      assert_equal "legacy:#{registered.fetch('project_id')}", registered.fetch("registration_id")
+      assert_equal registered.fetch("registration_id"), member.fetch("registration_id")
+      assert_equal registered.fetch("project_id"), member.fetch("project_id")
+      assert_equal NOW.iso8601(6), registered.fetch("registered_at")
+      assert_equal identity["project_id"], registered.fetch("project_id") if identity.key?("project_id")
+      refute persisted.key?("project_membership_history")
+      original = File.read(Hive::Config.global_config_path)
+      assert_equal result, migration.call
+      refute Hive::Config.ensure_project_identities!(now: NOW + 86_400)
+      assert_equal original, File.read(Hive::Config.global_config_path)
+    end
+  end
+
+  def test_failed_snapshot_does_not_persist_registry_identity_or_coverage
+    with_tmp_global_config do
+      original = { "registered_projects" => [ { "name" => "legacy", "path" => "/missing/legacy" } ] }.to_yaml
+      File.write(Hive::Config.global_config_path, original)
+      migration = Hive::DailyDigest::Migration.new(
+        detector: -> { "UTC" }, now: -> { NOW },
+        projects: -> { raise Hive::ConfigError, "snapshot failed" }
+      )
+
+      assert_raises(Hive::DailyDigest::Migration::InitializationError) { migration.call }
+      assert_equal original, File.read(Hive::Config.global_config_path)
+    end
+  end
+
+  def test_existing_snapshot_and_registration_history_are_preserved
+    with_tmp_global_config do
+      row = {
+        "name" => "demo", "path" => "/missing/demo",
+        "project_id" => "12345678-1234-4234-a234-123456789012",
+        "registration_id" => "historic-epoch", "registered_at" => "2026-01-01T00:00:00Z"
+      }
+      history = [ { "kind" => "registered", "after" => row.dup } ]
+      File.write(Hive::Config.global_config_path, {
+        "registered_projects" => [ row ], "project_membership_history" => history
+      }.to_yaml)
+      migration = Hive::DailyDigest::Migration.new(detector: -> { "UTC" }, now: -> { NOW })
+      result = migration.call
+      assert_equal "historic-epoch", result.fetch("initial_membership").first.fetch("registration_id")
+      persisted = YAML.safe_load_file(Hive::Config.global_config_path)
+      assert_equal [ row ], persisted.fetch("registered_projects")
+      assert_equal history, persisted.fetch("project_membership_history")
+      original = File.read(Hive::Config.global_config_path)
+      later = Hive::DailyDigest::Migration.new(
+        detector: -> { flunk "must not redetect historic zone" },
+        projects: -> { flunk "must not resnapshot historic membership" }, now: -> { NOW + 86_400 }
+      )
+      assert_equal result, later.call
+      assert_equal original, File.read(Hive::Config.global_config_path)
+    end
+  end
+
   def test_failed_detection_leaves_existing_feature_disabled
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), { "daily_digest" => { "enabled" => false } }.to_yaml)

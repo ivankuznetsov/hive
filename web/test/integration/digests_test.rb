@@ -74,21 +74,21 @@ class DigestsTest < ActionDispatch::IntegrationTest
 
     get digest_path("2026-08-26")
     assert_response :success
-    assert_select ".digest-state-missing", text: /not persisted/
+    assert_select ".digest-state-missing", text: /No digest is saved/
     assert_select "code", text: "hive digest refresh --date 2026-08-26"
 
     get digest_path("2026-08-27")
     assert_select ".digest-state-pruned", text: /pruned/
 
     get digest_path("2026-08-28")
-    assert_select ".digest-empty", text: /No material activity/
+    assert_select ".digest-empty", text: /No task or project changes/
 
     get digest_path("2026-08-29")
     assert_select ".digest-state-partial", text: /incomplete/i
     assert_select ".digest-empty", 0
 
     get digest_path("2026-08-30")
-    assert_select ".digest-state-stale", text: /stale/i
+    assert_select ".digest-state-stale", text: /out of date/i
   end
 
   private

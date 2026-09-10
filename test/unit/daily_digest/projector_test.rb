@@ -121,6 +121,27 @@ class DailyDigestProjectorTest < Minitest::Test
     assert_nil unresolved
   end
 
+  def test_repeated_outage_after_recovery_has_a_new_id_and_replay_is_empty
+    require "hive/daily_digest/store"
+    Dir.mktmpdir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      now = NOW
+      projector = Hive::DailyDigest::Projector.new(clock: -> { now })
+      store.write_base(projector.base(interval: interval, batch: batch(gaps: [], facts: []), lifecycle: "closed"))
+      original = File.binread(store.base_path("2026-08-30"))
+      [ [ gap ], [], [ gap ], [] ].each do |gaps|
+        now += 60
+        incoming = batch(gaps: gaps.map { |g| g.merge("observed_at" => now.iso8601(6)) }, facts: [])
+        existing = store.read("2026-08-30")
+        delta = projector.amendment(existing: existing, batch: incoming, attempted_gap_ids: [ "gap:one" ])
+        store.append_amendment("2026-08-30", delta)
+        assert_nil projector.amendment(existing: store.read("2026-08-30"), batch: incoming, attempted_gap_ids: [ "gap:one" ])
+      end
+      assert_equal 4, store.read("2026-08-30").fetch("amendments").length
+      assert_equal original, File.binread(store.base_path("2026-08-30"))
+    end
+  end
+
   private
 
   def interval

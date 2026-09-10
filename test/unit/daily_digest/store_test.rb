@@ -421,6 +421,21 @@ class DailyDigestStoreTest < Minitest::Test
     end
   end
 
+  def test_pruned_discard_deduplicates_observation_time_churn
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      store.write_base(record("closed"))
+      store.prune("2026-08-30", reason: "retention", pruned_at: NOW)
+      entry = { "identity" => "gap:outage", "source" => "project_state", "kind" => "gap" }
+      first = store.discard_pruned("2026-08-30", entries: [ entry.merge("observed_at" => NOW.iso8601) ], source_frontiers: {}, discarded_at: NOW)
+      3.times do |i|
+        store.discard_pruned("2026-08-30", entries: [ entry.merge("observed_at" => (NOW + i + 1).iso8601) ], source_frontiers: {}, discarded_at: NOW + i + 1)
+      end
+      assert_equal first.fetch("discards"), store.read("2026-08-30").fetch("discards")
+      refute File.exist?(store.base_path("2026-08-30"))
+    end
+  end
+
   private
 
   def record(lifecycle, items: [], attention: [], completeness: "complete", content: nil, gaps: [],

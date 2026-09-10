@@ -239,7 +239,8 @@ module Hive
         end
         key = fingerprint_key(task_folder, File.basename(path))
         signature = file_signature(stat).merge(
-          "dependencies" => { "publication" => publication_signature(task_folder) }
+          "dependencies" => { "publication" => publication_signature(task_folder) },
+          "gap_window" => [ iso(@starts_at), iso(@ends_at) ]
         )
         if unchanged_fingerprint?(key, signature) &&
            (cached_gaps = cached_journal_gaps(key)) &&
@@ -268,6 +269,7 @@ module Hive
             next
           end
 
+          gap_event_time = record["occurred_at"]
           record = with_event_time(record)
           if before_boundary?(record["occurred_at"])
             boundary_records[task_folder] << record
@@ -284,7 +286,7 @@ module Hive
               journal_gaps << incomplete_pr_gap(record, task_folder) if incomplete_pr_evidence?(record)
             end
           elsif result.disposition == :gap
-            journal_gaps << result.value
+            journal_gaps << result.value if gap_in_window?(gap_event_time)
           end
         rescue JSON::ParserError
           malformed = true
@@ -551,6 +553,14 @@ module Hive
 
       def url_component(value)
         CGI.escape(value.to_s).gsub("+", "%20")
+      end
+
+      # Missing or malformed event times remain conservative source-health gaps.
+      def gap_in_window?(value)
+        time = normalize_time(value)
+        time >= @starts_at && time < @ends_at
+      rescue ArgumentError, TypeError
+        true
       end
 
       def in_window?(value)

@@ -40,7 +40,7 @@ module Hive
         }
       end
 
-      def amendment(existing:, batch:, attempted_gap_ids: nil)
+      def amendment(existing:, batch:, attempted_gap_ids: nil, ended_attention_ids: [])
         existing_fact_ids = Array(existing["items"]).to_h { |item| [ item.fetch("fact_id"), true ] }
         existing_attention_ids = Array(existing["attention"]).to_h do |item|
           [ item.fetch("attention_id"), true ]
@@ -57,7 +57,8 @@ module Hive
         end
         resolved_attention = Array(existing["attention"]).select do |item|
           !current_attention_ids[item.fetch("attention_id")] &&
-            changed_task_evidence?(existing, batch, item)
+            (ended_attention_ids.include?(item.fetch("attention_id")) ||
+             changed_task_evidence?(existing, batch, item))
         end
         resolved_attention_ids = resolved_attention.map do |item|
           item.fetch("attention_id")
@@ -76,6 +77,7 @@ module Hive
         now = timestamp(@clock.call)
         identity = {
           "local_date" => existing.fetch("local_date"),
+          "prior_amendment_count" => Array(existing["amendments"]).length,
           "item_ids" => new_items.map { |item| item.fetch("fact_id") }.sort,
           "attention_ids" => new_attention.map { |item| item.fetch("attention_id") }.sort,
           "gap_ids" => new_gaps.map { |gap| gap.fetch("gap_id") }.sort,

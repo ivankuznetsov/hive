@@ -69,7 +69,7 @@ module Hive
       end
 
       def initialize(detector: TimeZoneDetector.new,
-                     projects: Hive::Config.method(:registered_projects),
+                     projects: nil,
                      now: -> { Time.now.utc })
         @detector = detector
         @projects = projects
@@ -98,7 +98,9 @@ module Hive
           instant = normalize_now(@now.call)
           local_date = calendar.local_date_at(instant)
           interval = calendar.interval_for(local_date, sequence: 1)
-          membership = normalize_membership(@projects.call)
+          Hive::Config.normalize_project_identities!(data, now: instant)
+          projects = @projects ? @projects.call : Hive::Config.registered_project_entries_from_data(data)
+          membership = normalize_membership(projects)
           result = raw.merge(
             "enabled" => raw.fetch("enabled", false),
             "time_zone" => zone,

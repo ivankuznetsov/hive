@@ -169,6 +169,24 @@ class DailyDigestDeliveryTest < Minitest::Test
     end
   end
 
+  def test_missing_and_pruned_records_never_prepare_or_send_delivery
+    { "missing" => Hive::DailyDigest::MissingRecord,
+      "pruned" => Hive::DailyDigest::PrunedRecord }.each do |status, error|
+      with_tmp_dir do |dir|
+        telegram = FakeTelegram.new
+        delivery, ledger = build_delivery(
+          dir, telegram: telegram,
+          record: { "reader_status" => status, "local_date" => DATE },
+          token_loader: -> { flunk "unavailable records must not load credentials" }
+        )
+
+        assert_raises(error) { delivery.deliver(date: DATE) }
+        assert_nil ledger.read(DATE)
+        assert_empty telegram.messages
+      end
+    end
+  end
+
   def test_missing_token_leaves_a_resumable_prepared_intent
     with_tmp_dir do |dir|
       telegram = FakeTelegram.new

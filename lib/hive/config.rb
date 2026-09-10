@@ -1241,6 +1241,10 @@ module Hive
       data = load_global_config(path)
       raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
 
+      registered_project_entries_from_data(data, preserve_invalid: preserve_invalid)
+    end
+
+    def registered_project_entries_from_data(data, preserve_invalid: false)
       # Tolerate hand-edit accidents: a non-Hash row, a row missing
       # `name`, or a row whose `path` isn't a String would previously
       # raise here and brick every command (status / forget / prune /
@@ -1282,25 +1286,38 @@ module Hive
         data = load_global_config(global_config_path)
         raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
 
-        Array(data["registered_projects"]).each do |entry|
-          next unless valid_registry_entry?(entry)
+        changed = normalize_project_identities!(data, now: now)
+        write_global_config_atomic!(data) if changed
+      end
+      changed
+    end
 
-          unless valid_project_id?(entry["project_id"])
-            project_id = registry_project_id(entry)
-            entry["project_id"] = project_id
-            entry["registration_id"] ||= "legacy:#{project_id}"
-            entry["registered_at"] ||= now.utc.iso8601(6)
+    # Mutates only the supplied config, so callers can persist identities and
+    # dependent snapshots together under their existing global config lock.
+    def normalize_project_identities!(data, now:)
+      changed = false
+      Array(data["registered_projects"]).each do |entry|
+        next unless valid_registry_entry?(entry)
+
+        unless valid_project_id?(entry["project_id"])
+          entry["project_id"] = registry_project_id(entry)
+          changed = true
+        end
+        if entry["registration_id"].nil?
+          entry["registration_id"] = "legacy:#{entry.fetch('project_id')}"
+          changed = true
+        end
+        if entry["registered_at"].nil?
+          entry["registered_at"] = now.utc.iso8601(6)
+          changed = true
+        end
+        if entry["real_path"].nil?
+          real_path = realpath_or_nil(File.expand_path(entry.fetch("path")))
+          if real_path
+            entry["real_path"] = real_path
             changed = true
           end
-          if entry["real_path"].nil?
-            real_path = realpath_or_nil(File.expand_path(entry.fetch("path")))
-            if real_path
-              entry["real_path"] = real_path
-              changed = true
-            end
-          end
         end
-        write_global_config_atomic!(data) if changed
       end
       changed
     end

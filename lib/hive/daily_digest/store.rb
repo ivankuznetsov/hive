@@ -353,7 +353,7 @@ module Hive
           "observed_at" => normalize_time(input["observed_at"] || discarded_at),
           "reason" => input.fetch("reason", "projection was pruned").to_s.byteslice(0, 240)
         }
-        row["discard_id"] = Record.content_id(row)
+        row["discard_id"] = Record.content_id(row.reject { |key, _| key == "observed_at" })
         row["discarded_at"] = normalize_time(discarded_at)
         row
       rescue KeyError, NoMethodError
@@ -362,7 +362,7 @@ module Hive
 
       def discard_identity(entry)
         Record.canonical_json(entry.reject do |key, _value|
-          key == "discard_id" || key == "discarded_at"
+          key == "discard_id" || key == "discarded_at" || key == "observed_at"
         end)
       end
 

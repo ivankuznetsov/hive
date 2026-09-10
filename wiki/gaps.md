@@ -1411,3 +1411,13 @@ Automatic recovery requires successful process and open-file probes (`ps` and
 nonempty locks deliberately leave recovery to a later retry or operator.
 This is not general recovery of interrupted Git operations; preserved lock
 files may still require inspection on platforms without these probes.
+
+## Daily digest long-history scale remains unmeasured (2026-09-10)
+
+Digest collection holds the global store lock across source collection and
+commit to prevent lost updates. Readers share that lock and load the retained
+interval index for navigation. Correctness tests cover replay and retained
+history, but there is no measured reader-latency bound for years of intervals
+or unusually large daily activity. Measure those workloads before choosing
+pagination or changing the collection transaction; source retention must remain
+complete.

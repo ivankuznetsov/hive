@@ -223,14 +223,23 @@ module Hive
           return result_row(date, "pruned", discarded: discarded.length)
         end
 
+        attention_boundary = [ now, utc(interval.fetch("ends_at")) ].min
+        ended_attention_ids = Array(existing && existing["attention"]).filter_map do |item|
+          ended = membership.projects.any? do |project|
+            project["project_id"] == item["project_id"] &&
+              project["registration_id"] == item["registration_id"] &&
+              project["membership_end_exclusive"] == true &&
+              utc(project.fetch("membership_ends_at")) <= attention_boundary
+          end
+          item.fetch("attention_id") if ended
+        end
         lifecycle = now >= utc(interval.fetch("ends_at")) ? "closed" : "open"
         projector = Projector.new(clock: -> { now })
         if existing.nil? || existing.fetch("lifecycle") == "open"
           if existing
-            attention_boundary = lifecycle == "closed" ? utc(interval.fetch("ends_at")) : now
             batch = merge_open_batch(
               existing, batch, confirmed_gap_ids: confirmed_gap_ids,
-              attention_boundary: attention_boundary
+              attention_boundary: attention_boundary, ended_attention_ids: ended_attention_ids
             )
           end
           base = projector.base(interval: interval, batch: batch, lifecycle: lifecycle)
@@ -243,7 +252,8 @@ module Hive
         end
 
         amendment = projector.amendment(
-          existing: existing, batch: batch, attempted_gap_ids: confirmed_gap_ids
+          existing: existing, batch: batch, attempted_gap_ids: confirmed_gap_ids,
+          ended_attention_ids: ended_attention_ids
         )
         if amendment
           begin
@@ -255,7 +265,8 @@ module Hive
             # when no delta remains.
             latest = @store.read(date)
             retry_amendment = projector.amendment(
-              existing: latest, batch: batch, attempted_gap_ids: confirmed_gap_ids
+              existing: latest, batch: batch, attempted_gap_ids: confirmed_gap_ids,
+              ended_attention_ids: ended_attention_ids
             )
             raise if retry_amendment
 
@@ -301,7 +312,7 @@ module Hive
         existing.nil? || %w[open closed pruned].include?(existing.fetch("lifecycle"))
       end
 
-      def merge_open_batch(existing, batch, confirmed_gap_ids:, attention_boundary:)
+      def merge_open_batch(existing, batch, confirmed_gap_ids:, attention_boundary:, ended_attention_ids: [])
         confirmed = confirmed_gap_ids.to_h { |id| [ id, true ] }
         current_gaps = Array(existing["effective_gaps"] || existing["gaps"])
         retained_gaps = current_gaps.reject { |gap| confirmed[gap.fetch("gap_id")] }
@@ -310,6 +321,8 @@ module Hive
           frontier_identity(key, frontier)
         end
         retained_attention = Array(existing["attention"]).reject do |item|
+          next true if ended_attention_ids.include?(item.fetch("attention_id"))
+
           refreshed_projects.any? { |identity| same_registration?(identity, item) } &&
             changed_tasks.include?(
               [ item["project_id"], item["registration_id"], item["task_slug"] ]

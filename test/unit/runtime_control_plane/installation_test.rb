@@ -114,4 +114,26 @@ class RuntimeControlPlaneInstallationTest < Minitest::Test
       assert_equal "ok", results.first.dig("database", "status")
     end
   end
+
+  def test_setup_rejects_a_database_that_appears_before_publication
+    with_tmp_dir do |root|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      original_exist = File.method(:exist?)
+      target_checks = 0
+
+      with_replaced_singleton_method(File, :exist?, lambda { |candidate|
+        if candidate == path
+          target_checks += 1
+          target_checks > 1 || original_exist.call(candidate)
+        else
+          original_exist.call(candidate)
+        end
+      }) do
+        error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+          Hive::RuntimeControlPlane::Installation.setup(state_home: root)
+        end
+        assert_equal :database_already_present, error.code
+      end
+    end
+  end
 end

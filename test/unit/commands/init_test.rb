@@ -78,6 +78,23 @@ class HiveCommandsInitTest < Minitest::Test
     end
   end
 
+  def test_existing_bench_rebinding_restores_config_when_runtime_install_rolls_back
+    with_tmp_dir do |root|
+      ops = Object.new
+      ops.define_singleton_method(:hive_state_path) { root }
+      command = command(root)
+      command.define_singleton_method(:current_default_workflow_with_status) { |_ops| [ "coding", false ] }
+      command.define_singleton_method(:write_default_workflow!) { |path, value| File.write(path, "default_workflow: #{value}\n") }
+      command.define_singleton_method(:install_builtin_workflow_runtime!) do |_ops, _workflow, before_commit:, rollback:, **|
+        before_commit.call
+        rollback.call
+      end
+      command.send(:install_and_rebind_existing_bench!, ops, "bench")
+
+      refute_path_exists File.join(root, "config.yml")
+    end
+  end
+
   def test_project_config_binding_requires_every_limit_answer_key
     %w[budgets timeouts].each do |section|
       Hive::Commands::Init::Prompts::LIMIT_KEYS.each do |key|

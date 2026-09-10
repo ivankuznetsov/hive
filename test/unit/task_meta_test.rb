@@ -75,6 +75,12 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_completed_at_preflight_allows_metadata_removed_before_it_is_read
+    with_tmp_dir do |dir|
+      assert_nil Hive::TaskMeta.send(:validate_stored_completed_at!, dir)
+    end
+  end
+
   def test_malformed_stored_completed_at_warns_and_is_not_rewritten
     with_tmp_dir do |dir|
       path = File.join(dir, "meta.yml")

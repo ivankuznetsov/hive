@@ -57,6 +57,22 @@ class RuntimeCommandTest < Minitest::Test
     end
   end
 
+  def test_json_failure_supplies_a_next_action_when_the_runtime_error_has_none
+    output = StringIO.new
+    error = Hive::RuntimeControlPlane::IntegrityError.new(
+      "broken", code: :broken, action: nil
+    )
+
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::Installation, :status, ->(**) { raise error }) do
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::Commands::Runtime.new("status", json: true, output: output).call
+      end
+    end
+
+    assert_equal "repair the reported runtime database, then run hive runtime status",
+                 JSON.parse(output.string).fetch("next_action")
+  end
+
   def test_status_uses_database_identity_without_manifests
     with_tmp_dir do |root|
       status = Hive::RuntimeControlPlane::Installation.setup(state_home: root)

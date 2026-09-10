@@ -1058,6 +1058,23 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes err, "head unavailable"
   end
 
+  def test_install_retains_the_committed_runtime_when_commit_status_is_observed_after_failure
+    with_tmp_dir do |hive_state|
+      heads = [ "before\n", "after\n" ]
+      ops = Object.new
+      ops.define_singleton_method(:hive_state_path) { hive_state }
+      ops.define_singleton_method(:run_git!) do |*argv|
+        argv.include?("rev-parse") ? heads.shift : ""
+      end
+      ops.define_singleton_method(:hive_commit) { |**| raise "commit transport failed" }
+
+      assert_raises(RuntimeError) do
+        Hive::Workflows::Bench.install_runtime!(ops)
+      end
+      assert_path_exists File.join(hive_state, "bench-runtime")
+    end
+  end
+
   def test_generate_selects_the_sol_runner_for_stage_specific_5_6_models
     instruction = File.read(stages_by_name.fetch("generate").instruction)
 

@@ -136,6 +136,29 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
+  def test_runtime_probe_reports_control_plane_errors
+    with_tmp_dir do |root|
+      File.binwrite(Hive::Paths.runtime_control_plane_path(root), "placeholder")
+      previous = ENV["HIVE_HOME"]
+      ENV["HIVE_HOME"] = root
+      doctor = Hive::Commands::Doctor.new(
+        config: base_config, project_root: root,
+        inspector: ResolutionOnlyInspector.new(config: base_config, project_root: root)
+      )
+      error = Hive::RuntimeControlPlane::IntegrityError.new(
+        "broken", code: :broken, action: "run hive setup"
+      )
+
+      with_replaced_singleton_method(Hive::RuntimeControlPlane::Installation, :status, ->(**) { raise error }) do
+        row = doctor.send(:check_runtime_control_plane).fetch(0)
+        assert_equal "missing", row.fetch(:status)
+        assert_equal "broken: broken", row.fetch(:message)
+      end
+    ensure
+      previous.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = previous
+    end
+  end
+
   def test_exit_missing_skill_when_one_missing
     with_fake_home do |home|
       write_file("#{home}/.claude/commands/plan.md")

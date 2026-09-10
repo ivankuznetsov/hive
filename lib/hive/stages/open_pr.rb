@@ -56,7 +56,10 @@ module Hive
           )
           current.to_h == request.to_h
         end
-        publication = controller.publish!(request, revalidate: revalidate)
+        options = { revalidate: revalidate }
+        recorded_url = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
+        options[:existing_pr_url] = recorded_url unless recorded_url.to_s.empty?
+        publication = controller.publish!(request, **options)
         complete_publication(task, publication)
       rescue Hive::GithubPublication::Blocked => e
         Hive::Markers.set(
@@ -143,9 +146,19 @@ module Hive
         launch_arguments ||=
           Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         expected_output ||= authoring_path(task)
+        support = Hive::AgentSupport.for(profile)
+        provider_launch = if support&.respond_to?(:open_pr_launch_kwargs)
+          support.open_pr_launch_kwargs(
+            expected_output:,
+            completion_probe: -> { complete_authoring_file?(expected_output) }
+          )
+        else
+          {}
+        end
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "open_pr", task, profile,
-          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
+          **provider_launch.fetch(:permission_kwargs, {})
         )
         kwargs = {
           prompt: prompt,
@@ -160,6 +173,7 @@ module Hive
           expected_output: expected_output,
           status_mode: :output_file_exists,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
+          **provider_launch.fetch(:agent_kwargs, {}),
           **launch_arguments
         }
         if Hive::AgentSupport.supports?(profile, :Interactive)
@@ -289,6 +303,13 @@ module Hive
         raise Hive::StageError, "#{AUTHORING_FILE} must be a regular file, not a symlink"
       rescue SystemCallError, IOError => e
         raise Hive::StageError, "#{AUTHORING_FILE} is unreadable: #{e.class}: #{e.message}"
+      end
+
+      def complete_authoring_file?(path)
+        read_authoring(path)
+        true
+      rescue Hive::StageError, JSON::ParserError
+        false
       end
 
       def complete_publication(task, publication)

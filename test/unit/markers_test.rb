@@ -59,6 +59,32 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_seed_body_if_empty_replaces_marker_only_artifact_once
+    with_tmp_dir do |dir|
+      file = File.join(dir, "plan.md")
+      File.write(file, "<!-- ERROR reason=provider_error -->\n")
+
+      assert Hive::Markers.seed_body_if_empty(file, "# Checkpoint\n")
+      assert_equal "# Checkpoint\n", File.binread(file)
+      refute Hive::Markers.seed_body_if_empty(file, "# Replacement\n")
+      assert_equal "# Checkpoint\n", File.binread(file)
+    end
+  end
+
+  def test_seed_body_if_empty_does_not_follow_symlink
+    with_tmp_dir do |dir|
+      outside = File.join(dir, "outside.md")
+      state = File.join(dir, "plan.md")
+      File.write(outside, "do not replace\n")
+      File.symlink(outside, state)
+
+      assert Hive::Markers.seed_body_if_empty(state, "# Checkpoint\n")
+      assert_equal "do not replace\n", File.read(outside)
+      refute File.symlink?(state)
+      assert_equal "# Checkpoint\n", File.read(state)
+    end
+  end
+
   def test_current_reads_only_a_bounded_tail_of_a_large_sparse_artifact
     with_tmp_dir do |dir|
       file = File.join(dir, "large.md")

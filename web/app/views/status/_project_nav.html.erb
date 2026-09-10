@@ -1,11 +1,11 @@
 <aside id="project-nav" class="project-nav" aria-label="Project filter">
-  <%= link_to "All projects", status_project_filter_path(nil),
+  <%= link_to "All projects", status_filter_path(project: nil),
         class: class_names("project-nav-item", "active": selected_project.blank?),
         aria: { current: ("page" if selected_project.blank?) },
         data: { action: "project-filter#choose", project_filter_name_param: "" } %>
   <% projects.each do |project| %>
     <% name = project.name %>
-    <%= link_to name, status_project_filter_path(name),
+    <%= link_to name, status_filter_path(project: name),
           class: class_names("project-nav-item", "active": selected_project == name),
           aria: { current: ("page" if selected_project == name) },
           data: { action: "project-filter#choose", project_filter_name_param: name } %>

@@ -5,8 +5,8 @@ require "json"
 require "pathname"
 require "tmpdir"
 require "fileutils"
-require "lib/judge_output"
-require "lib/agent_limit"
+require_relative "judge_output"
+require_relative "agent_limit"
 
 module HiveBench
   # Judge_fn backed by the codex CLI (exec mode). By default it rides the

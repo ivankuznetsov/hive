@@ -174,6 +174,10 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
 
   def test_failure_after_service_stop_resumes_from_preparing_with_original_journal
     with_home do |state, data, projects|
+      home = File.dirname(state)
+      unit = File.join(home, ".config/systemd/user/hive-daemon.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "managed service\n")
       running = true
       calls = []
       runner = lambda do |argv|
@@ -182,11 +186,15 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
           true
         elsif argv.include?("is-active")
           argv.last == "hive-daemon" && running
+        elsif argv.include?("is-enabled")
+          argv.last == "hive-daemon"
         elsif argv.include?("stop")
           running = false
           true
         elsif argv.include?("start")
           running = true
+          true
+        elsif argv.include?("daemon-reload")
           true
         else
           false
@@ -194,7 +202,7 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
         [ "", "", CommandStatus.new(ok) ]
       end
       services = Hive::RuntimeControlPlane::MaintenanceServices.new(
-        state_home: state, host_os: "linux", runner: runner
+        state_home: state, home: home, host_os: "linux", runner: runner
       )
       crashing = build_cutover(state, data, projects, services: services, fault: lambda { |point|
         raise "refused after stop" if point == :services_stopped
@@ -206,7 +214,7 @@ class RuntimeControlPlaneCutoverTest < Minitest::Test
       assert_path_exists File.join(current, "preparing.json")
       assert_path_exists File.join(current, "services.json")
       resumed_services = Hive::RuntimeControlPlane::MaintenanceServices.new(
-        state_home: state, host_os: "linux", runner: runner
+        state_home: state, home: home, host_os: "linux", runner: runner
       )
       assert_equal "active", build_cutover(state, data, projects, services: resumed_services).resume.phase
       assert running

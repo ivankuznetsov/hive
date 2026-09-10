@@ -247,6 +247,17 @@ provider-only proxy, and sealed controller bundle remain the isolation
 boundary. The old OpenCode score is superseded pending a sealed six-cell rerun
 with that parity grant.
 
+Invocation-token custody now cleans ordinary inherited descendants even after
+`setsid` and reparenting, which is the leak observed during live Webmail
+dogfood. It is lifecycle cleanup, not hostile-process containment: a command
+that deliberately erases the custody environment or delegates a service to an
+external manager without forwarding it can evade the inventory. The same
+limit applies when a descendant becomes non-dumpable: an unreadable process
+environment cannot prove ownership. Unreadable same-user rows are skipped
+because unrelated service managers can legitimately have that property. A dedicated
+cgroup/namespace owner that preserves OpenCode's required repository writes,
+network, and cross-platform support remains a deeper isolation follow-up.
+
 ## Parallel Hive web CI exact-head evidence (2026-08-14)
 
 The serial Hive web job took 441 seconds in exact-head run `31818138021`, led
@@ -614,23 +625,39 @@ Residual audits of commits `6a6cf990`, `2d15e9ee`, and `5e8723fa` carried this b
 34. **Claude/tmux orphan-sweep server skip is unit-pinned but not post-fix parallel live-smoked.** Commit `024b29b0` changes `Hive::ClaudeLauncher.sweep_orphan_processes` from a blanket `pkill -f` to `pgrep` plus per-PID `TERM`, skipping matched `tmux` commands because the tmux server can retain the first session's full `new-session ... --add-dir <task.folder>` argv. `test/unit/stages/brainstorm_tmux_sentinel_test.rb` covers the observed shape: one matched tmux server line plus one matched Claude line must kill only the Claude PID and log `skipped=1`. The 2026-06-11 refreshes did not find an in-tree artifact showing two real Claude/tmux-backed Hive tasks running in parallel after the fix, one finishing, and the sibling session surviving without `tmux_session_terminated`.
 35. Hivebox web-tier residuals after the Rails rewrite (ADR-037): browser-level coverage of agents/telegram/repos pages beyond the pipeline system test (the Telegram page now has source-level integration coverage for its first-run setup guide, strict numeric chat-ID validation, and blank/@handle refusals, but no browser/Docker smoke; repos has source-level coverage for the first-run questionnaire, SSH-origin normalization, and non-directory clone-target refusal, but no live GitHub/Docker smoke; task-page red recovery now has source/Rails integration coverage and commit-message live verification, and oversized diff rendering is capped by source/Rails integration coverage, but no checked-in browser-system or Docker artifact); Action Cable behavior under many tabs; diff happy-path tests; cross-round brainstorm answer-numbering semantics (see `Task#answer_questions!`). The former action-to-verb ownership gap is closed: `TaskAction::READY_COMMANDS` is derived from the classifier table, the bot consumes it directly, and the web projects it through the daemon queue allowlist. Commits `eb971b55`, `463fff29`, `0dea8aa6`, `d7ce55a9`, `70d60980`, `24c41980`, `b47f6627`, `9d0fc9ef`, `65e90ebe`, and `c0630426` add Playwright/system or Rails integration coverage for the task log tail's follow/pause/resume behavior, node-preserving log-frame morph reloads, artifact open-state preservation across pushed morphs, status-grid scroll plus composer draft preservation across a live broadcast, project-rail filtering with URL/composer sync, `+ Add project` routing, and re-application after a live broadcast, Telegram first-timer setup guide open-state/BotFather/userinfobot/three-step rendering and strict chat-ID validation, red-task diagnostic banner plus Retry route queueing, Q&A round replacement without permanent stale forms, finalize-first artifact ordering, chronological ordering for earlier stages, Artifacts-before-Log layout, sanitized markdown rendering, non-directory repo-target refusal, plain-vs-deep health, and bounded diff output. `StatusBroadcaster` is source/model-test pinned for self-healing after a raising broadcast, and commit `65e90ebe` moves the task-page refresh signal before the fallible grid render, but this refresh did not find a focused test or live artifact proving task pages still refresh when the projects partial itself raises. Commit `c52e4e83` styles artifact summaries as filename-tab chrome and rendered markdown as a bordered document panel, but this refresh found no screenshot or visual-regression artifact proving that distinction in a browser. Commit `279a9380` adds `web/script/record_box_demo.rb` for a staged real Rails + daemon + Playwright demo recording, and commit `c0630426` adds a real-resume helper path that reruns a stranded `3-plan` stage through the product CLI before resuming filming, but this refresh only source-inspected the recorder scripts; no checked-in `box-demo` artifact or local run evidence proves the recorder currently completes with Playwright and ffmpeg. Apart from commit `9d0fc9ef`'s live-verified stuck-review recovery note, this refresh also did not find an in-tree live Docker or long-running-agent artifact proving the same behavior against a deployed hivebox while real agents are appending logs/artifacts and status updates.
 The 2026-07-22 subscriber-owned status-feed refactor supersedes gap 35's older
-partial-render note: the complete Turbo Stream message is now rendered before
-one Cable send, and focused model coverage proves a raising project partial
-sends no refresh-only prefix. Canonical snapshot tokens now remove
-process-local counter collisions across Puma workers/restarts, and browser
-coverage proves rejected asynchronous consumer setup retries without DOM
-churn, pre-confirmation teardown preserves subscribe/unsubscribe order, and a
-different token on the reconciliation GET cannot reopen the one-request latch.
-Transport-scoped reconnect teardown, a bounded never-confirmed cleanup fallback,
-and recovery from a real server-side subscription rejection are now browser-
-and channel-test pinned as well. Channel coverage also forces adapter
-registration to finish after teardown and proves the late handler removes
-itself, then forces deferred registration to raise and proves the lease releases
-before the transport reconnects.
-An isolated four-tab profile against the real 15-project registry confirms one
-shared poller and no idle DOM/HTTP loop. Real multi-worker Puma convergence and
-live-Docker evidence remain open; last-subscriber shutdown also retains an
-unbounded Ruby thread join if a filesystem call becomes uninterruptible.
+partial-render note: the complete Turbo Stream message is rendered before one
+Cable send, canonical snapshot tokens remove process-local counter collisions,
+and focused model/browser coverage pins the one-request catch-up and server
+lease contracts. The 2026-08-30 client-owner hardening replaces the remaining
+shared-client recovery assumptions: each application attempt now owns a
+dedicated consumer and transport, transport reconnect stays on that attempt,
+and setup or terminal failures retire into `retry_wait` before a fresh attempt.
+Focused lifecycle coverage pins confirmation-ordered release, the bounded
+transport-before-unsubscribe fallback, exact-once normal close, conditional
+`OPEN`/`CONNECTING` fallbacks, first-error preservation, failure-complete DOM
+cleanup, queued-open fencing, both reconnect modes, and retry/supersession
+recovery. Channel coverage still forces adapter registration to finish after
+teardown and proves the late handler removes itself, then forces deferred
+registration to raise and proves the lease releases before the transport
+reconnects.
+
+Dedicated client ownership intentionally changes allocation from turbo-rails'
+shared consumer to one Cable connection per simultaneously live status source.
+Deterministic browser coverage proves one transport for one source, two
+isolated transports for two sources, at most a successor plus one bounded
+retiring predecessor during repeated supersession, one replacement transport
+after cross-URL Turbo navigation, and zero after detach or its bounded pending-
+release timeout. Because a permanent element's cross-URL move still invokes
+disconnect/connect, every navigation now pays a fresh WebSocket and Action
+Cable subscription handshake before `connected` and catch-up instead of
+reusing turbo-rails' cached consumer. The older
+isolated four-tab profile against the real 15-project registry still confirms
+one shared server poller and no idle DOM/HTTP loop, but predates this client
+transport allocation and is not current connection-capacity evidence. A fresh
+many-tab/load profile under dedicated ownership, real multi-worker Puma
+convergence, and live-Docker evidence remain open; last-subscriber shutdown
+also retains an unbounded Ruby thread join if a filesystem call becomes
+uninterruptible.
 
 36. **Resolved 2026-07-20: root README/FAQ no longer claims there is no built-in web UI.** Maintained onboarding presents native Hive web first, explains that it shares the TUI/CLI file-backed state model, and reserves Hivebox for the container distribution. Loopback, login, service, proxy, and Hivebox details are delegated to [[commands/web]]; the old wording remains relevant only as historical evidence in this gap record.
 37. **Hivebox HTTPS-origin push path is source/integration-pinned but not live-Docker-smoked.** Commit `8be458bd` added origin normalization, now owned by the Rails `Repository` model, plus a Rails integration regression proving an existing `git@github.com:` origin is rewritten to `https://github.com/...`, and a Dockerfile system credential helper for `https://github.com` via `gh auth git-credential`. This refresh did not find an in-tree artifact showing the full Dockerized path after a real Agents-page `gh` login: register/clone a repo whose `gh` config prefers SSH, open a Hive PR, and observe `5-open-pr` push succeeding over the rewritten https origin.
@@ -703,6 +730,8 @@ integrity.
 55. **Evidence-bound task closure is source/focused-test pinned but not yet live-dogfooded.** `Hive::TaskClosure` now verifies merged PR/full commit evidence, default-branch reachability, registered repository identity, live attempts/locks, owned-worktree safety, two-step operator authorization, receipt quarantine, crash resume, status projection, and CLI/web/bot adapters. Focused tests use real local task/state/worktree transitions with an injected GitHub transport plus Rails authentication/CSRF coverage. The remaining uncertainty is the planned U9 dogfood against `fix-and-ship-github-merged-260719-0878`: its real Hive and PRDigest delivery PRs/OIDs must be reverified through the installed GitHub CLI, the exact receipt confirmed by an operator, and the archived closure observed on every live surface.
 
 56. **Stateless merge-watcher rollout is not yet live-evidenced.** The former reconciliation ledger, durable cursor, and remote/intake checkpoints are removed. Candidate reconstruction and process-local oldest-polled selection now provide bounded fair polling; idempotent architecture intake and durable `TaskClosure` receipts own restart safety at the side-effect boundaries. A later authorized deployment must demonstrate restart rediscovery and show that one failing repository or deferred intake does not block a healthy merged task. No retained per-task watcher ledger is expected.
+
+57. **Single-PID TERM-to-KILL escalation still has an identity-check-to-signal race.** `Hive::ProcessKill.terminate_process` now verifies the recorded start identity immediately before escalating to KILL, but the matching process can exit and its PID can be reused between that check and `Process.kill`. The later identity classification cannot undo a signal already delivered to a replacement process. Fully closing this race requires a durable OS process handle such as a pidfd (or an equivalent cross-platform lifetime boundary); repeated start-time checks can narrow but cannot eliminate the window.
 
 ## 2026-06-16/17 refresh uncertainty
 
@@ -1373,6 +1402,31 @@ installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
 
+## Sealed benchmark controller hardening awaits a live canary (2026-08-27)
+
+The sweep ran a network-disabled Docker canary through the actual root-controller
+origin setup with candidate-created `hive`/`git` shims, a pre-push hook, and a
+malicious global `init.templateDir` pointing at the sealed bundle. The shallow
+push and actual ManagedGit environment-scrubbing call passed; no hook, shim, or
+template copy ran, and uid 1000 could not read the control bundle. Executable
+Pi extension checks covered both GLM routes and unchanged other-model payloads.
+This is boundary/setup proof, not a complete model-driven offline review cycle.
+Keep the full-cycle gap open until that lifecycle has its own packaged canary.
+Resumed review also needs verification: recreated offline origins omit prior
+published branches, while the existing remote-CI gate rejects local repository
+identity before that expected-head path. Setup proof does not establish that
+these older offline lifecycle limitations are solved.
+
+## Benchmark egress preflight awaits a live Docker bypass canary (2026-08-27)
+
+Focused tests inject Docker network metadata and prove that strict topology is
+checked before the parallel campaign matrix starts. The 2026-09-09 sweep also
+ran real Docker network inspection: an internal network with only the named
+proxy container was admitted, and adding a peer was rejected. That proof used
+inert containers; it did not run the packaged CONNECT proxy or attempt direct
+HTTPS from a candidate. Keep this gap open until the packaged CI gate proves direct egress
+fails while the allowlisted proxy route still succeeds end to end.
+
 ## Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
 
 Backward `hive approve --to` now rearms descriptor-owned state files across the
@@ -1423,3 +1477,10 @@ The original mismatch is recorded in
 U4 locally: exact 100% coverage across all 29 changed library files and a passing
 838-file `bin/test --all` checkpoint (four workers). Fresh hosted CI remains
 pending.
+
+## Hive Web readable logs depend on persisted messages (2026-09-04)
+
+Durable logs deliberately omit some structured provider messages for secret
+safety. The readable log view cannot recover message text that was never
+persisted; it hides omission markers instead of presenting them as errors.
+Plain output and safely available supported message records remain readable.

@@ -3,7 +3,7 @@ title: hive runtime
 type: command
 source: lib/hive/commands/runtime.rb, lib/hive/runtime_control_plane/cutover.rb
 created: 2026-08-30
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, sqlite, runtime-control-plane, status, resume, recovery]
 ---
 
@@ -56,6 +56,9 @@ snapshot comparison through fencing, installs the fully validated candidate
 database idempotently, publishes `active`, and then replays only services that
 were running at cutover start. Once fencing begins, evidence and tombstones
 remain in place so another process cannot silently revive a legacy writer.
+Service stop/start effects run through each daemon, bot, or web installer's
+`UserService` lifecycle owner, so cutover contends on the same canonical-target
+lock and fails closed instead of racing install, removal, or recovery.
 
 The live database directory is private (`0700`), and the main database, WAL,
 and SHM files must be owned single-link regular files with no group/world mode
@@ -70,6 +73,19 @@ control plane, ordinary commands fail with `fleet_cutover_required`. The gate
 permits only fleet migration, runtime status/resume, doctor, version inspection,
 and genuinely fresh setup. It never creates or migrates the database.
 
+## Serialization and exit codes
+
+Success and error envelopes are encoded directly. A `JSON::GeneratorError` is
+not replaced with prose or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Status inspection or forward convergence completed. |
+| 64 | The action or argument shape was invalid. |
+| 69 | Required runtime state was unavailable. |
+| 70 | Runtime/database integrity failed. |
+| 78 | Migration state, codec identity, or configuration was invalid. |
+
 ## Tests
 
 - `test/unit/commands/runtime_test.rb` covers typed status/resume output and
@@ -80,7 +96,8 @@ and genuinely fresh setup. It never creates or migrates the database.
   import, disposable runtime reset, custom state roots, and crash-forward
   convergence across fencing, database, intent, and service boundaries.
 - `test/unit/runtime_control_plane/maintenance_test.rb` covers idempotent
-  service quiescence and restart intent without launcher mutation.
+  service quiescence, restart intent, and target-lock contention through the
+  shared UserService owner without launcher mutation.
 
 ## Backlinks
 

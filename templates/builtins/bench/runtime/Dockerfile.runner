@@ -113,4 +113,12 @@ WORKDIR /work
 
 # Agent auth is bind-injected as env at run time by harness/lib/isolation.sh,
 # never baked into an image layer (auth must not ship in a public image).
-ENTRYPOINT ["/bin/bash", "-lc"]
+#
+# The entrypoint is NOT bare `bash -lc`: Docker appends `docker run` arguments
+# to the ENTRYPOINT argv, and bash's `-c` would consume only the FIRST one —
+# an exec-style argv command (`hb_isolated gate /work sh -c '…'`) would be
+# silently truncated to its first word. hb-entrypoint.sh dispatches between
+# the single shell-command-string protocol and the argv protocol.
+COPY hb-entrypoint.sh /usr/local/bin/hb-entrypoint
+RUN chmod 755 /usr/local/bin/hb-entrypoint
+ENTRYPOINT ["/usr/local/bin/hb-entrypoint"]

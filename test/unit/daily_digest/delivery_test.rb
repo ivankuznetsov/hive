@@ -200,6 +200,8 @@ class DailyDigestDeliveryTest < Minitest::Test
       assert_equal "prepared", prepared.fetch("outcome")
       assert_equal 1, prepared.fetch("attempt")
 
+      GC.start(full_mark: true, immediate_sweep: true)
+
       resumed, = build_delivery(dir, telegram: telegram, ledger: ledger)
       assert_equal "sent", resumed.deliver(date: DATE).outcome
       assert_equal 1, ledger.read(DATE).fetch("attempt")

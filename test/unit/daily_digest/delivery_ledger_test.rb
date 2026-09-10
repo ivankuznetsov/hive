@@ -13,6 +13,7 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
 
       assert_equal :send, prepared.action
       assert_equal "prepared", prepared.receipt.fetch("outcome")
+      GC.start(full_mark: true, immediate_sweep: true)
       sending = ledger.mark_sending(DATE, attempt: 1, now: NOW + 1)
       assert_equal "sending", sending.fetch("outcome")
       sent = ledger.mark_sent(DATE, attempt: 1, now: NOW + 2)
@@ -76,6 +77,24 @@ class DailyDigestDeliveryLedgerTest < Minitest::Test
       refute_equal first.receipt.fetch("receipt_id"), resumed.receipt.fetch("receipt_id")
       assert_equal 1, resumed.receipt.fetch("attempt")
       assert_equal 1, resumed.receipt.fetch("history").length
+    end
+  end
+
+  def test_live_fiber_keeps_exclusive_preparation_ownership_across_gc
+    with_tmp_dir do |dir|
+      ledger = Hive::DailyDigest::DeliveryLedger.new(root: File.join(dir, "deliveries"))
+      owner = Fiber.new do
+        Fiber.yield ledger.prepare(**identity, now: NOW)
+        ledger.mark_sending(DATE, attempt: 1, now: NOW + 2)
+      end
+
+      assert_equal :send, owner.resume.action
+      GC.start(full_mark: true, immediate_sweep: true)
+      assert_equal :in_flight, ledger.prepare(**identity, now: NOW + 1).action
+      assert_raises(Hive::DailyDigest::DeliveryLedger::InvalidTransition) do
+        ledger.mark_sending(DATE, attempt: 1, now: NOW + 1)
+      end
+      assert_equal "sending", owner.resume.fetch("outcome")
     end
   end
 

@@ -261,7 +261,9 @@ sending, sent, suppressed, failed, and ambiguous unknown outcomes. See
 
 A prepared attempt is owned through the exact payload and amendment frontier
 until that owner starts or suppresses the effect. Competing live preparers
-cannot rewrite it, and a stale owner is fenced. Daemon startup and delivery
+cannot rewrite it, and a stale owner is fenced. Each live fiber retains its
+preparer token across garbage collection; completed fibers can be reclaimed,
+and a fork gets a new process-specific identity. Daemon startup and delivery
 child completion reconcile every dead `sending` receipt, including dates older
 than the next scheduled recap, to terminal `unknown`.
 

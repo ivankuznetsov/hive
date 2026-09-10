@@ -146,9 +146,11 @@ journal.
 
 Explicit `start`, `stop`, `restart`, and `takeover` calls use their own durable
 phases under the same target lock. Replay first observes whether the recorded
-effect already completed; in particular, restart/takeover compares the prior
-and current process identities before deciding whether another action is safe.
-A stopped-to-running restart completes from a fresh Linux process identity.
+effect already completed. Linux start/restart/takeover records the process
+observed after the target definition has been reloaded; a changed PID before
+that boundary cannot prove that the requested activation completed. Rollback
+uses the same ordering before restoring the prior manager state. A launchd
+stop must unload the job even when it is currently inactive between retries.
 Every lifecycle verification boundary requires an available manager, so a
 failed stop followed by an indeterminate observation retains its journal.
 Linux `ActiveState=deactivating` with a positive `MainPID` is transitional, not
@@ -166,11 +168,19 @@ retain pending intent until no live main process remains.
 | Ambiguous | No success; journal retained, with no unrelated overwrite or cleanup |
 
 `remove` and `purge` acquire the same lock and finish pending install recovery
-first. Verified stop/disable, unlink, and reload remove the journal and receipt.
+first. A teardown or lifecycle caller with different rendered configuration can
+restore and verify the recorded prior state before continuing; it does not
+publish replacement bytes from its own configuration. Foreground stop runs
+after removal intent is recorded. The journal records whether that stop is
+required and completed, so another caller cannot skip it during replay. An
+incomplete stop retains its journal until a caller with the stop handler retries.
+Verified stop/disable, unlink, and reload remove the journal and receipt.
 Ambiguous removal retains both. `hive uninstall`, including
 `--force-purge-state`, stops before later destructive cleanup when removal is
-busy or retains unverified recovery evidence. A repeated verified removal
-remains idempotent.
+busy or retains unverified recovery evidence. This includes raw filesystem
+failures during pending backup recovery and a foreground bot that cannot be
+signalled. Configuration and runtime state remain available for retry. A
+repeated verified removal remains idempotent.
 
 ## Manager availability
 

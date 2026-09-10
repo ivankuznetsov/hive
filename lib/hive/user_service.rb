@@ -20,10 +20,10 @@ module Hive
       activated verified committed
     ].freeze
     REMOVE_PHASE_ORDER = %w[
-      removal_prepared manager_disabled unit_removed removal_reloaded removal_verified
+      removal_prepared foreground_stopped manager_disabled unit_removed removal_reloaded removal_verified
     ].freeze
     LIFECYCLE_PHASE_ORDER = %w[
-      lifecycle_prepared lifecycle_acted lifecycle_verified lifecycle_committed
+      lifecycle_prepared lifecycle_reloaded lifecycle_acted lifecycle_verified lifecycle_committed
     ].freeze
 
     def initialize(definition:, runner: nil, query_available: false, manager_available: false,
@@ -156,8 +156,8 @@ module Hive
 
       @transaction.with_lock do |transaction|
         receipt = transaction.receipt.read
-        if (recovery = reconcile_pending(transaction))
-          return recovery unless recovery.success?
+        if (recovery = reconcile_pending(transaction, restore_incompatible: true))
+          return recovery unless recovery.success? || recovery.diagnostics.include?(:prior_state_restored)
           return recovery if recovery.operation == :remove
           plan = plan_remove
           receipt = transaction.receipt.read
@@ -288,28 +288,7 @@ module Hive
         )
       end
 
-      if @removal_takeover
-        begin
-          stopped = @removal_takeover.stop!
-        rescue StandardError => error
-          return result(
-            :failed,
-            operation: :remove,
-            final_status: safe_inspect(manager: plan.manager_observed),
-            diagnostics: [ :foreground_stop_failed ],
-            error: error
-          )
-        end
-        unless stopped
-          return result(
-            :failed,
-            operation: :remove,
-            final_status: safe_inspect(manager: plan.manager_observed),
-            diagnostics: [ :foreground_stop_failed ]
-          )
-        end
-      end
-      if current.content_state == :absent &&
+      if !@removal_takeover && current.content_state == :absent &&
          (!current.manager_available? || (!current.enabled? && current.stopped? && manager_removed?(current)))
         transaction.clear_after_verified_removal
         return result(:absent, operation: :remove, final_status: current)
@@ -326,6 +305,7 @@ module Hive
 
       document = transaction.journal.prepare(
         operation: :remove,
+        foreground_stop_required: !@removal_takeover.nil?,
         prior_content: prior_content,
         prior_digest: current.file_identity&.fetch(:digest),
         prior_enabled: current.enabled?,
@@ -482,7 +462,7 @@ module Hive
       complete_apply_transition(document, transaction, replay: false)
     end
 
-    def reconcile_pending(transaction)
+    def reconcile_pending(transaction, restore_incompatible: false)
       transaction.receipt.read
       document = transaction.journal.read
       return nil unless document
@@ -494,15 +474,19 @@ module Hive
         return recover_lifecycle(document, transaction)
       end
 
+      return rollback_apply(document, transaction, diagnostics: [ :recovery_resumed ]) if document.fetch("direction") == "rollback"
+
       desired_digest = Digest::SHA256.hexdigest(@definition.content.to_s)
       unless document.fetch("desired_digest") == desired_digest
+        if restore_incompatible
+          return rollback_apply(document, transaction, diagnostics: [ :recovery_resumed ])
+        end
         return result(
           :failed,
           final_status: safe_inspect(manager: true),
           diagnostics: %i[invalid_recovery_state recovery_pending]
         )
       end
-      return rollback_apply(document, transaction, diagnostics: [ :recovery_resumed ]) if document.fetch("direction") == "rollback"
 
       if document.fetch("autostart") && document.fetch("manager_intent")
         manager_status = inspect_status(manager: true)
@@ -922,7 +906,18 @@ module Hive
           )
         end
         if inspect_manager && @definition.platform == :linux &&
-           document.fetch("prior_running") && document["restore_from_main_pid"].nil?
+           (document["restore_from_main_pid"].nil? || !manager_definition_current?(status))
+          reload = @manager.reload
+          diagnostics.concat(reload.diagnostics)
+          status = inspect_status(manager: true)
+          unless status.manager_available? && (reload.ok || status.manager_evidence_source != :injected) &&
+                 (document.fetch("prior_digest") ? manager_definition_current?(status) : manager_removed?(status))
+            return pending_result(operation: :apply, document: document, status: status,
+              diagnostics: diagnostics + [ :rollback_manager_unverified ])
+          end
+        end
+        if inspect_manager && @definition.platform == :linux &&
+           document.fetch("prior_running") && reload
           current_identity = status.process_identity
           if status.running? && !current_identity
             return pending_result(
@@ -1010,6 +1005,38 @@ module Hive
          transaction.journal.phase?(document, :removal_prepared) &&
          file[:state] == :absent
         return invalid_recovery_result(operation: :remove, document: document)
+      end
+
+      if document["foreground_stop_required"] && !remove_phase_at_least?(document, :foreground_stopped)
+        unless @removal_takeover
+          return pending_result(operation: :remove, document: document,
+            status: safe_inspect(manager: false), diagnostics: diagnostics + [ :foreground_stop_failed ])
+        end
+        begin
+          stopped = @removal_takeover.stop!
+        rescue StandardError => error
+          return result(:failed, operation: :remove, final_status: safe_inspect(manager: true),
+            diagnostics: diagnostics + %i[foreground_stop_failed recovery_pending], error: error)
+        end
+        unless stopped
+          return pending_result(operation: :remove, document: document,
+            status: safe_inspect(manager: true), diagnostics: diagnostics + [ :foreground_stop_failed ])
+        end
+        document = transaction.journal.advance(document, phase: :foreground_stopped)
+        transition_event(:after_foreground_stopped)
+      end
+
+      # An absent filesystem-only removal has no manager action to recover.
+      # Its durable intent still precedes the idempotent foreground stop.
+      if !remove_phase_at_least?(document, :manager_disabled) &&
+         document.fetch("prior_digest").nil? && document.fetch("manager_intent").nil?
+        status = inspect_status(manager: false)
+        unless status.content_state == :absent
+          return pending_result(operation: :remove, document: document, status: status,
+            diagnostics: diagnostics + [ :verification_failed ])
+        end
+        transaction.clear_after_verified_removal
+        return result(:absent, operation: :remove, final_status: status, diagnostics: diagnostics)
       end
 
       status = inspect_status(manager: true)
@@ -1104,7 +1131,7 @@ module Hive
               diagnostics: diagnostics + status.diagnostics
             )
           end
-          reload = @manager.reload_after_remove
+          reload = @manager.reload
           diagnostics.concat(reload.diagnostics)
           status = inspect_status(manager: true)
           reload_verified = removal_manager_endpoint?(status, document) &&
@@ -1130,7 +1157,7 @@ module Hive
             diagnostics: diagnostics + status.diagnostics
           )
         end
-        reload = @manager.reload_after_remove
+        reload = @manager.reload
         diagnostics.concat(reload.diagnostics)
         status = inspect_status(manager: true)
         unless removal_manager_endpoint?(status, document)
@@ -1366,14 +1393,16 @@ module Hive
       when "start", "stop"
         lifecycle_endpoint?(status, document) ? :complete : :incomplete
       when "restart", "takeover"
-        return :incomplete unless status.running?
+        return :incomplete unless lifecycle_endpoint?(status, document)
         return :complete if !document.fetch("prior_running") && @definition.platform != :linux
         return trusted_action ? :complete : :incomplete unless @definition.platform == :linux
 
-        prior = recorded_process_identity(document)
+        return :ambiguous unless activation_boundary_recorded?(document)
+
+        prior = activation_boundary_identity(document)
         current = status.process_identity
         return :incomplete unless current
-        return :complete unless document.fetch("prior_running")
+        return :complete if prior.nil?
         return :complete if prior && current && current != prior
         return :complete if trusted_action && current && current.fetch(:process_start) == "injected"
         return :incomplete if prior && current == prior
@@ -1388,8 +1417,8 @@ module Hive
       return false unless status.manager_available?
 
       operation = document.fetch("manager_intent")
-      return status.stopped? if operation == "stop"
-      return false unless status.running?
+      return status.stopped? && (@definition.platform != :macos || !status.enabled?) if operation == "stop"
+      return false unless status.running? && manager_definition_current?(status)
       return false if @definition.platform == :linux && status.process_identity.nil?
 
       %w[start restart takeover].include?(operation)
@@ -1400,8 +1429,8 @@ module Hive
 
       @transaction.with_lock do |transaction|
         transaction.receipt.read
-        if (recovery = reconcile_pending(transaction))
-          return recovery unless recovery.success?
+        if (recovery = reconcile_pending(transaction, restore_incompatible: true))
+          return recovery unless recovery.success? || recovery.diagnostics.include?(:prior_state_restored)
           return recovery if recovery.operation == operation
         end
         before = inspect_status(manager: true)
@@ -1413,7 +1442,8 @@ module Hive
             diagnostics: before.diagnostics + [ :manager_action_unavailable ]
           )
         end
-        if (operation == :start && before.running?) || (operation == :stop && before.stopped?)
+        if (operation == :start && before.running? && manager_definition_current?(before)) ||
+           (operation == :stop && before.stopped? && (@definition.platform != :macos || !before.enabled?))
           return result(:unchanged, operation: operation, final_status: before)
         end
         unless before.file_identity
@@ -1482,7 +1512,25 @@ module Hive
         )
       end
 
-      unless lifecycle_phase_at_least?(document, :lifecycle_acted)
+      if operation != :stop && @definition.platform == :linux &&
+         (!lifecycle_phase_at_least?(document, :lifecycle_reloaded) || !manager_definition_current?(status))
+        reload = @manager.reload
+        diagnostics.concat(reload.diagnostics)
+        status = inspect_status(manager: true)
+        identity = activation_process_observation(status)
+        unless manager_definition_current?(status) && identity &&
+               (reload.ok || status.manager_evidence_source != :injected)
+          return pending_result(operation: operation, document: document, status: status,
+            diagnostics: diagnostics + [ :manager_action_unverified ])
+        end
+        document = transaction.journal.record_activation_process(document, **identity)
+        unless lifecycle_phase_at_least?(document, :lifecycle_reloaded)
+          document = transaction.journal.advance(document, phase: :lifecycle_reloaded)
+        end
+        transition_event(:after_lifecycle_reloaded)
+      end
+
+      if reload || !lifecycle_phase_at_least?(document, :lifecycle_acted)
         effect = lifecycle_effect(status, document)
         if effect == :ambiguous
           return pending_result(
@@ -1508,7 +1556,9 @@ module Hive
           )
         end
         diagnostics << :manager_effect_verified if action && !action.ok
-        document = transaction.journal.advance(document, phase: :lifecycle_acted)
+        unless lifecycle_phase_at_least?(document, :lifecycle_acted)
+          document = transaction.journal.advance(document, phase: :lifecycle_acted)
+        end
         transition_event(:after_lifecycle_acted)
       end
 

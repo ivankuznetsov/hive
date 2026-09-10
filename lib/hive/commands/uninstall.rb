@@ -11,7 +11,7 @@ module Hive
     class Uninstall
       FAIL_CLOSED_SERVICE_DIAGNOSTICS = %i[
         operation_busy recovery_pending invalid_recovery_state
-        manager_probe_indeterminate foreground_stop_failed
+        manager_probe_indeterminate foreground_stop_failed remove_failed
       ].freeze
 
       class DaemonRemovalTakeover
@@ -50,8 +50,8 @@ module Hive
           true
         rescue Errno::EPERM
           @output.puts "hive: warning: bot pid #{pid} is alive but could not be signalled (EPERM); " \
-                       "it may still be running after uninstall"
-          true
+                       "preserving state because it may still be running"
+          false
         rescue Errno::ESRCH, Errno::ENOENT, Psych::Exception
           true
         end

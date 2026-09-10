@@ -782,11 +782,9 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
-  def test_stop_foreground_bot_warns_but_continues_on_eperm
-    # EPERM means the bot is alive but owned by another uid. Unlike the
-    # dead/corrupt cases this must NOT be a silent no-op: the operator's bot
-    # may keep running against state we're about to delete, so it warns
-    # (without aborting the destructive uninstall).
+  def test_stop_foreground_bot_reports_failure_on_eperm
+    # A live bot that cannot be signalled must keep uninstall from deleting
+    # the state it may still be using.
     with_xdg_home do
       FileUtils.mkdir_p(Hive::Paths.state_home)
       File.write(File.join(Hive::Paths.state_home, ".bot.pid"),
@@ -794,7 +792,7 @@ class UninstallCommandTest < Minitest::Test
       out = StringIO.new
 
       with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
-        Hive::Commands::Uninstall.new(output: out).send(:stop_foreground_bot)
+        refute Hive::Commands::Uninstall.new(output: out).send(:stop_foreground_bot)
       end
 
       assert_match(/bot pid 999 is alive but could not be signalled \(EPERM\)/, out.string)
@@ -1022,7 +1020,7 @@ class UninstallCommandTest < Minitest::Test
   end
 
   def test_force_purge_stops_before_state_cleanup_for_busy_or_retained_removal
-    [ [ :operation_busy ], %i[remove_failed recovery_pending] ].each do |diagnostics|
+    [ [ :operation_busy ], [ :remove_failed ], %i[remove_failed recovery_pending] ].each do |diagnostics|
       with_xdg_home do |dir|
         project = File.join(dir, "project")
         setup_install_tree(project)
@@ -1060,6 +1058,80 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_force_purge_preserves_state_when_foreground_bot_cannot_be_signalled
+    with_xdg_home do |dir|
+      project = File.join(dir, "project")
+      setup_install_tree(project)
+      pid_path = File.join(Hive::Paths.state_home, ".bot.pid")
+      File.write(pid_path, { "pid" => 999 }.to_yaml)
+      out = StringIO.new
+      command = Hive::Commands::Uninstall.new(
+        purge: true, force_purge_state: true, output: out,
+        runner: ->(_argv) { true }, host_os: "linux"
+      )
+
+      with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+        raise Errno::EPERM if signal == "TERM" && pid == 999
+
+        1
+      }) do
+        assert_raises(Hive::Error) { command.call }
+      end
+
+      assert File.exist?(pid_path)
+      assert File.exist?(Hive::Config.global_config_path)
+      assert File.directory?(Hive::Paths.data_home)
+      assert File.directory?(File.join(project, ".hive-state"))
+      refute_match(/core uninstall cleanup complete/, out.string)
+    end
+  end
+
+  def test_force_purge_preserves_pending_apply_after_raw_backup_write_failure
+    with_xdg_home do |dir|
+      project = File.join(dir, "project")
+      setup_install_tree(project)
+      path = File.expand_path("~/.config/systemd/user/hive-daemon.service")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      definition = Hive::UserService::Definition.new(
+        platform: :linux, service_name: "hive-daemon", target_path: path,
+        content: "desired\n"
+      )
+      service = Hive::UserService.new(
+        definition: definition, runner: ->(_argv) { true }, home: ENV.fetch("HOME"),
+        event_handler: lambda do |event, _definition|
+          raise "interrupted" if event == :after_journal_prepared
+        end
+      )
+      assert service.apply(service.plan(autostart: false, force: true)).failed?
+      journal = service.inspect_recovery.fetch("journal_path")
+      recorded = File.binread(journal)
+      service.define_singleton_method(:write_backup_exclusive) do |*_args, **_options|
+        raise Errno::ENOSPC
+      end
+      installer = Object.new
+      installer.define_singleton_method(:target_path) { path }
+      installer.define_singleton_method(:remove!) do |**_options|
+        service.remove(service.plan_remove)
+      end
+      out = StringIO.new
+      command = Hive::Commands::Uninstall.new(
+        purge: true, force_purge_state: true, output: out
+      )
+      command.define_singleton_method(:deregister_babysitter) { nil }
+      command.define_singleton_method(:deregister_daemon) { deregister_unit(installer) }
+
+      assert_raises(Hive::Error) { command.call }
+
+      assert_equal recorded, File.binread(journal)
+      assert_equal "legacy\n", File.read(path)
+      assert File.exist?(Hive::Config.global_config_path)
+      assert File.directory?(Hive::Paths.data_home)
+      assert File.directory?(File.join(project, ".hive-state"))
+      refute_match(/core uninstall cleanup complete/, out.string)
+    end
+  end
+
   def test_deregister_unit_renders_stale_and_generic_boundary_failures
     out = StringIO.new
     command = Hive::Commands::Uninstall.new(output: out)
@@ -1074,7 +1146,7 @@ class UninstallCommandTest < Minitest::Test
       Hive::UserService::Result.new(
         :failed,
         operation: :remove,
-        diagnostics: [ :remove_failed ]
+        diagnostics: [ :unexpected_removal_failure ]
       )
     ]
     installer.define_singleton_method(:remove!) { |**_options| results.shift }

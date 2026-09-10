@@ -2659,7 +2659,7 @@ class UserServiceTest < Minitest::Test
       manager_available: false
     )
 
-    installed = manager.apply_intent(:enable)
+    installed = manager.activate(:enable)
     disabled = manager.disable
 
     assert installed.ok
@@ -2946,7 +2946,7 @@ class UserServiceTest < Minitest::Test
       assert_equal :failed, result.kind
       assert_includes result.diagnostics, :foreground_stop_failed
       assert File.exist?(path)
-      assert_empty pending_journals(dir)
+      assert_equal 1, pending_journals(dir).size
     end
   end
 
@@ -3662,6 +3662,7 @@ class UserServiceTest < Minitest::Test
       service.define_singleton_method(:inspect_status) { |manager:| desired_process }
       restore_calls = 0
       manager = Object.new
+      manager.define_singleton_method(:reload) { Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: []) }
       manager.define_singleton_method(:restore) do |**_kwargs|
         restore_calls += 1
         Hive::UserService::Manager::Action.new(
@@ -3874,8 +3875,8 @@ class UserServiceTest < Minitest::Test
         calls << :disable
         Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: [])
       end
-      manager.define_singleton_method(:reload_after_remove) do
-        calls << :reload_after_remove
+      manager.define_singleton_method(:reload) do
+        calls << :reload
         Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: [])
       end
       service.instance_variable_set(:@manager, manager)
@@ -3888,7 +3889,7 @@ class UserServiceTest < Minitest::Test
       )
 
       assert result.success?
-      assert_equal %i[disable reload_after_remove], calls
+      assert_equal %i[disable reload], calls
       refute File.exist?(path)
     end
   end
@@ -4027,7 +4028,7 @@ class UserServiceTest < Minitest::Test
       observations = [ available, stale_loaded, stale_loaded ]
       service.define_singleton_method(:inspect_status) { |manager:| observations.shift || stale_loaded }
       manager = Object.new
-      manager.define_singleton_method(:reload_after_remove) do
+      manager.define_singleton_method(:reload) do
         Hive::UserService::Manager::Action.new(ok: false, restarted: false, diagnostics: [ :daemon_reload_failed ])
       end
       service.instance_variable_set(:@manager, manager)
@@ -4171,7 +4172,7 @@ class UserServiceTest < Minitest::Test
       )
 
       assert_equal :failed, result.kind
-      assert_includes result.diagnostics, :manager_effect_ambiguous
+      assert_includes result.diagnostics, :manager_action_unverified
     end
   end
 
@@ -4229,6 +4230,7 @@ class UserServiceTest < Minitest::Test
         definition_current: true
       )
       manager = Object.new
+      manager.define_singleton_method(:reload) { Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: []) }
       manager.define_singleton_method(:start) do
         Hive::UserService::Manager::Action.new(
           ok: false,
@@ -4283,10 +4285,11 @@ class UserServiceTest < Minitest::Test
         process_start: nil
       )
       running = synthetic_status(dir, main_pid: 43, process_start: "fresh")
-      observations = [ stopped, running, running, running, running ]
+      observations = [ stopped, stopped, running, running, running, running ]
       service = build_service(dir, runner: ->(_argv) { true })
       service.define_singleton_method(:inspect_status) { |manager:| observations.shift || running }
       manager = Object.new
+      manager.define_singleton_method(:reload) { Hive::UserService::Manager::Action.new(ok: true, restarted: false, diagnostics: []) }
       manager.define_singleton_method(:restart) do
         Hive::UserService::Manager::Action.new(ok: true, restarted: true, diagnostics: [])
       end
@@ -4560,6 +4563,241 @@ class UserServiceTest < Minitest::Test
       end
       assert_match(/target changed before backup/, error.message)
       assert_equal "alien\n", File.read(path)
+    end
+  end
+
+  def test_removal_replay_requires_its_foreground_stopper_until_stop_is_durable
+    [ :after_removal_prepared, :after_foreground_stopped ].each do |interrupt_at|
+      with_tmp_dir do |dir|
+        calls = 0
+        takeover = Object.new
+        takeover.define_singleton_method(:stop!) { calls += 1; true }
+        remover = build_service(dir, runner: ->(_argv) { false }, manager_available: false,
+          removal_takeover: takeover, event_handler: lambda { |event, _|
+            raise "interruption" if event == interrupt_at
+          })
+        assert_equal :failed, remover.remove(remover.plan_remove(inspect_absent_manager: false)).kind
+        fresh = build_service(dir, runner: ->(_argv) { false }, manager_available: false)
+        outcome = fresh.apply(fresh.plan(autostart: false))
+        if interrupt_at == :after_removal_prepared
+          assert_equal :failed, outcome.kind
+          assert_includes outcome.diagnostics, :foreground_stop_failed
+          assert_equal 1, pending_journals(dir).size
+          refute File.exist?(definition_path(dir))
+          assert_equal 0, calls
+        else
+          assert outcome.success?, outcome.diagnostics.inspect
+          assert_equal 1, calls
+          assert_empty pending_journals(dir)
+          assert_equal "desired\n", File.read(definition_path(dir))
+        end
+      end
+    end
+  end
+
+  def test_absent_filesystem_only_removal_stops_foreground_without_querying_manager
+    with_tmp_dir do |dir|
+      takeover = Object.new
+      stopped = 0
+      takeover.define_singleton_method(:stop!) do
+        stopped += 1
+        raise "missing journal" if Dir[File.join(dir, ".local/state/hive/user-service/*.journal.json")].empty?
+        true
+      end
+      calls = []
+      service = build_service(dir, runner: ->(argv) { calls << argv; raise "unexpected manager call" },
+        removal_takeover: takeover)
+      result = service.remove(service.plan_remove(inspect_absent_manager: false))
+      assert result.success?, result.diagnostics.inspect
+      assert_equal :absent, result.kind
+      assert_equal 1, stopped
+      assert_empty calls
+      assert_empty pending_journals(dir)
+    end
+  end
+
+  def test_absent_filesystem_only_removal_rechecks_target_after_foreground_stop
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      takeover = Object.new
+      takeover.define_singleton_method(:stop!) do
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, "concurrent unit")
+        true
+      end
+      calls = []
+      service = build_service(dir, runner: ->(argv) { calls << argv; false }, removal_takeover: takeover)
+      result = service.remove(service.plan_remove(inspect_absent_manager: false))
+      assert_equal :failed, result.kind
+      assert_equal "concurrent unit", File.read(path)
+      assert_equal 1, pending_journals(dir).size
+      assert_empty calls
+    end
+  end
+
+  def test_removal_prepares_before_foreground_stop_and_replays_the_stop
+    with_tmp_dir do |dir|
+      calls = 0
+      takeover = Object.new
+      takeover.define_singleton_method(:stop!) do
+        calls += 1
+        journals = Dir[File.join(dir, ".local/state/hive/user-service/*.journal.json")]
+        raise "missing durable removal intent" if journals.empty?
+        raise "interrupted stop" if calls == 1
+        true
+      end
+      service = build_service(dir, runner: ->(_argv) { false }, manager_available: false, removal_takeover: takeover)
+      first = service.remove(service.plan_remove)
+      assert_equal :failed, first.kind
+      assert_equal "remove", JSON.parse(File.read(pending_journals(dir).fetch(0))).fetch("operation")
+      second = service.remove(service.plan_remove)
+      assert second.success?, second.diagnostics.inspect
+      assert_equal 2, calls
+      assert_empty pending_journals(dir)
+    end
+  end
+
+  def test_remove_restores_an_incompatible_pending_apply_before_removing
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.dirname(definition_path(dir)))
+      File.write(definition_path(dir), "legacy\n")
+      service = build_service(dir, runner: ->(_argv) { false }, event_handler: lambda { |event, _|
+        raise "interrupt" if event == :after_unit_published
+      })
+      assert_equal :failed, service.apply(service.plan(autostart: false, force: true)).kind
+      definition = Hive::UserService::Definition.new(platform: :linux, service_name: "hive-test",
+        target_path: definition_path(dir), content: "custom configuration unavailable\n")
+      remover = Hive::UserService.new(definition: definition, home: dir)
+      removed = remover.remove(remover.plan_remove)
+      assert removed.success?, removed.diagnostics.inspect
+      refute File.exist?(definition_path(dir))
+      assert_empty pending_journals(dir)
+    end
+  end
+
+  def test_stop_restores_an_incompatible_pending_apply_before_stopping
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      pending = build_service(dir, runner: ->(_argv) { true }, event_handler: lambda { |event, _|
+        raise "interrupt" if event == :after_unit_published
+      })
+      assert_equal :failed, pending.apply(pending.plan(autostart: false, force: true)).kind
+      running = true
+      definition = Hive::UserService::Definition.new(platform: :linux, service_name: "hive-test",
+        target_path: path, content: "unavailable custom config\n")
+      stopper = Hive::UserService.new(definition: definition, home: dir,
+        query_available: true, manager_available: true, runner: lambda { |argv|
+          running = false if argv == %w[systemctl --user stop hive-test]
+          argv[2] == "is-active" ? running : true
+        })
+      assert stopper.stop.success?
+      refute running
+      assert_equal "legacy\n", File.read(path)
+      assert_empty pending_journals(dir)
+    end
+  end
+
+  def test_launchd_stop_unloads_a_registered_inactive_job
+    with_tmp_dir do |dir|
+      path = File.join(dir, "Library/LaunchAgents/hive-test.plist")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "plist")
+      loaded = true
+      calls = []
+      service = Hive::UserService.new(
+        definition: Hive::UserService::Definition.new(platform: :macos, service_name: "hive-test",
+          launchd_label: "local.hive-test", target_path: path, content: "plist"),
+        home: dir, query_available: true, manager_available: true,
+        status_reader: ->(_argv) { [ "state = waiting", true ] },
+        runner: lambda { |argv|
+          calls << argv
+          if argv[1] == "unload"
+            loaded = false
+            true
+          else
+            loaded
+          end
+        })
+      assert service.stop.success?
+      assert_includes calls, [ "launchctl", "unload", path ]
+      refute loaded
+    end
+  end
+
+  def test_lifecycle_restart_requires_a_process_started_after_reload
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      pid = 100
+      reloaded = false
+      restart_works = false
+      service = build_service(dir,
+        event_handler: lambda { |event, _| pid = 200 if event == :after_lifecycle_prepared },
+        runner: lambda { |argv|
+          if argv == %w[systemctl --user daemon-reload]
+            reloaded = true
+            true
+          elsif argv == %w[systemctl --user restart hive-test]
+            pid = 300 if restart_works
+            restart_works
+          else
+            true
+          end
+        },
+        status_reader: lambda { |_argv|
+          [ "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nFragmentPath=#{path}\nNeedDaemonReload=#{reloaded ? 'no' : 'yes'}\nMainPID=#{pid}\nExecMainStartTimestampMonotonic=#{pid}\n", true ]
+        })
+      first = service.restart
+      assert_equal :failed, first.kind
+      assert reloaded
+      assert_equal 200, JSON.parse(File.read(pending_journals(dir).fetch(0))).fetch("activation_from_main_pid")
+      restart_works = true
+      assert service.restart.success?
+      assert_equal 300, pid
+    end
+  end
+
+  def test_rollback_records_process_identity_after_reloading_the_prior_file
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      pid = 100
+      loaded = "legacy\n"
+      reloads = 0
+      restart_works = false
+      service = build_service(dir,
+        runner: lambda { |argv|
+          if argv == %w[systemctl --user daemon-reload]
+            reloads += 1
+            pid = 200 if reloads == 2 # Auto-restarted desired process before prior reload.
+            loaded = File.read(path)
+            true
+          elsif argv == %w[systemctl --user restart hive-test]
+            pid = 300 if restart_works
+            restart_works
+          else
+            true
+          end
+        },
+        status_reader: lambda { |_argv|
+          [ "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nFragmentPath=#{path}\nNeedDaemonReload=#{loaded == File.read(path) ? 'no' : 'yes'}\nMainPID=#{pid}\nExecMainStartTimestampMonotonic=#{pid}\n", true ]
+        })
+      outcome = service.apply(service.plan(autostart: true, force: true))
+      assert_equal :failed, outcome.kind
+      refute_includes outcome.diagnostics, :prior_state_restored
+      document = JSON.parse(File.read(pending_journals(dir).fetch(0)))
+      assert_equal 200, document.fetch("restore_from_main_pid")
+      assert_equal "rollback", document.fetch("direction")
+      restart_works = true
+      recovered = service.apply(service.plan(autostart: true, force: true))
+      assert_includes recovered.diagnostics, :prior_state_restored
+      assert_equal 300, pid
+      assert_equal "legacy\n", File.read(path)
+      assert_empty pending_journals(dir)
     end
   end
 

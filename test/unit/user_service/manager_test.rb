@@ -3,6 +3,7 @@ require "hive/user_service/definition"
 require "hive/user_service/manager"
 
 class UserServiceManagerTest < Minitest::Test
+  include HiveTestHelper
   def test_inspection_rejects_unknown_availability
     error = assert_raises(ArgumentError) do
       Hive::UserService::Manager::Inspection.new(
@@ -23,7 +24,6 @@ class UserServiceManagerTest < Minitest::Test
 
     assert restored.ok
     assert_equal [
-      %w[systemctl --user daemon-reload],
       %w[systemctl --user enable hive-test],
       %w[systemctl --user stop hive-test]
     ], calls
@@ -32,7 +32,6 @@ class UserServiceManagerTest < Minitest::Test
     disabled = manager.restore(prior_enabled: false, prior_running: false)
     assert disabled.ok
     assert_equal [
-      %w[systemctl --user daemon-reload],
       %w[systemctl --user disable --now hive-test]
     ], calls
 
@@ -59,7 +58,7 @@ class UserServiceManagerTest < Minitest::Test
       manager_available: false
     )
 
-    apply = manager.apply_intent(:enable)
+    apply = manager.activate(:enable)
     start = manager.start
 
     refute apply.ok
@@ -221,38 +220,21 @@ class UserServiceManagerTest < Minitest::Test
     ], calls
   end
 
-  def test_apply_intent_does_not_activate_when_reload_fails
-    calls = []
-    manager = build_manager(
-      :linux,
-      runner: lambda do |argv|
-        calls << argv
-        argv != %w[systemctl --user daemon-reload]
-      end
-    )
 
-    action = manager.apply_intent(:enable)
-
-    refute action.ok
-    assert_includes action.diagnostics, :systemd_apply_failed
-    assert_equal [ %w[systemctl --user daemon-reload] ], calls
-  end
-
-  def test_apply_intent_compatibility_wrapper_covers_each_platform
+  def test_activation_covers_each_platform
     linux_calls = []
     linux = build_manager(:linux, runner: ->(argv) { linux_calls << argv; true })
-    assert linux.apply_intent(:enable).ok
+    assert linux.activate(:enable).ok
     assert_equal [
-      %w[systemctl --user daemon-reload],
       %w[systemctl --user enable --now hive-test]
     ], linux_calls
 
     macos_calls = []
     macos = build_manager(:macos, runner: ->(argv) { macos_calls << argv; true })
-    assert macos.apply_intent(:enable).ok
+    assert macos.activate(:enable).ok
     assert_equal [ [ "launchctl", "load", "/tmp/hive-test.plist" ] ], macos_calls
 
-    assert build_manager(:unsupported).apply_intent(:enable).ok
+    assert build_manager(:unsupported).activate(:enable).ok
     assert build_manager(:unsupported).activate(:enable).ok
     unavailable = build_manager(
       :linux,
@@ -327,6 +309,37 @@ class UserServiceManagerTest < Minitest::Test
 
     injected = build_manager(:linux, runner: ->(_argv) { true })
     assert injected.send(:run_query_command, [ "ignored" ]).ok
+  end
+
+  def test_cleanup_tolerates_another_reaper_winning_after_the_deadline
+    manager = build_manager(:linux, runner: nil)
+    times = [ 0, 1 ]
+    manager.define_singleton_method(:monotonic_now) { times.shift || 1 }
+    signals = []
+    manager.define_singleton_method(:signal_process_group) { |pid, signal| signals << [ pid, signal ] }
+    waits = []
+    wait = lambda do |pid, *flags|
+      waits << [ pid, flags ]
+      raise Errno::ECHILD if flags.empty?
+      nil
+    end
+    with_replaced_singleton_method(Process, :wait2, wait) do
+      assert_nil manager.send(:terminate_and_reap, 123)
+    end
+    assert_equal [ [ 123, "TERM" ], [ 123, "KILL" ] ], signals
+    assert_equal [ [ 123, [ Process::WNOHANG ] ], [ 123, [] ] ], waits
+  end
+
+  def test_process_group_permission_denied_is_conservatively_alive
+    manager = build_manager(:linux, runner: nil)
+    calls = []
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+      calls << [ signal, pid ]
+      raise Errno::EPERM
+    }) do
+      assert manager.send(:process_group_alive?, 123)
+    end
+    assert_equal [ [ 0, -123 ] ], calls
   end
 
   def test_production_cleanup_escalates_and_tolerates_already_reaped_processes

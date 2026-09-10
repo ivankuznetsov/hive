@@ -106,33 +106,6 @@ module Hive
         indeterminate_inspection
       end
 
-      # Compatibility wrapper for callers which do not yet persist the reload
-      # boundary separately. New transition code should call +reload+, persist
-      # that evidence, and then call +activate+.
-      def apply_intent(intent)
-        case @definition.platform
-        when :linux
-          unless operation_available?
-            return Action.new(ok: false, restarted: false, diagnostics: [ :autostart_unavailable ])
-          end
-
-          reloaded = reload
-          unless reloaded.ok
-            return Action.new(
-              ok: false,
-              restarted: false,
-              diagnostics: ([ :systemd_apply_failed ] + reloaded.diagnostics).uniq
-            )
-          end
-
-          activate(intent)
-        when :macos
-          apply_launchd_intent(intent)
-        else
-          successful_action
-        end
-      end
-
       # Reload is deliberately separate from activation so a durable caller can
       # record exactly which manager effect has completed before attempting the
       # next one.
@@ -164,7 +137,6 @@ module Hive
         when :linux
           return failed_action(:manager_restore_failed) unless operation_available?
 
-          reloaded = reload
           commands = if prior_running
             enablement = prior_enabled ? "enable" : "disable"
             [
@@ -179,12 +151,12 @@ module Hive
           else
             [ [ "systemctl", "--user", "disable", "--now", @definition.service_name ] ]
           end
-          results = reloaded.ok ? run_action_commands(commands) : []
-          ok = reloaded.ok && results.all?(&:ok)
+          results = run_action_commands(commands)
+          ok = results.length == commands.length && results.all?(&:ok)
           diagnostics = if ok
             []
           else
-            ([ :manager_restore_failed ] + reloaded.diagnostics + results.flat_map { |result|
+            ([ :manager_restore_failed ] + results.flat_map { |result|
               command_diagnostics(result)
             }).uniq
           end
@@ -219,10 +191,6 @@ module Hive
         else
           successful_action
         end
-      end
-
-      def reload_after_remove
-        reload
       end
 
       private
@@ -367,20 +335,9 @@ module Hive
 
         case @definition.platform
         when :linux
-          reloaded = if %i[start restart].include?(verb)
-            reload
-          else
-            successful_action
-          end
-          command = if reloaded.ok
-            run_action_command([ "systemctl", "--user", verb.to_s, @definition.service_name ])
-          end
-          ok = reloaded.ok && command&.ok
-          diagnostics = if ok
-            []
-          else
-            ([ :manager_action_failed ] + reloaded.diagnostics + command_diagnostics(command)).uniq
-          end
+          command = run_action_command([ "systemctl", "--user", verb.to_s, @definition.service_name ])
+          ok = command.ok
+          diagnostics = ok ? [] : ([ :manager_action_failed ] + command_diagnostics(command)).uniq
         when :macos
           commands = if verb == :stop
             [ [ "launchctl", "unload", @definition.target_path ] ]

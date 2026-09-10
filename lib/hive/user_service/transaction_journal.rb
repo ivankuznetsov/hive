@@ -19,10 +19,10 @@ module Hive
         rollback_selected prior_file_restored prior_manager_restored prior_verified
       ].freeze
       REMOVE_FORWARD_PHASES = %w[
-        removal_prepared manager_disabled unit_removed removal_reloaded removal_verified
+        removal_prepared foreground_stopped manager_disabled unit_removed removal_reloaded removal_verified
       ].freeze
       LIFECYCLE_FORWARD_PHASES = %w[
-        lifecycle_prepared lifecycle_acted lifecycle_verified lifecycle_committed
+        lifecycle_prepared lifecycle_reloaded lifecycle_acted lifecycle_verified lifecycle_committed
       ].freeze
       PHASES_BY_STATE = {
         [ "apply", "forward" ] => APPLY_FORWARD_PHASES,
@@ -43,12 +43,14 @@ module Hive
         [ "apply", "rollback", "prior_file_restored" ] => %w[prior_manager_restored],
         [ "apply", "rollback", "prior_manager_restored" ] => %w[prior_verified],
         [ "apply", "rollback", "prior_verified" ] => [],
-        [ "remove", "forward", "removal_prepared" ] => %w[manager_disabled],
+        [ "remove", "forward", "removal_prepared" ] => %w[foreground_stopped manager_disabled],
+        [ "remove", "forward", "foreground_stopped" ] => %w[manager_disabled],
         [ "remove", "forward", "manager_disabled" ] => %w[unit_removed],
         [ "remove", "forward", "unit_removed" ] => %w[removal_reloaded],
         [ "remove", "forward", "removal_reloaded" ] => %w[removal_verified],
         [ "remove", "forward", "removal_verified" ] => [],
-        [ "lifecycle", "forward", "lifecycle_prepared" ] => %w[lifecycle_acted],
+        [ "lifecycle", "forward", "lifecycle_prepared" ] => %w[lifecycle_reloaded lifecycle_acted],
+        [ "lifecycle", "forward", "lifecycle_reloaded" ] => %w[lifecycle_acted],
         [ "lifecycle", "forward", "lifecycle_acted" ] => %w[lifecycle_verified],
         [ "lifecycle", "forward", "lifecycle_verified" ] => %w[lifecycle_committed],
         [ "lifecycle", "forward", "lifecycle_committed" ] => []
@@ -61,6 +63,7 @@ module Hive
         created_at updated_at
       ].freeze
       OPTIONAL_KEYS = %w[
+        foreground_stop_required
         restore_from_main_pid restore_from_process_start
         activation_from_main_pid activation_from_process_start
       ].freeze
@@ -96,7 +99,7 @@ module Hive
 
       def prepare(operation:, prior_content:, prior_digest:, prior_enabled:, prior_running:,
                   desired_digest:, backup_path:, manager_intent:, result_kind:, autostart:,
-                  prior_main_pid: 0, prior_process_start: nil)
+                  prior_main_pid: 0, prior_process_start: nil, foreground_stop_required: false)
         raise Invalid, "pending user-service transition already exists" if read
 
         operation = operation.to_s
@@ -119,6 +122,7 @@ module Hive
           "manager_intent" => manager_intent&.to_s,
           "result_kind" => result_kind.to_s,
           "autostart" => !!autostart,
+          "foreground_stop_required" => foreground_stop_required,
           "prior_main_pid" => prior_main_pid,
           "prior_process_start" => prior_process_start,
           "restore_from_main_pid" => nil,
@@ -138,6 +142,10 @@ module Hive
         direction = direction.to_s
         phase = phase.to_s
         allowed = NEXT_PHASES.fetch([ operation, current_direction, current_phase ])
+        if document["foreground_stop_required"] && current_phase == "removal_prepared" &&
+           phase != "foreground_stopped"
+          raise Invalid, "transition journal requires foreground stop completion"
+        end
         unless allowed.include?(phase) &&
                (direction == current_direction ||
                 [ operation, current_direction, direction, phase ] ==
@@ -174,10 +182,6 @@ module Hive
         unless restore_process_recordable?(document)
           raise Invalid, "transition journal cannot record restore process in this state"
         end
-        unless document["restore_from_main_pid"].nil?
-          raise Invalid, "transition journal restore process is already recorded"
-        end
-
         updated = document.merge(
           "restore_from_main_pid" => main_pid,
           "restore_from_process_start" => process_start,
@@ -188,9 +192,9 @@ module Hive
 
       def record_activation_process(document, main_pid:, process_start:)
         validate_document!(document)
-        unless document.fetch("operation") == "apply" &&
-               document.fetch("direction") == "forward" &&
-               document.fetch("phase") == "manager_reloaded"
+        unless document.fetch("direction") == "forward" &&
+               ((document.fetch("operation") == "apply" && document.fetch("phase") == "manager_reloaded") ||
+                document.fetch("operation") == "lifecycle")
           raise Invalid, "transition journal cannot record activation process in this state"
         end
 
@@ -284,6 +288,11 @@ module Hive
                [ true, false ].include?(data["prior_running"]) &&
                [ true, false ].include?(data["autostart"])
           raise Invalid, "transition journal booleans are invalid"
+        end
+        if data.key?("foreground_stop_required") &&
+           (![ true, false ].include?(data["foreground_stop_required"]) ||
+            (data["foreground_stop_required"] && data["operation"] != "remove"))
+          raise Invalid, "transition journal foreground stop requirement is invalid"
         end
         validate_prior_state!(data)
         validate_process_identity!(data)
@@ -379,7 +388,7 @@ module Hive
         else
           APPLY_ROLLBACK_PHASES.include?(data.fetch("phase"))
         end
-        unless data.fetch("operation") == "apply" && valid_phase
+        unless (data.fetch("operation") == "apply" && valid_phase) || data.fetch("operation") == "lifecycle"
           raise Invalid, "transition journal activation-from process identity is invalid in this state"
         end
       end
@@ -421,9 +430,8 @@ module Hive
 
       def validate_apply!(data)
         desired = data["desired_digest"]
-        expected = @definition.content && Digest::SHA256.hexdigest(@definition.content)
-        unless desired.is_a?(String) && desired.match?(DIGEST_PATTERN) && desired == expected
-          raise Invalid, "transition journal desired digest does not match definition"
+        unless desired.is_a?(String) && desired.match?(DIGEST_PATTERN)
+          raise Invalid, "transition journal desired digest is invalid"
         end
         unless APPLY_RESULT_KINDS.include?(data["result_kind"])
           raise Invalid, "transition journal result kind is invalid"
@@ -517,7 +525,7 @@ module Hive
             [ prior ]
           end
         when [ "remove", "forward" ]
-          if %w[removal_prepared manager_disabled].include?(data.fetch("phase"))
+          if %w[removal_prepared foreground_stopped manager_disabled].include?(data.fetch("phase"))
             [ prior, nil ]
           else
             [ nil ]

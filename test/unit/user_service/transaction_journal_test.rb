@@ -43,6 +43,24 @@ class UserServiceTransactionJournalTest < Minitest::Test
     assert_match(/invalid user-service transition/, error.message)
   end
 
+  def test_required_foreground_stop_cannot_be_skipped_or_recorded_for_apply
+    journal = fake_journal(writer: ->(*) { nil })
+    apply = prepared_document(journal)
+    [ true, "true" ].each do |value|
+      assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+        readable_journal(apply.merge("foreground_stop_required" => value)).read
+      end
+    end
+    removal = apply.merge("operation" => "remove", "phase" => "removal_prepared",
+      "foreground_stop_required" => true, "desired_digest" => nil,
+      "manager_intent" => nil, "result_kind" => "absent")
+    assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      journal.advance(removal, phase: :manager_disabled)
+    end
+    stopped = journal.advance(removal, phase: :foreground_stopped)
+    assert_equal "manager_disabled", journal.advance(stopped, phase: :manager_disabled).fetch("phase")
+  end
+
   def test_activation_recorded_only_after_the_activation_boundary
     journal = fake_journal(writer: ->(*) { nil })
     prepared = prepared_document(journal)
@@ -68,7 +86,7 @@ class UserServiceTransactionJournalTest < Minitest::Test
     assert_equal "after-reload", reloaded.fetch("activation_from_process_start")
   end
 
-  def test_process_recording_rejects_wrong_phases_and_duplicate_restore_identity
+  def test_process_recording_rejects_wrong_phases_and_refreshes_restore_identity
     journal = fake_journal(writer: ->(*) { nil })
     prepared = prepared_document(journal)
 
@@ -109,10 +127,8 @@ class UserServiceTransactionJournalTest < Minitest::Test
       main_pid: 321,
       process_start: "restored"
     )
-    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
-      journal.record_restore_process(restored, main_pid: 654, process_start: "duplicate")
-    end
-    assert_match(/already recorded/, error.message)
+    refreshed = journal.record_restore_process(restored, main_pid: 654, process_start: "after-next-reload")
+    assert_equal 654, refreshed.fetch("restore_from_main_pid")
   end
 
   def test_prior_content_translates_a_non_string_payload
@@ -158,15 +174,16 @@ class UserServiceTransactionJournalTest < Minitest::Test
     assert_match(/prior content does not match digest/, error.message)
   end
 
-  def test_read_rejects_apply_desired_digest_that_does_not_match_definition
+  def test_read_validates_recorded_digest_without_requiring_the_callers_rendering
     document = prepared_document(fake_journal(writer: ->(*) { nil })).merge(
       "desired_digest" => "b" * 64
     )
-    journal = readable_journal(document)
+    assert_equal "b" * 64, readable_journal(document).read.fetch("desired_digest")
 
-    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) { journal.read }
-
-    assert_match(/desired digest does not match/, error.message)
+    error = assert_raises(Hive::UserService::TransactionJournal::Invalid) do
+      readable_journal(document.merge("desired_digest" => "invalid")).read
+    end
+    assert_match(/desired digest is invalid/, error.message)
   end
 
   def test_read_rejects_foreign_backup_path_and_invalid_result_kind

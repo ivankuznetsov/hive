@@ -242,7 +242,9 @@ module Hive
         )
         return query_failure_inspection(running) if running.failure
 
-        loaded = enabled.ok || running.ok
+        # Boolean runners cannot report LoadState. Their synthetic model must
+        # retain a stopped, disabled unit while its fixture file still exists.
+        loaded = enabled.ok || running.ok || File.file?(@definition.target_path)
         Inspection.new(
           availability: :available,
           enabled: enabled.ok,

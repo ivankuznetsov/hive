@@ -38,7 +38,11 @@ class RuntimeControlPlaneMaintenanceTest < Minitest::Test
       )
 
       services.stop!(cutover_id: "cutover-1")
+      refute states.fetch("hive-bot").fetch(:running)
+      refute states.fetch("hive-bot").fetch(:enabled)
       services.activate!
+      assert states.fetch("hive-bot").fetch(:running)
+      refute states.fetch("hive-bot").fetch(:enabled)
 
       mutations = calls.reject do |argv|
         argv.any? { |item| item.start_with?("is-") } || argv.include?("show-environment")

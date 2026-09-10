@@ -177,6 +177,33 @@ class UserServiceManagerTest < Minitest::Test
     refute inspection.running
   end
 
+  def test_boolean_runner_distinguishes_disabled_stopped_unit_from_absence
+    with_tmp_dir do |dir|
+      target = File.join(dir, "hive-test.service")
+      File.write(target, "desired\n")
+      definition = Hive::UserService::Definition.new(platform: :linux,
+        service_name: "hive-test", target_path: target, content: "desired\n")
+      manager = Hive::UserService::Manager.new(definition: definition,
+        runner: ->(_argv) { false }, query_available: true, manager_available: true)
+
+      stopped = manager.inspect
+      refute stopped.enabled
+      refute stopped.running
+      assert_equal :injected, stopped.evidence_source
+      assert stopped.loaded_definition?(target)
+
+      File.unlink(target)
+      assert_equal :not_found, manager.inspect.load_state
+
+      File.write(target, "desired\n")
+      observed = Hive::UserService::Manager.new(definition: definition,
+        runner: ->(_argv) { false }, query_available: true, manager_available: true,
+        status_reader: ->(_argv) { [ systemd_status(load_state: "not-found", fragment_path: "",
+          unit_file_state: "", active_state: "inactive", main_pid: "0", process_start: "0"), false ] })
+      assert_equal :not_found, observed.inspect.load_state
+    end
+  end
+
   def test_systemd_inspection_accepts_a_conclusive_missing_unit
     manager = build_manager(
       :linux,

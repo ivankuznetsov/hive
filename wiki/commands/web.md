@@ -110,8 +110,9 @@ systemd-user first on Linux so a unit written while systemd-user was unavailable
 becomes visible. Managed start and stop failures retain the shared UserService
 contention or recovery guidance in the raised CLI error, so callers can tell
 whether to retry shortly or preserve and inspect pending evidence. Foreground
-`hive web start` is equivalent to `hive web`. `hive web status --json` emits
-`hive-web-status.v1`; `hive web install --json` emits `hive-web-install.v1`. Both carry
+`hive web start` is equivalent to `hive web`. `hive web status --json`
+emits `hive-web-status.v1`; `hive web install --json` emits
+`hive-web-install.v1`. Both carry
 `mode: "managed_service"`, deduplicated environment migration warnings, and
 separate installed, enabled, running, manager availability, URL, and readiness
 state on success and pre-dispatch/runtime errors. Readiness probes the local

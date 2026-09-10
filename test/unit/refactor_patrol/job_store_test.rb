@@ -1170,7 +1170,15 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal (T0 + 61).iso8601, released.fetch("attempts").last.fetch("next_eligible_at")
       assert_empty released.dig("dispositions", "fix")
       assert_empty store.claimable_jobs(now: T0 + 60)
+      assert_nil store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 60, lease_sec: 60
+      )
       assert_equal [ "pr-7-stable" ], store.claimable_jobs(now: T0 + 61).map { |item| item.fetch("job_id") }
+      refute_nil store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 61, lease_sec: 60
+      )
     end
   end
 
@@ -2250,6 +2258,36 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       completed = Hive::RefactorPatrol::JobStore.new(File.join(dir, "complete"))
       completed.write_job!(job)
       assert_equal job, completed.block_discovery!("job-1", reason: "ignored", now: T0)
+    end
+  end
+
+  def test_block_discovery_rejects_a_stale_observation
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      observed = enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      token = store.claim_discovery!(
+        observed.fetch("job_id"), owner: "daemon-a",
+        analysis_sha: "c" * 40, now: T0, lease_sec: 60
+      )
+      assert_equal observed.fetch("updated_at"),
+                   store.read_job(observed.fetch("job_id")).fetch("updated_at"),
+                   "the fence must detect same-timestamp mutations"
+
+      assert_raises(Hive::RefactorPatrol::JobStore::StaleClaim) do
+        store.block_discovery!(
+          observed.fetch("job_id"), reason: "stale_ownership",
+          now: T0 + 1, expected_record: observed
+        )
+      end
+
+      current = store.read_job(observed.fetch("job_id"))
+      assert_equal "analyzing", current.fetch("state")
+      assert_equal token.fetch(:generation),
+                   current.fetch("attempts").last.fetch("generation")
+      blocked = current.fetch("attempts").any? do |attempt|
+        attempt["kind"] == "discovery_block"
+      end
+      refute blocked
     end
   end
 

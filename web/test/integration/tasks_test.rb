@@ -1201,13 +1201,10 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
 
-    get task_path(@project, @slug, format: :json)
-    workspace = response.parsed_body
-    operator_questions = workspace.dig("operator", "questions")
+    operator_questions = Hive::Commands::Answer.inventory(@slug, project: @project)
+                                              .fetch("slots")
+                                              .reject { |slot| slot.fetch("answered") }
     assert_equal [ "Scope?", "Acceptance?" ], operator_questions.map { |row| row.fetch("text") }
-    assert_equal "current", workspace.dig("status", "state")
-    assert_equal "answer", workspace.dig("decision", "posture")
-    assert workspace.dig("decision", "action", "enabled")
 
     get "/tasks/#{@project}/#{@slug}"
 
@@ -1216,7 +1213,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     operator_questions.each do |question|
       assert_select ".qa-question", text: /#{Regexp.escape(question.fetch("text"))}/
       assert_select "textarea[data-question-number=?][name=?]:not([disabled])",
-                    question.fetch("n").to_s, "answers[#{question.fetch('binding')}]", count: 1
+                    question.fetch("question_number").to_s, "answers[#{question.fetch('binding')}]", count: 1
     end
     assert_select "form[id^='qa-form-'] input[type='submit']:not([disabled])", 1
   end

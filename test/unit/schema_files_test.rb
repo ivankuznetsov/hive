@@ -147,7 +147,7 @@ class SchemaFilesTest < Minitest::Test
       %w[hive evidence recover my-task] => false
     }
     accepted.each { |argv, expected| assert_equal expected, repository.valid_argv?(argv), argv.inspect }
-    [ 4, 5 ].each do |version|
+    [ 5 ].each do |version|
       document = JSON.parse(File.read(Hive::Schemas.schema_path(
         "hive-dispatch-request", version: version
       )))

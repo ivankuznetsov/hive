@@ -316,8 +316,7 @@ reference.
    "review_fix" => 14400,
    "review_browser" => 3600,
    "patrol" => 3600},
- "brainstorm" =>
-  {"agent" => "claude", "skill" => "/ce-brainstorm", "runtime" => "headless"},
+ "brainstorm" => {"agent" => "claude", "skill" => "/ce-brainstorm"},
  "plan" =>
   {"agent" => "claude",
    "skill_by_agent" =>

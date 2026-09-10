@@ -355,18 +355,6 @@ module Hive
         @archive_projects.flat_map(&:rows)
       end
 
-      def hidden_archived_task_count(scope: 0)
-        scoped =
-          if scope.zero?
-            @projects
-          elsif scope.between?(1, @projects.size)
-            [ @projects[scope - 1] ]
-          else
-            []
-          end
-        scoped.sum(&:hidden_archived_task_count)
-      end
-
       # Resolve a dashboard numeric scope exactly once, against this
       # snapshot's original registry order. Name-only revalidation belongs to
       # `resolve_new_idea_project`.

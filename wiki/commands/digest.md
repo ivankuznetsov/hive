@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/commands/digest*.rb, lib/hive/daily_digest/, schemas/hive-digest*.json
 created: 2026-08-30
-updated: 2026-09-07
+updated: 2026-09-10
 tags: [command, digest, activity, history, json, telegram, retention]
 ---
 
@@ -39,7 +39,7 @@ JSON supplies `previous_date` and `next_date`. Callers asking for "yesterday"
 must follow `previous_date`; subtracting one from `local_date` is not a valid
 navigation rule. An explicit ISO date remains a stable record identifier.
 
-## Pure reads
+## Behavior: pure reads
 
 The text view leads with local date, persisted IANA zone, lifecycle,
 completeness, content, full record identity, and materialization freshness. It then shows attention,
@@ -47,6 +47,8 @@ source gaps, project activity, late amendments, and the canonical Web URL.
 Every dynamic terminal field is control- and ANSI-sanitized. CLI, Web, and
 Telegram share deterministic item ordering; CLI and Web also share project
 group order and bounded stage/PR/check/review outcome labels.
+
+## Output and schema
 
 The `hive-digest` v1 JSON envelope is the stable agent contract. Its main
 fields are:
@@ -146,6 +148,35 @@ other source authority. A later fact, correction, or recovered gap targeting a
 pruned day becomes one idempotent bounded discard entry on the tombstone while
 the matching source frontier advances; Hive never silently reconstructs the
 removed projection.
+
+## Error and serialization policy
+
+Typed Hive errors retain their exit code; unexpected command failures become
+`Hive::InternalError`. JSON errors use the selected command schema and include
+`error_class`, `error_kind`, `exit_code`, and `message`; the launcher also writes
+human error text to stderr. Refresh, send, and prune use `hive-digest-refresh`,
+`hive-digest-send`, and `hive-digest-prune`, all at schema version 1.
+
+The reader suppresses `Errno::EPIPE` during JSON emission. Send suppresses both
+`Errno::EPIPE` and `JSON::GeneratorError` so output failure cannot turn a completed
+delivery into a retry. Reader, refresh, and prune do not suppress JSON generation
+failure: a failed success serialization enters their internal-error path, which
+attempts a JSON error envelope; there is no guaranteed second serialization
+fallback. Refresh and prune suppress broken pipes only while emitting an error;
+a broken success-output pipe enters the internal-error path.
+
+## Exit codes
+
+- `0`: successful read (including missing/pruned reader states), refresh,
+  delivery/deduplication/empty suppression, or prune preview/completion.
+- `1`: an otherwise unclassified digest/store error.
+- `64`: invalid arguments, date, selected project, future refresh date, or
+  missing prune confirmation.
+- `69`: unavailable history required by a mutation, a record not yet closed,
+  failed/in-flight delivery, or an unavailable browser opener.
+- `70`: an unexpected internal failure.
+- `78`: invalid configuration, disabled/uninitialized refresh, or invalid
+  delivery destination.
 
 ## Related pages
 

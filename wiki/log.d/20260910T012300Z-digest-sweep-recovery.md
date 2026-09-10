@@ -13,3 +13,5 @@ Regression tests cover these cases and preserve immutable closed bases, source
 history, and delivery evidence. Missing and pruned delivery inputs are checked
 before ledger or transport effects. Web state descriptions use plain wording.
 Long-history reader latency remains an explicit measurement gap.
+
+The navigation-only CLI index includes `digest` and points to its command owner.

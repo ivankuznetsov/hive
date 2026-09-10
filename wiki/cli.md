@@ -60,6 +60,7 @@ owner page, never as competing links here.
 | `hive connect` | [[commands/screenote]] |
 | `hive daemon` | [[commands/daemon]] |
 | `hive decide` | [[commands/workflow]] |
+| `hive digest` | [[commands/digest]] |
 | `hive develop` | [[commands/stage_action]] |
 | `hive disconnect` | [[commands/screenote]] |
 | `hive doctor` | [[commands/doctor]] |

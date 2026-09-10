@@ -17,8 +17,9 @@ module Hive
                      host_os: RbConfig::CONFIG["host_os"], runner: nil)
         @state_home = File.expand_path(state_home)
         @home = File.expand_path(home)
+        @host_os = host_os
         @platform = host_os.match?(/darwin/i) ? :macos : (host_os.match?(/linux/i) ? :linux : :unsupported)
-        @runner = runner || ->(argv) { Open3.capture3(*argv) }
+        @runner = runner
       end
 
       def stop!(cutover_id:)
@@ -66,27 +67,61 @@ module Hive
       end
 
       def transition!(action, name)
-        if @platform == :macos
-          present = success?([ "launchctl", "print", "gui/#{Process.uid}/local.#{name}" ])
-          return true if (action == :stop && !present) || (action == :start && present)
-        end
-        command = if @platform == :linux
-          [ "systemctl", "--user", action.to_s, name ]
-        elsif action == :stop
-          [ "launchctl", "bootout", "gui/#{Process.uid}/local.#{name}" ]
-        else
-          [ "launchctl", "bootstrap", "gui/#{Process.uid}",
-            File.join(@home, "Library", "LaunchAgents", "local.#{name}.plist") ]
-        end
-        run!(command)
+        service_installer(name).public_send("#{action}!")
+        true
+      rescue Hive::Error => error
+        raise Error.new(
+          "service lifecycle failed for #{name}: #{error.message}",
+          code: :service_lifecycle_failed
+        )
       end
 
-      def success?(argv) = @runner.call(argv).last.success?
+      def success?(argv)
+        _error, status = command_result(argv)
+        command_success?(status)
+      end
 
       def run!(argv)
-        _output, error, status = @runner.call(argv)
-        return true if status.success?
+        error, status = command_result(argv)
+        return true if command_success?(status)
+
         raise Error.new("service lifecycle failed: #{error.to_s.strip}", code: :service_lifecycle_failed)
+      end
+
+      def run_raw(argv) = @runner ? @runner.call(argv) : Open3.capture3(*argv)
+
+      def command_result(argv)
+        value = run_raw(argv)
+        value.is_a?(Array) ? [ value[1], value.last ] : [ "", value ]
+      end
+
+      def command_success?(status)
+        status.respond_to?(:success?) ? status.success? : !!status
+      end
+
+      def service_installer(name)
+        klass = case name
+        when "hive-daemon"
+          require "hive/commands/daemon/service_installer"
+          Hive::Commands::Daemon::ServiceInstaller
+        when "hive-bot"
+          require "hive/commands/bot/service_installer"
+          Hive::Commands::Bot::ServiceInstaller
+        when "hive-web"
+          require "hive/config"
+          require "hive/commands/web/service_installer"
+          Hive::Commands::Web::ServiceInstaller
+        else raise Error.new("unknown managed service #{name}", code: :service_lifecycle_failed)
+        end
+        options = {
+          home: @home,
+          host_os: @host_os,
+          systemctl_available: @platform == :linux,
+          launchctl_available: @platform == :macos
+        }
+        options[:runner] = ->(argv) { success?(argv) } if @runner
+        options[:config] = Hive::Config::DEFAULTS.fetch("web") if name == "hive-web"
+        klass.new(**options)
       end
 
       def journal_path = File.join(@state_home, ".runtime-cutover", "current", "services.json")

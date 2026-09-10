@@ -120,8 +120,12 @@ class ComponentBoundariesTest < Minitest::Test
       ],
       user_service.dig("public_contract", "values").sort
     )
-    assert_equal [ "Hive::UserService::Manager" ],
-                 user_service.fetch("forbidden_constructions")
+    assert_equal %w[
+      Hive::UserService::AppliedReceipt
+      Hive::UserService::Manager
+      Hive::UserService::Transaction
+      Hive::UserService::TransactionJournal
+    ], user_service.fetch("forbidden_constructions").sort
     assert_empty user_service.fetch("migration_exceptions")
 
     patrol_fix = contract.component("patrol-fix")

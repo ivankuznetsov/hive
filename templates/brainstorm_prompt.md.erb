@@ -39,7 +39,9 @@ Behavior:
 
 Constraints:
 - Do not modify any file other than brainstorm.md.
-- Do not invoke shell, network, or any tool that mutates the working tree
-  outside this folder.
+- Read-only shell commands are allowed to inspect local task artifacts, project
+  files, and skill instructions (for example, `cat`, `rg`, and `git diff`).
+- Do not make network requests or run commands that modify files other than
+  brainstorm.md, including commands that change Git state.
 - The trailing marker must be exactly one of `<!-- WAITING -->` or
   `<!-- COMPLETE -->` — no other line follows it.

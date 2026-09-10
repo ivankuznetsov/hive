@@ -85,3 +85,18 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary preserves the
+# runtime action argv named (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("runtime") do |argv, command_index:, option_argv:|
+  action = Hive::CliUsageContracts.positionals(argv, command_index).first || "status"
+  {
+    schema: "hive-runtime-maintenance", error_kind: "usage",
+    extras: {
+      "action" => action, "runtime_code" => "usage",
+      "next_action" => nil, "details" => {}
+    }
+  }
+end

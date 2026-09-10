@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/runtime_identity.rb, lib/hive/cli_argv_policy.rb
 created: 2026-04-25
-updated: 2026-09-02
+updated: 2026-09-10
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm, plan-review]
 ---
 
@@ -162,6 +162,14 @@ an exit code.
 The CLI has no universal authentication or mutation precondition beyond these
 wrapper rules. Each owner page documents its own credentials, clean-tree,
 consent, registration, state, and service requirements.
+
+The usage-error rescue resolves its command-owned `Hive::CliUsageContracts`
+contract once and passes the same value to classification and rendering.
+Successful invocations do not resolve a usage contract. An absent contract keeps
+generic `UsageError`, exit 64, human stderr, and empty stdout even when JSON was
+requested. Loader/resolver failure adds one bounded stderr diagnostic,
+`[hive.cli] usage_contract_resolution_failed exception=CLASS`, with no exception
+message, argv, path, or backtrace. Rendering never retries resolution.
 
 ## Backlinks
 

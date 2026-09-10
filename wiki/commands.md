@@ -99,9 +99,8 @@ exception: after `hive new PROJECT`, later `--help`, `-h`, or malformed
 `--` before the tail so Thor leaves the idea text alone. Wrapper-owned usage
 errors use the last recognized JSON boolean flag, so `--json --no-json` and
 `--json --json=false` choose human prose instead of an error envelope. When the
-final recognized JSON flag is truthy, pre-dispatch Thor usage errors listed in
-`JSON_USAGE_ERROR_CONTRACTS` emit command-shaped JSON before stderr, including
-unversioned `hive-setup` usage failures and Screenote connect/disconnect
+final recognized JSON flag is truthy, pre-dispatch Thor usage contracts declared in each command boundary emit
+command-shaped JSON before stderr, including versioned `hive-setup.v1` usage failures and Screenote connect/disconnect
 missing-`SERVICE` failures.
 
 After dispatch, commands whose published failures use the common
@@ -266,3 +265,11 @@ exit `78`; JSON mode distinguishes them as `missing_repro` and
 - [[commands/web]]
 - [[commands/setup]]
 - [[commands/screenote]]
+
+Command boundaries own static usage contracts, argv-dependent variants, extras,
+and custom payload builders through `Hive::CliUsageContracts`. The launcher
+resolves once after a usage rejection and reuses the exact contract for error
+classification and rendering. Missing contracts or failed resolution use human
+stderr, empty stdout, and generic usage exit 64. Only resolution failures add the
+bounded `[hive.cli] usage_contract_resolution_failed exception=CLASS` diagnostic;
+there is no second lookup during rendering.

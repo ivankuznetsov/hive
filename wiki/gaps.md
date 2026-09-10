@@ -1466,6 +1466,18 @@ nonempty locks deliberately leave recovery to a later retry or operator.
 This is not general recovery of interrupted Git operations; preserved lock
 files may still require inspection on platforms without these probes.
 
+## Pre-dispatch workflow usage envelopes versus published schemas
+
+Resolved in the 2026-09-08 CI fix: the current lifecycle schemas now accept the
+existing pre-dispatch `error_kind: usage` envelopes. Publish has a separate closed
+usage arm, preserving its handler error arms' retryability and recovery fields.
+Output fields, error kinds, exit statuses, and schema versions are unchanged.
+The original mismatch is recorded in
+`docs/implementation/cli-usage-contracts-baseline.md`. Review pass 01 completed
+U4 locally: exact 100% coverage across all 29 changed library files and a passing
+838-file `bin/test --all` checkpoint (four workers). Fresh hosted CI remains
+pending.
+
 ## Hive Web readable logs depend on persisted messages (2026-09-04)
 
 Durable logs deliberately omit some structured provider messages for secret

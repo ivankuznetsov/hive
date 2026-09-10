@@ -121,3 +121,10 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary: Thor
+# rejections that never reach the handler still ride this command's JSON
+# envelope (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("rebase-status", { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" })

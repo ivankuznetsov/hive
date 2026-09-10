@@ -2278,3 +2278,31 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary follows the
+# status mode flags: each mode rides its own schema, and the default surface
+# rides hive-running-status (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("status") do |argv, command_index:, option_argv:|
+  diagnose = option_argv.any? do |arg|
+    arg.valid_encoding? && (arg == "--diagnose" || arg.start_with?("--diagnose="))
+  end
+  next { schema: "hive-status-diagnose", error_kind: "error" } if diagnose
+
+  operational = option_argv.any? do |arg|
+    arg.valid_encoding? && (arg == "--operational" || arg.start_with?("--operational="))
+  end
+  next { schema: "hive-operational-status", error_kind: "error" } if operational
+
+  internal_task_graph = option_argv.any? do |arg|
+    arg.valid_encoding? &&
+      (arg == "--internal-task-graph" || arg.start_with?("--internal-task-graph="))
+  end
+  daemon_task = option_argv.any? do |arg|
+    arg.valid_encoding? && (arg == "--daemon-task" || arg.start_with?("--daemon-task="))
+  end
+  next { schema: "hive-status", error_kind: "error" } if internal_task_graph || daemon_task
+
+  { schema: "hive-running-status", error_kind: "error" }
+end

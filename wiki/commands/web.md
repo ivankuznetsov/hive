@@ -3,8 +3,8 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-09-02
-tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
+updated: 2026-09-10
+tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
@@ -26,7 +26,9 @@ reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
 Telegram validators from the gem. Red task recovery submits the fresh status
 observation through the neutral `Hive::Recovery::API` to the same
 `RecoveryCoordinator` used by Telegram, TUI, CLI/action, recorder, and daemon
-healing.
+healing. The selected-day Digest view is a thin authenticated adapter over the
+same pure persisted `Hive::DailyDigest::Reader` used by the CLI; GET never
+collects activity or calls GitHub/PRDigest.
 
 The stage-action map has one typed exception: a fresh
 `outcome_evidence_rework` row at `7-artifacts` is not translated into the
@@ -153,6 +155,48 @@ error arms. Those documents are encoded directly: a JSON serialization failure
 propagates and no prose or fallback JSON document is emitted. Success exits `0`;
 an unready service or ordinary bootstrap/service failure exits `1`, invalid
 arguments exit `64`, and invalid web configuration exits `78`.
+
+## Daily activity digest
+
+The authenticated read-only route is:
+
+```text
+GET /digests/:date                 # :date is today or YYYY-MM-DD
+GET /digests/:date?project=NAME    # filtered view, same global identity
+```
+
+`DailyDigest.find` delegates to `Hive::DailyDigest::Reader`. It does not use
+`StatusBroadcaster`, scan registered projects for activity, materialize a
+record, or make a live GitHub/PRDigest request. Consequently every GET leaves
+bases, amendments, frontiers, and `last_materialized_at` unchanged.
+
+The page leads with persisted date/zone and distinct lifecycle, completeness,
+and content badges. Navigation follows the record's `previous_date` and
+`next_date` sequence links, including across time-zone cutovers; `today`
+resolves the persisted interval containing now. Filter choices come from the
+selected historical record rather than the current registry. A project filter
+hides only other projects' facts and retains applicable global/source gaps.
+
+The content hierarchy is attention first, then grouped project changes and
+clearly labeled late amendments/resolved gaps. Complete-empty, partial,
+stale, missing, pre-coverage, and pruned states use separate accessible copy.
+Missing feature-era pages name `hive digest refresh --date ...`; pre-coverage
+pages state that V1 does not reconstruct history, and pruned pages preserve the
+tombstone outcome.
+
+Waiting attention is reduced in the Rails model to the privacy allowlist before
+ERB receives it: identity, stage/state, waiting age, and a resolved task
+destination. No question, answer, prompt, excerpt, or opaque binding can reach
+the template. A task link targets `#task-questions` only when the stored project
+still matches the current registration identity and the active/archive task
+route resolves at read time. Removed or replaced projects remain filterable and
+are labeled historical without a dead action link. PR links pass the shared
+strict HTTP(S) validator.
+
+The view uses semantic article/section/navigation landmarks, labeled date and
+project controls, text as well as color for state, visible focus, and the
+existing responsive touch-target/navigation containment. The primary Digest
+link targets `/digests/today`.
 
 ## Environment compatibility
 
@@ -807,6 +851,17 @@ rendered while a plan review applies, and task mutations independently invoke
 `TransitionGuard` before any plan-to-execute move.
 
 ## Tests
+
+`web/test/models/daily_digest_test.rb` and
+`web/test/integration/digests_test.rb` pin the thin-reader boundary, historical
+project identity/link resolution, privacy allowlist, complete/partial/stale/
+missing/pruned rendering, interval-sequence navigation, filtering, global-gap
+retention, and authenticated read-only behavior. The matching CLI fixture is
+used to compare identity, ordering, links, and counts.
+`web/test/system/digest_flow_test.rb` uses Playwright at desktop and mobile
+widths to prove attention-first hierarchy, accessible landmarks/labels,
+keyboard focus, filter/date navigation, native `#task-questions` handoff, and
+back navigation without losing selected-day context.
 
 `web/test/integration/` drives the real GithubAuth through the device-flow
 routes via the `http:` DI seam (no API stubbing), including ownerless

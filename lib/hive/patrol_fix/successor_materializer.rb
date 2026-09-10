@@ -89,6 +89,7 @@ module Hive
           input_fingerprint: Digest::SHA256.hexdigest(
             PatrolFix.canonical_json("project" => @project_name, "slug" => @origin.slug)
           ),
+          project: project_identity!,
           candidate_writer: lambda do |folder|
             Hive::AtomicFile.write(
               File.join(folder, ORIGIN_FILENAME), PatrolFix.canonical_json(relation), mode: 0o600
@@ -105,6 +106,12 @@ module Hive
       end
 
       private
+
+      def project_identity!
+        @project_identity ||= Hive::Config.registered_projects.find do |entry|
+          File.expand_path(entry.fetch("path")) == File.expand_path(@origin.project_root)
+        end || raise(Hive::ConfigError, "Patrol Fix project is not currently registered")
+      end
 
       def default_workflow_info
         {

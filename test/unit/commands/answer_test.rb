@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "hive/commands/digest"
 require "hive/commands/answer"
 
 class HiveCommandsAnswerTest < Minitest::Test

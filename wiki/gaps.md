@@ -1472,3 +1472,13 @@ Durable logs deliberately omit some structured provider messages for secret
 safety. The readable log view cannot recover message text that was never
 persisted; it hides omission markers instead of presenting them as errors.
 Plain output and safely available supported message records remain readable.
+
+## Daily digest long-history scale remains unmeasured (2026-09-10)
+
+Digest collection holds the global store lock across source collection and
+commit to prevent lost updates. Readers share that lock and load the retained
+interval index for navigation. Correctness tests cover replay and retained
+history, but there is no measured reader-latency bound for years of intervals
+or unusually large daily activity. Measure those workloads before choosing
+pagination or changing the collection transaction; source retention must remain
+complete.

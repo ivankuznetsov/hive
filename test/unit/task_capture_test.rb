@@ -126,6 +126,16 @@ class TaskCaptureTest < Minitest::Test
     end
   end
 
+  def test_task_creation_requires_a_current_registered_project_identity
+    capture = Hive::TaskCapture.allocate
+    capture.instance_variable_set(:@project, nil)
+    capture.instance_variable_set(:@project_root, "/tmp/unregistered-project")
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do
+      assert_raises(Hive::ConfigError) { capture.send(:project_identity!) }
+    end
+  end
+
   private
 
   def capture_options(project_root)

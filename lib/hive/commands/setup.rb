@@ -2,6 +2,7 @@ require "json"
 require "open3"
 
 require "hive/config"
+require "hive/daily_digest/migration"
 require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
@@ -79,6 +80,7 @@ module Hive
             else
               observe_web_service
             end
+            initialize_daily_digest
           end
         end
         add_web_phase
@@ -88,6 +90,17 @@ module Hive
       end
 
       private
+
+      # Digest initialization is advisory to setup: failure keeps the feature
+      # disabled and must not undo unrelated daemon/Web provisioning. The
+      # explicit migrate command surfaces the same typed failure as a hard
+      # remediation gate when the operator chooses to enable the feature.
+      def initialize_daily_digest
+        Hive::DailyDigest::Migration.ensure!
+      rescue Hive::DailyDigest::Migration::InitializationError => error
+        @error.puts("hive setup: daily digest remains disabled: #{error.message}") if @error
+        nil
+      end
 
       # Refuse before diagnostics or agent discovery. Even version/list probes
       # can make upstream CLIs or version managers initialize state, so the

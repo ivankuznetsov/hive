@@ -3,7 +3,7 @@ title: hive markers
 type: command
 source: lib/hive/commands/markers.rb
 created: 2026-04-26
-updated: 2026-07-12
+updated: 2026-09-02
 tags: [command, markers, recovery, json]
 ---
 
@@ -84,7 +84,7 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 }
 ```
 
-The `error_kind` enum mirrors `hive approve --json`: `ambiguous_slug`, `wrong_stage`, `invalid_task_path`, `error`. The published JSON Schema lives at `schemas/hive-markers-clear.v1.json`.
+The `error_kind` enum mirrors `hive approve --json`: `ambiguous_slug`, `wrong_stage`, `invalid_task_path`, `error`. `hive-markers-clear.v1` intentionally retains its narrower key set and does not expose commit-lock holder or path metadata. Pre-dispatch usage failures use the same envelope with `error_kind: "invalid_task_path"`. Command-level error serialization deliberately propagates `JSON::GeneratorError`. The published JSON Schema lives at `schemas/hive-markers-clear.v1.json`.
 
 ## Exit codes
 

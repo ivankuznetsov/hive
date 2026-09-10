@@ -3,7 +3,7 @@ title: hive runtime
 type: command
 source: lib/hive/commands/runtime.rb, lib/hive/runtime_control_plane/cutover.rb
 created: 2026-08-30
-updated: 2026-08-30
+updated: 2026-09-02
 tags: [command, sqlite, runtime-control-plane, status, resume, recovery]
 ---
 
@@ -69,6 +69,19 @@ reconciliation or any other startup mutation. With legacy state and no active
 control plane, ordinary commands fail with `fleet_cutover_required`. The gate
 permits only fleet migration, runtime status/resume, doctor, version inspection,
 and genuinely fresh setup. It never creates or migrates the database.
+
+## Serialization and exit codes
+
+Success and error envelopes are encoded directly. A `JSON::GeneratorError` is
+not replaced with prose or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Status inspection or forward convergence completed. |
+| 64 | The action or argument shape was invalid. |
+| 69 | Required runtime state was unavailable. |
+| 70 | Runtime/database integrity failed. |
+| 78 | Migration state, codec identity, or configuration was invalid. |
 
 ## Tests
 

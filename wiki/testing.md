@@ -413,6 +413,12 @@ bundle exec rake coverage
 
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
+Tests that assert a subprocess leaves the repository unchanged must clear
+`HIVE_COVERAGE`, `HIVE_COVERAGE_ROOT`, `HIVE_COVERAGE_RUN_ID`, and `RUBYOPT`
+for that child. Otherwise the coverage bootstrap itself writes an ignored
+resultset file inside the checkout and creates a false repository-mutation
+failure even when the exercised command is read-only.
+
 Hosted CI separates collection from enforcement. Six `coverage:collect`
 matrix legs run a complete, disjoint partition of the default test-file set and
 upload their raw process results plus a `hive-coverage-shard.v1` manifest.
@@ -539,7 +545,22 @@ task default: :test
   credential helpers, hooks, and signing settings. The authenticated
   `rake smoke` task explicitly opts out because it exists to exercise real
   operator logins; direct smoke-file runs must set
-  `HIVE_TEST_ALLOW_REAL_USER_ENV=1` deliberately.
+  `HIVE_TEST_ALLOW_REAL_USER_ENV=1` deliberately. The escape hatch fails
+  closed unless every requested test file is under `test/smoke/`; valid smoke
+  processes retain the operator `HOME` only for authenticated agent state and
+  receive a disposable `HIVE_HOME` plus disposable XDG data/bin roots. Any
+  inherited `HIVE_PREFIX` is removed, so both Hive runtime paths and the shell
+  installer's managed QMD tree/user-bin links remain isolated. `bin/test`
+  passes its consumed leading file list to this guard before loading tests, so
+  focused smoke invocations use the same boundary as the Rake smoke task. A
+  zero-provider smoke case exercises that path and its normal cleanup hooks.
+  The Rake task injects the opt-in only into its test child, so later tasks in
+  the same Rake process cannot inherit real-user access. Its regression probe
+  explicitly selects the provider-free smoke file despite an inherited `TEST`
+  selector and checks the Rake parent's environment after the child exits.
+  PATH-based diagnostics
+  may still execute operator tools such as QMD by design; their Hive installer
+  write targets remain redirected.
 - `with_tmp_dir` — creates a `hive-test*` directory and removes it through
   `HiveTestTmpCleanup` in `ensure`. The cleanup is restricted to direct
   children with test-shaped names owned by the current uid, handles read-only
@@ -1316,3 +1337,7 @@ provider replays and timing remain separate verification gates.
 - [[modules/task_workspace]]
 - [[e2e]]
 - [[gaps]]
+
+The command-owner guard checks each named cell in shared command-contract tables.
+Regression probes delete one cell at a time and reject command-specific contract
+prose even when it appears inside the navigation index section.

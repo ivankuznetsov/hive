@@ -303,7 +303,7 @@ class HiveBotSupervisorTest < Minitest::Test
       project_path: project_path,
       hive_state_path: File.join(project_path, ".hive-state"),
       legacy_stage_dirs: [ { "stage_dir" => "6-pr", "task_count" => 1 } ],
-      legacy_migrate_command: "hive migrate"
+      legacy_state_guide: "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     )
   end
 
@@ -2084,7 +2084,7 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_empty @child_supervisor.dispatched
     message = @telegram.messages.last
     assert_includes message.fetch(:text),
-                    "Project hive has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/hive`"
+                    "Project hive has 1 task hidden in legacy stage dirs (6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/hive"
     assert_includes message.fetch(:text), "No active Hive tasks."
     assert_nil message[:reply_markup]
   end
@@ -2106,7 +2106,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
     message = @telegram.messages.last
     assert_includes message.fetch(:text),
-                    "Project other has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/other`"
+                    "Project other has 1 task hidden in legacy stage dirs (6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/other"
     assert_includes message.fetch(:text), "No active Hive tasks."
     refute_includes message.fetch(:text), "Alpha"
     assert_nil message[:reply_markup]

@@ -1,18 +1,13 @@
 # Recovery
 
-## Runtime cutover recovery
+## Current runtime storage
 
-A `fleet_cutover_required` error is a controller-wide maintenance fence, not a
-task retry. Run the read-only `hive runtime status --json` first and report its
-`phase`, database status, `runtime_code`, and `next_action`. Do not run ordinary
-workflow commands while the fence is active.
-
-The SQLite cutover is irreversible. `hive migrate --all --yes` starts it and
-`hive runtime resume` advances an interrupted cutover; both change controller
-state and require explicit operator approval. There is no rollback, restore, or
-downgrade path. Never invent one or remove cutover evidence. After an approved
-resume, re-run `hive runtime status --json` and require `phase: active` with an
-`ok` database before returning to task operations.
+Run `hive runtime status --json` and report phase, database status and any typed
+error. A healthy current database needs no conversion. Missing storage points to
+explicit `hive setup`; unsupported historical storage uses
+`https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md` with the operator's agent and verified
+backups. Startup and update never import old state. Do not invent a migrate or
+resume command, erase evidence, or change schema versions to bypass validation.
 
 ## Diagnose before changing state
 
@@ -71,8 +66,8 @@ continues unrelated work automatically.
 - If the daemon is not running and background automation is expected,
   `hive daemon start --detach` is the normal start form.
 - `recovery_migration_required` means the current failure predates marker IDs.
-  Run `hive migrate PROJECT_PATH` once; do not synthesize an identity from
-  reason, mtime, or another marker attr.
+  Use `https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md` for an offline conversion; do not
+  synthesize an identity from reason, mtime, or another marker attr.
 
 Keep these commonly confused cases separate:
 

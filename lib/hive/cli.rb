@@ -374,19 +374,16 @@ module Hive
         brew  → brew upgrade ivankuznetsov/hive/hive
         aur   → yay -Syu hive-bin (or paru when yay is unavailable)
         bash  → download the pinned install.sh to a tempfile, then run it
-        dev   → prints git pull && bundle install && hive migrate --all guidance
+        dev   → prints git pull && bundle install && hive runtime status guidance
 
-      Hive never guesses across channels. The package manager publishes the
-      candidate normally, then that installed binary runs the confirmed
-      `hive migrate --all --yes`. Once legacy authority is sealed the transition
-      is irreversible; an interrupted activation resumes forward with
-      `hive runtime resume`.
+      Hive never guesses across channels. After the package manager finishes,
+      the installed binary validates the current runtime with `hive runtime status`.
+      Historical formats require the standalone agent migration guide.
     DESC
     option :dry_run, type: :boolean, default: false, desc: "print the selected updater command without executing it"
-    option :yes, type: :boolean, default: false, desc: "confirm the one-way runtime cutover"
     def update
       require "hive/commands/update"
-      Hive::Commands::Update.new(dry_run: options[:dry_run], confirm: options[:yes]).call
+      Hive::Commands::Update.new(dry_run: options[:dry_run]).call
     end
 
     desc "connect SERVICE", "Connect an external service (screenote)"
@@ -456,32 +453,10 @@ module Hive
       ).call
     end
 
-    desc "migrate [PROJECT_PATH]", "Migrate legacy project config, task folders, and metadata"
-    option :all, type: :boolean, default: false,
-                 desc: "migrate global state and every registered project"
-    option :yes, type: :boolean, default: false, desc: "confirm the one-way runtime cutover"
-    option :exclude_project, type: :array, default: [],
-                             desc: "explicitly exclude a missing or retired registered project"
-    def migrate(project_path = nil)
-      if options[:all]
-        if project_path
-          raise Hive::UsageError, "hive migrate: PROJECT_PATH and --all are mutually exclusive"
-        end
-
-        require "hive/commands/migrate_all"
-        Hive::Commands::MigrateAll.new(
-          confirm: options[:yes], exclusions: options[:exclude_project]
-        ).call
-      else
-        require "hive/commands/migrate"
-        Hive::Commands::Migrate.new(project_path || Dir.pwd).call
-      end
-    end
-
-    desc "runtime ACTION", "Inspect or resume an irreversible runtime cutover"
+    desc "runtime ACTION", "Inspect the current runtime database"
     def runtime(action = "status")
       require "hive/commands/runtime"
-      Hive::Commands::Runtime.new(action, json: options[:json]).call
+      exit Hive::Commands::Runtime.new(action, json: options[:json]).call
     end
 
     desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"

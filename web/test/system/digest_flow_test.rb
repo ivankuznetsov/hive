@@ -50,6 +50,7 @@ class DigestFlowTest < ApplicationSystemTestCase
     assert_current_path digest_path("2026-08-29")
     click_link "Next →"
     assert_current_path digest_path(@date)
+    assert_selector "h1", text: @date
 
     select @project, from: "Project"
     click_button "Apply"

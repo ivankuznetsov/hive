@@ -124,10 +124,7 @@ module Hive
 
         def workflows_dir
           @workflows_dir ||= begin
-            source_path, data = Hive::Config.read_project_config(@project_root)
-            data = Hive::Config.normalize_legacy_project_config(
-              data, source_path, emit_warning: false
-            )
+            _source_path, data = Hive::Config.read_project_config(@project_root)
             hive_state_path = data["hive_state_path"]
             unless hive_state_path.is_a?(String)
               hive_state_path = Hive::Config::DEFAULTS.fetch("hive_state_path")

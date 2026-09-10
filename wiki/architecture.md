@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-09-04
+updated: 2026-09-09
 tags: [architecture, overview]
 ---
 
@@ -76,9 +76,11 @@ attempt cannot unlink bytes while another attempt publishes the same digest.
 Project and task source files remain authoritative. Registration YAML is
 project discovery authority and synchronizes stable project lineage into SQL;
 deregistering and re-registering the same project reuses that inactive lineage.
-The irreversible fleet cutover imports only validated token-usage history,
-rebuilds project/task identity from files, and discards other legacy runtime
-state after proving services, attempts, and leases are quiescent.
+Fresh setup publishes a current SQLite database with its installation identity.
+Existing current databases are validated in place; runtime startup neither
+requires a cutover manifest nor imports historical state. Unsupported storage
+requires the explicit offline procedure in
+`docs/guides/current-format-migration.md`.
 
 ## Host-global daily activity projection
 

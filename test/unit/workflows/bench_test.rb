@@ -970,7 +970,6 @@ class WorkflowsBenchTest < Minitest::Test
         ops,
         destination: "/unused/bench-runtime",
         backup: "/unused/bench-runtime.previous",
-        migration_pathspecs: [],
         pathspecs: [ "bench-runtime" ],
         runtime_backed_up: false,
         runtime_installed: false
@@ -1007,7 +1006,6 @@ class WorkflowsBenchTest < Minitest::Test
             ops,
             destination: destination,
             backup: backup,
-            migration_pathspecs: [],
             pathspecs: [ "bench-runtime" ],
             runtime_backed_up: true,
             runtime_installed: true
@@ -1024,29 +1022,6 @@ class WorkflowsBenchTest < Minitest::Test
     end
   end
 
-  def test_nonlegacy_descriptor_is_left_in_place_and_releases_directory_pin
-    Dir.mktmpdir("hive-bench-custom") do |hive_state|
-      workflows = File.join(hive_state, "workflows")
-      FileUtils.mkdir_p(File.join(workflows, "bench"))
-      descriptor = File.join(workflows, "bench.yml")
-      File.write(descriptor, <<~YAML)
-        id: bench
-        stages:
-          - name: inbox
-            kind: terminal
-            state_file: task.md
-      YAML
-      ops = Object.new
-      ops.define_singleton_method(:hive_state_path) { hive_state }
-
-      migration = Hive::Workflows::Bench.archive_legacy_project_workflow!(ops)
-
-      assert_empty migration.fetch(:pathspecs)
-      assert_nil migration.fetch(:handle)
-      assert_path_exists descriptor
-    end
-  end
-
   def test_failed_rollback_reports_a_missing_previous_runtime_backup
     Dir.mktmpdir("hive-bench-missing-backup") do |hive_state|
       destination = File.join(hive_state, "bench-runtime")
@@ -1060,7 +1035,6 @@ class WorkflowsBenchTest < Minitest::Test
           ops,
           destination: destination,
           backup: backup,
-          migration_pathspecs: [],
           pathspecs: [ "bench-runtime" ],
           runtime_backed_up: true,
           runtime_installed: false
@@ -1068,85 +1042,6 @@ class WorkflowsBenchTest < Minitest::Test
       end
 
       assert_includes err, "previous bench runtime backup is missing at #{backup}"
-    end
-  end
-
-  def test_directory_pin_rejects_a_different_opened_inode_and_closes_on_error
-    Dir.mktmpdir("hive-bench-pin") do |hive_state|
-      workflows = File.join(hive_state, "workflows")
-      FileUtils.mkdir_p(workflows)
-      Dir.mktmpdir("hive-bench-other") do |other|
-        replacement = ->(_handle) { other }
-
-        error = with_replaced_singleton_method(
-          Hive::Workflows::Bench, :pinned_directory_path, replacement
-        ) do
-          assert_raises(Hive::ConfigError) do
-            Hive::Workflows::Bench.pin_workflows_directory!(hive_state, workflows)
-          end
-        end
-
-        assert_includes error.message, "workflows directory changed"
-      end
-    end
-  end
-
-  def test_close_directory_handle_tolerates_an_already_closed_handle
-    handle = Object.new
-    handle.define_singleton_method(:close) { raise IOError, "closed directory" }
-
-    assert_nil Hive::Workflows::Bench.close_directory_handle(handle)
-  end
-
-  def test_pinned_directory_path_fails_closed_without_a_supported_fd_path
-    handle = Object.new
-    handle.define_singleton_method(:fileno) { 99_999 }
-    original_directory = File.method(:directory?)
-    unavailable = lambda do |path|
-      if path == "/proc/self/fd/99999" || path == "/dev/fd/99999"
-        false
-      else
-        original_directory.call(path)
-      end
-    end
-
-    error = with_replaced_singleton_method(File, :directory?, unavailable) do
-      assert_raises(Hive::ConfigError) do
-        Hive::Workflows::Bench.pinned_directory_path(handle)
-      end
-    end
-
-    assert_includes error.message, "cannot safely pin"
-  end
-
-  def test_parent_validation_rejects_a_reappeared_descriptor_and_missing_parent
-    Dir.mktmpdir("hive-bench-parent") do |hive_state|
-      workflows = File.join(hive_state, "workflows")
-      FileUtils.mkdir_p(workflows)
-      handle = Dir.open(workflows)
-      stat = File.stat(workflows)
-      migration = {
-        handle: handle,
-        root: Hive::Workflows::Bench.pinned_directory_path(handle),
-        dev: stat.dev,
-        ino: stat.ino
-      }
-      ops = Object.new
-      ops.define_singleton_method(:hive_state_path) { hive_state }
-
-      File.write(File.join(workflows, "bench.yml"), "custom\n")
-      error = assert_raises(Hive::ConfigError) do
-        Hive::Workflows::Bench.validate_migration_parent!(ops, migration)
-      end
-      assert_includes error.message, "descriptor path reappeared before commit"
-
-      FileUtils.mv(workflows, "#{workflows}.moved")
-      error = assert_raises(Hive::ConfigError) do
-        Hive::Workflows::Bench.validate_migration_parent!(ops, migration)
-      end
-      assert_includes error.message, "cannot validate legacy bench workflows directory"
-    ensure
-      Hive::Workflows::Bench.close_directory_handle(handle)
     end
   end
 
@@ -1159,70 +1054,24 @@ class WorkflowsBenchTest < Minitest::Test
       assert Hive::Workflows::Bench.commit_landed?(ops, "before")
     end
 
-    assert_includes err, "could not determine whether bench migration committed"
+    assert_includes err, "could not determine whether bench runtime installation committed"
     assert_includes err, "head unavailable"
   end
 
-  def test_descriptor_snapshot_errors_are_normalized_as_config_errors
-    missing = File.join(Dir.tmpdir, "missing-bench-descriptor-#{Process.pid}")
-    error = assert_raises(Hive::ConfigError) do
-      Hive::Workflows::Bench.read_descriptor_snapshot!(missing)
-    end
-    assert_includes error.message, "cannot read legacy bench descriptor safely"
-
-    error = assert_raises(Hive::ConfigError) do
-      Hive::Workflows::Bench.parse_descriptor_snapshot!({ content: "[" }, missing)
-    end
-    assert_includes error.message, "is not valid YAML"
-  end
-
-  def test_instruction_archive_cleanup_runs_after_an_unexpected_publish_error
-    Dir.mktmpdir("hive-bench-publish") do |root|
-      source = File.join(root, "staged")
-      destination = File.join(root, "archive")
-      FileUtils.mkdir_p(source)
-      original_rename = File.method(:rename)
-      failing_rename = lambda do |from, to|
-        result = original_rename.call(from, to)
-        raise "publish interrupted after rename" if from == source && to == destination
-
-        result
+  def test_install_retains_the_committed_runtime_when_commit_status_is_observed_after_failure
+    with_tmp_dir do |hive_state|
+      heads = [ "before\n", "after\n" ]
+      ops = Object.new
+      ops.define_singleton_method(:hive_state_path) { hive_state }
+      ops.define_singleton_method(:run_git!) do |*argv|
+        argv.include?("rev-parse") ? heads.shift : ""
       end
+      ops.define_singleton_method(:hive_commit) { |**| raise "commit transport failed" }
 
-      error = with_replaced_singleton_method(File, :rename, failing_rename) do
-        assert_raises(RuntimeError) do
-          Hive::Workflows::Bench.publish_instruction_archive!(source, destination)
-        end
+      assert_raises(RuntimeError) do
+        Hive::Workflows::Bench.install_runtime!(ops)
       end
-
-      assert_includes error.message, "publish interrupted after rename"
-      refute_path_exists destination
-    end
-  end
-
-  def test_migration_path_validation_rejects_wrong_type_escape_and_missing_path
-    Dir.mktmpdir("hive-bench-paths") do |hive_state|
-      directory = File.join(hive_state, "directory")
-      FileUtils.mkdir_p(directory)
-      error = assert_raises(Hive::ConfigError) do
-        Hive::Workflows::Bench.validate_migration_path!(hive_state, directory, expected: :file)
-      end
-      assert_includes error.message, "expected file"
-
-      Dir.mktmpdir("hive-bench-external") do |external|
-        outside = File.join(external, "bench.yml")
-        File.write(outside, "external\n")
-        error = assert_raises(Hive::ConfigError) do
-          Hive::Workflows::Bench.validate_migration_path!(hive_state, outside, expected: :file)
-        end
-        assert_includes error.message, "outside hive state"
-      end
-
-      missing = File.join(hive_state, "missing.yml")
-      error = assert_raises(Hive::ConfigError) do
-        Hive::Workflows::Bench.validate_migration_path!(hive_state, missing, expected: :file)
-      end
-      assert_includes error.message, "cannot validate legacy bench migration path"
+      assert_path_exists File.join(hive_state, "bench-runtime")
     end
   end
 

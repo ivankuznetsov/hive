@@ -15,6 +15,34 @@ require "hive/web/service_status"
 module Hive
   module Commands
     class Setup
+      # Pre-dispatch usage errors for `hive setup` ride the versioned
+      # hive-setup envelope with the native web bootstrap context: the mode
+      # reflects how the requested argv opted in or out of bootstrap and
+      # service installation.
+      def self.usage_error_payload(error, argv: [])
+        require "hive/commands/web"
+        context = Hive::Commands::Web.error_context(environment: ENV)
+        mode = if argv.any? { |arg| %w[--no-bootstrap --skip-bootstrap --bootstrap=false].include?(arg) }
+          "diagnose_only"
+        elsif argv.any? { |arg| %w[--no-service --skip-service --service=false].include?(arg) }
+          "service_opt_out"
+        else
+          "managed_service"
+        end
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-setup", error: error, error_kind: "usage",
+          extras: {
+            "mode" => mode,
+            "url" => context.fetch("url"),
+            "service" => context.slice(
+              "platform", "unit_path", "service_installed", "service_enabled",
+              "service_running", "service_manager_available", "url", "ready", "readiness"
+            ),
+            "warnings" => context.fetch("warnings")
+          }
+        )
+      end
+
       def initialize(json: false, service: true, no_bootstrap: false,
                      no_init: false, yes: false, input: $stdin, output: $stdout,
                      error: $stderr, environment: ENV, setup_agents_factory: nil)
@@ -221,25 +249,10 @@ module Hive
 
       def bootstrap_runtime_control_plane
         phase("runtime_control_plane") do
-          require "hive/runtime_control_plane"
-          database = Hive::RuntimeControlPlane::Database.new(
-            path: Hive::Paths.runtime_control_plane_path
-          )
-          diagnosis = database.diagnostics
-          if diagnosis.ok?
-            require "hive/runtime_control_plane/cutover"
-            status = Hive::RuntimeControlPlane::Cutover.inspect_status(
-              state_home: Hive::Paths.state_home, database: database
-            )
-            next [ true, { "phase" => status.fetch("phase"), "database" => database.path } ]
-          end
-          raise diagnosis.error unless diagnosis.status == :missing
-
-          require "hive/runtime_control_plane/cutover"
-          result = Hive::RuntimeControlPlane::Cutover.bootstrap(
-            confirm: true, projects: Hive::Config.registered_projects
-          )
-          [ true, { "phase" => result.phase, "database" => result.database_path } ]
+          require "hive/runtime_control_plane/installation"
+          status = Hive::RuntimeControlPlane::Installation.setup
+          [ true, { "phase" => status.fetch("phase"),
+                    "database" => status.fetch("database").fetch("path") } ]
         end
       end
 
@@ -563,3 +576,14 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary: Thor
+# rejections ride the versioned hive-setup envelope with the native web
+# bootstrap context this boundary owns (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare(
+  "setup",
+  { schema: "hive-setup", error_kind: "usage",
+    payload: ->(error, argv: []) { Hive::Commands::Setup.usage_error_payload(error, argv: argv) } }
+)

@@ -660,6 +660,31 @@ class HiveCommandsAnswerTest < Minitest::Test
     assert_schema(payload)
   end
 
+  def test_programmatic_inventory_and_write_use_the_bound_slot_without_console_output
+    with_project do |_project, _folder, path|
+      out, err = capture_io do
+        payload = Hive::Commands::Answer.inventory(SLUG, project: "demo")
+        assert_equal "inventory", payload.fetch("operation")
+        assert_equal 3, payload.fetch("unanswered_count")
+        assert_schema(payload)
+
+        written = Hive::Commands::Answer.write(
+          SLUG, project: "demo", binding: payload.dig("slots", 2, "binding"),
+          answer: "Programmatic answer"
+        )
+        assert_equal "written", written.fetch("outcome")
+        assert_schema(written)
+      end
+
+      assert_empty out
+      assert_empty err
+      questions = Hive::BrainstormParser.parse(path)
+      assert_nil questions.fetch(0).answer
+      assert_nil questions.fetch(1).answer
+      assert_equal "Programmatic answer", questions.fetch(2).answer
+    end
+  end
+
   def test_programmatic_write_requires_a_nonempty_binding
     error = assert_raises(Hive::Commands::Answer::InvalidBinding) do
       Hive::Commands::Answer.write(SLUG, project: "demo", binding: "", answer: "unsafe")

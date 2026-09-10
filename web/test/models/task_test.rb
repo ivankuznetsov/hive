@@ -238,7 +238,7 @@ class TaskTest < ActiveSupport::TestCase
     FileUtils.remove_entry(root) if root&.exist?
   end
 
-  test "renders verified capture-manifest artifacts as stills and videos" do
+  test "rejects superseded v1 capture manifests" do
     root = Pathname(Dir.mktmpdir("hive-web-capture-model"))
     folder = root.join("task")
     media = folder.join("media")
@@ -267,8 +267,7 @@ class TaskTest < ActiveSupport::TestCase
 
     manifest = task.media_manifest
 
-    assert_equal "captured", manifest.fetch("status")
-    assert_equal %w[still video], manifest.fetch("items").map { |item| item.fetch("type") }
+    assert_nil manifest
   ensure
     FileUtils.remove_entry(root) if root&.exist?
   end

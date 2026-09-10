@@ -68,19 +68,22 @@ module Hive
       # `legacy_stage_dirs` carries the JSON's `legacy_stage_dirs` array
       # verbatim ([] when the project is clean) so the renderer can flag
       # projects with task folders stuck under a renamed stage directory
-      # without re-walking the filesystem. `legacy_migrate_command`
-      # carries the JSON's `legacy_migrate_command` string verbatim
-      # ("hive migrate" when legacy_stage_dirs is non-empty; nil
+      # without re-walking the filesystem. `legacy_state_guide`
+      # carries the JSON's `legacy_state_guide` string verbatim
+      # ("https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md" when legacy_stage_dirs is non-empty; nil
       # otherwise) — agent-facing parity of the text recovery hint.
       ProjectView = Data.define(:name, :path, :hive_state_path, :error, :rows,
-                                :legacy_stage_dirs, :legacy_migrate_command) do
-        # `legacy_stage_dirs` defaults to `[]` and `legacy_migrate_command`
+                                :legacy_stage_dirs, :legacy_state_guide,
+                                :hidden_archived_task_count) do
+        # `legacy_stage_dirs` defaults to `[]` and `legacy_state_guide`
         # to nil so existing test factories (predating the fields) can keep
         # building ProjectView with the original 5-keyword shape.
         # Production callers in this file always pass them explicitly.
-        def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil, **rest)
+        def initialize(legacy_stage_dirs: [].freeze, legacy_state_guide: nil,
+                       hidden_archived_task_count: 0, **rest)
           super(legacy_stage_dirs: legacy_stage_dirs,
-                legacy_migrate_command: legacy_migrate_command, **rest)
+                legacy_state_guide: legacy_state_guide,
+                hidden_archived_task_count: hidden_archived_task_count, **rest)
         end
       end
 
@@ -279,8 +282,15 @@ module Hive
           error: payload["error"],
           rows: sorted.freeze,
           legacy_stage_dirs: Array(payload["legacy_stage_dirs"]).freeze,
-          legacy_migrate_command: payload["legacy_migrate_command"]
+          legacy_state_guide: payload["legacy_state_guide"],
+          hidden_archived_task_count: normalized_hidden_count(
+            payload["hidden_archived_task_count"]
+          )
         ).freeze
+      end
+
+      def self.normalized_hidden_count(value)
+        value.is_a?(Integer) && value >= 0 ? value : 0
       end
 
       def self.build_row(payload, project_name)
@@ -413,7 +423,16 @@ module Hive
               row.id
             ].any? { |value| value.to_s.downcase.include?(needle) }
           end
-          project.with(rows: matched.freeze).freeze
+          ProjectView.new(
+            name: project.name,
+            path: project.path,
+            hive_state_path: project.hive_state_path,
+            error: project.error,
+            rows: matched.freeze,
+            legacy_stage_dirs: project.legacy_stage_dirs,
+            legacy_state_guide: project.legacy_state_guide,
+            hidden_archived_task_count: project.hidden_archived_task_count
+          ).freeze
         end
         self.class.new(
           generated_at: @generated_at,

@@ -51,7 +51,7 @@
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": {"const": "hive-workflow-install"}, "schema_version": {"const": 2}, "ok": {"const": false},
-        "error_class": {"type": "string"}, "error_kind": {"enum": ["consent_required", "ownership", "update_required", "concurrent_run", "git", "config", "registry", "error"]},
+        "error_class": {"type": "string"}, "error_kind": {"enum": ["usage", "consent_required", "ownership", "update_required", "concurrent_run", "git", "config", "registry", "error"]},
         "exit_code": {"enum": [1, 64, 69, 70, 75, 78]}, "message": {"type": "string"},
         "holder": {"type": "object", "additionalProperties": true}, "lock_path": {"type": "string"}
       }

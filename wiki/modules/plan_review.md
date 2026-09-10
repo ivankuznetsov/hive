@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-09-02
+updated: 2026-09-09
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -34,11 +34,13 @@ The first release applies only when all of these are true:
 There is no tenth workflow stage and no descriptor extension. Custom workflows,
 architecture/research/content/bench flows, and coding tasks already beyond plan
 project `plan_review: null`. New coding tasks carry
-`meta.yml: plan_review_required: true`; `hive migrate` adds that bit to existing
-coding tasks in stages 1–3 while leaving stages 4+ grandfathered. Consequently,
-an already-executing pre-feature task with no review root receives a private
-`legacy-execute-adoption.json` receipt, while removing evidence and raw-moving a
-new/migrated task fails closed at execute entry.
+`meta.yml: plan_review_required: true`. Execute entry rejects missing required
+review evidence. The existing marker/journal contract still permits a task
+without that requirement and without a review root to receive a private
+`legacy-execute-adoption.json` receipt; malformed metadata does not qualify.
+Hive does not automatically add the requirement to historical tasks. An offline
+conversion must preserve metadata and rerun required review rather than invent
+approval evidence.
 
 ## Deterministic policy
 
@@ -113,10 +115,9 @@ Hive's review-session journal, derived projection, and bounded projection
 checkpoint are excluded only from this review-time manifest because the
 controller updates all three while the provider is running. Canonical
 `plan.md`, task metadata, and every existing plan-review record remain anchored.
-Reviews blocked by the former checkpoint false positive are re-entered once per
-affected initial-review role when their immutable route carries the exact
-runner diagnostic. A versioned recovery reset prevents repeated retries and
-reviewer-authored or unrelated custody failures remain operator-owned.
+Historical checkpoint false positives do not trigger automatic contract repair.
+Current custody failures retain their normal diagnostics and guarded recovery
+requirements.
 
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,
@@ -136,22 +137,11 @@ with a letter and then use letters, digits, hyphens, or underscores, up to 64
 characters. The primary, adversarial, and verification prompts publish that
 same grammar. Natural specialist names such as `product-lens` therefore remain
 valid without weakening the stricter machine-owned coverage-name contract or
-discarding otherwise valid findings and coverage. A blocked legacy primary or
-adversarial route with the exact old selected-lens diagnostic is classified as
-runnable and receives one versioned recovery reset; the daemon can therefore
-rerun each affected initial reviewer leg automatically after upgrade. Missing
-diagnostic provenance is accepted only for historical records. Current adapter
-receipts distinguish parser failures, including retryable malformed reviewer
-output, from reviewer- or runner-authored diagnostics, so a reviewer cannot
-request this migration retry by copying the
-old text. The reset is one-time, so a genuinely malformed current-contract
-result remains terminal instead of looping. Verification output uses the new
-grammar but is not eligible for the legacy reset, preserving the existing
-revision-round fence.
-Initial primary and adversarial prompts also require `residual_evidence` to be
-exactly empty; only disposition verification may emit verified fingerprint
-attestations there. A blocked initial leg with the exact historical parser
-diagnostic receives the same bounded, versioned, daemon-runnable recovery.
+discarding otherwise valid findings and coverage. Historical parser, model and
+checkpoint repair resets have been removed. Current invalid results retain
+their normal diagnostics; offline conversion may choose to
+rerun review. Initial legs require empty `residual_evidence`; only disposition
+verification may emit verified fingerprint attestations there.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
 initial attempt plus `plan_review.attempts.max_transient` retries in one
@@ -183,25 +173,14 @@ whose latest primary or adversarial route is explicitly `unsupported` classify
 as `plan_reviewing` once under the new code and enter the same paced recovery;
 configuration-only blocks without an attempted route remain operator-owned. A
 changed probe resets the stable-observation series and permits a new reviewer
-launch. A legacy successful adversarial receipt whose served-model alias is now
-explicitly attested by provider support receives one versioned rerun under the
-current identity contract. This repairs pre-contract `reviewer_family_unknown`
-coverage without rewriting old immutable attempt evidence or repeatedly
-launching a genuinely non-independent reviewer. Review identity includes adapter,
-reviewer, route configuration, and the effective `models.plan_review`,
-`models.plan_review_adversarial`, and `models.plan_review_verification`
-overrides. Unrelated stage-model changes plus attempt timeout and retry tuning
-remain operational and do not invalidate an otherwise identical verdict.
+launch. Historical served-model identity repair is not performed automatically.
 
 Planner authority capture is provider-scoped too. A Codex-authored plan never
 inherits `claude.model` or `claude.effort` when its own plan route is unpinned;
-the durable identity records provider-default sentinels instead. Legacy
-records carrying the impossible `provider: codex` plus `model: claude-*`
-combination receive one versioned recovery route. The same Codex authority is
-retained, the foreign model is replaced by Codex's default, any failed planner
-revision series is reset once, and both direct approvals and daemon resumes
-continue through the repaired identity. Blocked legacy rows are classified as
-runnable so the migration is reachable without an operator rewriting state.
+the durable identity records provider-default sentinels instead. Historical
+records with an impossible provider/model pair are not rewritten or retried by
+a one-time identity repair. Offline conversion can choose to rerun planning and
+review under a valid current identity; ordinary provider retries remain active.
 
 ## Findings, revision, and verification
 
@@ -400,12 +379,10 @@ required route from the sanctioned recovery action. Its semantic target binds
 the current terminal attempt IDs, so a later failed attempt can receive a new
 recovery decision while an exact replay remains a no-op.
 
-A retired projection-checkpoint rollout briefly included Hive's own
-`task-projection.checkpoint.json` write in reviewer custody. The current
-reviewer firewall excludes that orchestrator-owned file. Exact historical
-runner diagnostics for this false positive receive one versioned recovery
-reset for primary, adversarial, or verification; unrelated diagnostics and a
-second failure under the current contract remain terminal.
+The reviewer firewall excludes the controller-owned
+`task-projection.checkpoint.json` file. Historical checkpoint diagnostics are
+not a special automatic retry trigger; use the current guarded recovery action
+when its requirements are satisfied.
 
 Under ADR-008's local same-user trust model, direct CLI invocation is the
 operator boundary; Web actions use the authenticated access predicate. An
@@ -452,36 +429,6 @@ review without mutation. Its Run action dispatches the projected
 mandatory failed or unsupported coverage row exposes an exact waiver form even
 when that row began as configured optional coverage. While a plan review
 applies, the generic force-approve control is hidden.
-
-## CLI serialization and exit codes
-
-`hive plan-review --json` uses the shared envelope emitter with serialization
-policy `raise`: a `JSON::GeneratorError` is raised and no fallback JSON document
-is emitted. `hive plan-review-run` is text-only, so JSON serialization is not
-applicable to that automation verb.
-
-| Code | Meaning |
-|---:|---|
-| 0 | An action applied/idempotently replayed, or automation completed. |
-| 1 | A plan-review record, evidence, or orchestration invariant failed. |
-| 64 | The action, observation identity, target, or authority was invalid or conflicting. |
-| 70 | Git or another software boundary failed. |
-| 75 | The observation was stale or the task/commit lock was busy. |
-| 78 | Review policy, workflow, or project configuration was invalid. |
-
-## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
-
-| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
-|---|---|---|---|---|---|---|
-| `hive plan-review` | Options: observation identity plus action-specific `--answer`, `--coverage`, `--level`, and `--reason`, with optional `--json`. | Revalidates one authority-bearing action and applies or idempotently replays it under the mutation lock. | JSON schema `hive-plan-review-action.v1`. | Invalid/conflicting authority, stale observations, policy/configuration, and software failures use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `1`, `64`, `70`, `75`, `78`. |
-| `hive plan-review-run` | Options: no command-specific options beyond its target. | Dispatches or resumes non-authority review automation and may advance an already-cleared plan. | Output is text-only and has no success JSON schema. | Record, orchestration, target, policy/configuration, stale-lock, and software failures remain explicit. | Serialization fallback is not applicable because no JSON is emitted. | Exit codes `0`, `1`, `64`, `70`, `75`, `78`. |
-
-## Examples
-
-Use `hive plan-review PROJECT:SLUG ACTION --json` with the complete observation
-identity and action-specific options from the current projection. Automation
-uses `hive plan-review-run PROJECT:SLUG` to dispatch or resume the projected
-review state.
 
 ## Tests and proof
 

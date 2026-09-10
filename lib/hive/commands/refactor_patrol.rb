@@ -38,6 +38,63 @@ require "hive/worktree"
 module Hive
   module Commands
     class RefactorPatrol
+      # Pre-dispatch usage errors for `hive refactor-patrol` ride the reporter
+      # envelope, so agent callers keep the v4 patrol document shape even when
+      # Thor rejects argv before this class is instantiated.
+      def self.usage_error_payload(error, error_kind:)
+        Hive::RefactorPatrol::Reporter.error_envelope(
+          error,
+          version: Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION,
+          error_kind: error_kind
+        )
+      end
+
+      # Classifies the job-listing flags in a refactor-patrol argv region: a
+      # jobs envelope (with its action) applies whenever the argv selects a
+      # jobs surface (archive/show, explicit list toggle, --full, or any list
+      # pagination modifier).
+      def self.usage_jobs_argv(argv)
+        archive = false
+        list = nil
+        full = nil
+        show = false
+        modifier = argv.any? do |arg|
+          arg == "--limit" || arg.start_with?("--limit=") ||
+            arg == "--cursor" || arg.start_with?("--cursor=")
+        end
+        argv.each do |arg|
+          if arg == "--archive" || arg.start_with?("--archive=")
+            archive = true
+          elsif arg == "--show" || arg.start_with?("--show=")
+            show = true
+          elsif %w[--no-list --skip-list].include?(arg)
+            list = false
+          elsif arg == "--list"
+            list = true
+          elsif arg.start_with?("--list=")
+            value = arg.split("=", 2).last.to_s.downcase
+            list = !%w[false f no n 0].include?(value)
+          elsif %w[--no-full --skip-full].include?(arg)
+            full = false
+          elsif arg == "--full"
+            full = true
+          elsif arg.start_with?("--full=")
+            value = arg.split("=", 2).last.to_s.downcase
+            full = !%w[false f no n 0].include?(value)
+          end
+        end
+        action = if archive
+          "show"
+        elsif list == true
+          "list"
+        elsif show
+          "show"
+        end
+        return unless action || full == true || modifier
+
+        { action: action }
+      end
+
       CLAIM_HEARTBEAT_INTERVAL_SEC = 30
       CLAIM_HEARTBEAT_LEASE_SEC = 7200
       # Durable discovery checkpoints each completed slice before returning,
@@ -1289,4 +1346,25 @@ module Hive
       end
     end
   end
+end
+
+# The pre-dispatch JSON usage contract for this command boundary: the base
+# surface rides this boundary's v4 reporter envelope, while job-listing argv
+# variants ride the generic hive-refactor-patrol-jobs envelope with the
+# action they named (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("refactor-patrol") do |_argv, command_index:, option_argv:|
+  jobs = Hive::Commands::RefactorPatrol.usage_jobs_argv(option_argv)
+  if jobs
+    next {
+      schema: "hive-refactor-patrol-jobs", error_kind: "usage",
+      extras: { "action" => jobs.fetch(:action) }
+    }
+  end
+
+  {
+    error_kind: "error",
+    payload: ->(error, argv: []) { Hive::Commands::RefactorPatrol.usage_error_payload(error, error_kind: "error") }
+  }
 end

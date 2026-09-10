@@ -324,29 +324,8 @@ module HiveTestHelper
   end
 
   def activate_test_control_plane(state_home)
-    require "hive/runtime_control_plane/cutover_manifest"
-    epoch = 20260829120000
-    database = Hive::RuntimeControlPlane::Database.new(
-      path: Hive::Paths.runtime_control_plane_path(state_home)
-    ).migrate!
-    identity = database.read { |db| db[:installations].first }
-    database.transaction do |db|
-      db[:installations].update(
-        activation_epoch: epoch, activated_at: "2026-08-29T12:00:00.000000Z"
-      )
-    end
-    database.disconnect
-    root = File.join(state_home, ".runtime-cutover", "current")
-    FileUtils.mkdir_p(root)
-    document = Hive::RuntimeControlPlane::CutoverManifest.build(
-      phase: "active", installation_id: identity.fetch(:installation_id),
-      source_release: "0.7.1",
-      target_release: Hive::VERSION, exclusions: [], task_authority: [],
-      evidence: { "activation_epoch" => epoch }
-    )
-    Hive::RuntimeControlPlane::CutoverManifest.new(
-      path: File.join(root, "active.json")
-    ).publish(document)
+    require "hive/runtime_control_plane/installation"
+    Hive::RuntimeControlPlane::Installation.setup(state_home: state_home)
   end
 
   def register_runtime_project(database:, name:, path:,

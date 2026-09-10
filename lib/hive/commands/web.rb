@@ -48,6 +48,20 @@ module Hive
         )
       end
 
+      # Pre-dispatch usage errors for `hive web install|status` ride the same
+      # native web context the command's own failures carry, so an agent whose
+      # argv Thor rejected still learns why the web surface is unavailable.
+      def self.usage_error_payload(error, schema:, argv: [])
+        extras = if schema == "hive-web-status"
+          status_error_context(environment: ENV)
+        else
+          error_context(environment: ENV)
+        end
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error, error_kind: "invalid_task_path", extras: extras
+        )
+      end
+
       VALID_SUBCOMMANDS = %w[install start stop status capture capture-server].freeze
       INSTALL_READINESS_ATTEMPTS = 40
       INSTALL_READINESS_INTERVAL_SEC = 0.25
@@ -497,4 +511,20 @@ module Hive
       end
     end
   end
+end
+
+# The pre-dispatch JSON usage contract for this command boundary: only the
+# install/status surfaces pre-announce a JSON envelope, and their payloads
+# carry the native web context this boundary owns (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("web") do |argv, command_index:, option_argv:|
+  sub = Hive::CliUsageContracts.subcommand(argv, command_index, value_options: %w[--bind --port])
+  next unless %w[install status].include?(sub)
+
+  {
+    schema: "hive-web-#{sub}",
+    error_kind: "invalid_task_path",
+    payload: ->(error, argv: []) { Hive::Commands::Web.usage_error_payload(error, schema: "hive-web-#{sub}", argv: argv) }
+  }
 end

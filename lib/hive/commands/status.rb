@@ -667,7 +667,7 @@ module Hive
           "error" => "project_load_failed",
           "tasks" => [],
           "legacy_stage_dirs" => [],
-          "legacy_migrate_command" => nil
+          "legacy_state_guide" => nil
         }
         degraded["hidden_archived_task_count"] = 0 unless @archive
         degraded["__archive_folders"] = [] if include_archive_index
@@ -781,13 +781,8 @@ module Hive
               detect_legacy_stage_dirs(hive_state, workflow_generation: workflow_generation)
             end
             out["legacy_stage_dirs"] = legacy_stage_dirs
-            # `legacy_migrate_command` is the machine-readable parity of the
-            # text-mode "run `hive migrate`" recovery hint. Agents reading
-            # the JSON envelope get a ready-to-execute command string when
-            # legacy_stage_dirs is non-empty; `null` otherwise. The field is
-            # always present (never absent) — same diagnostic-field
-            # convention as `diagnostic` on tasks. Issue #94.
-            out["legacy_migrate_command"] = legacy_stage_dirs.empty? ? nil : "hive migrate"
+            # Unsupported folders stay visible; conversion is an offline agent task.
+            out["legacy_state_guide"] = legacy_stage_dirs.empty? ? nil : "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
             out
           end
         end
@@ -809,10 +804,7 @@ module Hive
       # the detector that turns that silent gap into a visible warning
       # instead. Only
       # `Hive::Stages.task_slug?` children count toward `task_count` so
-      # stray `logs/`, `.DS_Store`, or `.gitkeep` siblings don't inflate
-      # the number — the same predicate `Hive::Commands::Migrate` uses to
-      # decide what it is allowed to mv, so the count matches what
-      # `hive migrate` would actually move.
+      # stray `logs/`, `.DS_Store`, or `.gitkeep` siblings do not inflate counts.
       STATUS_PRIVATE_STAGE_DIRS = %w[archived-manual].freeze
 
       def detect_legacy_stage_dirs(hive_state, workflow_generation: nil)
@@ -1361,7 +1353,7 @@ module Hive
         total = legacy.sum { |entry| entry["task_count"] }
         dirs = legacy.map { |entry| "#{entry['stage_dir']} (#{entry['task_count']})" }.join(", ")
         puts "  ⚠ #{total} task#{total == 1 ? '' : 's'} hidden in legacy stage dirs: #{dirs}"
-        puts "    run `hive migrate` to move them into the current layout"
+        puts "    read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent before converting this state"
       end
 
       # Stage dirs to walk when no explicit `stages:` list is given are
@@ -2298,4 +2290,32 @@ module Hive
       end
     end
   end
+end
+
+# The pre-dispatch JSON usage contract for this command boundary follows the
+# status mode flags: each mode rides its own schema, and the default surface
+# rides hive-running-status (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("status") do |argv, command_index:, option_argv:|
+  diagnose = option_argv.any? do |arg|
+    arg.valid_encoding? && (arg == "--diagnose" || arg.start_with?("--diagnose="))
+  end
+  next { schema: "hive-status-diagnose", error_kind: "error" } if diagnose
+
+  operational = option_argv.any? do |arg|
+    arg.valid_encoding? && (arg == "--operational" || arg.start_with?("--operational="))
+  end
+  next { schema: "hive-operational-status", error_kind: "error" } if operational
+
+  internal_task_graph = option_argv.any? do |arg|
+    arg.valid_encoding? &&
+      (arg == "--internal-task-graph" || arg.start_with?("--internal-task-graph="))
+  end
+  daemon_task = option_argv.any? do |arg|
+    arg.valid_encoding? && (arg == "--daemon-task" || arg.start_with?("--daemon-task="))
+  end
+  next { schema: "hive-status", error_kind: "error" } if internal_task_graph || daemon_task
+
+  { schema: "hive-running-status", error_kind: "error" }
 end

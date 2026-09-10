@@ -262,3 +262,20 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contracts for the stage-action command boundary:
+# every workflow stage verb (plus the `pr` alias of open-pr) rides the
+# hive-stage-action envelope when Thor rejects argv before dispatch (see
+# Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+%w[brainstorm plan develop open-pr review artifacts finalize archive].each do |verb|
+  Hive::CliUsageContracts.declare(
+    verb,
+    { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => verb } }
+  )
+end
+Hive::CliUsageContracts.declare(
+  "pr",
+  { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "open-pr" } }
+)

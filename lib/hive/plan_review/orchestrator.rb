@@ -9,7 +9,6 @@ require "hive/lock"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
-require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/clearance"
 require "hive/plan_review/decision"
 require "hive/plan_review/identity"
@@ -130,13 +129,8 @@ module Hive
         return terminal(record, state: "skipped", outcome: "skipped") if
           record.effective_level == "skip"
 
-        record = refresh_planner_identity_contract(record)
         record, capability_pending = refresh_capability_probes(record)
         return Projection.new(record) if capability_pending
-        record = refresh_checkpoint_custody_contract(record)
-        record = refresh_adversarial_identity_contract(record)
-        record = refresh_selected_lenses_contract(record)
-        record = refresh_residual_evidence_contract(record)
 
         %w[primary adversarial].each do |role|
           record, pending = ensure_leg(record, role, original_plan_bytes)
@@ -360,125 +354,6 @@ module Hive
           route = latest_route(record, role)
           route if route && route["outcome"] == "unsupported"
         end
-      end
-
-      # Grok reports the served alias `grok-4.6-build`. Reviews completed
-      # before Hive learned that exact alias were retained as successful
-      # attempts but denied adversarial coverage because their family was
-      # unknown. Re-run one such leg under the current identity contract so
-      # the immutable attempt evidence, not a projection rewrite, earns the
-      # missing coverage. The versioned reset makes this a one-time migration.
-      def refresh_adversarial_identity_contract(record)
-        route = RouteResolver.recoverable_identity_route(
-          routes: record["routes"], planner_identity: planner_identity(record)
-        )
-        return record unless route
-
-        reset = Hive::PlanReview.recovery_reset_route(
-          route,
-          "identity_contract_recovery" => true,
-          "identity_contract_version" => RouteResolver::IDENTITY_CONTRACT_VERSION,
-          "diagnostic" => "retry reviewer under the current served-model identity contract"
-        )
-        publish_transition(
-          record, state: "reviewing",
-          required_action: "retry adversarial review under the current identity contract",
-          routes: record["routes"] + [ reset ]
-        )
-      end
-
-      def refresh_planner_identity_contract(record)
-        route = latest_route(record, "planner")
-        captured = route&.fetch("actual", nil) || route&.fetch("requested", nil)
-        return record unless PlannerIdentity.recoverable?(captured)
-        return record if PlannerIdentity.recoverable?(@planner_identity)
-        return record unless captured["provider"].to_s == @planner_identity["provider"].to_s
-
-        recovered = planner_route(@planner_identity).merge(
-          "recovery_reset" => true,
-          "planner_identity_contract_recovery" => true,
-          "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION,
-          "diagnostic" => "recovered a legacy cross-provider planner model"
-        )
-        routes = record["routes"] + [ recovered ]
-        revision = latest_route(record, "planner_revision")
-        if revision && !SUCCESS_OUTCOMES.include?(revision["outcome"])
-          routes << Hive::PlanReview.recovery_reset_route(
-            revision,
-            "planner_identity_contract_recovery" => true,
-            "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION,
-            "diagnostic" => "retry planner revision with the recovered planner identity"
-          )
-        end
-        publish_transition(
-          record, state: "reviewing",
-          required_action: "retry plan review under the current planner identity contract",
-          routes:
-        )
-      end
-
-      # A projection-checkpoint rollout briefly placed Hive's own
-      # review-session write inside reviewer custody. Retry each exact,
-      # runner-authored false positive once after the custody exclusion ships.
-      def refresh_checkpoint_custody_contract(record)
-        routes = CheckpointCustody.recoverable_routes(record["routes"])
-        refresh_route_contract(
-          record, routes:,
-          recovery_attributes: {
-            "checkpoint_custody_recovery" => true,
-            "checkpoint_custody_contract_version" =>
-              CheckpointCustody::CONTRACT_VERSION
-          },
-          diagnostic: "retry reviewer after repairing review-session checkpoint custody"
-        )
-      end
-
-      # Older parsers rejected lowercase specialist names such as
-      # `product-lens` and persisted the otherwise valid reviewer response as a
-      # terminal failure. Re-run that exact legacy diagnostic once under the
-      # widened contract; the versioned reset prevents repeated retries for a
-      # genuinely malformed result produced by the current parser.
-      def refresh_selected_lenses_contract(record)
-        routes = ResultParser.recoverable_selected_lenses_routes(record["routes"])
-        refresh_route_contract(
-          record, routes:,
-          recovery_attributes: {
-            "selected_lenses_contract_recovery" => true,
-            "selected_lenses_contract_version" => ResultParser::SELECTED_LENSES_CONTRACT_VERSION
-          },
-          diagnostic: "retry reviewer under the current selected_lenses contract"
-        )
-      end
-
-      # Initial review prompts historically showed only an empty
-      # residual_evidence example without saying that the field is reserved
-      # for disposition verification. Natural-language notes were therefore
-      # rejected by the stricter machine contract. Re-run each affected
-      # initial role once under the explicit empty-array contract.
-      def refresh_residual_evidence_contract(record)
-        routes = ResultParser.recoverable_residual_evidence_routes(record["routes"])
-        refresh_route_contract(
-          record, routes:,
-          recovery_attributes: {
-            "residual_evidence_contract_recovery" => true,
-            "residual_evidence_contract_version" => ResultParser::RESIDUAL_EVIDENCE_CONTRACT_VERSION
-          },
-          diagnostic: "retry initial reviewer under the residual_evidence contract"
-        )
-      end
-
-      def refresh_route_contract(record, routes:, recovery_attributes:, diagnostic:)
-        return record if routes.empty?
-
-        resets = routes.map do |route|
-          Hive::PlanReview.recovery_reset_route(
-            route, recovery_attributes.merge("diagnostic" => diagnostic)
-          )
-        end
-        publish_transition(
-          record, state: "reviewing", required_action: diagnostic,
-          routes: record["routes"] + resets
-        )
       end
 
       # Capability retries are cheap probes, not repeated reviewer launches.
@@ -769,20 +644,6 @@ module Hive
         loop do
           route = latest_route(record, role)
           if route && TRANSIENT_OUTCOMES.include?(route["outcome"])
-            if stale_planner_revision_contract?(route)
-              reset = Hive::PlanReview.recovery_reset_route(
-                route,
-                "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION,
-                "contract_upgrade_recovery" => true,
-                "diagnostic" => "planner result adjudication changed; retrying under the current contract"
-              )
-              record = publish_transition(
-                record, state: "revising",
-                required_action: "retry planner revision under the current result contract",
-                routes: record["routes"] + [ reset ]
-              )
-              route = reset
-            end
             if attempts_in_current_run(record, role) >= max_attempts
               record, pending = schedule_transient_series_recovery(record, role, route)
               return [ record, nil, true ] if pending
@@ -1313,13 +1174,6 @@ module Hive
         observed.is_a?(Hash) && expected.all? do |key, value|
           observed[key].to_s == value.to_s
         end
-      end
-
-      def stale_planner_revision_contract?(route)
-        Integer(route["planner_revision_contract_version"] || 0) <
-          PlannerRevision::RESULT_CONTRACT_VERSION
-      rescue ArgumentError, TypeError
-        true
       end
 
       def planner_identity(record)

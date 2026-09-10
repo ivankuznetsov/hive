@@ -118,7 +118,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       { "stage_dir" => "5-review", "task_count" => 2 },
       { "stage_dir" => "6-pr", "task_count" => 1 }
     ]
-    project["legacy_migrate_command"] = "hive migrate"
+    project["legacy_state_guide"] = "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
 
     with_fake_status(JSON.generate(payload)) do |bin|
       result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
@@ -132,7 +132,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal "/tmp/hive/.hive-state", entry.hive_state_path
       assert_equal [ "5-review", "6-pr" ], entry.stage_dir_names
       assert_equal 3, entry.total_task_count
-      assert_equal "hive migrate", entry.legacy_migrate_command
+      assert_equal "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", entry.legacy_state_guide
       assert_equal "legacy_stage_dirs", entry.action
     end
   end
@@ -146,7 +146,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       "hive_state_path" => "/tmp/clean/.hive-state",
       "tasks" => [],
       "legacy_stage_dirs" => [],
-      "legacy_migrate_command" => nil
+      "legacy_state_guide" => nil
     }
     payload["projects"] << {
       "name" => "broken",
@@ -155,7 +155,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       "error" => "not_initialised",
       "tasks" => [],
       "legacy_stage_dirs" => [ { "stage_dir" => "5-review", "task_count" => 1 } ],
-      "legacy_migrate_command" => "hive migrate"
+      "legacy_state_guide" => "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     }
 
     with_fake_status(JSON.generate(payload)) do |bin|

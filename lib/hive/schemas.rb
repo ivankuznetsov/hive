@@ -22,9 +22,7 @@ module Hive
       "hive-web-status" => 1,
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,
-      # Controller-owned, generation-bound outcome-evidence ledger. Legacy
-      # visual capture remains readable through its own v1/v2 contracts but
-      # cannot satisfy these universal coding-task requirements.
+      # Controller-owned, generation-bound outcome-evidence ledger.
       "hive-outcome-evidence-requirement" => 1,
       "hive-outcome-evidence-candidate" => 1,
       "hive-outcome-evidence-attempt" => 1,
@@ -156,9 +154,8 @@ module Hive
     # Absolute path to the published JSON Schema files. Use
     # `Hive::Schemas.schema_path(name)` for the current version of a
     # schema; external consumers validate emitted documents with any
-    # draft-2020-12 validator. Pass an explicit `version:` to load an
-    # older revision (e.g. for back-compat tests against pinned
-    # consumers).
+    # draft-2020-12 validator. Only current contracts are shipped.
+    # Explicit versions identify paths, including absent historical revisions.
     def self.schema_dir
       File.expand_path("../../schemas", __dir__)
     end

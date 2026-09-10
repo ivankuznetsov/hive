@@ -1201,13 +1201,10 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
 
-    get task_path(@project, @slug, format: :json)
-    workspace = response.parsed_body
-    operator_questions = workspace.dig("operator", "questions")
+    operator_questions = Hive::Commands::Answer.inventory(@slug, project: @project)
+                                              .fetch("slots")
+                                              .reject { |slot| slot.fetch("answered") }
     assert_equal [ "Scope?", "Acceptance?" ], operator_questions.map { |row| row.fetch("text") }
-    assert_equal "current", workspace.dig("status", "state")
-    assert_equal "answer", workspace.dig("decision", "posture")
-    assert workspace.dig("decision", "action", "enabled")
 
     get "/tasks/#{@project}/#{@slug}"
 
@@ -1216,7 +1213,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     operator_questions.each do |question|
       assert_select ".qa-question", text: /#{Regexp.escape(question.fetch("text"))}/
       assert_select "textarea[data-question-number=?][name=?]:not([disabled])",
-                    question.fetch("n").to_s, "answers[#{question.fetch('binding')}]", count: 1
+                    question.fetch("question_number").to_s, "answers[#{question.fetch('binding')}]", count: 1
     end
     assert_select "form[id^='qa-form-'] input[type='submit']:not([disabled])", 1
   end
@@ -1431,14 +1428,14 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal "application/json", response.media_type
     document = JSON.parse(response.body)
     schemer = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 1)))
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
     )
     assert_empty schemer.validate(document).to_a
     assert_equal @project, document.dig("task", "project")
     assert_equal @slug, document.dig("task", "slug")
     assert_equal "hive-task-workspace", document.fetch("schema")
-    assert_equal Hive::TaskWorkspace::PANEL_NAMES.sort,
-                 document.fetch("panels").keys.sort
+    refute document.key?("panels")
+    assert document.key?("headline")
     refute_includes document.to_s, stage_dir(@project, "1-inbox").to_s
     refute document.to_s.include?("suggested_command")
     refute document.to_s.include?("observation_token")
@@ -1448,19 +1445,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/login"
   end
 
-  test "legacy task json does not construct semantic pricing or presentation" do
-    replacement = -> { raise "semantic v2 must not run for the v1 compatibility route" }
 
-    with_replaced_instance_method(Hive::TaskWorkspace::Builder, :semantic, replacement) do
-      get task_path(@project, @slug, format: :json)
-    end
-
-    assert_response :success
-    assert_equal 1, response.parsed_body.fetch("schema_version")
-    assert response.parsed_body.key?("panels")
-  end
-
-  test "explicit semantic workspace route is v2 while the existing JSON route stays v1" do
+  test "both task JSON routes expose the current semantic workspace" do
     get "/tasks/#{@project}/#{@slug}/workspace.json"
 
     assert_response :success
@@ -1484,7 +1470,7 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}.json"
     assert_response :success
-    assert_equal 1, response.parsed_body.fetch("schema_version")
+    assert_equal 2, response.parsed_body.fetch("schema_version")
 
     post "/logout"
     get "/tasks/#{@project}/#{@slug}/workspace.json"

@@ -151,6 +151,10 @@ removed projection.
 
 ## Error and serialization policy
 
+The digest command declares its pre-dispatch JSON usage contract through
+`Hive::CliUsageContracts`. Thor argument errors retain the `hive-digest` envelope
+with `error_kind: "usage"`, including when the handler never runs.
+
 Typed Hive errors retain their exit code; unexpected command failures become
 `Hive::InternalError`. JSON errors use the selected command schema and include
 `error_class`, `error_kind`, `exit_code`, and `message`; the launcher also writes

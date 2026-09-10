@@ -435,7 +435,7 @@ class RunReviewTest < Minitest::Test
 
   # --- clean fast path: zero reviewers + no CI + browser disabled --
 
-  def test_top_level_reviewers_are_promoted_before_the_review_runner
+  def test_top_level_reviewers_are_rejected_before_the_review_runner
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         legacy_reviewer = {
@@ -452,20 +452,20 @@ class RunReviewTest < Minitest::Test
         raw_cfg.fetch("review").delete("reviewers")
         File.write(cfg_path, raw_cfg.to_yaml)
         review_runner_called = false
-        effective_reviewers = nil
-
-        capture_io do
-          with_replaced_singleton_method(Hive::Stages::Review, :run!, lambda { |_task, cfg|
-            review_runner_called = true
-            effective_reviewers = cfg.dig("review", "reviewers")
-            { commit: nil, status: :review_complete }
-          }) do
-            Hive::Commands::Run.new(folder).call
+        error = assert_raises(Hive::UnsupportedProjectConfigError) do
+          capture_io do
+            with_replaced_singleton_method(Hive::Stages::Review, :run!, lambda { |*_args|
+              review_runner_called = true
+              { commit: nil, status: :review_complete }
+            }) do
+              Hive::Commands::Run.new(folder).call
+            end
           end
         end
 
-        assert review_runner_called
-        assert_equal [ legacy_reviewer ], effective_reviewers
+        refute review_runner_called
+        assert_includes error.message, "Unknown top-level key `reviewers`."
+        assert_equal raw_cfg, YAML.safe_load(File.read(cfg_path))
       end
     end
   end

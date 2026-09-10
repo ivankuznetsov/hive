@@ -205,7 +205,7 @@ behavior is covered in [[commands/web]].
 
 The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). Current producers emit `hive-dispatch-request.v5`. V5 carries generation intent for ordinary delivery and, for recovery, canonical task/stage identity plus marker-bound failures, markerless provider-admission observations, or markerless controller failures, all on the crash-restartable `admitted → cleared → dispatched → terminal` lifecycle. Runtime readers accept v5 SQL rows only; the irreversible fleet cutover discards pending v1-v4 file deliveries rather than importing them. Recovery requests never use a sequence sidecar or adapter-owned clear/run pair.
 
-The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
+The allowlist is closed: `run develop brainstorm plan plan-review-run review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the positional `argv` constraint (`prefixItems` verb enum plus the `daemon`/`evidence` `allOf` branches) in `schemas/hive-dispatch-request.v4.json` and `hive-dispatch-request.v5.json` in lockstep — `SchemaFilesTest#test_dispatch_request_schemas_enforce_positional_argv_allowlist` asserts the cross-list equality and that both schemas reject non-`hive` argv.
 
 **Relationship to ADR-026:** ADR-026's "subprocess caller" model still holds for the **non-queue-routable** verbs that don't bump task-state mtime: `hive status`, `hive doctor`, `hive new`, `hive approve`, `hive accept-finding`, `hive reject-finding`. The bot's `ChildSupervisor#dispatch` continues to spawn those directly via `Process.spawn`. The line is drawn at "does this verb's child write to the task state file?" — if yes, queue-route; if no, direct-spawn.
 
@@ -945,3 +945,12 @@ Once `git log` accumulates real history, future updates should add ADRs from sub
 - [[stages/execute]]
 - [[commands/bot]] · [[modules/bot]]
 - [[commands/findings]] · [[modules/task_action]]
+
+## Current-format-only runtime (2026-09-09)
+
+Hive supports only current formats. This supersedes historical requirements for
+automatic project migration, fleet cutover, old wire-schema compatibility and
+historical upgrade survivor lanes. Current setup, database integrity, task journal
+recovery, workflow-package upgrades and source-state visibility remain required.
+Old installations use the external agent conversion guide with verified backups.
+Current release artifact authenticity and native install checks remain required.

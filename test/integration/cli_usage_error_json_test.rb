@@ -24,7 +24,7 @@ class CliUsageErrorJsonTest < Minitest::Test
     Open3.capture3({ "HIVE_HOME" => home }, RbConfig.ruby, "-Ilib", HIVE_BIN, *args)
   end
 
-  def assert_pre_dispatch_error(home, argv, schema:, error_kind:)
+  def assert_pre_dispatch_error(home, argv, schema:, error_kind:, version: :registered, extras: {})
     out, _err, status = run_hive(home, *argv)
 
     refute status.success?, "#{argv.inspect} should fail"
@@ -41,14 +41,20 @@ class CliUsageErrorJsonTest < Minitest::Test
     assert_equal error_kind, payload["error_kind"]
     assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
 
+    extras.each do |key, value|
+      value.nil? ? assert_nil(payload.fetch(key)) : assert_equal(value, payload.fetch(key))
+    end
+    assert_equal version, payload.fetch("schema_version") unless version == :registered || version.nil?
+
     if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
       assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch(schema), payload["schema_version"]
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(schema))))
       assert_empty schemer.validate(payload).map { |error| error["error"] },
                    "#{argv.inspect} envelope must validate against #{schema}"
-    else
+    elsif version == :registered || version.nil?
       refute payload.key?("schema_version"), "#{schema} is an unversioned legacy envelope"
     end
+    payload
   end
 
   def test_json_usage_errors_emit_envelopes_before_command_dispatch
@@ -84,28 +90,135 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  # Fixed expectations transcribed from the pre-extraction inventory in
+  # docs/implementation/cli-usage-contracts-baseline.md. The deliberately invalid
+  # assignment followed by --json guarantees wrapper rejection before dispatch,
+  # even for commands whose variable arity otherwise permits these positionals.
+  def test_current_main_inventory_retains_pre_dispatch_contracts
+    cases = [
+      [ %w[run], "run", 2, "invalid_task_path" ],
+      [ %w[rebase-status], "rebase-status", 1, "invalid_task_path" ],
+      [ %w[approve], "approve", 2, "invalid_task_path" ],
+      [ %w[drop], "drop", 2, "invalid_task_path" ],
+      [ %w[findings], "findings", 1, "invalid_task_path" ],
+      [ %w[patrol], "patrol", 3, "error" ],
+      [ %w[refactor-patrol], "refactor-patrol", 4, "error" ],
+      [ %w[accept-finding], "findings", 1, "invalid_task_path", { "operation" => "accept" } ],
+      [ %w[reject-finding], "findings", 1, "invalid_task_path", { "operation" => "reject" } ],
+      [ %w[markers clear], "markers-clear", 1, "invalid_task_path" ],
+      [ %w[status extra], "running-status", 2, "error" ],
+      [ %w[status --diagnose=task extra], "status-diagnose", 2, "error" ],
+      [ %w[status --operational extra], "operational-status", 4, "error" ],
+      [ %w[status --internal-task-graph extra], "status", 8, "error" ],
+      [ %w[status --daemon-task=task extra], "status", 8, "error" ],
+      [ %w[runtime unknown extra], "runtime-maintenance", 1, "usage",
+        { "action" => "unknown", "runtime_code" => "usage", "next_action" => nil, "details" => {} } ],
+      [ %w[runtime], "runtime-maintenance", 1, "usage", { "action" => "status" } ],
+      [ %w[act], "act", 2, "usage", { "action_id" => "", "target" => "" } ],
+      [ %w[act workflow.advance], "act", 2, "usage", { "action_id" => "workflow.advance", "target" => "" } ],
+      [ %w[act --observation ignored workflow.advance demo:task extra], "act", 2, "usage",
+        { "action_id" => "workflow.advance", "target" => "demo:task" } ],
+      [ %w[prune extra], "prune", 1, "usage" ],
+      [ %w[forget project extra], "forget", 1, "usage" ],
+      [ %w[metrics rollback-rate extra], "metrics-rollback-rate", 1, "error" ],
+      [ %w[answer-digest extra], "answer-digest", 1, "usage" ],
+      [ %w[digest extra], "digest", 1, "usage" ],
+      [ %w[answer], "answer", 1, "usage" ],
+      [ %w[workflow validate editorial extra], "workflow-validate", 1, "usage", { "valid" => false, "id" => "editorial" } ],
+      [ %w[worktree status demo extra], "worktree", 1, "invalid_arguments" ],
+      [ %w[bot status extra], "bot-status", 1, "extra_arguments" ],
+      [ %w[pairing approve extra], "pairing-approve", 1, "invalid_arguments" ],
+      [ %w[pairing list extra], "pairing-list", 1, "invalid_arguments" ],
+      [ %w[pairing unknown extra], "pairing-list", 1, "invalid_arguments" ],
+      [ %w[pairing], "pairing-list", 1, "invalid_arguments" ],
+      [ %w[decide task approve], "decide", 1, "invalid_task_path" ]
+    ]
+    %w[pr brainstorm plan develop open-pr review artifacts finalize archive].each do |verb|
+      cases << [ [ verb ], "stage-action", 2, "invalid_task_path", { "verb" => verb == "pr" ? "open-pr" : verb } ]
+    end
+    { "install" => 2, "list" => 2, "remove" => 1, "update" => 2, "publish" => 2 }.each do |sub, version|
+      cases << [ [ "workflow", sub, "x", "extra" ], "workflow-#{sub}", version, "usage" ]
+    end
+    [ [], %w[new], %w[commit], %w[unknown] ].each do |sub|
+      cases << [ [ "workflow", *sub ], "workflow-new", 1, "usage" ]
+    end
+    { "install" => "lifecycle", "unknown" => "lifecycle", "list" => "list", "inspect" => "status",
+      "status" => "status", "doctor" => "doctor", "dry-run" => "dry-run" }.each do |sub, schema|
+      cases << [ [ "module", sub, "x", "extra" ], "module-#{schema}", 1, "usage" ]
+    end
+    cases << [ %w[module], "module-lifecycle", 1, "usage" ]
+    { "--list" => "list", "--show=x" => "show", "--archive=x" => "show",
+      "--full" => nil, "--limit=1" => nil, "--cursor=x" => nil }.each do |flag, action|
+      cases << [ [ "refactor-patrol", flag ], "refactor-patrol-jobs", 2, "usage", { "action" => action } ]
+    end
+    with_tmp_global_config do |home|
+      cases.each do |argv, schema, version, kind, extras|
+        payload = assert_pre_dispatch_error(home, [ *argv, "--json=yes", "--json" ],
+          schema: "hive-#{schema}", error_kind: kind, version: version, extras: extras || {})
+        assert_equal [ { "message" => payload.fetch("message") } ], payload.fetch("diagnostics") if schema == "workflow-validate"
+      end
+    end
+  end
+
+  def test_inventory_native_context_variants_remain_command_owned
+    with_tmp_global_config do |home|
+      { nil => "managed_service", "--no-bootstrap" => "diagnose_only", "--no-service" => "service_opt_out" }.each do |flag, mode|
+        payload = assert_pre_dispatch_error(home, [ "setup", flag, "--json=yes", "--json" ].compact,
+          schema: "hive-setup", version: 1, error_kind: "usage", extras: { "mode" => mode })
+        assert_kind_of String, payload.fetch("url")
+        assert_kind_of Array, payload.fetch("warnings")
+        assert_equal %w[platform readiness ready service_enabled service_installed service_manager_available service_running unit_path url],
+          payload.fetch("service").keys.sort
+      end
+      %w[status install].each do |sub|
+        payload = assert_pre_dispatch_error(home, [ "web", sub, "extra", "--json=yes", "--json" ],
+          schema: "hive-web-#{sub}", version: 1, error_kind: "invalid_task_path", extras: { "mode" => "managed_service" })
+        assert_kind_of String, payload.fetch("url")
+        assert_kind_of String, payload.fetch("readiness")
+        assert_kind_of Array, payload.fetch("warnings")
+        assert_equal sub == "status", payload.key?("runtime")
+      end
+      out, err, status = run_hive(home, "web", "unknown", "extra", "--json=yes", "--json")
+      assert_equal 64, status.exitstatus
+      assert_empty out
+      assert_match(/--json/, err)
+      refute_includes err, "usage_contract_resolution_failed"
+    end
+  end
+
   def test_runtime_usage_and_early_activation_failures_use_the_runtime_contract
     with_tmp_global_config(runtime: false) do |home|
-      File.binwrite(File.join(home, "task-counter.yml"), "---\ngeneration: 1\n")
+      path = Hive::Paths.runtime_control_plane_path(home)
+      File.write(path, "invalid database", perm: 0o600)
       schemer = JSONSchemer.schema(JSON.parse(File.read(
         Hive::Schemas.schema_path("hive-runtime-maintenance")
       )))
 
-      out, _err, status = run_hive(home, "run", "demo:task", "--json")
-      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      out, err, status = run_hive(home, "run", "demo:task", "--json")
+      assert_equal Hive::ExitCodes::SOFTWARE, status.exitstatus
       payload = JSON.parse(out)
       assert_equal "hive-runtime-maintenance", payload.fetch("schema")
-      assert_equal "fleet_cutover_required", payload.fetch("runtime_code")
+      assert_equal false, payload.fetch("ok")
+      assert_equal "database_corrupt", payload.fetch("runtime_code")
       assert_equal "run", payload.fetch("action")
+      assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+      assert_equal Hive::RuntimeControlPlane::Database::BACKUP_ACTION, payload.fetch("next_action")
+      assert_includes err, "hive: next action:"
+      assert_equal "invalid database", File.read(path)
       assert_empty schemer.validate(payload).to_a
 
-      File.unlink(File.join(home, "task-counter.yml"))
-      out, _err, status = run_hive(home, "runtime", "unknown", "extra", "--json")
-      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
-      payload = JSON.parse(out)
-      assert_equal "unknown", payload.fetch("action")
-      assert_equal "usage", payload.fetch("runtime_code")
-      assert_empty schemer.validate(payload).to_a
+      File.unlink(path)
+      [ %w[unknown extra], %w[resume] ].each do |arguments|
+        out, _err, status = run_hive(home, "runtime", *arguments, "--json")
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal false, payload.fetch("ok")
+        assert_equal arguments.first, payload.fetch("action")
+        assert_equal "usage", payload.fetch("runtime_code")
+        assert_nil payload.fetch("next_action")
+        assert_empty schemer.validate(payload).to_a
+        refute_path_exists path
+      end
     end
   end
 
@@ -343,6 +456,118 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_launcher_resolves_once_and_reuses_the_selected_contract
+    with_tmp_global_config do |home|
+      out, err, status, probe = traced_usage(home, "success", %w[run --json])
+      assert_equal 64, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "InvalidTaskPath", payload.fetch("error_class")
+      assert_equal "invalid_task_path", payload.fetch("error_kind")
+      assert_equal 1, probe.fetch("resolutions")
+      assert_equal true, probe.fetch("classification_identity")
+      assert_equal true, probe.fetch("render_identity")
+      refute_includes err, "usage_contract_resolution_failed"
+    end
+  end
+
+  def test_one_shot_loader_and_resolver_failures_are_terminal_and_safe
+    with_tmp_global_config do |home|
+      %w[loader resolver].product([ true, false ]).each do |mode, json|
+        argv = json ? %w[run --json] : %w[run]
+        out, err, status, probe = traced_usage(home, mode, argv)
+        assert_equal 64, status.exitstatus
+        assert_empty out
+        assert_equal 1, probe.fetch("resolutions")
+        assert_equal 1, probe.fetch("loads") if mode == "loader"
+        assert_equal "Hive::UsageError", probe.fetch("error_class")
+        assert_equal true, probe.fetch("classification_identity")
+        assert_equal true, probe.fetch("render_identity")
+        klass = mode == "loader" ? "LoadError" : "ArgumentError"
+        diagnostics = err.lines.grep(/^\[hive.cli\]/)
+        assert_equal [ "[hive.cli] usage_contract_resolution_failed exception=#{klass}\n" ], diagnostics
+        assert_equal 1, err.scan(klass).length
+        assert_match(/Usage: "hive run TARGET"/, err)
+        refute_includes err, "secret-sentinel"
+        refute_includes err, "hive:"
+        refute_match(/\.rb:\d+/, err)
+      end
+    end
+  end
+
+  def test_absent_contract_has_no_resolution_failure_diagnostic
+    with_tmp_global_config do |home|
+      out, err, status, probe = traced_usage(home, "unsupported", %w[unknown-command --json])
+      assert_equal 64, status.exitstatus
+      assert_empty out
+      assert_equal 1, probe.fetch("resolutions")
+      assert_equal "Hive::UsageError", probe.fetch("error_class")
+      refute_includes err, "usage_contract_resolution_failed"
+    end
+  end
+
+  def test_successful_command_does_not_resolve_a_usage_contract
+    with_tmp_global_config do |home|
+      _out, _err, status, probe = traced_usage(home, "success", %w[--version])
+      assert status.success?
+      assert_equal 0, probe.fetch("resolutions")
+    end
+  end
+
+  def traced_usage(home, mode, argv)
+    with_tmp_dir do |dir|
+      patch = File.join(dir, "trace-usage.rb")
+      File.write(patch, <<~RUBY)
+        require "hive/cli_usage_contracts"
+        require "json"
+        $usage_probe = { "resolutions" => 0, "loads" => 0 }
+        $usage_mode = #{mode.inspect}
+        abort "run boundary is not cold" if Hive::CliUsageContracts.instance_variable_get(:@contracts).key?("run")
+        abort "run file is not cold" if $LOADED_FEATURES.any? { |path| path.end_with?("/commands/run.rb") }
+        if $usage_mode == "resolver"
+          Hive::CliUsageContracts.declare("run") { raise ArgumentError, "secret-sentinel" }
+        end
+        module UsageProbe
+          def contract(...)
+            $usage_probe["resolutions"] += 1
+            $usage_selected = super
+          end
+
+          def load_boundary_declaration!(command)
+            $usage_probe["loads"] += 1
+            if $usage_mode == "loader" && $usage_probe["loads"] == 1
+              raise LoadError, "secret-sentinel"
+            end
+            super
+          end
+
+          def usage_error(selected, message)
+            $usage_probe["classification_identity"] = selected.equal?($usage_selected)
+            error = super
+            $usage_probe["error_class"] = error.class.name
+            error
+          end
+        end
+        module UsageRenderProbe
+          def emit_json_usage_error(selected, *args)
+            $usage_probe["render_identity"] = selected.equal?($usage_selected)
+            super
+          end
+        end
+        Hive::CliUsageContracts.singleton_class.prepend(UsageProbe)
+        Object.prepend(UsageRenderProbe)
+        at_exit { warn "USAGE_PROBE=" + JSON.generate($usage_probe) }
+      RUBY
+      out, err, status = Open3.capture3(
+        { "HIVE_HOME" => home, "RUBYOPT" => [ ENV["RUBYOPT"], "-r#{patch}" ].compact.join(" ") },
+        RbConfig.ruby, "-Ilib", HIVE_BIN, *argv
+      )
+      trace = err.lines.find { |line| line.start_with?("USAGE_PROBE=") }
+      refute_nil trace, err
+      [ out, err.lines.reject { |line| line == trace }.join, status,
+       JSON.parse(trace.delete_prefix("USAGE_PROBE=")) ]
+    end
+  end
+
   def test_json_generator_failure_falls_back_to_human_usage_error
     with_tmp_global_config do |home|
       with_tmp_dir do |dir|
@@ -363,7 +588,7 @@ class CliUsageErrorJsonTest < Minitest::Test
         RUBY
 
         out, err, status = Open3.capture3(
-          { "HIVE_HOME" => home, "RUBYOPT" => "-r#{patch}" },
+          { "HIVE_HOME" => home, "RUBYOPT" => [ ENV["RUBYOPT"], "-r#{patch}" ].compact.join(" ") },
           RbConfig.ruby, "-Ilib", HIVE_BIN, "connect", "--json"
         )
 

@@ -3,7 +3,7 @@ title: Release Candidate Evidence
 type: reference
 source: bin/hive-release-candidate, packaging/release_candidate/, packaging/managed_web_archive.rb, .github/workflows/{release-candidate,release}.yml
 created: 2026-07-27
-updated: 2026-08-12
+updated: 2026-09-09
 tags: [release, candidate, evidence, packaging, safety]
 ---
 
@@ -95,10 +95,9 @@ public component contract is implied.
 ## Reviewed release baselines
 
 `packaging/release_candidate/baselines.yml` is the reviewed, non-floating
-baseline catalog. Its `latest-stable` alias is pinned to v0.7.1. The initial
-historical `legacy-bench-v041` row binds the real v0.4.1 producer and v0.4.2
-collision observer. Every package and checksum/signature/certificate asset has
-one canonical HTTPS release URL, exact filename, byte size, and SHA-256. Rows
+baseline catalog. Its `latest-stable` alias is pinned to v0.7.1; historical
+Bench producer/observer rows have been retired. Every retained package and
+checksum/signature/certificate asset has one canonical HTTPS release URL, exact filename, byte size, and SHA-256. Rows
 also name their owner, review date, rationale, retirement rule, supported
 platforms, before/transition/after/idempotency oracles, tagged `Gemfile.lock`
 digest, and required no-network offline runtime-closure manifest.
@@ -117,18 +116,16 @@ to the tracked alias and report `baseline_catalog_stale`, but it never floats or
 rewrites the run input.
 
 `plan` inspects the candidate-bound catalog and tag-scoped cache roots under
-`tmp/release-candidates/baseline-cache/` without creating them. v0.7.1,
-v0.4.1, and v0.4.2 have separate directories so their common
-`SHA256SUMS{,.sig,.pem}` filenames cannot collide. Availability requires the
-gem and all three authentication sidecars plus each row's exact producer lock,
-the historical row's separate exact observer lock, offline-cache manifest, and
-complete manifest-bound `gems/` directory.
+`tmp/release-candidates/baseline-cache/` without creating them. Each retained
+tag has a separate directory for its gem and `SHA256SUMS{,.sig,.pem}` files.
+Availability requires those authentication sidecars, the exact producer lock,
+offline-cache manifest, and complete manifest-bound `gems/` directory.
 
-Hosted staging downloads each baseline's tagged `Gemfile.lock` as immutable
-bytes and verifies its reviewed SHA-256 before using it. It does not fetch or
+The explicit cache materializer downloads each baseline's tagged
+`Gemfile.lock` as immutable bytes and verifies its reviewed SHA-256 before using it. It does not fetch or
 archive tags through the Actions checkout, because mutating a shallow checkout
 can race Git's shallow-file maintenance. Package assets and dependency gems
-remain network-staged only before the no-network upgrade sandbox begins.
+are fetched only by the separately authorized materialization step.
 Missing release files remain `baseline_assets_missing` and expose only the
 needed exact `gh release download <tag> --repo ivankuznetsov/hive --pattern
 <filename> --dir <tag-cache>` argv. Planning never executes those argv.
@@ -154,110 +151,25 @@ Operators should execute the exact `baseline_cache.fetch_argv[]` returned by
 the plan rather than reconstructing it. The materializer reads the catalog,
 tagged lockfiles, and manifest bytes from the candidate commit, downloads only
 manifest-listed RubyGems files, verifies every size/SHA-256, and refuses to
-replace an invalid cache entry. Candidate execution does not invoke it, and
-installed package code starts only after all authenticated inputs are staged
-and network access is disabled.
+replace an invalid cache entry. Candidate execution does not invoke the
+materializer automatically.
 
-## Installed targets and containment
+## Current installation proof
 
-Upgrade code does not accept arbitrary executable paths. A trusted installer
-contract installs every manifest-listed dependency from an authenticated
-offline cache with RubyGems `--local --ignore-dependencies`, installs the
-package into a separate role root, and binds a verified agent-skills archive to
-a role-owned import root. Only `baseline`, `observer`, and `candidate`
-manifests can resolve an executable, and it must be an owned executable regular
-file beneath that root. Equal semantic versions remain distinguishable by
-root, wrapper, gem, and skills digests.
+The hosted candidate workflow installs the exact candidate gem on Linux x86-64,
+Linux ARM64, and macOS ARM64 through
+`packaging/live_agent_skills/install_candidate_gem.sh`, then verifies the
+installed binary. Managed-Web setup is a separate required job. These jobs
+retain exact candidate-artifact receipts before executing candidate code.
 
-Hosted fetch evidence retains the producer namespace's absolute cache roots,
-but those paths are not executable authority. Install validates the exact
-closed role set and each embedded role identity, then derives an in-memory
-closure root beneath the consumer's current `HIVE_RC_CACHE_ROOT`. This keeps
-the staged JSON immutable while allowing the Linux host cache to be consumed
-through its read-only `/cache` mount; baseline and observer share their
-reviewed row root, while candidate dependencies remain separately rooted.
-
-Installed processes receive a closed environment: only locale and time-zone
-values may survive from the host. `HOME`, `HIVE_HOME`, XDG roots, gem roots,
-and `PATH` are rebuilt beneath isolated state/target roots; Bundler, checkout,
-Git, credential, provider, loader, socket, and host Hive variables do not cross
-the boundary.
-
-The local sandbox seam accepts reachable Podman or Docker engines and emits an
-invocation contract with a digest-pinned image, read-only root, read-only
-repository and authenticated-cache mounts, one writable run mount, network
-disabled, all capabilities dropped, no-new-privileges, a PID ceiling, and no
-host socket/device/credential mounts. Engine-specific user isolation uses
-Podman `--userns=keep-id` or Docker's explicit current uid/gid. No container is
-pulled or started by planning. If neither supported engine is usable, the gate
-is `unavailable` with the exact separately authorized
-`bin/hive-release-candidate dispatch --sha <full-sha>` next action.
-
-## Upgrade-survivor oracles
-
-`latest_stable_upgrade` and `legacy_bench_v041_upgrade` are blocking candidate
-gates. The default local CLI deliberately has no production upgrade executor:
-both remain `unavailable` with
-`compliant_local_upgrade_executor_unavailable`, even when the authenticated
-cache and sandbox invocation contract are available. Preflight returns the
-exact candidate-SHA hosted dispatch argv and does not begin a producer. Focused
-tests can inject the trusted fixed executor seam, but that fixture success is
-not release evidence. Only the trusted hosted aggregate can execute and promote
-the real upgrade results.
-
-Inside the disposable sandbox,
-`packaging/release_candidate/hosted_upgrade_lane.rb` resolves only reviewed row
-and platform identifiers. It loads `baseline`, optional `observer`, and
-`candidate` role manifests from runner-owned roots. The fixed executor creates
-a disposable Git project, runs the installed baseline binary, and captures
-named before/transition/after/second-run snapshots. The historical producer
-uses v0.4.1 to initialize state, installs the exact pinned legacy `bench.yml`
-and four instruction files, then uses that old binary to create the task.
-v0.4.2 must emit the exact `workflow_id_collision:bench` observation before the
-candidate migration runs.
-
-Snapshots name registry, config/default workflow, task identity/content/stage,
-dependencies, markers, durable attempts, dispatch receipts, channel sidecars,
-managed-web data, inert service definitions, status JSON, doctor JSON, and
-installed bytes. Status/doctor comparison removes version, binary path,
-PID/timing, schema-version, and array-order noise. It also omits the candidate's
-version-owned managed-skill `expected` projection and treats newly emitted
-empty task defaults (`closure: null`, `outcomes: []`, and a zero hidden archive
-count) as equivalent to their absence. Observation mtimes are also volatile.
-Observed managed-skill state and persisted task or archive values remain
-protected. Every other state change appears as a normalized JSON-pointer diff.
-The v0.4.1 transition explicitly permits the legacy archive/runtime install,
-the candidate install identity, the bench default binding, the one-time project
-registry identity rewrite, the doctor v1-to-v2 envelope replacement, and only
-the named additive task-condition projection fields emitted by current status.
-Core task identity, contents, stage, dependencies, and markers remain outside
-the allowlist. A second candidate run accepts no changes.
-
-Each command has bounded stdout/stderr and a process group. Teardown fails for
-any surviving daemon, TUI, web, producer, observer, candidate, or inert service
-stub. The channel phase first clones and records the authenticated baseline
-prefix, then invokes the installed candidate's real `hive update` command
-against an offline reviewed seam: a fixed curl/download shim on Linux and a
-fixed local-formula Homebrew shim on macOS. The updater receives a dedicated
-empty `HIVE_HOME` beneath the lane run root, so representative phase state
-cannot shadow the reviewed prefix's channel marker or participate in the
-channel-only migration. It verifies the candidate gem
-digest, wrapper role, sidecars, dependency closure, exact active inventory, and
-absence of stale baseline files. AUR remains in its incumbent post-release
-gate.
-
-`UpgradeSurvivor` is the stable coordinator for preflight, fixed phase order,
-invariant comparison, channel verification, and teardown. Channel-prefix
-verification, the reviewed channel updater, channel execution, state capture,
-and phase execution live in focused collaborators under
-`packaging/release_candidate/upgrade_survivor/`. The extraction preserves the
-existing class names, command/environment contracts, and evidence shape; the
-candidate tool-input digest includes every collaborator source.
-
-Focused tests use a deterministic fake installed binary, which is explicitly
-not acceptable producer evidence. This implementation did not execute the real
-v0.6.9/v0.4.1/v0.4.2 packages or a container; those authenticated platform
-results remain a hosted pre-release requirement.
+Historical upgrade-survivor executors, baseline/observer phase snapshots,
+channel-update replay and their Linux/macOS sandbox jobs have been removed.
+The local gate registry contains artifact integrity, coverage catalog, baseline
+catalog and candidate-version checks, plus the reserved trusted-remote gate.
+Baseline identity, cache authentication, catalog freshness and version ordering
+remain release requirements; they do not promise compatibility with old runtime
+storage. See `docs/guides/current-format-migration.md` for that separate offline
+conversion.
 
 ## Trusted hosted proof
 
@@ -282,35 +194,14 @@ dispatch validator against `git show`, and runs that validator only from the
 trusted archive. The attestation job's exact-workflow checkout runs two small
 committed scripts for job/ordinary-CI queries and receipt/predecessor
 collection. These three private workflow scripts are part of candidate tool
-identity; candidate construction, platform sandbox commands, aggregate
+identity; candidate construction, platform installation commands, aggregate
 construction, and publication remain at their existing review surfaces.
 
 Catalog integrity uses a full-history candidate checkout because its focused
-contracts read the reviewed historical tags. Managed-Web verification passes
-the helper's documented `--name=value` arguments. The macOS upgrade cell keeps
-a deny-default sandbox and permits read-only `sysctl` calls needed by the
-hosted Ruby runtime plus writes to the literal `/dev/null` device used by
-RubyGems. Its scrubbed process environment fixes `LANG` and `LC_ALL` to
-`en_US.UTF-8`, so installed historical and candidate processes receive a
-deterministic UTF-8 external encoding instead of macOS's US-ASCII fallback.
-Network remains denied, every other write remains confined to the run root,
-and Mach service lookup is not allowed. Install smoke starts Ruby, verifies
-that exact external encoding, and opens `/dev/null` for writing under the same
-profile on every PR. Constant-size checkpoint and exit-status lines identify
-install, each required attestation, and upgrade-lane failures without provider
-credentials.
-
-Historical packages, dependency closures, and candidate bytes are downloaded
-and authenticated before installed package code runs. Installation and the U4
-lane then run with a scrubbed environment and network disabled. Linux uses a
-full-manifest-digest-pinned Ruby image as an unprivileged, read-only container:
-all capabilities are dropped, no-new-privileges and a PID ceiling are set,
-only the trusted control repository and authenticated cache are mounted
-read-only, and the run root is the sole writable mount. macOS uses a
-deny-network sandbox on its ephemeral runner with the same trusted-control,
-read-only-cache, and writable-run split. Captured subprocess diagnostics are
-bounded and normalized to valid UTF-8 before they enter JSON evidence, including
-when a byte limit cuts through a multibyte sequence.
+contracts read reviewed release tags. Managed-Web verification passes the
+helper's documented `--name=value` arguments. Native install jobs run on their
+named platform runners and verify the installed candidate version; the deleted
+historical upgrade sandbox is not part of these current proof jobs.
 
 Every blocking cell compares its candidate-controlled harness paths
 byte-for-byte with the separately checked-out trusted workflow revision before

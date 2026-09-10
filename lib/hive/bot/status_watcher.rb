@@ -28,15 +28,15 @@ module Hive
       end
 
       LegacyStageDirs = Data.define(:project, :project_path, :hive_state_path,
-                                    :legacy_stage_dirs, :legacy_migrate_command) do
+                                    :legacy_stage_dirs, :legacy_state_guide) do
         def initialize(project:, project_path: nil, hive_state_path: nil,
-                       legacy_stage_dirs: [], legacy_migrate_command: nil)
+                       legacy_stage_dirs: [], legacy_state_guide: nil)
           super(
             project: project,
             project_path: project_path,
             hive_state_path: hive_state_path,
             legacy_stage_dirs: normalize_stage_dirs(legacy_stage_dirs),
-            legacy_migrate_command: legacy_migrate_command
+            legacy_state_guide: legacy_state_guide
           )
         end
 
@@ -259,7 +259,7 @@ module Hive
             project_path: project_doc["path"],
             hive_state_path: project_doc["hive_state_path"],
             legacy_stage_dirs: project_doc["legacy_stage_dirs"],
-            legacy_migrate_command: project_doc["legacy_migrate_command"]
+            legacy_state_guide: project_doc["legacy_state_guide"]
           )
           next if entry.legacy_stage_dirs.empty?
 

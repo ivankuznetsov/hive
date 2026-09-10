@@ -280,7 +280,7 @@ module Hive
             return receipt(
               "blocked", failure_origin: failure_origin, owner: "operator",
               reason: "recovery_migration_required",
-              remediation: "run `hive migrate` in the task project and retry from fresh status",
+              remediation: "read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent, then retry from fresh status",
               retry_count: retry_count, provider_hint: provider_hint(row)
             )
           end
@@ -1831,7 +1831,7 @@ module Hive
       end
 
       def missing_task_id_remediation(next_step:)
-        "run hive migrate --all to assign the task id, then #{next_step}"
+        "use https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md to assign the task id, then #{next_step}"
       end
 
       def secure_compare(left, right)

@@ -228,7 +228,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     refute File.exist?(File.join(@home, "attempts", "v2")),
            "daemon startup must not run attempt migration"
     refute File.exist?(File.join(@home, "recovery-migration-v6.json")),
-           "daemon startup must leave migration to hive migrate"
+           "daemon startup must leave existing state untouched"
     reconciler = captured.fetch(:refactor_patrol_merge_reconciler)
     assert_instance_of Hive::Daemon::RefactorPatrolMergeReconciler, reconciler
     assert_same reconciler, captured.fetch(:merge_watcher).instance_variable_get(:@merge_intake),

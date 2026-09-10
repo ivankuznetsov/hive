@@ -202,7 +202,7 @@ module Hive
         issues << issue(
           code: "legacy_stage_dirs", source: "task_graph", project: project["name"],
           message: "#{total} task#{total == 1 ? '' : 's'} hidden in legacy stage dirs: #{dirs}",
-          remediation: project["legacy_migrate_command"] || "hive migrate"
+          remediation: project["legacy_state_guide"] || "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
         )
       end
       active.each do |project, row|
@@ -749,7 +749,7 @@ module Hive
             "next_eligible_at" => nil,
             "owner" => "operator",
             "reason" => "recovery_migration_required",
-            "remediation" => "run `hive migrate` in the task project and retry from fresh status",
+            "remediation" => "read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent, then retry from fresh status",
             "retry_count" => nil,
             "provider_hint" => provider_hint(row),
             "terminal_outcome" => nil,

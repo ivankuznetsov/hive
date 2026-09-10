@@ -54,11 +54,6 @@ module Hive
           unless data
             return load_overlay!(project_root, fallback_workflow_dir(project_root))
           end
-          legacy_reviewers = data.key?("reviewers")
-          data = Hive::Config.normalize_legacy_project_config(
-            data, source_path, emit_warning: false
-          )
-
           configured_path = data["hive_state_path"]
           configured_path = Hive::Config::DEFAULTS.fetch("hive_state_path") unless configured_path.is_a?(String)
           workflow_dir = begin
@@ -75,7 +70,6 @@ module Hive
             Hive::Config.build_project_config(
               project_root, source_path, data, stage_names: registered_stage_names
             )
-            Hive::Config.warn_legacy_root_reviewers_once!(source_path) if legacy_reviewers
           rescue Hive::UnsupportedProjectConfigError
             raise
           rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
@@ -165,13 +159,6 @@ module Hive
 
       def register_descriptor(workflow, workflow_dir, project_root)
         source_path = File.join(workflow_dir, "#{workflow.id}.yml")
-        if Hive::Workflows::Bench.legacy_project_descriptor?(workflow, source_path: source_path) &&
-           warned_skips.add?(source_path)
-          Hive::Warnings.emit(
-            "hive: legacy bench workflow at #{source_path} remains active; " \
-            "run `hive init #{Shellwords.escape(project_root)} --workflow bench` to migrate to the built-in"
-          )
-        end
         Hive::Workflows::Registry.register!(workflow, project: true, source_path: source_path)
       rescue Hive::ConfigError => e
         # A descriptor whose id collides with a built-in (or another already-

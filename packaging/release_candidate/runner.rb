@@ -13,15 +13,14 @@ module HiveReleaseCandidate
   class Runner
     attr_reader :repo_root, :runs_root, :repository, :registry
 
-    def initialize(repo_root:, runs_root: nil, gate_executor: nil, upgrade_executor: nil,
-                   sandbox: nil, remote_client: nil)
+    def initialize(repo_root:, runs_root: nil, gate_executor: nil, remote_client: nil)
       @repo_root = File.expand_path(repo_root)
       @runs_root = runs_root
       @repository = Repository.new(@repo_root)
       @registry = GateRegistry.new
       @baseline_cache = BaselineCache.new(repo_root: @repo_root, repository: @repository)
       @gate_execution = GateExecution.new(
-        gate_executor: gate_executor, upgrade_executor: upgrade_executor, sandbox: sandbox
+        gate_executor: gate_executor
       )
       @local_attempt = LocalAttempt.new(
         repo_root: @repo_root, runs_root: @runs_root,

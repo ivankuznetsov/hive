@@ -24,17 +24,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
       "962514b682286e700b8c5efc196fb01c619eaf093e2da4b6057c476a10762894",
       catalog.latest_stable.packages.fetch("producer").fetch("artifact").fetch("sha256")
     )
-    legacy = catalog.fetch("legacy-bench-v041")
-    assert_equal 1_070_592, legacy.packages.fetch("producer").fetch("artifact").fetch("size")
-    assert_equal 1_164_288, legacy.packages.fetch("observer").fetch("artifact").fetch("size")
-    assert_equal(
-      "596f8e9018a2a7d419ca1758344ed64b617d1edb5679a25e8d86684ecb15ee36",
-      legacy.packages.fetch("producer").fetch("artifact").fetch("sha256")
-    )
-    assert_equal(
-      "df7e1599621db2fe4710dcd676d11be6b7f0a8a050fcda3b28030e943143a356",
-      legacy.packages.fetch("observer").fetch("artifact").fetch("sha256")
-    )
+    assert_equal [ "latest-stable" ], catalog.entries.map(&:id)
     assert_match(/\A[0-9a-f]{64}\z/, catalog.digest)
     assert_match(/\A[0-9a-f]{64}\z/, catalog.dependency_closure_digest)
     assert_equal(
@@ -129,44 +119,6 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
     assert_includes error.message, "locked runtime closure"
   end
 
-  def test_historical_closure_rejects_observer_lock_mismatch
-    catalog = HiveReleaseCandidate::BaselineCatalog.load(CATALOG)
-    entry = catalog.fetch("legacy-bench-v041")
-    producer = run_git(ROOT, "show", "v0.4.1:Gemfile.lock")
-    observer = run_git(ROOT, "show", "v0.4.2:Gemfile.lock")
-    lock_sha256s = {
-      "producer" => Digest::SHA256.hexdigest(producer),
-      "observer" => Digest::SHA256.hexdigest(observer)
-    }
-    manifest = {
-      "schema" => "hive-release-candidate-offline-gem-cache",
-      "schema_version" => 1,
-      "lock_sha256s" => lock_sha256s,
-      "completeness" => "exact-locked-runtime-transitive-closure",
-      "network" => "forbidden",
-      "artifacts" => catalog.send(
-        :runtime_closure_filenames,
-        { "producer" => producer, "observer" => observer }
-      ).map do |filename|
-        { "filename" => filename, "size" => 4, "sha256" => "a" * 64 }
-      end
-    }
-
-    assert catalog.verify_dependency_closure!(
-      entry,
-      lock_contents: { "producer" => producer, "observer" => observer },
-      cache_manifest_content: JSON.generate(manifest)
-    )
-    error = assert_raises(HiveReleaseCandidate::Error) do
-      catalog.verify_dependency_closure!(
-        entry,
-        lock_contents: { "producer" => producer, "observer" => "#{observer}substituted" },
-        cache_manifest_content: JSON.generate(manifest)
-      )
-    end
-    assert_includes error.message, "observer dependency lock digest mismatch"
-  end
-
   def test_checked_reviewed_manifests_match_every_runtime_lock_and_catalog_digest
     catalog = HiveReleaseCandidate::BaselineCatalog.load(CATALOG)
 
@@ -242,13 +194,13 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
       assert_match(/\A[0-9a-f]{64}\z/, baseline.fetch("catalog_dependency_closure_sha256"))
       assert_equal "missing", plan.dig("baseline_cache", "status")
       assert_equal "baseline_assets_missing", plan.dig("baseline_cache", "reason")
-      assert_equal 12, plan.dig("baseline_cache", "assets").size
-      assert_equal 2, plan.dig("baseline_cache", "closures").size
+      assert_equal 4, plan.dig("baseline_cache", "assets").size
+      assert_equal 1, plan.dig("baseline_cache", "closures").size
       assert_nil plan.dig("baseline_cache", "verified_dependency_closure_sha256")
       fetch_argv = plan.dig("baseline_cache", "fetch_argv")
       release_fetches = fetch_argv.select { |argv| argv.first(3) == %w[gh release download] }
       closure_fetch = fetch_argv.reject { |argv| argv.first(3) == %w[gh release download] }
-      assert_equal 12, release_fetches.length
+      assert_equal 4, release_fetches.length
       assert_equal 1, closure_fetch.length
       assert_equal(
         "packaging/release_candidate/materialize_baseline_cache.rb",
@@ -257,7 +209,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
       assert_equal sha, closure_fetch.first.fetch(2)
       assert_equal 4, closure_fetch.first.length
       assert_equal(
-        %w[v0.4.1 v0.4.2 v0.7.1],
+        %w[v0.7.1],
         release_fetches.map { |argv| File.basename(argv.fetch(-1)) }.uniq.sort
       )
       assert_equal before, Dir.glob(File.join(repo, "tmp", "**", "*")),
@@ -278,7 +230,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
         "a" * 64,
         [
           Struct.new(:id).new("latest-stable"),
-          Struct.new(:id).new("legacy-bench-v041")
+          Struct.new(:id).new("another-fixture-baseline")
         ]
       )
       inventory = [
@@ -289,7 +241,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
       ]
       closures = [
         { "status" => "verified", "row_id" => "latest-stable", "sha256" => "c" * 64 },
-        { "status" => "verified", "row_id" => "legacy-bench-v041", "sha256" => "d" * 64 }
+        { "status" => "verified", "row_id" => "another-fixture-baseline", "sha256" => "d" * 64 }
       ]
       release_digest = Digest::SHA256.hexdigest(JSON.generate(
         [ [ "v0.6.9", "hive.gem", "b" * 64, 4 ] ]
@@ -304,7 +256,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
         "baseline_catalog_sha256" => "a" * 64,
         "release_assets_sha256" => release_digest,
         "verified_dependency_closure_sha256" => closure_digest,
-        "rows" => %w[latest-stable legacy-bench-v041].sort
+        "rows" => %w[latest-stable another-fixture-baseline].sort
       ) + "\n")
       repository = HiveReleaseCandidate::Repository.new(repo)
       baseline_cache = HiveReleaseCandidate::BaselineCache.new(

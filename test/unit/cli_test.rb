@@ -1101,6 +1101,18 @@ class HiveCliTest < Minitest::Test
   end
 
   def test_internal_patrol_commands_forward_fenced_identifiers
+    require "hive/commands/refactor_patrol_scheduled"
+    with_command_new_stub(Hive::Commands::RefactorPatrolScheduled, return_value: { "ok" => true }) do |calls|
+      Hive::CLI.start([ "refactor-patrol-scheduled", "proj", "--result-file", "/tmp/result.json", "--json" ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal({ result_file: "/tmp/result.json" }, calls.first.fetch(:kwargs))
+    end
+    with_command_new_stub(Hive::Commands::RefactorPatrolScheduled, return_value: { "ok" => false }) do
+      _out, _err, status = with_captured_exit do
+        Hive::CLI.start([ "refactor-patrol-scheduled", "proj", "--result-file", "/tmp/result.json" ])
+      end
+      assert_equal 1, status
+    end
     require "hive/commands/refactor_patrol_classify"
     with_command_new_stub(Hive::Commands::RefactorPatrolClassify) do |calls|
       Hive::CLI.start([

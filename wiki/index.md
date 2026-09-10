@@ -3,7 +3,7 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-08-30
+updated: 2026-09-10
 tags: [index, wiki]
 ---
 
@@ -13,8 +13,8 @@ local-first workflow engine for AI agents; software delivery is its flagship
 proof, while built-in content/bench, installable Honeycomb, and owner-authored
 workflows use the same folder-backed execution model.
 
-Page count: 109
-Updated: 2026-09-04
+Page count: 116
+Updated: 2026-09-10
 
 Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`, `opencode`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on bounded default liveness status, lock-checked memoized task-journal folds, the operational workflow contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, native semantic `hive task` inspection, a durable host-global [[commands/digest]] activity record, and stable-ID semantic E2E profiles; the former public full-fleet status graph is now internal-only pending consumer-specific projection extraction. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and OpenCode `/hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional authenticated live diagnostics.
 
@@ -44,11 +44,14 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 
 ## Pages
 
+- [[publication-recovery]] — PR identity, rebase recovery, revalidation and exact secret-scan exceptions.
+
 - [[active-areas]] — `wiki/active-areas.md`
 - [[architecture]] — `wiki/architecture.md`
 - [[cli]] — `wiki/cli.md`
 - [[commands]] — `wiki/commands.md`
 - [[commands/answer]] — `wiki/commands/answer.md`
+- [[commands/answer-digest]] — `wiki/commands/answer-digest.md`
 - [[commands/approve]] — `wiki/commands/approve.md`
 - [[commands/babysit]] — `wiki/commands/babysit.md`
 - [[commands/bench-submit]] — `wiki/commands/bench-submit.md`
@@ -61,14 +64,17 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/findings]] — `wiki/commands/findings.md`
 - [[commands/forget]] — `wiki/commands/forget.md`
 - [[commands/generate-name]] — `wiki/commands/generate-name.md`
+- [[commands/help]] — `wiki/commands/help.md`
 - [[commands/init]] — `wiki/commands/init.md`
 - [[commands/markers]] — `wiki/commands/markers.md`
 - [[commands/metrics]] — `wiki/commands/metrics.md`
 - [[commands/migrate]] — `wiki/commands/migrate.md`
+- [[commands/module]] — `wiki/commands/module.md`
 - [[commands/new]] — `wiki/commands/new.md`
 - [[commands/patrol]] — `wiki/commands/patrol.md`
 - [[commands/pairing]] — `wiki/commands/pairing.md`
 - [[commands/prune]] — `wiki/commands/prune.md`
+- [[commands/publication-reconcile]] — `wiki/commands/publication-reconcile.md`
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
 - [[commands/refactor-patrol]] — `wiki/commands/refactor-patrol.md`
 - [[commands/run]] — `wiki/commands/run.md`
@@ -79,10 +85,12 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/stage_action]] — `wiki/commands/stage_action.md`
 - [[commands/status]] — `wiki/commands/status.md`
 - [[commands/task]] — `wiki/commands/task.md`
+- [[commands/tree]] — `wiki/commands/tree.md`
 - [[commands/watch]] — `wiki/commands/watch.md`
 - [[commands/tui]] — `wiki/commands/tui.md`
 - [[commands/uninstall]] — `wiki/commands/uninstall.md`
 - [[commands/update]] — `wiki/commands/update.md`
+- [[commands/version]] — `wiki/commands/version.md`
 - [[commands/web]] — `wiki/commands/web.md`
 - [[commands/wiki]] — `wiki/commands/wiki.md`
 - [[commands/workflow]] — `wiki/commands/workflow.md`

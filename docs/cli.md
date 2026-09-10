@@ -1,6 +1,8 @@
 # CLI
 
-This page documents the command surface exposed by `bin/hive` in this checkout. For the full API contract, see [wiki/cli.md](../wiki/cli.md).
+This page is a task-oriented guide to `bin/hive`. Use the navigation index in
+[wiki/cli.md](../wiki/cli.md) to find the single authoritative owner for each
+command's complete contract.
 
 ## Day-To-Day Workflow
 
@@ -10,7 +12,7 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive web` | Bootstrap and run Hive web in the foreground; this command blocks. | `hive web` |
 | `hive web status [--json]` | Observe installed, enabled, running, and readiness state without mutation. | `hive web status --json` |
 | `hive web install [--force] [--json]` | Install or explicitly repair the managed per-user web service. | `hive web install --force` |
-| `hive status [--json]` | Poll bounded daemon health and identity-verified live tasks through `hive-running-status.v1`; scan/output truncation is explicit. | `hive status --json` |
+| `hive status [--json]` | Poll bounded daemon health and identity-verified live tasks; scan/output truncation is explicit. | `hive status --json` |
 | `hive status --operational [--json]` | Inspect the active workflow queue, blocker ownership, and safe next actions. | `hive status --operational --json` |
 | `hive task TARGET --json` | Inspect one task in depth without materializing every task's details. | `hive task demo:my-task --json` |
 | `hive new PROJECT [--workflow ID] [--idempotency-key KEY] [--json] TEXT` | Capture an idea in the workflow entry stage; optional idempotency makes agent retries return the existing task. | `hive new xbookmark --workflow editorial --idempotency-key creator:42 --json "draft a launch post"` |
@@ -180,21 +182,11 @@ installs are true no-ops. A retry begins from fresh inspection and schedules
 only unresolved work. JSON mode writes only its single document to stdout and
 never prompts; without `--yes`, planned mutation returns 64.
 
-## JSON Output
+## Machine output and exits
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`, `decide`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics/setup (`status`, `setup`, `doctor`, `setup-agents`, `web status`, `web install`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow lifecycle (`workflow new/validate/install/list/update/remove/publish`), `new`, `init`, and daemon control support `--json` where documented and emit typed envelopes. Native setup uses `hive-setup.v1`; web observation and installation use `hive-web-status.v1` and `hive-web-install.v1`. These contracts keep `mode`, effective `url`, compatibility `warnings`, and service installed/enabled/running/readiness distinct. `hive doctor --json` emits `hive-doctor.v2`; `hive setup-agents --json --yes` emits `hive-setup-agents.v1`, never prompts, and requires `--yes` whenever mutation is planned. Ordinary `hive init --json` emits `hive-init.v2`; minimal preview emits `hive-init-preview.v1` without mutation. Idempotent task capture emits `hive-new.v1`, human decisions emit `hive-decide.v1`, and read-only workflow validation emits `hive-workflow-validate.v1`. Architecture-patrol list/show emits `hive-refactor-patrol-jobs.v2`. Other workflow verbs emit a `hive-stage-action` envelope. Honeycomb install, list, and update use schema v2; remove remains v1; publish uses `hive-workflow-publish.v2` while retaining the v1 file for pinned readers. Non-TTY/JSON mutations require `--yes` where documented, and an escalating workflow update separately requires `--allow-escalation`. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; `version`, `tree`, and `migrate` remain text-only.
-
-## Exit Codes
-
-| Code | Meaning |
-|---:|---|
-| 0 | Success. |
-| 1 | Generic failure; for `setup-agents`, an attempted operation failed or an actionable residual remains. |
-| 2 | Already initialized. |
-| 3 | Task is in an error marker state. |
-| 4 | Wrong stage. |
-| 64 | Usage error; for `setup-agents`, consent was declined or mutation was requested without a TTY/`--yes`. |
-| 65 | `hive doctor`: an available managed skill or required dependency is actionable. |
-| 70 | Software, git, worktree, agent, or stage failure. |
-| 75 | Temporary failure, usually lock contention. |
-| 78 | Config error; for `setup-agents`, invalid manifest, effective config, or filter. |
+`--json` is shared wrapper grammar, not a promise that every command has the
+same output. Follow the command's sole owner from
+[wiki/cli.md](../wiki/cli.md) for its exact schema name and version, required
+companion flags, error fields, serialization fallback, and exit codes. The
+shared cross-command exit vocabulary remains documented on that navigation
+page; owner pages define what each code means for their command.

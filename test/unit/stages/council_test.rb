@@ -95,6 +95,33 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_reviser_references_large_target_and_triage_without_embedding_them
+    with_tmp_dir do |project|
+      workflow = council_workflow(revise: true)
+      task = task_for(project, workflow: workflow)
+      stage = workflow.stage_named("review")
+      target = File.join(task.folder, "draft.md")
+      triage = File.join(task.folder, "triage.md")
+      File.write(target, "LARGE-TARGET-CONTENT\n" * 30_000)
+      File.write(triage, "LARGE-TRIAGE-CONTENT\n" * 30_000)
+
+      with_stubbed_spawn([]) do |captured|
+        Hive::Stages::Council::Revise.run!(
+          task: task, cfg: {}, stage: stage, revise: stage.council.revise,
+          round: 1, target_path: target, triage_path: triage
+        )
+
+        prompt = captured.fetch(0).fetch(:prompt)
+        assert_includes prompt, target
+        assert_includes prompt, triage
+        refute_includes prompt, "LARGE-TARGET-CONTENT"
+        refute_includes prompt, "LARGE-TRIAGE-CONTENT"
+        assert_operator prompt.bytesize, :<, 10_000
+        assert_includes File.read(target), "LARGE-TARGET-CONTENT"
+      end
+    end
+  end
+
   def test_descriptor_limits_reach_every_reviewer_and_revise_agent_spawn
     with_tmp_dir do |project|
       workflow = council_workflow(
@@ -643,15 +670,17 @@ class StagesCouncilTest < Minitest::Test
       # The prior stage's state_file (draft.md) is intentionally NOT created:
       # if `input:` were ignored the council would resolve to draft.md and
       # fail with missing_input rather than reviewing custom-input.md.
-      File.write(File.join(task.folder, "custom-input.md"), "CUSTOM-INPUT-MARKER document\n")
+      File.write(File.join(task.folder, "custom-input.md"), "CUSTOM-INPUT-MARKER document\n" * 20_000)
 
       with_stubbed_spawn([ "Verdict: ready\n", "Verdict: ready\n" ]) do |captured|
         result = Hive::Stages::Council.run!(task, {})
 
         assert_equal({ commit: "complete", status: :complete }, result)
         prompts = captured.map { |kwargs| kwargs[:prompt].to_s }
-        assert prompts.any? { |p| p.include?("CUSTOM-INPUT-MARKER") },
-               "reviewer prompt must embed the explicit input: document"
+        assert prompts.all? { |p| p.include?(File.join(task.folder, "custom-input.md")) }
+        refute prompts.any? { |p| p.include?("CUSTOM-INPUT-MARKER") },
+               "reviewers must read the explicit input file instead of embedding it"
+        assert prompts.all? { |p| p.bytesize < 10_000 }
       end
     end
   end

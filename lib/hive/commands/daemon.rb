@@ -16,6 +16,7 @@ require "hive/daemon/operational_snapshot"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
+require "hive/daemon/scheduled_architecture_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/daily_digest_close_scheduler"
 require "hive/daemon/daily_digest_delivery_scheduler"
@@ -260,6 +261,7 @@ module Hive
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
         refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+          scheduled_scheduler: Hive::Daemon::ScheduledArchitectureScheduler.new(dry_run: @dry_run),
           dry_run: @dry_run
         )
         patrol_fix_runtime = Hive::Daemon::PatrolFixRuntime.new

@@ -25,6 +25,21 @@ module Hive
         @collections.each { |name| FileUtils.mkdir_p(File.join(root, name)) }
       end
 
+      def write_features(features)
+        supplied = Array(features)
+        identities = supplied.map { |feature| feature.id.to_s }
+        return [] if identities.empty?
+
+        ids = identities.sort
+        if ids.any?(&:empty?) || ids.uniq.size != ids.size
+          raise Hive::ConfigError,
+                "patrol feature batch identities are malformed"
+        end
+
+        supplied.each { |feature| write_record("features", feature) }
+        supplied
+      end
+
       def state
         read_json(File.join(root, "state.json"))
       end

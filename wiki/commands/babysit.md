@@ -136,6 +136,15 @@ checks reject any file with group or world permission bits. The blocked command
 still returns synthetic success and emits the stderr marker plus an audit-write
 warning, but the permissive file is left untouched and receives no new argv.
 
+## Output, errors, serialization, and exit codes
+
+`hive babysit` is text-only: it has no JSON schema, so JSON serialization and a
+serialization fallback are not applicable. Lifecycle, configuration, PID-file,
+Git, GitHub, worktree, and agent failures are reported as command errors rather
+than structured documents. Successful lifecycle and one-shot operations exit
+`0`; ordinary operational failures exit `1`, invalid command shapes exit `64`,
+and software failures exit `70`.
+
 ## Tests
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation, lifecycle helpers, foreground `restart`, detached restart re-exec into `start --detach`, stale-runtime status recommendations, stale-runtime reload warnings, refused-stop failures, PID-file cleanup races, and bounded PID-lock behavior.

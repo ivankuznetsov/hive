@@ -175,7 +175,14 @@ probe: non-blocking child reap plus a rotating batch of at most 64 state-file
 mtime stats from the last full status scan. A child exit identifies its exact
 tracked task; an mtime change identifies the task owning that file. The daemon
 then asks status for only those project/slug rows and applies only their
-per-task heal/dispatch path. Every refreshed row with a dependency fails closed
+per-task heal/dispatch path. A cached `ready_to_advance` Patrol Fix approval
+can still claim capacity before a fresh same-stage row; coding `ready_to_*`
+transitions and other generic workflows are never replayed from that cache.
+The full tick seeds terminal contenders before dispatch. Local or durable
+ownership consumes each contender, preventing an old approval from being
+re-admitted after completion. Pending same-task requests exclude cached rows
+from incremental replay and retain full-tick queue precedence. Heartbeat-only
+ticks do not inspect this queue or replay cached work. Every refreshed row with a dependency fails closed
 until authoritative dependency admission runs, so the incremental path does not
 build or traverse a dependency graph. Pure live-agent heartbeat refreshes reuse
 the last full attempt snapshot; a row that could heal or dispatch reconciles
@@ -255,6 +262,11 @@ Fresh rows therefore preserve the pipeline WIP limit, while an old eligible
 plan, retry, or generic-stage row eventually outranks a continuous stream of
 newer later-stage work instead of starving indefinitely. Rows with missing or
 future mtimes receive no aging boost, and equal scores retain source order.
+Within an equal stage-and-age lane, a generic Patrol Fix `ready_to_advance`
+controller transition receives a half-step tie-break ahead of fresh work. The
+same score participates in the shared row/request arbitration, so this
+terminal progress does not bypass request FIFO, capacity fences, or the
+same-slug request precedence.
 
 Chronological dispatch-request consumption applies the same rule within each
 queue scan. Once an older request or a higher-priority interleaved row observes
@@ -1336,3 +1348,13 @@ code is not part of the daemon scan path.
 - [[decisions]] (ADR-024)
 - [[architecture]]
 - [[cli]]
+
+## Periodic Architecture Patrol wiring
+
+`Commands::Daemon` composes `ScheduledArchitectureScheduler` into
+`RefactorPatrolScheduler`, which offers both periodic and post-merge candidates
+to `PatrolArbiter`. The dispatcher supervises `refactor-patrol-scheduled` with
+an Architecture token whose phase is `scheduled`; completion returns through
+the same scheduler. Periodic work does not require a merged-PR job. Its child
+owns the durable `ScheduledSliceProducer` claim and only advances the cursor
+after successful review and finding admission.

@@ -6,12 +6,10 @@ baseline_lines: 9951
 counting_rule: physical_source_lines
 includes_new_production_files: true
 maximum_final_lines: 7960
-final_inventory_lines: 9806
-outside_inventory_net_lines: -7517
-final_lines: 2289
+final_inventory_lines: 9189
+outside_inventory_net_lines: -7461
+final_lines: 1728
 final_paths:
-- path: lib/hive/agent_git_gate/isolation.rb
-  lines: 291
 - path: lib/hive/betterleaks.rb
   lines: 26
 - path: lib/hive/secret_scanner.rb
@@ -44,8 +42,6 @@ final_paths:
   lines: 85
 - path: lib/hive/patrol/launch_budget.rb
   lines: 262
-- path: lib/hive/patrol_fix/agent_git_isolation.rb
-  lines: 326
 - path: lib/hive/runtime_control_plane.rb
   lines: 96
 - path: lib/hive/runtime_control_plane/activation_gate.rb

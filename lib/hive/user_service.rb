@@ -1402,12 +1402,10 @@ module Hive
         prior = activation_boundary_identity(document)
         current = status.process_identity
         return :incomplete unless current
-        return :complete if prior.nil?
-        return :complete if prior && current && current != prior
-        return :complete if trusted_action && current && current.fetch(:process_start) == "injected"
-        return :incomplete if prior && current == prior
+        return :complete if prior.nil? || current != prior
+        return :complete if trusted_action && current.fetch(:process_start) == "injected"
 
-        :ambiguous
+        :incomplete
       else
         :ambiguous
       end

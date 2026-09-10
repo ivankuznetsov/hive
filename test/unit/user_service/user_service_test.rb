@@ -4801,6 +4801,136 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  def test_rollback_retains_journal_when_prior_definition_reload_cannot_be_verified
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "legacy\n")
+      loaded = "legacy\n"
+      pid = 10
+      repaired = false
+      calls = []
+      options = {
+        runner: lambda { |argv|
+          calls << argv
+          if argv == %w[systemctl --user daemon-reload]
+            next false if File.read(path) == "legacy\n" && !repaired
+            loaded = File.read(path)
+            true
+          elsif argv == %w[systemctl --user restart hive-test]
+            pid = 20 if repaired
+            repaired
+          else
+            true
+          end
+        },
+        status_reader: lambda { |_argv|
+          [ "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nFragmentPath=#{path}\nNeedDaemonReload=#{loaded == File.read(path) ? 'no' : 'yes'}\nMainPID=#{pid}\nExecMainStartTimestampMonotonic=#{pid}\n", true ]
+        }
+      }
+      interrupted = build_service(dir, **options, event_handler: lambda { |event, _|
+        raise "interruption" if event == :after_prior_file_restored
+      })
+      assert_equal :failed, interrupted.apply(interrupted.plan(autostart: true, force: true)).kind
+      journal_path = pending_journals(dir).fetch(0)
+      before = File.read(journal_path)
+      assert_equal "prior_file_restored", JSON.parse(before).fetch("phase")
+      calls.clear
+
+      replay = build_service(dir, **options)
+      failed = replay.apply(replay.plan(autostart: true, force: true))
+      assert_equal :failed, failed.kind
+      assert_includes failed.diagnostics, :rollback_manager_unverified
+      assert_includes failed.diagnostics, :recovery_pending
+      assert_equal [ %w[systemctl --user daemon-reload] ], calls
+      assert_equal before, File.read(journal_path)
+      assert_equal "legacy\n", File.read(path)
+
+      repaired = true
+      recovered = build_service(dir, **options)
+      result = recovered.apply(recovered.plan(autostart: true, force: true))
+      assert_includes result.diagnostics, :prior_state_restored
+      assert_empty pending_journals(dir)
+    end
+  end
+
+  def test_lifecycle_retains_journal_when_reload_still_reports_stale_definition
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      stale = true
+      pid = 10
+      calls = []
+      options = {
+        runner: lambda { |argv|
+          calls << argv
+          pid += 1 if argv == %w[systemctl --user restart hive-test]
+          true
+        },
+        status_reader: lambda { |_argv|
+          [ "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nFragmentPath=#{path}\nNeedDaemonReload=#{stale ? 'yes' : 'no'}\nMainPID=#{pid}\nExecMainStartTimestampMonotonic=#{pid}\n", true ]
+        }
+      }
+      failed = build_service(dir, **options).restart
+      assert_equal :failed, failed.kind
+      assert_includes failed.diagnostics, :manager_action_unverified
+      assert_equal [ %w[systemctl --user daemon-reload] ], calls
+      journal_path = pending_journals(dir).fetch(0)
+      before = File.read(journal_path)
+      assert_equal "lifecycle_prepared", JSON.parse(before).fetch("phase")
+      calls.clear
+
+      replay = build_service(dir, **options).restart
+      assert_equal :failed, replay.kind
+      assert_includes replay.diagnostics, :recovery_pending
+      assert_equal [ %w[systemctl --user daemon-reload] ], calls
+      assert_equal before, File.read(journal_path)
+
+      stale = false
+      assert build_service(dir, **options).restart.success?
+      assert_equal 11, pid
+      assert_empty pending_journals(dir)
+    end
+  end
+
+  def test_lifecycle_reloaded_without_process_boundary_retains_ambiguous_recovery
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "desired\n")
+      calls = []
+      options = {
+        runner: ->(argv) { calls << argv; true },
+        status_reader: ->(_argv) {
+          [ "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nFragmentPath=#{path}\nNeedDaemonReload=no\nMainPID=10\nExecMainStartTimestampMonotonic=10\n", true ]
+        }
+      }
+      service = build_service(dir, **options)
+      transaction = service.instance_variable_get(:@transaction)
+      transaction.with_lock do |owner|
+        digest = Digest::SHA256.hexdigest("desired\n")
+        document = owner.journal.prepare(operation: :lifecycle, prior_content: nil,
+          prior_digest: digest, desired_digest: digest, prior_enabled: true, prior_running: true,
+          prior_main_pid: 10, prior_process_start: "10", backup_path: nil,
+          manager_intent: :restart, result_kind: :unchanged, autostart: true)
+        # The schema accepts older or incomplete reload evidence without these
+        # optional fields; a phase alone cannot prove the activation boundary.
+        owner.journal.advance(document, phase: :lifecycle_reloaded)
+      end
+      journal_path = pending_journals(dir).fetch(0)
+      before = File.read(journal_path)
+      2.times do
+        result = build_service(dir, **options).restart
+        assert_equal :failed, result.kind
+        assert_includes result.diagnostics, :manager_effect_ambiguous
+        assert_includes result.diagnostics, :recovery_pending
+        assert_equal before, File.read(journal_path)
+        assert_empty calls
+      end
+    end
+  end
+
   private
 
   def apply_document(phase:, desired_digest:, prior_digest:, prior_content:,

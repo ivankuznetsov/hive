@@ -364,6 +364,32 @@ class WorkflowsBenchTest < Minitest::Test
     end
   end
 
+  def test_runner_dockerfile_installs_entrypoint_before_dropping_to_runner_user
+    dockerfile = File.read(
+      File.join(Hive::Workflows::Bench::RUNTIME_DIR, "Dockerfile.runner")
+    )
+    lines = dockerfile.lines
+
+    user_runner = lines.index { |line| line.start_with?("USER runner") }
+    assert user_runner, "Dockerfile.runner must switch to USER runner"
+
+    # /usr/local/bin is root-owned, so every build instruction touching the
+    # entrypoint (COPY, chmod) must run while the build is still root. After
+    # `USER runner`, the COPY succeeds but RUN chmod fails with
+    # "chmod: changing permissions of /usr/local/bin/hb-entrypoint: Operation
+    # not permitted" and the image never builds.
+    installs = lines.each_index.select do |i|
+      lines[i].include?("hb-entrypoint") &&
+        (lines[i].start_with?("COPY") || lines[i].start_with?("RUN chmod"))
+    end
+    assert installs.any?, "Dockerfile.runner must install /usr/local/bin/hb-entrypoint"
+    installs.each do |i|
+      assert_operator i, :<, user_runner,
+        "entrypoint install at Dockerfile line #{i + 1} must precede USER runner " \
+        "at line #{user_runner + 1}: the runner user cannot chmod the root-owned copy"
+    end
+  end
+
   def test_sealed_controller_git_ignores_candidate_hooks_and_push_redirects
     wrapper = File.join(
       Hive::Workflows::Bench::RUNTIME_DIR,

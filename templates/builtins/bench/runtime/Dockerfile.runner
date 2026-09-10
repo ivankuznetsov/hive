@@ -104,6 +104,20 @@ RUN mkdir -p /tmp/hive-build \
      /opt/hb/control-bundle/bin/hive --version \
   && rm -rf /tmp/hive-build /tmp/hive-src.tar
 
+# The entrypoint lives in root-owned /usr/local/bin, so it must be installed
+# while the build is still root: COPYing it after `USER runner` leaves a
+# root-owned file the runner user cannot chmod (`chmod: changing permissions
+# of /usr/local/bin/hb-entrypoint: Operation not permitted`). ENTRYPOINT itself
+# executes nothing at build time and stays below.
+#
+# The entrypoint is NOT bare `bash -lc`: Docker appends `docker run` arguments
+# to the ENTRYPOINT argv, and bash's `-c` would consume only the FIRST one —
+# an exec-style argv command (`hb_isolated gate /work sh -c '…'`) would be
+# silently truncated to its first word. hb-entrypoint.sh dispatches between
+# the single shell-command-string protocol and the argv protocol.
+COPY hb-entrypoint.sh /usr/local/bin/hb-entrypoint
+RUN chmod 755 /usr/local/bin/hb-entrypoint
+
 # Non-root: the candidate's code and the gate's tests run unprivileged. uid 1000
 # matches the typical host user so files written into the mounted /work keep
 # host ownership (no root-owned artifacts left behind).
@@ -113,12 +127,4 @@ WORKDIR /work
 
 # Agent auth is bind-injected as env at run time by harness/lib/isolation.sh,
 # never baked into an image layer (auth must not ship in a public image).
-#
-# The entrypoint is NOT bare `bash -lc`: Docker appends `docker run` arguments
-# to the ENTRYPOINT argv, and bash's `-c` would consume only the FIRST one —
-# an exec-style argv command (`hb_isolated gate /work sh -c '…'`) would be
-# silently truncated to its first word. hb-entrypoint.sh dispatches between
-# the single shell-command-string protocol and the argv protocol.
-COPY hb-entrypoint.sh /usr/local/bin/hb-entrypoint
-RUN chmod 755 /usr/local/bin/hb-entrypoint
 ENTRYPOINT ["/usr/local/bin/hb-entrypoint"]

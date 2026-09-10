@@ -638,10 +638,7 @@ class Task
     manifest = JSON.parse(File.binread(path, Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES))
     return nil unless manifest.is_a?(Hash)
     return nil unless manifest["schema"] == "hive-artifact-capture"
-    return nil unless [ 1, 2 ].include?(manifest["schema_version"])
-    if manifest["schema_version"] == 2
-      return nil unless CAPTURE_MANIFEST_V2_SCHEMER.valid?(manifest)
-    end
+    return nil unless CAPTURE_MANIFEST_V2_SCHEMER.valid?(manifest)
 
     status = manifest["status"].to_s
     return nil unless %w[captured failed].include?(status)

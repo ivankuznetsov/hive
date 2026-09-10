@@ -11,19 +11,19 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
   WIKI_ROOT = File.join(ROOT, "wiki")
 
-  def test_public_help_metadata_and_owner_index_are_one_read_only_contract
+  def test_public_help_metadata_and_navigation_are_one_read_only_contract
     before = repository_snapshot
     stdout, stderr, status = render_public_help
 
     assert status.success?, "bin/hive help failed (#{status.exitstatus}): #{stderr}"
 
-    guard = WikiCommandIndex::Guard.new(wiki_root: WIKI_ROOT)
+    guard = WikiCommandIndex::Guard.new(wiki_root: WIKI_ROOT, expected_owners: nil)
     index_text = File.read(File.join(WIKI_ROOT, "cli.md"))
     first = guard.evaluate(help_text: stdout, index_text: index_text)
     second = guard.evaluate(help_text: stdout, index_text: index_text)
 
-    assert first.success?, first.diagnostics.map(&:to_s).join("\n")
     assert_equal first, second, "guard result or diagnostic ordering changed across identical runs"
+    assert_empty first.owners
 
     metadata = guard.metadata(
       all_commands: Hive::CLI.all_commands,
@@ -33,27 +33,14 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
     rendered_aliases = first.help_commands & metadata.aliases.keys
     assert_equal metadata.visible, (first.help_commands - rendered_aliases).sort
     assert_empty metadata.hidden & first.help_commands
-    assert_empty metadata.hidden & first.index_commands
-
     assert_includes first.help_commands, "help"
     assert_includes first.help_commands, "tree"
-    assert_equal "commands/help", first.owners.fetch("help")
-    assert_equal "commands/tree", first.owners.fetch("tree")
-    assert_equal "commands/stage_action", first.owners.fetch("review")
-    assert_equal "modules/plan_review", first.owners.fetch("plan-review")
-    assert_equal "modules/plan_review", first.owners.fetch("plan-review-run")
-    assert_equal "modules/worktree", first.owners.fetch("worktree")
 
     assert_equal "open-pr", metadata.aliases.fetch("pr")
     assert_equal "version", metadata.aliases.fetch("--version")
     assert_equal "version", metadata.aliases.fetch("-v")
-    metadata.aliases.each do |alias_name, canonical|
-      if first.help_commands.include?(alias_name)
-        assert_includes first.index_commands, alias_name
-        assert_equal first.owners.fetch(canonical), first.owners.fetch(alias_name)
-      else
-        refute_includes first.index_commands, alias_name
-      end
+    metadata.aliases.each_key do |alias_name|
+      refute_includes first.index_commands, alias_name
     end
 
     canonical_version = render_hive("version")

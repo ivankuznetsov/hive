@@ -169,7 +169,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       set_schema_version(path, 0)
       error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) { database.open! }
       assert_equal :older_schema, error.code
-      assert_match(/hive migrate --all/, error.message)
+      assert_match(/current-format-migration/, error.message)
 
       set_schema_version(path, Hive::RuntimeControlPlane::SCHEMA_VERSION + 1)
       error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) { database.open! }

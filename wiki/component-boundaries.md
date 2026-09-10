@@ -67,17 +67,14 @@ and the complete target coordination schema. The
 boundary does not activate any legacy runtime consumer or move task/workflow
 authority out of project task folders.
 
-The clean cutover keeps two focused helpers outside the minimal entry point.
 `PayloadStore` moves retained bytes from stable open paths to immutable SHA-256
-addresses only at terminal publication; and `CutoverManifest` publishes a
-digest-bound, owner-private phase record outside both the legacy roots and the
-candidate database. Attempts, dispatch requests/results, and PR merge
-reconciliation use the activated runtime control plane through typed
-repositories; provider routing remains a pure current-configuration boundary.
-Cutover rejects live legacy owners, discards derived runtime
-rows, and directly imports only validated token-usage history. Fresh bootstrap
-loads no legacy decoder. Normal runtime never creates, imports, or repairs
-legacy state.
+addresses at terminal publication. `Installation.setup` creates the current
+runtime database explicitly; status and startup validate it read-only. The
+installation coordinator and the setup/runtime commands are Hive consumers of
+the database boundary; its catalog includes current initialization tests. Attempts,
+dispatch and PR merge reconciliation use typed repositories. Historical cutover,
+manifest, sealing and token-usage import machinery has been removed. Task/workflow
+file authority and ordinary runtime recovery remain unchanged.
 
 ## Patrol Fix boundary
 

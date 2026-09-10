@@ -188,26 +188,37 @@ class CliUsageErrorJsonTest < Minitest::Test
 
   def test_runtime_usage_and_early_activation_failures_use_the_runtime_contract
     with_tmp_global_config(runtime: false) do |home|
-      File.binwrite(File.join(home, "task-counter.yml"), "---\ngeneration: 1\n")
+      path = Hive::Paths.runtime_control_plane_path(home)
+      File.write(path, "invalid database", perm: 0o600)
       schemer = JSONSchemer.schema(JSON.parse(File.read(
         Hive::Schemas.schema_path("hive-runtime-maintenance")
       )))
 
-      out, _err, status = run_hive(home, "run", "demo:task", "--json")
-      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      out, err, status = run_hive(home, "run", "demo:task", "--json")
+      assert_equal Hive::ExitCodes::SOFTWARE, status.exitstatus
       payload = JSON.parse(out)
       assert_equal "hive-runtime-maintenance", payload.fetch("schema")
-      assert_equal "fleet_cutover_required", payload.fetch("runtime_code")
+      assert_equal false, payload.fetch("ok")
+      assert_equal "database_corrupt", payload.fetch("runtime_code")
       assert_equal "run", payload.fetch("action")
+      assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+      assert_equal Hive::RuntimeControlPlane::Database::BACKUP_ACTION, payload.fetch("next_action")
+      assert_includes err, "hive: next action:"
+      assert_equal "invalid database", File.read(path)
       assert_empty schemer.validate(payload).to_a
 
-      File.unlink(File.join(home, "task-counter.yml"))
-      out, _err, status = run_hive(home, "runtime", "unknown", "extra", "--json")
-      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
-      payload = JSON.parse(out)
-      assert_equal "unknown", payload.fetch("action")
-      assert_equal "usage", payload.fetch("runtime_code")
-      assert_empty schemer.validate(payload).to_a
+      File.unlink(path)
+      [ %w[unknown extra], %w[resume] ].each do |arguments|
+        out, _err, status = run_hive(home, "runtime", *arguments, "--json")
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal false, payload.fetch("ok")
+        assert_equal arguments.first, payload.fetch("action")
+        assert_equal "usage", payload.fetch("runtime_code")
+        assert_nil payload.fetch("next_action")
+        assert_empty schemer.validate(payload).to_a
+        refute_path_exists path
+      end
     end
   end
 

@@ -473,35 +473,17 @@ idempotently expires eligible bytes while continuing past individual failures.
 The interval is process-local; SQLite stores no maintenance claim or cursor.
 This retention does not delete the terminal attempt row or still-referenced payloads.
 
-The one-way installation cutover is offline and fleet-atomic. A durable
-`ready → intended → active` manifest binds the registered projects,
-canonical `stages/` task-authority fingerprints, a validated immutable
-token-usage snapshot, and
-every path-shape fence. Before candidate startup mutation an early read-only
-gate refuses ordinary commands. Services stop and live owners are rejected
-before task identity is rebuilt from file authority. Fingerprinting preserves
-regular hardlinked task artifacts while rejecting symlinks and non-regular
-entries. All other machine-local runtime domains start empty. Every retry
-converges forward from the manifest;
-`active` is published only after the services recorded as running at cutover
-start again. There is no general legacy decoder, attempts-v4 migration state
-machine, dual reader/writer, reverse hydration, implicit database creation,
-rollback, or downgrade.
+Current runtime storage is initialized explicitly by `Installation.setup`.
+Existing healthy databases retain identity and data without a cutover manifest.
+Startup never imports or upgrades old storage. Unsupported databases are refused
+and point to `docs/guides/current-format-migration.md`; old attempts and usage may
+be retained offline rather than converted. Task journals, artifacts and referenced
+payload files keep their existing authority. Normal terminal publication and
+consumer acknowledgements remain required.
 
-The cutover retains task journals while resetting legacy attempt rows. Current
-Hive validates and folds those journals directly; it neither retains nor
-rebuilds a projection checkpoint. Historical attempt IDs remain journal facts,
-while SQLite starts with only post-cutover live runtime state and the imported
-token-usage history. A pending terminal publication is a transient live fence
-until its journal append is acknowledged, not a second historical read path.
-
-The package manager publishes the candidate normally; Hive never renames
-package-owned launcher entries or retains the previous executable tree.
-`hive runtime` exposes only bounded status and forward resume. The external
-manifest is cutover evidence, not a user-selectable backup or restore source.
-Workflow files, task journals, artifacts, and referenced
-payload files remain under their existing authorities after activation; only
-genuinely retired runtime writer paths receive tombstones.
+`hive runtime status` validates storage read-only. `hive update` invokes the owning
+package manager and validates its installed binary; it does not migrate tasks,
+seal writers, replay services or resume historical activation phases.
 
 ## Runtime dispatch requests and web snapshots
 

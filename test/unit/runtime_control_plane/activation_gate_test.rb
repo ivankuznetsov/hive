@@ -1,168 +1,79 @@
 require "test_helper"
 require "hive/runtime_control_plane/activation_gate"
+require "open3"
 
 class RuntimeControlPlaneActivationGateTest < Minitest::Test
   include HiveTestHelper
 
-  def test_ordinary_route_is_refused_before_any_startup_callback
+  def test_fresh_commands_remain_available_without_creating_storage
     with_tmp_dir do |root|
-      state = File.join(root, "state")
-      FileUtils.mkdir_p(state)
-      File.binwrite(File.join(state, "task-counter.yml"), "---\ngeneration: 4\n")
+      %w[setup help init].each do |route|
+        assert Hive::RuntimeControlPlane::ActivationGate.check!(argv: [ route ], state_home: root)
+      end
+      refute_path_exists Hive::Paths.runtime_control_plane_path(root)
+    end
+  end
+
+  def test_existing_invalid_database_blocks_startup_but_allows_diagnosis
+    with_tmp_dir do |root|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      File.write(path, "invalid", perm: 0o600)
       callbacks = []
-
-      error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
         Hive::RuntimeControlPlane::ActivationGate.check!(
-          argv: [ "status" ], state_home: state, config_home: File.join(root, "config"),
-          before_allow: -> { callbacks << :startup_mutation }
+          argv: [ "status" ], state_home: root, before_allow: -> { callbacks << :mutation }
         )
       end
-
-      assert_equal :fleet_cutover_required, error.code
-      assert_equal "hive migrate --all --yes", error.action
       assert_empty callbacks
-    end
-  end
-
-  def test_only_forward_maintenance_routes_are_admitted_while_inactive
-    with_tmp_dir do |root|
-      state = File.join(root, "state")
-      FileUtils.mkdir_p(File.join(state, ".runtime-cutover", "current"))
-      config = File.join(root, "config")
-
       [
-        [ "migrate", "--all" ], [ "runtime", "status" ], [ "runtime", "resume" ],
-        [ "doctor" ], [ "--version" ], [ "version" ]
+        %w[runtime], %w[runtime --json], %w[runtime status],
+        %w[runtime status --json], %w[runtime --json status], %w[--json runtime status],
+        %w[doctor], %w[setup], %w[--version]
       ].each do |argv|
-        assert Hive::RuntimeControlPlane::ActivationGate.check!(
-          argv: argv, state_home: state, config_home: config
-        ), argv.join(" ")
+        assert Hive::RuntimeControlPlane::ActivationGate.check!(argv: argv, state_home: root)
       end
-      assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
-        Hive::RuntimeControlPlane::ActivationGate.check!(
-          argv: [ "runtime", "backup" ], state_home: state, config_home: config
-        )
-      end
-      assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
-        Hive::RuntimeControlPlane::ActivationGate.check!(
-          argv: [ "setup" ], state_home: state, config_home: config
-        )
-      end
+      assert_equal "invalid", File.read(path)
+      refute Hive::RuntimeControlPlane::ActivationGate.active?(root)
     end
   end
 
-  def test_fresh_setup_is_admitted_only_without_legacy_or_cutover_state
+  def test_current_database_admits_startup_without_cutover_evidence
     with_tmp_dir do |root|
+      Hive::RuntimeControlPlane::Installation.setup(state_home: root)
+      callbacks = []
       assert Hive::RuntimeControlPlane::ActivationGate.check!(
-        argv: [ "setup" ], state_home: File.join(root, "state"),
-        config_home: File.join(root, "config")
+        argv: %w[daemon start], state_home: root, before_allow: -> { callbacks << :allowed }
       )
+      assert_equal [ :allowed ], callbacks
+      assert Hive::RuntimeControlPlane::ActivationGate.active?(root)
     end
   end
 
-  def test_managed_service_waits_at_intended_until_active_is_published
-    status = { "phase" => "intended", "database" => { "status" => "ok" } }
-    probes = 0
-    sleeps = []
-    with_replaced_singleton_method(
-      Hive::RuntimeControlPlane::ActivationGate, :runtime_status, ->(*) { status }
-    ) do
-      with_replaced_singleton_method(
-        Hive::RuntimeControlPlane::ActivationGate, :active?, ->(*) { (probes += 1) > 1 }
-      ) do
-        assert Hive::RuntimeControlPlane::ActivationGate.check!(
-          argv: %w[daemon start], state_home: "/tmp/state",
-          config_home: "/tmp/config", sleeper: ->(seconds) { sleeps << seconds }
-        )
-      end
+  def test_executable_reports_corrupt_storage_as_typed_json
+    with_tmp_dir do |root|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      File.write(path, "invalid", perm: 0o600)
+      output, errors, process = Open3.capture3(
+        { "HIVE_HOME" => root }, RbConfig.ruby,
+        File.expand_path("../../../bin/hive", __dir__), "status", "--json"
+      )
+      assert_equal Hive::ExitCodes::SOFTWARE, process.exitstatus
+      payload = JSON.parse(output)
+      assert_equal "hive-runtime-maintenance", payload.fetch("schema")
+      assert_equal false, payload.fetch("ok")
+      assert_equal "status", payload.fetch("action")
+      assert_equal "database_corrupt", payload.fetch("runtime_code")
+      assert_equal Hive::RuntimeControlPlane::Database::BACKUP_ACTION, payload.fetch("next_action")
+      assert_includes errors, "hive: next action:"
+      refute_includes errors, "Traceback"
+      assert_equal "invalid", File.read(path)
     end
-    assert_equal [ 0.05 ], sleeps
   end
 
-  def test_executable_checks_activation_before_loading_or_reconciling_the_wiki
+  def test_executable_checks_database_before_loading_or_reconciling_the_wiki
     source = File.binread(File.expand_path("../../../bin/hive", __dir__))
-
     gate = source.index("ActivationGate.check!")
-    wiki_require = source.index('require "hive/llm_wiki_bootstrap"')
-    reconcile = source.index("Scheduler.reconcile_existing!")
-    assert gate < wiki_require
-    assert gate < reconcile
-  end
-
-  def test_active_manifest_does_not_admit_commands_when_database_is_unhealthy
-    with_tmp_dir do |root|
-      state = File.join(root, "state")
-      path = Hive::Paths.runtime_control_plane_path(state)
-      database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
-      identity = database.installation_identity
-      database.disconnect
-      manifest_path = File.join(state, ".runtime-cutover", "current", "active.json")
-      Hive::RuntimeControlPlane::CutoverManifest.new(path: manifest_path).publish(
-        Hive::RuntimeControlPlane::CutoverManifest.build(
-          phase: "active", installation_id: identity.fetch(:installation_id),
-          source_release: "old", target_release: "new",
-          exclusions: [], task_authority: [], evidence: { "activation_epoch" => 0 }
-        )
-      )
-      File.binwrite(path, "corrupt")
-
-      refute Hive::RuntimeControlPlane::ActivationGate.active?(state)
-      assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
-        Hive::RuntimeControlPlane::ActivationGate.check!(
-          argv: [ "status" ], state_home: state, data_home: File.join(root, "data"),
-          config_home: File.join(root, "config")
-        )
-      end
-    ensure
-      database&.disconnect
-    end
-  end
-
-  def test_active_probe_timeout_and_corrupt_registry_fail_closed
-    with_replaced_singleton_method(
-      Hive::RuntimeControlPlane::ActivationGate, :runtime_status, ->(*) { raise KeyError, "bad" }
-    ) do
-      refute Hive::RuntimeControlPlane::ActivationGate.active?("/state")
-    end
-
-    clocks = [ 0.0, Hive::RuntimeControlPlane::ActivationGate::SERVICE_ACTIVATION_WAIT_SEC ].each
-    with_replaced_singleton_method(
-      Hive::RuntimeControlPlane::ActivationGate, :active?, ->(*) { false }
-    ) do
-      error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
-        Hive::RuntimeControlPlane::ActivationGate.wait_for_active!(
-          "/state", sleeper: ->(_) { }, monotonic_clock: -> { clocks.next }
-        )
-      end
-      assert_equal :fleet_cutover_required, error.code
-    end
-
-    with_tmp_dir do |root|
-      config = File.join(root, "config")
-      FileUtils.mkdir_p(config)
-      File.binwrite(File.join(config, "config.yml"), "registered_projects: [\n")
-      assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
-        Hive::RuntimeControlPlane::ActivationGate.check!(
-          argv: [ "status" ], state_home: File.join(root, "state"),
-          data_home: File.join(root, "data"), config_home: config
-        )
-      end
-    end
-  end
-
-  def test_default_service_wait_sleeper_is_exercised
-    status = { "phase" => "intended", "database" => { "status" => "ok" } }
-    probes = 0
-    with_replaced_singleton_method(
-      Hive::RuntimeControlPlane::ActivationGate, :runtime_status, ->(*) { status }
-    ) do
-      with_replaced_singleton_method(
-        Hive::RuntimeControlPlane::ActivationGate, :active?, ->(*) { (probes += 1) > 1 }
-      ) do
-        assert Hive::RuntimeControlPlane::ActivationGate.check!(
-          argv: %w[daemon start], state_home: "/tmp/state", config_home: "/tmp/config"
-        )
-      end
-    end
+    assert gate < source.index('require "hive/llm_wiki_bootstrap"')
+    assert gate < source.index("Scheduler.reconcile_existing!")
   end
 end

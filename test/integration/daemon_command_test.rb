@@ -1676,14 +1676,19 @@ class HiveDaemonCommandTest < Minitest::Test
       # database uses the runtime-maintenance contract rather than pretending
       # the queue command reached its own repository.
       File.write(Hive::Paths.runtime_control_plane_path(home), "not a sqlite database")
-      out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
+      out, err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN,
                                          "daemon", "queue", "list", "--json")
-      assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
+      assert_equal Hive::ExitCodes::SOFTWARE, status.exitstatus
       doc = JSON.parse(out)
       assert_equal false, doc["ok"]
       assert_equal "hive-runtime-maintenance", doc["schema"]
       assert_equal "runtime", doc["error_kind"]
-      assert_equal "fleet_cutover_required", doc["runtime_code"]
+      assert_equal "database_corrupt", doc["runtime_code"]
+      assert_equal "daemon", doc["action"]
+      assert_equal Hive::ExitCodes::SOFTWARE, doc["exit_code"]
+      assert_equal Hive::RuntimeControlPlane::Database::BACKUP_ACTION, doc["next_action"]
+      assert_includes err, "hive: next action:"
+      assert_equal "not a sqlite database", File.read(Hive::Paths.runtime_control_plane_path(home))
     end
   end
 

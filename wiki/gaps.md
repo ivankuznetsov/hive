@@ -731,8 +731,6 @@ integrity.
 
 56. **Stateless merge-watcher rollout is not yet live-evidenced.** The former reconciliation ledger, durable cursor, and remote/intake checkpoints are removed. Candidate reconstruction and process-local oldest-polled selection now provide bounded fair polling; idempotent architecture intake and durable `TaskClosure` receipts own restart safety at the side-effect boundaries. A later authorized deployment must demonstrate restart rediscovery and show that one failing repository or deferred intake does not block a healthy merged task. No retained per-task watcher ledger is expected.
 
-57. **Single-PID TERM-to-KILL escalation still has an identity-check-to-signal race.** `Hive::ProcessKill.terminate_process` now verifies the recorded start identity immediately before escalating to KILL, but the matching process can exit and its PID can be reused between that check and `Process.kill`. The later identity classification cannot undo a signal already delivered to a replacement process. Fully closing this race requires a durable OS process handle such as a pidfd (or an equivalent cross-platform lifetime boundary); repeated start-time checks can narrow but cannot eliminate the window.
-
 ## 2026-06-16/17 refresh uncertainty
 
 The 2026-06-17 audit rechecked recent source, tests, git history, project wiki
@@ -1466,31 +1464,12 @@ nonempty locks deliberately leave recovery to a later retry or operator.
 This is not general recovery of interrupted Git operations; preserved lock
 files may still require inspection on platforms without these probes.
 
-## Pre-dispatch workflow usage envelopes versus published schemas
+## Current-format-only conversion boundary (2026-09-09)
 
-Resolved in the 2026-09-08 CI fix: the current lifecycle schemas now accept the
-existing pre-dispatch `error_kind: usage` envelopes. Publish has a separate closed
-usage arm, preserving its handler error arms' retryability and recovery fields.
-Output fields, error kinds, exit statuses, and schema versions are unchanged.
-The original mismatch is recorded in
-`docs/implementation/cli-usage-contracts-baseline.md`. Review pass 01 completed
-U4 locally: exact 100% coverage across all 29 changed library files and a passing
-838-file `bin/test --all` checkpoint (four workers). Fresh hosted CI remains
-pending.
-
-## Hive Web readable logs depend on persisted messages (2026-09-04)
-
-Durable logs deliberately omit some structured provider messages for secret
-safety. The readable log view cannot recover message text that was never
-persisted; it hides omission markers instead of presenting them as errors.
-Plain output and safely available supported message records remain readable.
-
-## Daily digest long-history scale remains unmeasured (2026-09-10)
-
-Digest collection holds the global store lock across source collection and
-commit to prevent lost updates. Readers share that lock and load the retained
-interval index for navigation. Correctness tests cover replay and retained
-history, but there is no measured reader-latency bound for years of intervals
-or unusually large daily activity. Measure those workloads before choosing
-pagination or changing the collection transaction; source retention must remain
-complete.
+Historical installation conversion is manual through
+`docs/guides/current-format-migration.md`. No live installation has been converted
+by this cleanup. Old attempts, usage and incompatible task evidence may remain in
+external backups; exact conversion coverage depends on the inventoried source.
+Markers still serve current stages outside execute; `legacy_baseline` remains a
+current ad-hoc task initialization event, and provider routing's `legacy` mode
+still denotes current default routing. Their names do not imply removable code.

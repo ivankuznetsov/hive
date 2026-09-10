@@ -459,31 +459,17 @@ class WikiCommandIndexTest < Minitest::Test
     assert_diagnostic result, :unexpected_owner, "review"
   end
 
-  def test_durable_aggregate_owners_match_the_authoritative_index
-    expected = {
-      "brainstorm" => "commands/stage_action",
-      "plan" => "commands/stage_action",
-      "develop" => "commands/stage_action",
-      "open-pr" => "commands/stage_action",
-      "review" => "commands/stage_action",
-      "artifacts" => "commands/stage_action",
-      "finalize" => "commands/stage_action",
-      "archive" => "commands/stage_action",
-      "plan-review" => "modules/plan_review",
-      "plan-review-run" => "modules/plan_review",
-      "worktree" => "modules/worktree"
-    }
-
+  def test_navigation_only_cli_has_no_retired_command_owner_pins
     result = WikiCommandIndex::Guard.new(
       wiki_root: WIKI_ROOT,
       expected_owners: nil
     ).evaluate(
-      help_text: help_for(*expected.keys),
+      help_text: help_for,
       index_text: page("cli.md"),
       validate_contracts: false
     )
 
-    assert_equal expected, result.owners.slice(*expected.keys)
+    assert_empty result.owners
   end
 
   def test_unpinned_commands_are_still_resolved_and_contract_checked

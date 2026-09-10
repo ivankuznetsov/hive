@@ -487,7 +487,8 @@ class ConfigTest < Minitest::Test
       config_path = File.join(dir, ".hive-state", "config.yml")
       FileUtils.mkdir_p(File.dirname(config_path))
       File.write(config_path, <<~YAML)
-        reviewers: []
+        review:
+          reviewers: []
         models:
           plan:
             agent: codex
@@ -524,7 +525,8 @@ class ConfigTest < Minitest::Test
       config_path = File.join(dir, ".hive-state", "config.yml")
       FileUtils.mkdir_p(File.dirname(config_path))
       File.write(config_path, <<~YAML)
-        reviewers: []
+        review:
+          reviewers: []
         plan:
           agent: pi
         models:
@@ -723,84 +725,6 @@ class ConfigTest < Minitest::Test
 
       assert_match(/models\.review_ci\.effort/i, error.message)
       assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
-    end
-  end
-
-  def test_load_promotes_top_level_reviewers_for_upgrade_compatibility_and_warns_once
-    with_tmp_dir do |dir|
-      config_path = File.join(dir, ".hive-state", "config.yml")
-      FileUtils.mkdir_p(File.dirname(config_path))
-      reviewer = {
-        "name" => "legacy",
-        "kind" => "agent",
-        "agent" => "codex",
-        "skill" => "ce-code-review",
-        "output_basename" => "legacy",
-        "prompt_template" => "reviewer_codex_ce_code_review.md.erb"
-      }
-      File.write(config_path, { "reviewers" => [ reviewer ] }.to_yaml)
-
-      cfg = nil
-      _out, err = capture_io do
-        cfg = Hive::Config.load(dir)
-        Hive::Config.load(dir)
-      end
-
-      assert_equal [ reviewer ], cfg.dig("review", "reviewers")
-      refute cfg.key?("reviewers")
-      assert_equal 1, err.scan(/top-level `reviewers`/).length
-      assert_includes err, "run `hive migrate`"
-      assert_includes err, config_path
-    end
-  end
-
-  def test_load_rejects_conflicting_legacy_and_canonical_reviewers
-    with_tmp_dir do |dir|
-      config_path = File.join(dir, ".hive-state", "config.yml")
-      FileUtils.mkdir_p(File.dirname(config_path))
-      File.write(config_path, {
-        "review" => { "reviewers" => [] },
-        "reviewers" => []
-      }.to_yaml)
-
-      error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
-
-      assert_includes error.message, "both top-level `reviewers` and `review.reviewers`"
-      assert_includes error.message, "choose which value to keep"
-      assert_includes error.message, config_path
-    end
-  end
-
-  def test_load_rejects_legacy_reviewers_when_review_is_not_a_mapping
-    with_tmp_dir do |dir|
-      config_path = File.join(dir, ".hive-state", "config.yml")
-      FileUtils.mkdir_p(File.dirname(config_path))
-      File.write(config_path, {
-        "review" => "invalid",
-        "reviewers" => []
-      }.to_yaml)
-
-      error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
-
-      assert_includes error.message, "cannot be migrated because `review` is String"
-      assert_includes error.message, "make `review` a mapping"
-    end
-  end
-
-  def test_load_validates_reviewers_after_promoting_the_legacy_key
-    [ nil, {}, "", 7 ].each do |value|
-      with_tmp_dir do |dir|
-        config_path = File.join(dir, ".hive-state", "config.yml")
-        FileUtils.mkdir_p(File.dirname(config_path))
-        File.write(config_path, { "reviewers" => value }.to_yaml)
-
-        error = assert_raises(Hive::ConfigError) do
-          capture_io { Hive::Config.load(dir) }
-        end
-
-        assert_includes error.message, "review.reviewers"
-        assert_includes error.message, config_path
-      end
     end
   end
 
@@ -2015,7 +1939,7 @@ class ConfigTest < Minitest::Test
       assert_equal :tmux, Hive::Config.claude_mode(cfg), "claude.mode must default to tmux"
       assert_equal "bypassPermissions", Hive::Config.claude_permission_mode(cfg),
                    "claude.permission_mode must default to bypassPermissions"
-      assert_equal "headless", cfg.dig("brainstorm", "runtime"), "brainstorm runtime must default to headless"
+      assert_nil cfg.dig("brainstorm", "runtime")
     end
   end
 
@@ -2315,21 +2239,6 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_tracks_legacy_brainstorm_runtime_separately_from_global_claude_mode
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        brainstorm:
-          runtime: headless
-      YAML
-      cfg = Hive::Config.load(dir)
-      assert_equal :tmux, Hive::Config.claude_mode(cfg),
-                   "legacy brainstorm.runtime must not become the project-global claude.mode"
-      assert_equal false, Hive::Config.explicit_claude_mode?(cfg)
-      assert_equal true, Hive::Config.explicit_brainstorm_runtime?(cfg)
-    end
-  end
-
   def test_load_honors_per_project_stage_agent_overrides
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -2342,21 +2251,9 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal "codex", cfg.dig("brainstorm", "agent")
       assert_equal "pi",    cfg.dig("plan", "agent")
-      assert_equal "headless", cfg.dig("brainstorm", "runtime")
+      assert_nil cfg.dig("brainstorm", "runtime")
       assert_equal "claude", cfg.dig("execute", "agent"),
                    "execute agent must fall back to default when not overridden"
-    end
-  end
-
-  def test_load_honors_brainstorm_tmux_runtime_override
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        brainstorm:
-          runtime: tmux_interactive
-      YAML
-      cfg = Hive::Config.load(dir)
-      assert_equal "tmux_interactive", cfg.dig("brainstorm", "runtime")
     end
   end
 
@@ -2369,8 +2266,17 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/brainstorm\.runtime/, err.message)
-      assert_match(/headless/, err.message)
-      assert_match(/tmux_interactive/, err.message)
+      assert_match(/claude.mode/, err.message)
+    end
+  end
+
+  def test_load_rejects_obsolete_reviewers_and_brainstorm_runtime
+    [ { "reviewers" => [] }, { "brainstorm" => { "runtime" => "headless" } } ].each do |data|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), data.to_yaml)
+        assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      end
     end
   end
 

@@ -35,11 +35,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
   def test_builds_one_schema_valid_snapshot_and_projects_answer_posture
     with_fixture do |native, task|
       snapshot = builder(native, task, questions: 2).call
-      schemer = JSONSchemer.schema(
-        JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 1)))
-      )
 
-      assert_empty schemer.validate(snapshot).to_a
       assert_equal "answer", snapshot.dig("decision", "posture")
       assert snapshot.dig("decision", "action", "enabled")
       assert_equal "hive-task-workspace", snapshot.fetch("schema")

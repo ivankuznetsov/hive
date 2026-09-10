@@ -9,7 +9,6 @@ require "hive/attempts/repository"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/contract"
 require "hive/artifacts/outcome_evidence/identity"
-require "hive/artifacts/outcome_evidence/legacy_capture_reader"
 require "hive/artifacts/outcome_evidence/proof"
 require "hive/artifacts/outcome_evidence/recovery"
 
@@ -489,10 +488,6 @@ module Hive
             requirement_path(generation), schema: SCHEMAS.fetch(:requirement),
             label: "outcome-evidence requirement"
           )
-        end
-
-        def legacy_capture
-          LegacyCaptureReader.new(@task.folder).read
         end
 
         def package

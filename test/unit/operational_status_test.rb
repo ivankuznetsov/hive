@@ -528,12 +528,12 @@ class OperationalStatusTest < Minitest::Test
       { "stage_dir" => "5-implement", "task_count" => 2 },
       { "stage_dir" => "6-review", "task_count" => 1 }
     ]
-    payload.dig("projects", 0)["legacy_migrate_command"] = "hive migrate demo"
+    payload.dig("projects", 0)["legacy_state_guide"] = "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
 
     issue = project(payload).fetch("issues").find { |entry| entry.fetch("code") == "legacy_stage_dirs" }
 
     assert_equal "3 tasks hidden in legacy stage dirs: 5-implement (2), 6-review (1)", issue.fetch("message")
-    assert_equal "hive migrate demo", issue.fetch("remediation")
+    assert_equal "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", issue.fetch("remediation")
 
     payload.dig("projects", 0)["legacy_stage_dirs"] = [
       { "stage_dir" => "5-implement", "task_count" => 1 }
@@ -1151,7 +1151,7 @@ class OperationalStatusTest < Minitest::Test
 
     assert_equal "blocked", projected.dig("recovery", "status")
     assert_equal "recovery_migration_required", projected.dig("recovery", "reason")
-    assert_includes projected.dig("recovery", "remediation"), "hive migrate"
+    assert_includes projected.dig("recovery", "remediation"), "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
   end
 
   def test_lean_recovery_projection_only_joins_recovery_candidates
@@ -1676,7 +1676,7 @@ class OperationalStatusTest < Minitest::Test
     else
       [ {
         "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state",
-        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_migrate_command" => nil,
+        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_state_guide" => nil,
         "hidden_archived_task_count" => hidden_count
       } ]
     end

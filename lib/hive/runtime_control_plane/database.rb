@@ -12,10 +12,9 @@ module Hive
     EXPECTED_SCHEMA_SHA256 = "f237684b17dfd8f7ded175a5e3c7a1b0445c4a7bee109fca4f2f51e498ead0a7".freeze
 
     class Database
-      MIGRATE_ACTION = "stop Hive and run hive migrate --all".freeze
+      MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze
       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
       MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
-      REQUEST_FOREIGN_KEY_SCHEMA = "24f43b9a0ac27f015b9a4321b9ff3ac2034cd109f354a30abf50f181a8748935".freeze
       attr_reader :path, :owner_pid
 
       def initialize(path: Hive::Paths.runtime_control_plane_path, migrations_dir: MIGRATIONS_DIR,
@@ -44,13 +43,15 @@ module Hive
           ensure_process_owner!
           validate_migration_set!
           verify_runtime_capabilities!
-          diagnosis = diagnostics_uncoordinated if File.exist?(path)
-          raise_for_diagnosis!(diagnosis) if diagnosis &&
-            %i[unrelated_database corrupt newer_schema].include?(diagnosis.status)
+          diagnosis = diagnostics_uncoordinated
+          if diagnosis.status != :missing
+            raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
+            open_uncoordinated!
+            next
+          end
           FileUtils.mkdir_p(File.dirname(path))
           prepare_storage!
           connect!
-          upgrade_request_provenance!
           Sequel::IntegerMigrator.new(@connection, @migrations_dir, table: :schema_info,
                                       column: :version, use_transactions: true).run
           ensure_installation_identity!
@@ -64,8 +65,7 @@ module Hive
         disconnect
         raise IntegrityError.new("runtime control-plane migration failed: #{error.message}",
                                  code: :migration_failed,
-                                 action: "correct storage and resume the incomplete cutover; " \
-                                         "active recovery requires an external backup",
+                                 action: BACKUP_ACTION,
                                  details: { error_class: error.class.name })
       end
 
@@ -223,7 +223,7 @@ module Hive
 
       def unavailable!(code, message, error: nil)
         action = "install a supported sqlite3 gem build"
-        action += " and rerun hive migrate --all" unless message.start_with?("SQLite version is unreadable")
+        action += " and rerun hive setup" unless message.start_with?("SQLite version is unreadable")
         raise Unavailable.new(message, code: code, action: action,
                               details: error ? { error_class: error.class.name } : {})
       end
@@ -246,7 +246,7 @@ module Hive
       def raise_migration_set!(detail)
         raise MigrationRequired.new("runtime control-plane migration set is invalid: #{detail}",
                                     code: :migration_set_invalid,
-                                    action: "reinstall Hive, then rerun hive migrate --all")
+                                    action: "reinstall Hive, then rerun hive setup")
       end
 
       def ensure_installation_identity!
@@ -271,33 +271,6 @@ module Hive
         Digest::SHA256.hexdigest(Codec.dump_json(rows)) == expected
       rescue Sequel::Error
         false
-      end
-
-      # Explicit migration only: queue retention must not rewrite immutable attempts.
-      # Rebuild from the canonical schema: SQLite's generic ALTER emulation loses
-      # CHECK constraints. Foreign keys are disabled outside the transaction so
-      # dropping the old table cannot cascade into receipts, leases or usage.
-      def upgrade_request_provenance!
-        return unless exact_schema?(@connection, expected: REQUEST_FOREIGN_KEY_SCHEMA)
-
-        template = Sequel.sqlite
-        Sequel::Migrator.run(template, @migrations_dir)
-        definitions = template[:sqlite_master].where(tbl_name: "attempts")
-          .exclude(sql: nil).order(Sequel.desc(:type), :name).select_map(:sql)
-        @connection.run("PRAGMA foreign_keys = OFF")
-        @connection.transaction(mode: :exclusive, rollback: :reraise) do
-          @connection.run("CREATE TEMP TABLE attempt_provenance_upgrade AS SELECT * FROM attempts")
-          @connection.drop_table(:attempts)
-          definitions.each { |sql| @connection.run(sql) }
-          @connection.run("INSERT INTO attempts SELECT * FROM attempt_provenance_upgrade")
-          @connection.run("DROP TABLE temp.attempt_provenance_upgrade")
-          unless exact_schema?(@connection) && pragma_rows(@connection, "foreign_key_check").empty?
-            raise Sequel::Error, "attempt provenance upgrade failed schema or foreign-key validation"
-          end
-        end
-      ensure
-        @connection.run("PRAGMA foreign_keys = ON") if template
-        template&.disconnect
       end
 
       def prepare_storage!
@@ -372,7 +345,7 @@ module Hive
         when :partial_schema
           "runtime control-plane schema is incomplete; #{MIGRATE_ACTION}"
         else
-          "runtime control-plane schema #{version || 'missing'} requires hive migrate --all"
+          "runtime control-plane schema #{version || 'missing'} is unsupported; #{MIGRATE_ACTION}"
         end
         diagnosis(status, application_id: application_id, schema_version: version,
                   integrity: integrity,
@@ -387,8 +360,8 @@ module Hive
 
       def raise_for_diagnosis!(diagnosis)
         raise diagnosis.error if diagnosis&.error
-        raise MigrationRequired.new("runtime control-plane database is missing; run hive migrate --all",
-                                    code: :missing_database, action: "run hive migrate --all")
+        raise MigrationRequired.new("runtime control-plane database is missing; run hive setup",
+                                    code: :missing_database, action: "run hive setup")
       end
     end
   end

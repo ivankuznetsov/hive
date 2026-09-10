@@ -106,8 +106,7 @@ module Hive
       # CLI's installed skill names.
       "brainstorm" => {
         "agent" => "claude",
-        "skill" => "/ce-brainstorm",
-        "runtime" => "headless"
+        "skill" => "/ce-brainstorm"
       },
       "plan" => {
         "agent" => "claude",
@@ -778,7 +777,6 @@ module Hive
     # changes, update this list to match.
     DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze # coding-scoped: coding dependency-gate stages (last two of Stages::DIRS)
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
-    EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
     EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
     IMPLEMENTATION_IDENTITY_PROVENANCE_KEY = :__hive_implementation_identity_provenance
     IMPLEMENTATION_IDENTITY_PATHS = {
@@ -794,8 +792,6 @@ module Hive
     # DEFAULTS. Keep this list explicit so a newly rendered section cannot
     # silently become an unvalidated extension namespace.
     PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh models]).freeze
-    @legacy_project_config_warning_lock = Mutex.new
-    @legacy_project_config_warned_paths = Set.new
 
     module_function
 
@@ -858,8 +854,6 @@ module Hive
 
     def build_project_config(project_root, source_path, data, stage_names: nil)
       project_root = File.expand_path(project_root)
-      legacy_reviewers = data.key?("reviewers")
-      data = normalize_legacy_project_config(data, source_path, emit_warning: false)
       validate_project_top_level_keys!(data, source_path, project_root, stage_names: stage_names)
       data = normalize_models_config(data, source_path)
       # Nested review actors execute inside one durable review/patrol attempt.
@@ -870,7 +864,6 @@ module Hive
       resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
-      merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
       merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
       if provider_routing_configured?(data)
@@ -878,7 +871,6 @@ module Hive
       end
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, source_path)
-      warn_legacy_root_reviewers_once!(source_path) if legacy_reviewers
       merged
     end
 
@@ -890,49 +882,6 @@ module Hive
         data["models"], source: describe_source(source_path)
       )
       normalized
-    end
-
-    # `reviewers` was never a supported project-root key, but older Hive
-    # versions silently deep-merged and ignored it. The strict root-key
-    # boundary therefore turned an existing typo into an upgrade outage.
-    # Keep one narrow read-through compatibility window while `hive migrate`
-    # provides the durable rewrite; do not extend this to arbitrary typos.
-    def normalize_legacy_project_config(data, source_path, emit_warning: true)
-      return data unless data.key?("reviewers")
-
-      review_present = data.key?("review")
-      review = data["review"]
-      if review_present && !review.is_a?(Hash)
-        raise UnsupportedProjectConfigError,
-              "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \
-              "- Top-level `reviewers` cannot be migrated because `review` is #{review.class}; " \
-              "make `review` a mapping and move the value to `review.reviewers`."
-      end
-      if review&.key?("reviewers")
-        raise UnsupportedProjectConfigError,
-              "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \
-              "- The config defines both top-level `reviewers` and `review.reviewers`; " \
-              "choose which value to keep, then remove the top-level key."
-      end
-
-      normalized = deep_dup(data)
-      normalized_review = review_present ? deep_dup(review) : {}
-      normalized_review["reviewers"] = normalized.delete("reviewers")
-      normalized["review"] = normalized_review
-      warn_legacy_root_reviewers_once!(source_path) if emit_warning
-      normalized
-    end
-
-    def warn_legacy_root_reviewers_once!(source_path)
-      should_warn = @legacy_project_config_warning_lock.synchronize do
-        @legacy_project_config_warned_paths.add?(source_path.to_s)
-      end
-      return unless should_warn
-
-      message = "hive: top-level `reviewers` in #{describe_source(source_path)} is deprecated; " \
-                "using it as `review.reviewers` for upgrade compatibility; run `hive migrate` " \
-                "in the project to rewrite the config"
-      Hive::Warnings.emit(message)
     end
 
     def validate_project_top_level_keys!(data, source_path, project_root, stage_names: nil)
@@ -1182,20 +1131,6 @@ module Hive
       cfg[EXPLICIT_CLAUDE_MODE_KEY] == true
     end
 
-    # Pairs with `explicit_claude_mode?` but kept on the legacy
-    # explicit-via-cfg.dig fallback intentionally: synthesised cfgs
-    # under tests / daemon helpers that carry `brainstorm.runtime`
-    # without going through `Config.load` still need to opt into the
-    # one-release legacy 2-brainstorm branch. The DEFAULTS path does
-    # NOT seed `brainstorm.runtime`, so the dig-based fallback is
-    # unambiguous here — distinct from claude.mode, which IS seeded
-    # by DEFAULTS and needs the strict flag.
-    def explicit_brainstorm_runtime?(cfg)
-      return cfg[EXPLICIT_BRAINSTORM_RUNTIME_KEY] unless cfg[EXPLICIT_BRAINSTORM_RUNTIME_KEY].nil?
-
-      cfg.dig("brainstorm", "runtime") != nil
-    end
-
     def stage_skill(cfg, stage)
       stage_cfg = cfg.fetch(stage, {})
       agent_name = (stage_cfg["agent"] || DEFAULTS.dig(stage, "agent") || "claude").to_s
@@ -1245,7 +1180,6 @@ module Hive
     end
 
     def registered_project_entries(preserve_invalid:)
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       return [] unless File.exist?(path)
@@ -1290,7 +1224,6 @@ module Hive
     # event: historical projects did not have a durable registration
     # occurrence and must not receive a synthetic bootstrap replay.
     def ensure_project_identities!(now: Time.now.utc)
-      Hive::Paths.ensure_migrated!
       return false unless File.exist?(global_config_path)
 
       changed = false
@@ -1339,7 +1272,6 @@ module Hive
     # intentionally called only after a project declares routing.pool; a
     # legacy project never consults or validates this opt-in registry.
     def load_global_provider_accounts
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1400,7 +1332,6 @@ module Hive
     # locking config.yml itself whose inode changes on every atomic
     # replace.
     def update_global_config!
-      Hive::Paths.ensure_migrated!
       FileUtils.mkdir_p(hive_home)
       with_global_config_lock do
         path = global_config_path
@@ -1418,7 +1349,6 @@ module Hive
     # methods that already hold the lock call write_global_config_atomic!
     # directly to keep the whole mutation in one critical section.
     def write_global_config!(data)
-      Hive::Paths.ensure_migrated!
       FileUtils.mkdir_p(hive_home)
       with_global_config_lock { write_global_config_atomic!(data) }
     end
@@ -1538,7 +1468,6 @@ module Hive
     # Returns the bare DEFAULTS["daemon"] when no global config is
     # present (first-run scenario, no projects registered yet).
     def load_global_daemon
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1564,7 +1493,6 @@ module Hive
     # so an operator's opt-out actually takes effect at runtime. Returns
     # the bare defaults when no global config exists.
     def load_global_update
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1582,12 +1510,11 @@ module Hive
     end
 
     # Shared loader for a single named global config block such as
-    # `answer_digest`: runs the ensure_migrated!/validate_hive_home!/path +
+    # `answer_digest`: runs the validate_hive_home!/path +
     # shape-check preamble, deep-merges the override over DEFAULTS[key], runs the
     # block's own validator, and returns the merged hash. An optional block
     # receives (merged, data, override) and returns the merged hash to validate.
     def load_global_block(key, validator:)
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1614,7 +1541,6 @@ module Hive
     end
 
     def load_global_project_membership_history
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1624,7 +1550,6 @@ module Hive
     end
 
     def load_global_web
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1642,7 +1567,6 @@ module Hive
     end
 
     def load_global_screenote
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1696,7 +1620,6 @@ module Hive
     # credentials fail loudly there without making read-only commands like
     # `hive status` require a Telegram token.
     def load_global_bot(require_runtime: false)
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1967,7 +1890,6 @@ module Hive
     # `entries - [removed]` would clear BOTH. delete_at on the matched
     # index removes exactly the row the operator named.
     def unregister_project(name:, now: Time.now.utc)
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       return nil unless File.exist?(global_config_path)
 
@@ -2021,7 +1943,6 @@ module Hive
     # consistency window where a concurrent register/forget between the
     # two reads produced inconsistent counts.
     def prune_missing_projects!(dry_run: false, now: Time.now.utc)
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       return { removed: [], kept_count: 0 } unless File.exist?(global_config_path)
 
@@ -3276,7 +3197,6 @@ module Hive
       end
     end
 
-    BRAINSTORM_RUNTIMES = %w[headless tmux_interactive].freeze
 
     def validate_claude_mode!(cfg, source_path)
       mode = cfg.dig("claude", "mode")
@@ -3456,11 +3376,7 @@ module Hive
     def validate_brainstorm_runtime!(cfg, source_path)
       runtime = cfg.dig("brainstorm", "runtime")
       return if runtime.nil?
-      return if BRAINSTORM_RUNTIMES.include?(runtime)
-
-      raise ConfigError,
-            "brainstorm.runtime in #{describe_source(source_path)} must be one of " \
-            "#{BRAINSTORM_RUNTIMES.inspect}; got #{runtime.inspect} (#{runtime.class})"
+      raise ConfigError, "brainstorm.runtime is unsupported; set claude.mode in #{describe_source(source_path)}"
     end
 
     # Shared check used by both validate_reviewers! and

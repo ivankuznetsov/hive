@@ -8,7 +8,6 @@ require "hive/commands/update"
 require "hive/commands/connect"
 require "hive/commands/disconnect"
 require "hive/commands/uninstall"
-require "hive/commands/migrate"
 require "hive/commands/new"
 require "hive/commands/workflow"
 require "hive/commands/generate_name"
@@ -232,7 +231,7 @@ class HiveCliTest < Minitest::Test
     assert_empty schema.validate(payload).to_a
   end
 
-  def test_init_forget_prune_update_uninstall_and_migrate_pass_options
+  def test_init_forget_prune_update_uninstall_pass_options
     with_command_new_stub(Hive::Commands::Init) do |calls|
       Hive::CLI.start([ "init", "/tmp/project", "--force", "--json", "--workflow", "content_fixture" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
@@ -289,7 +288,7 @@ class HiveCliTest < Minitest::Test
 
     with_command_new_stub(Hive::Commands::Update) do |calls|
       Hive::CLI.start([ "update", "--dry-run" ])
-      assert_equal({ dry_run: true, confirm: false }, calls.first.fetch(:kwargs))
+      assert_equal({ dry_run: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Connect) do |calls|
@@ -309,26 +308,11 @@ class HiveCliTest < Minitest::Test
       assert_equal({ purge: true, force_purge_state: true }, calls.first.fetch(:kwargs))
     end
 
-    with_command_new_stub(Hive::Commands::Migrate) do |calls|
-      Hive::CLI.start([ "migrate", "/tmp/project" ])
-      assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-    end
-
-    require "hive/commands/migrate_all"
-    with_command_new_stub(Hive::Commands::MigrateAll) do |calls|
-      Hive::CLI.start([ "migrate", "--all" ])
-      assert_empty calls.first.fetch(:args)
-    end
-
-    error = assert_raises(Hive::UsageError) do
-      Hive::CLI.start([ "migrate", "/tmp/project", "--all" ])
-    end
-    assert_match(/PROJECT_PATH and --all are mutually exclusive/, error.message)
-
     require "hive/commands/runtime"
-    with_command_new_stub(Hive::Commands::Runtime) do |calls|
-      Hive::CLI.start([ "runtime", "resume", "--json" ])
-      assert_equal [ "resume" ], calls.first.fetch(:args)
+    with_command_new_stub(Hive::Commands::Runtime, return_value: 1) do |calls|
+      _out, _err, status = with_captured_exit { Hive::CLI.start([ "runtime", "status", "--json" ]) }
+      assert_equal 1, status
+      assert_equal [ "status" ], calls.first.fetch(:args)
       assert_equal({ json: true }, calls.first.fetch(:kwargs))
     end
   end

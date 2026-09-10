@@ -249,8 +249,8 @@ class TaskActionTest < Minitest::Test
         ]
       }
     )
-    assert_equal "plan_reviewing", stale_planner_identity.key
-    assert_equal "hive plan-review-run demo-260426-aaaa", stale_planner_identity.command
+    assert_equal "plan_review_blocked", stale_planner_identity.key
+    assert_nil stale_planner_identity.command
 
     stale_residual_evidence = Hive::TaskAction.for(
       task, waiting,
@@ -265,8 +265,8 @@ class TaskActionTest < Minitest::Test
         ]
       }
     )
-    assert_equal "plan_reviewing", stale_residual_evidence.key
-    assert_equal "hive plan-review-run demo-260426-aaaa", stale_residual_evidence.command
+    assert_equal "plan_review_blocked", stale_residual_evidence.key
+    assert_nil stale_residual_evidence.command
 
     stale_revision = Hive::TaskAction.for(
       task, waiting,
@@ -280,13 +280,10 @@ class TaskActionTest < Minitest::Test
         ]
       }
     )
-    assert_equal "plan_reviewing", stale_revision.key
-    assert_equal "hive plan-review-run demo-260426-aaaa", stale_revision.command
+    assert_equal "plan_review_blocked", stale_revision.key
+    assert_nil stale_revision.command
 
-    # A contract version Hive cannot parse is unreadable adjudication
-    # evidence, not a current verdict. Classify the row as runnable so the
-    # orchestrator re-runs the bounded series rather than stranding the task
-    # on a value it never compared.
+    # Old contract versions do not authorize automatic replay.
     unreadable_revision = Hive::TaskAction.for(
       task, waiting,
       plan_review: {
@@ -299,9 +296,8 @@ class TaskActionTest < Minitest::Test
         ]
       }
     )
-    assert_equal "plan_reviewing", unreadable_revision.key
-    assert_equal "hive plan-review-run demo-260426-aaaa",
-                 unreadable_revision.command
+    assert_equal "plan_review_blocked", unreadable_revision.key
+    assert_nil unreadable_revision.command
   end
 
   def test_policy_eligible_awaiting_decision_is_runnable
@@ -2230,103 +2226,6 @@ class TaskActionTest < Minitest::Test
 
     assert_equal "plan_reviewing", exhausted.key
     assert_equal "hive plan-review-run demo-260426-aaaa", exhausted.command
-  end
-
-  def test_plan_review_recovers_a_legacy_success_with_a_now_attestable_grok_identity
-    task = fake_task(stage_name: "plan", stage_index: 3)
-    routes = [
-      {
-        "role" => "planner",
-        "actual" => { "provider" => "codex", "family" => "openai" }
-      },
-      {
-        "role" => "adversarial", "outcome" => "unsupported",
-        "capability_result" => "unsupported"
-      },
-      {
-        "role" => "adversarial", "outcome" => "success",
-        "requested" => {
-          "provider" => "grok", "model" => "grok-4.6", "family" => "grok",
-          "effort" => "high", "route" => "native_grok_build"
-        },
-        "actual" => {
-          "provider" => "grok", "model" => "grok-4.6-build",
-          "effort" => "high", "route" => "native_grok_build"
-        },
-        "capability_result" => "present", "independence_verified" => false,
-        "independence_reason" => "reviewer_family_unknown"
-      }
-    ]
-    legacy = Hive::TaskAction.for(
-      task, marker(:waiting),
-      plan_review: {
-        "state" => "blocked",
-        "required_action" => "waive named coverage or restore required reviewer capability",
-        "routes" => routes
-      }
-    )
-    unknown_routes = Marshal.load(Marshal.dump(routes))
-    unknown_routes.last["actual"]["model"] = "grok-4.7-build"
-    unknown = Hive::TaskAction.for(
-      task, marker(:waiting),
-      plan_review: {
-        "state" => "blocked", "required_action" => "restore reviewer capability",
-        "routes" => unknown_routes
-      }
-    )
-
-    assert_equal "plan_reviewing", legacy.key
-    assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
-    assert_equal "plan_review_unsupported", unknown.key
-    assert_nil unknown.command
-  end
-
-  def test_plan_review_recovers_a_legacy_selected_lenses_parser_rejection
-    task = fake_task(stage_name: "plan", stage_index: 3)
-    legacy = Hive::TaskAction.for(
-      task, marker(:waiting),
-      plan_review: {
-        "state" => "blocked",
-        "required_action" => "waive named coverage or restore required reviewer capability",
-        "routes" => [
-          {
-            "role" => "primary", "outcome" => "terminal_failure",
-            "diagnostic" => "plan review selected_lenses must contain lowercase names"
-          }
-        ]
-      }
-    )
-
-    assert_equal "plan_reviewing", legacy.key
-    assert_equal "hive plan-review-run demo-260426-aaaa", legacy.command
-  end
-
-  def test_plan_review_recovers_a_runner_checkpoint_custody_false_positive
-    task = fake_task(stage_name: "plan", stage_index: 3)
-    false_positive = Hive::TaskAction.for(
-      task, marker(:waiting),
-      plan_review: {
-        "state" => "blocked",
-        "required_action" => "waive named coverage or restore required reviewer capability",
-        "routes" => [
-          {
-            "role" => "adversarial", "outcome" => "terminal_failure",
-            "attempt_id" => "pra-checkpoint", "diagnostic_source" => "runner",
-            "diagnostic" =>
-              "reviewer modified protected artifacts: task-projection.checkpoint.json"
-          }
-        ]
-      }
-    )
-
-    assert_equal "plan_reviewing", false_positive.key
-    assert_equal "hive plan-review-run demo-260426-aaaa", false_positive.command
-
-    reviewer_authored = Marshal.load(Marshal.dump(false_positive.plan_review))
-    reviewer_authored.fetch("routes").first["diagnostic_source"] = "reviewer"
-    terminal = Hive::TaskAction.for(task, marker(:waiting), plan_review: reviewer_authored)
-    assert_equal "plan_review_unsupported", terminal.key
-    assert_nil terminal.command
   end
 
   def test_stale_loaded_plan_review_blocks_execution_with_a_hive_owned_repair

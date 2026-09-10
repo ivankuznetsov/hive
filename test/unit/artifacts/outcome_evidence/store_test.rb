@@ -572,8 +572,7 @@ class OutcomeEvidenceStoreTest < Minitest::Test
       File.write(
         File.join(task.folder, "media", "capture-manifest.json"), JSON.generate(legacy)
       )
-      assert_equal legacy, store.legacy_capture
-      refute store.accepted?, "a readable legacy capture is not accepted outcome evidence"
+      refute store.accepted?, "an old capture file is not accepted outcome evidence"
 
       current_path = File.join(task.folder, "outcome-evidence", "current.json")
       File.write(current_path, %({"schema":"hive-outcome-evidence-current","schema":"duplicate"}\n))

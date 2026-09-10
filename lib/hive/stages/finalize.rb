@@ -559,17 +559,12 @@ module Hive
         :failed
       end
 
-      # Migration shim: read `budget_usd.pr` / `timeout_sec.pr` for one
-      # version. `hive migrate` (Hive::Commands::Migrate::CONFIG_KEY_RENAMES)
-      # rewrites these onto the canonical `.finalize` keys so the
-      # fallback has a removal path. Slated for removal one version
-      # after migrate ships.
       def finalize_budget(cfg)
-        cfg.dig("budget_usd", "finalize") || cfg.dig("budget_usd", "pr") || 50
+        cfg.dig("budget_usd", "finalize") || 50
       end
 
       def finalize_timeout(cfg)
-        cfg.dig("timeout_sec", "finalize") || cfg.dig("timeout_sec", "pr") || 1800
+        cfg.dig("timeout_sec", "finalize") || 1800
       end
 
       def write_summary(task, worktree_path, branch, pr_url, cfg = nil)

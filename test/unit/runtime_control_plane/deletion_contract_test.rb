@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/runtime_control_plane/cutover"
+require "hive/runtime_control_plane/installation"
 
 class RuntimeControlPlaneDeletionContractTest < Minitest::Test
   include HiveTestHelper
@@ -100,22 +100,12 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
   def test_clean_bootstrap_never_creates_a_retired_runtime_root
     with_tmp_dir do |root|
       state = File.join(root, "state")
-      data = File.join(root, "data")
-      FileUtils.mkdir_p([ state, data ])
-      services = Struct.new(:events) do
-        def stop!(**) = events << :stopped
-        def activate! = events << :active
-      end.new([])
-
-      Hive::RuntimeControlPlane::Cutover.new(
-        state_home: state, data_home: data, projects: [], services: services
-      ).bootstrap(confirm: true)
+      Hive::RuntimeControlPlane::Installation.setup(state_home: state)
 
       assert_path_exists Hive::Paths.runtime_control_plane_path(state)
-      assert_path_exists Hive::Paths.runtime_payload_root(state)
-      Hive::RuntimeControlPlane::Cutover::TARGETS.each do |target|
-        home = target.home == :state ? state : data
-        refute_path_exists File.join(home, target.relative_path), target.relative_path
+      %w[.runtime-cutover dispatch_requests dispatch_results attempts provider-health
+         operational task-counter.yml usage.db].each do |relative|
+        refute_path_exists File.join(state, relative), relative
       end
     end
   end

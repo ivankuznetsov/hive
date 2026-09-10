@@ -143,7 +143,7 @@ class OpenClawSkillsTest < Minitest::Test
       assert_includes text, escaped.tr("\\", "")
     end
     assert_includes text, "hive act workflow.retry"
-    assert_includes text, "hive migrate PROJECT_PATH"
+    assert_includes text, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     assert_includes text, "RecoveryCoordinator"
     assert_includes normalized_text, "not a retry recipe"
     assert_includes text, "obtain explicit confirmation"

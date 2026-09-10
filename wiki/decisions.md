@@ -945,3 +945,12 @@ Once `git log` accumulates real history, future updates should add ADRs from sub
 - [[stages/execute]]
 - [[commands/bot]] · [[modules/bot]]
 - [[commands/findings]] · [[modules/task_action]]
+
+## Current-format-only runtime (2026-09-09)
+
+Hive supports only current formats. This supersedes historical requirements for
+automatic project migration, fleet cutover, old wire-schema compatibility and
+historical upgrade survivor lanes. Current setup, database integrity, task journal
+recovery, workflow-package upgrades and source-state visibility remain required.
+Old installations use the external agent conversion guide with verified backups.
+Current release artifact authenticity and native install checks remain required.

@@ -333,8 +333,7 @@ module HiveReleaseCandidate
     def parse_packages(value, id)
       packages = string_hash(value, "#{id} packages")
       roles = packages.keys
-      unless roles.include?("producer") && (roles - %w[observer producer]).empty? &&
-             (id != "legacy-bench-v041" || roles.include?("observer"))
+      unless roles.include?("producer") && (roles - %w[observer producer]).empty?
         raise Error, "#{id} packages must contain a producer and only reviewed roles"
       end
       packages.to_h do |role, package_value|

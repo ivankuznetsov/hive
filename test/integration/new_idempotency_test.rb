@@ -543,9 +543,23 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_authored_workflow_fixture_cleans_up_registration
+    with_initialized_project do |project_root, project|
+      create_authored_workflow(project_root, "editorial")
+      create_json_with(
+        project, "same request", key: "creator:cleanup", slug: "cleanup-authored",
+        workflow: "editorial"
+      )
+      assert_includes Hive::Workflows::Registry.ids, :editorial
+    end
+
+    refute_includes Hive::Workflows::Registry.ids, :editorial
+  end
+
   private
 
   def with_initialized_project
+    Hive::Workflows::Project.reset!
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|
         capture_io do
@@ -554,6 +568,8 @@ class NewIdempotencyTest < Minitest::Test
         yield project_root, File.basename(project_root)
       end
     end
+  ensure
+    Hive::Workflows::Project.reset!
   end
 
   def create_json(project, text, key:, slug:)

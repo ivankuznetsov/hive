@@ -29,24 +29,39 @@ module Hive
           "web unit"
         end
 
-        def restart!
-          ok = case envelope_platform
-          when "linux"
-            @runner.call(%w[systemctl --user daemon-reload]) &&
-              @runner.call([ "systemctl", "--user", "restart", service_name ])
-          when "macos"
-            @runner.call([ "launchctl", "unload", target_path ]) &&
-              @runner.call([ "launchctl", "load", target_path ])
-          else
-            false
+        def install!(autostart:, force: false, restart_if_running: false)
+          outcome = super
+          if restart_if_running && outcome.restarted
+            @messages << "restarted running web service to load the refreshed application bundle"
           end
-          raise Hive::Error, "hive web: could not restart managed web service" unless ok
+          outcome
+        end
 
+        def restart!
+          super
           @messages << "restarted running web service to load the refreshed application bundle"
           true
         end
 
+        def start!
+          super
+        rescue Hive::Error => error
+          raise_web_lifecycle_error(error, :start)
+        end
+
+        def stop!
+          super
+        rescue Hive::Error => error
+          raise_web_lifecycle_error(error, :stop)
+        end
+
         private
+
+        def raise_web_lifecycle_error(error, operation)
+          base = "hive web: could not #{operation} managed web service"
+          detail = error.message.delete_prefix(base)
+          raise Hive::Error, "hive web: could not #{operation} managed service#{detail}"
+        end
 
         def render_systemd
           rendered = render_systemd_from(

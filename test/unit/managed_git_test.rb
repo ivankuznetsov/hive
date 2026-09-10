@@ -80,7 +80,7 @@ class ManagedGitTest < Minitest::Test
                     "credential.https://github.com.helper=!/usr/bin/true auth git-credential"
   end
 
-  def test_default_gh_binary_is_embedded_in_credential_helper
+  def test_default_gh_binary_is_used_when_no_override_is_present
     command = Hive::ManagedGit.command("/tmp/repo", "status", env: {})
 
     assert_includes command,

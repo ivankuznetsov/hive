@@ -3347,6 +3347,26 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal [ Hive::Bot::Supervisor::POLL_FAILURE_BACKOFF_SEC ], slept
   end
 
+  def test_poll_loop_retries_after_the_transport_recovers_without_restarting
+    supervisor = @supervisor
+    @supervisor.instance_variable_get(:@config)["long_poll_timeout_sec"] = 0
+    attempts = 0
+    slept = []
+    @telegram.define_singleton_method(:poll_updates) do |timeout:, since_update_id:|
+      attempts += 1
+      supervisor.request_shutdown! if attempts == 2
+      []
+    end
+    @telegram.define_singleton_method(:last_poll_failed?) { attempts == 1 }
+    @supervisor.define_singleton_method(:interruptible_sleep) { |seconds| slept << seconds }
+
+    @supervisor.send(:poll_loop)
+
+    assert_equal 2, attempts
+    assert_equal [ Hive::Bot::Supervisor::POLL_FAILURE_BACKOFF_SEC ], slept
+    assert_equal 1, Hive::Bot::Supervisor::POLL_FAILURE_BACKOFF_SEC
+  end
+
   def test_status_loop_logs_tick_failures
     supervisor = @supervisor
     @supervisor.define_singleton_method(:status_tick) do

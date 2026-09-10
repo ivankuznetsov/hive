@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/lock"
+require "hive/runtime_control_plane/task_lease_repository"
 
 class LockTest < Minitest::Test
   include HiveTestHelper

@@ -1,7 +1,7 @@
 <% content_for(:title, "#{web_product_name} — close #{@task.title}") %>
 
 <div class="task-header">
-  <h1>Close with delivery evidence</h1>
+  <h1>Archive task</h1>
 </div>
 <p class="task-slug"><%= @project.name %> · <%= @task.slug %></p>
 
@@ -22,7 +22,7 @@
       <dt>Reason</dt>
       <dd><%= @preview.input["reason"].to_s.tr("_", " ") %></dd>
       <dt>Task repository</dt>
-      <dd><%= @preview.task_repository&.fetch("identity", "unavailable") %></dd>
+      <dd><%= @preview.task_repository&.values_at("identity", "path")&.compact&.first || "unavailable" %></dd>
       <dt>Authority</dt>
       <dd><%= @preview.authority || "unavailable" %></dd>
       <dt>Evidence digest</dt>
@@ -48,7 +48,7 @@
         <%= hidden_field_tag :attestation, @preview.input["attestation"] %>
         <%= hidden_field_tag :preview_digest, @preview.preview_digest %>
         <%= form.submit "Confirm and archive",
-              data: { turbo_confirm: "Archive #{@task.slug} with this exact verified evidence?" } %>
+              data: { turbo_confirm: "Archive #{@task.slug} with this closure reason?" } %>
       <% end %>
     <% end %>
   </section>
@@ -59,22 +59,22 @@
   <div>
     <%= form.label :reason, "Closure reason" %>
     <%= form.select :reason,
-          [["Already delivered", "already_delivered"], ["Superseded", "superseded"]],
+          [["Already delivered", "already_delivered"], ["Superseded", "superseded"], ["Cancelled", "cancelled"]],
           selected: @closure_input["reason"] %>
   </div>
   <div>
-    <%= form.label :evidence, "Immutable GitHub PR or commit evidence (one per line)" %>
+    <%= form.label :evidence, "Immutable GitHub PR or commit evidence (leave empty for cancellation)" %>
     <%= text_area_tag "evidence[]", Array(@closure_input["evidence"]).join("\n"),
-          rows: 6, required: true %>
+          rows: 6 %>
   </div>
   <div>
     <%= form.label :successor, "Successor project:slug (required for superseded)" %>
     <%= form.text_field :successor, value: @closure_input["successor"] %>
   </div>
   <div>
-    <%= form.label :attestation, "Operator attestation (required for superseded or cross-repository evidence)" %>
+    <%= form.label :attestation, "Operator reason (required for cancellation or superseded closure)" %>
     <%= form.text_area :attestation, value: @closure_input["attestation"],
           maxlength: Hive::TaskClosure::MAX_ATTESTATION_BYTES, rows: 4 %>
   </div>
-  <%= form.submit "Verify evidence" %>
+  <%= form.submit "Preview archive" %>
 <% end %>

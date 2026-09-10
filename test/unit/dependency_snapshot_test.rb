@@ -210,6 +210,7 @@ class DependencySnapshotTest < Minitest::Test
   def test_semantic_fingerprint_is_order_independent_and_includes_fallback_layers
     task = lambda do |slug, depends_on = nil|
       Hive::DependencyAdmission::TaskSnapshot.new(
+        cancelled: false,
         project: "app", slug: slug, id: nil, stage: "4-execute",
         workflow_stages: Hive::Stages::DIRS, depends_on: depends_on,
         metadata_status: :ok, metadata_error: nil, plan_status: :absent,
@@ -436,6 +437,7 @@ class DependencySnapshotTest < Minitest::Test
 
   def test_cross_project_target_scan_ignores_invalid_references
     invalid = Hive::DependencyAdmission::TaskSnapshot.new(
+      cancelled: false,
       project: "app", slug: "bad", id: 1, stage: "4-execute",
       workflow_stages: Hive::Stages::DIRS, depends_on: "too:many:parts",
       metadata_status: :ok, metadata_error: nil, plan_status: :absent,

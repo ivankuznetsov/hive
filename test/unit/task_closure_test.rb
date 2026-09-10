@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/task_closure"
+require "hive/commands/run"
 require "hive/task_meta"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/projection"
@@ -66,6 +67,146 @@ class TaskClosureTest < Minitest::Test
 
   EmptyAttempts = Struct.new(:unused) do
     def active_attempts = []
+  end
+
+  def test_cancel_archives_locally_without_delivery_or_terminal_agent_and_replays
+    with_closure_project(stage: "2-brainstorm", state_file: "brainstorm.md") do |task, project|
+      service = service_for(gh: Object.new)
+      input = { "reason" => "cancelled", "attestation" => "Feature no longer wanted" }
+      original = File.binread(task.state_file)
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+
+      preview_schema = JSON.parse(File.read(File.expand_path("../../schemas/hive-task-closure-input.v1.json", __dir__)))
+      assert JSONSchemer.schema(preview_schema).valid?(preview.to_h)
+
+      with_replaced_singleton_method(
+        Hive::Commands::Run, :new, ->(*) { flunk "cancellation must not launch a terminal agent" }
+      ) do
+        receipt = service.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+        archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+        assert_equal "9-done", "#{archived.stage_index}-#{archived.stage_name}"
+        assert_equal "archived", Hive::TaskAction.new(archived, Hive::Markers.current(archived.state_file)).key
+        assert_equal original, File.binread(File.join(archived.folder, "brainstorm.md"))
+        assert_equal "cancelled", receipt.fetch("reason")
+        assert_empty receipt.fetch("evidence")
+        schema = JSON.parse(File.read(File.expand_path("../../schemas/hive-task-closure.v1.json", __dir__)))
+        assert JSONSchemer.schema(schema).valid?(receipt)
+        assert service.read(archived, project: project).valid?
+        replay = service.confirm!(
+          task: archived, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+        assert_equal receipt, replay
+      end
+    end
+  end
+
+  def test_cancel_requires_a_reason_and_does_not_accept_delivery_claims
+    with_closure_project do |task, project|
+      service = service_for(gh: Object.new)
+      [ { "attestation" => "" }, { "evidence" => [ "acme/app#42" ] },
+        { "successor" => "app:successor-task" } ].each do |extra|
+        input = { "reason" => "cancelled", "attestation" => "Not wanted" }.merge(extra)
+        # Rejected delivery references must never result in network access.
+        preview = service.preview(task: task, project: project, input: input)
+        refute preview.valid?
+      end
+    end
+  end
+
+  def test_cancel_content_without_a_deliverable_or_terminal_agent
+    with_closure_project(workflow: "content", stage: "4-draft", state_file: "draft.md") do |task, project|
+      service = service_for(gh: Object.new)
+      input = { "reason" => "cancelled", "attestation" => "Not wanted" }
+      preview = service.preview(task: task, project: project, input: input)
+      service.confirm!(task: task, project: project, input: input,
+                       preview_digest: preview.preview_digest,
+                       operator: "tester", channel: "cli", authorized: true)
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      assert_equal "6-done", "#{archived.stage_index}-#{archived.stage_name}"
+      assert_equal "archived", Hive::TaskAction.new(archived, Hive::Markers.current(archived.state_file)).key
+    end
+  end
+
+  def test_cancel_refuses_a_live_attempt
+    with_closure_project do |task, project|
+      attempt = Attempt.new(attempt_id: "live-1", state: "running",
+                            payload: { "project" => project, "task_slug" => task.slug })
+      service = service_for(gh: Object.new, attempt_store: AttemptStore.new(records: [ attempt ]))
+      preview = service.preview(task: task, project: project,
+                                input: { "reason" => "cancelled", "attestation" => "Not wanted" })
+      refute preview.valid?
+      assert_equal "live_attempt", preview.blockers.first.fetch("code")
+      assert File.directory?(task.folder)
+    end
+  end
+
+  def test_cancel_receipt_rejects_changed_checkout_and_delivery_claims
+    with_closure_project do |task, project|
+      service = service_for(gh: Object.new)
+      preview = service.preview(task: task, project: project,
+                                input: { "reason" => "cancelled", "attestation" => "Not wanted" })
+      base = service.send(:build_receipt, preview, operator: "tester", channel: "cli")
+      [
+        ->(receipt) { receipt["task_repository"]["path"] = "/different-checkout" },
+        ->(receipt) { receipt["authority"] = "remote_merge" },
+        ->(receipt) { receipt["attestation"] = "" },
+        ->(receipt) { receipt["confirmed_by"]["channel"] = "daemon" },
+        ->(receipt) { receipt["evidence"] = [ {} ] }
+      ].each do |mutation|
+        receipt = deep_copy(base)
+        mutation.call(receipt)
+        refresh_receipt_digests!(receipt)
+        assert_raises(Hive::TaskClosure::InvalidReceipt) do
+          service.send(:validate_receipt!, receipt, task: task, project: project)
+        end
+      end
+    end
+  end
+
+  def test_cancel_does_not_wait_for_missing_dependencies
+    with_closure_project do |task, project|
+      Hive::TaskMeta.rewrite(task.folder, depends_on: "missing-task")
+      service = service_for(gh: Object.new)
+      input = { "reason" => "cancelled", "attestation" => "Not wanted" }
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+      service.confirm!(task: task, project: project, input: input,
+                       preview_digest: preview.preview_digest,
+                       operator: "tester", channel: "cli", authorized: true)
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      assert_equal "done", archived.stage_name
+    end
+  end
+
+  def test_cancel_preserves_worktree_and_does_not_satisfy_a_dependency
+    with_closure_project(successor: true) do |task, project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug)
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "unfinished.txt"), "keep this work\n")
+      follower_folder = File.join(task.hive_state_path, "stages", "1-inbox", "successor-task")
+      Hive::TaskMeta.rewrite(follower_folder, depends_on: task.slug)
+      service = service_for(gh: Object.new)
+      input = { "reason" => "cancelled", "attestation" => "No longer needed" }
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+      service.confirm!(task: task, project: project, input: input,
+                       preview_digest: preview.preview_digest,
+                       operator: "tester", channel: "cli", authorized: true)
+      assert_equal "keep this work\n", File.read(File.join(worktree.path, "unfinished.txt"))
+      context = Hive::DependencySnapshot.admission_context(Hive::Config.registered_projects)
+      assert context.verdict(project: project, slug: task.slug).clear?
+      verdict = context.verdict(project: project, slug: "successor-task")
+      assert verdict.blocked?
+      assert_includes verdict.admission_error.safe_correction, "cancelled"
+    end
   end
 
   Attempt = Struct.new(:attempt_id, :state, :payload, keyword_init: true) do

@@ -269,6 +269,7 @@ class DependencyAdmissionTest < Minitest::Test
            workflow_stages: Hive::Stages::DIRS, metadata_status: :ok, metadata_error: nil,
            plan_status: :absent, plan_dependency: nil, plan_error: nil, validation_error: nil)
     D::TaskSnapshot.new(
+      cancelled: false,
       project: project,
       slug: slug,
       id: id,

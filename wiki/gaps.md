@@ -7,6 +7,14 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Operator cancellation awaits live validation (2026-09-09)
+
+`archive --reason cancelled` is covered locally for cancellation without GitHub
+evidence, live-owner refusal, preserved worktrees, missing prerequisites,
+dependency rejection, and Web preview. Deploy a compatible runtime before
+creating cancellation receipts in live state; older readers reject the new
+reason. Task 43085 is the intended first live validation, not yet archived.
+
 ## Automatic outcome capture remains unreliable (2026-09-06)
 
 Dogfood producers can still fail to obtain controller screenshot receipts or

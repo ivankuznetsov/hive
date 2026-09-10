@@ -118,7 +118,7 @@
             "properties": {
               "project": { "type": "string" },
               "slug": { "type": "string" },
-              "reason": { "type": "string", "enum": ["already_delivered", "superseded"] },
+              "reason": { "type": "string", "enum": ["already_delivered", "superseded", "cancelled"] },
               "authority": { "type": "string", "enum": ["remote_merge", "operator_attestation"] },
               "receipt_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
               "evidence": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
@@ -619,7 +619,7 @@
         },
         "reason": {
           "type": ["string", "null"],
-          "enum": ["already_delivered", "superseded", null]
+          "enum": ["already_delivered", "superseded", "cancelled", null]
         },
         "authority": {
           "type": ["string", "null"],
@@ -831,7 +831,7 @@
         "confirmation_required": { "const": true },
         "supported_reasons": {
           "type": "array",
-          "const": ["already_delivered", "superseded"]
+          "const": ["already_delivered", "superseded", "cancelled"]
         },
         "provenance": {
           "type": "object",

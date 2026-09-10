@@ -27,6 +27,8 @@ hive archive <slug> --reason superseded \
   --evidence other/repo#7 \
   --successor project:new-task \
   --attestation "Delivered by the successor"
+hive archive <slug> --reason cancelled \
+  --attestation "No longer wanted"         # preserve history and worktree; no delivery claim
 hive archive                              # list every 9-done task via Status archive mode
 hive archive --json                       # hive-status payload filtered to 9-done rows
 
@@ -42,8 +44,8 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 ## Evidence-bound delivered closure
 
 `--reason`, `--evidence`, `--successor`, or `--attestation` selects
-`Hive::TaskClosure`, not ordinary StageAction. This path requires a local TTY;
-`--json` and noninteractive stdin fail closed. Verification prints one
+`Hive::TaskClosure`, not ordinary StageAction. Confirmation requires a local TTY;
+`--json` returns a read-only preview and noninteractive confirmation fails closed. Verification prints one
 normalized preview and a digest bound to the current task/marker generation,
 registered repository identity, immutable GitHub facts, live owner state, and
 owned-worktree safety. The operator must type `CLOSE <digest-prefix>`.
@@ -60,6 +62,18 @@ successor and a non-empty operator attestation; cross-repository evidence is
 recorded under `operator_attestation` authority. Equal refs, a clean branch,
 similar titles, a merely closed PR, and shortened SHAs are never delivery
 proof.
+
+`cancelled` retires unwanted work without claiming delivery. It requires a
+non-empty operator reason, accepts neither evidence nor a successor, and needs
+no GitHub access. It checks the registered local project and refuses live task
+owners or attempts. Missing dependencies do not prevent cancellation. Dirty
+worktrees, branches, task artifacts, journals, and token history are retained.
+The existing receipt/confirmation protocol moves the task to its workflow's
+terminal stage without running a terminal agent, cleanup, or completion hook.
+Marker-based workflows record `COMPLETE outcome=cancelled`; controller-owned
+inert terminals retain their manifest unchanged. A cancelled prerequisite does
+not count as delivered: dependents must remove or replace that dependency.
+The Web archive form and bot `/close` accept the same reason.
 
 The receipt is written atomically before transition. Its exact digest enters a
 separate `TransitionGuard.validate_closure!` path; it is not attempt success

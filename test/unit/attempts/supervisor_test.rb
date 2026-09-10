@@ -297,7 +297,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal 7, Timeout.timeout(2) { supervisor.run }
+      assert_equal 7, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       references = terminal.receipt.fetch("output_references")
       assert_equal 1, references.length

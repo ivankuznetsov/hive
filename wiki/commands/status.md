@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-09-01
+updated: 2026-09-02
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal]
 ---
 
@@ -41,6 +41,32 @@ managed-workflow breadcrumbs become one `status_warning` per tick instead of
 leaking to process stderr. Outside that scoped build the same warnings retain
 their ordinary stderr behavior. A failed scan retains warnings emitted before
 its final exception.
+
+## Usage and examples: act
+
+`hive act ACTION_ID TARGET --observation TOKEN --json` executes one fresh
+routine action issued by operational status. For example, use
+`hive act workflow.retry demo:task --observation TOKEN --json` only with the
+exact `action_id`, target, and opaque token from the current status document; a
+stale or invented action is refused.
+
+## Output exceptions, serialization, and exit codes
+
+Status uses `hive-running-status.v2`, `hive-status-diagnose.v2`, or
+`hive-operational-status.v4` according to the selected mode; act uses
+`hive-act.v2`. Invalid arguments and stale/refused actions emit the selected
+typed error surface. Status suppresses a `JSON::GeneratorError` while encoding
+an error so the original typed error controls the exit, while act propagates
+the generator exception and emits no fallback JSON. Success exits `0`; usage
+errors exit `64`, temporary/stale observations exit `75`, and configuration
+errors exit `78`.
+
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive status` | Options: `--json`, `--operational`, `--diagnose`, and the mode-specific filters documented below. | Reads bounded liveness, operational, diagnostic, or archive projections without mutating tasks. | The selected JSON schema is `hive-running-status.v2`, `hive-status-diagnose.v2`, or `hive-operational-status.v4`. | Invalid arguments and projection failures use the selected typed error surface. | Error-envelope `JSON::GeneratorError` is suppressed so the original typed status error controls the exit. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
+| `hive act` | Options: required `--observation` and optional `--json`. | Revalidates and executes one current routine action; stale or invented actions are refused. | JSON uses schema `hive-act.v2`. | Invalid arguments and stale/refused actions use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
 
 ## Bounded running-task contract
 
@@ -185,6 +211,17 @@ Confirmation-free operational actions repeat this routine read under the task
 lock. If history changes or becomes invalid between status and `hive act`, the
 observation token is rejected without mutation.
 
+Dead process metadata is stale liveness only while the task's current action
+or marker still claims that a runner owns the step. A markerless controller
+task whose durable receipts already project `ready_to_run` or
+`ready_to_advance` reports `not_running` and keeps that workflow state even if
+an earlier attempt left dead process metadata in the runtime task lease. For
+daemon-enrolled projects the next transition remains scheduler-owned, and ordinary
+task-lock acquisition reclaims the dead holder with a higher fence without an
+operator repair step. A genuinely current
+`agent_running`, `AGENT_WORKING`, or `REVIEW_WORKING` claim with a dead runner
+continues to report `needs_repair`.
+
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and
 `dependency_wait` as its primary reason; it cannot fall through to `idle`.
@@ -291,6 +328,19 @@ mtime, reason, or another low-cardinality attr.
 and rejects stale tokens or recommendations that are no longer routine. It is
 not a general command executor and cannot represent destructive, release, or
 administrative actions.
+
+`hive-act.v2` errors include the requested `action_id` and `target`; a missing
+pre-dispatch positional is represented by an empty string. Command-level act
+error serialization uses the strict policy: if `JSON.generate` raises
+`JSON::GeneratorError`, that generator exception is raised rather than
+suppressed, and no fallback JSON document is emitted.
+
+Status pre-dispatch errors retain the requested surface. Bare JSON errors use
+`hive-running-status.v2`, `--diagnose` uses `hive-status-diagnose.v2`, and
+`--operational` uses `hive-operational-status.v4`, each with
+`error_kind: "error"`. Status itself suppresses a
+`JSON::GeneratorError` while serializing an error envelope so the original
+typed status error continues to control the exit boundary.
 
 For markerless descriptor tasks, `observation_mtime` and the locked recheck use
 the stable task `meta.yml` mtime when present rather than the task-directory

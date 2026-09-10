@@ -70,6 +70,7 @@ module Hive
           claims = requirement.fetch("claims")
           claim_by_id = claims.to_h { |item| [ item.fetch("id"), item ] }
           covered = Hash.new(0)
+          wrong_kind = {}
           expected_hashes = []
           entries.each do |entry|
             kind = entry.fetch("kind").to_s
@@ -77,7 +78,8 @@ module Hive
               claim = claim_by_id[claim_id.to_s]
               raise StoreError, "evidence names unknown claim #{claim_id.inspect}" unless claim
               unless claim.fetch("proof_kind") == kind
-                raise StoreError, "claim #{claim_id} requires #{claim.fetch('proof_kind')} proof, not #{kind}"
+                wrong_kind[claim.fetch("id")] ||= kind
+                next
               end
               covered[claim.fetch("id")] += 1
             end
@@ -99,6 +101,22 @@ module Hive
             raise StoreError, "reviewer must return exactly one verdict per claim and exclusion"
           end
           verdict_by_target = verdicts.to_h { |item| [ item.fetch("target_id"), item ] }
+          # A rejected candidate is still valuable durable history: recording
+          # the independent review is what lets the next producer receive its
+          # revision guidance. Requiring rejected evidence to satisfy the
+          # acceptance contract first stranded malformed candidates as
+          # perpetually pending and every daemon retry reviewed the same bytes.
+          # Preserve the strict boundary by allowing a wrong proof kind only
+          # when the reviewer explicitly revises that same claim. Publication
+          # can therefore never admit it, while autonomous recapture can move
+          # forward from the immutable failed attempt.
+          wrong_kind.each do |claim_id, kind|
+            next if verdict_by_target.fetch(claim_id).fetch("verdict") == "revise"
+
+            raise StoreError,
+                  "claim #{claim_id} requires #{claim_by_id.fetch(claim_id).fetch('proof_kind')} " \
+                  "proof, not #{kind}"
+          end
           accepted_without_proof = uncovered.select do |claim_id|
             verdict_by_target.fetch(claim_id).fetch("verdict") == "accepted"
           end

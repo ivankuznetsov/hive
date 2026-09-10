@@ -88,6 +88,26 @@ class OperationalStatusTest < Minitest::Test
                  result.dig("runtime", "display_version")
   end
 
+  def test_controller_failure_is_not_hidden_by_markerless_scheduler_brake
+    %w[secret_policy_publish_blocked fix_worktree_dirty worktree_head_custody_mismatch].each do |code|
+      row = task(action: "ready_to_run", slug: "controller", marker: "none").merge(
+        "workflow" => "patrol-fix",
+        "diagnostic" => { "source" => "artifact", "code" => code,
+                          "owner" => "operator", "detail" => "Exact controller failure" }
+      )
+      snapshot = scheduler_snapshot_for(row, decision: "markerless_stalled", reason: "No progress")
+      projected = project(
+        status_payload(row), scheduler_snapshot: snapshot,
+        project_context: { "demo" => { "daemon_enabled" => true } }
+      ).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state")
+      assert_equal "operator", projected.fetch("blocker_owner")
+      assert_equal code, projected.dig("reasons", 0, "code")
+      assert_equal "markerless_stalled", projected.dig("reasons", 1, "code")
+    end
+  end
+
   def test_closure_projection_advertises_operator_confirmation_and_retains_archived_receipt
     receipt = {
       "schema" => Hive::TaskClosure::SCHEMA,
@@ -197,6 +217,48 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "hive", projected.fetch("blocker_owner")
     assert_equal "stale", projected.dig("liveness", "status")
     assert_equal "stale_runner", projected.dig("reasons", 0, "code")
+  end
+
+  def test_dead_runner_marker_stays_repair_after_the_action_projects_error
+    %w[agent_working review_working].each do |marker|
+      row = task(action: "error", slug: marker, marker: marker).merge(
+        "claude_pid" => 99_999,
+        "claude_pid_alive" => false
+      )
+
+      projected = project(status_payload(row)).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state"), marker
+      assert_equal "stale", projected.dig("liveness", "status"), marker
+      assert_equal "stale_runner", projected.dig("reasons", 0, "code"), marker
+    end
+  end
+
+  def test_patrol_fix_receipt_progress_outweighs_a_dead_predecessor_lock
+    row = task(
+      action: "ready_to_advance", slug: "receipt-ready",
+      stage: "2-fix", marker: "none"
+    ).merge(
+      "workflow" => "patrol-fix",
+      "claude_pid" => 99_999,
+      "claude_pid_alive" => false,
+      "attempt_id" => "completed-attempt",
+      "task_generation" => "generation-1"
+    )
+
+    projected = project(
+      status_payload(row),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "idle", projected.fetch("state")
+    assert_equal "scheduler", projected.fetch("blocker_owner")
+    assert_equal "not_running", projected.dig("liveness", "status")
+    assert_nil projected.dig("liveness", "pid")
+    assert_nil projected.dig("liveness", "attempt_id")
+    assert_nil projected.dig("liveness", "task_generation")
+    assert_equal "ready_for_dispatch", projected.dig("reasons", 0, "code")
+    assert_nil projected.fetch("action"), "the enrolled daemon owns the next transition"
   end
 
   def test_invalid_task_is_unknown_while_admission_error_needs_repair

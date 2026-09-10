@@ -122,6 +122,9 @@ root-Minitest-owning job in `ci.yml` retains that file: coverage shards,
 expensive proof gates, e2e harness library tests, the advisory TUI latency job,
 the required systemd-user offline/reconnect job, and the macOS launchd proof.
 
+Publication tests disable automatic Git maintenance in their disposable local
+and bare repositories, so detached maintenance cannot race with fixture cleanup.
+
 During implementation, run the smallest relevant test files directly:
 
 ```bash
@@ -438,6 +441,12 @@ bundle exec rake coverage
 
 The coverage task uses Ruby's stdlib `Coverage` API. It starts line and branch coverage in the parent test process and prepends `RUBYOPT=-Itest -rhive_coverage_boot` so Ruby subprocess tests dump their own result files under a per-run `coverage/.resultset/<run-id>/` directory. The final merged report is written to `coverage/coverage.json` and prints the lowest-covered source files plus uncovered line numbers.
 
+Tests that assert a subprocess leaves the repository unchanged must clear
+`HIVE_COVERAGE`, `HIVE_COVERAGE_ROOT`, `HIVE_COVERAGE_RUN_ID`, and `RUBYOPT`
+for that child. Otherwise the coverage bootstrap itself writes an ignored
+resultset file inside the checkout and creates a false repository-mutation
+failure even when the exercised command is read-only.
+
 Hosted CI separates collection from enforcement. Six `coverage:collect`
 matrix legs run a complete, disjoint partition of the default test-file set and
 upload their raw process results plus a `hive-coverage-shard.v1` manifest.
@@ -564,7 +573,22 @@ task default: :test
   credential helpers, hooks, and signing settings. The authenticated
   `rake smoke` task explicitly opts out because it exists to exercise real
   operator logins; direct smoke-file runs must set
-  `HIVE_TEST_ALLOW_REAL_USER_ENV=1` deliberately.
+  `HIVE_TEST_ALLOW_REAL_USER_ENV=1` deliberately. The escape hatch fails
+  closed unless every requested test file is under `test/smoke/`; valid smoke
+  processes retain the operator `HOME` only for authenticated agent state and
+  receive a disposable `HIVE_HOME` plus disposable XDG data/bin roots. Any
+  inherited `HIVE_PREFIX` is removed, so both Hive runtime paths and the shell
+  installer's managed QMD tree/user-bin links remain isolated. `bin/test`
+  passes its consumed leading file list to this guard before loading tests, so
+  focused smoke invocations use the same boundary as the Rake smoke task. A
+  zero-provider smoke case exercises that path and its normal cleanup hooks.
+  The Rake task injects the opt-in only into its test child, so later tasks in
+  the same Rake process cannot inherit real-user access. Its regression probe
+  explicitly selects the provider-free smoke file despite an inherited `TEST`
+  selector and checks the Rake parent's environment after the child exits.
+  PATH-based diagnostics
+  may still execute operator tools such as QMD by design; their Hive installer
+  write targets remain redirected.
 - `with_tmp_dir` — creates a `hive-test*` directory and removes it through
   `HiveTestTmpCleanup` in `ensure`. The cleanup is restricted to direct
   children with test-shaped names owned by the current uid, handles read-only
@@ -630,7 +654,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | `draft_pr_receipt_test.rb`, `stages/draft_pr_handoff_test.rb` | Managed draft-PR controller — strict atomic phases and receipt evidence; exact absence-leased publication and one-attempt ambiguous push/create recovery; byte-exact UTF-8 report resume and reparsing; retried root-confined no-fix cleanup and quarantine redaction; PAT/history/binary/oversize quarantine through closed hardened reads; PII-safe projection; remote identity blocks; terminal artifact repair; and no corrective/ready/merge/close/edit/release/publish/deploy operations. |
 | `pr_test.rb` | `Hive::Pr` — pull-request-number extraction from `/pull/<number>` URLs, including query/fragment/trailing-slash tolerance, nil for issue/non-number/subpage URLs, `identifier_to_number` acceptance/rejection for `hive review --pr`, and http(s) URL validation including invalid-URI rejection. |
 | `agent_limit_test.rb` | `Hive::AgentLimit` — provider-limit classifier for Claude usage-credit menus and common quota/rate-limit API errors; provider reset-estimate parsing for display; marker-age-only periodic retry eligibility; and the shared quota-held display/JSON helpers (`held?`, provider extraction, UTC reset display, label text, and `held` field shape), with runnable false-positive guards for source line numbers and ordinary "missing rate limit" findings. |
-| `agent_runtime_test.rb`, `agent_test.rb`, `agent_profile_test.rb`, `agent_profile_modes_test.rb`, `opencode_agent_lifecycle_test.rb` | `Hive::AgentRuntime` / `Hive::Agent` / `AgentProfile` — immutable provider-neutral request/invocation/evidence/result contracts; exact positional, stdin, and flag-value transport for Claude/Codex/Pi/Grok; fail-closed headless, sandbox, required-directory, model/effort, raw-argument, and named-capability requests; bounded redacted diagnostics; spawn/wait/timeout/SIGINT forwarding; version/capability process-group cleanup; completed-child lock cleanup for headless and native OpenCode runs; observable status/usage normalization; safe-mode non-leakage; and provider-limit classification before generic exit-code / expected-output failures. |
+| `agent_runtime_test.rb`, `agent_test.rb`, `agent_profile_test.rb`, `agent_profile_modes_test.rb`, `invocation_process_custody_test.rb`, `opencode_agent_lifecycle_test.rb` | `Hive::AgentRuntime` / `Hive::Agent` / `AgentProfile` — immutable provider-neutral request/invocation/evidence/result contracts; exact positional, stdin, and flag-value transport for Claude/Codex/Pi/Grok; fail-closed headless, sandbox, required-directory, model/effort, raw-argument, and named-capability requests; bounded redacted diagnostics; spawn/wait/timeout/SIGINT forwarding; version/capability process-group cleanup; completed-child lock cleanup for headless and native OpenCode runs; OpenCode invocation-token cleanup of a reparented `setsid` descendant without touching another run; bounded procfs and `ps xeww` inventory failure modes (survived TERM/KILL, vanished, oversized environments, unavailable procfs roots, missing PID start identity, unavailable inventory, exited versus unsignalable targets); cleanup-failure precedence over a successful transcript, including the warned reap failure on the unwind path; observable status/usage normalization; safe-mode non-leakage; and provider-limit classification before generic exit-code / expected-output failures. |
 | `artifact_firewall_test.rb`, `protected_files_test.rb`, `secret_patterns_test.rb`, `agent_profile_modes_test.rb`, `claude_launcher_test.rb`, and affected `stages/*` tests | `Hive::ArtifactFirewall` — immutable manifest/snapshot/report contracts; bounded and duplicate-free manifest inputs; no-follow add/change/delete/symlink/directory/mode/parent/unreadable classification; descriptor-bound captured bytes and baseline identity, including open-time type changes and legacy capture verification; non-empty regular required outputs inside realpath-checked writable roots; immutable in-memory captures; bounded injectable redaction and fail-closed internal-error translation; snapshot/report binding; atomic verified restoration with parent-substitution refusal, including exceptional spawn exits; non-recursive and unreconstructable failure; symlink rejection in headless/tmux output polling; exact execute/open-PR/finalize/review/managed-worktree marker and result adapters, including aliased Git config environment paths; clean loading; and the production `ProtectedFiles` bypass guard. |
 | `skill_check_test.rb` | `Hive::SkillCheck` — exact Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and Grok top-level invocation parsing/discovery; Claude/Codex plugin fallback paths; enabled Grok installed-plugin registry/config resolution; Pi package/settings/git discovery; malformed invocation hints; and deterministic `npm root -g` success/timeout coverage. |
 | `agent_skills/{facade,canonical_skill,directory_publisher,inspector,openclaw}_test.rb`, `commands/{doctor,doctor_managed_skills}_test.rb`, `openclaw_skills_test.rb` | Canonical Hive operating skill and diagnosis — clean-loading `Hive::AgentSkills` render/inspect/plan/apply contracts; exact local skill version `0.1.5` and 17-reference inventory; deterministic OpenClaw/Claude/Codex/Pi projections and invocations; dogfood active-install/runtime-reporting policy; OpenCode's exact package-bound configured-plugin identity without a persistent install root; Guided-default/explicit-YOLO answer policy and scenario projection; canonical/file digests; Codex interface metadata; generated OpenClaw byte correspondence; non-mutating previews; stale-plan and foreign-content refusal; safe whole-directory atomic publication; ownership/mode/symlink refusal; rollback boundaries; orphan detection; filesystem-only native/ClawHub evidence; zero agent-runner calls; production internal-require guards; and byte-identical disposable homes under Doctor. |
@@ -737,6 +761,7 @@ exercise every migrated consumer. The follow-up attempt/projection slice runs
 | `honeycomb_workflow_lifecycle_test.rb` | A local immutable v2 git registry fixture drives canonical `catalog.json` plus `packages/NAME/VERSION/manifest.yml` through install, no-write dry-run, update, catalog-commit task pinning, list selected/retained dimensions, remove, and offline execution of the retained task. It also proves later agent-profile drift leaves immutable task reads visible while exact-slot runtime preparation still fails closed. A second fixture-backed path runs preview→apply install/update/remove through the real Hive Web adapter and command constructors. Recommendation coverage pins package-effort selection, compatible-prior retention, interactive agent/model/effort editing, and identical preview/apply configuration receipts. Unit lifecycle/store coverage also pins strict browser-preview source/digest identities, first-install still-unselected checks, cleanup-error cause preservation, post-commit warning envelopes, and removal rechecks inside the mutation lock. |
 | `user_workflow_e2e_test.rb` | Project-authored workflow acceptance — `hive workflow new` scaffolds a descriptor, `hive new --workflow` creates a pinned task, generic run/approve drives it from `1-inbox -> 2-work -> 3-done`, and a same-process coding capture still uses the default coding path. |
 | `daemon_auto_retry_test.rb`, `daemon_stale_agent_healing_test.rb` | Status-to-recovery integration — real status rows feed the sole automatic scheduler, pinning stale `AGENT_WORKING` rewrites, closed coordinator events, `daemon.agent_marker_grace_sec` threading, ordinary `ERROR` / `REVIEW_ERROR` reasons sharing one cooldown, exact `terminal_outcome_blocked` / `terminal_outcome_invalid` errors remaining operator-owned, current-work safety deferral, global/project kill switches, and fresh failure generations retrying without an exhaustion counter. |
+| `unit/attempts/detached_launcher_test.rb`, `unit/commands/attempt_supervise_test.rb` | Durable-attempt handoff — POSIX session detachment, capability/ready descriptor transfer through the private command, timer and result propagation, trusted load-path failure without ambient fallback, launch timeout and preflight failures, and Linux systemd-user sibling-scope placement that keeps accepted wrappers outside the daemon service's OOM cgroup. |
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → open-pr → review → finalize → done. |
 | `cli_test.rb`, `cli_version_test.rb`, `cli_usage_error_json_test.rb`, `new_wrapper_argv_test.rb`, `bin_hive_refactor_patrol_usage_error_test.rb` | CLI/help/wrapper contract — init help derives the advertised schema version from `SCHEMA_VERSIONS`; top-level `--version`; option-bearing help; JSON boolean and malformed-assignment rejection; invalid-byte argv rejection; `hive new` text protection; representative pre-dispatch errors; and current v4 Refactor Patrol error envelopes. |
 | `patrol_command_test.rb`, `unit/patrol/{finding_registry,fixer,reviewer,validator,launch_budget}_test.rb`, `unit/usage_db_test.rb` | `hive patrol` — JSON envelope, dry-run behavior, language-neutral mapping, exact-remote SHA pinning, durable finding lifecycle and semantic dedup, validation admission, clean-baseline and stale-target checks, ranked selection, immutable audit records, schema validation, mode-derived shared daily launches across ordinary/architecture work, project-lifetime locking, UTC-boundary backoff, token telemetry, and Patrol attribution. |
@@ -889,14 +914,34 @@ current-DOM query and visits that stable route directly. The project-rail test
 uses the same discipline for the broadcaster-replaced rail and composer:
 button lookup/click and ordered-value reads each happen in one current-DOM
 JavaScript turn, so Turbo cannot detach a saved node between lookup and action.
-Status-stream browser coverage also pins cancelled-confirmation refresh
-admission, changing-token one-request reconciliation, and pre-confirmation DOM
-teardown through the real Action Cable connection command path. It additionally
-pins teardown during a current-transport reconnect, bounded cleanup when no
-confirmation callback ever arrives, retry after a real server-side startup
-rejection, and reconnect after deferred adapter registration fails. Unit barriers
-bound every wait and assert the exact shared scan count and first-poller lease
-rollback rather than relying on scheduler timing.
+`web/test/system/status_stream_source_test.rb` is the focused status-source
+lifecycle suite. It retains the real browser/server pre-confirmation cases:
+`DOM teardown waits for Cable confirmation before server unsubscribe` observes
+server registration before release and a final zero subscriber count, while
+`a detached source has bounded cleanup when confirmation never arrives` proves
+transport-before-unsubscribe timeout cleanup. The suite also covers teardown
+during current-transport reconnect, one dedicated consumer per application
+attempt without changing Turbo's shared consumer, direct first-error identity,
+failure-complete and idempotent cleanup, exact-once normal socket close, guarded
+`OPEN`/`CONNECTING` fallbacks, DOM warning/recovery, supersession error order,
+pending-release failures, failed setup and terminal-disconnect retry, stale
+consumer/callback/timer and queued `open`/`reopen` fencing, same-attempt
+transport reconnect, persistent synchronous retry failure, immediate
+detach/reattach during pending consumer setup, real client-side setup and
+partial-registration recovery through `StatusChannel#catch_up`, fresh-attempt
+`retry_wait`, and one/two/zero transport bounds across source connection,
+supersession, repeated unconfirmed detach/attach, multiple sources, and detach.
+It keeps server startup rejection, deferred adapter failure, and detach-before-
+retry coverage alongside those owner/attempt cases.
+
+`kanban_board_test.rb` retains version/catch-up and navigation integration:
+cancelled-confirmation refresh admission, changing-token one-request
+reconciliation, same-URL permanent handoff, cross-URL/history clearing, real
+disconnect recovery, and task-page catch-up. Channel and Rails integration
+suites continue to own subscriber lease pairing, deferred registration,
+rejection recovery, and rendered wiring. Explicit barriers bound waits and
+assert exact shared scan counts and first-poller lease rollback rather than
+relying on scheduler timing.
 Before submitting the
 brainstorm answer, it waits for the daemon to classify the
 `needs_input` row and for the current `brainstorm.md` mtime second to pass, so
@@ -1322,3 +1367,7 @@ provider replays and timing remain separate verification gates.
 - [[modules/task_workspace]]
 - [[e2e]]
 - [[gaps]]
+
+The command-owner guard checks each named cell in shared command-contract tables.
+Regression probes delete one cell at a time and reject command-specific contract
+prose even when it appears inside the navigation index section.

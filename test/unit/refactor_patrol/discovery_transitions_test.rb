@@ -76,7 +76,7 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
 
   def test_forwards_completion_and_block_transitions
     token = { job_id: "job-1" }
-    aggregate = { "job_id" => "job-1" }
+    aggregate = { "job_id" => "job-1", "updated_at" => NOW.iso8601 }
     assert_equal :release_discovery!, @subject.release(store: @store, token: token, reason: "failed", now: NOW, backoff_sec: 60)
     assert_equal :checkpoint_discovery!, @subject.checkpoint(store: @store, token: token, envelope: {}, now: NOW, backoff_sec: 60)
     assert_equal :checkpoint_discovery_progress!, @subject.checkpoint_progress(store: @store, token: token, envelope: {}, now: NOW, lease_sec: 120)
@@ -88,5 +88,9 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
       checkpoint_discovery_progress! block_discovery! block_actions!
       retire_obsolete_source!
     ], @store.calls.map(&:first)
+    discovery_block = @store.calls.fetch(3).fetch(2)
+    assert_equal aggregate, discovery_block.fetch(:expected_record)
+    action_block = @store.calls.fetch(4).fetch(2)
+    refute action_block.key?(:expected_record)
   end
 end

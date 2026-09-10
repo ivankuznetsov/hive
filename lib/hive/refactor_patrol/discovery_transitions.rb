@@ -54,9 +54,15 @@ module Hive
       def block(store:, aggregate:, phase:, reason:, evidence:, now:,
                 backoff_sec:, **)
         method = phase.to_sym == :action ? :block_actions! : :block_discovery!
+        options = {
+          reason: reason, evidence: evidence, now: now,
+          backoff_sec: backoff_sec
+        }
+        if method == :block_discovery!
+          options[:expected_record] = aggregate
+        end
         store.public_send(
-          method, aggregate.fetch("job_id"), reason: reason,
-          evidence: evidence, now: now, backoff_sec: backoff_sec
+          method, aggregate.fetch("job_id"), **options
         )
       end
 

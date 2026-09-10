@@ -40,6 +40,16 @@ module Hive
       File.join(workflow_publish_root, "objects")
     end
 
+    # Host-global daily activity projection. The version lives in the path so
+    # future readers never have to infer a record schema from mutable config.
+    def daily_digest_root
+      File.join(state_home, "daily-digest", "v1")
+    end
+
+    def daily_digest_delivery_root
+      File.join(daily_digest_root, "deliveries")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

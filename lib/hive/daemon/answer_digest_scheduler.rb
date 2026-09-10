@@ -33,7 +33,7 @@ module Hive
 
       def tick(now: @clock.call)
         return [] unless @enabled
-        return [] if @pending.any?
+        return [] if pending_any?
         return [] if backed_off?(now)
         return [] if now.getlocal.hour < @hour
 
@@ -42,13 +42,13 @@ module Hive
         last = parse_date(state["last_fired_date"])
         return [] if last && last >= today
 
-        @pending[today.iso8601] = true
+        pending_for(nil)[today.iso8601] = true
         [ dispatch_for(today) ]
       end
 
-      def complete(date:, exit_code:, envelope: nil, now: @clock.call)
+      def complete(date:, exit_code:, envelope: nil, now: @clock.call, stage: nil)
         local_date = Hive::LocalDateWindow.parse_date(date)
-        @pending.delete(local_date.iso8601)
+        pending_for(stage).delete(local_date.iso8601)
 
         # ChildSupervisor reports a nil exit status for a signalled child
         # (killed by SIGTERM/SIGKILL on shutdown or timeout). `nil.to_i` is 0,
@@ -66,19 +66,19 @@ module Hive
         if last && last >= local_date
           # The cursor already covers this date (a stale/older completion); the
           # send is durably recorded, so clear any backoff and stop.
-          @failure = nil
+          clear_stage_failure(stage)
           return
         end
 
         # Advance the cursor FIRST and clear the failure backoff only once the
-        # write durably lands. Clearing `@failure` before persisting would let a
+        # write durably lands. Clearing failure state before persisting would let a
         # write_state fault (ENOSPC/EROFS on the atomic rename) leave the day
-        # owed with NO backoff, so the next tick re-fires and re-sends the same
+        # owed with no backoff, so the next tick re-fires and re-sends the same
         # daily Telegram digest in an unbounded loop. On a write failure we
         # instead (re-)engage the bounded backoff and re-raise so the dispatcher
         # logs it; the day stays owed and is retried on the backoff schedule.
         write_state("last_fired_date" => local_date.iso8601, "updated_at" => now.utc.iso8601)
-        @failure = nil
+        clear_stage_failure(stage)
       rescue StandardError
         record_failure(now)
         raise

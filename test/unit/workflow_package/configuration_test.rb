@@ -210,9 +210,11 @@ class WorkflowPackageConfigurationTest < Minitest::Test
   end
 
   def test_manifest_without_recommendations_retains_legacy_configuration_digest
-    # The profile fingerprint includes Claude's piped-stdin transport.
-    assert_equal "567a35755fe39500f2ebf464bbfaed3ae46ca7886da6b76bdeb70c258840c6d2",
-                 build_configuration.digest
+    with_env("HIVE_CODEX_BIN" => nil) do
+      # The profile fingerprint includes Claude's piped-stdin transport.
+      assert_equal "567a35755fe39500f2ebf464bbfaed3ae46ca7886da6b76bdeb70c258840c6d2",
+                   build_configuration.digest
+    end
   end
 
   def test_supported_configuration_pins_translate_to_native_launch_arguments

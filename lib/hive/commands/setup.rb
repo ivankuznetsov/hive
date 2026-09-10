@@ -2,6 +2,7 @@ require "json"
 require "open3"
 
 require "hive/config"
+require "hive/daily_digest/migration"
 require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
@@ -79,6 +80,7 @@ module Hive
             else
               observe_web_service
             end
+            initialize_daily_digest
           end
         end
         add_web_phase
@@ -88,6 +90,17 @@ module Hive
       end
 
       private
+
+      # Digest initialization is advisory to setup: failure keeps the feature
+      # disabled and must not undo unrelated daemon/Web provisioning. The
+      # explicit migrate command surfaces the same typed failure as a hard
+      # remediation gate when the operator chooses to enable the feature.
+      def initialize_daily_digest
+        Hive::DailyDigest::Migration.ensure!
+      rescue Hive::DailyDigest::Migration::InitializationError => error
+        @error.puts("hive setup: daily digest remains disabled: #{error.message}") if @error
+        nil
+      end
 
       # Refuse before diagnostics or agent discovery. Even version/list probes
       # can make upstream CLIs or version managers initialize state, so the
@@ -237,7 +250,6 @@ module Hive
           installer = Hive::Commands::Babysit::ServiceInstaller.new(
             binary_path: Hive::InvokedBinary.path
           )
-          Hive::Commands::Babysit.prepare_service_takeover!(installer: installer)
           outcome = installer.install!(autostart: true, force: true)
           [ outcome.success?, {
             "outcome" => outcome.wire_outcome,
@@ -332,13 +344,15 @@ module Hive
             environment: @environment,
             config: web_config
           )
-          lifecycle = Hive::Web::ServiceStatus.lifecycle_state(installer)
-          was_running = lifecycle["service_running"]
           # Ordinary setup is intentionally drift-safe. A customized unit is
           # observed and preserved; explicit `hive web install --force` owns
           # the backup-producing repair path.
-          outcome = installer.install!(autostart: true, force: false)
-          restarted = @web_bundle_refreshed && was_running && outcome.success? ? installer.restart! : false
+          outcome = installer.install!(
+            autostart: true,
+            force: false,
+            restart_if_running: @web_bundle_refreshed
+          )
+          restarted = outcome.restarted
           state = setup_web_service_snapshot(installer: installer, wait_for_running: true)
           @web_service = state
           @web_service_platform_exception = outcome.success? &&

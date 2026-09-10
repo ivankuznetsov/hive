@@ -548,8 +548,10 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "Error", payload["error_class"]
       assert_equal "service_install_failed", payload["error_kind"]
       assert_equal Hive::ExitCodes::GENERIC, payload["exit_code"]
-      assert_match(/Errno::(?:EEXIST|ENOTDIR)/, payload["message"])
-      assert_includes payload["message"], invalid_home
+      assert_equal(
+        "Hive::UserService::Transaction::Unsafe: user-service home must be a directory",
+        payload["message"]
+      )
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-web-install"))))
       assert_empty schemer.validate(payload).map { |error| error["error"] }
       assert_equal 1, out.lines.length, "JSON mode must emit exactly one install document"

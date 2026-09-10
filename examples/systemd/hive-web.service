@@ -33,7 +33,8 @@
 
 [Unit]
 Description=Hive web UI
-After=network.target
+# Do not order a user unit on system-manager network targets. The local UI can
+# start offline; individual remote operations surface their own failures.
 StartLimitBurst=3
 StartLimitIntervalSec=300
 

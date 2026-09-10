@@ -5,6 +5,7 @@ require "hive/task_projection"
 require "hive/workflow_package/canonical_json"
 require "hive/task_closure"
 require "hive/terminal_outcome"
+require "hive/patrol_fix"
 
 module Hive
   # Closed, non-shell recommendations emitted by the operational status
@@ -15,7 +16,10 @@ module Hive
     ACTION_ID = "workflow.advance".freeze
     RETRY_ACTION_ID = "workflow.retry".freeze
     CLOSURE_ACTION_ID = "workflow.close_with_evidence".freeze
-    EXECUTABLE_ACTION_IDS = [ ACTION_ID, RETRY_ACTION_ID ].freeze
+    PATROL_FIX_PUBLICATION_REWORK_ACTION_ID = "patrol_fix.rework_publication".freeze
+    EXECUTABLE_ACTION_IDS = [
+      ACTION_ID, RETRY_ACTION_ID, PATROL_FIX_PUBLICATION_REWORK_ACTION_ID
+    ].freeze
     RISK_CLASS = "routine_idempotent".freeze
 
     SAFE_TASK_ACTIONS = %w[
@@ -35,6 +39,7 @@ module Hive
     TOKEN_FIELDS = %w[
       project slug folder workflow stage marker attrs mtime action
       condition_task_generation commit_generation current_attempt
+      action_receipt_id
     ].freeze
 
     STAGE_ACTIONS = {
@@ -104,6 +109,11 @@ module Hive
       end
 
       def action_id_for(row)
+        if row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED &&
+           row["workflow"] == Hive::PatrolFix::WORKFLOW_ID.to_s && row["marker"] == "none" &&
+           !row["action_receipt_id"].to_s.empty?
+          return PATROL_FIX_PUBLICATION_REWORK_ACTION_ID
+        end
         return RETRY_ACTION_ID if recoverable?(row)
         return ACTION_ID if safe?(row)
 
@@ -178,6 +188,8 @@ module Hive
           "task_history_invalid" => bounded.state == "invalid",
           "mtime" => observation_mtime(task),
           "action" => action.key,
+          "action_receipt_id" => action.respond_to?(:patrol_fix) ?
+            action.patrol_fix&.dig("outcome", "receipt_id") : nil,
           "condition_task_generation" => projection_data.dig("identity", "task_generation"),
           "commit_generation" => projection_data.dig("identity", "commit_generation"),
           "current_attempt" => projection_data.dig("identity", "attempt_id"),
@@ -252,6 +264,13 @@ module Hive
           target: target,
           observation_token: observation_token
         )
+        if action_id == OperationalAction::PATROL_FIX_PUBLICATION_REWORK_ACTION_ID
+          execute_publication_rework(
+            task, project_name: project_name, target: target,
+            observation_token: observation_token
+          )
+          return result_for(project_name, slug)
+        end
         if action_id == OperationalAction::RETRY_ACTION_ID
           receipt = @recovery_writer.recover!(
             row: observed,
@@ -325,6 +344,55 @@ module Hive
         else
           raise Hive::StaleOperationalObservation,
                 "the current task state has no confirmation-free operational action"
+        end
+      end
+
+      def execute_publication_rework(task, project_name:, target:, observation_token:)
+        require "hive/lock"
+        require "hive/patrol_fix/receipt_store"
+        require "hive/patrol_fix/stage_transition"
+        require "hive/patrol_fix/transition"
+
+        OperationalAction.assert_current!(
+          task, project: project_name,
+          action_id: OperationalAction::PATROL_FIX_PUBLICATION_REWORK_ACTION_ID,
+          target: target, observation_token: observation_token
+        )
+        Hive::PatrolFix::StageTransition.with_lock(task) do
+          Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
+            lock = Hive::Lock.read_task_lock(task.folder)
+            unless lock && lock["lock_id"]
+              raise Hive::PatrolFix::Transition::InvalidTransition,
+                    "publication rework task lock ownership could not be verified"
+            end
+            OperationalAction.assert_current!(
+              task, project: project_name,
+              action_id: OperationalAction::PATROL_FIX_PUBLICATION_REWORK_ACTION_ID,
+              target: target, observation_token: observation_token
+            )
+            manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+            receipt = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).read_all.find do |row|
+              row["kind"] == "publication_block" && row["stage"] == "publish" &&
+                row["task"] == manifest["task"] &&
+                row["evidence_revision"] == manifest["evidence_revision"]
+            end
+            unless receipt
+              raise Hive::StaleOperationalObservation,
+                    "publication block receipt changed; take a fresh operational snapshot"
+            end
+            OperationalAction.assert_current!(
+              task, project: project_name,
+              action_id: OperationalAction::PATROL_FIX_PUBLICATION_REWORK_ACTION_ID,
+              target: target, observation_token: observation_token
+            )
+            moved = Hive::PatrolFix::Transition.new(task).apply_publication_block!(receipt)
+            unless Hive::Lock.release_task_lock(
+              moved.fetch(:task_folder), lock_id: lock.fetch("lock_id")
+            )
+              raise Hive::PatrolFix::Transition::InvalidTransition,
+                    "publication rework task lock could not be released after the move"
+            end
+          end
         end
       end
 

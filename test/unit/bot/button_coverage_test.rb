@@ -94,7 +94,7 @@ class HiveBotButtonCoverageTest < Minitest::Test
   # coherent marker. Inert by construction.
   INERT_KINDS = %w[
     admission_error agent_running archived manual_steering recover_draft_pr review_parked
-    patrol_fix_rejected patrol_fix_blocked patrol_fix_escalated
+    patrol_fix_rejected patrol_fix_blocked patrol_fix_escalated patrol_fix_publication_blocked
     plan_reviewing plan_review_retry plan_review_decision plan_review_unsupported plan_review_blocked
   ].freeze
 
@@ -106,7 +106,7 @@ class HiveBotButtonCoverageTest < Minitest::Test
       ready_to_run plan_reviewing plan_review_retry plan_review_decision
       plan_review_degraded plan_review_unsupported plan_review_blocked
       admission_error agent_running archived manual_steering review_parked
-      patrol_fix_rejected patrol_fix_blocked patrol_fix_escalated
+      patrol_fix_rejected patrol_fix_blocked patrol_fix_escalated patrol_fix_publication_blocked
     ]
     assert_equal expected.sort, Hive::Schemas::TaskActionKind::ALL.sort,
                  "a new TaskActionKind must be classified as actionable or inert below"

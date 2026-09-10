@@ -659,6 +659,12 @@ replayable so a crash after the folder move is reconciled from either the old
 caller path or the new location. Blocked outcomes expose no custom operational
 action; they remain visible through the standard `needs_input` task contract.
 
+When Review or Publish detects that its clean worktree has advanced after
+validation, its `revalidate` intent returns the task to Validate. The intent is
+source-bound to the stage that detected staleness, preserves the current Fix
+receipt as carried evidence, and rotates the generation before validation runs
+again.
+
 `blocked` remains parked and non-terminal. `reject` and `escalate` dispatch the
 normal receipt-gated `approve` transition directly to `6-done`, retaining
 `rejected` or `escalated` as the archived outcome rather than implying publication.
@@ -701,6 +707,23 @@ evidence closure authorizes terminal entry. Worktree cleanup follows publication
 receipt durability; failure is a
 bounded diagnostic and cannot revoke completion. Publication performs no LLM,
 issue, edit, close, ready, or merge operation.
+
+If the pre-effect secret scan returns `secret_detected`, Publish writes no
+publication state or PR receipt. It appends one generation-scoped
+`publication_block` receipt containing the safe blocked-field names, exact
+review/fix/validation receipt IDs, HEAD and diff digests, policy version, fixed
+operator owner, and fixed summary. The projection treats that receipt as a
+parked `publication_blocked` outcome and exposes
+`patrol_fix.rework_publication`; the receipt ID participates in the action's
+observation token. The action rechecks that token while holding the controller
+transition and task locks, writes a replayable `publication_rework` intent,
+advances the manifest/evidence generation, rotates worktree custody, appends a
+new-generation Publish reopen receipt, and moves to `1-inbox`, `2-fix`, or
+`4-review`. Review rework carries the exact prior Fix and Validation receipts;
+Fix and Inbox rework carry none. The old block is no longer current after the
+generation change. Daemon policy never dispatches this action, while daemon
+status retains it for the operator. `workflow.retry` is neither advertised nor
+accepted for the park.
 
 Admission may bypass remote reconciliation only by supplying this
 same full canonical publication payload, including host/repository/base,

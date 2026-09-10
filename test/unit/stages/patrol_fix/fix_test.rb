@@ -139,6 +139,35 @@ class PatrolFixFixStageTest < Minitest::Test
     assert_match(/requires a current inbox fix/, error.message)
   end
 
+  def test_fix_accepts_only_an_exact_publication_policy_reopen_for_fix
+    manifest = {
+      "task" => { "slug" => "repair-one", "generation" => 2 },
+      "evidence_revision" => { "generation" => 2, "digest" => "b" * 64 }
+    }
+    reopen = {
+      "receipt_id" => "reopen-1", "kind" => "reopen", "stage" => "publish",
+      "task" => manifest.fetch("task"),
+      "evidence_revision" => manifest.fetch("evidence_revision"),
+      "payload" => {
+        "outcome_receipt_id" => "block-1",
+        "operator" => "operator:publication_policy", "carried_receipts" => []
+      }
+    }
+    block = {
+      "receipt_id" => "block-1", "kind" => "publication_block", "stage" => "publish",
+      "payload" => { "rework_stage" => "fix" }
+    }
+    store = Struct.new(:rows) { def read_all = rows }.new([ block, reopen ])
+
+    assert_equal({ decision: nil, prior_fix: nil },
+                 Hive::Stages::PatrolFix::Fix.send(:fix_authorization, store, manifest))
+
+    block.fetch("payload")["rework_stage"] = "review"
+    assert_raises(Hive::StageError) do
+      Hive::Stages::PatrolFix::Fix.send(:fix_authorization, store, manifest)
+    end
+  end
+
   def test_rework_rejects_custody_from_an_older_generation
     with_fix_task do |task, worktree_root|
       owner = Hive::PatrolFix::WorktreeReceipt.new(
@@ -211,7 +240,7 @@ module PatrolFixStageFixture
   extend HiveTestHelper
 
   module_function
-  def with_task(stage:)
+  def with_task(stage:, source_evidence: "bug")
     Dir.mktmpdir do |dir|
       repo = File.join(dir, "repo")
       FileUtils.mkdir_p(repo)
@@ -227,7 +256,7 @@ module PatrolFixStageFixture
       manifest = { "schema" => "hive-patrol-fix-task-manifest", "schema_version" => 1,
         "task" => { "slug" => "repair-one", "generation" => 1 }, "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 }, "target_revision" => head,
         "sources" => [ { "engine" => "ordinary_patrol", "identity" => "finding-1", "target_revision" => head,
-          "evidence" => [ "bug" ], "affected_code" => [ "app.rb" ], "reproduction_guidance" => "touch /tmp/never-from-prose",
+          "evidence" => [ source_evidence ], "affected_code" => [ "app.rb" ], "reproduction_guidance" => "touch /tmp/never-from-prose",
           "discovery_run" => "run-1", "semantic_lineage" => [ "root-1" ] } ], "aliases" => [], "relations" => { "successor" => nil, "issues" => [] } }
       Hive::PatrolFix::TaskManifest.new(task_folder: folder).write!(manifest)
       yield Hive::Task.new(folder), dir, manifest

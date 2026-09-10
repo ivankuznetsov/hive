@@ -18,7 +18,7 @@ module Hive
       SCHEMA_VERSION = 1
       INTENT_FILENAME = "route-intent.json".freeze
       MAX_INTENT_BYTES = 32 * 1024
-      ROUTES = %w[rework revalidate].freeze
+      ROUTES = %w[rework revalidate publication_rework].freeze
       class InvalidTransition < Hive::Error; end
 
       def initialize(task, worktree_root: nil, commit: nil, clock: -> { Time.now.utc })
@@ -42,8 +42,28 @@ module Hive
         validate_decision!(decision, route: "rework")
         intent = begin_intent(
           action_id: decision.fetch("receipt_id"), route: "rework",
-          stage: "review", destination: "2-fix", operator: "controller:review",
+          stage: "review", destination: stage_dir("fix"), operator: "controller:review",
           carried_receipts: []
+        )
+        apply_intent(intent)
+      end
+
+      def apply_publication_block!(receipt)
+        validate_publication_block!(receipt)
+        target = receipt.dig("payload", "rework_stage")
+        destination = { "inbox" => stage_dir("inbox"), "fix" => stage_dir("fix"),
+                        "review" => stage_dir("review") }
+                      .fetch(target)
+        carried = if target == "review"
+          [ receipt.dig("payload", "fix_receipt_id"),
+            receipt.dig("payload", "validation_receipt_id") ]
+        else
+          []
+        end
+        intent = begin_intent(
+          action_id: receipt.fetch("receipt_id"), route: "publication_rework",
+          stage: "publish", destination: destination,
+          operator: "operator:publication_policy", carried_receipts: carried
         )
         apply_intent(intent)
       end
@@ -150,7 +170,8 @@ module Hive
       def commit_intent!(intent)
         @commit.call(
           stage_name: intent.fetch("to"), slug: @task.slug,
-          action: intent.fetch("route") == "rework" ? "review rework" : "outcome reopened",
+          action: intent.fetch("route") == "rework" ?
+            "review rework" : "publication policy rework",
           pathspecs: [
             File.join("stages", intent.fetch("from"), @task.slug),
             File.join("stages", intent.fetch("to"), @task.slug),
@@ -250,8 +271,76 @@ module Hive
         end
       end
 
+      def validate_publication_block!(receipt)
+        folder = current_task_folder
+        manifest = TaskManifest.new(task_folder: folder).read
+        rows = ReceiptStore.new(task_folder: folder).read_all
+        stored = rows.find do |row|
+          row["receipt_id"] == receipt["receipt_id"]
+        end if receipt.is_a?(Hash)
+        unless stored == receipt && receipt["kind"] == "publication_block" &&
+               receipt["stage"] == "publish" &&
+               receipt.fetch("task") == manifest.fetch("task") &&
+               receipt.fetch("evidence_revision") == manifest.fetch("evidence_revision")
+          raise InvalidTransition, "publication rework requires the exact current block receipt"
+        end
+        payload = receipt.fetch("payload")
+        review = rows.find { |row| row["receipt_id"] == payload["review_receipt_id"] }
+        fix = rows.find { |row| row["receipt_id"] == payload["fix_receipt_id"] }
+        validation = rows.find do |row|
+          row["receipt_id"] == payload["validation_receipt_id"]
+        end
+        common_identity = [ receipt.fetch("task"), receipt.fetch("evidence_revision") ]
+        unless review&.values_at("task", "evidence_revision") == common_identity &&
+               publication_evidence_authorized?(rows, receipt, fix, validation) &&
+               review.values_at("kind", "stage") == %w[decision review] &&
+               review.dig("payload", "route") == "publish" &&
+               fix.values_at("kind", "stage") == %w[fix fix] &&
+               validation.values_at("kind", "stage") == %w[validation validate] &&
+               review.dig("payload", "fix_receipt_id") == fix["receipt_id"] &&
+               review.dig("payload", "validation_receipt_id") == validation["receipt_id"] &&
+               [ review.dig("payload", "head_revision"),
+                 fix.dig("payload", "head_revision"),
+                 validation.dig("payload", "worktree_head") ].all? do |head|
+                 head == payload["head_revision"]
+               end &&
+               [ review.dig("payload", "diff_digest"),
+                 fix.dig("payload", "diff_digest") ].all? do |digest|
+                 digest == payload["diff_digest"]
+               end
+          raise InvalidTransition, "publication block no longer binds its exact evidence chain"
+        end
+      rescue KeyError
+        raise InvalidTransition, "publication rework requires the exact current block receipt"
+      end
+
+      def publication_evidence_authorized?(rows, block, fix, validation)
+        return false unless fix && validation
+
+        identity = block.values_at("task", "evidence_revision")
+        return true if [ fix, validation ].all? do |row|
+          row.values_at("task", "evidence_revision") == identity
+        end
+
+        rows.any? do |row|
+          row["kind"] == "reopen" && row["stage"] == "publish" &&
+            row.values_at("task", "evidence_revision") == identity &&
+            row.dig("payload", "operator") == "operator:publication_policy" &&
+            row.dig("payload", "carried_receipts") == [ fix["receipt_id"], validation["receipt_id"] ] &&
+            rows.any? do |previous|
+              previous["receipt_id"] == row.dig("payload", "outcome_receipt_id") &&
+                previous["kind"] == "publication_block" && previous["stage"] == "publish" &&
+                previous.dig("task", "slug") == block.dig("task", "slug") &&
+                previous.dig("task", "generation") == block.dig("task", "generation") - 1 &&
+                previous.dig("payload", "rework_stage") == "review" &&
+                previous.dig("payload", "fix_receipt_id") == fix["receipt_id"] &&
+                previous.dig("payload", "validation_receipt_id") == validation["receipt_id"]
+            end
+        end
+      end
+
       def current_task_folder
-        matches = Projection::STAGE_DIRS.filter_map do |stage|
+        matches = @task.workflow.stage_dirs.filter_map do |stage|
           folder = File.join(@task.hive_state_path, "stages", stage, @task.slug)
           folder if File.directory?(folder)
         end
@@ -284,8 +373,9 @@ module Hive
         unless intent.is_a?(Hash) && intent.keys.sort == fields.sort &&
                intent["schema"] == SCHEMA && intent["schema_version"] == SCHEMA_VERSION &&
                %w[pending completed].include?(intent["status"]) && intent["task"] == @task.slug &&
-               ROUTES.include?(intent["route"]) && %w[inbox review].include?(intent["stage"]) &&
-               Projection::STAGE_DIRS.include?(intent["from"]) && Projection::STAGE_DIRS.include?(intent["to"]) &&
+               ROUTES.include?(intent["route"]) && %w[inbox review publish].include?(intent["stage"]) &&
+               @task.workflow.stage_dirs.include?(intent["from"]) &&
+               @task.workflow.stage_dirs.include?(intent["to"]) &&
                intent["from_generation"].is_a?(Integer) &&
                intent["to_generation"] == intent["from_generation"] + 1 &&
                intent["from_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
@@ -295,10 +385,47 @@ module Hive
                intent["carried_receipts"].is_a?(Array) && intent["carried_receipts"].length <= 2
           raise InvalidTransition, "route transition intent is invalid"
         end
+        validate_route_shape!(intent)
         Time.iso8601(intent.fetch("recorded_at"))
         intent
       rescue ArgumentError, KeyError
         raise InvalidTransition, "route transition intent timestamp is invalid"
+      end
+
+
+      def validate_route_shape!(intent)
+        valid = if intent["route"] == "rework"
+          intent["stage"] == "review" && intent["from"] == stage_dir("review") &&
+            intent["to"] == stage_dir("fix") && intent["operator"] == "controller:review" &&
+            intent["carried_receipts"].empty?
+        elsif intent["route"] == "revalidate"
+          intent["stage"] == "review" &&
+            [ stage_dir("review"), stage_dir("publish") ].include?(intent["from"]) &&
+            intent["to"] == stage_dir("validate") &&
+            intent["operator"] == "controller:revalidation" &&
+            intent["carried_receipts"].length == 1 &&
+            intent["carried_receipts"].first.is_a?(String) &&
+            !intent["carried_receipts"].first.empty? &&
+            intent["carried_receipts"].first.bytesize <= 128
+        else
+          destinations = {
+            stage_dir("inbox") => 0,
+            stage_dir("fix") => 0,
+            stage_dir("review") => 2
+          }
+          intent["stage"] == "publish" && intent["from"] == stage_dir("publish") &&
+            intent["operator"] == "operator:publication_policy" &&
+            destinations[intent["to"]] == intent["carried_receipts"].length &&
+            intent["carried_receipts"].all? do |receipt_id|
+              receipt_id.is_a?(String) && !receipt_id.empty? && receipt_id.bytesize <= 128
+            end
+        end
+        raise InvalidTransition, "route transition intent has an invalid semantic shape" unless valid
+      end
+
+      def stage_dir(name)
+        @task.workflow.stage_named(name)&.dir or
+          raise InvalidTransition, "Patrol-fix workflow is missing stage #{name.inspect}"
       end
     end
   end

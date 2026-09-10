@@ -9,7 +9,7 @@
     "schema": {"const": "hive-patrol-fix-receipt"},
     "schema_version": {"const": 1},
     "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
-    "kind": {"enum": ["decision", "fix", "validation", "publication", "reopen"]},
+    "kind": {"enum": ["decision", "fix", "validation", "publication", "publication_block", "reopen"]},
     "stage": {"enum": ["inbox", "fix", "validate", "review", "publish"]},
     "task": {"$ref": "#/$defs/task"},
     "evidence_revision": {"$ref": "#/$defs/evidenceRevision"},
@@ -21,6 +21,7 @@
     {"$ref": "#/$defs/fixReceipt"},
     {"$ref": "#/$defs/validationReceipt"},
     {"$ref": "#/$defs/publicationReceipt"},
+    {"$ref": "#/$defs/publicationBlockReceipt"},
     {"$ref": "#/$defs/reopenReceipt"}
   ],
   "$defs": {
@@ -128,6 +129,23 @@
         "observed_at": {"type": "string", "format": "date-time"}
       }
     },
+    "publicationBlockPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["code", "owner", "summary", "blocked_fields", "rework_stage", "review_receipt_id", "fix_receipt_id", "validation_receipt_id", "head_revision", "diff_digest", "secret_policy_version"],
+      "properties": {
+        "code": {"const": "secret_detected"},
+        "owner": {"const": "operator"},
+        "summary": {"const": "Publication was blocked by the secret policy before any remote effect."},
+        "blocked_fields": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["title", "body", "diff"]}},
+        "rework_stage": {"enum": ["inbox", "fix", "review"]},
+        "review_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "fix_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "validation_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "head_revision": {"$ref": "#/$defs/revision"},
+        "diff_digest": {"$ref": "#/$defs/digest"},
+        "secret_policy_version": {"const": "betterleaks-1.8.1"}
+      }
+    },
     "reopenPayload": {
       "type": "object", "additionalProperties": false, "required": ["outcome_receipt_id", "operator", "carried_receipts"],
       "properties": {
@@ -166,6 +184,7 @@
     "fixReceipt": {"properties": {"kind": {"const": "fix"}, "stage": {"const": "fix"}, "payload": {"$ref": "#/$defs/fixPayload"}}},
     "validationReceipt": {"properties": {"kind": {"const": "validation"}, "stage": {"const": "validate"}, "payload": {"$ref": "#/$defs/validationPayload"}}},
     "publicationReceipt": {"properties": {"kind": {"const": "publication"}, "stage": {"const": "publish"}, "payload": {"$ref": "#/$defs/publicationPayload"}}},
-    "reopenReceipt": {"properties": {"kind": {"const": "reopen"}, "stage": {"enum": ["inbox", "review"]}, "payload": {"$ref": "#/$defs/reopenPayload"}}}
+    "publicationBlockReceipt": {"properties": {"kind": {"const": "publication_block"}, "stage": {"const": "publish"}, "payload": {"$ref": "#/$defs/publicationBlockPayload"}}},
+    "reopenReceipt": {"properties": {"kind": {"const": "reopen"}, "stage": {"enum": ["inbox", "review", "publish"]}, "payload": {"$ref": "#/$defs/reopenPayload"}}}
   }
 }

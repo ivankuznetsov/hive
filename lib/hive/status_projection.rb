@@ -61,6 +61,7 @@ module Hive
       "Rejected (parked)",
       "Blocked (parked)",
       "Escalated (parked)",
+      "Publication blocked by secret policy",
       "Ready to finalize",
       "Ready to archive",
       "Archived",

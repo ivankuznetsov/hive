@@ -1,10 +1,10 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-09-01
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
+updated: 2026-09-10
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
 **TLDR**: Authored task/project documents remain in `.hive-state` and feature
@@ -357,6 +357,39 @@ without creating an infinite loop.
   closed; a lease-created placeholder is never treated as an admitted source.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
+### Process cleanup identity and Drop fence
+
+A recorded process is the pair of numeric PID and usable start identity. For
+single-PID cleanup, a readable initial mismatch refuses before signalling; an
+unavailable initial lookup retains compatibility trust for TERM. After each
+failed grace wait, `Hive::ProcessKill` retains one authoritative classification:
+`match`, `replacement`, or `unavailable`. A readable post-TERM replacement
+completes without KILL. An unavailable state gets exactly one liveness check:
+absence completes, while a live ambiguous PID fails closed as `kill_failed`.
+Only a readable match may receive KILL. If the KILL wait still reports live,
+the same retained classification rules apply, so a readable replacement is a
+successful cleanup rather than a false failure.
+
+`ProcessKill::Result#killed` is therefore a cleanup outcome for the recorded
+identity, not a record that SIGKILL was sent. Records without a usable start
+time perform the legacy liveness-only TERM-to-KILL path and are outside this
+replacement-identity guarantee. `terminate_process_group` remains a separate
+compatibility path: its initial unavailable lookup is trusted, while its
+confirmed-tree and identity-required KILL rules are unchanged. See
+[[modules/lock]].
+
+Drop retains every candidate result through aggregation. If any result is
+`kill_failed`, the command raises a retryable refusal before task-lease
+acquisition, `cleanup_context`, or the drop audit commit. The task folder,
+lease and marker identities, logs, PR record, worktree, and branch remain the
+recovery authority. Restore identity visibility or stop and verify the
+recorded process, then retry the unchanged Drop command. Non-gating outcomes
+such as `pid_reuse_guard`, `not_alive`, `no_pid`, and
+`process_tree_unavailable` keep their established cleanup behavior. A
+replacement success still contributes the recorded number to v2
+`agent_killed_pids`; that number may now name a live foreign process and is
+never a signalling authority. See [[commands/drop]].
+
 ## Task condition journal
 
 Legacy, fail-soft operational telemetry remains in `events.jsonl` under
@@ -563,23 +596,58 @@ delivers no refresh-only prefix; the self-healing retry cannot turn that
 failure into a periodic full-page request loop. Failed delivery remains
 pending across last-subscriber shutdown, and a
 replacement broadcaster retries the retained feed value before resuming normal
-deduplication. Status and task pages use Hive's cancellation-safe custom Turbo
-stream source: a subscription that finishes connecting after its DOM owner has
-left is unsubscribed from its confirmed callback, preserving server command
-order while still releasing the abandoned owner. Confirmation is scoped to the
-current transport; disconnect clears it so teardown during reconnect again
-waits for confirmation, rejection, or disconnect. If none arrives within five
-seconds, Hive closes an otherwise-unowned Cable transport to make server cleanup
-authoritative before local release. `StatusChannel` fences the deferred adapter
-subscribe before it begins and in its completion callback, removing a handler
-that finishes after teardown. An adapter exception after deferral releases the
-lease and reconnects the transport instead of stranding an active unconfirmed
-channel. A rejected server subscription is forgotten
-and retried. A rejected asynchronous consumer setup
-clears turbo-rails' rejected cached consumer promise before retrying at a
-bounded five-second cadence. A synchronous subscription-creation failure drops
-the partial registration and failed consumer before retrying; DOM disconnect
-cancels that retry. The task-page
+deduplication.
+
+Status and task pages use Hive's cancellation-safe custom Turbo stream source.
+Its element holds one current `StatusStreamOwner`; that owner contains the
+current identity-bearing application attempt, `retryTimer`,
+`pendingReleaseTimer` and its disposition, catch-up attempt, and one of
+`connecting`, `connected`, `reconnecting`, `retry_wait`, `disconnecting`, or
+`disconnected`. `disconnected` is terminal for that owner. A later DOM connect
+or attribute supersession installs a new owner; there is no `stopped` state.
+Every application setup or retry attempt creates a fresh dedicated Action Cable
+consumer. A transient `disconnected({ willAttemptReconnect: true })` transition
+moves `connected -> reconnecting` and later reconfirms the same consumer,
+subscription, and attempt. Setup/registration/rejection failures and
+`willAttemptReconnect: false` instead retire the attempt, enter `retry_wait`,
+and let the existing five-second retry create a new attempt and consumer.
+
+All connection `open`/`reopen` paths, callbacks, timer callbacks, setup promise
+continuations, and catch-up work require both the current owner and current
+attempt. Retirement disables opening before external cleanup, so a queued
+visibility-monitor callback or late consumer cannot revive the attempt or
+touch a successor; a late dedicated consumer is closed when it arrives. A
+subscription that confirms after its DOM owner has left is released from that
+confirmed callback, preserving server command order. An unconfirmed detached
+attempt remains only as the disconnected owner's bounded pending-release
+disposition until confirmation, rejection, or disconnect. If no disposition
+arrives within five seconds, the owner closes the dedicated transport before
+local unsubscribe/forgetting, making server connection cleanup authoritative
+without consulting turbo-rails' shared consumer or subscription registry.
+The element retains that bounded custodian across ordinary detach/attach as
+well as attribute supersession, force-retiring an older predecessor before a
+third transport can be allocated.
+`StatusChannel` separately fences deferred adapter registration before it
+begins and at completion; a late handler removes itself, while a deferred
+adapter exception releases its lease and reconnects the same transport.
+
+Disconnect snapshots and clears owner/attempt slots before external calls,
+then records the first thrown value while still attempting each applicable
+timer cancellation, subscription release, consumer disconnect, conditional
+connection/socket fallback, and monitor stop. Consumer disconnect is primary;
+connection close with reconnect disabled and direct captured-socket close run
+only while the socket remains `OPEN` or `CONNECTING`, preventing a normal open
+socket from being closed twice. Final state is `disconnected` and a repeated
+disconnect performs no work. A direct internal caller receives the exact first
+error after finalization; DOM reactions and asynchronous failures warn after
+their cleanup/state obligations instead of leaking an uncaught reaction error.
+Attribute supersession clears the old reference and installs a successor even
+when old retirement fails, with the old failure retaining precedence and a
+successor setup failure routed to that new owner's `retry_wait`. One live
+source therefore intentionally owns one dedicated transport; supersession can
+temporarily own one successor plus one bounded retiring predecessor, detach
+returns to zero after any bounded pending-release custody, and simultaneous
+sources own isolated transports. The task-page
 owner includes all mutation forms, keeping their native submit events inside
 the same refresh-suppression boundary as the stream source; admission begins
 only after Turbo accepts any confirmation.
@@ -1242,8 +1310,96 @@ stale generation or digest is rejected.
 
 See [[stages/index]] for one page per stage.
 
+## Host-global daily digest state
+
+The daily activity record is the deliberate exception to project-local task
+storage: one versioned projection spans every registration under
+`Hive::Paths.state_home/daily-digest/v1/`.
+
+```text
+daily-digest/v1/
+├── .store.lock                         # global projection transaction flock
+├── records/YYYY-MM-DD/
+│   ├── base.json                       # replaceable only while open
+│   ├── frontiers.json                  # source frontier sidecar
+│   └── amendments/<sha256>.json        # immutable, ID-addressed late facts
+├── tombstones/YYYY-MM-DD.json          # permanent prune receipt + discards
+└── deliveries/
+    ├── .ledger.lock
+    └── YYYY-MM-DD.json                 # Telegram intent/outcome receipt
+```
+
+Directories are owner-only `0700`; records, receipts, and lock files are
+`0600`. Canonical JSON and SHA-256 content identities make replay and conflict
+checks deterministic. The store's single flock covers base, amendment,
+frontier, prune, and post-prune discard transactions. Delivery has a separate
+lock because publication and notification are independent lifecycles.
+
+### Persisted interval identity
+
+Each base records:
+
+```text
+local_date · sequence · time_zone · starts_at · ends_at
+boundary_kind · cutover · interval_id · record_id
+```
+
+The UTC range is half-open. `sequence` is the monotonic calendar identity;
+`local_date` is its stable human label. Ordinary boundaries come from the
+persisted IANA zone and may span 23/24/25 hours. A zone cutover starts at the
+previous record's immutable `ends_at`, stores the requested/effective metadata,
+and can skip zero-duration labels. Readers select the interval containing an
+instant and navigate by sequence, never by recalculating local midnights or
+adding days to labels.
+
+Global configuration holds `coverage_started_at`, `initial_membership`, and the
+`first_interval`. Ordered registry mutation history assigns each later interval
+the registrations effective at its boundary. Missing legacy membership evidence
+is a gap; it is not guessed from the current registry.
+
+### Orthogonal record axes
+
+Lifecycle, completeness, and content are separate:
+
+| Axis | Values | Meaning |
+|---|---|---|
+| Lifecycle | `open`, `closed`; tombstone reader outcome `pruned` | Whether the base may still be replaced |
+| Completeness | `complete`, `partial` | Whether every required source was observed sufficiently |
+| Content | `empty`, `non_empty`, `unknown` | Whether material facts/attention are present or source gaps prevent an empty claim |
+
+`missing` is a reader outcome and no file exists for it. A day can be closed and
+partial. `empty` is valid only with complete observation. Staleness is virtual
+reader data for an overdue open materialization and never rewrites the base.
+
+The open base is replaced atomically. A closed base has a non-null `closed_at`
+and is write-once; only a byte-identical identity is accepted thereafter. Each
+amendment has a stable `amendment_id`, source, known nullable event time,
+`observed_at`, `amended_at`, facts/attention/gaps, resolved gap IDs, resolved
+attention IDs with their allowlisted prior rows, and source frontiers. Effective
+attention/completeness/content are derived from the frozen base plus ordered
+amendments.
+
+### Gaps, pruning, and delivery
+
+A source gap has a stable identity, source, bounded scope/reason, observation
+time, freshness, and retry state. Recovery appends an amendment referencing the
+exact resolved gap. Source frontiers advance in the same lock transaction as
+their admitted base/amendment effect so crashes replay safely.
+
+Pruning removes a closed record directory only after writing a tombstone with
+record/interval identity, prior frontiers, and discarded amendment IDs. Later
+facts, corrections, or gap recovery append bounded idempotent discard entries
+to that tombstone and advance source frontiers without recreating the base.
+
+Daily Telegram delivery receipts retain the exact record identity, amendment
+frontier, payload hash, one private destination identity, attempt number,
+history, and `prepared|sending|sent|suppressed_empty|failed|unknown` outcome.
+They never contain a bot token or message body and survive projection pruning.
+An orphaned `sending` intent becomes `unknown` when the next send attempt
+prepares that day; neither sent nor ambiguous outcomes auto-resend.
+
 ## Backlinks
 
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
-- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/patrol]] · [[commands/refactor-patrol]]
+- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/patrol]] · [[commands/digest]] · [[commands/refactor-patrol]]

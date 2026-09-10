@@ -9,6 +9,11 @@ ENV["HIVE_HOME"] = File.join(ENV["HIVE_TEST_HOME_ROOT"], "hive-home")
 ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
 ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = "1"
 ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
+%w[
+  HIVE_RUNTIME_CHANNEL
+  HIVE_RUNTIME_BUILD_SHA
+  HIVE_RUNTIME_DEPLOYMENT_ID
+].each { |key| ENV.delete(key) }
 FileUtils.mkdir_p(ENV["HIVE_HOME"])
 
 require_relative "../config/environment"

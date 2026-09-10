@@ -37,6 +37,10 @@ require "hive/commands/metrics"
 require "hive/commands/setup"
 require "hive/commands/setup_agents"
 require "hive/commands/evidence"
+require "hive/commands/digest"
+require "hive/commands/digest_refresh"
+require "hive/commands/digest_send"
+require "hive/commands/digest_prune"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
@@ -71,8 +75,76 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def test_prdigest_delivery_command_is_absent
-    refute Hive::CLI.tasks.key?("digest")
+  def test_daily_digest_command_is_present_without_restoring_prdigest
+    assert Hive::CLI.tasks.key?("digest")
+    refute defined?(Hive::Prdigest)
+  end
+
+  def test_digest_routes_reads_refresh_send_and_prune_as_separate_actions
+    with_command_new_stub(Hive::Commands::Digest) do |calls|
+      Hive::CLI.start([ "digest", "--date", "2026-08-30", "--project", "alpha", "--json" ])
+      assert_equal [], calls.first.fetch(:args)
+      assert_equal({
+        date: "2026-08-30", project: "alpha", json: true, open_web: false
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::DigestRefresh) do |calls|
+      Hive::CLI.start([ "digest", "refresh", "--date", "2026-08-30", "--json" ])
+      assert_equal({ date: "2026-08-30", json: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::DigestSend) do |calls|
+      Hive::CLI.start([ "digest", "send", "--date", "2026-08-30", "--retry", "--json" ])
+      assert_equal({
+        date: "2026-08-30", retry: true, json: true
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::DigestPrune) do |calls|
+      Hive::CLI.start([ "digest", "prune", "--before", "2026-08-30", "--dry-run", "--json" ])
+      assert_equal({
+        before: "2026-08-30", dry_run: true, confirm: false, json: true
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_unknown_digest_action_emits_the_digest_json_error_contract
+    out, _err = capture_io do
+      assert_raises(Hive::UsageError) do
+        Hive::CLI.start([ "digest", "surprise", "--json" ])
+      end
+    end
+    payload = JSON.parse(out)
+    assert_equal "hive-digest", payload.fetch("schema")
+    assert_equal false, payload.fetch("ok")
+    assert_equal "usage", payload.fetch("error_kind")
+  end
+
+  def test_digest_rejects_options_that_belong_to_a_different_action
+    cases = [
+      [ [ "digest", "refresh", "--dry-run" ], "--dry-run" ],
+      [ [ "digest", "send", "--date", "2026-08-30", "--dry-run" ], "--dry-run" ],
+      [ [ "digest", "prune", "--before", "2026-08-30", "--yes", "--retry" ], "--retry" ],
+      [ [ "digest", "--retry" ], "--retry" ]
+    ]
+    cases.each do |argv, option|
+      error = assert_raises(Hive::UsageError) { Hive::CLI.start(argv) }
+      assert_includes error.message, option
+    end
+
+    out, = capture_io do
+      assert_raises(Hive::UsageError) do
+        Hive::CLI.start([ "digest", "refresh", "--dry-run", "--json" ])
+      end
+    end
+    payload = JSON.parse(out)
+    assert_equal "hive-digest-refresh", payload.fetch("schema")
+    assert_equal "usage", payload.fetch("error_kind")
   end
 
   def test_setup_agents_help_exposes_consent_json_and_filters
@@ -1029,6 +1101,18 @@ class HiveCliTest < Minitest::Test
   end
 
   def test_internal_patrol_commands_forward_fenced_identifiers
+    require "hive/commands/refactor_patrol_scheduled"
+    with_command_new_stub(Hive::Commands::RefactorPatrolScheduled, return_value: { "ok" => true }) do |calls|
+      Hive::CLI.start([ "refactor-patrol-scheduled", "proj", "--result-file", "/tmp/result.json", "--json" ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal({ result_file: "/tmp/result.json" }, calls.first.fetch(:kwargs))
+    end
+    with_command_new_stub(Hive::Commands::RefactorPatrolScheduled, return_value: { "ok" => false }) do
+      _out, _err, status = with_captured_exit do
+        Hive::CLI.start([ "refactor-patrol-scheduled", "proj", "--result-file", "/tmp/result.json" ])
+      end
+      assert_equal 1, status
+    end
     require "hive/commands/refactor_patrol_classify"
     with_command_new_stub(Hive::Commands::RefactorPatrolClassify) do |calls|
       Hive::CLI.start([

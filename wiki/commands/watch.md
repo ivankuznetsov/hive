@@ -99,6 +99,15 @@ The command never writes task state, claims a task lock, dispatches a stage,
 or calls a model. To execute a routine action, obtain the descriptor from a
 fresh `hive status --operational --json` snapshot and use `hive act`.
 
+Each JSON Lines event is encoded directly. A serialization failure is not
+replaced with a prose line or fallback JSON event; it remains a failed stream
+instead of publishing a misleading terminal observation.
+
+The stream schema is `hive-watch-event.v1`. A completed timeout, event cap, or
+requested terminal condition exits `0`; initial selection and repeated source
+failures exit non-zero, invalid arguments exit `64`, and signals exit `130` or
+`143` after their final event.
+
 ## Tests
 
 - `test/unit/commands/watch_test.rb` covers target resolution, ambiguity,

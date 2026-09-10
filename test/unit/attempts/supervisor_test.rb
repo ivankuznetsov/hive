@@ -153,6 +153,8 @@ class AttemptsSupervisorTest < Minitest::Test
         "reset_hint_seconds" => 30
       }
       worker = <<~RUBY
+        gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+        abort "gate not released" unless gate.read(1) == "1"
         evidence = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_EVIDENCE_FD")), "w")
         evidence.write(#{JSON.generate("#{JSON.generate(signal)}\n")})
         evidence.close
@@ -168,7 +170,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(2) { supervisor.run }
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       assert_equal "failed", terminal.outcome
       assert_equal "model_capacity", terminal.receipt.dig("provider_evidence", "failure_class")
@@ -207,7 +209,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(2) { supervisor.run }
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(10) { supervisor.run }
       diagnostic = diagnostic_from_terminal(store, store.fetch(attempt.attempt_id))
       assert_equal "model_capacity", diagnostic.fetch("code")
       assert_equal "provider", diagnostic.fetch("owner")
@@ -297,7 +299,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal 7, Timeout.timeout(2) { supervisor.run }
+      assert_equal 7, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       references = terminal.receipt.fetch("output_references")
       assert_equal 1, references.length
@@ -597,10 +599,15 @@ class AttemptsSupervisorTest < Minitest::Test
         stale_sec: 1, first_heartbeat_timeout_sec: 1
       )
       supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
-        [ RbConfig.ruby, "-e", 'Process.kill("KILL", Process.pid)' ]
+        worker = <<~'RUBY'
+          gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+          abort "gate not released" unless gate.read(1) == "1"
+          Process.kill("KILL", Process.pid)
+        RUBY
+        [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal 137, Timeout.timeout(2) { supervisor.run }
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       diagnostic = diagnostic_from_terminal(store, terminal)
       assert_equal "agent_signalled", diagnostic.fetch("code")

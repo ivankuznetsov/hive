@@ -3,7 +3,7 @@ title: hive prune
 type: command
 source: lib/hive/commands/prune.rb
 created: 2026-05-06
-updated: 2026-05-26
+updated: 2026-09-02
 tags: [command, registry, cleanup, json]
 ---
 
@@ -72,7 +72,7 @@ Malformed rows from a hand-edited `config.yml` (e.g., a non-Hash entry or a row 
 | `config` | 78 | malformed `config.yml` or missing `$HIVE_HOME` |
 | `internal` | 70 | uncategorised crash |
 
-External consumers validate against `schemas/hive-prune.v1.json`; resolve via `Hive::Schemas.schema_path("hive-prune")`.
+External consumers validate against `schemas/hive-prune.v1.json`; resolve via `Hive::Schemas.schema_path("hive-prune")`. Pre-dispatch usage failures use the same envelope with `error_kind: "usage"`. If command-level error-envelope encoding raises `JSON::GeneratorError`, prune warns on stderr, emits no substitute document, and re-raises the original typed failure.
 
 ## Symlink semantics
 

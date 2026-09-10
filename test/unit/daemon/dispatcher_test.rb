@@ -9,6 +9,7 @@ require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
+require "hive/daemon/scheduled_architecture_scheduler"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
 # these tests is the routing decisions: which Policy outcome maps to
@@ -172,9 +173,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @shutdown_exits
     end
 
-    def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
+    def update_timeouts(default_timeout_sec:, verb_timeouts:, stage_timeouts:, kill_grace_sec:)
       @timeouts = { default_timeout_sec: default_timeout_sec,
-                    verb_timeouts: verb_timeouts, kill_grace_sec: kill_grace_sec }
+                    verb_timeouts: verb_timeouts, stage_timeouts: stage_timeouts,
+                    kill_grace_sec: kill_grace_sec }
     end
 
     # #252: the dispatcher now calls this unconditionally each tick (the
@@ -362,13 +364,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
       out
     end
 
-    def complete(date:, exit_code:, envelope:, now:)
+    def complete(date:, exit_code:, envelope:, now:, stage: nil)
       completion = { date: date, exit_code: exit_code, now: now }
       completion[:envelope] = envelope if envelope
       @completed << completion
     end
 
-    def cancel(date:)
+    def cancel(date:, stage: nil)
       @cancelled ||= []
       @cancelled << date
     end
@@ -379,6 +381,16 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @reconfigured ||= []
       @reconfigured << { enabled: enabled, hour: hour }
     end
+  end
+
+  class FakeDailyDigestCloseScheduler < FakeAnswerDigestScheduler
+    def reconfigure(enabled:, interval_sec:)
+      @reconfigured ||= []
+      @reconfigured << { enabled: enabled, interval_sec: interval_sec }
+    end
+  end
+
+  class FakeDailyDigestDeliveryScheduler < FakeAnswerDigestScheduler
   end
 
   class FakeRecoveryCoordinator
@@ -552,6 +564,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       dispatch_state: nil, status_result: nil,
                       dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                       with_answer_digest_scheduler: false,
+                      with_daily_digest_close_scheduler: false,
+                      with_daily_digest_delivery_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
                       patrol_fix_admission_scheduler: nil,
@@ -592,6 +606,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
     patrol_scheduler = with_patrol_scheduler ? FakePatrolScheduler.new : nil
     answer_digest_scheduler = with_answer_digest_scheduler ? FakeAnswerDigestScheduler.new : nil
+    daily_digest_close_scheduler = if with_daily_digest_close_scheduler
+      FakeDailyDigestCloseScheduler.new
+    end
+    daily_digest_delivery_scheduler = if with_daily_digest_delivery_scheduler
+      FakeDailyDigestDeliveryScheduler.new
+    end
 
     dispatcher = Hive::Daemon::Dispatcher.new(
       config: config,
@@ -606,6 +626,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
       patrol_arbiter: patrol_arbiter,
       answer_digest_scheduler: answer_digest_scheduler,
+      daily_digest_close_scheduler: daily_digest_close_scheduler,
+      daily_digest_delivery_scheduler: daily_digest_delivery_scheduler,
       dry_run: dry_run,
       dispatch_request_state_home: dispatch_request_state_home,
       dispatch_result_state_home: dispatch_result_state_home,
@@ -625,7 +647,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.define_singleton_method(:project_enabled?) { |_| project_enabled }
     [
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
-      answer_digest_scheduler
+      answer_digest_scheduler, daily_digest_close_scheduler, daily_digest_delivery_scheduler
     ]
   end
 
@@ -1109,6 +1131,78 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, supervisor.spawned.size
   end
 
+
+  def test_periodic_architecture_scan_dispatches_and_reaps_through_real_schedulers
+    with_tmp_dir do |root|
+      entry = { "name" => "p1", "path" => root, "project_id" => "p1-id",
+                "hive_state_path" => File.join(root, ".hive-state") }
+      cfg = Hive::Config.merge_defaults(
+        "daemon" => { "enabled" => true }, "refactor_patrol" => { "enabled" => true }
+      )
+      scheduled = Hive::Daemon::ScheduledArchitectureScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { cfg }
+      )
+      architecture = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { cfg }, scheduled_scheduler: scheduled
+      )
+      arbiter = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil, architecture_scheduler: architecture,
+        state_path: File.join(root, "arbiter.json")
+      )
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+      )
+      remaining = 1
+      budget = Object.new
+      budget.define_singleton_method(:remaining_launches) { remaining }
+      with_replaced_singleton_method(Hive::Patrol::LaunchBudget, :new, ->(*) { budget }) do
+        dispatcher.tick(now: T0)
+        assert_equal 1, supervisor.spawned.size
+        child = supervisor.spawned.first
+        assert_includes child.fetch(:command), "refactor-patrol-scheduled"
+        token = child.fetch(:dispatch_token)
+        assert_equal :scheduled, token.fetch(:phase)
+        dispatcher.tick(now: T0 + 1)
+        assert_equal 1, supervisor.spawned.size, "live slice must not launch twice"
+        supervisor.next_exits = [ ChildExit.new(
+          pid: child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: child.fetch(:command), started_at: T0,
+          finished_at: T0 + 2, json_envelope: { "ok" => true }, dispatch_token: token
+        ) ]
+        dispatcher.tick(now: T0 + 2)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        assert_equal 1, supervisor.spawned.size, "completion must preserve cadence"
+        dispatcher.tick(now: T0 + 3600)
+        assert_equal 2, supervisor.spawned.size, "completed sweep must permit the next periodic dispatch"
+        second_child = supervisor.spawned.last
+        second_token = second_child.fetch(:dispatch_token)
+        assert_equal :scheduled, second_token.fetch(:phase)
+        refute_equal token.fetch(:job_id), second_token.fetch(:job_id)
+        supervisor.next_exits = [ ChildExit.new(
+          pid: second_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: second_child.fetch(:command), started_at: T0 + 3600,
+          finished_at: T0 + 3602, json_envelope: { "ok" => true }, dispatch_token: second_token
+        ) ]
+        dispatcher.tick(now: T0 + 3602)
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        dispatcher.tick(now: T0 + 7200)
+        third_child = supervisor.spawned.last
+        assert_equal 3, supervisor.spawned.size
+        supervisor.next_exits = [ ChildExit.new(
+          pid: third_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: third_child.fetch(:command), started_at: T0 + 7200,
+          finished_at: T0 + 7202, json_envelope: { "ok" => true, "reason" => "no_available_slice" },
+          dispatch_token: third_child.fetch(:dispatch_token)
+        ) ]
+        dispatcher.tick(now: T0 + 7202)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_skipped && attrs[:reason] == "no_available_slice" }
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        remaining = 0
+        dispatcher.tick(now: T0 + 10800)
+        assert_equal 3, supervisor.spawned.size, "exhausted discovery allowance must block another launch"
+      end
+    end
+  end
 
   def test_architecture_patrol_spawn_attaches_fence_then_commits_arbiter_and_routes_completion
     architecture = FakeRefactorPatrolScheduler.new
@@ -2786,7 +2880,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     ctrl.record_dispatch(
       pid: 999, project: "answer_digest", slug: "2026-06-13", stage: "answer_digest",
       command: "hive answer-digest --date 2026-06-13 --json", started_at: T0 - 5,
-      state_file_mtime: nil, kind: :digest
+      state_file_mtime: nil, kind: :answer_digest
     )
     answer_digest.next_dispatches = [
       {
@@ -3035,6 +3129,126 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     assert_equal({ enabled: true, hour: 11 }, answer_digest.reconfigured&.last)
+  end
+
+  def test_daily_digest_schedulers_dispatch_independently_from_answer_digest
+    dispatcher, supervisor, controller, _logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_answer_digest_scheduler: true,
+        with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+    controller.record_dispatch(
+      pid: 999, project: "answer_digest", slug: "2026-08-30", stage: "answer_digest",
+      command: "hive answer-digest --date 2026-08-30 --json", started_at: T0 - 5,
+      state_file_mtime: nil, kind: :answer_digest
+    )
+    close_scheduler.next_dispatches = [
+      {
+        project: "daily_digest_refresh", slug: "2026-08-30", stage: "daily_digest_refresh",
+        command: "hive digest refresh --json", state_file_mtime: nil,
+        state_file_path: nil, hive_state_path: nil
+      },
+      {
+        project: "daily_digest_close", slug: "2026-08-30", stage: "daily_digest_close",
+        command: "hive digest refresh --json", state_file_mtime: nil,
+        state_file_path: nil, hive_state_path: nil
+      }
+    ]
+    delivery_scheduler.next_dispatches = [ {
+      project: "daily_digest_delivery", slug: "2026-08-29", stage: "daily_digest_delivery",
+      command: "hive digest send --date 2026-08-29 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal %w[daily_digest_refresh daily_digest_close daily_digest_delivery],
+                 supervisor.spawned.map { |entry| entry.fetch(:stage) }
+    assert_equal :daily_digest_refresh_in_flight,
+                 controller.can_dispatch_digest?(identity: :daily_digest_refresh, now: T0)
+    assert_equal :daily_digest_delivery_in_flight,
+                 controller.can_dispatch_digest?(identity: :daily_digest_delivery, now: T0)
+    assert_equal :daily_digest_close_in_flight,
+                 controller.can_dispatch_digest?(identity: :daily_digest_close, now: T0)
+    assert_equal :answer_digest_in_flight,
+                 controller.can_dispatch_digest?(identity: :answer_digest, now: T0)
+  end
+
+  def test_daily_digest_child_exits_complete_only_the_matching_scheduler
+    dispatcher, supervisor, _controller, _logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+    supervisor.next_exits = [
+      ChildExit.new(
+        pid: 123, exit_code: 0, project: "daily_digest", slug: "2026-08-30",
+        stage: "daily_digest_close", command: "hive digest refresh --json",
+        state_file_path: nil, started_at: T0 - 5, finished_at: T0,
+        json_envelope: { "record_id" => "r1" }
+      ),
+      ChildExit.new(
+        pid: 124, exit_code: 0, project: "daily_digest_delivery", slug: "2026-08-29",
+        stage: "daily_digest_delivery", command: "hive digest send --date 2026-08-29 --json",
+        state_file_path: nil, started_at: T0 - 4, finished_at: T0,
+        json_envelope: { "outcome" => "sent" }
+      )
+    ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ {
+      date: "2026-08-30", exit_code: 0, now: T0,
+      envelope: { "record_id" => "r1" }
+    } ], close_scheduler.completed
+    assert_equal [ {
+      date: "2026-08-29", exit_code: 0, now: T0,
+      envelope: { "outcome" => "sent" }
+    } ], delivery_scheduler.completed
+  end
+
+  def test_reload_config_reconfigures_daily_digest_schedulers
+    dispatcher, _supervisor, _controller, _logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+    daily = Hive::Config::DEFAULTS.fetch("daily_digest").merge(
+      "enabled" => true,
+      "materialization_interval_sec" => 45,
+      "telegram" => { "enabled" => true, "hour" => 17 }
+    )
+
+    with_replaced_singleton_method(Hive::Config, :load_global_daily_digest, -> { daily }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_equal({ enabled: true, interval_sec: 45 }, close_scheduler.reconfigured&.last)
+    assert_equal({ enabled: true, hour: 17 }, delivery_scheduler.reconfigured&.last)
+  end
+
+  def test_reload_invalid_daily_digest_disables_only_daily_schedulers
+    dispatcher, _supervisor, _controller, logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+
+    with_replaced_singleton_method(Hive::Config, :load_global_daily_digest, lambda {
+      raise Hive::ConfigError, "daily digest frontier is not initialized"
+    }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_equal({ enabled: false, interval_sec: 300 }, close_scheduler.reconfigured&.last)
+    assert_equal({ enabled: false, hour: 9 }, delivery_scheduler.reconfigured&.last)
+    assert logger.events.any? { |name, attrs|
+      name == :daily_digest_configuration_disabled &&
+        attrs[:message].include?("not initialized")
+    }
+    assert logger.events.any? { |name, _attrs| name == :config_reloaded },
+           "an invalid digest block must not prevent unrelated config reload"
   end
 
   def test_dispatches_later_pipeline_stages_first

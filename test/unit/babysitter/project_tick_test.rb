@@ -3,6 +3,7 @@ require "json"
 require "set"
 require "hive/babysitter/project_tick"
 require "hive/babysitter/logger"
+require "hive/babysitter/dispatcher"
 
 class BabysitterProjectTickTest < Minitest::Test
   include HiveTestHelper
@@ -79,6 +80,42 @@ class BabysitterProjectTickTest < Minitest::Test
       end
 
       refute listed, "a stopped dispatcher must not load project configuration or query GitHub"
+    end
+  end
+
+  def test_provider_failure_is_retried_by_the_next_project_tick
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true })
+      logger = make_logger(dir)
+      attempts = 0
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, lambda { |_path, **_kwargs|
+        attempts += 1
+        raise Hive::GhError, "offline" if attempts == 1
+
+        []
+      }) do
+        first = Hive::Babysitter::ProjectTick.run(
+          project, dry_run: true, logger: logger, inflight: Set.new
+        )
+        second = Hive::Babysitter::ProjectTick.run(
+          project, dry_run: true, logger: logger, inflight: Set.new
+        )
+
+        assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, first)
+        assert_equal first, second
+      end
+
+      assert_equal 2, attempts
+      assert_equal 600, Hive::Babysitter::Dispatcher::DEFAULT_INTERVAL_SEC
+      events = File.readlines(
+        File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      ).map { |line| JSON.parse(line) }
+      assert events.any? { |event| event["outcome"] == "gh-error" }
+      assert events.any? { |event| event["outcome"] == "success" }
+    ensure
+      logger&.close
     end
   end
 

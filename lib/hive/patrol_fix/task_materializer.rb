@@ -186,8 +186,15 @@ module Hive
           slug: manifest.dig("task", "slug"),
           state_bytes: PatrolFix.canonical_json(manifest),
           idempotency_key: intent.fetch("idempotency_key"),
-          input_fingerprint: intent.fetch("input_fingerprint")
+          input_fingerprint: intent.fetch("input_fingerprint"),
+          project: project_identity!
         ).call
+      end
+
+      def project_identity!
+        @project_identity ||= Hive::Config.registered_projects.find do |entry|
+          File.expand_path(entry.fetch("path")) == @project_root
+        end || raise(Hive::ConfigError, "Patrol Fix project is not currently registered")
       end
 
       def update_existing!(occurrence_id, record, snapshot, folder)

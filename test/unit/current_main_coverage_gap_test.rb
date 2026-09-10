@@ -165,6 +165,8 @@ class CurrentMainCoverageGapTest < Minitest::Test
 
       assert_equal 1, calls.length
       assert_equal %w[finalize], calls.map { |_task, kwargs| kwargs[:log_label] }
+      assert_equal "error", Hive::Stages::Artifacts.action_for(:error)
+      assert_equal "custom", Hive::Stages::Artifacts.action_for(:custom)
     end
   end
 

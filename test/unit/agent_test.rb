@@ -1362,6 +1362,49 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_claude_model_identity_ignores_child_events_and_ambiguous_totals
+    identity = Hive::AgentSupport.for(:claude)::Stream::ModelIdentity.new
+    identity.observe({ "type" => "assistant", "parent_tool_use_id" => "child",
+                       "message" => { "model" => "claude-haiku-4-5-20251001" } })
+    identity.observe({ "type" => "result", "modelUsage" => { "haiku" => {}, "opus" => {} } })
+    assert_nil identity.model
+
+    identity.observe({ "type" => "system", "subtype" => "init", "model" => "configured-opus" })
+    identity.observe({ "type" => "assistant", "parent_tool_use_id" => nil,
+                       "message" => { "model" => "served-opus" } })
+    identity.observe({ "type" => "result", "modelUsage" => { "haiku" => {} } })
+    assert_equal "served-opus", identity.model
+  end
+
+  def test_claude_subagent_usage_does_not_replace_the_main_reviewer_identity
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      events = [
+        { "type" => "system", "subtype" => "init", "model" => "configured-opus" },
+        { "type" => "stream_event", "parent_tool_use_id" => nil,
+          "event" => { "type" => "message_start", "message" => {
+            "model" => "claude-opus-5", "usage" => { "input_tokens" => 90 } } } },
+        { "type" => "stream_event", "parent_tool_use_id" => "subagent-1",
+          "event" => { "type" => "message_start", "message" => {
+            "model" => "claude-haiku-4-5-20251001", "usage" => { "input_tokens" => 10 } } } },
+        { "type" => "result", "subtype" => "success", "result" => "done",
+          "usage" => { "input_tokens" => 100, "output_tokens" => 50 },
+          "modelUsage" => { "claude-haiku-4-5-20251001" => {}, "claude-opus-5" => {} } }
+      ]
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = events.map { |event| JSON.generate(event) }.join("\n")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal "claude-opus-5", result[:model]
+      assert_equal "claude-opus-5", result.dig(:usage, :model)
+      assert_equal 100, result.dig(:usage, :input)
+      assert_equal 50, result.dig(:usage, :output)
+    end
+  end
+
   def test_captures_last_usage_from_profile_extractor
     with_tmp_dir do |dir|
       task = make_task(dir)

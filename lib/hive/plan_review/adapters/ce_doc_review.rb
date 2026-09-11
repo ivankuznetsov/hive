@@ -104,7 +104,7 @@ module Hive
             else
               "retryable_failure"
             end
-            served_model = result.dig(:usage, :model).to_s
+            served_model = result.fetch(:model) { result.dig(:usage, :model) }.to_s
             retry_at = result[:retry_at]
             if status == "provider_limit" && retry_at.to_s.empty?
               retry_at = Hive::AgentLimit.retry_after(text: result[:limit_text])
@@ -116,7 +116,7 @@ module Hive
               "model" => request.reviewer["model"],
               "family" => request.reviewer["family"]
             }
-            unless served_model.empty?
+            if result.key?(:model) || !served_model.empty?
               actual["model"] = served_model
               actual.delete("family")
               actual = RouteResolver.attest_observed_identity(

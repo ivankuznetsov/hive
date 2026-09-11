@@ -383,7 +383,11 @@ module Hive
         RECOVERABLE_ROLES.filter_map do |role|
           current["routes"].reverse.find { |entry| entry["role"] == role }
         end.select do |entry|
-          RECOVERABLE_TERMINAL_OUTCOMES.include?(entry["outcome"])
+          RECOVERABLE_TERMINAL_OUTCOMES.include?(entry["outcome"]) ||
+            (entry["role"] == "adversarial" &&
+             Adapters::Base::SUCCESS_OUTCOMES.include?(entry["outcome"]) &&
+             entry["independence_verified"] == false &&
+             entry["independence_reason"] == "reviewer_family_unknown")
         end
       end
 

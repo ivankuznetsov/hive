@@ -174,6 +174,17 @@ as `plan_reviewing` once under the new code and enter the same paced recovery;
 configuration-only blocks without an attempted route remain operator-owned. A
 changed probe resets the stable-observation series and permits a new reviewer
 launch. Historical served-model identity repair is not performed automatically.
+A successful adversarial attempt whose independence failed with `reviewer_family_unknown`
+can be rerun through `request-review`. This appends a normal recovery reset,
+preserves the successful primary leg and historical evidence, and requires the
+new attempt to earn independent coverage. It does not waive coverage or retry
+same-family reviews.
+
+Claude reviewer identity comes from the main conversation's init, assistant,
+or message-start events, ignoring events with `parent_tool_use_id`. Aggregate
+`modelUsage` can include subagents and cannot identify the reviewer by key order.
+An explicit main-agent identity takes precedence over usage; ambiguous usage
+without identity stays unknown instead of borrowing the configured model.
 
 Planner authority capture is provider-scoped too. A Codex-authored plan never
 inherits `claude.model` or `claude.effort` when its own plan route is unpinned;

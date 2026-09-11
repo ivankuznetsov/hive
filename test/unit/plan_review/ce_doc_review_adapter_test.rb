@@ -526,6 +526,29 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_production_runner_uses_main_agent_identity_instead_of_subagent_usage
+    [ "gpt-5.6-sol", nil ].each do |main_model|
+      with_runner do |runner, request, output_path|
+        payload = valid_result(request)
+        replacement = lambda do |_task, expected_output:, **|
+          File.write(expected_output, JSON.generate(payload))
+          { status: :ok, model: main_model, usage: { model: "helper-model" } }
+        end
+        observed = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+          runner.call(prompt: "review", cwd: request.output_directory, output_path:, request:)
+        end
+
+        if main_model
+          assert_equal main_model, observed.dig("actual_route", "model")
+          assert_equal request.reviewer["family"], observed.dig("actual_route", "family")
+        else
+          refute observed.fetch("actual_route").key?("model")
+          refute observed.fetch("actual_route").key?("family")
+        end
+      end
+    end
+  end
+
   def test_production_runner_attests_only_the_exact_grok_46_build_served_name
     with_runner do |runner, request, output_path|
       cases = [

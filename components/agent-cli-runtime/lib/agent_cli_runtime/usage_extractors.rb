@@ -179,11 +179,6 @@ module AgentCliRuntime
     end
 
     def model_from(event)
-      model_usage = event["modelUsage"]
-      if model_usage.is_a?(Hash) && !model_usage.empty?
-        return model_usage.keys.first.to_s
-      end
-
       candidates = [
         event["model"],
         event.dig("message", "model"),
@@ -191,7 +186,12 @@ module AgentCliRuntime
         event.dig("response", "model"),
         event.dig("item", "model")
       ]
-      candidates.find { |value| !value.to_s.empty? }&.to_s
+      explicit = candidates.find { |value| !value.to_s.empty? }
+      return explicit.to_s if explicit
+
+      # Run totals may include helper models; their order is not agent identity.
+      model_usage = event["modelUsage"]
+      model_usage.keys.first.to_s if model_usage.is_a?(Hash) && model_usage.size == 1
     end
 
     def model_from_usage(usage)

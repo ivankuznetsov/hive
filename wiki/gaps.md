@@ -1473,3 +1473,9 @@ external backups; exact conversion coverage depends on the inventoried source.
 Markers still serve current stages outside execute; `legacy_baseline` remains a
 current ad-hoc task initialization event, and provider routing's `legacy` mode
 still denotes current default routing. Their names do not imply removable code.
+
+- 2026-09-11: Three blocked adversarial reviews recorded Haiku for an Opus
+  request. The mixed-model attribution defect is reproduced and fixed in code;
+  native task diagnostics expose no correlated raw stream for those attempts,
+  so their exact subagent provenance remains unverified. Existing records need
+  an explicit `request-review` after deploying the corrected runtime.

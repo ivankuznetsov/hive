@@ -316,7 +316,17 @@ reference.
    "review_fix" => 14400,
    "review_browser" => 3600,
    "patrol" => 3600},
- "brainstorm" => {"agent" => "claude", "skill" => "/ce-brainstorm"},
+ "brainstorm" =>
+  {"agent" => "claude",
+   "skill" => "/ce-brainstorm",
+   "suggestions" =>
+    {"enabled" => false,
+     "agent" => "claude",
+     "capture_timeout_sec" => 5,
+     "timeout_sec" => 120,
+     "coalesce_window_sec" => 5,
+     "min_retry_interval_sec" => 300,
+     "max_automatic_attempts" => 3}},
  "plan" =>
   {"agent" => "claude",
    "skill_by_agent" =>

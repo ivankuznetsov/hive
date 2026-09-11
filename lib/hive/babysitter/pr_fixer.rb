@@ -298,11 +298,16 @@ module Hive
           # Git ref names may contain shell metacharacters (`$`, `(`, `)` are
           # all legal in refs and `git check-ref-format` accepts them), and the
           # template interpolates the head ref into an executable shell recipe
-          # (fetch/rev-parse/push). Bind a shell-escaped form for those
-          # positions so an adversarial headRefName like `review$(printf-owned)`
-          # is passed to Git as a literal argument instead of being evaluated
-          # by the shell. Display-only lines keep the raw name.
-          head_ref_sh: Shellwords.escape(head_ref),
+          # (fetch/rev-parse/push). Shell-escape every Git argument so nothing
+          # is evaluated by the shell, and fully qualify the ref so Git cannot
+          # re-parse it either: a bare branch argument is interpreted by
+          # `git fetch`/`git push` as an option (leading `-`, e.g.
+          # `--upload-pack=<cmd>`) or a refspec (leading `+`), while a
+          # `refs/heads/...` argument is always taken literally. The
+          # remote-tracking counterpart lives under `refs/remotes/origin/`.
+          # Display-only lines keep the raw name.
+          head_ref_branch_sh: Shellwords.escape("refs/heads/#{head_ref}"),
+          head_ref_remote_sh: Shellwords.escape("refs/remotes/origin/#{head_ref}"),
           failing_jobs: context.failing_jobs,
           mergeable_state: context.mergeable_state,
           dry_run: @dry_run,

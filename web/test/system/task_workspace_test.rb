@@ -1,4 +1,5 @@
 require "application_system_test_case"
+require "hive/commands/answer"
 
 class TaskWorkspaceTest < ApplicationSystemTestCase
   setup do
@@ -11,6 +12,111 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
   end
 
   teardown { StatusBroadcaster.stop! }
+
+  test "suggestion approval and decline stay reversible until Send answers" do
+    record_suggestion_flow_when_requested
+    destination = stage_dir(@project, "2-brainstorm").join(@slug)
+    destination.dirname.mkpath
+    FileUtils.mv(@folder, destination)
+    @folder = destination
+    brainstorm = @folder.join("brainstorm.md")
+    brainstorm.write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
+    inventory = Hive::Commands::Answer.inventory(@slug, project: @project)
+    flow = YAML.safe_load_file(Rails.root.join("test/fixtures/brainstorm_suggestion_flow.yml"))
+    candidate = flow.fetch("candidate")
+    suggestion_text = candidate.fetch("text")
+    inventory.fetch("slots").first["suggestion"] = candidate
+    original = brainstorm.binread
+    unchanged = lambda do
+      assert_equal original, brainstorm.binread
+      assert_nil Hive::BrainstormParser.parse(brainstorm.to_s).first.answer
+    end
+
+    with_replaced_singleton_method(
+      Hive::Commands::Answer, :inventory, ->(*_args, **_kwargs) { inventory }
+    ) do
+      sign_in!
+      visit task_path(@project, @slug)
+      assert_selector ".brainstorm-suggestion", wait: 10
+      assert_text suggestion_text
+      assert_text "Sources: repository, project wiki"
+      assert_no_selector ".brainstorm-suggestion script"
+      evidence_pause
+
+      fill_in "Answer to question 1", with: flow.fetch("draft")
+      click_button "Approve"
+      assert_field "Answer to question 1", with: suggestion_text
+      unchanged.call
+      session = page.evaluate_script(<<~JS)
+        JSON.parse(sessionStorage.getItem("hive:brainstorm-answer-presentation:v1"))
+      JS
+      assert_includes session.fetch("drafts").to_h.values, suggestion_text
+      assert_includes session.fetch("suggestionDrafts").to_h.values, flow.fetch("draft")
+      draft_key = session.fetch("drafts").to_h.key(suggestion_text)
+      assert_equal find_field("Answer to question 1")[:name], draft_key
+      assert_operator draft_key.length, :<=, 4096
+      evidence_pause
+
+      page.refresh
+      assert_selector ".brainstorm-suggestion", wait: 10
+      restored = find_field("Answer to question 1")
+      post_refresh_session = page.evaluate_script(<<~JS)
+        JSON.parse(sessionStorage.getItem("hive:brainstorm-answer-presentation:v1"))
+      JS
+      assert_equal draft_key, restored[:name]
+      assert_equal suggestion_text, restored.value, post_refresh_session.inspect
+      click_button "Undo"
+      assert_field "Answer to question 1", with: flow.fetch("draft")
+      unchanged.call
+      click_button "Approve"
+      evidence_pause
+
+      replacement_text = flow.dig("replacement", "text")
+      page.execute_script(<<~JS)
+        (() => {
+          const card = document.querySelector("[data-suggestion-key]")
+          card.dataset.suggestionKey = #{flow.dig("replacement", "suggestion_binding").to_json}
+          card.dataset.suggestionText = #{replacement_text.to_json}
+          document.dispatchEvent(new Event("turbo:render"))
+        })()
+      JS
+      click_button "Approve"
+      assert_field "Answer to question 1", with: replacement_text
+      click_button "Undo"
+      assert_field "Answer to question 1", with: suggestion_text
+      unchanged.call
+
+      page.execute_script(<<~JS)
+        (() => {
+          const card = document.querySelector("[data-suggestion-key]")
+          card.dataset.suggestionKey = #{candidate.fetch("suggestion_binding").to_json}
+          card.dataset.suggestionText = #{suggestion_text.to_json}
+          document.dispatchEvent(new Event("turbo:render"))
+        })()
+      JS
+
+      click_button "Undo"
+      assert_field "Answer to question 1", with: flow.fetch("draft")
+      click_button "Decline"
+      assert_no_selector ".brainstorm-suggestion-text", visible: true
+      assert_field "Answer to question 1", with: flow.fetch("draft")
+      unchanged.call
+      evidence_pause
+      click_button "Restore"
+      assert_selector ".brainstorm-suggestion-text", visible: true
+      assert_field "Answer to question 1", with: flow.fetch("draft")
+      unchanged.call
+
+      click_button "Approve"
+      assert_field "Answer to question 1", with: suggestion_text
+      unchanged.call
+      evidence_pause
+      click_button "Send answers"
+      assert_text "Recorded answer to Q1", wait: 10
+    end
+
+    assert_equal suggestion_text, Hive::BrainstormParser.parse(brainstorm.to_s).first.answer
+  end
 
   test "one semantic workspace reflows from wide desktop through actual 400 percent zoom" do
     sign_in!
@@ -342,5 +448,21 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert find("details[data-workspace-disclosure-key='advanced']")[:open]
     assert_equal "advanced",
                  page.evaluate_script("document.activeElement.closest('details')?.dataset.workspaceDisclosureKey")
+  end
+
+  private
+
+  def record_suggestion_flow_when_requested
+    return unless ENV["HIVE_RECORD_BRAINSTORM_SUGGESTION_FLOW"] == "1"
+
+    destination = Rails.root.join("tmp/evidence/brainstorm-suggestion-flow.webm")
+    page.driver.on_save_screenrecord do |source|
+      destination.dirname.mkpath
+      FileUtils.cp(source, destination)
+    end
+  end
+
+  def evidence_pause
+    sleep 0.6 if ENV["HIVE_RECORD_BRAINSTORM_SUGGESTION_FLOW"] == "1"
   end
 end

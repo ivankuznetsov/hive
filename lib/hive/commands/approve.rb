@@ -21,6 +21,7 @@ require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
 require "hive/plan_review/transition_guard"
 require "hive/task_activity"
+require "hive/brainstorm_suggestions/transition_cleanup"
 
 module Hive
   module Commands
@@ -400,6 +401,10 @@ module Hive
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
               end
+              brainstorm_stage = task.workflow.stage_named("brainstorm")
+              if task.stage_name == brainstorm_stage&.name && dest_stage != brainstorm_stage.dir
+                Hive::BrainstormSuggestions::TransitionCleanup.call_under_lock(task.folder)
+              end
               new_folder = move_task!(task, dest_stage)
             end
             verb = stage_for_dest!(task, dest_stage).index < task.stage_index ? "reject" : "approve"
@@ -621,6 +626,7 @@ module Hive
         if source_has_tracked_files?(task.hive_state_path, source_slug_rel)
           ops.run_git!("-C", task.hive_state_path, "add", "-A", source_slug_rel)
         end
+        ops.stage_advisory_free_task!(dest_slug_rel)
 
         _, _, status = Open3.capture3("git", "-C", task.hive_state_path, "diff", "--cached", "--quiet")
         ops.run_git!("-C", task.hive_state_path, "commit", "-m", message) unless status.success?

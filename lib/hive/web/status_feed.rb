@@ -3,9 +3,11 @@ require "json"
 require "monitor"
 require "time"
 require "hive/commands/status"
+require "hive/brainstorm_suggestions"
 require "hive/config"
 require "hive/daemon/operational_snapshot"
 require "hive/secret_patterns"
+require "hive/stages"
 require "hive/tui/state_source"
 
 module Hive
@@ -436,7 +438,48 @@ module Hive
       end
 
       def state_key(availability, payload)
-        { "availability" => availability, "payload" => comparable_key(payload) }
+        {
+          "availability" => availability,
+          "payload" => comparable_key(payload),
+          "brainstorm_suggestions" => brainstorm_suggestion_identity(payload)
+        }
+      end
+
+      # Suggestion state is deliberately absent from the fleet status schema,
+      # but a sidecar change must still wake task-page Turbo consumers. This
+      # reads only the exact bounded owner-private files already named by
+      # status rows; it never inventories repository content.
+      def brainstorm_suggestion_identity(payload)
+        Array(payload["projects"]).flat_map do |project|
+          Array(project["tasks"]).filter_map do |task|
+            next unless task["stage"] == Hive::Stages::SHORT_TO_FULL.fetch("brainstorm")
+
+            folder = task["folder"].to_s
+            next if folder.empty?
+
+            [ project["name"].to_s, task["slug"].to_s, suggestion_sidecar_digest(folder) ]
+          end
+        end
+      end
+
+      def suggestion_sidecar_digest(folder)
+        path = File.join(folder, Hive::BrainstormSuggestions::STORE_FILENAME)
+        return nil unless File.exist?(path) || File.symlink?(path)
+
+        status = File.lstat(path)
+        return "unsafe" unless Hive::BrainstormSuggestions::Store.owned_private_file?(status) &&
+                               status.size <= Hive::BrainstormSuggestions::MAX_STORE_BYTES
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        bytes = File.open(path, flags) do |file|
+          file.read(Hive::BrainstormSuggestions::MAX_STORE_BYTES + 1)
+        end
+        return "unsafe" if bytes.bytesize > Hive::BrainstormSuggestions::MAX_STORE_BYTES
+
+        ::Digest::SHA256.hexdigest(bytes.b)
+      rescue SystemCallError, IOError
+        "unavailable"
       end
 
       def comparable_key(node)

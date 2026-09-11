@@ -41,6 +41,8 @@ module Hive
         { mode: :grid, key: "i",         action: :open_idea_preview,  description: "open the info panel for the focused task (slug, stage, created_at, folder, latest log, original idea, and stage-specific brainstorm.md / plan.md / execute log tail)" },
         { mode: :grid, key: "I",         action: :implementation_identity, description: "open implementation ownership details (execute, PR opening, review fix, and CI fix provenance)" },
         { mode: :grid, key: "s",         action: :open_in_agent,      description: "steer the focused task manually — opens the project's configured development agent in the feature worktree with every stage folder for this slug preloaded as context, marks the task MANUAL_STEERING so headless runs skip it, then archives the slug on agent exit" },
+        { mode: :grid, key: "u",         action: :restore_suggestion, description: "restore the lowest-ordinal dismissed repository-aware suggestion on a waiting brainstorm task" },
+        { mode: :grid, key: "R",         action: :retry_suggestion,   description: "request a replacement repository-aware suggestion without writing an answer or dispatching the task" },
         { mode: :grid, key: "T",         action: :token_stats,        description: "open token usage statistics for the current selection" },
         { mode: :grid, key: "z",         action: :archive_pane,       description: "open Archive pane (all done tasks)" },
         { mode: :grid, key: "n",         action: :new_idea,           description: "open the new-idea prompt; from ★ All projects, choose a target project first; submitting runs `hive new <project> \"<title>\"`" },

@@ -92,6 +92,11 @@ module Hive
         daily_digest_delivery_state_unreadable
         daily_digest_scheduler_failure_backoff
         daily_digest_configuration_disabled
+        brainstorm_suggestion_bundle_sweep
+        brainstorm_suggestion_scheduler_error
+        brainstorm_suggestion_unavailable
+        brainstorm_suggestion_deferred
+        brainstorm_suggestion_worker_error
         architecture_patrol_opened
         architecture_patrol_progress
         architecture_patrol_closed

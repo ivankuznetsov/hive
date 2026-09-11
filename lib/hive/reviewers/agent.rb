@@ -86,7 +86,6 @@ module Hive
         profile_name = context&.explicit_routing? ? context.adapter : spec.fetch("agent")
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: @cfg)
         skill = spec.fetch("skill")
-        prompt = render_prompt(profile, skill, reviewer_output_path: staged_output_path)
         max_attempts = max_attempts_from_spec
         configured_timeout = spec["timeout_sec"] || DEFAULT_TIMEOUT_SEC
 
@@ -116,6 +115,9 @@ module Hive
           # attempt cannot satisfy the next attempt's
           # :output_file_exists check.
           clear_partial_output!(:pre_attempt)
+          prompt = render_prompt(
+            profile, skill, reviewer_output_path: staged_output_path
+          )
 
           spawn_timeout = effective_timeout(configured_timeout, deadline)
           if spawn_timeout && spawn_timeout <= 0
@@ -130,7 +132,14 @@ module Hive
           end
 
           result = yield(profile, prompt, configured_timeout, spawn_timeout, attempts)
-          break if result[:status] == :ok
+          if result[:status] == :ok
+            begin
+              promote_staged_output!
+              break
+            rescue Hive::Error => e
+              result = { status: :error, error_message: e.message }
+            end
+          end
           break if attempts >= max_attempts
 
           sleep_seconds = backoff_seconds_for(attempts)
@@ -141,14 +150,6 @@ module Hive
             sleep_seconds = [ sleep_seconds, remaining ].min
           end
           backoff(sleep_seconds)
-        end
-
-        if result[:status] == :ok
-          begin
-            promote_staged_output!
-          rescue Hive::Error => e
-            result = { status: :error, error_message: e.message }
-          end
         end
 
         # ce-review P1 #3 (final-failure cleanup): the last attempt may

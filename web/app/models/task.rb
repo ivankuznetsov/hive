@@ -44,7 +44,7 @@ class Task
   end
 
   BoundBrainstormQuestion = Struct.new(
-    :round, :n, :text, :binding, :ordinal, keyword_init: true
+    :round, :n, :text, :binding, :ordinal, :suggestion, keyword_init: true
   )
 
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
@@ -346,7 +346,8 @@ class Task
         n: slot.fetch("question_number"),
         text: slot.fetch("text"),
         binding: slot.fetch("binding"),
-        ordinal: slot.fetch("ordinal")
+        ordinal: slot.fetch("ordinal"),
+        suggestion: slot["suggestion"]
       )
     end
   rescue StandardError => e

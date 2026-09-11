@@ -67,7 +67,7 @@ claude:
 #     model: gpt-5.6-sol       # inherits review.effort
 #
 # Project-owned keys:
-# brainstorm, plan, plan_review, plan_review_adversarial,
+# brainstorm, brainstorm_suggestion, plan, plan_review, plan_review_adversarial,
 # plan_review_verification, execute, execute_implementation, rebase, diagnose,
 # babysitter, review, review_ci, review_reviewers, review_triage, review_fix,
 # review_browser, patrol, patrol_review, patrol_fix, open_pr, artifacts,
@@ -112,6 +112,19 @@ brainstorm:
   #   tools: [Read, Write, Edit]
   # Runtime mode is configured project-wide through
   # the project-global claude.mode setting above.
+  suggestions:
+    # Advisory generation is asynchronous and never writes an answer. Claude
+    # is the only shipped profile admitted to the fixed-endpoint, schema-only
+    # Anthropic Messages transport. It requires ANTHROPIC_API_KEY and a
+    # concrete routed/default model; no provider CLI or live filesystem is
+    # exposed. Missing prerequisites surface an unavailable card.
+    enabled: false
+    agent: claude
+    capture_timeout_sec: 5
+    timeout_sec: 120
+    coalesce_window_sec: 5
+    min_retry_interval_sec: 300
+    max_automatic_attempts: 3
 plan:
   agent: <%= planning_agent %>
   # skill: /plan

@@ -893,7 +893,7 @@ class AttemptsSupervisorTest < Minitest::Test
         launch_timeout_sec: 30, now: Time.now.utc
       )
       unless workflow_controller
-        yield store, attempt
+        Bundler.with_unbundled_env { yield store, attempt }
         next
       end
 
@@ -903,7 +903,7 @@ class AttemptsSupervisorTest < Minitest::Test
       resolver.define_singleton_method(:resolve) { task }
       with_replaced_singleton_method(
         Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }
-      ) { yield store, attempt }
+      ) { Bundler.with_unbundled_env { yield store, attempt } }
     end
   end
 

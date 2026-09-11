@@ -206,8 +206,14 @@ module Hive
       def render_prompt(task, cfg, profile:)
         idea_path = File.join(task.folder, "idea.md")
         idea_text = File.exist?(idea_path) ? File.read(idea_path) : ""
+        preserve_unanswered_round = preservation_mode?(task.state_file)
         skill = cfg.dig("brainstorm", "skill") ||
           Hive::Config::DEFAULTS.dig("brainstorm", "skill")
+        skill_invocation = unless preserve_unanswered_round
+          Hive::Stages::Base.format_verified_skill_invocation(
+            profile, skill, project_root: task.project_root
+          )
+        end
         Hive::Stages::Base.render(
           "brainstorm_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -215,12 +221,23 @@ module Hive
             task_folder: task.folder,
             idea_text: idea_text,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
-            skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
-              profile, skill, project_root: task.project_root
-            )
+            preserve_unanswered_round: preserve_unanswered_round,
+            agent_name: profile.name.to_s,
+            skill_invocation: skill_invocation
           )
         )
       end
+
+      def preservation_mode?(path)
+        questions = Hive::BrainstormParser.parse(path)
+        return false if questions.empty?
+
+        latest_round = questions.last.round
+        questions.select { |question| question.round == latest_round }.any? do |question|
+          !question.answered?
+        end
+      end
+      private_class_method :preservation_mode?
 
       def action_for(marker_name)
         return "none" if marker_name == :none

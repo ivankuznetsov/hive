@@ -1473,3 +1473,16 @@ external backups; exact conversion coverage depends on the inventoried source.
 Markers still serve current stages outside execute; `legacy_baseline` remains a
 current ad-hoc task initialization event, and provider routing's `legacy` mode
 still denotes current default routing. Their names do not imply removable code.
+
+## Brainstorm suggestion API transport awaits authenticated live proof (2026-09-07)
+
+The repository-aware suggestion runner now has a controller-owned,
+fixed-endpoint Anthropic Messages transport and deterministic tests for the
+request boundary, cancellation, response admission, complete
+capture/validation/store/projection path, and cleanup. This checkout had no
+`ANTHROPIC_API_KEY`, so no current live paid suggestion-generation request was
+claimed. The separate real-Codex brainstorm-producer smoke proves that an
+untouched advisory envelope remains unanswered; it does not prove the
+Anthropic suggestion transport. Close this gap only with an explicitly
+authorized live run that records bounded state/provenance and no raw context,
+output, or credential material.

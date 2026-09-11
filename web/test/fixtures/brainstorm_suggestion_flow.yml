@@ -1,0 +1,25 @@
+candidate:
+  state: fresh
+  text: |-
+    Keep <script>alert('no')</script> & the tracked adapter.
+    Preserve its public contract exactly.
+  rationale: The repository and project wiki already define this boundary.
+  provenance:
+    - repository
+    - project_wiki
+  safe_reason:
+  retryable: true
+  dismissed: false
+  input_binding: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  suggestion_binding: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+draft: My operator draft
+replacement:
+  text: Use the replacement candidate.
+  suggestion_binding: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+storyboard:
+  - Candidate and controller-derived sources render as escaped text.
+  - Approve copies the exact candidate body while persisted answers stay empty.
+  - A hard reload retains approval; Undo restores the operator draft.
+  - A newer binding cannot overwrite or discard the older binding's draft.
+  - Decline hides presentation only; Restore reveals it with the draft unchanged.
+  - Send answers is the sole action that persists the approved body.

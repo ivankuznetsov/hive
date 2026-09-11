@@ -261,6 +261,74 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_hive_commit_never_persists_actionable_suggestion_state
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      slug = "advisory-task"
+      relative = File.join("stages", "2-brainstorm", slug)
+      task_dir = File.join(ops.hive_state_path, relative)
+      FileUtils.mkdir_p(task_dir)
+      envelope = Hive::BrainstormSuggestions::Envelope.render(
+        binding: "a" * 64, text: "Use the private candidate."
+      )
+      brainstorm = "### Q1. Which path?\n### A1.\n#{envelope}\n<!-- WAITING -->\n"
+      File.write(File.join(task_dir, "brainstorm.md"), brainstorm)
+      File.write(File.join(task_dir, "brainstorm-suggestions.json"), "private sidecar\n")
+
+      assert_equal :committed,
+                   ops.hive_commit(
+                     stage_name: "2-brainstorm", slug: slug, action: "waiting"
+                   )
+
+      committed = run!(
+        "git", "-C", ops.hive_state_path, "show", "HEAD:#{relative}/brainstorm.md"
+      )
+      _out, _err, sidecar_status = Open3.capture3(
+        "git", "-C", ops.hive_state_path, "cat-file", "-e",
+        "HEAD:#{relative}/brainstorm-suggestions.json"
+      )
+      assert_nil Hive::BrainstormParser.parse_text(committed).first.answer
+      refute_includes committed, "hive-suggestion:v1"
+      refute_includes committed, "Use the private candidate."
+      refute sidecar_status.success?
+      assert_includes File.read(File.join(task_dir, "brainstorm.md")), envelope
+      assert File.exist?(File.join(task_dir, "brainstorm-suggestions.json"))
+    end
+  end
+
+  def test_advisory_free_staging_rejects_an_unsafe_brainstorm_source
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      relative = File.join("stages", "2-brainstorm", "unsafe-advisory")
+      task_dir = File.join(ops.hive_state_path, relative)
+      FileUtils.mkdir_p(task_dir)
+      File.symlink(File.join(dir, "outside.md"), File.join(task_dir, "brainstorm.md"))
+
+      error = assert_raises(Hive::GitError) do
+        ops.send(:stage_advisory_free_task!, relative)
+      end
+      assert_match(/commit source is unsafe/, error.message)
+    end
+  end
+
+  def test_advisory_blob_write_surfaces_hash_object_failure
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      status = Object.new
+      status.define_singleton_method(:success?) { false }
+      replacement = ->(*, **) { [ "not-an-oid", "hash failed", status ] }
+
+      with_replaced_singleton_method(Open3, :capture3, replacement) do
+        error = assert_raises(Hive::GitError) do
+          ops.send(:write_hive_blob, "safe brainstorm bytes")
+        end
+        assert_match(/hash-object failed.*hash failed/, error.message)
+      end
+    end
+  end
+
   def test_hive_commit_serializes_staging_callback_and_commit
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

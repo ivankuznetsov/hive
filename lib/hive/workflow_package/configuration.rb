@@ -7,6 +7,7 @@ require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/input_name"
 require "hive/workflow_package/manifest"
 require "hive/workflow_package/registry_client"
+require "hive/workflow_package/runtime_policy"
 require "hive/workflows/descriptor_parser"
 
 module Hive
@@ -204,7 +205,12 @@ module Hive
           "headless_supported" => !!profile.headless_supported,
           "permission_skip_flag" => profile.permission_skip_flag,
           "workspace_write_flags" => Array(profile.workspace_write_flags),
-          "policy_capabilities" => Array(profile.policy_capabilities).map(&:to_s).sort,
+          # Bind only capabilities that can affect managed-workflow admission.
+          # Auxiliary capabilities (for example the data-only brainstorm
+          # worker) must not churn an otherwise byte-identical workflow pin.
+          "policy_capabilities" => (
+            Array(profile.policy_capabilities) & RuntimePolicy::REQUIRED_CAPABILITIES
+          ).map(&:to_s).sort,
           "model_pinning" => !profile.model_argument_builder.nil?,
           "effort_pinning" => !profile.effort_argument_builder.nil?
         }

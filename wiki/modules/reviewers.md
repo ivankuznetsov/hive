@@ -3,7 +3,7 @@ title: Hive::Reviewers
 type: module
 source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,runtime,synthetic_task,plan_context}.rb, lib/hive/agent_support/codex/reviewer.rb
 created: 2026-04-26
-updated: 2026-08-30
+updated: 2026-08-31
 tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 ---
 
@@ -51,8 +51,9 @@ The v1 reviewer adapter. `run!`:
 5. On success, atomically renames the staged file to `output_path`. On failure,
    deletes only the staged file and returns it as `Result#output_path`, allowing
    orchestration cleanup without deleting a prior successful canonical file.
+6. Returns `Result.new(status: :ok | :error, ...)`.
 
-When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive::ClaudeLauncher` session per pass for Claude agent reviewers. `Reviewers::Agent#run_in_session!` sends each Claude reviewer prompt into that same pane sequentially and waits on that reviewer's staging path before publishing it atomically. Non-Claude reviewers and all reviewers under `claude.mode: headless` keep the `run!` / `spawn_agent` path.
+When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive::ClaudeLauncher` session per pass for Claude agent reviewers. `Reviewers::Agent#run_in_session!` sends each Claude reviewer prompt into that same pane sequentially and waits on that reviewer's staging path before publication. Non-Claude reviewers and all reviewers under `claude.mode: headless` keep the `run!` / `spawn_agent` path.
 
 `status_mode: :output_file_exists` is critical: reviewer spawns own a per-pass output file, not the task marker — the orchestrator's `REVIEW_WORKING` marker must persist across each reviewer's spawn (per ADR-021).
 

@@ -1,10 +1,10 @@
 ---
 title: hive answer
 type: command
-source: lib/hive/commands/answer.rb, lib/hive/brainstorm_parser.rb, lib/hive/bot/brainstorm_answer_writer.rb, schemas/hive-answer.v1.json
+source: lib/hive/commands/answer.rb, lib/hive/brainstorm_parser.rb, lib/hive/brainstorm_suggestions/projection.rb, lib/hive/bot/brainstorm_answer_writer.rb, schemas/hive-answer.v1.json
 created: 2026-08-10
-updated: 2026-08-11
-tags: [command, brainstorm, answers, bindings, concurrency, json, agents]
+updated: 2026-09-07
+tags: [command, brainstorm, answers, bindings, concurrency, json, agents, suggestions]
 ---
 
 **TLDR**: `hive answer` is the transport-neutral literal boundary for coding
@@ -53,6 +53,34 @@ revalidates current state under the task lock.
 `hive answer TARGET --json` is the authority for the selected task's question
 inventory. Its parsed slots are the answer truth; fleet status is not a
 question-detail API.
+
+### Advisory suggestion projection
+
+Every unanswered slot also carries a nullable `suggestion` object. Missing
+canonical records are represented as `loading`, not as an absent card. The
+object exposes the closed state, bounded current `text`/`rationale` and
+controller-derived `provenance`, a bounded `safe_reason`, `retryable` and
+`dismissed` flags, and the current `input_binding` / `suggestion_binding`.
+Only a freshness-verified `fresh` record exposes text; stale, failed,
+unavailable, no-safe, corrupt, or unobservable state returns null text.
+
+Projection performs at most one deadline-bounded context observation for the
+task, shared across all unanswered slots. Its process-local cache key combines
+the canonical sidecar lifecycle with bounded identities for `idea.md`,
+`brainstorm.md`, the Git index plus tracked worktree diff, the selection
+recipe, task/answer generation, and a validated main wiki. Hive checks that
+external identity both before and after capture. A tracked edit cannot reuse a
+previously successful cache entry, and a change to the newly selected manifest
+immediately returns null stale text. Untracked files and HEAD-only commits do
+not invalidate selected-input freshness. Failed observations are not retained,
+and the cache never stores raw context or provider output. Observation failure
+fails closed without affecting the slot's normal `binding` or manual
+submission path.
+
+The nested suggestion contract is read-only. No suggestion state, candidate
+binding, Retry, Restore, or client-side approval is accepted by the answer
+write form. Only the slot's existing opaque answer `binding` plus literal
+stdin can invoke the writer.
 
 ## Bound literal write
 

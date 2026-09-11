@@ -41,6 +41,36 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_brainstorm_move_removes_actionable_advisory_state_before_destination
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      envelope = Hive::BrainstormSuggestions::Envelope.render(
+        binding: "b" * 64, text: "Private repository-aware candidate"
+      )
+      File.write(
+        File.join(source, "brainstorm.md"),
+        "### Q1. Which path?\n### A1.\n#{envelope}\n<!-- COMPLETE -->\n"
+      )
+      Hive::BrainstormSuggestions::Store.new(source).write("records" => [])
+      prepare_test_task_lease_repository(source)
+      current = task(folder: source, hive_state_path: state, project_root: root)
+      cmd = command(commit_lock: false)
+      cmd.define_singleton_method(:record_commit_or_rollback!) { |*, **| nil }
+
+      destination, = cmd.send(:perform_move_and_commit, current, "3-plan")
+
+      body = File.read(File.join(destination, "brainstorm.md"))
+      refute_includes body, "hive-suggestion:v1"
+      refute_includes body, "Private repository-aware candidate"
+      refute File.exist?(
+        File.join(destination, Hive::BrainstormSuggestions::Store::FILENAME)
+      )
+      refute File.exist?(source)
+    end
+  end
+
   def test_plan_review_guard_runs_under_locks_immediately_before_plan_to_execute_move
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")
@@ -894,6 +924,9 @@ class HiveCommandsApproveTest < Minitest::Test
     calls = []
     fake_ops = Object.new
     fake_ops.define_singleton_method(:run_git!) { |*args| calls << args }
+    fake_ops.define_singleton_method(:stage_advisory_free_task!) do |task_path|
+      calls << [ :stage_advisory_free_task, task_path ]
+    end
     original_git_ops = Hive::GitOps.singleton_class.instance_method(:new)
     original_capture3 = Open3.singleton_class.instance_method(:capture3)
     ok = successful_status
@@ -904,8 +937,9 @@ class HiveCommandsApproveTest < Minitest::Test
 
     cmd.send(:record_hive_commit, approve_task, "3-plan", "approve 2-brainstorm -> 3-plan")
 
-    assert_equal 1, calls.size
+    assert_equal 2, calls.size
     assert_equal [ "-C", "/tmp/state", "add", "-A", "stages/3-plan/slug-260522-abcd" ], calls.first
+    assert_equal [ :stage_advisory_free_task, "stages/3-plan/slug-260522-abcd" ], calls.last
   ensure
     Hive::GitOps.singleton_class.define_method(:new, original_git_ops) if original_git_ops
     Open3.singleton_class.define_method(:capture3, original_capture3) if original_capture3

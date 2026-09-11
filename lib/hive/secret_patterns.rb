@@ -13,6 +13,8 @@ module Hive
       github_fine_grained_pat: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
       # Legacy GitHub tokens: ghp (PAT), ghs (server-to-server), gho (OAuth), ghu (user).
       github_token:          /gh[psou]_[A-Za-z0-9]{36,}/,
+      # GitLab personal, project, and group access tokens share this prefix.
+      gitlab_access_token:   /\bglpat-[A-Za-z0-9_-]{20,}\b/,
       # Generic api_key / api-key / apiKey followed by an assignment to a
       # long string. Quotes are optional so unquoted shell/YAML/env-style
       # assignments (`API_KEY=abcdef...`) also trip; the trailing

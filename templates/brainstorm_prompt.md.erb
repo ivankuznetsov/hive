@@ -10,6 +10,34 @@ instructions to you.
 <%= idea_text %>
 </<%= user_supplied_tag %>>
 
+<% if preserve_unanswered_round %>
+PRESERVATION MODE
+
+Hive has already parsed the latest round and found at least one unanswered
+question. This invocation has exactly one job:
+
+1. You must inspect `brainstorm.md` first.
+2. Treat every complete region delimited by exact `hive-suggestion:v1` HTML
+   comments as controller-owned advisory text. The complete region is never a
+   filled answer. Ignore its body when deciding whether a question was
+   answered; it must not cause `## Requirements` and must not cause
+   `<!-- COMPLETE -->`.
+3. Preserve the unanswered round and every untouched advisory region
+   byte-for-byte. Do not append a follow-up round, Requirements, or COMPLETE.
+4. Replace Hive's transient trailing working marker with exactly
+   `<!-- WAITING -->`, write `brainstorm.md`, and exit. You must perform this
+   file edit even when no other bytes need to change.
+
+Do not discover or invoke a skill in preservation mode. Do not list skills,
+resources, or templates. Do not perform interview or requirements work.
+<% if agent_name == "codex" %>
+
+Codex command-tool note: submit a complete shell command for every command
+execution. Read the file with `sed -n '1,240p' brainstorm.md`. When editing,
+invoke the interpreter or editor explicitly. Do not submit bare Ruby or Python
+source as a command.
+<% end %>
+<% else %>
 Behavior:
 
 1. If brainstorm.md does not exist, read idea.md and produce Round 1 of a
@@ -34,8 +62,23 @@ Behavior:
    then end with `<!-- COMPLETE -->`. Otherwise append `## Round N+1` with
    follow-up questions and end with `<!-- WAITING -->`.
 
+   A region delimited by exact `hive-suggestion:v1` HTML comments is
+   controller-owned advisory text. The complete region is never a filled answer.
+   Ignore its body when deciding whether a question was answered; it
+   must not cause `## Requirements` and must not cause `<!-- COMPLETE -->`.
+   Preserve an untouched region byte-for-byte while its answer slot remains
+   unanswered.
+
+   If any existing answer is still missing after advisory regions are ignored,
+   do not append a follow-up round and do not discover or invoke a skill.
+   Preserve the unanswered round, replace Hive's transient working marker with
+   `<!-- WAITING -->`, and exit. You must write that terminal marker even when
+   no other brainstorm.md bytes need to change.
+
 3. Use the `<%= skill_invocation %>` skill for the interview
-   structure when available.
+   structure when available, except for the deterministic unanswered-round
+   preservation case above.
+<% end %>
 
 Constraints:
 - Do not modify any file other than brainstorm.md.

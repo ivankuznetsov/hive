@@ -258,6 +258,7 @@ module Hive
       meter_class = stream&.const_defined?(:TokenMeter, false) ?
         stream::TokenMeter : Hive::AgentSupport::StreamMeter
       token_meter = meter_class.new
+      model_identity = stream::ModelIdentity.new if stream&.const_defined?(:ModelIdentity, false)
       resource_exhaustion = nil
       provider_signal = nil
       provider_error = nil
@@ -305,6 +306,7 @@ module Hive
             # logical message can span multiple newline-delimited JSON events,
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
+            model_identity&.observe(json)
             provider_signal ||= Hive::AgentProfiles::ErrorNormalizers.normalize(
               adapter: @profile.name,
               event: json,
@@ -497,6 +499,7 @@ module Hive
       else
         last_usage
       end
+      reported_usage = reported_usage&.merge(model: model_identity.model) if model_identity
       result = {
         pid: pid,
         pgid: pgid,
@@ -508,7 +511,7 @@ module Hive
         final_message_truncated: messages.truncated?,
         limit_text: limit_text,
         usage: reported_usage,
-        model: reported_usage&.dig(:model),
+        model: model_identity ? model_identity.model : reported_usage&.dig(:model),
         resource_exhaustion: resource_exhaustion,
         output_completed: output_completed,
         provider_signal: provider_signal,

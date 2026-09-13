@@ -165,6 +165,41 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_request_review_can_rerun_successful_adversarial_output_with_unknown_identity
+    primary = route("success")
+    adversarial = route("success").merge(
+      "role" => "adversarial", "attempt_id" => "pra-#{'f' * 64}",
+      "independence_verified" => false, "independence_reason" => "reviewer_family_unknown"
+    )
+    with_service(routes: [ primary, adversarial ]) do |service, store, record|
+      arguments = decision_arguments(record, action: "request_review", authorized: false)
+      assert service.apply(**arguments).applied
+      assert_equal primary, store.current["routes"].first
+      assert_equal adversarial, store.current["routes"][1]
+      reset = store.current["routes"].last
+      assert_equal "adversarial", reset["role"]
+      assert reset["recovery_reset"]
+      refute store.current.execution_allowed?
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(store.current, action: "request_review", authorized: false))
+      end
+    end
+  end
+
+  def test_request_review_does_not_reset_successful_independent_or_same_family_reviews
+    [ "different_model_family", "same_model_family" ].each do |reason|
+      adversarial = route("success").merge(
+        "role" => "adversarial", "independence_reason" => reason,
+        "independence_verified" => reason == "different_model_family"
+      )
+      with_service(routes: [ adversarial ]) do |service, _store, record|
+        assert_raises(Hive::PlanReview::InvalidAction) do
+          service.apply(**decision_arguments(record, action: "request_review", authorized: false))
+        end
+      end
+    end
+  end
+
   def test_request_review_resets_each_current_terminal_reviewer_route
     primary = route("terminal_failure")
     adversarial = route("unsupported").merge(

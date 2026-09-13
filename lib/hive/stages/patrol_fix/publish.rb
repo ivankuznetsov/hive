@@ -238,7 +238,7 @@ module Hive
           # Review evidence may quote credential-bearing example URLs. Export
           # the URL without userinfo; retain the original immutable receipt.
           # The publication scanner still validates the resulting body.
-          body.gsub!(%r{\b([a-z][a-z0-9+.-]*://)[^\s/@]+@}i, '\\1')
+          body.gsub!(%r{\b([a-z][a-z0-9+.-]*://)[^\s/@?#]+@}i, '\\1')
           bounded_utf8(body, MAX_BODY_BYTES)
         end
         private_class_method :body_for

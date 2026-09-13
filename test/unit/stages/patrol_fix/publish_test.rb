@@ -289,7 +289,8 @@ class PatrolFixPublishStageTest < Minitest::Test
   end
 
   def test_publication_omits_example_url_credentials_without_changing_review_receipts
-    rationale = "Checked HTTP://user:pw@example.com/a and https://user:pw@example.com/b."
+    rationale = "Checked HTTP://user:pw@example.com/a and https://user:pw@example.com/b. " \
+                "Keep https://example.com?email=user@example.org and https://example.com#user@example.org."
     with_publish_task(review_rationale: rationale) do |task, worktree_root, _manifest, _review, _remote|
       before = File.binread(File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME))
       request = Hive::Stages::PatrolFix::Publish.publication_request(
@@ -299,6 +300,8 @@ class PatrolFixPublishStageTest < Minitest::Test
       assert_includes request.body, "HTTP://example.com/a"
       assert_includes request.body, "https://example.com/b"
       refute_includes request.body, "user:pw@"
+      assert_includes request.body, "https://example.com?email=user@example.org"
+      assert_includes request.body, "https://example.com#user@example.org"
       assert_equal before, File.binread(File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME))
       refute Hive::SecretScanner.match?(request.published_body)
     end

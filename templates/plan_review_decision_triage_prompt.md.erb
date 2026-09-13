@@ -36,6 +36,14 @@ unresolved choices. If a finding is mistaken or already satisfied, produce a
 safe_auto disposition to retain the existing behavior with cited evidence;
 the subsequent planner and verifier must still check that disposition.
 
+Unverified automatic dispositions are included alongside unanswered gates,
+including corrections already incorporated into a candidate. Reconcile conflicts
+between them: if an automatic instruction invents a default for an explicitly
+unanswered choice, retire that instruction into the same manual disposition.
+Do not preserve a contradictory instruction merely because a reviewer previously
+called it automatic or the planner attempted it. Operator-approved and answered
+findings are excluded from reclassification.
+
 Previously assessed but unanswered gates are included when a verifier raises
 a new gate. Consolidate recurring concerns with those existing gates. A prior
 reviewer's classification or accepted automatic disposition is not an operator

@@ -275,6 +275,11 @@ module Hive
           record, findings, verification_findings, verification_outcome, plan_bytes: candidate_bytes
         )
         return followup if followup
+        resolved_ids = findings.filter_map do |entry|
+          finding = Finding.new(entry)
+          finding.fingerprint if finding.resolved?
+        end
+        verification_blockers.reject! { |blocker| resolved_ids.include?(blocker["finding_fingerprint"]) }
         if record["candidate_plan_digest"] && !SUCCESS_OUTCOMES.include?(verification_outcome)
           verification_blockers << {
             "owner" => "reviewer", "reason" => "candidate_verification_#{verification_outcome}"
@@ -1007,8 +1012,14 @@ module Hive
         record = consume_approval_policies(record)
         findings = record["findings"]
         return [ record, findings, nil ] if accepted_findings(record).empty?
-        return [ record, findings, nil ] if verification_revision_rounds(record) >=
-                                                   MAX_VERIFICATION_REVISION_ROUNDS
+        if verification_revision_rounds(record) >= MAX_VERIFICATION_REVISION_ROUNDS
+          blocked = terminal(
+            record, state: "blocked", outcome: "blocked", findings:,
+            blockers: [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
+            required_action: "resolve remaining findings with a new linked plan"
+          )
+          return [ blocked.record, findings, blocked ]
+        end
 
         reset = Hive::PlanReview.recovery_reset_route(
           latest_route(record, "verification"),

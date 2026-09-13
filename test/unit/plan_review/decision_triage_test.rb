@@ -69,6 +69,21 @@ class PlanReviewDecisionTriageTest < Minitest::Test
     assert_equal "approved", approved.fetch("lifecycle")
   end
 
+  def test_unverified_automatic_dispositions_are_reconciled_with_pending_choices
+    gate = finding("manual", "manual")
+    automatic = finding("contradictory", "safe_auto").merge("lifecycle" => "incorporated")
+    verified = finding("verified", "safe_auto").merge("lifecycle" => "verified")
+    authorized = finding("authorized", "safe_auto").merge("decision_id" => "operator-decision")
+    record = { "findings" => [ gate, automatic, verified, authorized ], "routes" => [ {
+      "role" => "decision_triage", "triage_version" => Hive::PlanReview::DecisionTriage::VERSION,
+      "assessed_fingerprints" => [ gate.fetch("fingerprint") ]
+    } ] }
+    assert_equal [ gate, automatic ], Hive::PlanReview::DecisionTriage.pending(record)
+    record["routes"].first["assessed_fingerprints"] << automatic.fetch("fingerprint")
+    assert_empty Hive::PlanReview::DecisionTriage.pending(record)
+    assert_empty Hive::PlanReview::DecisionTriage.pending({ "findings" => [ automatic ], "routes" => [] })
+  end
+
   def test_missing_duplicate_unknown_or_unjustified_dispositions_cannot_remove_a_gate
     entries = [ finding("primary"), finding("adversarial") ]
     bad = [ [], [ assessment(entries.take(1)) ], [ assessment(entries), assessment(entries) ],

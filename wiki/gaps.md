@@ -7,6 +7,14 @@ updated: 2026-09-23
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Public interactive demo launch configuration (2026-09-13)
+
+The static demo and local waitlist checks do not establish hivedev.sh ownership,
+its existing deployment state, production D1/Turnstile configuration, or approved
+privacy contact/retention text. Default builds leave collection disabled. Verify
+these prerequisites before an explicitly authorized public deployment; see
+[[interactive-demo]] and `demo/README.md`.
+
 ## Operator cancellation awaits live validation (2026-09-09)
 
 `archive --reason cancelled` is covered locally for cancellation without GitHub

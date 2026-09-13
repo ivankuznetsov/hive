@@ -1,0 +1,49 @@
+name: Interactive demo
+
+on:
+  pull_request:
+    paths:
+      - 'demo/**'
+      - 'web/**'
+      - '.github/workflows/demo.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'demo/**'
+      - 'web/**'
+      - '.github/workflows/demo.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: web
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - run: npm ci
+        working-directory: demo
+      - run: npx playwright install --with-deps chromium
+        working-directory: demo
+      - run: bundle exec rails test test/integration/demo_export_test.rb
+        working-directory: web
+      - run: npm test && npm run build && npm run test:browser
+        working-directory: demo
+      - name: Keep browser evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: interactive-demo-browser
+          path: demo/test-results/
+          if-no-files-found: warn

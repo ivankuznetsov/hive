@@ -7,6 +7,9 @@ updated: 2026-09-23
 tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
+The separate public [[interactive-demo]] uses these views at build time with
+fictional fixtures; it does not run `hive web` or agents for visitors.
+
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
 **Rails 8** app (importmap, Turbo, Stimulus, propshaft, solid_cable) living in
 `web/` at the repo root. It is the browser counterpart to the TUI over the same

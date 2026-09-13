@@ -874,6 +874,17 @@ class PlanReviewOrchestratorTest < Minitest::Test
                    revision.calls.length
       assert_equal verification_calls,
                    adapter.calls.count { |request| request.kind == "verification" }
+
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      legacy = Hive::PlanReview::Record.new(replay.to_h.merge(
+        "version" => replay.version + 1, "state" => "awaiting_decision", "outcome" => nil
+      ))
+      store.publish_current!(legacy, expected_version: replay.version)
+      recovered = runner.advance!.record
+      assert_equal "blocked", recovered.state
+      assert_equal "revision_round_limit", recovered["blockers"].first.fetch("reason")
+      assert_equal Hive::PlanReview::Orchestrator::MAX_VERIFICATION_REVISION_ROUNDS,
+                   revision.calls.length
     end
   end
 

@@ -55,6 +55,20 @@ class PlanReviewDecisionTriageTest < Minitest::Test
     assert_equal entries.first["evidence"], forward.last["evidence"]
   end
 
+  def test_new_verifier_gate_is_reconciled_with_existing_unanswered_gates
+    existing = finding("already-assessed", "manual")
+    duplicate = finding("verification", "manual")
+    approved = finding("operator-approved").merge("lifecycle" => "approved", "decision_id" => "decision-1")
+    record = { "findings" => [ existing, approved ], "routes" => [ {
+      "role" => "decision_triage", "triage_version" => Hive::PlanReview::DecisionTriage::VERSION,
+      "assessed_fingerprints" => [ existing.fetch("fingerprint") ]
+    } ] }
+    assert_empty Hive::PlanReview::DecisionTriage.pending(record)
+    record["findings"] << duplicate
+    assert_equal [ existing, duplicate ], Hive::PlanReview::DecisionTriage.pending(record)
+    assert_equal "approved", approved.fetch("lifecycle")
+  end
+
   def test_missing_duplicate_unknown_or_unjustified_dispositions_cannot_remove_a_gate
     entries = [ finding("primary"), finding("adversarial") ]
     bad = [ [], [ assessment(entries.take(1)) ], [ assessment(entries), assessment(entries) ],

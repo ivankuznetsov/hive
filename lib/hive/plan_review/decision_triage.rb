@@ -16,9 +16,10 @@ module Hive
           route["role"] == "decision_triage" && route["triage_version"] == VERSION ?
             Array(route["assessed_fingerprints"]) : []
         end.to_set
-        Array(record["findings"]).select do |entry|
-          Finding.new(entry).blocking? && !assessed.include?(entry.fetch("fingerprint"))
-        end
+        blockers = Array(record["findings"]).select { |entry| Finding.new(entry).blocking? }
+        return [] if blockers.all? { |entry| assessed.include?(entry.fetch("fingerprint")) }
+
+        blockers
       end
 
       def validate!(rows, entries)

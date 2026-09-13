@@ -829,9 +829,10 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
                 "title" => "Test existing behavior", "disposition" => "Add the missing acceptance test",
                 "rationale" => "The delivery requirement already promises this behavior", "boundary" => nil } ]
       observed = nil
+      extra_findings = []
       runner = lambda do |prompt:, output_path:, request:, **|
         observed = prompt
-        output = valid_result(request).merge("findings" => [], "decision_assessments" => rows)
+        output = valid_result(request).merge("findings" => extra_findings, "decision_assessments" => rows)
         File.write(output_path, JSON.generate(output))
         { "status" => "ok", "actual_route" => request.reviewer }
       end
@@ -841,6 +842,14 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal rows, result.decision_assessments
       assert_includes observed, "CHANGE\nIN AUTHORIZATION"
       assert_includes observed, source.fetch("fingerprint")
+      extra_findings << source
+      failed = adapter.call(request)
+      assert_equal "retryable_failure", failed.outcome
+      assert_includes failed.diagnostic, "not findings or verification"
+      extra_findings.clear
+      failed = adapter.call(request.with(kind: "verification"))
+      assert_equal "retryable_failure", failed.outcome
+      assert_includes failed.diagnostic, "only valid during decision triage"
       rows.clear
       failed = adapter.call(request)
       assert_equal "retryable_failure", failed.outcome

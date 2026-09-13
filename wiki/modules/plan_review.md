@@ -242,7 +242,9 @@ matches; an intervening operator decision causes a fresh assessment of the
 remaining findings and preserves the recorded decision.
 Existing `awaiting_decision` records with unassessed findings become runnable
 through `TaskAction`; a completed assessment is not repeated on each tick.
-New verification findings pass through the same reconciliation boundary.
+New verification findings pass through the same reconciliation boundary,
+together with still-unanswered gates so recurring concerns can be consolidated.
+Approved or answered findings remain outside that reassessment.
 
 Routine revisions can proceed while unrelated human choices remain open.
 Both planner and verifier receive those unresolved choices separately and must

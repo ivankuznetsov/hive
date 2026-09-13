@@ -509,3 +509,14 @@ applies, the generic force-approve control is hidden.
 - [[modules/config]] · [[modules/daemon]] · [[modules/model_routing]] · [[modules/task_action]]
 - [[commands/status]] · [[commands/daemon]] · [[commands/web]] · [[cli]]
 - [[decisions]] · [[testing]] · [[gaps]]
+
+### Conflicting automatic dispositions
+
+Decision reassessment includes unverified, unapproved `safe_auto` findings when
+an unanswered gate exists, including already incorporated dispositions. A false
+automatic default can therefore be consolidated with the reserved choice instead
+of surviving as a contradictory verification target. Verified findings and
+operator-approved or answered findings remain outside that reassessment. A blocked
+record with a prior completed triage and newly eligible sources is runnable again;
+exhausted triage itself is not rearmed. Verification blockers referring to sources
+resolved by reassessment are removed, while unrelated missing evidence remains.

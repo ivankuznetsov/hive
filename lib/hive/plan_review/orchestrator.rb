@@ -275,6 +275,11 @@ module Hive
           record, findings, verification_findings, verification_outcome, plan_bytes: candidate_bytes
         )
         return followup if followup
+        resolved_ids = findings.filter_map do |entry|
+          finding = Finding.new(entry)
+          finding.fingerprint if finding.resolved?
+        end
+        verification_blockers.reject! { |blocker| resolved_ids.include?(blocker["finding_fingerprint"]) }
         if record["candidate_plan_digest"] && !SUCCESS_OUTCOMES.include?(verification_outcome)
           verification_blockers << {
             "owner" => "reviewer", "reason" => "candidate_verification_#{verification_outcome}"

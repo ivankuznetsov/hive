@@ -316,7 +316,7 @@ class TaskActionTest < Minitest::Test
       with_replaced_singleton_method(Hive::PlanReview::Store, :new, ->(**) { store }) do
         action = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
         assert_equal "plan_reviewing", action.key
-        record["routes"] << { "role" => "decision_triage", "triage_version" => 1,
+        record["routes"] << { "role" => "decision_triage", "triage_version" => 1, "outcome" => "success",
                                "assessed_fingerprints" => [ finding.fetch("fingerprint") ] }
         settled = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
         assert_equal "plan_review_decision", settled.key
@@ -327,6 +327,13 @@ class TaskActionTest < Minitest::Test
         safe["lifecycle"] = "incorporated"
         verifying = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
         assert_equal "plan_reviewing", verifying.key
+        recoverable = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "blocked" })
+        assert_equal "plan_reviewing", recoverable.key
+        record["routes"] << { "role" => "decision_triage", "triage_version" => 1, "outcome" => "terminal_failure" }
+        failed_triage = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "blocked" })
+        assert_equal "plan_review_blocked", failed_triage.key
+        record["routes"].pop
+        record["routes"].last["assessed_fingerprints"] << safe.fetch("fingerprint")
         blocked = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "blocked" })
         assert_equal "plan_review_blocked", blocked.key
         assert_nil blocked.command

@@ -609,6 +609,43 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_verifier_conflict_reconciles_automatic_disposition_without_answering_manual_choice
+    with_task(standard_plan) do |task, cfg|
+      automatic = finding("safe_auto", "Default to strict revocation")
+      gate = finding("manual", "Choose replay policy", line: 2)
+      conflict = finding("manual", "Automatic default contradicts unanswered policy", line: 3)
+      triage_calls = 0
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request, findings: request.kind == "primary" ? [ automatic, gate ] : [])
+        if request.kind == "decision_triage" && (triage_calls += 1) > 1
+          result = result.with(decision_assessments: [ {
+            "sources" => request.pending_findings.map { |entry| entry.fetch("fingerprint") },
+            "classification" => "manual", "title" => "Choose replay policy",
+            "disposition" => "Preserve the unresolved policy; retire the contradictory default instruction",
+            "rationale" => "The plan explicitly reserves the policy choice",
+            "boundary" => { "requirement" => "Replay behavior remains unanswered", "change" => "Revocation semantics",
+                            "alternatives" => [ "Strict revocation", "Bounded grace" ] }
+          } ])
+        elsif request.kind == "verification"
+          result = successful_result(request, findings: [ conflict ]).with(residual_evidence: [])
+        end
+        result
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      result = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "awaiting_decision", result.record.state
+      assert_equal 1, result.summary.dig("finding_counts", "open_manual")
+      assert_equal 0, result.summary.dig("finding_counts", "incorporated")
+      assert_equal [ "manual_answer_required" ], result.record["blockers"].map { |entry| entry["reason"] }
+      assert_empty result.record["decisions"]
+      refute result.record.execution_allowed?
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md"))
+      calls = adapter.calls.size
+      orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal calls, adapter.calls.size
+    end
+  end
+
   def test_decision_triage_provider_outage_retries_without_approving_or_dropping_findings
     with_task(standard_plan) do |task, cfg|
       cfg["plan_review"]["attempts"]["max_transient"] = 0
@@ -1719,8 +1756,9 @@ class PlanReviewOrchestratorTest < Minitest::Test
           { "sources" => [ f.fetch("fingerprint") ], "classification" => f.fetch("classification"),
             "title" => f.fetch("title"), "disposition" => f.fetch("description"),
             "rationale" => "The requirement explicitly leaves this material choice unresolved.",
-            "boundary" => { "requirement" => "Unanswered requirement", "change" => "Change authorized behavior",
-                            "alternatives" => [ "Keep existing behavior", "Change behavior" ] } }
+            "boundary" => f.fetch("classification") == "safe_auto" ? nil :
+              { "requirement" => "Unanswered requirement", "change" => "Change authorized behavior",
+                "alternatives" => [ "Keep existing behavior", "Change behavior" ] } }
         } : [],
         residual_evidence:,
         route_receipt: {

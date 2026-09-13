@@ -101,6 +101,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[gaps]] — `wiki/gaps.md`
 - [[update-flow]] — `wiki/update-flow.md`
 - [[index]] — `wiki/index.md`
+- [[interactive-demo]] — `wiki/interactive-demo.md`
 - [[log]] — `wiki/log.md`
 - [[modules/agent]] — `wiki/modules/agent.md`
 - [[modules/agent_cli_runtime]] — `wiki/modules/agent_cli_runtime.md`

@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "project": "Notebook",
+  "tasks": [
+    {
+      "slug": "dark-mode",
+      "title": "Add dark mode",
+      "phase": "question",
+      "plan": "# Dark mode requirements\n\nMake Notebook comfortable for evening writing. Decide whether the theme should follow the system setting or use an explicit Light / Dark choice."
+    },
+    {
+      "slug": "search-notes",
+      "title": "Find notes as you type",
+      "phase": "implementing",
+      "plan": "# Find notes as you type: plan\n\nFilter notes by title and body. Keep keyboard focus in the search field. Show a helpful empty state.",
+      "result": "# Find notes as you type\n\nThe prepared agent is implementing title and body filtering. Keyboard and empty-state verification are next.\n\nThis is a fictional example task.",
+      "diff": "diff --git a/app/search-notes.js b/app/search-notes.js\n--- a/app/search-notes.js\n+++ b/app/search-notes.js\n@@ -0,0 +1 @@\n+const visible = notes.filter(note => `${note.title} ${note.body}`.toLowerCase().includes(query));\n",
+      "evidence": "# Sample test evidence\n\nPrepared scenario, not live test output.\n\nImplementation is in progress. Keyboard and empty-state checks are pending; no passing result is claimed."
+    },
+    {
+      "slug": "export-markdown",
+      "title": "Export a note as Markdown",
+      "phase": "review",
+      "plan": "# Export a note as Markdown: plan\n\nDownload the note as UTF-8 Markdown. Preserve headings and lists. Use a safe filename.",
+      "result": "# Export a note as Markdown\n\nThe prepared change adds Download Markdown. Review the diff and example tests, including Unicode and empty notes.\n\nThis is a fictional example task.",
+      "diff": "diff --git a/app/export-markdown.js b/app/export-markdown.js\n--- a/app/export-markdown.js\n+++ b/app/export-markdown.js\n@@ -0,0 +1 @@\n+download(new Blob([markdown], { type: \"text/markdown;charset=utf-8\" }), \"note.md\");\n",
+      "evidence": "# Sample test evidence\n\nPrepared scenario, not live test output.\n\n- Heading and list preservation: Pass\n- Unicode round trip: Pass\n- Empty note download: Pass"
+    },
+    {
+      "slug": "autosave-status",
+      "title": "Show when a note is saved",
+      "phase": "completed",
+      "plan": "# Show when a note is saved: plan\n\nShow Saving while a save is pending, Saved after success, and a retry message on failure.",
+      "result": "# Show when a note is saved\n\nThe prepared result adds a quiet Saved indicator and an actionable retry message. Users can tell whether their latest edit was stored.\n\nThis is a fictional example task.",
+      "diff": "diff --git a/app/autosave-status.js b/app/autosave-status.js\n--- a/app/autosave-status.js\n+++ b/app/autosave-status.js\n@@ -0,0 +1 @@\n+<p role=\"status\" aria-live=\"polite\">Saved</p>\n",
+      "evidence": "# Sample test evidence\n\nPrepared scenario, not live test output.\n\n- Pending save shows Saving: Pass\n- Successful save shows Saved: Pass\n- Failure offers retry: Pass\n- Accessible announcement: Pass"
+    }
+  ],
+  "branches": {
+    "system": {
+      "plan": "# Dark mode plan\n\n## Your decision\n\nFollow the system setting by default, with a saved Light / Dark / System override.\n\n## Implementation\n\n1. Add keyboard-accessible theme controls.\n2. Apply colors to editor and navigation.\n3. Save the selection and restore it on refresh.\n\n## Acceptance checks\n\nCheck the chosen default, keyboard selection, readable text, and persistence.\n\nPrepared example; no live execution.",
+      "diff": "diff --git a/app/theme.js b/app/theme.js\n--- a/app/theme.js\n+++ b/app/theme.js\n@@ -1 +1,3 @@\n-export const theme = \"light\";\n+const mode = localStorage.getItem('theme') || 'system';\n+const dark = mode === 'dark' || (mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);\n+export const theme = dark ? \"dark\" : \"light\";\n",
+      "evidence": "# Sample test evidence\n\nPrepared results, not live test output.\n\n## Behavior checked\n\nFollow the system setting by default, with a saved Light / Dark / System override.\n\n| Check | Sample result |\n| --- | --- |\n| Chosen default | Pass |\n| Keyboard selection | Pass |\n| Selection survives refresh | Pass |\n| Readable editor colors | Pass |",
+      "outcome": "# Dark mode is ready\n\nFollow the system setting by default, with a saved Light / Dark / System override.\n\n## Prepared outcome\n\nInspect the matching plan, implementation diff, and sample acceptance evidence. A real Hive task keeps these reviewable results together.\n\nDemo only: no code was changed or deployed during your visit."
+    },
+    "manual": {
+      "plan": "# Dark mode plan\n\n## Your decision\n\nStart in light mode, with a saved Light / Dark choice. Do not follow the system setting.\n\n## Implementation\n\n1. Add keyboard-accessible theme controls.\n2. Apply colors to editor and navigation.\n3. Save the selection and restore it on refresh.\n\n## Acceptance checks\n\nCheck the chosen default, keyboard selection, readable text, and persistence.\n\nPrepared example; no live execution.",
+      "diff": "diff --git a/app/theme.js b/app/theme.js\n--- a/app/theme.js\n+++ b/app/theme.js\n@@ -1 +1,3 @@\n-export const theme = \"light\";\n+const mode = localStorage.getItem('theme') || 'light';\n+const dark = mode === 'dark';\n+export const theme = dark ? \"dark\" : \"light\";\n",
+      "evidence": "# Sample test evidence\n\nPrepared results, not live test output.\n\n## Behavior checked\n\nStart in light mode, with a saved Light / Dark choice. Do not follow the system setting.\n\n| Check | Sample result |\n| --- | --- |\n| Chosen default | Pass |\n| Keyboard selection | Pass |\n| Selection survives refresh | Pass |\n| Readable editor colors | Pass |",
+      "outcome": "# Dark mode is ready\n\nStart in light mode, with a saved Light / Dark choice. Do not follow the system setting.\n\n## Prepared outcome\n\nInspect the matching plan, implementation diff, and sample acceptance evidence. A real Hive task keeps these reviewable results together.\n\nDemo only: no code was changed or deployed during your visit."
+    }
+  }
+}

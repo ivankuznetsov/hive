@@ -344,6 +344,20 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_invalid_review_cannot_reactivate_a_blocked_task
+    Dir.mktmpdir do |project|
+      task = fake_task(stage_name: "plan", stage_index: 3, project_root: project)
+      FileUtils.mkdir_p(task.folder)
+      store = Object.new
+      store.define_singleton_method(:current_validated) { raise Hive::PlanReview::InvalidRecord, "truncated review" }
+      with_replaced_singleton_method(Hive::PlanReview::Store, :new, ->(**) { store }) do
+        action = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "blocked" })
+        assert_equal "plan_review_blocked", action.key
+        assert_nil action.command
+      end
+    end
+  end
+
   def test_policy_eligible_awaiting_decision_is_runnable
     Dir.mktmpdir do |project|
       task = fake_task(stage_name: "plan", stage_index: 3, project_root: project)

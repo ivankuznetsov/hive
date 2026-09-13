@@ -288,6 +288,22 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_publication_omits_example_url_credentials_without_changing_review_receipts
+    rationale = "Checked HTTP://user:pw@example.com/a and https://user:pw@example.com/b."
+    with_publish_task(review_rationale: rationale) do |task, worktree_root, _manifest, _review, _remote|
+      before = File.binread(File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME))
+      request = Hive::Stages::PatrolFix::Publish.publication_request(
+        task, config, git_gateway: LocalGit.new, worktree_root: worktree_root
+      )
+
+      assert_includes request.body, "HTTP://example.com/a"
+      assert_includes request.body, "https://example.com/b"
+      refute_includes request.body, "user:pw@"
+      assert_equal before, File.binread(File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME))
+      refute Hive::SecretScanner.match?(request.published_body)
+    end
+  end
+
   def test_secret_in_review_body_blocks_before_push_without_leaking_diagnostic
     with_publish_task(review_rationale: "token ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}") do |task, worktree_root, _manifest, _review, _remote|
       git = LocalGit.new

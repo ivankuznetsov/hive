@@ -987,6 +987,38 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_reclassified_verifier_gates_cannot_clear_an_exhausted_revision_budget
+    with_task(standard_plan) do |task, cfg|
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request, findings: request.kind == "primary" ?
+          [ finding("safe_auto", "Clarify tests") ] : [])
+        if request.kind == "verification"
+          verification_calls += 1
+          result = successful_result(request, findings: [ finding("manual", "Routine correction", line: verification_calls + 1) ])
+        elsif request.kind == "decision_triage"
+          result = result.with(decision_assessments: request.pending_findings.map { |entry|
+            { "sources" => [ entry.fetch("fingerprint") ], "classification" => "safe_auto",
+              "title" => "Implement the existing requirement", "disposition" => "Correct the test instructions",
+              "rationale" => "No product choice is needed", "boundary" => nil }
+          })
+        end
+        result
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+      2.times { assert_equal "revising", runner.advance!.record.state }
+      capped = runner.advance!.record
+      assert_equal "blocked", capped.state
+      refute capped.execution_allowed?
+      assert_equal 3, revision.calls.size
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md"))
+      calls = adapter.calls.size
+      assert_equal capped.to_h, runner.advance!.record.to_h
+      assert_equal calls, adapter.calls.size
+    end
+  end
+
   def test_capped_verification_revision_is_a_noop_on_external_reentry
     candidates = 4.times.map do |index|
       standard_plan.sub("# Plan", "# Revision #{index + 1}")

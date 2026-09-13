@@ -520,3 +520,7 @@ operator-approved or answered findings remain outside that reassessment. A block
 record with a prior completed triage and newly eligible sources is runnable again;
 exhausted triage itself is not rearmed. Verification blockers referring to sources
 resolved by reassessment are removed, while unrelated missing evidence remains.
+
+Reassessment at the final allowed revision round cannot clear newly reclassified
+routine work: accepted residuals at that boundary terminate with
+`revision_round_limit` before any obsolete source blocker is removed.

@@ -139,6 +139,11 @@ churn, and retries without a changed durable outcome advance bookkeeping only.
 | Registry membership | `Config`'s locked registry mutation owner | Ordered before/after membership history |
 | Correction and older commit/push/operator vocabulary | Explicitly declared unsupported legacy producers | Never claimed complete without new authoritative evidence |
 
+Hold observation accepts the daemon's actual `StatusConsumer::Row`, whose
+optional provider attribution comes from marker or routing metadata. A missing
+Struct member is treated as absent attribution rather than an exception, so
+capacity and authority holds cannot interrupt scheduler observation.
+
 `ProjectSource` is the only per-registration adapter. It containment-checks all
 known active/done/archive stage buckets, reads bounded creation receipts and
 journals, reconstructs boundary attention, enriches the PR core from Hive-owned

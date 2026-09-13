@@ -94,7 +94,7 @@ module Hive
 
       def value(row, key)
         row.respond_to?(key) ? row.public_send(key) : row[key]
-      rescue KeyError, TypeError, NoMethodError
+      rescue KeyError, TypeError, NameError
         nil
       end
     end

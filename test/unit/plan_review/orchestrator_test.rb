@@ -463,7 +463,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
       end
       assert_equal "awaiting_decision", old.record.state
       original_attempts = old.record["attempt_ids"]
-      revision = FakeRevision.new(standard_plan)
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
       adapter = FakeAdapter.new do |request|
         result = successful_result(request)
         if request.kind == "decision_triage"
@@ -483,6 +483,9 @@ class PlanReviewOrchestratorTest < Minitest::Test
       repaired = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
       assert_equal "awaiting_decision", repaired.record.state
       refute repaired.record.execution_allowed?
+      assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection: repaired, config: cfg
+      ).fetch("status")
       assert_equal %w[decision_triage verification], adapter.calls.map(&:kind)
       assert_equal 1, revision.calls.size
       assert_equal 1, revision.calls.first[:findings].size

@@ -324,6 +324,15 @@ class TaskActionTest < Minitest::Test
         record["findings"] << safe
         remaining = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
         assert_equal "plan_reviewing", remaining.key
+        safe["lifecycle"] = "incorporated"
+        verifying = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
+        assert_equal "plan_reviewing", verifying.key
+        blocked = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "blocked" })
+        assert_equal "plan_review_blocked", blocked.key
+        assert_nil blocked.command
+        safe["lifecycle"] = "verified"
+        done = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
+        assert_equal "plan_review_decision", done.key
       end
     end
   end

@@ -503,6 +503,112 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_pending_choice_does_not_interrupt_verification_retry_after_revision
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 1
+      initial_findings = [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ]
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+        else
+          successful_result(request, findings: request.kind == "primary" ? initial_findings : [])
+        end
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
+      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "retry_scheduled", first.record.state
+      assert_equal 1, first.summary.dig("finding_counts", "incorporated")
+      retry_at = Time.parse(first.record["retry_at"])
+      held = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { retry_at - 1 }).advance!
+      assert_equal "retry_scheduled", held.record.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
+
+      # Reproduce a record parked by the older build after the retry was saved.
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      parked = held.record.to_h.merge("state" => "awaiting_decision", "retry_at" => nil,
+                                     "version" => held.record.version + 1)
+      store.publish_current!(Hive::PlanReview::Record.new(parked), expected_version: held.record.version)
+
+      recovered_adapter = success_adapter
+      recovered = orchestrator(task, cfg, adapter: recovered_adapter, planner_revision: revision,
+                               clock: -> { retry_at + 1 }).advance!
+      assert_equal "awaiting_decision", recovered.record.state
+      assert_equal [ "verification" ], recovered_adapter.calls.map(&:kind)
+      assert_equal 1, revision.calls.size
+      assert_equal 1, recovered.summary.dig("finding_counts", "verified")
+      assert_equal 1, recovered.summary.dig("finding_counts", "open_manual")
+      assert_empty recovered.record["decisions"]
+      refute recovered.record.execution_allowed?
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  def test_degraded_coverage_does_not_clear_pending_choice_or_unverified_candidate
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 1
+      initial_findings = [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ]
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "adversarial"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
+        elsif request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+        else
+          successful_result(request, findings: request.kind == "primary" ? initial_findings : [])
+        end
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
+      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "retry_scheduled", first.record.state
+      assert_equal 1, first.summary.dig("finding_counts", "incorporated")
+      retry_at = Time.parse(first.record["retry_at"])
+      held = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { retry_at - 1 }).advance!
+      assert_equal "retry_scheduled", held.record.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
+
+      # Reproduce a record parked by the older build after the retry was saved.
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      parked = held.record.to_h.merge("state" => "awaiting_decision", "retry_at" => nil,
+                                     "version" => held.record.version + 1)
+      store.publish_current!(Hive::PlanReview::Record.new(parked), expected_version: held.record.version)
+
+      recovered_adapter = success_adapter
+      recovered = orchestrator(task, cfg, adapter: recovered_adapter, planner_revision: revision,
+                               clock: -> { retry_at + 1 }).advance!
+      assert_equal "awaiting_decision", recovered.record.state
+      assert_equal [ "verification" ], recovered_adapter.calls.map(&:kind)
+      assert_equal 1, revision.calls.size
+      assert_equal 1, recovered.summary.dig("finding_counts", "verified")
+      assert_equal 1, recovered.summary.dig("finding_counts", "open_manual")
+      assert_empty recovered.record["decisions"]
+      refute recovered.record.execution_allowed?
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  def test_pending_choice_does_not_hide_exhausted_verification
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+        else
+          successful_result(request, findings: request.kind == "primary" ?
+            [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ] : [])
+        end
+      end
+      runner = orchestrator(task, cfg, adapter:,
+                            planner_revision: FakeRevision.new(standard_plan.sub("# Plan", "# Revised")))
+      blocked = runner.advance!
+      assert_equal "blocked", blocked.record.state
+      assert_equal 1, blocked.summary.dig("finding_counts", "open_manual")
+      assert blocked.record["blockers"].any? { |entry| entry["reason"] == "candidate_verification_provider_limit" }
+      refute blocked.record.execution_allowed?
+      calls = adapter.calls.size
+      assert_equal "blocked", runner.advance!.record.state
+      assert_equal calls, adapter.calls.size
+    end
+  end
+
   def test_decision_triage_provider_outage_retries_without_approving_or_dropping_findings
     with_task(standard_plan) do |task, cfg|
       cfg["plan_review"]["attempts"]["max_transient"] = 0

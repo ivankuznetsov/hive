@@ -989,7 +989,7 @@ module Hive
       return true unless Hive::PlanReview::DecisionTriage.pending(record).empty?
       return true if Array(record["findings"]).any? do |entry|
         entry["classification"] == "safe_auto" && entry["lifecycle"] == "open" ||
-          %w[approved answered].include?(entry["lifecycle"])
+          %w[approved answered incorporated].include?(entry["lifecycle"])
       end
 
       pending = record["findings"].map { |entry| Hive::PlanReview::Finding.new(entry) }

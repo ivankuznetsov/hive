@@ -300,6 +300,34 @@ class TaskActionTest < Minitest::Test
     assert_nil unreadable_revision.command
   end
 
+  def test_legacy_decisions_and_remaining_routine_work_are_runnable_but_assessed_choices_are_not
+    Dir.mktmpdir do |project|
+      task = fake_task(stage_name: "plan", stage_index: 3, project_root: project)
+      FileUtils.mkdir_p(task.folder)
+      finding = Hive::PlanReview::Finding.new(
+        "source" => "primary", "classification" => "manual", "risk" => "high",
+        "title" => "Choose replay behavior", "description" => "The plan leaves this choice unanswered",
+        "evidence" => { "path" => "plan.md", "start_line" => 1, "end_line" => 1, "anchor_digest" => "a" * 64 },
+        "lifecycle" => "open", "display_order" => 1
+      ).to_h
+      record = { "findings" => [ finding ], "routes" => [] }
+      store = Object.new
+      store.define_singleton_method(:current_validated) { record }
+      with_replaced_singleton_method(Hive::PlanReview::Store, :new, ->(**) { store }) do
+        action = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
+        assert_equal "plan_reviewing", action.key
+        record["routes"] << { "role" => "decision_triage", "triage_version" => 1,
+                               "assessed_fingerprints" => [ finding.fetch("fingerprint") ] }
+        settled = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
+        assert_equal "plan_review_decision", settled.key
+        safe = Hive::PlanReview::Finding.new(finding.except("fingerprint").merge("classification" => "safe_auto")).to_h
+        record["findings"] << safe
+        remaining = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
+        assert_equal "plan_reviewing", remaining.key
+      end
+    end
+  end
+
   def test_policy_eligible_awaiting_decision_is_runnable
     Dir.mktmpdir do |project|
       task = fake_task(stage_name: "plan", stage_index: 3, project_root: project)

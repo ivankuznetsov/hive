@@ -152,7 +152,7 @@ module Hive
       end
 
       def call(review_id:, plan_bytes:, findings:, planner_identity:, timeout_sec:,
-               planner_authority: planner_identity)
+               planner_authority: planner_identity, pending_findings: [])
         DisposableWorktree.open(
           project_root: @task.project_root,
           prefix: "hive-plan-revision-worktree-"
@@ -165,7 +165,7 @@ module Hive
           seed_candidate!(output_path, redacted_plan)
           prompt = render_prompt(
             input_path:, output_path:, findings:, review_id:, planner_identity:,
-            planner_authority:
+            planner_authority:, pending_findings:
           )
           observed = stringify(@runner.call(
             prompt:, workspace:, output_path:, planner_identity:, timeout_sec:
@@ -199,13 +199,14 @@ module Hive
       end
 
       def render_prompt(input_path:, output_path:, findings:, review_id:, planner_identity:,
-                        planner_authority:)
+                        planner_authority:, pending_findings: [])
         source = File.read(File.expand_path("../../../templates/plan_revision_prompt.md.erb", __dir__))
         ERB.new(source, trim_mode: "-").result_with_hash(
           nonce: SecureRandom.hex(24), input_path:, output_path:, review_id:,
           findings_json: JSON.pretty_generate(Array(findings).map do |finding|
             finding.respond_to?(:to_h) ? finding.to_h : finding
           end),
+          pending_findings_json: JSON.pretty_generate(pending_findings),
           planner_identity_json: JSON.generate(planner_identity),
           planner_authority_json: JSON.generate(planner_authority)
         )

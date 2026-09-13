@@ -13,6 +13,7 @@ require "hive/config"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/result_parser"
+require "hive/plan_review/decision_triage"
 require "hive/plan_review/route_resolver"
 require "hive/plan_review/workspace_scope"
 require "hive/secret_patterns"
@@ -193,7 +194,7 @@ module Hive
         # immutable snapshot copies, and reviewer launch.
         def probe_capability(kind:, reviewer:, project_root:)
           return { "status" => "present", "diagnostic" => nil } if
-            kind.to_s == "adversarial"
+            %w[adversarial decision_triage].include?(kind.to_s)
 
           provider = reviewer.fetch("provider")
           support = Hive::AgentSupport.for(provider)
@@ -280,6 +281,14 @@ module Hive
               },
               snapshot_bytes:
             )
+            if request.kind == "decision_triage" && Base::SUCCESS_OUTCOMES.include?(parsed.outcome)
+              DecisionTriage.validate!(parsed.decision_assessments, request.pending_findings)
+              unless parsed.findings.empty? && parsed.residual_evidence.empty?
+                raise InvalidRecord, "decision triage must return dispositions, not findings or verification"
+              end
+            elsif request.kind != "decision_triage" && parsed.decision_assessments != []
+              raise InvalidRecord, "decision assessments are only valid during decision triage"
+            end
           rescue InvalidRecord => e
             # A well-confined reviewer that emitted malformed JSON or one bad
             # diagnostic field did not judge the plan. Treat the producer's
@@ -298,6 +307,7 @@ module Hive
             coverage: parsed.coverage,
             selected_lenses: parsed.selected_lenses,
             residual_evidence: parsed.residual_evidence,
+            decision_assessments: parsed.decision_assessments,
             diagnostic: parsed.diagnostic,
             retry_at: parsed.retry_at,
             route_receipt: route_receipt(
@@ -374,11 +384,12 @@ module Hive
           template = case request.kind
           when "adversarial" then "plan_review_adversarial_prompt.md.erb"
           when "verification" then "plan_review_verification_prompt.md.erb"
+          when "decision_triage" then "plan_review_decision_triage_prompt.md.erb"
           else "plan_review_prompt.md.erb"
           end
           source = File.read(File.expand_path("../../../../templates/#{template}", __dir__))
           ERB.new(source, trim_mode: "-").result_with_hash(
-            skill_invocation: request.kind == "adversarial" ? nil : capability.fetch("invocation"),
+            skill_invocation: %w[adversarial decision_triage].include?(request.kind) ? nil : capability.fetch("invocation"),
             nonce: SecureRandom.hex(24),
             plan_path: File.join(disposable, "plan.md"),
             project_root: disposable,
@@ -388,6 +399,7 @@ module Hive
             attempt_id: request.attempt_id,
             plan_digest: request.plan_digest,
             policy_fingerprint: request.policy_fingerprint,
+            pending_findings_json: JSON.pretty_generate(request.pending_findings),
             verification_findings_json: JSON.pretty_generate(request.verification_findings)
           )
         end

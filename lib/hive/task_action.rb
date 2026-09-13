@@ -14,6 +14,7 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/decision_triage"
 require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
@@ -985,6 +986,12 @@ module Hive
       return false unless task.folder && File.directory?(task.folder)
 
       record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      return true unless Hive::PlanReview::DecisionTriage.pending(record).empty?
+      return true if Array(record["findings"]).any? do |entry|
+        entry["classification"] == "safe_auto" && entry["lifecycle"] == "open" ||
+          %w[approved answered].include?(entry["lifecycle"])
+      end
+
       pending = record["findings"].map { |entry| Hive::PlanReview::Finding.new(entry) }
         .select(&:blocking?)
       return false if pending.empty?

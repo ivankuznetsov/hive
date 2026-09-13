@@ -208,14 +208,48 @@ of four classes:
 The primary and adversarial prompts classify by decision authority rather than
 severity. That prompt-level taxonomy is authoritative for the final Hive JSON,
 even when primary review invokes a skill with a different internal routing
-rubric. A routine, repository-grounded technical correction is `safe_auto`;
-`gated_auto` is reserved for a clear correction that itself crosses a material
+rubric. A correction that follows from already-authorized requirements or repository
+conventions is `safe_auto`, including high-risk security and recovery fixes;
+`gated_auto` is reserved for a clear correction that exceeds existing authorization across a material
 approval boundary. `manual` is reserved for a choice the existing contract and
 repository patterns cannot safely determine when the alternatives materially
 change product scope, authority or trust, privacy or compliance, risk
 acceptance, irreversible external effects, or architectural direction. Merely
 needing to choose, decide, specify, or add detail does not make a finding
 manual.
+
+Before an open `gated_auto` or `manual` finding can stop the workflow, a
+`decision_triage` pass reconciles its claimed approval boundary against the plan
+and repository. It uses the configured verification route and the existing
+read-only reviewer workspace and typed result envelope. Each disposition must
+account for its exact source fingerprints; the set must cover every supplied
+finding exactly once. Duplicate concerns may share one disposition. A retained
+human gate must name the unresolved or exceeded contract clause, the material
+change, and at least two alternatives. High severity or merely touching a
+security, compatibility, migration, or architecture area is insufficient.
+
+The controller retains original findings as resolved historical entries and
+adds the consolidated dispositions as open findings. Attempt results and a
+versioned, fingerprint-bound application receipt are immutable artifacts;
+triage does not write approvals, answers, waivers, or clearance. Automatic
+dispositions still require original-planner incorporation and verification.
+Missing or malformed source accounting retries through the adapter contract,
+then becomes a recoverable reviewer repair block after the configured bound;
+provider outages use the existing bounded attempt series and cooldown. Each
+attempt binds the exact source fingerprints it received. A completed result
+can be applied after a crash without another provider call when that set still
+matches; an intervening operator decision causes a fresh assessment of the
+remaining findings and preserves the recorded decision.
+Existing `awaiting_decision` records with unassessed findings become runnable
+through `TaskAction`; a completed assessment is not repeated on each tick.
+New verification findings pass through the same reconciliation boundary.
+
+Routine revisions can proceed while unrelated human choices remain open.
+Both planner and verifier receive those unresolved choices separately and must
+preserve them without choosing defaults. The candidate remains an internal
+artifact; it cannot authorize execution or replace the canonical plan while
+any required decision remains. The successful revision-round cap also applies
+to re-entry from `awaiting_decision`.
 
 The fingerprint binds classification, risk, source, and exact plan evidence,
 but deliberately excludes model-authored title, description, and excerpt

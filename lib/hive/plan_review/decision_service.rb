@@ -19,7 +19,7 @@ module Hive
       RECOVERABLE_TERMINAL_OUTCOMES = (
         Adapters::Base::OUTCOMES - Adapters::Base::SUCCESS_OUTCOMES - TRANSIENT_OUTCOMES
       ).freeze
-      RECOVERABLE_ROLES = %w[primary adversarial verification planner_revision].freeze
+      RECOVERABLE_ROLES = %w[primary adversarial verification planner_revision decision_triage].freeze
 
       Result = Data.define(:applied, :decision, :projection) do
         def noop? = !applied

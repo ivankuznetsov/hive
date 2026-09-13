@@ -34,6 +34,13 @@ class PlanReviewActionIntegrationTest < Minitest::Test
       end : []
       Hive::PlanReview::Adapters::Base::Result.new(
         outcome: "success", findings:, residual_evidence: evidence,
+        decision_assessments: request.kind == "decision_triage" ? request.pending_findings.map { |f|
+          { "sources" => [ f.fetch("fingerprint") ], "classification" => f.fetch("classification"),
+            "title" => f.fetch("title"), "disposition" => f.fetch("description"),
+            "rationale" => "The requirement explicitly leaves this choice to the operator",
+            "boundary" => { "requirement" => "Unanswered compatibility choice", "change" => "Change public behavior",
+                            "alternatives" => [ "Preserve", "Change" ] } }
+        } : [],
         coverage: request.required_coverage.map do |name|
           { "name" => name, "required" => true, "status" => "completed" }
         end,
@@ -191,7 +198,7 @@ class PlanReviewActionIntegrationTest < Minitest::Test
           review_id: current.review_id, task_generation: current.task_generation,
           policy_fingerprint: current.policy_fingerprint,
           expected_artifact_digest: initial.observation_digest,
-          target_fingerprint: current["findings"].first.fetch("fingerprint"),
+          target_fingerprint: current["findings"].find { |f| f["lifecycle"] == "open" }.fetch("fingerprint"),
           json: true
         }
         output = nil
@@ -212,7 +219,7 @@ class PlanReviewActionIntegrationTest < Minitest::Test
         assert_equal candidate, File.read(File.join(folder, "plan.md"))
         assert_equal "verified", Hive::PlanReview::Store.new(
           task_folder: folder
-        ).current["findings"].first.fetch("lifecycle")
+        ).current["findings"].last.fetch("lifecycle")
       end
     end
   end
@@ -240,7 +247,7 @@ class PlanReviewActionIntegrationTest < Minitest::Test
       review_id: current.review_id, task_generation: current.task_generation,
       policy_fingerprint: current.policy_fingerprint,
       expected_artifact_digest: Hive::PlanReview::Projection.new(current).observation_digest,
-      target_fingerprint: current["findings"].first.fetch("fingerprint")
+      target_fingerprint: current["findings"].find { |f| f["lifecycle"] == "open" }.fetch("fingerprint")
     }
   end
 

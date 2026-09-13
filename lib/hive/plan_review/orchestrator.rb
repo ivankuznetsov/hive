@@ -10,6 +10,7 @@ require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
 require "hive/plan_review/clearance"
+require "hive/plan_review/decision_triage"
 require "hive/plan_review/decision"
 require "hive/plan_review/identity"
 require "hive/plan_review/planner_revision"
@@ -152,9 +153,14 @@ module Hive
             required_action: "waive named coverage or restore required reviewer capability"
           )
         end
+        candidate_bytes = candidate_bytes(record)
+        record, triage_pending = ensure_decision_triage(record, candidate_bytes || original_plan_bytes)
+        return Projection.new(record) if triage_pending
         record = consume_approval_policies(record)
+
         pending = pending_decision_findings(record)
-        unless pending.empty?
+        accepted = accepted_findings(record)
+        if !pending.empty? && accepted.empty?
           blockers = pending.map { |finding| Clearance.send(:finding_blocker, finding) }
           action = pending.first.classification == "manual" ?
             "answer manual plan finding #{pending.first.fingerprint}" :
@@ -166,23 +172,26 @@ module Hive
         end
         if record.effective_level == "standard" && initial_coverage.degraded? &&
            initial_coverage.degradation_reason != "partial_coverage" &&
-           accepted_findings(record).empty?
+           accepted.empty?
           return terminal(
             record, state: "degraded_cleared", outcome: "degraded_cleared",
             degradation_reason: initial_coverage.degradation_reason
           )
         end
 
-        accepted = accepted_findings(record)
-        candidate_bytes = candidate_bytes(record)
         unless accepted.empty?
           # The follow-up limit must fence external re-entry as well as the
           # automatic continuation below. A capped terminal record otherwise
           # retained enough accepted evidence to launch revision N+1 on every
           # later advance! call.
-          if record.state == "blocked" &&
-             verification_revision_rounds(record) >= MAX_VERIFICATION_REVISION_ROUNDS
-            return Projection.new(record)
+          if verification_revision_rounds(record) >= MAX_VERIFICATION_REVISION_ROUNDS
+            return Projection.new(record) if record.state == "blocked"
+
+            return terminal(
+              record, state: "blocked", outcome: "blocked",
+              blockers: [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
+              required_action: "resolve remaining findings with a new linked plan"
+            )
           end
 
           verification_route = latest_route(record, "verification")
@@ -263,7 +272,7 @@ module Hive
           )
         end
         record, findings, followup = prepare_verification_followup(
-          record, findings, verification_findings, verification_outcome
+          record, findings, verification_findings, verification_outcome, plan_bytes: candidate_bytes
         )
         return followup if followup
         if record["candidate_plan_digest"] && !SUCCESS_OUTCOMES.include?(verification_outcome)
@@ -532,8 +541,59 @@ module Hive
         end
       end
 
+      def ensure_decision_triage(record, plan_bytes)
+        entries = DecisionTriage.pending(record)
+        return [ record, false ] if entries.empty?
+
+        previous = latest_route(record, "decision_triage")
+        input_ids = entries.map { |entry| entry.fetch("fingerprint") }.sort
+        if previous && (previous["triage_version"] == DecisionTriage::VERSION ||
+           SUCCESS_OUTCOMES.include?(previous["outcome"]) && previous["triage_input_fingerprints"] != input_ids)
+          reset = Hive::PlanReview.recovery_reset_route(previous)
+          record = publish(record, "routes" => record["routes"] + [ reset ])
+        end
+        record, pending = ensure_leg(
+          record, "decision_triage", plan_bytes,
+          requested: [ { "name" => "decision_triage", "required" => true } ],
+          merge_coverage: false, merge_findings: false, pending_findings: entries
+        )
+        return [ record, true ] if pending
+
+        route = latest_route(record, "decision_triage")
+        unless SUCCESS_OUTCOMES.include?(route["outcome"])
+          if TRANSIENT_OUTCOMES.include?(route["outcome"])
+            route = route.merge("outcome" => "terminal_failure", "triage_output_exhausted" => true)
+            record = publish(record, "routes" => record["routes"] + [ route ])
+          end
+          terminal(
+            record, state: "blocked", outcome: "blocked",
+            blockers: [ { "owner" => "reviewer", "reason" => "decision_triage_#{route['outcome']}" } ],
+            required_action: "restore decision triage reviewer and request review"
+          )
+          return [ @store.current_validated, true ]
+        end
+        rows = persisted_result(record, "decision_triage").fetch("decision_assessments", [])
+        reconciled = DecisionTriage.apply(entries, rows, display_order: record["findings"].map { |entry| entry.fetch("display_order") }.max.to_i)
+        ids = entries.map { |entry| entry.fetch("fingerprint") }
+        findings = record["findings"].reject { |entry| ids.include?(entry["fingerprint"]) } + reconciled
+        receipt = route.merge(
+          "triage_version" => DecisionTriage::VERSION,
+          "assessed_fingerprints" => reconciled.map { |entry| entry.fetch("fingerprint") }
+        )
+        reference = @store.write_review_artifact!(
+          review_id: record.review_id, basename: "decision-triage-#{route.fetch('attempt_id')}.json",
+          content: JSON.generate(receipt)
+        )
+        updated = publish_transition(
+          record, state: "reviewing", required_action: nil, findings:,
+          routes: record["routes"] + [ receipt ],
+          artifacts: record["artifacts"].merge("decision_triage_applied_#{route.fetch('attempt_id')}" => reference)
+        )
+        [ updated, false ]
+      end
+
       def ensure_leg(record, role, plan_bytes, requested: nil, merge_coverage: true,
-                     merge_findings: true, verification_findings: [])
+                     merge_findings: true, verification_findings: [], pending_findings: [])
         max_attempts = 1 + Integer(@cfg.dig("plan_review", "attempts", "max_transient"))
         loop do
           route = latest_route(record, role)
@@ -563,14 +623,17 @@ module Hive
           record, = dispatch_attempt(
             record, role, plan_bytes,
             requested || coverage_for(role, record.review_id, record.policy_fingerprint),
-            merge_coverage:, merge_findings:, verification_findings:
+            merge_coverage:, merge_findings:, verification_findings:, pending_findings:
           )
         end
       end
 
       def dispatch_attempt(record, role, plan_bytes, requested, merge_coverage: true,
-                           merge_findings: true, verification_findings: [])
-        resolution = @route_resolver.call(role:, planner_identity: planner_identity(record))
+                           merge_findings: true, verification_findings: [], pending_findings: [])
+        resolution = @route_resolver.call(
+          role: role == "decision_triage" ? "verification" : role,
+          planner_identity: planner_identity(record)
+        )
         attempt_id = Identity.attempt(record.review_id)
         if resolution.resolved?
           adapter_result = Dir.mktmpdir("hive-plan-review-#{attempt_id}-") do |attempt_dir|
@@ -586,7 +649,8 @@ module Hive
               output_directory: attempt_dir,
               timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec"),
               attempt_id:, kind: role, project_root: @task.project_root,
-              verification_findings:
+              verification_findings:,
+              pending_findings: role == "verification" ? pending_decision_findings(record).map(&:to_h) : pending_findings
             )
             @adapter.call(request)
           end
@@ -608,6 +672,9 @@ module Hive
           role:, attempt_id:, outcome: adapter_result.outcome,
           retry_at:, diagnostic: adapter_result.diagnostic
         )
+        if role == "decision_triage"
+          route["triage_input_fingerprints"] = pending_findings.map { |entry| entry.fetch("fingerprint") }.sort
+        end
         coverage = reject_unverified_adversarial_coverage(coverage, role:, route:)
         refs = @store.write_attempt!(
           review_id: record.review_id, attempt_id:, plan_bytes:,
@@ -659,6 +726,7 @@ module Hive
             review_id: record.review_id, plan_bytes:, findings:,
             planner_identity: revision_identity,
             planner_authority: planner_identity(record),
+            pending_findings: pending_decision_findings(record).map(&:to_h),
             timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec")
           )
           retry_at = if TRANSIENT_OUTCOMES.include?(revision.outcome)
@@ -916,7 +984,7 @@ module Hive
       # decision when the same fingerprint recurs, consume any matching
       # approval policy immediately, and hand the daemon a runnable `revising`
       # state instead of parking on an operator-owned `awaiting_decision` row.
-      def prepare_verification_followup(record, findings, observed, outcome)
+      def prepare_verification_followup(record, findings, observed, outcome, plan_bytes:)
         actionable = Array(observed).map do |entry|
           entry.is_a?(Finding) ? entry : Finding.new(entry)
         end.reject { |finding| finding.classification == "fyi" || finding.resolved? }
@@ -926,9 +994,11 @@ module Hive
         record = publish_transition(
           record, state: "reviewing", required_action: nil, findings: findings
         )
+        record, pending = ensure_decision_triage(record, plan_bytes)
+        return [ record, record["findings"], Projection.new(record) ] if pending
+
         record = consume_approval_policies(record)
         findings = record["findings"]
-        return [ record, findings, nil ] unless pending_decision_findings(record).empty?
         return [ record, findings, nil ] if accepted_findings(record).empty?
         return [ record, findings, nil ] if verification_revision_rounds(record) >=
                                                    MAX_VERIFICATION_REVISION_ROUNDS
@@ -1014,8 +1084,10 @@ module Hive
       # verification retries and successful planner-revision rounds retain
       # their separate caps.
       def automatic_transient_series_recovery?(record, role, route)
-        record.effective_level == "mandatory" &&
-          %w[primary adversarial].include?(role) &&
+        return false if role == "decision_triage" && route["diagnostic_source"] == "parser"
+
+        (role == "decision_triage" ||
+          record.effective_level == "mandatory" && %w[primary adversarial].include?(role)) &&
           TRANSIENT_OUTCOMES.include?(route["outcome"]) &&
           !route["attempt_id"].to_s.empty?
       end

@@ -806,8 +806,8 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
           assert_includes observed, "[a-z][a-z0-9_]{0,63}"
           assert_match(/Set\s+`residual_evidence` to `\[\]`/, observed)
           rubric_patterns = [
-            /`safe_auto`: one concrete, low-risk, reversible technical correction follows\s+from the plan, product contract, or established repository patterns/,
-            /`gated_auto`: the preferred technical correction is clear, but applying it\s+materially changes architecture, external behavior, compatibility/,
+            /`safe_auto`: one concrete technical correction follows\s+from the plan, product contract, or established repository patterns/,
+            /`gated_auto`: the preferred technical correction is clear, but applying it\s+exceeds the already-authorized requirements by changing architecture, external/,
             /`manual`: a human must supply a choice because the existing contract and\s+repository patterns do not determine a safe answer/,
             /`fyi`: useful information that requires no plan change/
           ]
@@ -817,6 +817,44 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
           assert_match(/Do not use `manual`\s+merely because the plan must choose/, observed)
         end
       end
+    end
+  end
+
+  def test_decision_triage_validates_complete_bound_dispositions_before_accepting_output
+    with_request do |request, _|
+      source = valid_result(request).fetch("findings").first
+      source = Hive::PlanReview::Finding.new(source.merge("classification" => "gated_auto")).to_h
+      request = request.with(kind: "decision_triage", pending_findings: [ source ], required_coverage: [ "decision_triage" ])
+      rows = [ { "sources" => [ source.fetch("fingerprint") ], "classification" => "safe_auto",
+                "title" => "Test existing behavior", "disposition" => "Add the missing acceptance test",
+                "rationale" => "The delivery requirement already promises this behavior", "boundary" => nil } ]
+      observed = nil
+      extra_findings = []
+      runner = lambda do |prompt:, output_path:, request:, **|
+        observed = prompt
+        output = valid_result(request).merge("findings" => extra_findings, "decision_assessments" => rows)
+        File.write(output_path, JSON.generate(output))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+      adapter = adapter_for(runner)
+      result = adapter.call(request)
+      assert_equal "success", result.outcome
+      assert_equal rows, result.decision_assessments
+      assert_includes observed, "CHANGE\nIN AUTHORIZATION"
+      assert_includes observed, source.fetch("fingerprint")
+      extra_findings << source
+      failed = adapter.call(request)
+      assert_equal "retryable_failure", failed.outcome
+      assert_includes failed.diagnostic, "not findings or verification"
+      extra_findings.clear
+      failed = adapter.call(request.with(kind: "verification"))
+      assert_equal "retryable_failure", failed.outcome
+      assert_includes failed.diagnostic, "only valid during decision triage"
+      rows.clear
+      failed = adapter.call(request)
+      assert_equal "retryable_failure", failed.outcome
+      assert_equal "parser", failed.route_receipt["diagnostic_source"]
+      assert_includes failed.diagnostic, "every pending finding"
     end
   end
 

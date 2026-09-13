@@ -160,7 +160,7 @@ module Hive
 
         pending = pending_decision_findings(record)
         accepted = accepted_findings(record)
-        if !pending.empty? && accepted.empty?
+        if !pending.empty? && accepted.empty? && verification_targets(record).empty?
           blockers = pending.map { |finding| Clearance.send(:finding_blocker, finding) }
           action = pending.first.classification == "manual" ?
             "answer manual plan finding #{pending.first.fingerprint}" :
@@ -172,7 +172,7 @@ module Hive
         end
         if record.effective_level == "standard" && initial_coverage.degraded? &&
            initial_coverage.degradation_reason != "partial_coverage" &&
-           accepted.empty?
+           accepted.empty? && pending.empty? && verification_targets(record).empty?
           return terminal(
             record, state: "degraded_cleared", outcome: "degraded_cleared",
             degradation_reason: initial_coverage.degradation_reason
@@ -279,6 +279,13 @@ module Hive
           verification_blockers << {
             "owner" => "reviewer", "reason" => "candidate_verification_#{verification_outcome}"
           }
+        end
+        if verification_blockers.any? { |blocker| blocker["reason"] != "verification_finding" }
+          return terminal(
+            record, state: "blocked", outcome: "blocked", findings:,
+            blockers: verification_blockers,
+            required_action: "resolve verification blockers with a new linked plan"
+          )
         end
         clearance = Clearance.evaluate(
           level: record.effective_level, coverage: record["coverage"], findings:,

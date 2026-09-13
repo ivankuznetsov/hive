@@ -171,10 +171,11 @@ module Hive
       def freshness(task:, projection:, config:, allow_policy_drift: false)
         record = projection.record
         required_digest = record["candidate_plan_digest"] || record.plan_digest
+        allowed_digests = record.execution_allowed? ? [ required_digest ] : [ record.plan_digest, required_digest ]
         return stale("task generation changed after plan review") unless
           record.task_generation.to_s == Identity.task_generation(task).to_s
         return stale("canonical plan changed after plan review") unless
-          required_digest == current_plan_digest(task)
+          allowed_digests.include?(current_plan_digest(task))
         unless allow_policy_drift || policy_configuration_matches?(record, task, config)
           return stale("plan review policy changed after resolution")
         end

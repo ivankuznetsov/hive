@@ -23,6 +23,18 @@ the reviewed plan digest, task generation, executable resolution, and empty
 blocker set remain mandatory. Raw moves and first-time plan transitions still
 require the current review policy fingerprint.
 
+A pending revised candidate does not make the original canonical plan stale.
+Until execution is cleared, freshness accepts either the original digest or the
+candidate digest (including recovery after promotion interrupted before final
+publication). Neither digest grants execution while the review remains pending.
+After clearance, only the final reviewed candidate digest is current; reverting
+to the original plan or making an unrelated edit invalidates that clearance.
+Re-entry resumes incorporated findings through verification before pausing for
+unanswered choices, including legacy records already parked awaiting a decision.
+A provider retry keeps its existing deadline. Exhausted verification or missing
+attestations remain a repair blocker, retaining unanswered findings; degraded
+initial coverage cannot clear a pending choice or unverified candidate.
+
 ## Applicability and boundary
 
 The first release applies only when all of these are true:

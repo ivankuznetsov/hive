@@ -1400,3 +1400,5 @@ an Architecture token whose phase is `scheduled`; completion returns through
 the same scheduler. Periodic work does not require a merged-PR job. Its child
 owns the durable `ScheduledSliceProducer` claim and only advances the cursor
 after successful review and finding admission.
+
+Manual Architecture discovery claims also honor the durable retry deadline. A retry during backoff cannot start review work; after the deadline, an interrupted review resumes from its completed feature checkpoints. Claim rejection reports that the job may be claimed or waiting for retry backoff.

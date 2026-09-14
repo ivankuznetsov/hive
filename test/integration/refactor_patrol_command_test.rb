@@ -755,11 +755,26 @@ class RefactorPatrolCommandTest < Minitest::Test
 
       search = thesis("search", feature_id: "search", fingerprint: "fp-search")
       retry_reviewer = FakeReviewer.new({ "search" => [ search ] })
-      second_out, second_err, second_status = with_captured_exit do
-        command_for(
-          pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
-          features: features, reviewer: retry_reviewer,
-        ).call
+      retry_at = Time.iso8601(aggregate.fetch("attempts").last.fetch("next_eligible_at"))
+      with_replaced_singleton_method(Time, :now, -> { retry_at - 1 }) do
+        blocked_out, blocked_err, blocked_status = with_captured_exit do
+          command_for(
+            pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
+            features: features, reviewer: retry_reviewer,
+          ).call
+        end
+        assert_equal Hive::ExitCodes::CONFIG, blocked_status, "#{blocked_out}\n#{blocked_err}"
+        assert_includes JSON.parse(blocked_out).fetch("message"), "retry backoff"
+        assert_empty retry_reviewer.seen_feature_ids
+      end
+
+      second_out, second_err, second_status = with_replaced_singleton_method(Time, :now, -> { retry_at }) do
+        with_captured_exit do
+          command_for(
+            pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
+            features: features, reviewer: retry_reviewer,
+          ).call
+        end
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, second_status, "#{second_out}\n#{second_err}"

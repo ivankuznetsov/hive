@@ -668,7 +668,7 @@ module Hive
           now: Time.now
         )
         unless @manual_claim_token
-          raise Hive::ConfigError, "refactor patrol job is already claimed by another worker"
+          raise Hive::ConfigError, "refactor patrol job is already claimed or waiting for retry backoff"
         end
         @durable_aggregate = @job_store.read_job(aggregate.fetch("job_id"))
       end

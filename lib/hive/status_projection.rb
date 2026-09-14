@@ -41,6 +41,7 @@ module Hive
       "Ready to develop",
       "Implementation rework required",
       "Needs recovery",
+      "Needs execution repair",
       "Retry draft PR handoff manually",
       "Agent running",
       "Ready to open PR",

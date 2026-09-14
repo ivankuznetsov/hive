@@ -92,8 +92,13 @@ same-project numeric ids are indexed without using the global task resolver.
 Routine active projections build a new immutable context from current active
 task metadata, then recursively exact-load only missing dependency references
 from terminal history. Exact slug references read the one matching folder;
-same-project numeric references enumerate bounded metadata only until the id is
-resolved. Loaded prerequisites preserve their workflow, dependency edge,
+same-project numeric references use the control plane's registered ID-to-slug
+mapping, scoped to the project's state root. They check that slug across stage
+folders and verify the current metadata ID, so an observed path that predates a
+stage move does not cause a miss and a replacement folder cannot satisfy the
+old identity. This reads no unrelated task metadata for registered IDs.
+Older or never-run tasks without a registered subject retain metadata discovery
+as a compatibility fallback; the lookup does not create or migrate a database. Loaded prerequisites preserve their workflow, dependency edge,
 validation error, and project repository identity, including transitive chains,
 without retaining or periodically refreshing a fleet archive cache. Bounded
 Watch projections use the same closure builder from an exact set of selected

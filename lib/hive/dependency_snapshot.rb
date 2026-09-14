@@ -1,3 +1,4 @@
+require "hive/runtime_control_plane/task_lease_repository"
 require "digest"
 require "json"
 require "hive/stages"
@@ -459,7 +460,25 @@ module Hive
         end
       end
 
-      wanted_id = Integer(reference.task)
+      wanted_id = Integer(reference.task, 10)
+      slug = Hive::RuntimeControlPlane::TaskLeaseRepository.registered_slug(
+        task_id: wanted_id, state_root: File.join(root, ".hive-state")
+      )
+      if slug
+        unless Hive::Dependencies::TASK_SLUG_RE.match?(slug)
+          raise Hive::ConfigError, "registered dependency task slug is invalid"
+        end
+        return stage_dirs.filter_map do |stage_dir|
+          folder = File.join(stage_dir, slug)
+          next unless File.directory?(folder)
+          next unless Hive::TaskMeta.read_for_admission(folder).data[:id] == wanted_id
+
+          folder
+        end
+      end
+
+      # Older or never-run tasks may not have a runtime subject yet. Retain
+      # discovery for those tasks; registered identities never scan neighbors.
       stage_dirs.flat_map do |stage_dir|
         Dir.children(stage_dir).sort.filter_map do |entry|
           folder = File.join(stage_dir, entry)

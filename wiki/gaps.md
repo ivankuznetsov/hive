@@ -1504,3 +1504,12 @@ external backups; exact conversion coverage depends on the inventoried source.
 Markers still serve current stages outside execute; `legacy_baseline` remains a
 current ad-hoc task initialization event, and provider routing's `legacy` mode
 still denotes current default routing. Their names do not imply removable code.
+
+## Numeric dependency lookup registration coverage (2026-09-14)
+
+Registered IDs resolve through the runtime subject alias and exact stage-folder
+checks. Older or never-run tasks without that registration still use metadata
+discovery. This change does not claim every numeric dependency is scan-free.
+The targeted path verifies the selected folder ID and detects copies of its
+slug across stages; it is not an audit for hand-copied duplicate IDs under
+unrelated slugs. Full admission scans retain that broader ambiguity check.

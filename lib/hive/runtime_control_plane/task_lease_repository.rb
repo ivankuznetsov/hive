@@ -21,6 +21,20 @@ module Hive
         @process_alive = process_alive
       end
 
+      # Resolve the stable alias, not observed_path: a folder can move between
+      # stages before its next lease updates that observation.
+      def self.registered_slug(task_id:, state_root:, database: RuntimeControlPlane.database)
+        return nil unless File.file?(database.path)
+
+        database.read do |db|
+          db[:task_subjects]
+            .join(:projects, project_id: :project_id)
+            .where(Sequel[:task_subjects][:task_id] => task_id.to_s,
+                   Sequel[:projects][:state_root_path] => File.expand_path(state_root))
+            .get(Sequel[:task_subjects][:task_slug])
+        end
+      end
+
       def acquire(task_folder, payload, create: true)
         folder = File.expand_path(task_folder)
         if create

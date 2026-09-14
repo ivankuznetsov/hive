@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/dependency_snapshot"
 require "hive/task_meta"
 
+require "hive/runtime_control_plane/task_lease_repository"
 # Direct coverage for the disk→resolver seam. Before this, `tasks`,
 # `current_task`, `depends_on`, and `stacked_base` were exercised only
 # indirectly through execute/open_pr happy-path stubs, so a regression in
@@ -417,6 +418,45 @@ class DependencySnapshotTest < Minitest::Test
       assert context.verdict(project: project_name, slug: "dependent-task").clear?
       fallback_tasks = context.project_snapshot_layers.drop(1).flatten.flat_map(&:tasks)
       assert_equal [ "terminal-target" ], fallback_tasks.map(&:slug)
+    end
+  end
+
+  def test_numeric_dependency_uses_registered_slug_after_a_stage_move
+    with_tmp_dir do |root|
+      target = write_task_meta(root, "4-execute", "terminal-target", id: 91)
+      unrelated = write_task_meta(root, "9-done", "unrelated-terminal", id: 92)
+      database = prepare_runtime_project(state_home: root, name: "lookup", path: root)
+      repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+        database: database, process_start_time: ->(*) { "test" }, process_alive: ->(*) { false }
+      )
+      lease = repository.acquire(target, {})
+      repository.release(target, lock_id: lease.fetch("lock_id"))
+      moved = File.join(root, ".hive-state", "stages", "9-done", "terminal-target")
+      FileUtils.mv(target, moved)
+      reference = Hive::Dependencies.parse_reference("91")
+      reader = Hive::TaskMeta.method(:read_for_admission)
+      reads = []
+      with_replaced_singleton_method(Hive::RuntimeControlPlane, :database, ->(**) { database }) do
+        with_replaced_singleton_method(Hive::TaskMeta, :read_for_admission, lambda { |folder|
+          reads << folder
+          reader.call(folder)
+        }) do
+          assert_equal [ moved ], Hive::DependencySnapshot.dependency_task_folders(root, reference)
+        end
+        refute_includes reads, unrelated
+        assert_equal [ moved ], reads
+
+        # Copies of the registered folder in two stages remain ambiguous.
+        FileUtils.cp_r(moved, target)
+        assert_equal [ target, moved ], Hive::DependencySnapshot.dependency_task_folders(root, reference)
+        FileUtils.remove_entry(target)
+
+        # A stale mapping must not turn a replacement folder into task 91.
+        Hive::TaskMeta.write(moved, id: 93, slug: "terminal-target", display_name: nil)
+        assert_empty Hive::DependencySnapshot.dependency_task_folders(root, reference)
+      end
+    ensure
+      database&.disconnect
     end
   end
 

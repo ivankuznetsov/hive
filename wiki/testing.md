@@ -1444,3 +1444,9 @@ provider replays and timing remain separate verification gates.
 The command-owner guard checks each named cell in shared command-contract tables.
 Regression probes delete one cell at a time and reject command-specific contract
 prose even when it appears inside the navigation index section.
+
+Active-row reuse regressions in `commands/status_test.rb`,
+`dependency_snapshot_test.rb`, and `tui/state_source_test.rb` cover one action
+classification per candidate, prepared-folder admission, project-local fallback,
+captured invalid-row membership, and matching TUI admission context. Status
+tests also preserve retention-boundary and internal archive-index contracts.

@@ -43,7 +43,7 @@ Gem::Specification.new do |spec|
   spec.executables = [ "agent-runtime" ]
   spec.require_paths = [ "lib" ]
 
-  spec.add_dependency "json", ">= 2.7", "< 3.0"
+  spec.add_dependency "json", ">= 2.7", "< 4.0"
   spec.add_dependency "open3", "~> 0.2"
   spec.add_dependency "timeout", ">= 0.4", "< 1.0"
 end

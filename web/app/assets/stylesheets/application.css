@@ -340,6 +340,7 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 }
 .status-view-toolbar h1 { margin: 0; font-size: 1.35rem; }
 .status-view-toolbar p { margin: 4px 0 0; }
+.status-view-actions { display: flex; align-items: center; gap: 8px; }
 .status-view-switch {
   display: inline-flex;
   gap: 3px;

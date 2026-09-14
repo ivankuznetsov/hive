@@ -131,7 +131,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_includes result.warning, "council declares a revise agent with max_rounds: 1"
       assert_includes result.warning, "bot.notification_dedupe_window_sec"
       assert_includes result.warning, 'skipping managed workflow "managed"'
-      assert_includes result.warning, "hive: completion_time: invalid completed_at"
+      # Exact task reads bypass retention, even for an explicitly named archive row.
+      refute_includes result.warning, "hive: completion_time: invalid completed_at"
       assert_empty stderr
     ensure
       Hive::Workflows::Project.reset!

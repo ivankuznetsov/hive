@@ -43,13 +43,9 @@ module Hive
     class CachedStatusCommand
       include StatusCommand
 
-      ARCHIVE_REFRESH_FALLBACK_SECONDS = 300.0
-
       def initialize(
         source: Hive::Tui::StateSource.new(
-          poll_interval_seconds: 60,
-          archive_cache_mode: :visible,
-          archive_refresh_fallback_seconds: ARCHIVE_REFRESH_FALLBACK_SECONDS
+          poll_interval_seconds: 60
         ),
         recovery_status_command: Hive::Commands::Status.new(json: true),
         scheduler_snapshot_reader: Hive::Daemon::OperationalSnapshot::Reader.new,
@@ -93,10 +89,9 @@ module Hive
     #
     # The Cable poller enters refresh_state while HTTP status renders only read
     # the latest completed state. The default command makes each background
-    # scan a bounded active-task refresh:
-    # terminal membership/policy changes and a five-minute archive backstop
-    # refresh the ordinary archive projection, while complete archive reads
-    # remain on-demand. An idle server performs no scans.
+    # scan an active-task refresh. Complete archive reads are requested
+    # separately and never merged into the active feed. An idle server
+    # performs no scans.
     #
     # Failures never manufacture a healthy empty fleet: they publish either a
     # degraded latest-good snapshot or an explicit unavailable envelope. A new
@@ -314,7 +309,7 @@ module Hive
         @monitor.synchronize { @state }
       end
 
-      # The web page already paid for one ordinary status scan. Reuse that
+      # The web page already paid for one active status scan. Reuse that
       # exact payload when asking the status producer to join the daemon's
       # owner-private snapshot, then copy only canonical recovery receipts
       # onto the matching task rows. This is a file read + in-memory join, not

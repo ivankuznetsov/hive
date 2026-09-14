@@ -46,6 +46,21 @@ class LockTest < Minitest::Test
     assert_nil row.fetch(:holder_id)
   end
 
+  def test_registered_slug_lookup_is_scoped_to_the_state_root
+    folder = task_folder(19)
+    lookup = Hive::RuntimeControlPlane::TaskLeaseRepository
+    assert_equal "task-19", lookup.registered_slug(
+      task_id: 19, state_root: File.join(@root, ".hive-state"), database: @database
+    )
+    assert_nil lookup.registered_slug(
+      task_id: 19, state_root: File.join(@root, "other-state"), database: @database
+    )
+    assert_nil lookup.registered_slug(
+      task_id: 20, state_root: File.join(@root, ".hive-state"), database: @database
+    )
+    assert File.directory?(folder)
+  end
+
   def test_live_holder_returns_typed_contention_with_identity
     folder = task_folder(2)
     held = Hive::Lock.acquire_task_lock(folder, op: "run")

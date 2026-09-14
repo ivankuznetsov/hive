@@ -460,6 +460,23 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_numeric_dependency_rejects_an_invalid_registered_slug_before_reading_metadata
+    with_tmp_dir do |root|
+      write_task_meta(root, "9-done", "terminal-target", id: 91)
+      reference = Hive::Dependencies.parse_reference("91")
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::TaskLeaseRepository, :registered_slug, ->(**) { "../terminal-target" }
+      ) do
+        with_replaced_singleton_method(Hive::TaskMeta, :read_for_admission, ->(*) { flunk "must reject slug before reading metadata" }) do
+          error = assert_raises(Hive::ConfigError) do
+            Hive::DependencySnapshot.dependency_task_folders(root, reference)
+          end
+          assert_equal "registered dependency task slug is invalid", error.message
+        end
+      end
+    end
+  end
+
   def test_active_admission_context_records_a_targeted_scan_failure
     with_tmp_dir do |root|
       dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)

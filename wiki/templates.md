@@ -189,3 +189,24 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[architecture]]
 
 <!-- updated: 2026-07-22 -->
+
+## Execution safeguards and evidence limitations
+
+The planner identifies concrete prerequisite paths, symbols, and contracts,
+inspecting them where its allowed context permits. Unverified assumptions are
+checked by the executor in its actual checkout before editing, without treating
+unavailable planner source access as a missing dependency. The planner declares known unfinished
+prerequisites through the existing scalar `depends_on`; the controller adopts
+that value into empty task metadata. The planner must not edit `meta.yml`.
+
+Plan review, execution, and code-review triage treat unavailable screenshots,
+recordings, historical captures, and current collection limitations as
+nonblocking verification limitations. Execution reports missing evidence and
+available checks without fabricating a pass, including for older plans that
+made capture mandatory. Plan reviewers propose removing impossible evidence
+gates, and code-review triage retains the limitation as `RESOLVED/NO-FIX`.
+The artifact reviewer reserves implementation `rework` for demonstrated product
+defects; evidence-tooling limitations use its existing `blocked` verdict, which
+the artifacts stage completes best-effort without accepted evidence. Actual
+product requirements, source integrity, and implementation failures remain
+blocking.

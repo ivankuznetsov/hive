@@ -11,6 +11,21 @@ tags: [stage, execute, worktree, plan-review]
 
 ## Condition boundary
 
+Before launching an implementation agent, execute validates the actual task
+branch and baseline ancestry in the worktree. Wrong branches and rewritten
+history pause with the existing repair reasons; unreadable Git objects remain
+errors. The pointer is never guessed or rewritten by this check. A valid older
+base is allowed, as is existing task progress. The same checks still run after
+the agent exits. `hive run` retains its existing rebase policy, and review
+freshness is still checked by the plan-review transition guard before entry.
+
+Screenshots and other outcome capture remain best-effort, including when an
+older plan calls missing evidence mandatory. Implementers continue available
+checks and record the precise verification limitation in their final output.
+This does not waive product failures or unfinished implementation. Known
+technical pauses, including a clean no-change exit, display as execution repair
+rather than a presumed user question; see [[modules/execute_waiting_action]].
+
 Every mutating completion boundary reconciles exact HEAD/diff and durable
 attempt health, appends one authoritative observation batch, publishes its
 bound projection, evaluates the versioned execute gate, then writes the
@@ -115,6 +130,8 @@ consume another evidence generation or rework authorization.
 - Research-only execution is explicit: `plan.md` YAML frontmatter must include `execution_mode: research`. In that mode a clean no-commit exit can complete, but only if the final message was captured; otherwise it pauses as `EXECUTE_WAITING reason=missing_research_output`.
 
 ## Tests
+
+- `test/unit/stages/execute_entry_test.rb` — real Git branch/history failures stop before agent launch without changing the pointer; valid older bases continue; post-launch branch changes remain blocked.
 
 - `test/unit/agent_test.rb` — captures final messages from stream-json result lines.
 - `test/unit/stages/execute_test.rb` — pins execute's provider-limit classification via both `error_message` and raw `limit_text`, typed and exceptional `implementer_failed` markers, nil spawn-result output capture, post-custody controller output capture, tamper precedence, and bounded custody of growing controller-receipt history.

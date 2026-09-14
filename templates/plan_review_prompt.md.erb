@@ -121,3 +121,10 @@ coverage row for every requested item; statuses are `requested`, `completed`,
 Set `residual_evidence` to `[]` for this primary review. Typed residual rows are
 reserved for the later disposition-verification request; general observations
 do not belong in that field.
+
+Outcome-evidence collection is currently best-effort. Missing screenshots,
+recordings, historical captures, or unsupported collection alone are `fyi`,
+not a manual decision or an implementation blocker. If a plan makes those
+artifacts mandatory, propose a `safe_auto` correction to record the limitation
+and continue available verification. Do not waive actual product requirements
+or demonstrated product failures, and never claim unavailable evidence exists.

@@ -3,7 +3,7 @@ title: Hive::ExecuteWaitingAction
 type: module
 source: lib/hive/execute_waiting_action.rb
 created: 2026-05-13
-updated: 2026-05-13
+updated: 2026-09-14
 tags: [module, execute, status, json, tui]
 ---
 
@@ -17,9 +17,26 @@ tags: [module, execute, status, json, tui]
 | `branch_mismatch` / `head_not_descendant` | `edit` | the execute worktree path from `worktree.yml` |
 | `no_worktree_changes` | `edit` | `<task>/plan.md` |
 | `missing_research_output` | `run` | the task folder |
+| `attempt_lost` / `attempt_terminal_failed` / `attempt_terminal_cancelled` | `run` | the task folder |
+| `worktree_evidence_unverifiable` / `evidence_unverifiable` / `attempt_state_unverifiable` | `edit` | the execute worktree path |
 | unknown | `edit` | the task state file |
 
 `missing_research_output` is intentionally `kind=run`: editing `task.md` by hand cannot satisfy the execute runner's structured final-message gate. The operator or agent must rerun with an agent/profile/prompt that emits a final answer Hive can capture under `## Execute Output`.
+
+## Pause classification
+
+`technical_reason?` identifies the known repair reasons above. `TaskAction` uses
+that classification for both legacy waiting markers and authoritative condition
+gate diagnostics: these produce `recover_execute` / **Needs execution repair**,
+with the same structured repair guidance and explicit rerun command. The daemon
+does not automatically resume this action; operational status reports
+`needs_repair`, owned by the operator. Missing or unknown reasons retain the
+legacy **Needs your input** classification.
+
+No-change output is insufficient evidence of a human question. Worktree evidence
+errors concern Git or attempt-store integrity, not unavailable screenshots.
+Condition inhibitor observations remain unchanged: reclassifying their display
+must not accidentally waive branch, baseline, or dirty-worktree blockers.
 
 ## Consumers
 

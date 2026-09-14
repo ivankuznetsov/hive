@@ -103,6 +103,11 @@ module Hive
         label: "Needs your input",
         command: "develop"
       },
+      execute_repair: {
+        key: Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
+        label: "Needs execution repair",
+        command: "develop"
+      },
       execute_complete: {
         key: Hive::Schemas::TaskActionKind::READY_TO_OPEN_PR,
         label: "Ready to open PR",
@@ -620,7 +625,10 @@ module Hive
 
     def execute_action
       if migration_selection.effective == "conditions"
-        return condition_gate.eligible? ? ACTIONS.fetch(:execute_complete) : ACTIONS.fetch(:execute_waiting)
+        return ACTIONS.fetch(:execute_complete) if condition_gate.eligible?
+
+        reason = Hive::Conditions::RecoveryAction.primary_diagnostic(condition_gate)&.fetch("reason", nil)
+        return execute_wait_action(reason)
       end
 
       case marker.name
@@ -631,7 +639,7 @@ module Hive
       when :execute_waiting
         return ACTIONS.fetch(:execute_stale) if legacy_execute_findings?
 
-        ACTIONS.fetch(:execute_waiting)
+        execute_wait_action(marker.attrs["reason"])
       when :none
         # Markerless (:none) = nothing ran at this stage yet → runnable, not an
         # input gate; a real pause carries an `:execute_waiting` marker (U6).
@@ -646,6 +654,11 @@ module Hive
         # Policy than presuming the stage is runnable.
         ACTIONS.fetch(:error)
       end
+    end
+
+    def execute_wait_action(reason)
+      action = Hive::ExecuteWaitingAction.technical_reason?(reason) ? :execute_repair : :execute_waiting
+      ACTIONS.fetch(action)
     end
 
     def execute_condition_rule

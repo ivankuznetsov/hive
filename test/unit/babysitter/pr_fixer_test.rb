@@ -393,7 +393,7 @@ class BabysitterPrFixerTest < Minitest::Test
     # `git fetch` into `git fetch origin --upload-pack=<cmd>` (option + local
     # command execution) and a leading `+` turns the argument into a refspec
     # that fetches a different branch. Only fully qualified refs are immune.
-    ["--upload-pack=false", "+topic"].each do |hostile_ref|
+    [ "--upload-pack=false", "+topic" ].each do |hostile_ref|
       prompt = rendered_prompt_for_head_ref(hostile_ref)
       # Shellwords escapes `=` as well, so build the expected strings through
       # the same escaping the renderer uses.
@@ -412,7 +412,7 @@ class BabysitterPrFixerTest < Minitest::Test
 
   def test_push_recipe_executes_safely_against_hostile_head_refs
     skip "git not available" unless system("git", "--version", out: File::NULL)
-    hostile_refs = ["--upload-pack=false", "+topic", "review$(printf-owned)"]
+    hostile_refs = [ "--upload-pack=false", "+topic", "review$(printf-owned)" ]
 
     with_tmp_dir do |dir|
       origin = File.join(dir, "origin.git")

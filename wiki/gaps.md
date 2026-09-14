@@ -1412,6 +1412,47 @@ installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
 
+## Active-only status projections and Patrol cadence still need installed dogfood (2026-08-28)
+
+As repaired during the 2026-09-09 PR sweep, in-process daemon, operational
+status, TUI, Web, and watch use the active projection; TUI/Web archive history
+is loaded on demand. The bot's internal CLI graph retains ordinary rows while
+its terminal notification recovery policy is unresolved. Focused source tests
+cover exact dependency loading and archive separation. Earlier live-registry
+measurements below predate these repairs and have not been repeated.
+This has not yet been installed or dogfooded through the managed daemon, Web,
+bot, and TUI runtimes, so do not treat source-checkout evidence as rollout
+proof.
+
+The active projection is smaller, but it is not small: the sampled registry
+still contained 249 active rows, including 152 active Patrol Fix rows. The rich
+v7 producer emitted 1,578,516 JSON bytes and took 9.56 seconds; its admission
+pre-scan alone took 2.16 seconds before the 6.30-second rich row projection.
+Removing terminal transport therefore prevents unbounded archive growth but
+does not solve active-controller scale or the duplicate active metadata reads.
+Patrol candidate enumeration is now decoupled from scheduler cadence through a
+one-slot background worker. The dispatcher can publish another authoritative
+task snapshot while a prior discovery pass is still running; it harvests the
+completed hints later and keeps reservation, capacity gates, and spawn on the
+main thread. Architecture discovery's durable maintenance stays under its
+existing store locks, with stale diagnostic writes rejected by an observation
+fence. Focused source tests prove non-overlap, repeated publication carrying a
+fresh task source, once-only stall telemetry, truthful non-drained shutdown,
+retry-deadline enforcement, and rejection of candidates made stale by newer
+failure backoff or registration/config changes. This has not yet been installed
+and observed through a discovery pass longer than the snapshot-validity window,
+so the live cadence claim remains a dogfood gap, not a source-code gap. The
+harvest-time reservation/ownership checks still run on the dispatcher thread;
+live timing should determine whether they need a separate bounded optimization.
+The PR sweep also identified competing process waits between discovery and the
+ancillary supervisor. Its focused regression uses real subprocesses and the
+Gh capture path; it does not replace the installed slow-discovery cadence proof.
+
+Finally, bot delivery of `auto_residue` on a row that becomes archived between
+polls has not been proven under the active-only transport. If that terminal
+transition carries a notification that was not visible before the move, the
+bot needs an exact event/receipt source instead of periodic archive scanning.
+
 ## Sealed benchmark controller hardening awaits a live canary (2026-08-27)
 
 The sweep ran a network-disabled Docker canary through the actual root-controller
@@ -1493,3 +1534,12 @@ still denotes current default routing. Their names do not imply removable code.
   an explicit `request-review` after deploying the corrected runtime.
 
 - 2026-09-13: Decision-triage fixtures cover duplicate correction consolidation, retained choices, and legacy recovery. Real-provider replays of three existing reviews are in progress; live installed-task recovery is not yet verified for this change.
+
+## Numeric dependency lookup registration coverage (2026-09-14)
+
+Registered IDs resolve through the runtime subject alias and exact stage-folder
+checks. Older or never-run tasks without that registration still use metadata
+discovery. This change does not claim every numeric dependency is scan-free.
+The targeted path verifies the selected folder ID and detects copies of its
+slug across stages; it is not an audit for hand-copied duplicate IDs under
+unrelated slugs. Full admission scans retain that broader ambiguity check.

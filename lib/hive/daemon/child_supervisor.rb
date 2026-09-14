@@ -199,24 +199,24 @@ module Hive
         actions
       end
 
-      # Reap every child that has exited since the last call. Returns an
+      # Reap every tracked child that has exited since the last call. Returns an
       # Array<ChildExit> for the dispatcher to feed into the
       # concurrency controller. Empty array when nothing has completed.
       def reap_all(now: Time.now)
         completed = @forced_completions.shift(@forced_completions.length)
-        loop do
-          # Process.wait with WNOHANG returns nil when nothing is ready.
-          pid, status = Process.wait2(-1, Process::WNOHANG)
-          break if pid.nil?
-        rescue Errno::ECHILD
-          break
-        else
-          entry = @running.delete(pid)
-          # Could be a child we don't track (sub-spawn from a hive run),
-          # but since we use pgroup: true, kids of our children should
-          # be in their own process groups already. Be defensive anyway.
-          next if entry.nil?
+        @running.each do |pid, entry|
+          next if entry[:dry_run]
 
+          # Background discovery owns its own Gh subprocess waits. A process-
+          # wide wait would steal their statuses, including during shutdown.
+          waited_pid, status = Process.wait2(pid, Process::WNOHANG)
+          next if waited_pid.nil?
+        rescue Errno::ECHILD
+          # A missing status is not a successful completion. Keep this entry
+          # fenced, but still collect other children whose statuses we own.
+          next
+        else
+          @running.delete(pid)
           completed << child_exit(pid, status, entry, now)
         end
         completed

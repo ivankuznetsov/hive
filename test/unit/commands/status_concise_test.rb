@@ -108,7 +108,7 @@ class CommandsStatusConciseTest < Minitest::Test
     out, = capture_io { Hive::Commands::Status.new.send(:render_operational, payload) }
 
     lines = out.lines.map(&:chomp)
-    assert_equal "SNAPSHOT COMPLETE — 6 active · 0 archived", lines.first
+    assert_equal "SNAPSHOT COMPLETE — 6 active · archive on demand", lines.first
     assert_includes out, "\\x1B"
     assert_includes out, "\\x0A"
     refute_includes out, "\e"
@@ -132,14 +132,14 @@ class CommandsStatusConciseTest < Minitest::Test
     idle_out, = capture_io { Hive::Commands::Status.new.send(:render_operational, healthy_idle) }
     partial_out, = capture_io { Hive::Commands::Status.new.send(:render_operational, partial) }
 
-    assert_match(/SNAPSHOT COMPLETE — 0 active · 0 archived/, empty_out)
+    assert_match(/SNAPSHOT COMPLETE — 0 active · archive on demand/, empty_out)
     assert_match(/NO REGISTERED PROJECTS/, empty_out)
     assert_match(/hive init <path>/, empty_out)
-    assert_match(/SNAPSHOT COMPLETE — 0 active · 3 archived/, archive_out)
+    assert_match(/SNAPSHOT COMPLETE — 0 active · archive on demand/, archive_out)
     assert_match(/ARCHIVE ONLY/, archive_out)
     assert_match(/hive archive/, archive_out)
     assert_match(/IDLE — no active work/, idle_out)
-    assert_equal "SNAPSHOT PARTIAL — 1 active · 0 archived", partial_out.lines.first.chomp
+    assert_equal "SNAPSHOT PARTIAL — 1 active · archive on demand", partial_out.lines.first.chomp
     assert_operator partial_out.index("scheduler unavailable"), :<, partial_out.index("READY / IDLE")
     refute partial_out.lines.any? { |line| line.chomp == "IDLE" }
   end
@@ -152,7 +152,7 @@ class CommandsStatusConciseTest < Minitest::Test
 
     out, = capture_io { Hive::Commands::Status.new.send(:render_operational, unknown) }
 
-    assert_equal "SNAPSHOT UNKNOWN — 0 active · 0 archived", out.lines.first.chomp
+    assert_equal "SNAPSHOT UNKNOWN — 0 active · archive on demand", out.lines.first.chomp
     assert_includes out, "task status unavailable"
     refute_includes out, "IDLE"
   end

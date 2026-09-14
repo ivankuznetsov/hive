@@ -365,18 +365,6 @@ module Hive
         @archive_projects.flat_map(&:rows)
       end
 
-      def hidden_archived_task_count(scope: 0)
-        scoped =
-          if scope.zero?
-            @projects
-          elsif scope.between?(1, @projects.size)
-            [ @projects[scope - 1] ]
-          else
-            []
-          end
-        scoped.sum(&:hidden_archived_task_count)
-      end
-
       # Resolve a dashboard numeric scope exactly once, against this
       # snapshot's original registry order. Name-only revalidation belongs to
       # `resolve_new_idea_project`.
@@ -415,8 +403,8 @@ module Hive
           )
         end
 
-        new_idea_resolution(:available, name: candidate)
-      end
+         new_idea_resolution(:available, name: candidate)
+       end
 
       # Case-insensitive substring filter on each row's slug, display name,
       # or id. Empty
@@ -463,10 +451,14 @@ module Hive
         return self if n.zero?
 
         if n.between?(1, @projects.size)
+          project = @projects[n - 1]
+          archive_project = @archive_projects.find do |candidate|
+            candidate.path == project.path
+          end
           self.class.new(
             generated_at: @generated_at,
-            projects: [ @projects[n - 1] ],
-            archive_projects: [ @archive_projects[n - 1] ].compact,
+            projects: [ project ],
+            archive_projects: [ archive_project ].compact,
             new_idea_admission: @new_idea_admission,
             new_idea_registry_projects: @new_idea_registry_projects
           )
@@ -485,7 +477,7 @@ module Hive
       # scope to the focused project, then apply the slug filter. Archive
       # retention has already been applied by Status; Snapshot never derives
       # visibility from row mtimes.
-      def visible_projection(scope:, filter:, now: nil)
+      def visible_projection(scope:, filter:)
         scope_to_project_index(scope)
           .filter_by_slug(filter)
       end

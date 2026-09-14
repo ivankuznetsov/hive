@@ -150,6 +150,14 @@ module Hive
     # built each call, so freezing it can't surprise a caller.
     def stage_names = map(&:name).freeze
     def stage_dirs = map(&:dir).freeze
+    # Every nonterminal stage may hold live work. A terminal inert stage never
+    # can: it has no runner and TaskAction classifies it as archived on entry.
+    # Other terminal kinds remain potentially active until their completion
+    # contract succeeds, so routine status must continue scanning them.
+    def active_stage_dirs
+      dirs = stage_dirs
+      stages.last.kind == :inert ? dirs[0...-1].freeze : dirs
+    end
     def draft_pr_handoff? = any? { |stage| stage.handoff == :draft_pr }
     def controller? = !controller.nil?
 

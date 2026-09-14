@@ -330,6 +330,10 @@ class PromptInjectionTest < Minitest::Test
       assert_includes prompt, "/ce-brainstorm",
         "default skill must be the CE brainstorm skill"
       refute_match(/<%=/, prompt, "no unrendered ERB should leak through")
+      assert_includes prompt, "Read-only shell commands are allowed"
+      assert_includes prompt, "Do not modify any file other than brainstorm.md."
+      assert_includes prompt, "Do not make network requests"
+      refute_includes prompt, "Do not invoke shell"
     end
   end
 

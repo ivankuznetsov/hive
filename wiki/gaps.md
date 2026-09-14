@@ -1505,6 +1505,14 @@ Markers still serve current stages outside execute; `legacy_baseline` remains a
 current ad-hoc task initialization event, and provider routing's `legacy` mode
 still denotes current default routing. Their names do not imply removable code.
 
+- 2026-09-11: Three blocked adversarial reviews recorded Haiku for an Opus
+  request. The mixed-model attribution defect is reproduced and fixed in code;
+  native task diagnostics expose no correlated raw stream for those attempts,
+  so their exact subagent provenance remains unverified. Existing records need
+  an explicit `request-review` after deploying the corrected runtime.
+
+- 2026-09-13: Decision-triage fixtures cover duplicate correction consolidation, retained choices, and legacy recovery. Real-provider replays of three existing reviews are in progress; live installed-task recovery is not yet verified for this change.
+
 ## Numeric dependency lookup registration coverage (2026-09-14)
 
 Registered IDs resolve through the runtime subject alias and exact stage-folder

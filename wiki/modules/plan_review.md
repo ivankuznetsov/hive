@@ -23,6 +23,18 @@ the reviewed plan digest, task generation, executable resolution, and empty
 blocker set remain mandatory. Raw moves and first-time plan transitions still
 require the current review policy fingerprint.
 
+A pending revised candidate does not make the original canonical plan stale.
+Until execution is cleared, freshness accepts either the original digest or the
+candidate digest (including recovery after promotion interrupted before final
+publication). Neither digest grants execution while the review remains pending.
+After clearance, only the final reviewed candidate digest is current; reverting
+to the original plan or making an unrelated edit invalidates that clearance.
+Re-entry resumes incorporated findings through verification before pausing for
+unanswered choices, including legacy records already parked awaiting a decision.
+A provider retry keeps its existing deadline. Exhausted verification or missing
+attestations remain a repair blocker, retaining unanswered findings; degraded
+initial coverage cannot clear a pending choice or unverified candidate.
+
 ## Applicability and boundary
 
 The first release applies only when all of these are true:
@@ -174,6 +186,17 @@ as `plan_reviewing` once under the new code and enter the same paced recovery;
 configuration-only blocks without an attempted route remain operator-owned. A
 changed probe resets the stable-observation series and permits a new reviewer
 launch. Historical served-model identity repair is not performed automatically.
+A successful adversarial attempt whose independence failed with `reviewer_family_unknown`
+can be rerun through `request-review`. This appends a normal recovery reset,
+preserves the successful primary leg and historical evidence, and requires the
+new attempt to earn independent coverage. It does not waive coverage or retry
+same-family reviews.
+
+Claude reviewer identity comes from the main conversation's init, assistant,
+or message-start events, ignoring events with `parent_tool_use_id`. Aggregate
+`modelUsage` can include subagents and cannot identify the reviewer by key order.
+An explicit main-agent identity takes precedence over usage; ambiguous usage
+without identity stays unknown instead of borrowing the configured model.
 
 Planner authority capture is provider-scoped too. A Codex-authored plan never
 inherits `claude.model` or `claude.effort` when its own plan route is unpinned;
@@ -197,14 +220,50 @@ of four classes:
 The primary and adversarial prompts classify by decision authority rather than
 severity. That prompt-level taxonomy is authoritative for the final Hive JSON,
 even when primary review invokes a skill with a different internal routing
-rubric. A routine, repository-grounded technical correction is `safe_auto`;
-`gated_auto` is reserved for a clear correction that itself crosses a material
+rubric. A correction that follows from already-authorized requirements or repository
+conventions is `safe_auto`, including high-risk security and recovery fixes;
+`gated_auto` is reserved for a clear correction that exceeds existing authorization across a material
 approval boundary. `manual` is reserved for a choice the existing contract and
 repository patterns cannot safely determine when the alternatives materially
 change product scope, authority or trust, privacy or compliance, risk
 acceptance, irreversible external effects, or architectural direction. Merely
 needing to choose, decide, specify, or add detail does not make a finding
 manual.
+
+Before an open `gated_auto` or `manual` finding can stop the workflow, a
+`decision_triage` pass reconciles its claimed approval boundary against the plan
+and repository. It uses the configured verification route and the existing
+read-only reviewer workspace and typed result envelope. Each disposition must
+account for its exact source fingerprints; the set must cover every supplied
+finding exactly once. Duplicate concerns may share one disposition. A retained
+human gate must name the unresolved or exceeded contract clause, the material
+change, and at least two alternatives. High severity or merely touching a
+security, compatibility, migration, or architecture area is insufficient.
+
+The controller retains original findings as resolved historical entries and
+adds the consolidated dispositions as open findings. Attempt results and a
+versioned, fingerprint-bound application receipt are immutable artifacts;
+triage does not write approvals, answers, waivers, or clearance. Automatic
+dispositions still require original-planner incorporation and verification.
+Missing or malformed source accounting retries through the adapter contract,
+then becomes a recoverable reviewer repair block after the configured bound;
+provider outages use the existing bounded attempt series and cooldown. Each
+attempt binds the exact source fingerprints it received. A completed result
+can be applied after a crash without another provider call when that set still
+matches; an intervening operator decision causes a fresh assessment of the
+remaining findings and preserves the recorded decision.
+Existing `awaiting_decision` records with unassessed findings become runnable
+through `TaskAction`; a completed assessment is not repeated on each tick.
+New verification findings pass through the same reconciliation boundary,
+together with still-unanswered gates so recurring concerns can be consolidated.
+Approved or answered findings remain outside that reassessment.
+
+Routine revisions can proceed while unrelated human choices remain open.
+Both planner and verifier receive those unresolved choices separately and must
+preserve them without choosing defaults. The candidate remains an internal
+artifact; it cannot authorize execution or replace the canonical plan while
+any required decision remains. The successful revision-round cap also applies
+to re-entry from `awaiting_decision`.
 
 The fingerprint binds classification, risk, source, and exact plan evidence,
 but deliberately excludes model-authored title, description, and excerpt
@@ -450,3 +509,18 @@ applies, the generic force-approve control is hidden.
 - [[modules/config]] · [[modules/daemon]] · [[modules/model_routing]] · [[modules/task_action]]
 - [[commands/status]] · [[commands/daemon]] · [[commands/web]] · [[cli]]
 - [[decisions]] · [[testing]] · [[gaps]]
+
+### Conflicting automatic dispositions
+
+Decision reassessment includes unverified, unapproved `safe_auto` findings when
+an unanswered gate exists, including already incorporated dispositions. A false
+automatic default can therefore be consolidated with the reserved choice instead
+of surviving as a contradictory verification target. Verified findings and
+operator-approved or answered findings remain outside that reassessment. A blocked
+record with a prior completed triage and newly eligible sources is runnable again;
+exhausted triage itself is not rearmed. Verification blockers referring to sources
+resolved by reassessment are removed, while unrelated missing evidence remains.
+
+Reassessment at the final allowed revision round cannot clear newly reclassified
+routine work: accepted residuals at that boundary terminate with
+`revision_round_limit` before any obsolete source blocker is removed.

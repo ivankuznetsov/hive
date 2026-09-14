@@ -3,7 +3,7 @@ title: 2-brainstorm stage
 type: stage
 source: lib/hive/stages/brainstorm.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-09-10
 tags: [stage, brainstorm, qa, tmux]
 ---
 
@@ -13,6 +13,7 @@ tags: [stage, brainstorm, qa, tmux]
 
 - **State file**: `brainstorm.md` (touched empty if absent so the marker write has a target).
 - **Prompt**: `templates/brainstorm_prompt.md.erb`, rendered with `project_name`, `task_folder`, `idea_text`. Idea text is wrapped in `<user_supplied content_type="idea_text">…</user_supplied>` per the prompt-injection boundary policy.
+- **Inspection and writes**: The prompt permits read-only shell inspection of local task artifacts, project files, and skill instructions. Only `brainstorm.md` may be modified; network requests and commands that change other files or Git state remain forbidden. This lets shell-based agents inspect context without expanding the brainstorm write boundary.
 - **Agent invocation**: `cwd = task.folder`, `--add-dir <task.folder>`, `log_label = "brainstorm"`. For `claude.mode: tmux`, `Hive::ClaudeLauncher` starts Claude through `interactive_claude_wrapper.sh`, unsets API-key env vars, maps `claude.permission_mode` (default `bypassPermissions`) to the same flags the headless path uses (`bypassPermissions` → `--dangerously-skip-permissions`, otherwise `--permission-mode <mode>`) plus `--allowedTools Read,Write,Edit,LS`, waits for the TUI prompt, and then asks `Hive::TmuxRunner` to paste the rendered prompt and submit only after the pane tail has settled.
 - **Tmux readiness env vars**: `Hive::ClaudeLauncher` owns `HIVE_CLAUDE_TMUX_*` readiness settings. `SESSION_READY`, `PID_READY`, and `CLAUDE_READY` inherit `HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC` when their specific env var is unset; `CLAUDE_READY` otherwise keeps a 120s bare default for slow Claude TUI startup. Legacy `HIVE_BRAINSTORM_TMUX_*` names remain fallback inputs during the migration window.
 - **Claude TUI readiness predicates**: Trust, permission, banner, footer, and prompt-chrome strings are named constants in `Hive::ClaudeLauncher`, with observed coverage for Claude Code 2.1.133, the later line-end-caret footer shape, and Claude Code 2.1.179's separator/caret/separator/footer shape. `claude_ready_prompt?` accepts an idle `❯` caret at the start or end of the current input line, including Unicode separator spaces around the caret and the patrol-observed case where the captured pane tail has scrolled the `Claude Code` banner out but still shows `... PR #N ... for agents`. It classifies trust and permission prompts from the current prompt block instead of stale scrollback, rejects numbered menu options as non-ready, and only treats `⏵⏵` footer lines as prompt chrome when they carry the real bypass-permissions footer copy.

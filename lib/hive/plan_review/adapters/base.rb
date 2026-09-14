@@ -9,17 +9,17 @@ module Hive
         ].freeze
         SUCCESS_OUTCOMES = %w[success partial_coverage].freeze
         TRANSIENT_OUTCOMES = %w[provider_limit timeout retryable_failure].freeze
-        KINDS = %w[primary adversarial verification].freeze
+        KINDS = %w[primary adversarial verification decision_triage].freeze
 
         Request = Data.define(
           :plan_path, :plan_digest, :document_type, :level, :required_coverage,
           :policy_fingerprint, :planner_identity, :reviewer, :output_directory,
-          :timeout_sec, :attempt_id, :kind, :project_root, :verification_findings
+          :timeout_sec, :attempt_id, :kind, :project_root, :verification_findings, :pending_findings
         ) do
           def initialize(plan_path:, plan_digest:, document_type:, level:, required_coverage:,
                          policy_fingerprint:, planner_identity:, reviewer:, output_directory:,
                          timeout_sec:, attempt_id:, kind: "primary", project_root: nil,
-                         verification_findings: [])
+                         verification_findings: [], pending_findings: [])
             normalized_level = Hive::PlanReview.level!(level)
             normalized_kind = kind.to_s
             raise ArgumentError, "unknown plan review adapter kind #{kind.inspect}" unless KINDS.include?(normalized_kind)
@@ -45,16 +45,19 @@ module Hive
               attempt_id: attempt_id.to_s.freeze,
               kind: normalized_kind.freeze,
               project_root: project_root && File.expand_path(project_root),
-              verification_findings: Hive::PlanReview.deep_freeze(
-                Array(verification_findings).map do |finding|
-                  finding.respond_to?(:to_h) ? finding.to_h : finding
-                end
-              )
+              pending_findings: freeze_findings(pending_findings),
+              verification_findings: freeze_findings(verification_findings)
             )
             freeze
           end
 
           private
+
+          def freeze_findings(value)
+            Hive::PlanReview.deep_freeze(Array(value).map do |finding|
+              finding.respond_to?(:to_h) ? finding.to_h : finding
+            end)
+          end
 
           def freeze_hash(value)
             value.to_h { |key, child| [ key.to_s.freeze, child.to_s.freeze ] }.freeze
@@ -63,11 +66,11 @@ module Hive
 
         Result = Data.define(
           :outcome, :findings, :coverage, :selected_lenses, :residual_evidence,
-          :diagnostic, :retry_at, :route_receipt
+          :diagnostic, :retry_at, :route_receipt, :decision_assessments
         ) do
           def initialize(outcome:, findings: [], coverage: [], selected_lenses: [],
                          residual_evidence: [], diagnostic: nil, retry_at: nil,
-                         route_receipt: {})
+                         route_receipt: {}, decision_assessments: [])
             normalized = outcome.to_s
             raise ArgumentError, "unknown plan review outcome #{outcome.inspect}" unless OUTCOMES.include?(normalized)
             super(
@@ -78,6 +81,7 @@ module Hive
               residual_evidence: Hive::PlanReview.deep_freeze(Array(residual_evidence).dup),
               diagnostic: diagnostic&.to_s&.freeze,
               retry_at: retry_at&.to_s&.freeze,
+              decision_assessments: Hive::PlanReview.deep_freeze(Array(decision_assessments).dup),
               route_receipt: Hive::PlanReview.deep_freeze(route_receipt.to_h.dup)
             )
             freeze
@@ -94,6 +98,7 @@ module Hive
               "residual_evidence" => residual_evidence,
               "diagnostic" => diagnostic,
               "retry_at" => retry_at,
+              "decision_assessments" => decision_assessments,
               "route_receipt" => route_receipt
             }
           end

@@ -154,6 +154,7 @@ class PlanReviewResultParserTest < Minitest::Test
       /invalid plan review adapter result envelope/ => { "schema_version" => 2 },
       /result identity is malformed/ => { "attempt_id" => "pr-#{'a' * 64}" },
       /diagnostic must be a String or null/ => { "diagnostic" => 42 },
+      /decision_assessments must be an Array/ => { "decision_assessments" => {} },
       /selected_lenses must contain lowercase names/ => { "selected_lenses" => [ "Security" ] },
       /retry_at must be a timestamp String/ => { "retry_at" => 42 },
       /invalid plan review coverage entry/ => {

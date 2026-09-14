@@ -35,11 +35,13 @@ Classify findings by decision authority:
 For the final JSON written to Hive, this rubric is authoritative and overrides
 any classification, autofix, or routing rubric from an invoked skill.
 
-- `safe_auto`: one concrete, low-risk, reversible technical correction follows
+- `safe_auto`: one concrete technical correction follows
   from the plan, product contract, or established repository patterns.
 - `gated_auto`: the preferred technical correction is clear, but applying it
-  materially changes architecture, external behavior, compatibility,
-  security/privacy posture, or operational risk and therefore needs approval.
+  exceeds the already-authorized requirements by changing architecture, external
+  behavior, compatibility, security/privacy posture, or accepted operational risk.
+  Name the exact additional authorization needed; touching these areas alone
+  does not create an approval boundary.
 - `manual`: a human must supply a choice because the existing contract and
   repository patterns do not determine a safe answer, and the alternatives
   materially change product scope, authority/trust, privacy/compliance, risk

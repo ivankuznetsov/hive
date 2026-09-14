@@ -303,3 +303,12 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 - [[modules/agent_profile]] · [[modules/protected_files]] · [[modules/config]]
 - [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/artifacts]] · [[stages/finalize]]
 - [[architecture]]
+
+### Claude main-agent identity
+
+The Claude stream tracks main-conversation model identity separately from token
+metering. Child events with `parent_tool_use_id` cannot replace the main model.
+The final result and usage projection carry that main identity while retaining
+aggregate token totals. A single-model terminal usage map remains a fallback;
+a multi-model map alone leaves identity unknown. Provider-emitted main assistant
+or message-start identity supersedes the initial model announcement.

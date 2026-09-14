@@ -310,3 +310,9 @@ the standard task projections.
 - [[modules/daemon]]
 - [[state-model]]
 - [[testing]]
+
+### Credential-bearing URLs in publication evidence
+
+Patrol Fix PR bodies omit URL userinfo from copied review and finding evidence.
+Original task receipts remain unchanged. Betterleaks still checks the generated
+body and exact commit range before publication; other detected secrets block.

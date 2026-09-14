@@ -14,6 +14,7 @@ require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/decision_triage"
 require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
@@ -739,7 +740,7 @@ module Hive
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
       when "blocked"
-        if recoverable_transient_planner_revision?
+        if recoverable_decision_triage? || recoverable_transient_planner_revision?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
           ACTIONS.fetch(:plan_reviewing)
@@ -981,10 +982,28 @@ module Hive
     # as runnable so the daemon can recover records written by an older build
     # and so a crash between publishing the finding and consuming the policy
     # cannot strand the task.
+    def recoverable_decision_triage?
+      return false unless task.folder && File.directory?(task.folder)
+
+      record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      route = record["routes"].reverse.find { |entry| entry["role"] == "decision_triage" }
+      route && route["triage_version"] == Hive::PlanReview::DecisionTriage::VERSION &&
+        %w[success partial_coverage].include?(route["outcome"]) &&
+        !Hive::PlanReview::DecisionTriage.pending(record).empty?
+    rescue Hive::PlanReview::Error, Hive::ConfigError, SystemCallError, IOError
+      false
+    end
+
     def auto_plan_review_decision?
       return false unless task.folder && File.directory?(task.folder)
 
       record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      return true unless Hive::PlanReview::DecisionTriage.pending(record).empty?
+      return true if Array(record["findings"]).any? do |entry|
+        entry["classification"] == "safe_auto" && entry["lifecycle"] == "open" ||
+          %w[approved answered incorporated].include?(entry["lifecycle"])
+      end
+
       pending = record["findings"].map { |entry| Hive::PlanReview::Finding.new(entry) }
         .select(&:blocking?)
       return false if pending.empty?

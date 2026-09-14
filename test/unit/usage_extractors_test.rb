@@ -59,6 +59,29 @@ class UsageExtractorsTest < Minitest::Test
     )
   end
 
+  def test_mixed_model_totals_do_not_identify_the_main_reviewer_by_entry_order
+    models = { "claude-haiku-4-5-20251001" => {}, "claude-opus-5" => {} }
+    [ models, models.to_a.reverse.to_h ].each do |model_usage|
+      result = CLAUDE.call(event(
+        "type" => "result", "usage" => { "input_tokens" => 100, "output_tokens" => 50 },
+        "modelUsage" => model_usage
+      ))
+      assert_nil result[:model]
+      assert_equal 100, result[:input]
+      assert_equal 50, result[:output]
+    end
+  end
+
+  def test_explicit_model_wins_over_mixed_model_totals
+    result = CLAUDE.call(event(
+      "type" => "result", "model" => "claude-opus-5",
+      "usage" => { "input_tokens" => 100, "output_tokens" => 50 },
+      "modelUsage" => { "claude-haiku-4-5-20251001" => {}, "claude-opus-5" => {} }
+    ))
+
+    assert_equal "claude-opus-5", result[:model]
+  end
+
   def test_claude_stream_event_extracts_partial_usage
     result = CLAUDE.call(event(
       "type" => "stream_event",

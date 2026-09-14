@@ -1,10 +1,11 @@
 require "test_helper"
 require "hive/daily_digest/hold_observer"
+require "hive/daemon/status_consumer"
 
 class DailyDigestHoldObserverTest < Minitest::Test
   include HiveTestHelper
 
-  Row = Struct.new(:folder, :stage, :marker_attrs, :provider, keyword_init: true)
+  Row = Hive::Daemon::StatusConsumer::Row
 
   def test_records_changed_provider_capacity_and_authority_holds_with_exits
     with_tmp_dir do |root|
@@ -36,6 +37,8 @@ class DailyDigestHoldObserverTest < Minitest::Test
       assert_equal %w[provider provider capacity capacity authority authority],
                    records.map { |record| record.dig(:payload, "hold_kind") }
       assert records.all? { |record| record.fetch(:kind) == "hold_recorded" }
+      assert_equal "codex", records.first.dig(:payload, "provider")
+      assert records.drop(1).none? { |record| record.fetch(:payload).key?("provider") }
     end
   end
 

@@ -1495,6 +1495,25 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "pagination failed", event.last.fetch(:reason)
   end
 
+  def test_event_drain_failure_is_reported_without_stopping_ticks_or_hiding_discovery_errors
+    architecture = FakeRefactorPatrolScheduler.new
+    architecture.define_singleton_method(:drain_events) { raise IOError, "event drain failed" }
+    arbiter = FakePatrolArbiter.new([])
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [], refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+    first = logger.events.select { |name, _| name == :fatal }.last
+    assert_includes first.last.fetch(:message), "event drain failed"
+    arbiter.candidate_error = IOError.new("original discovery failure")
+    dispatcher.tick(now: T0 + 30)
+    second = logger.events.select { |name, _| name == :fatal }.last
+    assert_includes second.last.fetch(:message), "original discovery failure"
+    assert_equal 2, logger.events.count { |name, _| name == :tick_end }
+    assert_empty supervisor.spawned
+  end
+
   def test_scheduler_block_events_are_forwarded_without_internal_status_field
     architecture = FakeRefactorPatrolScheduler.new
     architecture.events << {

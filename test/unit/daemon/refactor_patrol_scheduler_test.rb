@@ -151,14 +151,20 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         claim_resolver: ->(_attempt) { :resolved }
       )
       candidate = scheduler.candidates(now: T0).fetch(0)
-      registrations = [ entry.merge("project_id" => "replacement-id") ]
+      replacements = [
+        entry.merge("project_id" => "replacement-id"),
+        entry.reject { |key, _| key == "path" },
+        entry.merge("path" => nil)
+      ]
+      replacements.each do |current|
+        registrations = [ current ]
+        error = assert_raises(
+          Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked
+        ) { scheduler.reserve(candidate, now: T0 + 1) }
 
-      error = assert_raises(
-        Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked
-      ) { scheduler.reserve(candidate, now: T0 + 1) }
-
-      assert_equal "registration_identity_changed", error.reason
-      assert_equal "queued", store.read_job(candidate.fetch(:job_id)).fetch("state")
+        assert_equal "registration_identity_changed", error.reason
+        assert_equal "queued", store.read_job(candidate.fetch(:job_id)).fetch("state")
+      end
     end
   end
 

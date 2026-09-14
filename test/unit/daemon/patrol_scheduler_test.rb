@@ -186,10 +186,12 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
         database: runtime_database(original)
       )
       candidate = sched.candidates(now: T0).fetch(0)
-      registrations = [ replacement ]
+      [ replacement, original.reject { |key, _| key == "path" }, original.merge("path" => nil) ].each do |current|
+        registrations = [ current ]
 
-      assert_nil sched.reserve(candidate, now: T0)
-      refute sched.pending?(original.fetch("name"))
+        assert_nil sched.reserve(candidate, now: T0)
+        refute sched.pending?(original.fetch("name"))
+      end
     end
   end
 

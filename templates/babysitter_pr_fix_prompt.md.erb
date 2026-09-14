@@ -20,10 +20,10 @@ shell-escaped and fully qualified (`refs/heads/…` for remote-side refs and
 raw, unqualified name from above.
 
 ```sh
-git fetch origin <%= head_ref_branch_sh %>
+git fetch origin <%= head_ref_fetch_sh %>
 expected_sha=$(git rev-parse <%= head_ref_remote_sh %>)
 # … work on the PR …
-git fetch origin <%= head_ref_branch_sh %>
+git fetch origin <%= head_ref_fetch_sh %>
 current_sha=$(git rev-parse <%= head_ref_remote_sh %>)
 if [ "$expected_sha" != "$current_sha" ]; then
   echo "remote moved while we were working ($expected_sha -> $current_sha); aborting push" >&2

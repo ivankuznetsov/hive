@@ -372,7 +372,7 @@ class BabysitterPrFixerTest < Minitest::Test
     # Every executable position (fetch, rev-parse, push, prose backticks) must
     # use the shell-escaped, fully qualified form so the ref reaches Git as a
     # literal argument that Git also cannot re-parse.
-    assert_includes prompt, "git fetch origin #{Shellwords.escape("refs/heads/#{hostile_ref}")}"
+    assert_includes prompt, "git fetch origin #{Shellwords.escape("refs/heads/#{hostile_ref}:refs/remotes/origin/#{hostile_ref}")}"
     assert_includes prompt, "git rev-parse #{Shellwords.escape("refs/remotes/origin/#{hostile_ref}")}"
     assert_includes prompt, "git push --force-with-lease origin HEAD:#{Shellwords.escape("refs/heads/#{hostile_ref}")}"
     # The raw ref must never appear in an executable shell position; here the
@@ -399,7 +399,7 @@ class BabysitterPrFixerTest < Minitest::Test
       # the same escaping the renderer uses.
       fq_branch = Shellwords.escape("refs/heads/#{hostile_ref}")
       fq_remote = Shellwords.escape("refs/remotes/origin/#{hostile_ref}")
-      assert_includes prompt, "git fetch origin #{fq_branch}",
+      assert_includes prompt, "git fetch origin #{Shellwords.escape("refs/heads/#{hostile_ref}:refs/remotes/origin/#{hostile_ref}")}",
         "#{hostile_ref} must be fetched fully qualified"
       assert_includes prompt, "git rev-parse #{fq_remote}"
       assert_includes prompt, "git push --force-with-lease origin HEAD:#{fq_branch}"
@@ -448,6 +448,27 @@ class BabysitterPrFixerTest < Minitest::Test
         refute_empty remote_sha
         assert_equal pushed, remote_sha
       end
+
+      hostile_ref = hostile_refs.first
+      initial_sha = Dir.chdir(seed) { `git rev-parse HEAD` }.strip
+      work = File.join(dir, "race-work")
+      run_git!(dir, "clone", "-q", origin, work)
+      recipe = recipe_block(rendered_prompt_for_head_ref(hostile_ref))
+      first_fetch, after_work = recipe.split("# … work on the PR …\n", 2)
+      assert first_fetch
+      assert after_work
+      assert system("sh", "-c", first_fetch, chdir: work)
+      assert_equal initial_sha,
+        Dir.chdir(work) { `git rev-parse refs/remotes/origin/#{hostile_ref}` }.strip,
+        "the first fetch must populate the tracking ref used by the SHA guard"
+
+      run_git!(seed, "commit", "-q", "--allow-empty", "-m", "remote advance")
+      advanced_sha = Dir.chdir(seed) { `git rev-parse HEAD` }.strip
+      run_git!(seed, "push", "-q", origin, "HEAD:refs/heads/advance")
+      run_git!(origin, "update-ref", "refs/heads/#{hostile_ref}", advanced_sha)
+
+      refute system("sh", "-c", "expected_sha=#{Shellwords.escape(initial_sha)}\n#{after_work}", chdir: work),
+        "the second fetch must refresh the tracking ref and abort on a remote move"
     end
   end
 

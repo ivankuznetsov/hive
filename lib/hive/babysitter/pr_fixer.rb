@@ -306,6 +306,7 @@ module Hive
           # `refs/heads/...` argument is always taken literally. The
           # remote-tracking counterpart lives under `refs/remotes/origin/`.
           # Display-only lines keep the raw name.
+          head_ref_fetch_sh: Shellwords.escape("refs/heads/#{head_ref}:refs/remotes/origin/#{head_ref}"),
           head_ref_branch_sh: Shellwords.escape("refs/heads/#{head_ref}"),
           head_ref_remote_sh: Shellwords.escape("refs/remotes/origin/#{head_ref}"),
           failing_jobs: context.failing_jobs,

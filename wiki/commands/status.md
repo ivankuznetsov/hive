@@ -727,3 +727,5 @@ owner, or reason. For example, a Patrol fix now parked in review keeps its
 `Escalated (parked)` reason instead of becoming idle with reason `terminal`
 because an earlier recovery succeeded. Active recovery dispositions still
 participate in scheduling classification.
+
+Active and ordinary status share one envelope builder. Active-row preparation avoids duplicate action classification independently of numeric prerequisite resolution, which retains the registered-slug folder lookup and unregistered-task fallback.

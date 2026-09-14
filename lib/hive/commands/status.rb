@@ -573,13 +573,8 @@ module Hive
         else
           Hive::Schemas::StatusProjectionKind::ORDINARY
         end
-        {
-          "schema" => "hive-status",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
-          "ok" => true,
-          "generated_at" => now.iso8601(6),
-          "projection" => projection_kind,
-          "projects" => projects.map do |p|
+        status_payload_envelope(projection_kind: projection_kind, now: now) do
+          projects.map do |p|
             project_payload_or_degraded(
               p,
               project_count: projects.size,
@@ -591,9 +586,20 @@ module Hive
               include_archive_index: include_archive_index
             )
           end
-        }
+        end
       ensure
         @status_attempt_store = nil if owns_attempt_store
+      end
+
+      def status_payload_envelope(projection_kind:, now:)
+        {
+          "schema" => "hive-status",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+          "ok" => true,
+          "generated_at" => now.iso8601(6),
+          "projection" => projection_kind,
+          "projects" => yield
+        }
       end
 
       # Routine consumers omit resolved archive rows while dependency admission
@@ -628,20 +634,15 @@ module Hive
         projection_kind = @archive ?
           Hive::Schemas::StatusProjectionKind::ARCHIVE :
           Hive::Schemas::StatusProjectionKind::ACTIVE
-        payload = {
-          "schema" => "hive-status",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
-          "ok" => true,
-          "generated_at" => now.iso8601(6),
-          "projection" => projection_kind,
-          "projects" => prepared.map do |entry|
+        payload = status_payload_envelope(projection_kind: projection_kind, now: now) do
+          prepared.map do |entry|
             next entry unless entry.is_a?(PreparedProject)
 
             with_project_degradation(entry.project, include_archive_index: include_archive_index) do
               complete_project_payload(entry, admission_context: admission_context, now: now)
             end
           end
-        }
+        end
         ActiveProjection.new(payload: payload, admission_context: admission_context)
       ensure
         @status_attempt_store = nil if owns_attempt_store
@@ -760,21 +761,6 @@ module Hive
       def prepare_project(project, project_count:, stages: nil, exclude_archived: false,
                           now: Time.now.utc, workflow_generation: nil,
                           include_archive_index: false, task_slugs: nil)
-        unless @status_attempt_store
-          return with_status_attempt_store do
-            prepare_project(
-              project,
-              project_count: project_count,
-              stages: stages,
-              exclude_archived: exclude_archived,
-              now: now,
-              workflow_generation: workflow_generation,
-              include_archive_index: include_archive_index,
-              task_slugs: task_slugs
-            )
-          end
-        end
-
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {

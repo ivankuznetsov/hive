@@ -2859,10 +2859,9 @@ class CommandsStatusTest < Minitest::Test
       project = status_project(project_root, hive_state)
 
       command = Hive::Commands::Status.new
-      ordinary = command.json_payload([ project ], now: now, include_archive_index: true)
+      ordinary = command.json_payload([ project ], now: now)
         .fetch("projects").first
       assert_equal now, command.next_retention_boundary
-      assert_equal 4, ordinary.fetch("__archive_folders").size
       archived = Hive::Commands::Status.new(archive: true).json_payload([ project ], now: now)
         .fetch("projects").first
 

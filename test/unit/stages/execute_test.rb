@@ -378,12 +378,17 @@ class HiveStagesExecuteTest < Minitest::Test
       task = build_task(dir)
       write_plan(task)
       write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
-      git = FakeGit.new(head: "new-head", branch: task.slug, dirty: false, ancestor_result: false)
+      git = FakeGit.new(head: "new-head", branch: task.slug, dirty: false, ancestor_result: true)
 
-      result = with_fake_git_and_spawn(git, status: :ok) do
+      launched = false
+      result = with_fake_git_and_spawn(git, status: :ok, on_spawn: lambda {
+        launched = true
+        git.ancestor_result = false
+      }) do
         Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
       end
 
+      assert launched, "must exercise the post-agent ancestry check"
       marker = Hive::Markers.current(task.state_file)
       assert_equal({ commit: "execute_waiting_head_not_descendant", status: :execute_waiting }, result)
       assert_equal :execute_waiting, marker.name
@@ -562,12 +567,17 @@ class HiveStagesExecuteTest < Minitest::Test
       task = build_task(dir)
       write_plan(task)
       write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
-      git = FakeGit.new(head: "new-head", branch: task.slug, dirty: false, ancestor_result: true, raise_ancestor: true)
+      git = FakeGit.new(head: "new-head", branch: task.slug, dirty: false, ancestor_result: true)
 
-      result = with_fake_git_and_spawn(git, status: :ok) do
+      launched = false
+      result = with_fake_git_and_spawn(git, status: :ok, on_spawn: lambda {
+        launched = true
+        git.raise_ancestor = true
+      }) do
         Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
       end
 
+      assert launched, "must exercise the post-agent ancestry check"
       marker = Hive::Markers.current(task.state_file)
       assert_equal({ commit: "execute_worktree_git_failed", status: :error }, result)
       assert_equal :error, marker.name
@@ -1828,9 +1838,10 @@ class HiveStagesExecuteTest < Minitest::Test
     { "execute" => { "agent" => agent } }
   end
 
-  def with_fake_git_and_spawn(git, status: :ok, result: nil)
+  def with_fake_git_and_spawn(git, status: :ok, result: nil, on_spawn: nil)
     with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
       with_replaced_singleton_method(Hive::Stages::Execute, :spawn_implementation, lambda { |_task, _cfg, _path, **_kwargs|
+        on_spawn&.call
         result || { status: status }
       }) do
         yield

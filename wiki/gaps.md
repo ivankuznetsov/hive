@@ -9,6 +9,18 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 
 ## Automatic outcome capture remains unreliable (2026-09-06)
 
+Execution safeguards (2026-09-14) also tell planning, implementation, and review
+agents not to turn collection limitations into implementation blockers. These
+instructions guide semantic judgments; they do not prove that every provider
+will distinguish missing evidence from a real defect. Capture-tool improvements
+remain deferred. Concrete prerequisite inspection is likewise planner guidance,
+not an inferred dependency graph or a guarantee that an older execution checkout
+matches every semantic assumption in a plan. External history rewrites still
+require manual baseline reconciliation when the new entry check rejects them.
+Task-scoped planners may lack source access: they record unverified prerequisites
+for inspection by the executor in its real checkout, without expanding planner
+permissions or treating unavailable inspection as proof of a missing dependency.
+
 Dogfood producers can still fail to obtain controller screenshot receipts or
 start the target application. The artifact stage now treats these as best-effort
 warnings, not task-completion blockers, without labelling missing or rejected

@@ -39,10 +39,22 @@ Durable progress:
 Constraints:
 - Do not modify any file other than plan.md.
 - Do not run code in the project worktree — execution happens in the next stage.
-- If this task has a known prerequisite, declare exactly one scalar
+- Identify the concrete paths, symbols, and contracts each implementation unit
+  assumes, and inspect them when available within your allowed context. If source
+  access is unavailable, mark those assumptions unverified and require inspection
+  in the execution checkout before editing; do not claim a missing prerequisite
+  solely because you cannot inspect it, or block planning solely for that access
+  limitation. Do not assume an architecture exists merely because another plan
+  describes it. If a known unfinished task supplies a prerequisite, declare exactly one scalar
   `depends_on: <slug-or-id>` or `depends_on: <project>:<slug>` in plan.md YAML
-  frontmatter. Keep the same exact normalized value in meta.yml; meta.yml is
-  authoritative, and prose dependency statements are not scheduling input.
+  frontmatter. Hive adopts it into meta.yml when no dependency is already set;
+  do not edit meta.yml. A conflicting existing dependency must be reconciled,
+  and prose dependency statements alone are not scheduling input.
+- Screenshots, recordings, and other collected outcome evidence are best-effort
+  with the current tooling. Do not make unavailable historical captures or
+  unsupported collection a prerequisite for implementation or completion.
+  Record the missing evidence and verification limitation, use available checks,
+  and keep actual product requirements and demonstrated failures actionable.
 - The trailing marker must be exactly one of `<!-- WAITING -->` or
   `<!-- COMPLETE -->`.
 

@@ -44,7 +44,8 @@ module Hive
                 "workflow_stages" => task.workflow_stages,
                 "metadata_status" => task.metadata_status,
                 "plan_status" => task.plan_status,
-                "validation_error" => task.validation_error.to_s
+                "validation_error" => task.validation_error.to_s,
+                "cancelled" => task.cancelled
               }
             end.sort_by { |task| [ task["project"].to_s, task["slug"].to_s, task["id"].to_s ] }
           }
@@ -625,6 +626,19 @@ module Hive
       if original_folder_identity.nil? || folder_identity(folder) != original_folder_identity
         validation_error = "task folder changed while dependency admission was taking its snapshot"
       end
+      cancelled = false
+      if File.basename(File.dirname(folder)) == workflow_stages.last
+        require "hive/task_closure"
+        closure = Hive::TaskClosure.read(
+          Hive::Task.new(folder, workflow_generation: workflow_generation),
+          project: project_name, quarantine: false
+        )
+        if closure.valid?
+          cancelled = closure.receipt["reason"] == "cancelled"
+        elsif !closure.absent?
+          validation_error ||= "invalid task closure receipt: #{closure.error}"
+        end
+      end
 
       stage = File.basename(File.dirname(folder))
       slug = metadata.data[:slug] || File.basename(folder)
@@ -647,7 +661,8 @@ module Hive
         plan_dependency: plan.depends_on&.to_s,
         plan_error: plan.error,
         folder: folder,
-        validation_error: validation_error
+        validation_error: validation_error,
+        cancelled: cancelled
       )
     end
 

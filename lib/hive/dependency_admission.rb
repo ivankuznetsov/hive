@@ -41,7 +41,7 @@ module Hive
     TaskSnapshot = Data.define(
       :project, :slug, :id, :stage, :workflow_stages, :depends_on,
       :metadata_status, :metadata_error, :plan_status, :plan_dependency,
-      :plan_error, :folder, :validation_error
+      :plan_error, :folder, :validation_error, :cancelled
     )
 
     ProjectSnapshot = Data.define(
@@ -104,6 +104,7 @@ module Hive
         end
         source = source_matches.first
         return admission_error("dependency_task_missing", "#{project}:#{slug}", task_correction(project)) unless source
+        return clear if source.cancelled
 
         @verdict_cache_mutex.synchronize do
           @verdict_cache.fetch(qualify(source)) { walk(source) }
@@ -299,6 +300,11 @@ module Hive
       end
 
       def validate_gate(depending_task, prerequisite, prerequisite_project, reference)
+        if prerequisite.cancelled
+          return validation_failure(
+            "task was cancelled, not delivered; remove or replace this prerequisite", reference.to_s
+          )
+        end
         depending_project = unique_project(depending_task.project)
         return validation_failure("depending project snapshot is ambiguous", depending_task.project) unless depending_project
 

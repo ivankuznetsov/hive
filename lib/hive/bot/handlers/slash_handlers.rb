@@ -433,14 +433,14 @@ module Hive
                   "--reason must be one of #{Hive::TaskClosureContract::REASONS.join(', ')}"
           end
           raise ArgumentError, "at least one --evidence reference is required" if
-            input["evidence"].empty?
+            input["evidence"].empty? && input["reason"] != "cancelled"
 
           [ target, input ]
         end
 
         def closure_usage
-          "Use /close <id|slug> --reason <already_delivered|superseded> " \
-            "--evidence <PR-or-commit> [--evidence <ref>] " \
+          "Use /close <id|slug> --reason <already_delivered|superseded|cancelled> " \
+            "[--evidence <PR-or-commit>] " \
             "[--successor project:slug --attestation \"statement\"]."
         end
 

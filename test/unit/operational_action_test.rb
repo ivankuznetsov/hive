@@ -47,7 +47,7 @@ class OperationalActionTest < Minitest::Test
     assert_equal "workflow.close_with_evidence", descriptor.fetch("action_id")
     assert_equal "app:delivered-task", descriptor.fetch("target")
     assert descriptor.fetch("confirmation_required")
-    assert_equal %w[already_delivered superseded], descriptor.fetch("supported_reasons")
+    assert_equal %w[already_delivered superseded cancelled], descriptor.fetch("supported_reasons")
     refute_includes Hive::OperationalAction::EXECUTABLE_ACTION_IDS, descriptor.fetch("action_id")
     refute descriptor.key?("observation_token")
 

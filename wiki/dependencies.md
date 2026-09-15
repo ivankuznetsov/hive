@@ -88,7 +88,11 @@ dying in seconds rather than as a test failure.
 
 `agent-cli-runtime` accepts `json >= 2.7, < 4.0`; both lockfiles resolve
 `json 3.0.2`. Raising that path-gem ceiling also requires the web bundle's
-Rubocop 1.91.0, whose JSON requirement permits the 3.x line.
+Rubocop 1.91.0, whose JSON requirement permits the 3.x line. JSON 3 makes
+parser options keyword-only, while the locked Rails 8.1.3.1 still supplies
+them positionally from `ActiveSupport::JSON.decode`; the web initializer keeps
+that Rails decoder's date-conversion behavior while forwarding options as
+keywords, including for encrypted session-cookie reads.
 
 ## Runtime gems
 

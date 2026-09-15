@@ -40,7 +40,7 @@ module Hive
         validation = current.reverse.find { |receipt| receipt["kind"] == "validation" }
         if validation.nil?
           carried = current.reverse.find do |receipt|
-            receipt["kind"] == "reopen" && %w[review publish].include?(receipt["stage"])
+            receipt["kind"] == "reopen" && receipt["stage"] == "review"
           end
           validation_id = Array(carried&.dig("payload", "carried_receipts"))[1]
           validation = receipts.find { |receipt| receipt["receipt_id"] == validation_id }
@@ -90,7 +90,7 @@ module Hive
           "diagnostic" => diagnostic,
           "action" => action_for(
             state: state, done: done, outcome: outcome,
-            decision: decision, fix: fix, validation: validation,
+            decision: last_decision, fix: fix, validation: validation,
             publication: publication
           )
         }
@@ -179,10 +179,7 @@ module Hive
           "parked_seconds" => parked_seconds,
           "parked_since" => parked_since,
           "rework_count" => receipts.count do |receipt|
-            (receipt["kind"] == "decision" &&
-              receipt.dig("payload", "route") == "rework") ||
-              (receipt["kind"] == "reopen" &&
-                receipt.dig("payload", "operator") == "operator:publication_policy")
+            receipt["kind"] == "decision" && receipt.dig("payload", "route") == "rework"
           end
         }
       end

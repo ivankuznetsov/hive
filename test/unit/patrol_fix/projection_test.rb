@@ -306,7 +306,7 @@ class PatrolFixProjectionTest < Minitest::Test
     Hive::PatrolFix::PublicationBlockReceipt.build(
       task: { "slug" => "repair-login-260820-abcd", "generation" => 1 },
       evidence_revision: { "generation" => 1, "digest" => "a" * 64 },
-      blocked_fields: [ "body" ], rework_stage: "review",
+      blocked_fields: [ "body" ],
       review_receipt_id: "review-1", fix_receipt_id: "fix-1",
       validation_receipt_id: "validation-1", head_revision: "2" * 40,
       diff_digest: "3" * 64, recorded_at: Time.utc(2026, 8, 20, 12, 2)

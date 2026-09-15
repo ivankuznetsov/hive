@@ -2,7 +2,7 @@ require "digest"
 require "time"
 require "hive/patrol_fix"
 require "hive/patrol_fix/receipt_store"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module PatrolFix
@@ -11,7 +11,6 @@ module Hive
       OWNER = "operator".freeze
       SUMMARY = "Publication was blocked by the secret policy before any remote effect.".freeze
       BLOCKED_FIELDS = %w[title body diff].freeze
-      REWORK_STAGES = %w[inbox fix review].freeze
       DIGEST = /\A[0-9a-f]{64}\z/
       REVISION = /\A[0-9a-f]{40}\z/
 
@@ -19,7 +18,7 @@ module Hive
 
       module_function
 
-      def build(task:, evidence_revision:, blocked_fields:, rework_stage:,
+      def build(task:, evidence_revision:, blocked_fields:,
                 review_receipt_id:, fix_receipt_id:, validation_receipt_id:,
                 head_revision:, diff_digest:, recorded_at: Time.now.utc)
         payload = {
@@ -27,13 +26,12 @@ module Hive
           "owner" => OWNER,
           "summary" => SUMMARY,
           "blocked_fields" => BLOCKED_FIELDS.select { |field| blocked_fields.include?(field) },
-          "rework_stage" => rework_stage,
           "review_receipt_id" => review_receipt_id,
           "fix_receipt_id" => fix_receipt_id,
           "validation_receipt_id" => validation_receipt_id,
           "head_revision" => head_revision,
           "diff_digest" => diff_digest,
-          "secret_policy_version" => Hive::SecretPatterns::REDACTION_VERSION
+          "secret_policy_version" => Hive::SecretScanner::POLICY_VERSION
         }
         validate_payload!(payload)
         receipt_id = "publication-block-#{Digest::SHA256.hexdigest(PatrolFix.canonical_json(
@@ -54,12 +52,12 @@ module Hive
 
       def validate_payload!(payload)
         fields = %w[
-          code owner summary blocked_fields rework_stage review_receipt_id
+          code owner summary blocked_fields review_receipt_id
           fix_receipt_id validation_receipt_id head_revision diff_digest
           secret_policy_version
         ]
         blocked_fields = payload["blocked_fields"] if payload.is_a?(Hash)
-        ordered_fields = BLOCKED_FIELDS.select { |field| blocked_fields&.include?(field) }
+        ordered_fields = BLOCKED_FIELDS.select { |field| blocked_fields.include?(field) } if blocked_fields.is_a?(Array)
         receipt_ids_valid = %w[review_receipt_id fix_receipt_id validation_receipt_id].all? do |key|
           bounded_id?(payload[key])
         end if payload.is_a?(Hash)
@@ -68,11 +66,10 @@ module Hive
                payload["summary"] == SUMMARY &&
                blocked_fields.is_a?(Array) && !blocked_fields.empty? &&
                blocked_fields == ordered_fields &&
-               REWORK_STAGES.include?(payload["rework_stage"]) &&
                receipt_ids_valid &&
                payload["head_revision"].to_s.match?(REVISION) &&
                payload["diff_digest"].to_s.match?(DIGEST) &&
-               payload["secret_policy_version"] == Hive::SecretPatterns::REDACTION_VERSION
+               bounded_id?(payload["secret_policy_version"])
           raise InvalidBlock, "publication block payload is invalid"
         end
 

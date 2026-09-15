@@ -170,13 +170,13 @@ class PatrolFixReceiptStoreTest < Minitest::Test
     end
   end
 
-  def test_publication_block_receipt_is_closed_sanitized_and_reopenable
+  def test_publication_block_receipt_is_closed_sanitized_and_not_reopenable
     Dir.mktmpdir do |dir|
       store = Hive::PatrolFix::ReceiptStore.new(task_folder: dir)
       block = Hive::PatrolFix::PublicationBlockReceipt.build(
         task: decision_receipt.fetch("task"),
         evidence_revision: decision_receipt.fetch("evidence_revision"),
-        blocked_fields: %w[body diff], rework_stage: "review",
+        blocked_fields: %w[body diff],
         review_receipt_id: "review-1", fix_receipt_id: "fix-1",
         validation_receipt_id: "validation-1", head_revision: "1" * 40,
         diff_digest: "2" * 64, recorded_at: Time.utc(2026, 8, 20, 12)
@@ -187,6 +187,15 @@ class PatrolFixReceiptStoreTest < Minitest::Test
         Pathname.new(Hive::Schemas.schema_path("hive-patrol-fix-receipt"))
       ).valid?(block)
       refute_includes JSON.generate(block), "ghp_"
+      assert_equal Hive::SecretScanner::POLICY_VERSION, block.dig("payload", "secret_policy_version")
+      historical = block.merge("payload" => block.fetch("payload").merge(
+        "secret_policy_version" => "betterleaks-0.0.1"
+      ))
+      Dir.mktmpdir do |historical_dir|
+        historical_store = Hive::PatrolFix::ReceiptStore.new(task_folder: historical_dir)
+        historical_store.append!(historical)
+        assert_equal [ historical ], historical_store.read_all
+      end
       assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) do
         store.append!(publication_receipt)
       end
@@ -199,11 +208,13 @@ class PatrolFixReceiptStoreTest < Minitest::Test
           "carried_receipts" => %w[fix-1 validation-1]
         }
       )
-      assert_equal reopen, store.append!(reopen)
+      assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) { store.append!(reopen) }
 
       [
         block.merge("payload" => block.fetch("payload").merge("raw" => "ghp_#{'a' * 36}")),
         block.merge("payload" => block.fetch("payload").merge("blocked_fields" => %w[diff body])),
+        block.merge("payload" => block.fetch("payload").merge("blocked_fields" => 42)),
+        block.merge("payload" => block.fetch("payload").merge("blocked_fields" => false)),
         block.merge("payload" => block.fetch("payload").merge("rework_stage" => "publish"))
       ].each do |invalid|
         invalid = Marshal.load(Marshal.dump(invalid))

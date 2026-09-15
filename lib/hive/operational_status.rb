@@ -6,6 +6,7 @@ require "hive/workflows"
 require "hive/task_closure"
 require "hive/task_projection"
 require "hive/terminal_outcome"
+require "hive/patrol_fix/publication_block_receipt"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -26,7 +27,6 @@ module Hive
     REPAIR_ACTIONS = %w[error recover_execute recover_review admission_error].freeze
     COMPLETION_ACTIONS = %w[ready_to_archive review_parked].freeze
     HUMAN_ACTIONS = %w[needs_input].freeze
-    PATROL_FIX_PUBLICATION_BLOCKED_ACTION = "patrol_fix_publication_blocked".freeze
     PLAN_REVIEW_WAIT_ACTIONS = %w[plan_reviewing plan_review_retry].freeze
     PLAN_REVIEW_REPAIR_ACTIONS = %w[plan_review_unsupported plan_review_blocked].freeze
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
@@ -404,12 +404,8 @@ module Hive
         end
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
-      daemon_actions = [
-        Hive::OperationalAction::RETRY_ACTION_ID,
-        Hive::OperationalAction::PATROL_FIX_PUBLICATION_REWORK_ACTION_ID
-      ]
       if daemon_enabled?(project.fetch("name")) &&
-         action && !daemon_actions.include?(action.fetch("action_id"))
+         action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
         action = nil
       end
       {
@@ -622,7 +618,7 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
-      if row["action"] == PATROL_FIX_PUBLICATION_BLOCKED_ACTION
+      if row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
         return [ "waiting_on_you", "operator" ]
       end
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
@@ -951,10 +947,10 @@ module Hive
           "task has a verified live runner"
         end
         reasons << reason("live_runner", message, "liveness")
-      elsif row["action"] == PATROL_FIX_PUBLICATION_BLOCKED_ACTION
+      elsif row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
         reasons << reason(
-          "secret_detected",
-          "Publication was blocked by the secret policy before any remote effect.",
+          Hive::PatrolFix::PublicationBlockReceipt::CODE,
+          Hive::PatrolFix::PublicationBlockReceipt::SUMMARY,
           "patrol_fix"
         )
       elsif row["plan_review"].is_a?(Hash) && row["action"].to_s.start_with?("plan_review")

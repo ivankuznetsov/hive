@@ -3701,11 +3701,7 @@ module Hive
       def promote_attempt_finalization(attempt)
         return unless @attempt_reconciler&.respond_to?(:promote_finalization)
 
-        # Publication acknowledgements update the hot row during this tick.
-        # Promote against that current proof rather than the pre-ack snapshot.
-        current = @attempt_reconciler.fetch(attempt.attempt_id) if
-          @attempt_reconciler.respond_to?(:fetch)
-        @attempt_reconciler.promote_finalization(current || attempt)
+        @attempt_reconciler.promote_finalization(attempt)
       end
 
       def write_attempt_dispatch_result(request, attempt, receipt, now:)

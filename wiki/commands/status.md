@@ -318,13 +318,10 @@ terminal recovery receipt. The one-off recovery-contract migration moved every
 in-repository producer, consumer, fixture, and operating skill to v2; v1 is no
 longer published or supported.
 
-A Patrol Fix publication secret park recommends
-`patrol_fix.rework_publication` instead. Its observation token includes the
-exact sanitized `publication_block` receipt ID, and execution rechecks that
-receipt under the controller transition and task locks before advancing a new
-generation to Inbox, Fix, or Review. Daemon enrollment does not suppress this
-operator action, but daemon policy never dispatches it. `workflow.retry` cannot
-act on the same park.
+A Patrol Fix publication secret park reports `waiting_on_you`, owned by the
+operator, with a sanitized `secret_detected` reason. It offers no executable
+recovery action, including when the daemon is enabled. Ordinary retry cannot
+release the same blocked generation.
 
 Recovery recommendations bind to the exact current `marker_id`. A task carrying
 an old id-less recoverable marker reports `recovery_migration_required` and

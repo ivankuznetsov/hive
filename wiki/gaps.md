@@ -15,16 +15,6 @@ dependency rejection, and Web preview. Deploy a compatible runtime before
 creating cancellation receipts in live state; older readers reject the new
 reason. Task 43085 is the intended first live validation, not yet archived.
 
-## Patrol publication recovery needs an operator correction decision (2026-09-09)
-
-PR #1295 can park publication safely, but routing source/title blocks to Inbox
-does not change the protected manifest or immutable slug rendered by Publish.
-A secret removed from the final diff also remains in commit history; adding a
-new commit cannot erase it. Keep this PR open until source correction and the
-operator recovery contract are resolved. Do not report a routed generation as
-proof that these bytes can be corrected. Review-text rework and exact carried
-receipt authorization are independently testable.
-
 ## Automatic outcome capture remains unreliable (2026-09-06)
 
 Execution safeguards (2026-09-14) also tell planning, implementation, and review
@@ -71,11 +61,6 @@ selection is not used to skip tests. The local task-capture profile took 16.7s
 versus a nightly 178s mean, so no timeout reductions were made from that mismatch.
 Focused source-to-test mapping cannot establish every transitive consumer;
 shared infrastructure falls back broadly and the full coverage gate remains.
-The incident advisory's sixteen-second per-scenario ceiling is supported by
-two hosted `incident_provider_limit_retry` samples (13.424s and 14.031s) and
-one 15.871s local sample after Git-isolation setup landed. It retains the
-below-thirty-second aggregate cap, but needs a wider hosted sample before it
-can be treated as a stable p95 rather than bounded headroom.
 
 ## Ten-table runtime deployment proof
 

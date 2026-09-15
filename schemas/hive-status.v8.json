@@ -137,7 +137,7 @@
         "attempt_id", "task_generation",
         "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
         "condition_task_generation",
-         "commit_generation", "current_attempt", "action_receipt_id", "conditions", "condition_history",
+         "commit_generation", "current_attempt", "conditions", "condition_history",
          "evidence", "closure", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
          "shadow_audit", "condition_warning", "plan_review", "auto_residue", "unanswered_questions", "action",
          "action_label", "suggested_command", "outcomes",
@@ -218,11 +218,6 @@
         "current_attempt": {
           "description": "Current attempt selected from task-journal history, or null before handoff.",
           "type": ["string", "null"]
-        },
-        "action_receipt_id": {
-          "description": "Exact current semantic receipt bound into an operator action, or null.",
-          "type": ["string", "null"],
-          "maxLength": 128
         },
         "conditions": {
           "description": "Current condition facts selected by generation, attempt family, and commit scope.",

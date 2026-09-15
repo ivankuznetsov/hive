@@ -1,15 +1,7 @@
----
-date: 2026-08-27
-slug: patrol-publication-secret-park
----
+# Park secret-blocked Patrol Fix publication
 
-- Changed Patrol Fix secret-policy publication failures from repeated failed
-  attempts into a sanitized, generation-scoped `publication_block` receipt and
-  operator-owned parked outcome before any remote effect.
-- Added the exact receipt-bound `patrol_fix.rework_publication` operational
-  action. It advances a new generation to Inbox, Fix, or Review under the
-  controller and task locks; daemon policy does not dispatch it and ordinary
-  `workflow.retry` cannot release the park.
-- The rework executor now verifies the exact task-lock owner and releases that
-  same lock at the moved destination, so the operator action cannot strand a
-  live-lock artifact after changing stages.
+Publish records sanitized, generation-scoped block evidence before remote
+publication effects. Status reports an operator-owned park. Repeated runs and
+daemon dispatch cannot retry the same blocked publication. Publication recovery
+routing is intentionally excluded: fixing source data or Git history belongs
+to the operator before starting fresh work.

@@ -71,7 +71,7 @@ class PatrolFixTaskActionTest < Minitest::Test
     end
   end
 
-  def test_publication_secret_block_exposes_only_the_receipt_bound_operator_rework
+  def test_publication_secret_block_is_visible_without_retry_or_rework_action
     with_task("publish") do |task, receipts, root|
       block = publication_block_receipt
       receipts.append!(block)
@@ -84,14 +84,7 @@ class PatrolFixTaskActionTest < Minitest::Test
       assert_equal :skip, policy_decision(action)
 
       descriptor = Hive::OperationalAction.descriptor_for_task(task, project: "demo")
-      assert_equal "patrol_fix.rework_publication", descriptor.fetch("action_id")
-      assert_raises(Hive::StaleOperationalObservation) do
-        Hive::OperationalAction.assert_current!(
-          task, project: "demo", action_id: "workflow.retry",
-          target: descriptor.fetch("target"),
-          observation_token: descriptor.fetch("observation_token")
-        )
-      end
+      assert_nil descriptor
 
       project = {
         "name" => "demo", "path" => root,
@@ -101,7 +94,6 @@ class PatrolFixTaskActionTest < Minitest::Test
       payload = status.json_payload([ project ], now: Time.utc(2026, 8, 20, 12, 5))
       row = payload.dig("projects", 0, "tasks", 0)
       assert_equal "patrol_fix_publication_blocked", row.fetch("action")
-      assert_equal block.fetch("receipt_id"), row.fetch("action_receipt_id")
 
       operational = status.operational_payload(
         [ project ], status_payload: payload, scheduler_snapshot: nil,
@@ -110,10 +102,7 @@ class PatrolFixTaskActionTest < Minitest::Test
       assert_equal "waiting_on_you", operational.fetch("state")
       assert_equal "operator", operational.fetch("blocker_owner")
       assert_equal "secret_detected", operational.dig("reasons", 0, "code")
-      assert_equal "patrol_fix.rework_publication",
-                   operational.dig("action", "action_id")
-      assert_equal descriptor.fetch("observation_token"),
-                   operational.dig("action", "observation_token")
+      assert_nil operational["action"]
     end
   end
 
@@ -224,7 +213,7 @@ class PatrolFixTaskActionTest < Minitest::Test
     Hive::PatrolFix::PublicationBlockReceipt.build(
       task: { "slug" => SLUG, "generation" => 1 },
       evidence_revision: { "generation" => 1, "digest" => "a" * 64 },
-      blocked_fields: [ "body" ], rework_stage: "review",
+      blocked_fields: [ "body" ],
       review_receipt_id: "review-1", fix_receipt_id: "fix-1",
       validation_receipt_id: "validation-1", head_revision: "2" * 40,
       diff_digest: "3" * 64, recorded_at: Time.utc(2026, 8, 20, 12, 2)

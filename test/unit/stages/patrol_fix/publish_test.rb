@@ -106,18 +106,6 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
-  def test_publication_rework_defaults_to_review_when_no_specific_source_is_secret
-    snapshot = {
-      "manifest" => { "sources" => [ { "engine" => "git", "identity" => "commit", "evidence" => [ "clean" ] } ] },
-      "validation" => { "payload" => { "commands" => [ { "identity" => "bundle exec rake test" } ] } },
-      "review" => { "payload" => { "rationale" => "Reviewed cleanly.", "evidence" => [ "focused tests pass" ] } }
-    }
-
-    assert_equal "review", Hive::Stages::PatrolFix::Publish.send(
-      :publication_rework_stage, snapshot, []
-    )
-  end
-
   def test_existing_exact_owned_pr_is_imported_without_push_or_create
     with_publish_task do |task, worktree_root, _manifest, _review, _remote|
       git = LocalGit.new
@@ -334,7 +322,7 @@ class PatrolFixPublishStageTest < Minitest::Test
       assert_equal "secret_detected", block.dig("payload", "code")
       assert_equal "operator", block.dig("payload", "owner")
       assert_equal [ "body" ], block.dig("payload", "blocked_fields")
-      assert_equal "review", block.dig("payload", "rework_stage")
+      refute block.fetch("payload").key?("rework_stage")
       refute_includes JSON.generate(block), "ghp_"
       assert_equal 0, git.pushes
       assert_equal 0, github.creates
@@ -354,19 +342,20 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
-  def test_secret_rework_stage_uses_the_earliest_authority_that_can_change_the_bytes
+  def test_source_and_diff_secrets_park_without_a_recovery_route
     token = "ghp_aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
     [
-      [ { source_evidence: "evidence #{token}" }, "inbox", [ "body" ] ],
-      [ { fixed_contents: "puts '#{token}'\n" }, "fix", [ "diff" ] ]
-    ].each do |options, expected_stage, expected_fields|
+      [ { source_evidence: "evidence #{token}" }, [ "body" ] ],
+      [ { fixed_contents: "puts '#{token}'\n" }, [ "diff" ] ]
+    ].each do |options, expected_fields|
       with_publish_task(**options) do |task, worktree_root, _manifest, _review, _remote|
         result = Hive::Stages::PatrolFix::Publish.run!(
           task, config, git_gateway: LocalGit.new, github_gateway: FakeGithub.new,
           worktree_root: worktree_root, cleanup: ->(*) { true }
         )
 
-        assert_equal expected_stage, result.dig(:receipt, "payload", "rework_stage")
+        assert_equal :parked, result.fetch(:status)
+        refute result.fetch(:receipt).fetch("payload").key?("rework_stage")
         assert_equal expected_fields, result.dig(:receipt, "payload", "blocked_fields")
         refute_includes JSON.generate(result.fetch(:receipt)), token
       end
@@ -396,7 +385,7 @@ class PatrolFixPublishStageTest < Minitest::Test
     with_publish_task do |task, worktree_root, _manifest, _review, _remote|
       cleanup_calls = 0
       with_replaced_singleton_method(
-        Hive::Stages::PatrolFix::Publish, :current_publication, ->(*) { nil }
+        Hive::Stages::PatrolFix::Publish, :current_publish_result, ->(*) { nil }
       ) do
         error = assert_raises(Hive::GithubPublication::Blocked) do
           Hive::Stages::PatrolFix::Publish.run!(

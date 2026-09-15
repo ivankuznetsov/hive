@@ -259,8 +259,7 @@ module Hive
       end
 
       def validate_reopen!(stage, payload, label)
-        invalid!("reopen receipts are only valid for inbox, review, or publish") unless
-          (DECISION_ROUTES.keys + [ "publish" ]).include?(stage)
+        invalid!("reopen receipts are only valid for inbox or review") unless DECISION_ROUTES.key?(stage)
         exact_keys!(payload, %w[outcome_receipt_id operator carried_receipts], "#{label}.payload")
         string!(payload.fetch("outcome_receipt_id"), "#{label}.payload.outcome_receipt_id", max: 128)
         string!(payload.fetch("operator"), "#{label}.payload.operator", max: 256)

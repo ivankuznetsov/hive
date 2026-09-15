@@ -70,15 +70,14 @@ class OperationalStatusTest < Minitest::Test
     assert_equal diagnostic, projected.dig("evidence", "diagnostic")
   end
 
-  def test_publication_secret_park_remains_operator_owned_and_actionable_when_daemon_enabled
+  def test_publication_secret_park_remains_operator_owned_without_action_when_daemon_enabled
     row = task(
       action: "patrol_fix_publication_blocked", slug: "publication-block",
       stage: "5-publish", marker: "none"
     ).merge(
       "workflow" => "patrol-fix",
       "action_label" => "Publication blocked by secret policy",
-      "suggested_command" => nil,
-      "action_receipt_id" => "publication-block-one"
+      "suggested_command" => nil
     )
     projected = project(
       status_payload(row),
@@ -88,8 +87,7 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "waiting_on_you", projected.fetch("state")
     assert_equal "operator", projected.fetch("blocker_owner")
     assert_equal "secret_detected", projected.dig("reasons", 0, "code")
-    assert_equal "patrol_fix.rework_publication",
-                 projected.dig("action", "action_id")
+    assert_nil projected["action"]
   end
 
   def test_operational_snapshot_identifies_the_active_dogfood_build

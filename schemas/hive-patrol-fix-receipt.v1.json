@@ -131,19 +131,18 @@
     },
     "publicationBlockPayload": {
       "type": "object", "additionalProperties": false,
-      "required": ["code", "owner", "summary", "blocked_fields", "rework_stage", "review_receipt_id", "fix_receipt_id", "validation_receipt_id", "head_revision", "diff_digest", "secret_policy_version"],
+      "required": ["code", "owner", "summary", "blocked_fields", "review_receipt_id", "fix_receipt_id", "validation_receipt_id", "head_revision", "diff_digest", "secret_policy_version"],
       "properties": {
         "code": {"const": "secret_detected"},
         "owner": {"const": "operator"},
         "summary": {"const": "Publication was blocked by the secret policy before any remote effect."},
         "blocked_fields": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["title", "body", "diff"]}},
-        "rework_stage": {"enum": ["inbox", "fix", "review"]},
         "review_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "fix_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "validation_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "head_revision": {"$ref": "#/$defs/revision"},
         "diff_digest": {"$ref": "#/$defs/digest"},
-        "secret_policy_version": {"const": 1}
+        "secret_policy_version": {"type": "string", "minLength": 1, "maxLength": 128}
       }
     },
     "reopenPayload": {
@@ -185,6 +184,6 @@
     "validationReceipt": {"properties": {"kind": {"const": "validation"}, "stage": {"const": "validate"}, "payload": {"$ref": "#/$defs/validationPayload"}}},
     "publicationReceipt": {"properties": {"kind": {"const": "publication"}, "stage": {"const": "publish"}, "payload": {"$ref": "#/$defs/publicationPayload"}}},
     "publicationBlockReceipt": {"properties": {"kind": {"const": "publication_block"}, "stage": {"const": "publish"}, "payload": {"$ref": "#/$defs/publicationBlockPayload"}}},
-    "reopenReceipt": {"properties": {"kind": {"const": "reopen"}, "stage": {"enum": ["inbox", "review", "publish"]}, "payload": {"$ref": "#/$defs/reopenPayload"}}}
+    "reopenReceipt": {"properties": {"kind": {"const": "reopen"}, "stage": {"enum": ["inbox", "review"]}, "payload": {"$ref": "#/$defs/reopenPayload"}}}
   }
 }

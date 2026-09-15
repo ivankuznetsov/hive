@@ -258,28 +258,19 @@ observation. Discovery code has no remote mutation authority. Escalation creates
 one linked standard coding task through `TaskCapture`; it does not create a
 GitHub issue.
 
-A Patrol Fix `secret_detected` publication refusal is terminal for that exact
-generation: retrying cannot change the immutable manifest, review, validation,
-or patch bytes. Publish therefore appends one sanitized `publication_block`
-receipt before returning a parked result. The receipt contains only safe field
-names, exact evidence receipt IDs, HEAD/diff hashes, the secret-policy version,
-and a fixed summary; it never stores a match, snippet, or source byte. No push,
-authentication, or PR creation has occurred at this point. Status exposes the
-operator-only, receipt-bound `patrol_fix.rework_publication` action, including
-on daemon-enrolled projects. The action advances a new generation to Inbox,
-Fix, or Review according to the earliest authority that can change the blocked
-bytes. Review rework retains exact fix/validation receipts through the current
-operator reopen receipt and its adjacent prior publication block; a second
-rework validates that same lineage. The `diff` field covers the full commit
-range scanned by publication, including secrets absent from the final diff.
-Source/title correction and removal of history-only secrets still need an
-effective operator recovery path (see [[../gaps]]). Its controller lock and
-task lease are identity-backed runtime-control-plane leases, so the executor
-re-reads and releases the exact moved task identity rather than relying on a
-task-folder lock file. The Fix-stage authorization consumes the same current
-receipt rows as
-ordinary execution and returns the structured rework context expected by the
-stage runner. Generic `workflow.retry` cannot release this park.
+A Patrol Fix `secret_detected` publication refusal parks that exact generation.
+Publish appends one sanitized `publication_block` receipt containing safe field
+names, evidence receipt IDs, HEAD/diff hashes, the policy version, and a fixed
+summary. It never stores matched secrets or source snippets. No authentication,
+push, or PR creation occurs before this block. The `diff` field covers the full
+commit range, including secrets removed from the final diff. Repeated runs
+return the existing park without remote calls or cleanup. Status names the
+operator as owner; daemon dispatch and ordinary retry cannot release it.
+
+There is no publication-specific reopen action or routing back to earlier
+stages. The operator must correct the source problem before starting fresh
+work through the normal workflow. Historical secrets require cleaning history,
+not merely editing the latest file. The old blocked generation stays parked.
 
 ## One-time historical import
 
@@ -319,8 +310,8 @@ the standard task projections.
 - No legacy Patrol fixer, issue filer, PR opener, review handoff, action runner,
   or publication engine is runnable.
 - Remote PR publication goes through `Hive::GithubPublication`.
-- Secret-policy publication blocks are append-only, operator-owned, and can be
-  released only by the exact receipt-bound publication rework action.
+- Secret-policy publication blocks are append-only, operator-owned, and cannot be
+  released by ordinary retry or automatic stage routing.
 - Generic `hive run` auto-rebase never runs for a controller workflow; exact
   checkout movement belongs to the controller's receipts and transitions.
 - Historical import is explicit, local, one-time, and never daemon-triggered.

@@ -26,7 +26,7 @@
            data-action="keydown.esc@window->navigation#dismiss turbo:before-cache@document->navigation#close">
         <%= link_to root_path, class: "brand" do %>
           <%= image_tag "/brand.svg", class: "brand-mark", width: 32, height: 32, alt: "" %>
-          <span>Hive</span>
+          <span><%= web_product_name == "hivebox" ? "hivebox" : "Hive" %></span>
         <% end %>
         <% if operator_access? %>
           <button type="button" class="btn btn-ghost mobile-menu-toggle"

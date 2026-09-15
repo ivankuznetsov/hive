@@ -1046,15 +1046,17 @@ corners and preserves the mark when a platform applies its own icon mask.
 ## Visual fixtures and account branding
 
 `web/test/support/ui_fixtures.rb` provides isolated empty and populated workspaces
-for browser tests. `bundle exec rails test test/visual/status_scenarios_test.rb`
+for browser tests. `bundle exec rails test test/visual/status_scenarios_capture.rb`
 (from `web/`) captures Board/Grid at desktop/mobile widths in light/dark themes,
 plus expanded mobile menus: 20 full-page images and a Screenote manifest under
 `web/tmp/ui-captures/<run>/`. Native tasks provide usable detail links. These
 captures are explicitly synthetic and include local working-tree changes;
-publication remains a separate command. See `web/README.md` for the recipe.
+publication remains a separate command. The capture file intentionally omits the
+`_test.rb` suffix so Rails integration discovery does not require a browser.
+See `web/README.md` for the recipe.
 
-The header displays `Hive` with a compact logo gap and aligns the mobile
-account row with the navigation links. It uses `/brand.svg`: the existing Hive geometry, transparent background,
+The header displays `Hive` (or `hivebox` in the container distribution) with a
+compact logo gap and aligns the mobile account row with the navigation links. It uses `/brand.svg`: the existing Hive geometry, transparent background,
 and terracotta colors matched to the light/dark web theme. Launcher/favicons keep
 the opaque yellow-on-black assets. Signed-in users see their public GitHub avatar
 next to their login, with an initial fallback when unavailable. Local operators

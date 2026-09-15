@@ -11,7 +11,7 @@ decisions live in `wiki/decisions.md` (ADR-036/ADR-037).
 Run the visual scenario test from `web/`:
 
 ```sh
-bundle exec rails test test/visual/status_scenarios_test.rb
+bundle exec rails test test/visual/status_scenarios_capture.rb
 ```
 
 It creates a private test `HIVE_HOME`, uses native project/task creation, and

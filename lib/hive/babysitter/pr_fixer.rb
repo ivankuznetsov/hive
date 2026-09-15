@@ -1,4 +1,5 @@
 require "fileutils"
+require "shellwords"
 require "hive/agent_profiles"
 require "hive/babysitter/context_builder"
 require "hive/babysitter/dry_run_env"
@@ -287,11 +288,18 @@ module Hive
       end
 
       def render_prompt(worktree_path, context)
+        head_ref = @pr.fetch("headRefName")
+        base_ref = @pr.fetch("baseRefName")
         bindings = Hive::Stages::Base::TemplateBindings.new(
           pr_number: number,
           pr_url: @pr["url"],
-          head_ref: @pr.fetch("headRefName"),
-          base_ref: @pr.fetch("baseRefName"),
+          head_ref: head_ref,
+          base_ref: base_ref,
+          # Escape shell syntax and qualify refs so Git cannot parse branch
+          # names as options or force refspecs. Keep raw names for display.
+          head_ref_fetch_sh: Shellwords.escape("refs/heads/#{head_ref}:refs/remotes/origin/#{head_ref}"),
+          head_ref_branch_sh: Shellwords.escape("refs/heads/#{head_ref}"),
+          head_ref_remote_sh: Shellwords.escape("refs/remotes/origin/#{head_ref}"),
           failing_jobs: context.failing_jobs,
           mergeable_state: context.mergeable_state,
           dry_run: @dry_run,

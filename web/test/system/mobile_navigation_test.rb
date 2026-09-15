@@ -32,7 +32,7 @@ class MobileNavigationTest < ApplicationSystemTestCase
     click_button "Menu"
     assert_selector "button[aria-label='Menu'][aria-expanded='true']"
     within "nav[aria-label='Primary']" do
-      %w[Status Repos Workflows Modules Patrol Agents Telegram].each { |label| assert_link label }
+      %w[Status Digest Repos Honeycombs Patrol Agents Telegram].each { |label| assert_link label }
     end
     assert_button "Log out"
     alignment = page.evaluate_script(<<~JS)

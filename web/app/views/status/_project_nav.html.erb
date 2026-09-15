@@ -12,8 +12,8 @@
   <% end %>
   <%= link_to "+ Add project", repos_path, class: "project-nav-item project-nav-add" %>
   <div class="project-nav-mobile" data-controller="project-filter">
-    <% options = [["All projects", "", { "data-url" => status_project_filter_path(nil) }]] +
-         projects.map { |project| [project.name, project.name, { "data-url" => status_project_filter_path(project.name) }] } %>
+    <% options = [["All projects", "", { "data-url" => status_filter_path(project: nil) }]] +
+         projects.map { |project| [project.name, project.name, { "data-url" => status_filter_path(project: project.name) }] } %>
     <%= select_tag :project, options_for_select(options, selected_project.to_s),
           id: "mobile-project-filter", aria: { label: "Filter projects" },
           data: { action: "change->project-filter#chooseFromSelect" } %>

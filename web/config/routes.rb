@@ -28,6 +28,8 @@ Rails.application.routes.draw do
 
   post "ideas" => "ideas#create", as: :ideas
 
+  get "honeycombs" => "workflows#index", as: :honeycombs
+
   get  "workflows" => "workflows#index", as: :workflows
   post "workflows" => "workflows#create", as: :create_workflow
   post "workflows/install/preview" => "workflows/previews#create",

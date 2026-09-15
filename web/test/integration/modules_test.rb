@@ -101,7 +101,10 @@ class ModulesTest < ActionDispatch::IntegrationTest
     get modules_path, params: { project: @project }
 
     assert_response :success
-    assert_select "nav a.nav-link-active", text: "Modules"
+    assert_select "nav[aria-label=Primary] a.nav-link-active", text: "Honeycombs"
+    assert_select "h1", text: "Honeycombs"
+    assert_select "nav[aria-label=Honeycombs] a[aria-current=page]", text: "Modules"
+    assert_select "nav[aria-label=Honeycombs] a[href=?]", honeycombs_path(project: @project), text: "Workflows"
     assert_select "[data-module-name='demo'][data-module-state='active']", text: /MODULE_TOKEN.*available/m
     assert_select ".module-details", text: /Generation and integrity.*entrypoint:demo\.run.*duplicate/m
     refute_includes response.body, "raw-secret-value"

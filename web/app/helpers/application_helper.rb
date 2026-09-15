@@ -6,8 +6,7 @@ module ApplicationHelper
     status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
     digests: ->(c) { c == "digests" },
     repos: ->(c) { c == "repos" },
-    workflows: ->(c) { c == "workflows" },
-    modules: ->(c) { c == "modules" },
+    honeycombs: ->(c) { %w[workflows modules].include?(c) },
     patrol: ->(c) { c == "patrol" },
     agents: ->(c) { c == "agents" },
     telegram: ->(c) { c == "telegram" }

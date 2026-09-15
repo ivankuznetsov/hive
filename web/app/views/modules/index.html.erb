@@ -1,6 +1,5 @@
-<% content_for(:title, "#{web_product_name} — modules") %>
-<h1>Modules</h1>
-<p class="muted">Install and operate reviewed, project-local automation. Every change is previewed against one immutable candidate and exact settings, hooks, and grants.</p>
+<% content_for(:title, "#{web_product_name} — Honeycombs — Modules") %>
+<%= render "honeycombs/header", section: :modules %>
 
 <% if @projects.empty? %>
   <div class="empty-state">

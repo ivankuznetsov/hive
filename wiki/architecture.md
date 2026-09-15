@@ -526,6 +526,12 @@ and normalizes origins before handing the checkout to `Project#setup!`.
 `ReposController` only selects between new admission and existing-project
 setup, then renders or redirects.
 
+Hive web groups workflow and module management under one **Honeycombs**
+primary navigation entry. `/honeycombs` opens Workflows; shared Workflows and
+Modules links retain the selected project and stay visible on preview pages.
+The introduction explains that both workflows and modules can be installed.
+Existing workflow and module URLs and lifecycle actions remain available.
+
 Workflow list rows are typed `Workflow` models rather than anonymous adapter
 hashes. The model owns the shared `Hive::Web::WorkflowLifecycle` boundary for
 listing and scaffolding. Reviewed install/update/remove state is represented by

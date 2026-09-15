@@ -4,6 +4,7 @@ require "hive/conditions/transition_guard"
 require "hive/attempts/generation"
 require "hive/attempts/repository"
 require "hive/workflows/coding"
+require "hive/stages/execute"
 
 class ConditionsExecuteBoundaryTest < Minitest::Test
   include HiveTestHelper
@@ -101,6 +102,40 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
     assert_equal "operator_repair", boundary.send(
       :category_for, :execute_complete, {}, projection: human_repaired_projection
     )
+  end
+
+  def test_entry_integrity_reason_survives_condition_authority_without_new_changes
+    %w[branch_mismatch head_not_descendant].each do |reason|
+      with_fixture do |task, store, _attempt, context, baseline|
+        File.write(File.join(task.folder, "worktree.yml"), {
+          "path" => task.worktree_path, "branch" => "master", "execute_base_head" => baseline
+        }.to_yaml)
+        if reason == "branch_mismatch"
+          run!("git", "-C", task.worktree_path, "switch", "-c", "wrong-branch")
+        else
+          run!("git", "-C", task.worktree_path, "commit", "--amend", "-m", "rewritten history")
+        end
+
+        with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+          with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, -> { store }) do
+            outcome = Hive::Stages::Execute.validate_execution_checkout(
+              task, config("conditions"), task.worktree_path, Hive::GitOps.new(task.worktree_path), baseline
+            )
+            assert_equal :execute_waiting, outcome[:status]
+          end
+        end
+
+        assert_equal reason, Hive::Markers.current(task.state_file).attrs["reason"]
+        projection = Hive::TaskProjection::Reader.new(task_folder: task.folder, task: task).read
+        gate = Hive::Conditions::GateEvaluator.new(
+          projection: projection, rule: task.workflow.stage_named("execute").condition_policy
+        ).evaluate
+        refute gate.eligible?
+        action = Hive::Conditions::RecoveryAction.build(task: task, gate: gate)
+        assert_equal reason, action["reason"]
+        assert_equal task.worktree_path, action["target"]
+      end
+    end
   end
 
   def test_attempt_b_new_head_satisfies_gate_and_supersedes_attempt_a_wait

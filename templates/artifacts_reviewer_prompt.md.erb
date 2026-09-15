@@ -43,10 +43,15 @@ Return only one JSON object with `verdicts` (exactly one object per claim and ex
 `verdict` of `accepted`, `revise`, `rework`, or `blocked`, and a concrete `reason`). Use
 `revise` only when targeted replacement proof could resolve the concern. Use
 `rework` when source, configuration, tests, or repository documentation must
-change before truthful proof can exist; if any target needs such a repository
-change, prefer `rework` over another non-accepted verdict. Use `blocked` only
-for an operator-owned credential, decision, or environment that repository
-work cannot resolve. Hive records the exact immutable representation
+change to repair a demonstrated product defect before truthful proof can exist.
+Missing screenshots, unavailable historical captures, unsupported capture tools,
+or collector environment limitations alone are not implementation defects:
+use `blocked` with the exact collection limitation, never `rework` to demand
+evidence-tooling improvements. Hive records evidence-only limitations and
+continues without claiming accepted proof. If any target needs a product repository
+change, prefer `rework` over another non-accepted verdict. Use `blocked` for
+evidence that cannot be collected with available tools, credentials, or
+environment; state the unverified outcome precisely. Hive records the exact immutable representation
 scope exposed to this context; do not echo or calculate hashes. Uncertainty cannot count as accepted. Do not
 wrap JSON in Markdown and do not write any file or Hive marker. Do not narrate
 your inspection. Reserve enough output for the final JSON, emit it immediately

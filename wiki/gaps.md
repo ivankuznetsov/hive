@@ -17,6 +17,18 @@ reason. Task 43085 is the intended first live validation, not yet archived.
 
 ## Automatic outcome capture remains unreliable (2026-09-06)
 
+Execution safeguards (2026-09-14) also tell planning, implementation, and review
+agents not to turn collection limitations into implementation blockers. These
+instructions guide semantic judgments; they do not prove that every provider
+will distinguish missing evidence from a real defect. Capture-tool improvements
+remain deferred. Concrete prerequisite inspection is likewise planner guidance,
+not an inferred dependency graph or a guarantee that an older execution checkout
+matches every semantic assumption in a plan. External history rewrites still
+require manual baseline reconciliation when the new entry check rejects them.
+Task-scoped planners may lack source access: they record unverified prerequisites
+for inspection by the executor in its real checkout, without expanding planner
+permissions or treating unavailable inspection as proof of a missing dependency.
+
 Dogfood producers can still fail to obtain controller screenshot receipts or
 start the target application. The artifact stage now treats these as best-effort
 warnings, not task-completion blockers, without labelling missing or rejected
@@ -1408,7 +1420,7 @@ installed flow until a later authorized dogfood cutover supplies all three
 `HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
 unchanged installed plugin observes the matching status identity.
 
-## Active-only status projections still need installed dogfood and Patrol decoupling (2026-08-28)
+## Active-only status projections and Patrol cadence still need installed dogfood (2026-08-28)
 
 As repaired during the 2026-09-09 PR sweep, in-process daemon, operational
 status, TUI, Web, and watch use the active projection; TUI/Web archive history
@@ -1426,13 +1438,23 @@ v7 producer emitted 1,578,516 JSON bytes and took 9.56 seconds; its admission
 pre-scan alone took 2.16 seconds before the 6.30-second rich row projection.
 Removing terminal transport therefore prevents unbounded archive growth but
 does not solve active-controller scale or the duplicate active metadata reads.
-Patrol discovery also still executes inside the
-coordinator tick. Publishing the operational snapshot before that scan keeps a
-completed scheduler pass visible sooner, but a Patrol scan that runs longer
-than the snapshot-validity window can still make scheduler status expire while
-work is running. A later change must decouple Patrol discovery from scheduler
-snapshot cadence rather than extending freshness or reintroducing a full-fleet
-projection.
+Patrol candidate enumeration is now decoupled from scheduler cadence through a
+one-slot background worker. The dispatcher can publish another authoritative
+task snapshot while a prior discovery pass is still running; it harvests the
+completed hints later and keeps reservation, capacity gates, and spawn on the
+main thread. Architecture discovery's durable maintenance stays under its
+existing store locks, with stale diagnostic writes rejected by an observation
+fence. Focused source tests prove non-overlap, repeated publication carrying a
+fresh task source, once-only stall telemetry, truthful non-drained shutdown,
+retry-deadline enforcement, and rejection of candidates made stale by newer
+failure backoff or registration/config changes. This has not yet been installed
+and observed through a discovery pass longer than the snapshot-validity window,
+so the live cadence claim remains a dogfood gap, not a source-code gap. The
+harvest-time reservation/ownership checks still run on the dispatcher thread;
+live timing should determine whether they need a separate bounded optimization.
+The PR sweep also identified competing process waits between discovery and the
+ancillary supervisor. Its focused regression uses real subprocesses and the
+Gh capture path; it does not replace the installed slow-discovery cadence proof.
 
 Finally, bot delivery of `auto_residue` on a row that becomes archived between
 polls has not been proven under the active-only transport. If that terminal
@@ -1529,3 +1551,7 @@ discovery. This change does not claim every numeric dependency is scan-free.
 The targeted path verifies the selected folder ID and detects copies of its
 slug across stages; it is not an audit for hand-copied duplicate IDs under
 unrelated slugs. Full admission scans retain that broader ambiguity check.
+
+- PR #1331 integrated active-row reuse has a fresh classification-count regression
+  (two calls on the repaired parent, one after reuse), but no fresh fleet-scale
+  wall-clock measurement. Earlier percentage improvements are historical.

@@ -684,6 +684,29 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive develop demo-260426-aaaa --from 4-execute", action.command
   end
 
+  def test_technical_execute_waits_require_repair_without_automatic_resume
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    %w[dirty_worktree branch_mismatch head_not_descendant no_worktree_changes
+       missing_research_output attempt_lost attempt_terminal_failed attempt_terminal_cancelled
+       worktree_evidence_unverifiable evidence_unverifiable attempt_state_unverifiable].each do |reason|
+      action = Hive::TaskAction.for(task, marker(:execute_waiting, "reason" => reason))
+
+      assert_equal "recover_execute", action.key, reason
+      assert_equal "Needs execution repair", action.label, reason
+      refute_nil action.next_action, reason
+      refute Hive::Daemon::Policy.edit_resume?(action.key), reason
+      refute Hive::Daemon::Policy.advance?(action.key), reason
+      refute Hive::Daemon::Policy.run?(action.key), reason
+    end
+  end
+
+  def test_unknown_execute_wait_reason_preserves_user_question
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    action = Hive::TaskAction.for(task, marker(:execute_waiting, "reason" => "choose_scope"))
+
+    assert_equal "needs_input", action.key
+  end
+
   def test_legacy_execute_waiting_with_findings_surfaces_recovery_findings_cli
     task = fake_task(stage_name: "execute", stage_index: 4)
     action = Hive::TaskAction.for(task, marker(:execute_waiting, "findings_count" => 3))

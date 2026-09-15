@@ -1550,6 +1550,13 @@ class OperationalStatusTest < Minitest::Test
                  classify_row(row, daemon_enabled: true)
   end
 
+  def test_execution_repair_stays_operator_owned_with_daemon_enabled
+    row = task(action: "recover_execute", slug: "execute-repair", stage: "4-execute")
+
+    assert_equal [ "needs_repair", "operator" ], classify_row(row)
+    assert_equal [ "needs_repair", "operator" ], classify_row(row, daemon_enabled: true)
+  end
+
   def test_plan_review_repair_actions_report_the_review_blocker_owner
     Hive::OperationalStatus::PLAN_REVIEW_REPAIR_ACTIONS.each do |action|
       row = task(action:, slug: "repair", stage: "3-plan",

@@ -360,7 +360,8 @@ module Hive
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
           runtime_ready_callback: -> { activation_lock.release! },
-          clock: -> { Time.now.utc }
+          clock: -> { Time.now.utc },
+          patrol_discovery_async: true
         )
 
         reexec_requested = false

@@ -64,6 +64,7 @@ class WorkflowFlowTest < ApplicationSystemTestCase
     visit workflows_path(project: @project)
 
     assert_button "Log out"
+    page.execute_script("document.documentElement.style.fontSize = '20px'")
     metrics = page.evaluate_script(<<~JS)
       (() => {
         const nav = document.querySelector("nav[aria-label='Primary']")

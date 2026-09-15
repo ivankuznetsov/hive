@@ -1485,11 +1485,12 @@ pre {
   .topbar nav {
     order: 3;
     flex: 1 0 100%;
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    display: flex;
+    flex-wrap: wrap;
     gap: 2px 4px;
   }
   .topbar .nav-link {
+    flex: 1 0 auto;
     padding: 5px 3px;
     font-size: clamp(0.72rem, 3.2vw, 0.84rem);
     text-align: center;

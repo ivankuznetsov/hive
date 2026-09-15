@@ -29,10 +29,11 @@ module Hive
     PHASES = %w[prepared push_intent branch_observed pr_create_intent pr_observed].freeze
 
     class Blocked < Hive::Error
-      attr_reader :code
+      attr_reader :code, :blocked_fields
 
-      def initialize(code, message)
+      def initialize(code, message, blocked_fields: [])
         @code = code.to_s.freeze
+        @blocked_fields = %w[title body diff].select { |field| blocked_fields.include?(field) }.freeze
         super(message.to_s)
       end
     end
@@ -852,7 +853,10 @@ module Hive
         end
         return if detected.empty?
 
-        blocked!("secret_detected", "publication secret policy blocked #{detected.join(', ')} bytes")
+        raise Blocked.new(
+          "secret_detected", "publication secret policy blocked #{detected.join(', ')} bytes",
+          blocked_fields: detected.map { |field| field == "commits" ? "diff" : field }
+        )
       rescue Hive::SecretScanner::Unavailable => e
         blocked!("secret_scan_unavailable", e.message)
       end

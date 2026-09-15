@@ -6,6 +6,7 @@ require "hive/workflows"
 require "hive/task_closure"
 require "hive/task_projection"
 require "hive/terminal_outcome"
+require "hive/patrol_fix/publication_block_receipt"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -617,6 +618,9 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
+      if row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
+        return [ "waiting_on_you", "operator" ]
+      end
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
       if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
         owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
@@ -943,6 +947,12 @@ module Hive
           "task has a verified live runner"
         end
         reasons << reason("live_runner", message, "liveness")
+      elsif row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
+        reasons << reason(
+          Hive::PatrolFix::PublicationBlockReceipt::CODE,
+          Hive::PatrolFix::PublicationBlockReceipt::SUMMARY,
+          "patrol_fix"
+        )
       elsif row["plan_review"].is_a?(Hash) && row["action"].to_s.start_with?("plan_review")
         review = row.fetch("plan_review")
         message = review["required_action"] || review["blocker_reason"] || row["action_label"]

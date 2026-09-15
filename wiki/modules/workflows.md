@@ -319,6 +319,11 @@ is decision evidence only. There is no local-base fallback, while rework keeps
 the already-owned checkout and base. A same-generation retry also reuses that
 custody without refetching a moving remote branch.
 
+Publish secret-policy failures are distinct operator-owned parks. A sanitized,
+generation-scoped receipt prevents repeated publication attempts; status exposes
+no retry or rework action. Correcting the source and starting fresh work is an
+operator responsibility, separate from this publication gate.
+
 ## Durable human stages
 
 `Hive::Workflow::Stage` accepts `kind: :human` plus immutable named

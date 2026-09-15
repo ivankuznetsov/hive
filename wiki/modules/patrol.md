@@ -241,9 +241,10 @@ failure frame. Invalid Fix reports emit `fix_report_invalid`; invalid reports
 from the other managed stages emit `agent_report_invalid`. Silent failures
 receive a supervisor-authored terminal diagnostic. The first-party controller
 also publishes semantic failure facts before reraising known worktree head
-drift, dirty worktrees, validation mutation, publication secret blocks, and
-Hive-state Git index-lock conflicts, so those failures retain their typed
-cohort codes even when no managed agent seam ran.
+drift, dirty worktrees, validation mutation, and Hive-state Git index-lock
+conflicts, so those failures retain their typed cohort codes even when no
+managed agent seam ran. Publication secret blocks instead use the sanitized
+terminal receipt below and do not fail the attempt.
 
 Independent review hashes the bounded Git diff as raw bytes, then validates and
 labels a copy as UTF-8 before placing it in the canonical prompt context. Valid
@@ -256,6 +257,20 @@ intent, remote reconciliation, expected-absence leases, and exact hosted
 observation. Discovery code has no remote mutation authority. Escalation creates
 one linked standard coding task through `TaskCapture`; it does not create a
 GitHub issue.
+
+A Patrol Fix `secret_detected` publication refusal parks that exact generation.
+Publish appends one sanitized `publication_block` receipt containing safe field
+names, evidence receipt IDs, HEAD/diff hashes, the policy version, and a fixed
+summary. It never stores matched secrets or source snippets. No authentication,
+push, or PR creation occurs before this block. The `diff` field covers the full
+commit range, including secrets removed from the final diff. Repeated runs
+return the existing park without remote calls or cleanup. Status names the
+operator as owner; daemon dispatch and ordinary retry cannot release it.
+
+There is no publication-specific reopen action or routing back to earlier
+stages. The operator must correct the source problem before starting a new
+task through the normal workflow. Historical secrets require cleaning history,
+not merely editing the latest file. The old blocked generation stays parked.
 
 ## One-time historical import
 
@@ -295,6 +310,8 @@ the standard task projections.
 - No legacy Patrol fixer, issue filer, PR opener, review handoff, action runner,
   or publication engine is runnable.
 - Remote PR publication goes through `Hive::GithubPublication`.
+- Secret-policy publication blocks are append-only, operator-owned, and cannot be
+  released by ordinary retry or automatic stage routing.
 - Generic `hive run` auto-rebase never runs for a controller workflow; exact
   checkout movement belongs to the controller's receipts and transitions.
 - Historical import is explicit, local, one-time, and never daemon-triggered.

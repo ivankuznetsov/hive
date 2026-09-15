@@ -702,6 +702,14 @@ receipt durability; failure is a
 bounded diagnostic and cannot revoke completion. Publication performs no LLM,
 issue, edit, close, ready, or merge operation.
 
+If the pre-effect secret scan returns `secret_detected`, Publish appends one
+`publication_block` receipt for the current generation. It includes safe field
+names, review/fix/validation receipt IDs, HEAD/diff hashes, policy version, and
+fixed owner/summary fields. A publication receipt and block receipt cannot both
+be terminal authority for the same generation. The projection reports
+`publication_blocked` and remains parked on replay. No publication-specific
+reopen receipt, recovery action, or stage-routing intent is created.
+
 Admission may bypass remote reconciliation only by supplying this
 same full canonical publication payload, including host/repository/base,
 immutable creation base, exact head and digests, hosted state, and observation

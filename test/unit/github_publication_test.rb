@@ -842,6 +842,8 @@ class GithubPublicationTest < Minitest::Test
           ).publish!(request, revalidate: ->(_phase) { true })
         end
         assert_equal "secret_detected", error.code
+        assert_includes error.blocked_fields, label == "commits" ? "diff" : label
+        assert error.blocked_fields.frozen?
         refute_includes error.message, secret
         refute File.exist?(path)
         assert_equal 0, git.pushes

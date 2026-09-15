@@ -299,7 +299,7 @@
             "recover_review", "agent_running", "archived", "manual_steering",
             "plan_reviewing", "plan_review_retry", "plan_review_decision",
             "plan_review_degraded", "plan_review_unsupported", "plan_review_blocked",
-            "error", "admission_error"
+            "patrol_fix_publication_blocked", "error", "admission_error"
           ]
         },
         "action_label": { "type": "string" },

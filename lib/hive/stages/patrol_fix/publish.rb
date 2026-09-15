@@ -5,6 +5,7 @@ require "hive/atomic_file"
 require "hive/github_publication"
 require "hive/git_ops"
 require "hive/patrol_fix/publication_receipt"
+require "hive/patrol_fix/publication_block_receipt"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/transition"
 require "hive/patrol_fix/task_manifest"
@@ -32,7 +33,9 @@ module Hive
             return { status: :complete, commit: nil, moved_task_folder: recovered.fetch(:task_folder) }
           end
           store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
-          if (existing = current_publication(store, task.folder))
+          current = current_publish_result(store, task.folder)
+          if current && current["kind"] == "publication"
+            existing = current
             Hive::PatrolFix::PublicationReceipt.validate_payload!(existing.fetch("payload"))
             write_pr_metadata!(task.folder, existing.fetch("payload"))
             cleanup_after_receipt(
@@ -40,11 +43,18 @@ module Hive
             )
             return complete(existing)
           end
+          if current && current["kind"] == "publication_block"
+            blocked = current
+            Hive::PatrolFix::PublicationBlockReceipt.validate_payload!(blocked.fetch("payload"))
+            return parked(blocked)
+          end
 
           git_gateway ||= default_git_gateway(cfg)
           github_gateway ||= Hive::GithubPublication::GithubGateway.new(cfg: cfg)
-          request, authority = begin
-            publication_context(task, cfg, git_gateway: git_gateway, worktree_root: worktree_root)
+          request, authority, snapshot = begin
+            publication_context(
+              task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
+            )
           rescue Hive::PatrolFix::WorktreeSnapshot::StaleValidation
             moved = transition.revalidate!
             return { status: :complete, commit: nil, moved_task_folder: moved.fetch(:task_folder) }
@@ -54,17 +64,25 @@ module Hive
             git_gateway: git_gateway, github_gateway: github_gateway
           )
           revalidate = lambda do |_phase|
-            current, current_authority = publication_context(
+            current, current_authority, = publication_context(
               task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
             )
             current.to_h == request.to_h && current_authority == authority
           end
-          publication = controller.publish!(request, revalidate: revalidate)
+          begin
+            publication = controller.publish!(request, revalidate: revalidate)
+          rescue Hive::GithubPublication::Blocked => e
+            raise unless e.code == Hive::PatrolFix::PublicationBlockReceipt::CODE
+
+            block = build_publication_block(task, e.blocked_fields, authority, snapshot)
+            block = store.append!(block)
+            return parked(block)
+          end
 
           # The lower-level controller revalidates at its final observation,
           # and the stage repeats that exact check immediately before local
           # completion authority becomes durable.
-          final, final_authority = publication_context(
+          final, final_authority, = publication_context(
             task, cfg, git_gateway: git_gateway, worktree_root: worktree_root
           )
           unless final.to_h == request.to_h && final_authority == authority
@@ -85,7 +103,7 @@ module Hive
           )
           write_pr_metadata!(task.folder, receipt.fetch("payload"))
           receipt = store.append!(receipt)
-          unless current_publication(store, task.folder) == receipt
+          unless current_publish_result(store, task.folder) == receipt
             raise Hive::GithubPublication::Blocked.new(
               "stale_authority", "publication receipt is not current after durable append"
             )
@@ -112,9 +130,23 @@ module Hive
             "evidence_digest" => snapshot.fetch("manifest").dig("evidence_revision", "digest"),
             "review_receipt_id" => snapshot.fetch("review").fetch("receipt_id")
           }.freeze
-          [ request_from_snapshot(task, cfg, snapshot), authority ]
+          [ request_from_snapshot(task, cfg, snapshot), authority, snapshot ]
         end
         private_class_method :publication_context
+
+        def build_publication_block(task, blocked_fields, authority, snapshot)
+          Hive::PatrolFix::PublicationBlockReceipt.build(
+            task: { "slug" => task.slug, "generation" => authority.fetch("generation") },
+            evidence_revision: snapshot.fetch("manifest").fetch("evidence_revision"),
+            blocked_fields: blocked_fields,
+            review_receipt_id: snapshot.fetch("review").fetch("receipt_id"),
+            fix_receipt_id: snapshot.fetch("fix").fetch("receipt_id"),
+            validation_receipt_id: snapshot.fetch("validation").fetch("receipt_id"),
+            head_revision: snapshot.fetch("head_revision"),
+            diff_digest: snapshot.fetch("diff_digest")
+          )
+        end
+        private_class_method :build_publication_block
 
         def request_from_snapshot(task, cfg, snapshot)
           Hive::GithubPublication::Request.new(
@@ -251,13 +283,23 @@ module Hive
         end
         private_class_method :bounded_utf8
 
-        def current_publication(store, folder)
+        def current_publish_result(store, folder)
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: folder).read
           store.read_all.find do |row|
-            current?(row, manifest) && row["kind"] == "publication" && row["stage"] == "publish"
+            current?(row, manifest) && row["stage"] == "publish" &&
+              %w[publication publication_block].include?(row["kind"])
           end
         end
-        private_class_method :current_publication
+        private_class_method :current_publish_result
+
+        def parked(receipt)
+          {
+            status: :parked,
+            commit: "park Patrol-fix publication blocked by secret policy",
+            receipt: receipt
+          }
+        end
+        private_class_method :parked
 
         def current?(receipt, manifest)
           receipt.fetch("task") == manifest.fetch("task") &&

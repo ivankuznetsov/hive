@@ -627,13 +627,17 @@ module Hive
         validation_error = "task folder changed while dependency admission was taking its snapshot"
       end
       cancelled = false
-      if File.basename(File.dirname(folder)) == workflow_stages.last && File.file?(File.join(folder, "closure.json"))
+      if File.basename(File.dirname(folder)) == workflow_stages.last
         require "hive/task_closure"
         closure = Hive::TaskClosure.read(
           Hive::Task.new(folder, workflow_generation: workflow_generation),
           project: project_name, quarantine: false
         )
-        cancelled = closure.valid? && closure.receipt["reason"] == "cancelled"
+        if closure.valid?
+          cancelled = closure.receipt["reason"] == "cancelled"
+        elsif !closure.absent?
+          validation_error ||= "invalid task closure receipt: #{closure.error}"
+        end
       end
 
       stage = File.basename(File.dirname(folder))

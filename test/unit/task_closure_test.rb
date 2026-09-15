@@ -206,6 +206,25 @@ class TaskClosureTest < Minitest::Test
       verdict = context.verdict(project: project, slug: "successor-task")
       assert verdict.blocked?
       assert_includes verdict.admission_error.safe_correction, "cancelled"
+
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      File.write(File.join(archived.folder, "closure.json"), "{broken json")
+      registry = Hive::Config.registered_projects
+      invalid_context = Hive::DependencySnapshot.admission_context(registry)
+      invalid_verdict = invalid_context.verdict(project: project, slug: "successor-task")
+      assert invalid_verdict.blocked?, "invalid cancellation must not become delivery"
+      assert_includes invalid_verdict.admission_error.safe_correction, "closure receipt"
+      assert File.file?(File.join(archived.folder, "closure.json")), "admission must not quarantine evidence"
+
+      quarantined = service.read(archived, project: project)
+      refute quarantined.valid?
+      refute_nil quarantined.quarantine_path
+      refute File.exist?(File.join(archived.folder, "closure.json"))
+      [ :admission_context, :active_admission_context ].each do |builder|
+        after = Hive::DependencySnapshot.public_send(builder, registry)
+        assert after.verdict(project: project, slug: "successor-task").blocked?,
+               "#{builder} must preserve the blocker after receipt quarantine"
+      end
     end
   end
 

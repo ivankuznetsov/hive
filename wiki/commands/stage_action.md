@@ -73,6 +73,8 @@ terminal stage without running a terminal agent, cleanup, or completion hook.
 Marker-based workflows record `COMPLETE outcome=cancelled`; controller-owned
 inert terminals retain their manifest unchanged. A cancelled prerequisite does
 not count as delivered: dependents must remove or replace that dependency.
+An invalid closure receipt blocks dependency admission, including after another
+consumer quarantines it. Admission reads closure evidence without moving it.
 The Web archive form and bot `/close` accept the same reason.
 
 The receipt is written atomically before transition. Its exact digest enters a

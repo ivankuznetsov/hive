@@ -30,8 +30,10 @@ class StatusScenariosTest < ApplicationSystemTestCase
             else
               assert_selector ".project-nav-item", text: "hive-demo", visible: :all
               assert_selector ".project-nav-item", text: "notes-demo", visible: :all
-              assert_selector view == "board" ? ".kanban-card" : ".task-row", count: tasks.size
-              tasks.each { |task| assert_selector "a", text: task.fetch(:title), visible: :all }
+              assert_selector view == "board" ? ".kanban-card" : ".task-row", count: tasks.count { |task| task.fetch(:stage) != "9-done" }
+              tasks.reject { |task| task.fetch(:stage) == "9-done" }.each do |task|
+                assert_selector "a", text: task.fetch(:title), visible: :all
+              end
             end
             refute page.evaluate_script("document.documentElement.scrollWidth > innerWidth")
             filename = "#{scenario}-#{view}-#{theme}-#{viewport}.png"
@@ -52,6 +54,11 @@ class StatusScenariosTest < ApplicationSystemTestCase
                     file: filename, viewport: "mobile" }
       end
       next if tasks.empty?
+
+      visit archive_path
+      tasks.select { |task| task.fetch(:stage) == "9-done" }.each do |task|
+        assert_selector "a", text: task.fetch(:title)
+      end
 
       task = tasks.first
       visit task_path(task.fetch(:project), task.fetch(:slug))

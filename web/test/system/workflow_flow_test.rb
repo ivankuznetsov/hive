@@ -13,9 +13,9 @@ class WorkflowFlowTest < ApplicationSystemTestCase
 
   test "operator creates a project workflow from the primary navigation" do
     sign_in!
-    click_link "Workflows"
+    click_link "Honeycombs"
 
-    assert_current_path workflows_path
+    assert_current_path honeycombs_path
     select @project, from: "Project workflows"
     click_button "View workflows"
     assert_selector "h2", text: "#{@project} workflows", wait: 5
@@ -64,6 +64,7 @@ class WorkflowFlowTest < ApplicationSystemTestCase
     visit workflows_path(project: @project)
 
     assert_button "Log out"
+    page.execute_script("document.documentElement.style.fontSize = '20px'")
     metrics = page.evaluate_script(<<~JS)
       (() => {
         const nav = document.querySelector("nav[aria-label='Primary']")
@@ -76,7 +77,7 @@ class WorkflowFlowTest < ApplicationSystemTestCase
         }
       })()
     JS
-    assert_equal %w[Status Digest Repos Workflows Modules Patrol Agents Telegram],
+    assert_equal %w[Status Digest Repos Honeycombs Patrol Agents Telegram],
                  metrics.fetch("links")
     assert_operator metrics.fetch("navWidth"), :<=, metrics.fetch("navViewport"),
                     "primary capabilities must not start hidden in a tiny horizontal scroller"

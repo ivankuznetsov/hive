@@ -187,6 +187,8 @@ class PatrolFixReceiptStoreTest < Minitest::Test
         Pathname.new(Hive::Schemas.schema_path("hive-patrol-fix-receipt"))
       ).valid?(block)
       refute_includes JSON.generate(block), "ghp_"
+      reordered = block.fetch("payload").merge("blocked_fields" => %w[diff body])
+      assert_equal reordered, Hive::PatrolFix::PublicationBlockReceipt.validate_payload!(reordered)
       assert_equal Hive::SecretScanner::POLICY_VERSION, block.dig("payload", "secret_policy_version")
       historical = block.merge("payload" => block.fetch("payload").merge(
         "secret_policy_version" => "betterleaks-0.0.1"
@@ -212,7 +214,7 @@ class PatrolFixReceiptStoreTest < Minitest::Test
 
       [
         block.merge("payload" => block.fetch("payload").merge("raw" => "ghp_#{'a' * 36}")),
-        block.merge("payload" => block.fetch("payload").merge("blocked_fields" => %w[diff body])),
+        block.merge("payload" => block.fetch("payload").merge("blocked_fields" => %w[body body])),
         block.merge("payload" => block.fetch("payload").merge("blocked_fields" => 42)),
         block.merge("payload" => block.fetch("payload").merge("blocked_fields" => false)),
         block.merge("payload" => block.fetch("payload").merge("rework_stage" => "publish"))

@@ -268,8 +268,8 @@ return the existing park without remote calls or cleanup. Status names the
 operator as owner; daemon dispatch and ordinary retry cannot release it.
 
 There is no publication-specific reopen action or routing back to earlier
-stages. The operator must correct the source problem before starting fresh
-work through the normal workflow. Historical secrets require cleaning history,
+stages. The operator must correct the source problem before starting a new
+task through the normal workflow. Historical secrets require cleaning history,
 not merely editing the latest file. The old blocked generation stays parked.
 
 ## One-time historical import

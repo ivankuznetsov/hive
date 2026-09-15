@@ -65,7 +65,7 @@ module Hive
                payload["code"] == CODE && payload["owner"] == OWNER &&
                payload["summary"] == SUMMARY &&
                blocked_fields.is_a?(Array) && !blocked_fields.empty? &&
-               blocked_fields == ordered_fields &&
+               blocked_fields.length == ordered_fields.length &&
                receipt_ids_valid &&
                payload["head_revision"].to_s.match?(REVISION) &&
                payload["diff_digest"].to_s.match?(DIGEST) &&

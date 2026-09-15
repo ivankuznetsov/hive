@@ -94,18 +94,35 @@ class BenchHarnessPipelineTest < Minitest::Test
     assert_equal "planner hit a provider limit", cell.reason
   end
 
+  def test_failed_planner_with_provider_errors_parks_before_executor_dispatch
+    [ :error, :timeout ].each do |status|
+      executed = false
+      cell = pipeline(plan_status: status, provider_errors: "You've hit your usage limit.",
+                      exec_spawn: ->(_p) { executed = true; spawn_result(:ok) })
+            .call(entry: @entry, planner: @planner, executor: @executor,
+                  pair_id: "planner-1->executor-1", out_dir: @out_dir)
+
+      assert_equal "limit_hit", cell.status, "provider limit must take precedence over #{status}"
+      assert_equal "planner hit a provider limit", cell.reason
+      assert_nil cell.diff_path
+      refute executed, "executor must not run when the planner hits a provider limit"
+    end
+  end
+
   private
 
   # plan_spawn writes the plan file the way the real isolation runner does (the
   # agent writes it into its work tree) and returns the given spawn status.
-  def pipeline(plan_status:, write_plan: true, plan_stream: "", exec_spawn: nil)
+  def pipeline(plan_status:, write_plan: true, plan_stream: "", provider_errors: nil, exec_spawn: nil)
     plan_spawn = lambda do |profile:, prompt:, cwd:|
       if write_plan
         FileUtils.mkdir_p(cwd)
         File.write(File.join(cwd, HiveBench::IsolationExec::PLAN_OUTPUT_FILE),
                    "1. implement the thing\n2. test the thing\n")
       end
-      spawn_result(plan_status, stdout: plan_stream)
+      result = spawn_result(plan_status, stdout: plan_stream)
+      result[:provider_errors] = provider_errors unless provider_errors.nil?
+      result
     end
     exec_spawn ||= ->(_p) { spawn_result(:ok) }
 

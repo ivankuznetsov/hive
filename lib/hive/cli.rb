@@ -971,13 +971,13 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :reason, type: :string, enum: Hive::TaskClosureContract::REASONS,
-                    desc: "operator closure reason: already_delivered or superseded"
+                    desc: "operator closure reason: already_delivered, superseded or cancelled"
     option :evidence, type: :array,
                       desc: "immutable GitHub PR/commit evidence (repeat values after the flag)"
     option :successor, type: :string,
                        desc: "registered project:slug that supersedes this task"
     option :attestation, type: :string,
-                         desc: "operator statement for superseded/cross-repository delivery"
+                         desc: "operator reason for cancellation or superseded/cross-repository delivery"
     def archive(target = nil)
       if target.nil?
         if closure_options?

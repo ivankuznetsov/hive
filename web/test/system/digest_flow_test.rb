@@ -52,12 +52,13 @@ class DigestFlowTest < ApplicationSystemTestCase
     assert_current_path digest_path(@date)
     assert_selector "h1", text: @date
 
-    # Turbo can replace its cached preview while the select action starts.
-    # A locator re-resolves the control instead of retaining a detached node.
+    # Wait for the final page so Turbo cannot discard the selected value
+    # when it replaces a cached preview. Locators tolerate detached nodes.
+    assert_no_selector "html[data-turbo-preview]", visible: :all
     page.driver.with_playwright_page do |browser_page|
       browser_page.get_by_label("Project", exact: true).select_option(label: @project)
+      browser_page.get_by_role("button", name: "Apply", exact: true).click
     end
-    click_button "Apply"
     assert_current_path digest_path(@date, project: @project)
     assert_selector ".digest-project-group[data-project='#{@project}']"
     assert_no_selector ".digest-project-group[data-project='removed-project']"

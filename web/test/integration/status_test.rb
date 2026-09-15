@@ -285,6 +285,28 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "cold board and grid show loading inside the main column without an outage warning" do
+    sign_in!
+    with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
+      with_status_snapshot(
+        Hive::Web::StatusFeed::UNAVAILABLE_PAYLOAD,
+        version: StatusBroadcaster::LOADING_VERSION, availability: "unavailable"
+      ) do
+        [ board_path, grid_path ].each do |path|
+          get path
+
+          assert_response :success
+          assert_select ".status-layout > .project-nav"
+          assert_select ".status-layout > .status-main .status-loading[role=status]",
+                        text: /Loading your workspace/
+          assert_select ".status-freshness-warning", 0
+          assert_select ".status-content-unavailable", 0
+          assert_select "#status-board, #status-grid", 0
+        end
+      end
+    end
+  end
+
   test "first-load status failure renders unavailable rather than an empty fleet" do
     sign_in!
     with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
@@ -296,7 +318,7 @@ class StatusTest < ActionDispatch::IntegrationTest
         get board_path
 
         assert_response :success
-        assert_select ".status-freshness-warning[data-status-availability=unavailable][role=status]",
+        assert_select ".status-main > .status-freshness-warning[data-status-availability=unavailable][role=status]",
                       text: /No current fleet snapshot has loaded.*retry automatically/m
         assert_select ".status-content-unavailable", text: /Tasks will appear when live status is available/
         assert_select "#status-board", 0
@@ -456,12 +478,12 @@ class StatusTest < ActionDispatch::IntegrationTest
     Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new) if original_report_new
   end
 
-  def with_status_snapshot(payload = nil, availability: nil, last_success_at: nil, error: nil, **payload_keywords)
+  def with_status_snapshot(payload = nil, version: 1, availability: nil, last_success_at: nil, error: nil, **payload_keywords)
     payload ||= payload_keywords
     original_snapshot = StatusBroadcaster.method(:snapshot_with_version)
     StatusBroadcaster.define_singleton_method(:snapshot_with_version) do
       StatusBroadcaster::PageSnapshot.new(
-        payload:, version: 1, availability:, last_success_at:, error:
+        payload:, version:, availability:, last_success_at:, error:
       )
     end
     yield

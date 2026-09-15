@@ -13,6 +13,12 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
 
   setup do
     reset_system_test_projects!
+    # Browser examples never depend on GitHub's avatar CDN being reachable.
+    page.driver.with_playwright_page do |browser|
+      browser.route("https://github.com/*.png?size=64", ->(route, _request) {
+        route.fulfill(contentType: "image/svg+xml", body: Rails.root.join("test/fixtures/files/github-avatar.svg").read)
+      })
+    end
   end
 
   # Sign in through the env-gated dev seam (never drawn in production) and
@@ -20,7 +26,7 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
   def sign_in!(login: "alice")
     configure_owner!(owner: login)
     visit "/dev_login?as=#{login}"
-    assert_selector ".topbar-session", text: login,
+    assert_selector ".topbar-session", text: login, visible: :all,
                     wait: 5
     wait_for_status_snapshot
   end
@@ -49,7 +55,7 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
   # transient, so wait for Cable's first background projection explicitly.
   def wait_for_status_snapshot
     assert_selector "[data-status-version]", visible: :all, wait: 15
-    assert_no_selector "[data-status-availability='unavailable']", visible: :all, wait: 15
+    assert_no_selector "[data-status-availability='unavailable'], [data-status-version='loading']", visible: :all, wait: 15
   end
 
   private

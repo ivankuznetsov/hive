@@ -58,11 +58,12 @@ class WorkflowFlowTest < ApplicationSystemTestCase
     assert_equal [ "honeycomb/docs@1.2.0" ], lifecycle.installed_sources
   end
 
-  test "mobile header keeps every capability visible beside the account action" do
+  test "mobile menu keeps every capability accessible beside the account action" do
     sign_in!
     page.current_window.resize_to(390, 844)
     visit workflows_path(project: @project)
 
+    click_button "Menu"
     assert_button "Log out"
     page.execute_script("document.documentElement.style.fontSize = '20px'")
     metrics = page.evaluate_script(<<~JS)

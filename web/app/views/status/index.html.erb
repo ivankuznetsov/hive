@@ -1,3 +1,4 @@
+<% loading = @status_version == StatusBroadcaster::LOADING_VERSION %>
 <% content_for(:title, "#{web_product_name} — status") %>
 <%# The status channel delivers a page refresh signal. Without these metas the
     refresh falls back to a full-body replace — which resets window scroll to
@@ -17,13 +18,15 @@
       real reconnects receive one targeted catch-up refresh. %>
   <%= status_stream_source id: "status-stream-source",
         hidden: true, data: { turbo_permanent: true } %>
+  <%= render "status/project_nav", projects: @projects,
+        selected_project: @selected_project&.name %>
+  <div class="status-main">
+  <% unless loading %>
   <%= render "status/freshness_warning",
         availability: @status_page_snapshot.availability,
         last_success_at: @status_page_snapshot.last_success_at,
         error: @status_page_snapshot.error %>
-  <%= render "status/project_nav", projects: @projects,
-        selected_project: @selected_project&.name %>
-  <div class="status-main">
+  <% end %>
 
 <%# data-turbo-permanent: a morph must never touch the composer — it holds
     typed-but-unsent idea text and staged image attachments (Stimulus state
@@ -96,7 +99,13 @@
   </nav>
 <% end %>
 
-<% if @status_page_snapshot.unavailable? %>
+<% if loading %>
+  <div class="empty-state status-loading" role="status" aria-live="polite" aria-atomic="true">
+    <span class="status-loading-indicator" aria-hidden="true"></span>
+    <p><strong>Loading your workspace…</strong></p>
+    <p class="hint">Fetching your projects and tasks.</p>
+  </div>
+<% elsif @status_page_snapshot.unavailable? %>
   <div class="empty-state status-content-unavailable">
     <p>Tasks will appear when live status is available.</p>
   </div>

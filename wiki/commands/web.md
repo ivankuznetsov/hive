@@ -260,9 +260,11 @@ sharing the URL.
 A locally authenticated operator sees the
 complete primary navigation under the `hive` product identity and is labelled
 `Local`; GitHub-dependent repository browsing stays behind an explicit
-**Connect GitHub** action. At the 390px mobile breakpoint, all seven primary
-capabilities remain visible in a bounded four-column grid below the account
-action, without starting inside a horizontal scroll overflow. Navigation state is grouped by the first segment of
+**Connect GitHub** action. At phone widths (720px and below), a labelled 44px hamburger button
+opens the seven primary links and account actions in a vertical menu. The menu
+starts collapsed, supports Escape with focus returned to the button, and closes
+on navigation and before Turbo caches the page. Desktop navigation stays inline.
+Navigation state is grouped by the first segment of
 Rails `controller_path`, so namespaced task, workflow, and Telegram resource
 controllers retain their parent section's active link when they render a
 complete page. Completing the optional GitHub connection from verified
@@ -516,8 +518,9 @@ Honeycomb projections.
   permanent node during rendering. At mobile widths the composer toolbar
   becomes a two-row grid: the project selector owns the first row and the
   image/submit actions share the second, so long registered-project names
-  cannot widen the document beyond the viewport. The horizontal project rail
-  keeps edge padding while it scrolls. No polling JS, no SSE. The daemon strip uses
+  cannot widen the document beyond the viewport. At widths up to 760px, a labelled project dropdown and separate Add project
+  button replace the rail. The dropdown uses the same filtered URLs, keeps
+  other query parameters, and preserves the composer draft and project choice. No polling JS, no SSE. The daemon strip uses
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
@@ -1040,6 +1043,24 @@ canonical linked-cell Hive logo in the public site's yellow (`#f0b429`) on a
 full, opaque black (`#0d1117`) square; the solid square prevents white launcher
 corners and preserves the mark when a platform applies its own icon mask.
 
+## Visual fixtures and account branding
+
+`web/test/support/ui_fixtures.rb` provides isolated empty and populated workspaces
+for browser tests. `bundle exec rails test test/visual/status_scenarios_test.rb`
+(from `web/`) captures Board/Grid at desktop/mobile widths in light/dark themes,
+plus expanded mobile menus: 20 full-page images and a Screenote manifest under
+`web/tmp/ui-captures/<run>/`. Native tasks provide usable detail links. These
+captures are explicitly synthetic and include local working-tree changes;
+publication remains a separate command. See `web/README.md` for the recipe.
+
+The header displays `Hive` with a compact logo gap and aligns the mobile
+account row with the navigation links. It uses `/brand.svg`: the existing Hive geometry, transparent background,
+and terracotta colors matched to the light/dark web theme. Launcher/favicons keep
+the opaque yellow-on-black assets. Signed-in users see their public GitHub avatar
+next to their login, with an initial fallback when unavailable. Local operators
+keep the `Local` label and Connect GitHub action. Browser tests substitute a local
+avatar image and exercise the failure fallback without calling GitHub.
+
 ## Task-local reads and degraded status
 
 Ordinary task show, log, diff, media, and mutation routes resolve one registered
@@ -1050,7 +1071,13 @@ remain addressable and mutations revalidate current task state without a stale
 fleet cache. One process-wide `StatusFeed` owns polling,
 single-flight refresh, actual scan count, and latest-good state. Status-page
 HTTP renders never perform a fleet scan: they use the latest published state,
-or render the explicit loading state on a cold process. The first accepted
+or render a neutral “Loading your workspace…” panel on a cold process.
+Loading is identified by the initial `loading` version token, so normal startup
+does not display an outage warning. At phone widths, the loading panel becomes
+a compact message above the idea composer so it is visible without scrolling.
+Freshness warnings sit inside the main
+content column, keeping the project rail and content in their intended grid
+slots during failures as well as loading. The first accepted
 Turbo/Cable subscription performs that cold scan on the broadcaster thread and
 publishes the real snapshot. A later failure retains the last good rows with an
 accessible warning and disables freshness-dependent mutation controls until a

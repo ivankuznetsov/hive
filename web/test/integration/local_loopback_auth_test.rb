@@ -40,7 +40,7 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     assert_select "a", text: "Connect GitHub"
     assert_select "form[action='/logout']", 0,
                   "a tokenless local session must not offer a meaningless logout action"
-    assert_select "a.brand", text: "hive"
+    assert_select "a.brand", text: "Hive"
     assert_select "title", text: "hive — status"
     refute_includes response.body, "hivebox",
                     "local Hive Web must not present itself as the separate hivebox appliance"

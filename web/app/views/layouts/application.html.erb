@@ -22,9 +22,22 @@
 
   <body>
     <header class="topbar">
-      <div class="topbar-inner">
-        <%= link_to web_product_name, root_path, class: "brand" %>
+      <div class="topbar-inner" data-controller="navigation"
+           data-action="keydown.esc@window->navigation#dismiss turbo:before-cache@document->navigation#close">
+        <%= link_to root_path, class: "brand" do %>
+          <%= image_tag "/brand.svg", class: "brand-mark", width: 32, height: 32, alt: "" %>
+          <span>Hive</span>
+        <% end %>
         <% if operator_access? %>
+          <button type="button" class="btn btn-ghost mobile-menu-toggle"
+                  aria-label="Menu" aria-expanded="false" aria-controls="primary-menu"
+                  data-navigation-target="toggle" data-action="navigation#toggle">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          <div id="primary-menu" class="topbar-menu" data-action="click->navigation#navigate">
           <nav aria-label="Primary">
             <%= link_to "Status", root_path, class: nav_class(:status) %>
             <%= link_to "Digest", digest_path("today"), class: nav_class(:digests) %>
@@ -35,12 +48,23 @@
             <%= link_to "Telegram", telegram_path, class: nav_class(:telegram) %>
           </nav>
           <div class="topbar-session">
-            <span class="session-login"><%= operator_label %></span>
+            <span class="session-identity">
+              <% if current_login %>
+                <span class="session-avatar" aria-hidden="true">
+                  <span><%= current_login.first.upcase %></span>
+                  <%= image_tag "https://github.com/#{ERB::Util.url_encode(current_login)}.png?size=64",
+                        width: 28, height: 28, alt: "", referrerpolicy: "no-referrer",
+                        data: { controller: "avatar", action: "error->avatar#hide" } %>
+                </span>
+              <% end %>
+              <span class="session-login"><%= operator_label %></span>
+            </span>
             <% if current_login %>
               <%= button_to "Log out", logout_path, class: "btn btn-ghost btn-sm", form_class: "inline-form" %>
             <% else %>
               <%= link_to "Connect GitHub", login_path, class: "btn btn-ghost btn-sm" %>
             <% end %>
+          </div>
           </div>
         <% end %>
       </div>

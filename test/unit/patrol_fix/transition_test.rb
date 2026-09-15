@@ -325,7 +325,7 @@ class PatrolFixTransitionTest < Minitest::Test
 
       review_folder = File.join(task.hive_state_path, "stages", "4-review", task.slug)
       refute File.exist?(File.join(review_folder, ".lock"))
-      assert File.exist?(File.join(review_folder, ".lock.tmp.guard"))
+      assert_nil Hive::Lock.read_task_lock(review_folder)
     end
   end
 

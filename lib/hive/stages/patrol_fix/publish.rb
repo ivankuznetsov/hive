@@ -137,7 +137,7 @@ module Hive
             "body" => request.published_body
           }
           blocked_fields = fields.filter_map do |field, bytes|
-            field if Hive::SecretPatterns.match?(bytes)
+            field if Hive::SecretScanner.match?(bytes)
           end
           if Hive::SecretScanner.git_match?(
             request.worktree_path, base_oid: request.scan_base_oid, head_oid: request.head_oid
@@ -177,7 +177,7 @@ module Hive
         private_class_method :publication_rework_stage
 
         def secret_in?(values)
-          values.compact.any? { |value| Hive::SecretPatterns.match?(value.to_s) }
+          values.compact.any? { |value| Hive::SecretScanner.match?(value.to_s) }
         end
         private_class_method :secret_in?
 

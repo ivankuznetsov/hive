@@ -169,7 +169,7 @@ module Hive
             parked_seconds += elapsed_seconds(opened, receipt.fetch("recorded_at")) if opened
           end
         end
-        if outcome
+        if stage_name != "done" && outcome
           active = current.find { |receipt| receipt["receipt_id"] == outcome["receipt_id"] }
           parked_since = active&.fetch("recorded_at", nil)
         end

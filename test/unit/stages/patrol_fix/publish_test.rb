@@ -355,7 +355,7 @@ class PatrolFixPublishStageTest < Minitest::Test
   end
 
   def test_secret_rework_stage_uses_the_earliest_authority_that_can_change_the_bytes
-    token = "ghp_#{'b' * 36}"
+    token = "ghp_aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
     [
       [ { source_evidence: "evidence #{token}" }, "inbox", [ "body" ] ],
       [ { fixed_contents: "puts '#{token}'\n" }, "fix", [ "diff" ] ]

@@ -374,7 +374,7 @@ class BabysitterPrFixerTest < Minitest::Test
     # literal argument that Git also cannot re-parse.
     assert_includes prompt, "git fetch origin #{Shellwords.escape("refs/heads/#{hostile_ref}:refs/remotes/origin/#{hostile_ref}")}"
     assert_includes prompt, "git rev-parse #{Shellwords.escape("refs/remotes/origin/#{hostile_ref}")}"
-    assert_includes prompt, "git push --force-with-lease origin HEAD:#{Shellwords.escape("refs/heads/#{hostile_ref}")}"
+    assert_includes prompt, "git push --force-with-lease=#{Shellwords.escape("refs/heads/#{hostile_ref}")}:\"$expected_sha\" origin HEAD:#{Shellwords.escape("refs/heads/#{hostile_ref}")}"
     # The raw ref must never appear in an executable shell position; here the
     # unescaped form would run `$(printf owned)` as command substitution.
     refute_includes prompt, "git fetch origin #{escaped}"
@@ -402,7 +402,7 @@ class BabysitterPrFixerTest < Minitest::Test
       assert_includes prompt, "git fetch origin #{Shellwords.escape("refs/heads/#{hostile_ref}:refs/remotes/origin/#{hostile_ref}")}",
         "#{hostile_ref} must be fetched fully qualified"
       assert_includes prompt, "git rev-parse #{fq_remote}"
-      assert_includes prompt, "git push --force-with-lease origin HEAD:#{fq_branch}"
+      assert_includes prompt, "git push --force-with-lease=#{fq_branch}:\"$expected_sha\" origin HEAD:#{fq_branch}"
       # The bare form must not survive in any executable position.
       refute_includes prompt, "git fetch origin #{Shellwords.escape(hostile_ref)}"
       refute_includes prompt, "git rev-parse origin/#{Shellwords.escape(hostile_ref)}"
@@ -469,6 +469,15 @@ class BabysitterPrFixerTest < Minitest::Test
 
       refute system("sh", "-c", "expected_sha=#{Shellwords.escape(initial_sha)}\n#{after_work}", chdir: work),
         "the second fetch must refresh the tracking ref and abort on a remote move"
+
+      # The rejected recipe fetched the new remote tip. A bare lease would now
+      # permit overwriting it; the captured-SHA lease must still reject that.
+      push = recipe.lines.find { |line| line.start_with?("git push ") }
+      assert push
+      refute system("sh", "-c", "expected_sha=#{Shellwords.escape(initial_sha)}\n#{push}", chdir: work),
+        "a background fetch must not weaken the captured-SHA lease"
+      remote_sha, = Open3.capture2("git", "--git-dir=#{origin}", "rev-parse", "refs/heads/#{hostile_ref}")
+      assert_equal advanced_sha, remote_sha.strip
     end
   end
 

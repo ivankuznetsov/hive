@@ -52,7 +52,11 @@ class DigestFlowTest < ApplicationSystemTestCase
     assert_current_path digest_path(@date)
     assert_selector "h1", text: @date
 
-    select @project, from: "Project"
+    # Turbo can replace its cached preview while the select action starts.
+    # A locator re-resolves the control instead of retaining a detached node.
+    page.driver.with_playwright_page do |browser_page|
+      browser_page.get_by_label("Project", exact: true).select_option(label: @project)
+    end
     click_button "Apply"
     assert_current_path digest_path(@date, project: @project)
     assert_selector ".digest-project-group[data-project='#{@project}']"

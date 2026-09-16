@@ -31,6 +31,7 @@ case "$receipt_slug" in
     trusted_paths=(
       packaging/live_agent_skills/install_candidate_gem.sh
       packaging/verify-managed-web-setup.sh
+      packaging/fixtures/systemctl
     )
     ;;
   native-*)

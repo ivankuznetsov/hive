@@ -429,6 +429,9 @@ jobs:
 
   hivebox-image:
     name: hivebox image (ghcr)
+    concurrency:
+      group: hivebox-publication
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     needs: [hivebox-image-amd64, hivebox-image-arm64]
     permissions:

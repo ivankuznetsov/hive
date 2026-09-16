@@ -1118,6 +1118,21 @@ perform one fixed read for the validated registered repository/PR/head, under
 single-flight and minimum-interval limits. Cache and remote failures degrade
 that panel without hiding task controls, artifacts, diff, or log.
 
+## Hivebox publication recovery
+
+`hivebox-recover.yml` accepts an existing stable release tag and builds its
+source with the current Dockerfile. The SHA must match the source identifier
+in the release workflow-signed checksums. Each architecture must pass the native
+web/daemon smoke before its digest is promoted. Promotion checks that the
+requested release is still GitHub's latest release and shares the normal
+promotion concurrency lock. This does not replace the release tag or signed native
+artifacts.
+
+The image installs `sudo` for agent-browser's Linux dependency installer.
+Chrome for Testing does not supply a Linux ARM64 payload, so ARM64 images skip
+browser prewarming. Web and agent workflows remain available there; built-in
+browser-based task capture is unavailable on Linux ARM64 in 0.7.3.
+
 ## Supervised worktree capture server
 
 `hive web capture --task-folder TASK_FOLDER [--source-root WORKTREE]` is the

@@ -114,7 +114,14 @@ class PackagingVerifyReleaseTest < Minitest::Test
   end
 
   def test_managed_web_systemd_fixture_reports_install_and_reload_transitions
-    body = File.read(MANAGED_WEB_SETUP).split("<<'SYSTEMCTL_STUB'\n", 2).last.split("\nSYSTEMCTL_STUB", 2).first
+    [ MANAGED_WEB_SETUP, SCRIPT ].each do |fixture|
+      assert_systemd_fixture_transitions(fixture)
+    end
+  end
+
+  def assert_systemd_fixture_transitions(fixture)
+    assert_includes File.read(fixture), 'cp "$REPO_ROOT/packaging/fixtures/systemctl" "$SERVICE_MANAGER_BIN/systemctl"'
+    body = File.read(File.expand_path("../../../packaging/fixtures/systemctl", __dir__))
     Dir.mktmpdir do |root|
       script = File.join(root, "systemctl")
       File.write(script, body)
@@ -147,9 +154,15 @@ class PackagingVerifyReleaseTest < Minitest::Test
       assert_equal "yes", query.call.fetch("NeedDaemonReload")
       action.call("daemon-reload")
       assert_equal "no", query.call.fetch("NeedDaemonReload")
+      original_pid = query.call.fetch("MainPID")
+      action.call("restart", unit)
+      refute_equal original_pid, query.call.fetch("MainPID")
       action.call("disable", "--now", unit)
       assert_equal "inactive", query.call.fetch("ActiveState")
       assert_equal "disabled", query.call.fetch("UnitFileState")
+      File.unlink(File.join(unit_dir, unit))
+      action.call("daemon-reload")
+      assert_equal "not-found", query.call.fetch("LoadState")
     end
   end
 

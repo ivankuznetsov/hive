@@ -48,4 +48,38 @@ class DailyDigestDocumentGeneratorTest < Minitest::Test
     message = { type: "result", subtype: "success", is_error: false, result: "The change now saves snapshots." }.to_json
     assert_equal "The change now saves snapshots.", generator.send(:final_message, profile, message)
   end
+  def test_capture_supplies_stdin_and_preserves_the_complete_output
+    with_tmp_global_config do
+      invocation = Struct.new(:argv, :stdin_data).new(
+        [ RbConfig.ruby, "-e", "print STDIN.read.upcase" ], "recent changes"
+      )
+      profile = Struct.new(:subscription_environment).new({})
+      assert_equal "RECENT CHANGES", Hive::DailyDigest::DocumentGenerator.new.send(:capture, invocation, profile)
+    end
+  end
+
+  def test_capture_reports_failed_process_and_bounds_its_diagnostic
+    with_tmp_global_config do
+      invocation = Struct.new(:argv, :stdin_data).new(
+        [ RbConfig.ruby, "-e", 'STDERR.write("failure " * 500); exit 7' ], ""
+      )
+      profile = Struct.new(:subscription_environment).new({})
+      error = assert_raises(Hive::AgentError) do
+        Hive::DailyDigest::DocumentGenerator.new.send(:capture, invocation, profile)
+      end
+      assert_includes error.message, "exit 7"
+      assert_operator error.message.length, :<=, 2_100
+    end
+  end
+
+  def test_capture_kills_an_agent_that_exceeds_its_deadline
+    with_tmp_global_config do
+      invocation = Struct.new(:argv, :stdin_data).new([ RbConfig.ruby, "-e", "sleep 60" ], "")
+      profile = Struct.new(:subscription_environment).new({})
+      error = assert_raises(Hive::AgentError) do
+        Hive::DailyDigest::DocumentGenerator.new(timeout_sec: 0).send(:capture, invocation, profile)
+      end
+      assert_includes error.message, "time or output limit"
+    end
+  end
 end

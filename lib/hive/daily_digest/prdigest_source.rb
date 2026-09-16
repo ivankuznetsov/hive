@@ -1,3 +1,4 @@
+require "prdigest"
 require "hive/gh"
 require "hive/repository_identity"
 require "hive/secret_patterns"
@@ -6,10 +7,6 @@ module Hive
   module DailyDigest
     class PrdigestSource
       def call(date:, time_zone:, projects:)
-        require "prdigest"
-        unless Prdigest.const_defined?(:Document)
-          raise Hive::ConfigError, "installed PRDigest lacks document generation; install the matching PRDigest release before enabling Hive digests"
-        end
         repositories = projects.filter_map do |project|
           identity = project["repository_identity"] || Hive::RepositoryIdentity.current(project.fetch("path"))
           next unless identity&.start_with?("github.com/")
@@ -22,8 +19,6 @@ module Hive
         # Raw descriptions and patches never bypass Hive's existing secret
         # redaction on their way to an agent or persisted document.
         JSON.parse(Hive::SecretPatterns.redact(JSON.generate(Prdigest::Facts.new(digest: digest, timezone: time_zone).to_h)))
-      rescue LoadError
-        raise Hive::ConfigError, "PRDigest with document generation support must be installed"
       rescue Prdigest::Error => error
         raise Hive::UnavailableError, "digest evidence collection failed: #{error.message}"
       end

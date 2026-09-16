@@ -64,7 +64,7 @@ Gem::Specification.new do |spec|
   # they have no business being installed for end users.
   # Keep installed Hive on the independently published OpenCode-capable line.
   # Source checkouts still resolve the reviewed component through the Gemfile.
-  spec.add_dependency "agent-cli-runtime", "~> 0.2.0"
+  spec.add_dependency "agent-cli-runtime", "~> 0.2.4"
   spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
   # Usage accounting and pricing math parse token counts with BigDecimal.
@@ -102,7 +102,7 @@ Gem::Specification.new do |spec|
   # REXML::Document; without this declaration `hive daemon install/status`
   # and `hive setup` raise LoadError on a stock 3.4 install.
   spec.add_dependency "rexml", "~> 3.2"
-  spec.add_dependency "prdigest", "~> 0.3"
+  spec.add_dependency "prdigest", "~> 0.4.0"
   spec.add_dependency "sequel", "~> 5.107"
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"

@@ -1567,7 +1567,6 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
 
 ## PRDigest document integration
 
-- Local integration is verified against the updated PRDigest source. Published
-  PRDigest 0.3.0 does not expose `Prdigest::Document`; publish the corresponding
-  dependency update and raise Hive's minimum version before shipping this
-  integration. PRDigest 0.4.0 is tagged, but publication is blocked because RubyGems has no trusted publisher configured for its release workflow.
+- PRDigest 0.4.0 and agent-cli-runtime 0.2.4 are published and clean-install
+  verified. Local Web and real test Telegram formatting/deduplication passed.
+  Installed Hive generation and presentation remain to be verified after cutover.

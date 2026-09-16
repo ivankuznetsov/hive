@@ -70,10 +70,9 @@ does not require a separate current-day preview.
 
 ## Dependency and verification
 
-This integration requires the corresponding PRDigest evidence/document release.
-The existing published 0.3.0 does not provide `Prdigest::Document`; do not release
-Hive's integration against it. Development verification uses both worktrees via
-an external Bundler Gemfile, not a committed machine-specific source path.
+This integration requires PRDigest 0.4.0 or newer in the 0.4 line and
+agent-cli-runtime 0.2.4 or newer in the 0.2 line. Both dependencies are published
+and verified through clean registry installs.
 
 Focused tests cover real Store/Reader document round trips, before-setup dates,
 unchanged evidence, failed generation, midnight closure, timezone preservation,

@@ -3,6 +3,21 @@ require "application_system_test_case"
 class KanbanBoardTest < ApplicationSystemTestCase
   teardown { StatusBroadcaster.stop! }
 
+  test "completed task stays visible on its normal project board" do
+    project = create_hive_project!("kanban-project-completion")
+    slug = create_task!(project, "Read the finished architecture")
+    archived = stage_dir(project, "9-done").join(slug)
+    FileUtils.mv(stage_dir(project, "1-inbox").join(slug), archived)
+    archived.join("task.md").write("<!-- COMPLETE -->\n")
+    Hive::TaskMeta.rewrite(archived.to_s, completed_at: Time.now.utc - 30.days)
+    sign_in!
+    visit root_path(project: project)
+    assert_selector "[data-stage='9-done']:not(.is-folded) .kanban-card", text: "Read the finished architecture"
+    find("a[href='#{task_path(project, slug, source: "archive")}']").click
+    assert_selector "h1", text: "Read the finished architecture"
+    assert_no_selector "form[action*='/run']"
+  end
+
   test "operator opens the complete archive and task detail on demand" do
     project = create_hive_project!("kanban-archive-app")
     slug = create_task!(project, "Keep the complete archive reachable")

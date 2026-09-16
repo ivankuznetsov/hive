@@ -481,6 +481,50 @@ class StatusTest < ActionDispatch::IntegrationTest
   end
 
 
+  test "normal project board includes completed workflow tasks with archive links" do
+    sign_in!
+    name = create_hive_project!("completed-project-board")
+    path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", name)
+    workflows = File.join(path, ".hive-state", "workflows")
+    FileUtils.mkdir_p(workflows)
+    stages = (1..7).map { |index| { "name" => "step-#{index}", "kind" => "terminal", "state_file" => "architecture.md" } }
+    stages << { "name" => "done", "kind" => "terminal", "state_file" => "architecture.md" }
+    File.write(File.join(workflows, "architecture.yml"), { "id" => "architecture", "stages" => stages }.to_yaml)
+    Hive::Workflows::Project.reset!
+    project = { "name" => name, "path" => path,
+                "hive_state_path" => File.join(path, ".hive-state"), "tasks" => [] }
+    completed = project.merge("tasks" => [ { "slug" => "finished-architecture",
+      "stage" => "8-done", "workflow" => "architecture", "action" => "archived",
+      "title" => "Architecture record", "age_seconds" => 30 * 86_400 } ])
+    original = StatusBroadcaster.method(:archive_snapshot)
+    calls = []
+    StatusBroadcaster.define_singleton_method(:archive_snapshot) do |project: nil|
+      calls << project&.name
+      { "projects" => [ completed ] }
+    end
+    with_status_snapshot("projects" => [ project ]) do
+      get "/", params: { project: name }
+      assert_response :success
+      assert_select "[data-workflow='architecture'] [data-stage='8-done']:not(.is-folded) [data-task-slug='finished-architecture']"
+      assert_select "a[href='#{task_path(name, "finished-architecture", source: "archive")}']"
+      assert_select ".kanban-band-warning", count: 0
+      assert_select ".kanban-card form", count: 0
+      assert_select ".task-state-filter", text: /Completed\s+1/
+      assert_equal [ name ], calls
+      get "/", params: { project: name, state: "completed" }
+      assert_select "[data-task-slug='finished-architecture']"
+      calls.clear
+      get "/"
+      assert_empty calls, "fleet page must not scan the archive"
+      get archive_path(project: name, view: "board")
+      assert_response :success
+      assert_equal [ name ], calls, "project archive must scope the read before scanning"
+    end
+  ensure
+    StatusBroadcaster.define_singleton_method(:archive_snapshot, original) if original
+    Hive::Workflows::Project.reset!
+  end
+
   test "Done board reads archived tasks and keeps completed cards visible and read-only" do
     sign_in!
     project_name = create_hive_project!("done-board-app")
@@ -566,7 +610,7 @@ class StatusTest < ActionDispatch::IntegrationTest
 
   def with_archive_snapshot(payload)
     original_snapshot = StatusBroadcaster.method(:archive_snapshot)
-    StatusBroadcaster.define_singleton_method(:archive_snapshot) { payload }
+    StatusBroadcaster.define_singleton_method(:archive_snapshot) { |**| payload }
     yield
   ensure
     StatusBroadcaster.define_singleton_method(:archive_snapshot, original_snapshot) if original_snapshot

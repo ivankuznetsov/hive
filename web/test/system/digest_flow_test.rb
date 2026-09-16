@@ -102,7 +102,7 @@ class DigestFlowTest < ApplicationSystemTestCase
     Hive::DailyDigest::Store.new.write_base(record)
     sign_in!
     visit digest_path("2026-09-01")
-    assert_selector ".digest-document h1", text: "Recent changes"
+    assert_no_selector ".digest-document h1"
     assert_selector ".digest-document h2", text: "Hive"
     assert_selector ".digest-document strong", text: "cancel a task"
     assert_link "PR #1423", href: "https://github.com/ivankuznetsov/hive/pull/1423"

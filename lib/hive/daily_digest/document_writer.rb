@@ -44,7 +44,7 @@ module Hive
           date = day.iso8601
           existing = read_optional(date)
           raise PrunedRecord, "digest #{date} was pruned" if existing && existing["lifecycle"] == "pruned"
-          return result(existing, "unchanged") if existing && existing["lifecycle"] == "closed"
+          return enrich_closed(existing) if existing && existing["lifecycle"] == "closed"
 
           projects = @projects_loader.call
           interval = existing ? existing.slice(
@@ -68,10 +68,50 @@ module Hive
             text = empty ? "No pull requests were merged on #{date}." : generate(facts)
             batch = batch_for(repositories, projects)
             record = Projector.new(clock: -> { now }).base(interval: interval, batch: batch, lifecycle: lifecycle)
-            record.merge!("document" => text, "evidence_id" => evidence_id)
+            record.merge!("document" => text, "evidence_id" => evidence_id,
+                          "repository_stats" => repository_stats(repositories))
           end
           result(@store.write_base(record), lifecycle)
         end
+      end
+
+      def repository_stats(repositories)
+        repositories.filter_map do |repository|
+          pulls = repository.fetch("pull_requests")
+          next if pulls.empty?
+
+          { "name" => repository.fetch("name"), "pull_requests" => pulls.size }.merge(
+            %w[additions deletions commits].to_h do |key|
+              values = pulls.map { |pull| pull[key] }
+              [ key, values.all? { |value| value.is_a?(Integer) && value >= 0 } ? values.sum : nil ]
+            end
+          )
+        end
+      end
+
+      # Older documents have no numerical metadata. Append it once without
+      # changing the closed base, prose, or delivery identity.
+      def enrich_closed(existing)
+        if existing.key?("repository_stats") || Array(existing["amendments"]).any? { |entry| entry.key?("repository_stats") }
+          return result(existing, "unchanged")
+        end
+        facts = @facts_loader.call(date: existing.fetch("local_date"),
+                                  time_zone: existing.fetch("time_zone"), projects: existing.fetch("projects"), include_evidence: false)
+        urls = existing.fetch("items").filter_map { |item| item.dig("pr", "url") }
+        repositories = facts.fetch("digest").fetch("repositories").map do |repository|
+          repository.merge("pull_requests" => repository.fetch("pull_requests").select { |pull| urls.include?(pull.fetch("url")) })
+        end
+        collected_urls = repositories.flat_map { |repository| repository.fetch("pull_requests").map { |pull| pull.fetch("url") } }
+        unless (urls - collected_urls).empty?
+          raise Hive::UnavailableError, "digest statistics could not be collected for every saved pull request"
+        end
+        now = @clock.call.utc.iso8601(6)
+        @store.append_amendment(existing.fetch("local_date"), {
+          "amendment_id" => "repository-stats-v1", "kind" => "repository_stats", "source" => "prdigest",
+          "event_at" => nil, "observed_at" => now, "amended_at" => now,
+          "items" => [], "resolved_gap_ids" => [], "repository_stats" => repository_stats(repositories)
+        })
+        result(existing, "enriched")
       end
 
       def generate(facts)

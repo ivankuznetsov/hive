@@ -24,7 +24,7 @@
       <%= render "digests/nearest", digest: @digest %>
     </section>
   <% elsif @digest.document? %>
-    <div class="digest-document"><%= render_markdown(@digest.document) %></div>
+    <div class="digest-document"><%= render_digest_document(@digest) %></div>
   <% else %>
     <% if @digest.stale? %>
       <div class="digest-state digest-state-stale" role="status">

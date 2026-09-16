@@ -30,11 +30,13 @@ class DailyDigestPrdigestSourceTest < Minitest::Test
     with_replaced_singleton_method(Hive::RepositoryIdentity, :current, discover) do
       with_replaced_singleton_method(Hive::Gh, :capture3, ->(*) { [ "token\n", "", status ] }) do
         with_replaced_singleton_method(Prdigest::Collector, :new, factory) do
-          Hive::DailyDigest::PrdigestSource.new.call(date: "2026-09-15", time_zone: "UTC", projects: projects)
+          Hive::DailyDigest::PrdigestSource.new.call(date: "2026-09-15", time_zone: "UTC", projects: projects, include_evidence: false)
         end
       end
     end
     assert_equal [ "owner/app", "owner/discovered" ], captured.fetch(:repositories)
+    assert_equal true, captured.fetch(:line_stats)
+    assert_equal false, captured.fetch(:include_evidence)
   end
 
   def test_authentication_and_collection_failures_are_actionable

@@ -6,7 +6,7 @@ require "hive/secret_patterns"
 module Hive
   module DailyDigest
     class PrdigestSource
-      def call(date:, time_zone:, projects:)
+      def call(date:, time_zone:, projects:, include_evidence: true)
         repositories = projects.filter_map do |project|
           identity = project["repository_identity"] || Hive::RepositoryIdentity.current(project.fetch("path"))
           next unless identity&.start_with?("github.com/")
@@ -15,7 +15,8 @@ module Hive
         end.uniq.sort
         clock = Prdigest::Clock.new(timezone: time_zone)
         github = Prdigest::GitHub.new(token: repositories.empty? ? "" : github_token)
-        digest = Prdigest::Collector.new(clock: clock, github: github, repositories: repositories).call(date: date)
+        digest = Prdigest::Collector.new(clock: clock, github: github, repositories: repositories, line_stats: true,
+                                           include_evidence: include_evidence).call(date: date)
         # Raw descriptions and patches never bypass Hive's existing secret
         # redaction on their way to an agent or persisted document.
         JSON.parse(Hive::SecretPatterns.redact(JSON.generate(Prdigest::Facts.new(digest: digest, timezone: time_zone).to_h)))

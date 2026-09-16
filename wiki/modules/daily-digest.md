@@ -78,3 +78,22 @@ Focused tests cover real Store/Reader document round trips, before-setup dates,
 unchanged evidence, failed generation, midnight closure, timezone preservation,
 CLI/JSON/Web output, long Telegram attachments, and receipt reuse. Live QA must
 inspect an actual generated document as well as transport success.
+
+## Project statistics and Web presentation
+
+Collection enables PRDigest's line statistics. Each document saves per-repository
+merged PR counts, commits in those PRs, additions, and deletions in
+`repository_stats`; LOC changed is additions plus deletions, not net growth.
+These counts cover merged PRs, not every direct commit to a repository.
+
+Refreshing an older closed document with no statistics appends a metadata-only
+amendment from its saved repository scope and PR URLs. Missing evidence fails
+without changing the base. Subsequent refreshes reuse that amendment. The reader
+and CLI JSON expose these saved totals; Web requests never fetch GitHub data.
+
+Web removes the leading document title because its date is already in the page
+header. It starts with the introduction, links project headings to GitHub with
+an external-link icon, and shows the corresponding statistics under the heading, with added lines in green and deleted
+lines in red using the existing light/dark theme colors.
+The article uses the page width, compact vertical spacing, and body-sized theme
+headings. The stored Markdown remains unchanged for CLI and Telegram.

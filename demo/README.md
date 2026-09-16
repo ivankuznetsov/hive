@@ -148,3 +148,7 @@ Retention operations: remove the waitlist when Hive Cloud launches, and delete
 rows at their 12-month deadline (match `created_at` against the current timestamp
 minus 12 months). This deployment does not install a scheduled cleanup job;
 retention and earlier email removal requests are operator responsibilities.
+
+Initial production release: source `5e9219ecb61838082627c57e522712e60952e0b8`,
+Worker version `75042770-1899-4a17-ab26-58599c514874`, deployed 2026-09-16.
+See `wiki/gaps.md` for the remaining real-browser signup validation.

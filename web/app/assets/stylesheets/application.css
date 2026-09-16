@@ -1816,3 +1816,6 @@ pre {
   line-height: 1.6;
   color: var(--ink-muted);
 }
+
+.digest-loc-added { color: var(--ok); }
+.digest-loc-deleted { color: var(--danger); }

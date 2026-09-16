@@ -93,6 +93,7 @@ and CLI JSON expose these saved totals; Web requests never fetch GitHub data.
 
 Web removes the leading document title because its date is already in the page
 header. It starts with the introduction, links project headings to GitHub with
-an external-link icon, and shows the corresponding statistics under the heading.
+an external-link icon, and shows the corresponding statistics under the heading, with added lines in green and deleted
+lines in red using the existing light/dark theme colors.
 The article uses the page width, compact vertical spacing, and body-sized theme
 headings. The stored Markdown remains unchanged for CLI and Telegram.

@@ -33,12 +33,16 @@ module DigestsHelper
   def digest_stats_text(stats)
     additions, deletions, commits = stats.values_at("additions", "deletions", "commits")
     lines = if additions.is_a?(Integer) && deletions.is_a?(Integer)
-      "#{number_with_delimiter(additions + deletions)} LOC changed (+#{number_with_delimiter(additions)} / −#{number_with_delimiter(deletions)})"
+      safe_join([
+        "#{number_with_delimiter(additions + deletions)} LOC changed (",
+        tag.span("+#{number_with_delimiter(additions)}", class: "digest-loc-added"), " / ",
+        tag.span("−#{number_with_delimiter(deletions)}", class: "digest-loc-deleted"), ")"
+      ])
     else
       "LOC unavailable"
     end
     count = commits.is_a?(Integer) ? "#{number_with_delimiter(commits)} #{'commit'.pluralize(commits)} in merged PRs" : "Commit count unavailable"
-    "#{pluralize(stats.fetch('pull_requests'), 'PR')} merged · #{count} · #{lines}"
+    safe_join([ "#{pluralize(stats.fetch('pull_requests'), 'PR')} merged · #{count} · ", lines ])
   end
 
   def digest_project_icon

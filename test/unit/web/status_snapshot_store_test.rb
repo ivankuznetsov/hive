@@ -8,7 +8,7 @@ class StatusSnapshotStoreTest < Minitest::Test
       path = File.join(dir, "status.json")
       store = Hive::Web::StatusSnapshotStore.new(path: path)
       projects = [ { "name" => "demo", "path" => "/demo" } ]
-      payload = { "projects" => [ { "name" => "demo", "path" => "/demo", "tasks" => [] } ] }
+      payload = { "projects" => [ { "name" => "demo", "path" => "/demo", "tasks" => [ { "slug" => "saved-task" } ] } ] }
       with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
         assert_nil store.read
         store.write(payload, last_success_at: "2026-07-25T12:00:00Z")

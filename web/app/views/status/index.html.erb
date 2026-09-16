@@ -79,6 +79,8 @@
     <p class="muted">What is running, what needs you, and what is ready to continue.</p>
   </div>
   <div class="status-view-actions">
+    <%= link_to "Done", archive_path(project: @selected_project&.name, view: "board"),
+          class: "btn btn-ghost btn-sm status-done-link" %>
     <%= link_to "Archive", archive_path(project: @selected_project&.name),
           class: "btn btn-ghost btn-sm status-archive-link" %>
     <%= render "status/view_switch", status_view: @status_view %>

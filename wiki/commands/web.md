@@ -1293,3 +1293,11 @@ State filtering retains unavailable-project warnings; query values remain URL
 query data. Missing artifact or publication evidence is presented as unavailable,
 not as proof that work or publication never happened. Log filter results are
 announced through a polite status region and persist through frame reloads.
+
+## Completed workflow board
+
+The status toolbar's Done link opens `/archive?view=board`, preserving the
+selected project. It reads the archive on demand and renders the workflow's
+actual terminal columns, with completed cards expanded and mutations disabled.
+This includes older records without changing their completion timestamps or
+adding archive scans to active-feed polling. The Archive list remains available.

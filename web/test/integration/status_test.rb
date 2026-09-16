@@ -393,10 +393,11 @@ class StatusTest < ActionDispatch::IntegrationTest
         assert_response :success
         assert_select ".status-archive-link[href='#{archive_path}']", text: "Archive"
 
-        get board_path
+        get board_path(project: project_name)
 
         assert_response :success
-        assert_select ".status-archive-link[href='#{archive_path}']", text: "Archive"
+        assert_select ".status-done-link[href='#{archive_path(project: project_name, view: "board")}']", text: "Done"
+        assert_select ".status-archive-link[href='#{archive_path(project: project_name)}']", text: "Archive"
       end
     end
   end
@@ -479,6 +480,31 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+
+  test "Done board reads archived tasks and keeps completed cards visible and read-only" do
+    sign_in!
+    project_name = create_hive_project!("done-board-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    payload = { "projects" => [ {
+      "name" => project_name, "path" => project_path,
+      "hive_state_path" => File.join(project_path, ".hive-state"),
+      "tasks" => [ { "slug" => "finished-task", "stage" => "9-done",
+                    "workflow" => "coding", "action" => "archived", "age_seconds" => 30 * 86_400 } ]
+    } ] }
+    with_status_snapshot("projects" => []) do
+      with_archive_snapshot(payload) do
+        get archive_path(project: project_name, view: "board")
+        assert_response :success
+        assert_select "h1", text: "Done"
+        assert_select "[data-stage='9-done']:not(.is-folded) [data-task-slug='finished-task']"
+        assert_select "a[href='#{task_path(project_name, "finished-task", source: "archive")}']"
+        assert_select ".kanban-card form", count: 0
+        assert_select "hive-status-stream-source", count: 0
+        assert_select ".project-nav a.active", text: project_name
+        assert_select "a[href='#{board_path(project: project_name)}']", text: "Back to status"
+      end
+    end
+  end
 
   test "a stopped installed daemon shows the command that resumes it" do
     sign_in!

@@ -9,7 +9,7 @@ tags: [web, demo, waitlist]
 
 # Interactive public demo
 
-The independently deployable hivedev.sh demo lives in `demo/`. It reuses Hive Web
+The independently deployable hivedev.ai demo lives in `demo/`. It reuses Hive Web
 templates at build time and exports static HTML fragments. It does not run Hive
 agents, a daemon, or Rails in production. The source tree's normal web application
 has no demo auth bypass or changed routes.
@@ -31,6 +31,14 @@ approved privacy contact and retention text; the Worker additionally needs its
 secret, origin and database binding. Deployments and production provisioning
 remain separately authorized actions. See `demo/README.md` for configuration,
 verification, operator access and rollback.
+
+Production uses `hivedev.ai`, dedicated Worker and D1 database
+`hivedev-demo-production`, and hostname-restricted Turnstile. The production
+Wrangler environment enables logs and traces. `npm --prefix demo run
+build:production` loads checked-in public configuration; secrets stay in
+Cloudflare. The approved privacy contact is `ivan@ikuznetsov.com`; emails are
+retained until launch, capped at 12 months after signup, with earlier removal
+on request. Removal is an operator responsibility; no cleanup cron is installed.
 
 Focused checks: `web/test/integration/demo_export_test.rb`, `npm --prefix demo
 test`, and `npm --prefix demo run test:browser`. The browser suite exercises real

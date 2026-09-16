@@ -1,6 +1,6 @@
 # Hive interactive demo
 
-A separate website for hivedev.sh, built from the real Hive Web board and task
+A separate website for hivedev.ai, built from the real Hive Web board and task
 templates. All tasks and evidence are fictional. Browser interactions choose
 prepared states; no Rails server, daemon, provider, GitHub connection, or agent
 runs behind the public demo. Only the Cloud waitlist needs a Worker and D1.
@@ -72,7 +72,23 @@ in browser storage or URLs; resetting the story does not remove a signup.
 
 ## Preparing an authorized deployment
 
-Before publishing, verify hivedev.sh ownership and its existing service. Use a
+Approved launch inputs (2026-09-16): `hivedev.ai`, privacy/removal contact
+`ivan@ikuznetsov.com`, retention until launch with a maximum of 12 months after
+signup and earlier removal on request. Public build values are checked into
+`production.env`; the Turnstile secret exists only in the Cloudflare Worker.
+
+The `production` Wrangler environment binds dedicated D1 database
+`hivedev-demo-production`; migration `0001_waitlist.sql` is applied remotely.
+Default commands continue to use the local placeholder database. Production
+updates use:
+
+```sh
+npm run build:production
+npx wrangler deploy --env production --dry-run
+npx wrangler deploy --env production
+```
+
+Before publishing, verify hivedev.ai ownership and its existing service. Use a
 dedicated Worker and dedicated D1 database; preserve hivecli.sh and any existing
 hivedev deployment. Configure separate preview and production bindings and
 origins. Do not share the production database with preview.
@@ -93,7 +109,7 @@ origins. Do not share the production database with preview.
    Cloudflare use, retention, and removal contact. Confirm the operator/contact
    and retention policy before enabling public collection. Without these values,
    the default preview collects nothing. Never place the secret in build values.
-4. Deploy the reviewed bundle to the dedicated Worker, bind hivedev.sh, and enable
+4. Deploy the reviewed bundle to the dedicated Worker, bind hivedev.ai, and enable
    only the intended public route. Static content is served asset-first; only
    `/api/waitlist` runs Worker code. Keep unknown paths as true 404s.
 5. Verify the board, both scripted branches, mobile view, both installation
@@ -127,3 +143,8 @@ previous Worker/assets deployment and verify the public routes again. Preserve
 the D1 database and its records: an application rollback must not roll back or
 delete the subscriber list. If signup is broken, disable collection in a rebuilt
 bundle until storage/verification is healthy; never fake a success response.
+
+Retention operations: remove the waitlist when Hive Cloud launches, and delete
+rows at their 12-month deadline (match `created_at` against the current timestamp
+minus 12 months). This deployment does not install a scheduled cleanup job;
+retention and earlier email removal requests are operator responsibilities.

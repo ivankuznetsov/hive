@@ -5,9 +5,9 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { signup } from '../worker/index.mjs';
 
 let mf, db;
-const origin = 'https://hivedev.sh';
+const origin = 'https://hivedev.ai';
 const valid = { email: ' Demo+cloud@Example.com ', token: 'valid' };
-const verify = async () => Response.json({ success: true, hostname: 'hivedev.sh', action: 'waitlist' });
+const verify = async () => Response.json({ success: true, hostname: 'hivedev.ai', action: 'waitlist' });
 const request = (body = valid, headers = {}) => new Request(`${origin}/api/waitlist`, {
   method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers }, body: JSON.stringify(body)
 });
@@ -54,7 +54,7 @@ test('rejects origin mismatch, wrong method and wrong content type', async () =>
 });
 
 test('fails closed for failed, replayed, wrong hostname/action or unavailable Turnstile', async () => {
-  for (const response of [{ success: false, 'error-codes': ['timeout-or-duplicate'] }, { success: true, hostname: 'other.example', action: 'waitlist' }, { success: true, hostname: 'hivedev.sh', action: 'login' }]) {
+  for (const response of [{ success: false, 'error-codes': ['timeout-or-duplicate'] }, { success: true, hostname: 'other.example', action: 'waitlist' }, { success: true, hostname: 'hivedev.ai', action: 'login' }]) {
     assert.equal((await signup(request(), env(), async () => Response.json(response))).status, 400);
   }
   assert.equal((await signup(request(), env(), async () => { throw new Error('offline'); })).status, 503);

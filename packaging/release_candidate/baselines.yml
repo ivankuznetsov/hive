@@ -3,8 +3,8 @@ schema_version: 1
 latest_stable: latest-stable
 rows:
   - id: latest-stable
-    version: 0.7.2
-    tag: v0.7.2
+    version: 0.7.3
+    tag: v0.7.3
     owner: release-maintainers
     reviewed_on: "2026-09-16"
     rationale: Authenticates the latest stable package identity and dependency closure used by current native installation proof and version checks.
@@ -21,42 +21,42 @@ rows:
       idempotency: repeated_current_setup_is_idempotent
     packages:
       producer:
-        version: 0.7.2
-        tag: v0.7.2
+        version: 0.7.3
+        tag: v0.7.3
         artifact:
-          filename: hive-cli-0.7.2.gem
-          url: https://github.com/ivankuznetsov/hive/releases/download/v0.7.2/hive-cli-0.7.2.gem
-          size: 2147328
-          sha256: 66cc145f0571c7c68fd77b845958d35146e3bc245b749416af78c16d4dd320b6
+          filename: hive-cli-0.7.3.gem
+          url: https://github.com/ivankuznetsov/hive/releases/download/v0.7.3/hive-cli-0.7.3.gem
+          size: 40139776
+          sha256: edf044f32ad3d76dc389fbb14aabfa098cdcb57368e9896dbd042290bae328f3
         authentication:
           checksum:
             filename: SHA256SUMS
-            url: https://github.com/ivankuznetsov/hive/releases/download/v0.7.2/SHA256SUMS
+            url: https://github.com/ivankuznetsov/hive/releases/download/v0.7.3/SHA256SUMS
             size: 305
-            sha256: c3adb534325fef0855cde48e6a7ee2bf4ad59ca23b5cc1da75390543624b9b2b
+            sha256: 8f84def2af6c6f89155a49746e604965ff5a983b04a578cb5e77652533db7cad
           signature:
             filename: SHA256SUMS.sig
-            url: https://github.com/ivankuznetsov/hive/releases/download/v0.7.2/SHA256SUMS.sig
+            url: https://github.com/ivankuznetsov/hive/releases/download/v0.7.3/SHA256SUMS.sig
             size: 96
-            sha256: a91436b3681ff07e2b557a2dc33ae285b09f6f05a7c220828dba726325cb8821
+            sha256: 6a3755cb5aad0ecb1d65e9d548047975f45f696d8a1dc5fc1b2e1ea1ea5a6374
           certificate:
             filename: SHA256SUMS.pem
-            url: https://github.com/ivankuznetsov/hive/releases/download/v0.7.2/SHA256SUMS.pem
+            url: https://github.com/ivankuznetsov/hive/releases/download/v0.7.3/SHA256SUMS.pem
             size: 3292
-            sha256: 64f62f1f6a1f1939abf1d77346d8743904ee02efe9ca03bc3e70ae8c176b95d1
+            sha256: a410a9cc21353ecb3884e4135105083c989f1553875ba2f3288e737eb8331160
           issuer: https://token.actions.githubusercontent.com
-          identity: https://github.com/ivankuznetsov/hive/.github/workflows/release.yml@refs/tags/v0.7.2
+          identity: https://github.com/ivankuznetsov/hive/.github/workflows/release.yml@refs/tags/v0.7.3
     dependency_closure:
       schema_version: 1
       ruby: "3.4"
       lock:
-        source_tag: v0.7.2
+        source_tag: v0.7.3
         path: Gemfile.lock
-        sha256: 9821af48f3398328c05843f6e09304d9fed7b394c89b22740ca4fa82d68e4f44
+        sha256: 54da5b106c1933a8758b173f5e3ac089ce4b54a90fe4912929ff172666d144fd
       offline_cache:
-        manifest_filename: hive-cli-0.7.2-runtime-gems.v1.json
-        manifest_path: packaging/release_candidate/baseline_manifests/hive-cli-0.7.2-runtime-gems.v1.json
-        manifest_sha256: 4054811336f3eab79da219a5a99a17bcccc8f6da099f4e7d6ab16e0c200a31d9
+        manifest_filename: hive-cli-0.7.3-runtime-gems.v1.json
+        manifest_path: packaging/release_candidate/baseline_manifests/hive-cli-0.7.3-runtime-gems.v1.json
+        manifest_sha256: e7f0230b92984ede90b41d261c763c4c84ba2ca7fdaf2ffbe8e74de544447fec
         completeness: exact-locked-runtime-transitive-closure
         network: forbidden
         required_artifact_fields:

@@ -42,8 +42,8 @@ attempt results rather than copying or rewriting terminal evidence.
 
 Local evidence keeps `trust_scope`, `scope_status`, and `qa_status` separate. A
 passing requested local scope exits successfully but remains `qa_blocked` on
-`remote_validation_required`. The v0.7.3 development candidate is newer than
-the reviewed v0.7.2 baseline, so `candidate_not_newer` no longer applies; the
+`remote_validation_required`. The v0.7.4 development candidate is newer than
+the reviewed v0.7.3 baseline, so `candidate_not_newer` no longer applies; the
 command does not choose a version or print/perform a release action. `dispatch`
 is the sole explicit GitHub-writing verb and
 `collect` is read-only. Both bind a request ID, candidate/workflow SHA,

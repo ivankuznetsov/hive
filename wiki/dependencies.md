@@ -8,8 +8,10 @@ tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
 **TLDR**: Root development/test tooling is declared in `Gemfile`; the Rails
-hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, puma,
-and PRDigest are not `hive-cli` runtime dependencies. The web bundle owns
+hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and
+puma are not `hive-cli` runtime dependencies. PRDigest 0.4 supplies digest
+evidence and writing instructions; agent-cli-runtime 0.2.4 supplies agent
+execution. The web bundle owns
 Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
 artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 `gtimeout`) for timeout-governed Git-ref, QMD, and provider operations.
@@ -68,9 +70,9 @@ a local `getOctokit`, so the v9 module-loading changes do not alter this script.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. The v0.7.3 release-prep checkout is `0.7.3`: `lib/hive/version.rb`, root
+tools. The v0.7.4 release-prep checkout is `0.7.4`: `lib/hive/version.rb`, root
 `Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
-`hive-cli (0.7.3)`. The release-prep change keeps both lockfiles synchronized
+`hive-cli (0.7.4)`. The release-prep change keeps both lockfiles synchronized
 with public installer URLs and the changelog. Recent root bundle dependency
 commits also bumped RuboCop to 1.88.2, Brakeman from
 8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
@@ -263,7 +265,7 @@ an ambiguous command-not-found failure.
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.7.3)`.
+2.7.2, and the current local path gem as `hive-cli (0.7.4)`.
 
 ## Backlinks
 

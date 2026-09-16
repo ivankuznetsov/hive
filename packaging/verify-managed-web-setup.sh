@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 HIVE_BIN=""
 WEB_ARCHIVE=""
 WEB_SHA256=""
@@ -66,51 +68,7 @@ mkdir -p "$SERVICE_MANAGER_BIN" "$SANDBOX/home" "$SANDBOX/hive-home" "$SANDBOX/w
 
 case "$(uname -s)" in
   Linux)
-    cat > "$SERVICE_MANAGER_BIN/systemctl" <<'SYSTEMCTL_STUB'
-#!/usr/bin/env bash
-set -euo pipefail
-[[ "${1:-}" == --user ]] || exit 64
-shift
-verb=${1:-}
-shift
-state="$(dirname "$0")/systemd-state"
-mkdir -p "$state"
-printf '%s\n' "$verb $*" >> "$state/commands"
-unit="${!#}"
-[[ "$unit" == *.service ]] || unit="$unit.service"
-unit_path="$HOME/.config/systemd/user/$unit"
-case "$verb" in
-  --version) printf 'systemd 256\n' ;;
-  show-environment) ;;
-  daemon-reload)
-    for path in "$HOME"/.config/systemd/user/*.service; do
-      [[ -f "$path" ]] || continue
-      cp "$path" "$state/$(basename "$path").loaded"
-    done
-    ;;
-  show)
-    loaded=not-found; fragment=; reload=no; enabled=disabled; active=inactive; pid=0
-    if [[ -f "$state/$unit.loaded" ]]; then
-      loaded=loaded; fragment=$unit_path
-      cmp -s "$unit_path" "$state/$unit.loaded" || reload=yes
-    fi
-    [[ ! -f "$state/$unit.enabled" ]] || enabled=enabled
-    if [[ -f "$state/$unit.running" ]]; then active=active; pid=1; fi
-    printf '%s\n' "LoadState=$loaded" "FragmentPath=$fragment" "NeedDaemonReload=$reload" \
-      "UnitFileState=$enabled" "ActiveState=$active" "MainPID=$pid" "ExecMainStartTimestampMonotonic=$pid"
-    ;;
-  enable)
-    touch "$state/$unit.enabled"
-    if [[ " $* " == *' --now '* ]]; then touch "$state/$unit.running"; fi
-    ;;
-  restart|start) touch "$state/$unit.running" ;;
-  stop) rm -f "$state/$unit.running" ;;
-  disable) rm -f "$state/$unit.enabled" "$state/$unit.running" ;;
-  is-enabled) [[ -f "$state/$unit.enabled" ]] ;;
-  is-active) [[ -f "$state/$unit.running" ]] ;;
-  *) exit 64 ;;
-esac
-SYSTEMCTL_STUB
+    cp "$REPO_ROOT/packaging/fixtures/systemctl" "$SERVICE_MANAGER_BIN/systemctl"
     chmod 0755 "$SERVICE_MANAGER_BIN/systemctl"
     SERVICE_MANAGER_COMMAND="systemctl"
     ;;

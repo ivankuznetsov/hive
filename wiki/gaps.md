@@ -1555,3 +1555,12 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
 - PR #1331 integrated active-row reuse has a fresh classification-count regression
   (two calls on the repaired parent, one after reuse), but no fresh fleet-scale
   wall-clock measurement. Earlier percentage improvements are historical.
+
+## 0.7.3 distribution follow-up
+
+- Built-in browser capture on Linux ARM64 needs an explicit supported browser
+  strategy; Chrome for Testing has no ARM64 Linux payload. Hivebox skips
+  prewarming on that architecture while retaining web and agent workflows.
+- The Homebrew release-dispatch credential returned HTTP 401 during 0.7.3.
+  A maintainer dispatch published the exact verified formula; the automation
+  credential still needs renewal.

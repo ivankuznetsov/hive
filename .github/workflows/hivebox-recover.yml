@@ -1,0 +1,164 @@
+name: Recover Hivebox publication
+
+# Build the published tag with the current image recipe, without retagging
+# source or replacing any signed native release artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published stable release tag (vX.Y.Z)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  release-source:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.10.1
+      - id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json isDraft,isPrerelease | jq -e '.isDraft == false and .isPrerelease == false'
+          mkdir release-proof
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --dir release-proof \
+            --pattern SHA256SUMS --pattern SHA256SUMS.sig --pattern SHA256SUMS.pem
+          cosign verify-blob \
+            --certificate release-proof/SHA256SUMS.pem \
+            --signature release-proof/SHA256SUMS.sig \
+            --certificate-identity "https://github.com/$REPOSITORY/.github/workflows/release.yml@refs/tags/$RELEASE_TAG" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            release-proof/SHA256SUMS
+          sha=$(sed -nE 's/^[a-f0-9]{64}  (\.\/)?hive-agent-skills-([a-f0-9]{40})\.tar\.gz$/\2/p' release-proof/SHA256SUMS)
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  hivebox-image-amd64:
+    name: hivebox image smoke (amd64)
+    runs-on: ubuntu-24.04
+    needs: release-source
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-source.outputs.sha }}
+          path: release-source
+          persist-credentials: false
+      - name: Apply current container entrypoint
+        run: cp packaging/docker/entrypoint.sh release-source/packaging/docker/entrypoint.sh
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
+        id: build
+        with:
+          context: release-source
+          file: packaging/docker/Dockerfile
+          platforms: linux/amd64
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hivebox,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=hivebox-amd64
+          cache-to: type=gha,mode=max,scope=hivebox-amd64
+      - name: Smoke the exact amd64 digest
+        env:
+          OWNER: ${{ github.repository_owner }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: packaging/docker/smoke.sh "ghcr.io/${OWNER}/hivebox@${DIGEST}"
+
+  hivebox-image-arm64:
+    name: hivebox image smoke (arm64, native docker)
+    runs-on: ubuntu-24.04-arm
+    needs: release-source
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-source.outputs.sha }}
+          path: release-source
+          persist-credentials: false
+      - name: Apply current container entrypoint
+        run: cp packaging/docker/entrypoint.sh release-source/packaging/docker/entrypoint.sh
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
+        id: build
+        with:
+          context: release-source
+          file: packaging/docker/Dockerfile
+          platforms: linux/arm64
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hivebox,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=hivebox-arm64
+          cache-to: type=gha,mode=max,scope=hivebox-arm64
+      - name: Smoke the exact arm64 digest
+        env:
+          OWNER: ${{ github.repository_owner }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: packaging/docker/smoke.sh "ghcr.io/${OWNER}/hivebox@${DIGEST}"
+
+  hivebox-image:
+    name: hivebox image (ghcr)
+    concurrency:
+      group: hivebox-publication
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    needs: [hivebox-image-amd64, hivebox-image-arm64]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote the two proven digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          AMD64_DIGEST: ${{ needs.hivebox-image-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ needs.hivebox-image-arm64.outputs.digest }}
+        run: |
+          test "$(gh api "repos/$REPOSITORY/releases/latest" --jq .tag_name)" = "$RELEASE_TAG"
+          version="${RELEASE_TAG#v}"
+          image="ghcr.io/${OWNER}/hivebox"
+          docker buildx imagetools create \
+            --tag "${image}:${version}" \
+            --tag "${image}:latest" \
+            "${image}@${AMD64_DIGEST}" \
+            "${image}@${ARM64_DIGEST}"
+          docker buildx imagetools inspect "${image}:${version}"
+

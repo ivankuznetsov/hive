@@ -8,3 +8,7 @@ installed release. Hivebox installs the browser dependency installer's sudo
 prerequisite and skips unavailable Chrome for Testing on Linux ARM64. A manual
 recovery workflow builds released source with the corrected image recipe and
 promotes only both natively smoked digests, without changing signed artifacts.
+
+The Hivebox entrypoint now initializes fresh runtime storage through the same
+current-format installation contract as `hive setup` before starting children.
+It validates existing storage and refuses incompatible databases.

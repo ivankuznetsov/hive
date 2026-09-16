@@ -66,6 +66,13 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes body, 'Hive::Web::AppBundle.assets_ready?("/app/web")'
   end
 
+  def test_hivebox_initializes_current_storage_before_starting_children
+    body = File.read(File.expand_path("../../../packaging/docker/entrypoint.sh", __dir__))
+    assert_includes body, "-rhive/runtime_control_plane/installation"
+    assert_includes body, "Hive::RuntimeControlPlane::Installation.setup; Hive::Web::Supervisor.new.run"
+    assert_operator body.index('exec "$@"'), :<, body.index("Installation.setup")
+  end
+
   def test_hivebox_installs_the_native_fiddle_build_dependency
     body = File.read(HIVEBOX_DOCKERFILE)
 

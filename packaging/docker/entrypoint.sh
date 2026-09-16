@@ -11,4 +11,7 @@ fi
 # Hive::ConfigError, referenced transitively while requiring the supervisor,
 # are already defined — otherwise boot dies with an uninitialized-constant
 # NameError and the container never starts.
-exec ruby -rhive -rhive/web/supervisor -e 'Hive::Web::Supervisor.new.run'
+# Initialize a fresh data volume through setup's current-format contract.
+# Existing incompatible storage is rejected rather than converted.
+exec ruby -rhive -rhive/runtime_control_plane/installation -rhive/web/supervisor \
+  -e 'Hive::RuntimeControlPlane::Installation.setup; Hive::Web::Supervisor.new.run'

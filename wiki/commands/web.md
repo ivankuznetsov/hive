@@ -1128,6 +1128,9 @@ requested release is still GitHub's latest release and shares the normal
 promotion concurrency lock. This does not replace the release tag or signed native
 artifacts.
 
+The entrypoint initializes fresh runtime storage using `Installation.setup`
+before launching the supervisor, and validates existing storage without conversion.
+
 The image installs `sudo` for agent-browser's Linux dependency installer.
 Chrome for Testing does not supply a Linux ARM64 payload, so ARM64 images skip
 browser prewarming. Web and agent workflows remain available there; built-in

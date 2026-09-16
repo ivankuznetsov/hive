@@ -62,6 +62,8 @@ jobs:
           ref: ${{ needs.release-source.outputs.sha }}
           path: release-source
           persist-credentials: false
+      - name: Apply current container entrypoint
+        run: cp packaging/docker/entrypoint.sh release-source/packaging/docker/entrypoint.sh
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.0.0
         with:
@@ -101,6 +103,8 @@ jobs:
           ref: ${{ needs.release-source.outputs.sha }}
           path: release-source
           persist-credentials: false
+      - name: Apply current container entrypoint
+        run: cp packaging/docker/entrypoint.sh release-source/packaging/docker/entrypoint.sh
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.0.0
         with:

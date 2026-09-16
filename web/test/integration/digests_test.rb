@@ -20,12 +20,32 @@ class DigestsTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select ".digest-document", count: 1
+    assert_select ".digest-document h1", count: 0
     assert_select ".digest-document h2", text: "Shipped"
     assert_select ".digest-document strong", text: "Faster loading."
     assert_select '.digest-document a[href="https://github.com/owner/repo/pull/1"]', text: "#1"
     assert_select ".digest-document script", 0
     assert_select ".digest-filter, .digest-attention, .digest-activity, .digest-amendments, .digest-badges", 0
     assert_select "nav[aria-label='Digest date']"
+  end
+
+  test "project headings link to repositories and show persisted numerical evidence" do
+    sign_in!
+    record = simple_record("2026-08-30").merge(
+      "document" => "# Recent changes\n\nA short introduction.\n\n## Hive\n\n### Faster loading\n\nLoading is faster.",
+      "content" => "non_empty", "repository_stats" => [
+        { "name" => "ivankuznetsov/hive", "pull_requests" => 2, "commits" => 4, "additions" => 1200, "deletions" => 300 }
+      ])
+    store = Hive::DailyDigest::Store.new
+    store.write_base(record)
+    before = File.binread(store.base_path("2026-08-30"))
+    get digest_path("2026-08-30")
+    assert_response :success
+    assert_select ".digest-document h1", 0
+    assert_select '.digest-document h2 a[href="https://github.com/ivankuznetsov/hive"]', text: "Hive"
+    assert_select ".digest-project-link svg[aria-hidden='true']"
+    assert_select ".digest-project-stats", text: "2 PRs merged · 4 commits in merged PRs · 1,500 LOC changed (+1,200 / −300)"
+    assert_equal before, File.binread(store.base_path("2026-08-30"))
   end
 
   test "selected day is authenticated attention first filterable and read only" do

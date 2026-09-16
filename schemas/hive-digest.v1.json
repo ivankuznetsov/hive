@@ -39,6 +39,20 @@
         "completeness": { "enum": ["complete", "partial", "unknown"] },
         "content": { "enum": ["empty", "non_empty", "unknown"] },
         "document": { "type": "string" },
+        "repository_stats": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["name", "pull_requests", "additions", "deletions", "commits"],
+            "properties": {
+              "name": { "type": "string" },
+              "pull_requests": { "type": "integer", "minimum": 0 },
+              "additions": { "type": ["integer", "null"], "minimum": 0 },
+              "deletions": { "type": ["integer", "null"], "minimum": 0 },
+              "commits": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          }
+        },
         "last_materialized_at": { "type": ["string", "null"], "format": "date-time" },
         "stale": { "type": "boolean" },
         "selected_project": { "type": ["string", "null"] },

@@ -39,7 +39,10 @@ module Hive
         if record["document"].is_a?(String)
           return record.merge(
             "reader_status" => "ok", "stale" => stale?(record, config),
-            "selected_project" => nil, **navigation_for(selected_date)
+            "selected_project" => nil,
+            "repository_stats" => record["repository_stats"] ||
+              Array(record["amendments"]).reverse.find { |entry| entry.key?("repository_stats") }&.fetch("repository_stats"),
+            **navigation_for(selected_date)
           )
         end
 

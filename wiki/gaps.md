@@ -1570,3 +1570,8 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
 - PRDigest 0.4.0 and agent-cli-runtime 0.2.4 are published and clean-install
   verified. Local Web and real test Telegram formatting/deduplication passed.
   Installed Hive generation and presentation remain to be verified after cutover.
+
+## Digest numerical scope
+
+- Digest commit and LOC totals describe the PRs merged that day. Direct commits
+  outside merged PRs are not counted. The Web label makes that scope explicit.

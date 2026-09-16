@@ -113,6 +113,46 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes setup, 'SERVICE_MANAGER_BIN="$SANDBOX/service-manager-bin"'
   end
 
+  def test_managed_web_systemd_fixture_reports_install_and_reload_transitions
+    body = File.read(MANAGED_WEB_SETUP).split("<<'SYSTEMCTL_STUB'\n", 2).last.split("\nSYSTEMCTL_STUB", 2).first
+    Dir.mktmpdir do |root|
+      script = File.join(root, "systemctl")
+      File.write(script, body)
+      File.chmod(0o755, script)
+      unit_dir = File.join(root, ".config/systemd/user")
+      FileUtils.mkdir_p(unit_dir)
+      unit = "hive-web.service"
+      query = lambda do
+        output, status = Open3.capture2({ "HOME" => root }, script, "--user", "show", unit.delete_suffix(".service"))
+        assert status.success?
+        output.lines.to_h { |line| line.chomp.split("=", 2) }
+      end
+      action = lambda do |*argv|
+        _output, status = Open3.capture2({ "HOME" => root }, script, "--user", *argv)
+        assert status.success?
+      end
+
+      assert_equal "not-found", query.call.fetch("LoadState")
+      File.write(File.join(unit_dir, unit), "[Service]\nExecStart=/bin/true\n")
+      action.call("daemon-reload")
+      action.call("enable", "--now", unit)
+      installed = query.call
+      assert_equal "loaded", installed.fetch("LoadState")
+      assert_equal File.join(unit_dir, unit), installed.fetch("FragmentPath")
+      assert_equal "enabled", installed.fetch("UnitFileState")
+      assert_equal "active", installed.fetch("ActiveState")
+      assert_equal "no", installed.fetch("NeedDaemonReload")
+
+      File.write(File.join(unit_dir, unit), "[Service]\nExecStart=/bin/false\n")
+      assert_equal "yes", query.call.fetch("NeedDaemonReload")
+      action.call("daemon-reload")
+      assert_equal "no", query.call.fetch("NeedDaemonReload")
+      action.call("disable", "--now", unit)
+      assert_equal "inactive", query.call.fetch("ActiveState")
+      assert_equal "disabled", query.call.fetch("UnitFileState")
+    end
+  end
+
   def test_managed_web_verifier_keeps_bundler_available_under_candidate_gem_isolation
     setup = File.read(MANAGED_WEB_SETUP)
 
@@ -135,7 +175,9 @@ class PackagingVerifyReleaseTest < Minitest::Test
         printf 'candidate\n' > "$HIVE_HOME/web/.hive-web-version"
         : > "$HOME/.config/systemd/user/hive-daemon.service"
         : > "$HOME/.config/systemd/user/hive-web.service"
-        printf '%s\n' '{"schema":"hive-setup","mode":"managed_service","ok":false,"phases":[{"name":"agent_skills","ok":false,"classification":"residual_failure"},{"name":"web_bundle","ok":true},{"name":"daemon_service","ok":true},{"name":"web_service","ok":true},{"name":"web","ok":true}]}'
+        url="$(ruby -ryaml -e 'print YAML.load_file(File.join(ENV.fetch("HIVE_HOME"), "config.yml")).fetch("web").fetch("origin")')"
+        curl --fail --silent "$url/health" >/dev/null
+        printf '%s\n' '{"schema":"hive-setup","mode":"managed_service","ok":false,"phases":[{"name":"agent_skills","ok":false,"classification":"residual_failure"},{"name":"web_bundle","ok":true},{"name":"daemon_service","ok":true},{"name":"web_service","ok":true},{"name":"web","ok":true}]}' | jq --arg url "$url" '. + {url: $url}'
         exit 1
       SH
 

@@ -7,6 +7,12 @@ name: bot-e2e
 # a time, so this must not run concurrently or on every push.
 on:
   workflow_dispatch:
+    inputs:
+      flow:
+        description: Telegram flow to exercise
+        type: choice
+        default: all
+        options: [all, digest]
 
 concurrency:
   group: bot-e2e
@@ -17,6 +23,7 @@ permissions:
 
 jobs:
   idea-flow:
+    if: inputs.flow != 'digest'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -52,6 +59,7 @@ jobs:
         run: .venv/bin/python run_nudge_e2e.py
 
   digest-flow:
+    if: always() && !cancelled()
     needs: nudge-flow
     runs-on: ubuntu-latest
     timeout-minutes: 10

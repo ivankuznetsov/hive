@@ -84,6 +84,37 @@ class DigestFlowTest < ApplicationSystemTestCase
     assert_operator metrics.fetch("actionHeight"), :>=, 44
   end
 
+  test "recent changes read as an article on desktop and mobile" do
+    record = empty_record("2026-09-01", sequence: 4, interval_id: "c" * 64)
+    record["content"] = "non_empty"
+    record["document"] = <<~MARKDOWN
+      # Recent changes — 1 September 2026
+
+      A calmer workspace and clearer task controls.
+
+      ## Hive
+
+      ### Cancel unwanted work
+      You can now **cancel a task** while keeping its work available for later.
+
+      [PR #1423](https://github.com/ivankuznetsov/hive/pull/1423)
+    MARKDOWN
+    Hive::DailyDigest::Store.new.write_base(record)
+    sign_in!
+    visit digest_path("2026-09-01")
+    assert_selector ".digest-document h1", text: "Recent changes"
+    assert_selector ".digest-document h2", text: "Hive"
+    assert_selector ".digest-document strong", text: "cancel a task"
+    assert_link "PR #1423", href: "https://github.com/ivankuznetsov/hive/pull/1423"
+    assert_no_selector ".digest-attention, .digest-activity"
+    page.save_screenshot(Rails.root.join("tmp/screenshots/digest-desktop.png"))
+
+    page.current_window.resize_to(390, 844)
+    assert_operator page.evaluate_script("document.documentElement.scrollWidth"), :<=,
+                    page.evaluate_script("document.documentElement.clientWidth") + 1
+    page.save_screenshot(Rails.root.join("tmp/screenshots/digest-mobile.png"))
+  end
+
   private
 
   def write_digest!

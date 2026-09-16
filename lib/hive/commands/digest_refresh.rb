@@ -1,12 +1,12 @@
 require "json"
-require "hive/daily_digest/coordinator"
+require "hive/daily_digest/document_writer"
 
 module Hive
   module Commands
     # Explicit mutation boundary for operators and the daemon. Ordinary
     # `hive digest` reads never instantiate this class.
     class DigestRefresh
-      def initialize(date: nil, json: false, coordinator: DailyDigest::Coordinator.new,
+      def initialize(date: nil, json: false, coordinator: DailyDigest::DocumentWriter.new,
                      stdout: $stdout)
         @date = date
         @json = json

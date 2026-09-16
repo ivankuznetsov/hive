@@ -1,6 +1,7 @@
 require "time"
 require "tzinfo"
 require "hive/daemon/digest_scheduler_base"
+require "hive/daily_digest/calendar"
 require "hive/daily_digest/delivery_ledger"
 require "hive/daily_digest/store"
 require "hive/paths"
@@ -115,7 +116,8 @@ module Hive
         current_index = intervals.index do |interval|
           utc(interval.fetch("starts_at")) <= instant && instant < utc(interval.fetch("ends_at"))
         end
-        return nil unless current_index&.positive?
+        return preceding_document_record(instant, intervals) unless current_index
+        return nil unless current_index.positive?
 
         current = intervals.fetch(current_index)
         previous = intervals.fetch(current_index - 1)
@@ -124,6 +126,24 @@ module Hive
 
         { current_interval: current, record: record }
       rescue Hive::DailyDigest::MissingRecord
+        nil
+      end
+
+      # Daily documents need no provisional current-day record. Their saved
+      # zone must still put the closing boundary exactly at today's start.
+      def preceding_document_record(now, intervals)
+        previous = intervals.reverse.find { |interval| utc(interval.fetch("ends_at")) <= now }
+        return unless previous
+
+        record = @store.read(previous.fetch("local_date"))
+        return unless record["lifecycle"] == "closed" && record["document"].is_a?(String)
+
+        calendar = Hive::DailyDigest::Calendar.new(time_zone: record.fetch("time_zone"))
+        current = calendar.interval_for(calendar.local_date_at(now))
+        return unless utc(record.fetch("ends_at")) == utc(current.fetch("starts_at"))
+
+        { current_interval: current, record: record }
+      rescue Hive::DailyDigest::Calendar::InvalidTimeZone
         nil
       end
 

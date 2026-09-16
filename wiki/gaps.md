@@ -1564,3 +1564,10 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
 - The Homebrew release-dispatch credential returned HTTP 401 during 0.7.3.
   A maintainer dispatch published the exact verified formula; the automation
   credential still needs renewal.
+
+## PRDigest document integration
+
+- Local integration is verified against the updated PRDigest source. Published
+  PRDigest 0.3.0 does not expose `Prdigest::Document`; publish the corresponding
+  dependency update and raise Hive's minimum version before shipping this
+  integration. PRDigest 0.4.0 is tagged, but publication is blocked because RubyGems has no trusted publisher configured for its release workflow.

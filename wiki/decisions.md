@@ -881,7 +881,7 @@ blocked. See [[modules/plan_review]], [[stages/plan]], and [[stages/execute]].
 
 ## ADR-052: Hive owns one durable host-global daily activity record
 
-**Status:** Active
+**Status:** Superseded by the readable PRDigest document integration described in [[modules/daily-digest]]. The following records the earlier workflow-event design.
 
 **Context:** Current status is intentionally present-focused, while project
 task folders, PR observations, CI outcomes, and logs have different scopes and

@@ -100,7 +100,7 @@ module Hive
           "content" => content,
           "last_materialized_at" => view["last_materialized_at"],
           "stale" => view.fetch("stale", false) == true,
-          "selected_project" => @project || view["selected_project"],
+          "selected_project" => view["document"] ? nil : @project || view["selected_project"],
           "projects" => Array(view["projects"]).filter_map do |row|
             DailyDigest::PublicView.project(row) if row.is_a?(Hash)
           end,
@@ -121,8 +121,8 @@ module Hive
           "coverage_started_at" => view["coverage_started_at"],
           "precoverage" => view.fetch("precoverage", false) == true,
           "pruned_at" => view["pruned_at"],
-          "web_url" => web_url(local_date, @project || view["selected_project"])
-        })
+          "web_url" => web_url(local_date, view["document"] ? nil : @project || view["selected_project"])
+        }.merge(view["document"].is_a?(String) ? { "document" => view["document"] } : {}))
       end
 
       def normalized_requested_date
@@ -172,6 +172,8 @@ module Hive
       end
 
       def render_record(payload)
+        return @stdout.write(payload.fetch("document")) if payload["document"].is_a?(String)
+
         freshness = payload["last_materialized_at"] || "unknown"
         stale = payload.fetch("stale") ? " · stale" : ""
         @stdout.puts(

@@ -58,14 +58,24 @@ module Hive
       end
     end
 
-    # Idempotent global-config initializer used by `hive migrate` and
-    # `hive migrate --all`. The config update is one locked atomic write, so an
+    # Idempotent global-config initializer used by setup and daemon writers.
+    # The config update is one locked atomic write, so an
     # enabled block can never expose only half of its coverage identity.
     class Migration
       class InitializationError < DailyDigest::Error; end
 
       def self.ensure!
         new.call
+      end
+
+      # Called only at daemon startup/reload, never by config or digest reads.
+      def self.prepare!
+        config = Hive::Config.load_global_daily_digest
+        return config unless config.fetch("enabled")
+        return config unless config["first_interval"].nil?
+
+        ensure!
+        Hive::Config.load_global_daily_digest
       end
 
       def initialize(detector: TimeZoneDetector.new,
@@ -102,7 +112,7 @@ module Hive
           projects = @projects ? @projects.call : Hive::Config.registered_project_entries_from_data(data)
           membership = normalize_membership(projects)
           result = raw.merge(
-            "enabled" => raw.fetch("enabled", false),
+            "enabled" => raw.fetch("enabled", Hive::Config::DEFAULTS.fetch("daily_digest").fetch("enabled")),
             "time_zone" => zone,
             "coverage_started_at" => instant.iso8601(6),
             "initial_membership" => membership,

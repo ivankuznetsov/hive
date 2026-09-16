@@ -141,40 +141,15 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_includes route, "Do not run the current operational-status loop first"
     assert_includes policy, "hive digest --json"
     assert_includes policy, "hive digest --date YYYY-MM-DD --json"
-    assert_includes policy, "hive digest --date YYYY-MM-DD --project PROJECT --json"
     assert_includes policy, "previous_date"
     assert_includes policy, "reader_status"
-    assert_includes policy, "completeness"
-    assert_includes policy, "content"
-    assert_includes policy, "amendments"
-    assert_includes policy, "complete `empty` day"
-    assert_includes policy, "hive answer TASK --project PROJECT --json"
-    assert_includes policy, "Never reconstruct a daily record"
-    assert_includes policy, "Never invoke `hive digest refresh`"
-    assert_includes policy, "Never invoke `hive digest send`"
-    assert_includes policy, "Never use `hive digest --open-web` in machine mode"
-    assert_includes policy, "Never use the sendful `hive answer-digest`"
-    assert_includes policy, "Never create a polling loop"
-    assert_includes policy, "Agents do not configure recap schedules"
-    assert_includes policy, "No MCP-specific digest wrapper exists in V1"
-    assert_includes policy, "single authenticated Hive operator"
-    assert_includes policy, "does not add team identities, team ACLs, or per-project reader ACLs"
-    assert_includes policy, "does not authorize a release, version choice, publication, or deployment"
-
-    scenario_table = policy[/\| Operator request \| Read sequence \|.*?(?=\n\n)/m]
-    refute_nil scenario_table
-    {
-      "What happened today?" => "`hive digest --json`",
-      "What happened yesterday?" => "`hive digest --json`, then `hive digest --date PREVIOUS_DATE --json`",
-      "What happened in one project today?" => "`hive digest --project PROJECT --json`",
-      "Is a persisted day partial?" => "`hive digest --date YYYY-MM-DD --json`",
-      "Show a persisted day's late amendments." => "`hive digest --date YYYY-MM-DD --json`"
-    }.each do |request, command|
-      row = scenario_table.lines.find { |line| line.include?("| #{request} |") }
-      refute_nil row, request
-      assert_includes row, command
-      refute_match(/hive status|logs?|refresh|send|open-web|Telegram|answer-digest/, row)
-    end
+    assert_includes policy, "Read `document`"
+    assert_includes policy, "not necessarily adjacent calendar days"
+    assert_includes policy, "complete recorded repository scope"
+    assert_includes policy, "Never send or"
+    assert_includes policy, "Reads never call an agent, GitHub, PRDigest, refresh, or Telegram"
+    assert_includes policy, "does not authorize a release, version choice,"
+    refute_includes policy, "--project PROJECT"
   end
 
   def test_policy_preserves_consent_safe_setup_and_host_boundaries

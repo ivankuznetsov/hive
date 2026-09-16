@@ -50,3 +50,15 @@ jobs:
         working-directory: test/e2e/tg
         env: *tg_env
         run: .venv/bin/python run_nudge_e2e.py
+
+  digest-flow:
+    needs: nudge-flow
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/bot-e2e-setup
+      - name: Deliver formatted digest and verify receipt
+        working-directory: test/e2e/tg
+        env: *tg_env
+        run: .venv/bin/python run_digest_e2e.py

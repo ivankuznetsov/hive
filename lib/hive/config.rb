@@ -637,10 +637,10 @@ module Hive
         "enabled" => false,
         "hour" => 9
       },
-      # Hive-owned host-global activity record. Upgrades remain disabled and
-      # readable until migration has persisted an explicit coverage boundary.
+      # Hive-owned local activity record. The daemon initializes coverage before
+      # generating records; external delivery requires a separate opt-in.
       "daily_digest" => {
-        "enabled" => false,
+        "enabled" => true,
         "time_zone" => nil,
         "coverage_started_at" => nil,
         "initial_membership" => nil,
@@ -4108,16 +4108,19 @@ module Hive
       interval = daily["first_interval"]
       validate_digest_interval!(interval, source_path) unless interval.nil?
       return unless daily["enabled"]
+      # A new installation is valid before the daemon initializes coverage.
+      # Partial persisted identities remain invalid. Readers never initialize.
+      return if coverage.nil? && membership.nil? && interval.nil?
 
       if zone.nil?
         raise ConfigError,
               "daily_digest.time_zone is required when daily_digest.enabled is true in " \
-              "#{describe_source(source_path)}; run `hive migrate --all`"
+              "#{describe_source(source_path)}; run `hive setup`"
       end
       if coverage.nil? || membership.nil? || interval.nil?
         raise ConfigError,
               "daily_digest coverage frontier, initial_membership, and first_interval are required " \
-              "before enablement in #{describe_source(source_path)}; run `hive migrate --all`"
+              "before enablement in #{describe_source(source_path)}; run `hive setup`"
       end
     end
 

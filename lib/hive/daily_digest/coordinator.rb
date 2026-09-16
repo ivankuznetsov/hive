@@ -83,7 +83,7 @@ module Hive
         return if missing.empty?
 
         raise NotInitialized,
-              "daily digest is not initialized (missing #{missing.join(', ')}); run `hive migrate --all`"
+              "daily digest is not initialized (missing #{missing.join(', ')}); run `hive setup`"
       end
 
       def intervals_through(config, now:, selected_date:)

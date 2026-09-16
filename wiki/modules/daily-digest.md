@@ -1,288 +1,81 @@
 ---
-title: Daily activity digest
+title: Daily changes digest
 type: module
-source: lib/hive/daily_digest.rb, lib/hive/daily_digest/, lib/hive/daemon/daily_digest_*.rb, schemas/hive-digest*.json
+source: lib/hive/daily_digest/, web/app/views/digests/
 created: 2026-08-30
-updated: 2026-09-10
-tags: [digest, activity, projection, calendar, amendments, gaps, telegram, retention]
+updated: 2026-09-16
+tags: [digest, prdigest, document, telegram]
 ---
 
-**TLDR**: `Hive::DailyDigest` is one durable host-global projection of material
-activity across registered projects. It stores explicit IANA-zone intervals,
-allows atomic replacement only while a day is open, freezes the closed base,
-and represents late knowledge with immutable idempotent amendments. Healthy
-sources remain useful when another source fails; gaps are first-class data,
-not an absent record or a false empty day.
+Hive's digest is one readable document describing merged changes across its
+registered GitHub repositories. PRDigest remains an independent product and
+owns collection of PR descriptions and relevant patches, plus the shared writing
+instructions. Hive supplies its configured agent and owns scheduling, storage,
+Web/CLI reads, and Telegram delivery.
 
-## Ownership boundary
+## Generation
 
-The digest composes existing Hive authorities. Task journals, creation
-receipts, publication snapshots, operational transitions, registry membership
-history, daemon-observed provider/authority/capacity hold transitions, and PR
-owner observations remain source evidence. The daily store does
-not become a second workflow state machine, task action authority, or GitHub
-cache.
+`DocumentWriter`, the default for `hive digest refresh`, generates yesterday's
+calendar-day document. An explicit `--date YYYY-MM-DD` can generate an older day
+or preview today. GitHub evidence can be collected before local digest setup;
+workflow events and the old coverage frontier do not gate this query.
 
-The host-global projection is read through one `DailyDigest::Reader` by CLI,
-Rails, Telegram rendering, and agents. Project filtering happens in that reader
-and preserves the selected record identity. A reader never scans projects,
-contacts GitHub or PRDigest, refreshes a record, or changes delivery state.
+`PrdigestSource` derives unique GitHub repository names from registered project
+identities (falling back to the origin remote), reuses `gh` authentication, and
+calls PRDigest's collector. It redacts recognized secrets before giving facts
+to an agent. Non-GitHub projects are outside this PR-only scope. Collection
+failure leaves the previous document intact instead of publishing an empty day.
 
-V1 serves one authenticated Hive operator. It introduces neither team
-identities nor team/per-project reader ACLs. Agent-managed schedule changes,
-destination changes, delivery-status policy, and MCP-specific digest wrappers
-are deferred; agents use `hive digest --json`. Implementing or reading this
-projection does not authorize version selection, release, publication, or
-deployment.
+`DocumentGenerator` invokes the selected Hive agent with
+`Prdigest::Document.prompt`. `daily_digest.agent`, `model`, and `effort` can
+select a digest-specific route; otherwise the execute route is used. The writer
+validates non-empty output and preserves the exact generated document. A day
+with no merged PRs produces a short no-changes document without an agent call.
 
-## Global storage
+PRDigest bounds descriptions and source patches, prioritizes source files over
+lock/generated files, and records omitted or truncated evidence. The shared
+prompt has a total evidence budget; oversized metadata fails generation rather
+than silently dropping PRs. Generated descriptions must not claim complete
+inspection when evidence was truncated.
 
-The versioned owner-private root is
-`Hive::Paths.state_home/daily-digest/v1/`:
+## Persistence and retries
 
-```text
-daily-digest/v1/
-├── intervals.json
-├── records/YYYY-MM-DD/
-│   ├── base.json
-│   ├── frontiers.json
-│   └── amendments/*.json
-├── tombstones/YYYY-MM-DD.json
-├── deliveries/YYYY-MM-DD.json
-└── .store.lock
-```
+Documents use the existing private `Store` under
+`daily-digest/documents/v1/`. The earlier workflow-event store under
+`daily-digest/v1/` is left intact and is not the default digest source.
 
-One cross-process lock serializes each coordinator read/collect/merge/commit
-transaction as well as open replacement, close, amendment, frontier, prune,
-and post-prune discard operations. A stale refresh therefore cannot replace a
-newer open projection or regress its frontier. JSON is canonicalized and
-identities are content-derived. Atomic writes use owner-private
-directories/files, same-directory rename, and directory fsync through
-`Hive::AtomicFile`.
+A generation lock serializes writers without blocking reads during GitHub or
+agent calls. Atomic publication replaces an open preview. Unchanged evidence
+reuses its text; closed documents are reused without another generation call.
+Failed generation preserves the last saved document. Pruning leaves a tombstone
+and refresh does not recreate that day.
 
-`intervals.json` is rebuildable navigation metadata updated with every base or
-tombstone mutation. Mutation owners repair missing, invalid, or valid-but-stale
-entries after interrupted publication. CLI and Web navigation use a pure,
-non-initializing read path: an absent index is rebuilt only in memory, without
-creating the store, lock, or index. The record schema carries a
-monotonic sequence and `local_date`, persisted
-zone/boundaries, lifecycle, close/materialization timestamps, projects, items,
-attention, gaps, and source frontiers. Lifecycle, completeness, and content are
-orthogonal. `empty` requires complete observation.
+Existing preview intervals retain their timezone and boundaries. Collection
+that starts before midnight stays open even if it finishes after midnight; the
+next collection can observe the full day before closing it.
 
-## Calendar and coverage
+## Reading and delivery
 
-`daily_digest.time_zone` is an IANA identifier resolved through TZInfo. Setup
-and `hive migrate` / `hive migrate --all` idempotently persist the zone,
-coverage-start instant, initial membership snapshot, and first interval in one
-global-config transaction. Legacy project identities and registration epochs are
-initialized in that same transaction before taking the membership snapshot.
-Existing epochs, registration times, history, and initialized coverage snapshots
-are preserved; the upgrade does not invent membership events. Failed or
-ambiguous host-zone detection leaves the
-feature disabled and does not stop unrelated daemon work.
+The shared reader returns the current preview if one exists, otherwise the most
+recent saved document. CLI text prints the document, JSON exposes `document`,
+and Web displays sanitized Markdown as one article. A document always covers its
+recorded repository scope; legacy project-filter query strings do not rewrite it.
+Reads never generate or send.
 
-Intervals are half-open UTC ranges. Normal calendar days can therefore be 23,
-24, or 25 hours. A configured zone change becomes effective at the prior
-interval's immutable `ends_at`. The next interval begins at that exact instant,
-uses a monotonic label, and stores `boundary_kind: zone_cutover` plus cutover
-metadata. Existing boundaries are never recalculated. Sequence lookup rather
-than date arithmetic assigns every instant exactly once and drives default,
-previous, and next navigation.
+Telegram sends the same text as one formatted HTML message when it fits, or one complete
+UTF-8 `.txt` attachment when it exceeds Telegram's message size. Existing delivery
+receipts prevent automatic replay after a confirmed or ambiguous send. Scheduled
+delivery selects yesterday's closed document at the configured local hour; it
+does not require a separate current-day preview.
 
-No pre-feature history is synthesized. Coverage begins at the persisted
-frontier, and migration captures membership at that boundary. Later
-registration, unregistration, stale pruning, and replacement append ordered
-membership-history changes under the existing global config lock. Unprovable
-legacy membership becomes a scoped gap. Collection clips each registration to
-its exact membership span within the interval; registrations removed before
-the observation or close boundary do not contribute boundary attention. Reader
-pre-coverage classification compares against the first interval's persisted
-local label rather than deriving a date from the UTC coverage instant.
+## Dependency and verification
 
-A logical `project_id` survives a same-name path replacement, but each distinct
-registered path has its own `registration_id` and `registered_at`. Facts, gaps,
-attention, and source frontiers carry that registration epoch. This prevents a
-replacement from inheriting an old path's fingerprints and lets historical
-task links fail closed without losing the stable logical project identity.
+This integration requires the corresponding PRDigest evidence/document release.
+The existing published 0.3.0 does not provide `Prdigest::Document`; do not release
+Hive's integration against it. Development verification uses both worktrees via
+an external Bundler Gemfile, not a committed machine-specific source path.
 
-## Material collection
-
-`Collector` asks each effective registered project source for normalized facts
-and source health. `Materiality` owns the include/exclude matrix and stable
-fingerprints. A committed source frontier includes bounded file-stat and
-content fingerprints; unchanged task journals and creation receipts are not
-read or hashed again during the next refresh. Journal fingerprints retain their
-bounded scoped gaps and allowlisted boundary-attention fold. Their cache
-dependency also includes bounded `pr.md` publication evidence, so repaired PR
-metadata invalidates a stale gap without journal churn. Activity without an
-event time uses its durable observation time. Changed and unavailable sources
-remain isolated per project, malformed journal diagnostics are aggregated per
-journal, and creation receipts have an explicit read bound. Material facts
-include task creation, durable stage/state
-changes, answers, changed holds, failures/recoveries, PR/check/review/merge
-outcomes, completion, and archive. Polls, repeated snapshots, diagnostics, log
-churn, and retries without a changed durable outcome advance bookkeeping only.
-
-### Authoritative producer map
-
-| Material observation | Durable owner | Collector input |
-|---|---|---|
-| Task creation | `Commands::New` and `TaskCreationReceipt` | Task-local receipt committed with task capture |
-| Stage/state change, question entry, completion/archive | `Stages::Base` and terminal stage owners | `TaskJournal` activity rows |
-| Answer, approval, rejection, decision | `Commands::Answer`, `Commands::Approve`, `Commands::Decide` | Outcome journal rows without prompt/answer text |
-| Failed execution and capacity observation | `AgentObservation` | Changed `session_finished` / `resource_limit_observed` outcomes |
-| Retry and recovery | `Recovery::API` | Changed retry and recovery rows |
-| Provider, authority, or scheduler hold | `DailyDigest::HoldObserver` at daemon disposition boundaries | Entry/exit `hold_recorded` rows |
-| PR opened or merged | `Stages::OpenPr` | Journal outcome plus persisted publication core |
-| Check or review outcome | `TaskWorkspace::PublicationActivity` | Changed outcome plus `pr.md` enrichment |
-| Registry membership | `Config`'s locked registry mutation owner | Ordered before/after membership history |
-| Correction and older commit/push/operator vocabulary | Explicitly declared unsupported legacy producers | Never claimed complete without new authoritative evidence |
-
-Hold observation accepts the daemon's actual `StatusConsumer::Row`, whose
-optional provider attribution comes from marker or routing metadata. A missing
-Struct member is treated as absent attribution rather than an exception, so
-capacity and authority holds cannot interrupt scheduler observation.
-
-`ProjectSource` is the only per-registration adapter. It containment-checks all
-known active/done/archive stage buckets, reads bounded creation receipts and
-journals, reconstructs boundary attention, enriches the PR core from Hive-owned
-publication evidence, and returns facts plus scoped health. `Collector` keeps
-healthy registrations when a sibling fails and commits registration-scoped
-frontiers with the projection. Neither layer invokes GitHub or PRDigest.
-
-Task creation has a task-local content-derived receipt committed with capture,
-because a host-global write cannot share that transaction. PR facts prefer
-Hive-owned journal/publication evidence. GitHub is fail-soft and contributes a
-gap only when a required PR field or freshness rule cannot be satisfied from
-that evidence. V1 never invokes PRDigest.
-
-Open-day attention may use current operational state. Closing attention is an
-as-of-boundary fact reconstructed from durable entry/exit transitions. Waiting
-age starts at the latest durable transition into the current blocked or
-unanswered state. Retained unchanged attention recomputes that age at each open
-observation and at the immutable closing boundary. If state or age cannot be
-proved, the record closes partial with a boundary-history gap. Waiting items use a privacy allowlist: project,
-task identity, stage/state, age, and native task URL; question text, answers,
-prompts, and bindings are absent from the record.
-
-## Open, close, and amend
-
-Only the daemon scheduler or explicit `hive digest refresh` invokes
-`Coordinator`:
-
-1. enumerate missing feature-era intervals from the coverage frontier in
-   persisted sequence;
-2. collect healthy facts and scoped source gaps;
-3. atomically replace the current open base, or freeze an elapsed base as
-   closed; and
-4. commit source frontiers with the corresponding base/amendment effect.
-
-Every retained interval, including a gapless closed record or prune tombstone,
-is eligible for the cheap fingerprint refresh. This lets late evidence become
-an amendment or bounded discard without requiring an existing gap. Replacing
-an open base merges prior facts, attention, and frontiers for any unavailable
-source rather than turning an outage into evidence deletion.
-
-A crash before commit replays the old frontier and stable identities deduplicate
-the batch. The first materialization after `ends_at` closes the base. Thereafter
-`Store#write_base` accepts only a byte-identical identity and rejects
-replacement.
-
-Facts with a known event time are assigned to the persisted interval containing
-that instant; otherwise `observed_at` owns assignment. A fact discovered after
-its day closes becomes a separately immutable amendment with event,
-observation, and amendment time. Dated activity gaps belong only to their event
-interval; gaps with unparseable times remain conservative source-health
-evidence. Corrections reference the corrected identity.
-Gap recovery appends recovered facts and the exact resolved gap ID. Effective
-completeness can improve, but the closed base bytes, lifecycle, and close time
-remain unchanged. Amendment identity includes its position in the persisted
-history, so a repeated outage after recovery can append a new observation
-without colliding with the first outage. Unchanged replay adds no amendment.
-
-Boundary attention can also be corrected without rewriting the close. When a
-changed journal fingerprint for the exact registration proves that a formerly
-reported task was not waiting at the persisted boundary, an amendment carries
-both `resolved_attention_ids` and the allowlisted prior attention rows. A
-different replacement registration is never accepted as that proof. A task or
-registry health gap keeps the prior attention visible until the corresponding
-registration-scoped evidence is complete; a changed but malformed journal is
-not treated as recovery. Explicit registry history ending a registration before
-the attention boundary removes its retained attention even when the task journal
-has not changed; a source outage alone does not.
-
-### Executable persisted-state trace
-
-The deterministic store/lifecycle fixtures pin these before/after outcomes:
-
-| Operation | Persisted before | Persisted after | Replay result |
-|---|---|---|---|
-| Open refresh | Replaceable base for one `interval_id` | New canonical open `record_id` with its frontier | Stable fact IDs prevent duplicate items |
-| Close | Open base | One closed base with fixed `closed_at` and byte hash | Non-identical replacement is rejected; identical close repairs only navigation metadata |
-| Late fact or source recovery | Closed base, optionally partial with a stable gap | Separate immutable amendment; effective view adds facts/removes named gaps | Same amendment ID returns the existing bytes |
-| Boundary correction | Closed base with allowlisted attention | Separate amendment names resolved attention; effective view removes it | Unchanged or replacement-registration evidence emits no resolution |
-| Prune | Closed base plus amendments/frontier | Tombstone retains record/interval identity, gaps, frontiers, and amendment IDs | Late input adds one bounded discard and advances its frontier; no base reappears |
-
-`test/unit/daily_digest/{projector,store,pruner}_test.rb` and
-`test/integration/daily_digest_lifecycle_test.rb` compare closed-base bytes,
-exercise crash replay, source recovery, concurrent close/amend, and post-prune
-discard idempotency. `test/integration/daily_digest_collection_test.rb` traces
-the producer map through persisted multi-project facts and scoped degradation.
-
-## Degradation and recovery
-
-Each stable gap records source, bounded scope/reason, observation/freshness,
-and retry state. One unreadable project, malformed row, unavailable required PR
-observation, or missing boundary transition does not suppress healthy projects.
-A complete record with no content is explicit; a partial record with no known
-content remains `unknown`.
-
-Recovery retries unresolved sources through the same refresh owner. A gap
-resolves only when the attempted project or task scope supplies positive fresh
-membership or fingerprint evidence; disappearance of a task or project cannot
-manufacture completeness. A resolved gap and recovered facts are an idempotent
-amendment, visible in later CLI/Web reads. Recovery never changes Telegram
-outcome or triggers a second recap.
-
-## Retention and delivery independence
-
-Records are retained indefinitely by default. The explicit pruner removes only
-closed digest projection bytes and leaves a permanent tombstone, delivery
-ledger, and all underlying evidence. Late input aimed at a tombstone is audited
-and its source frontier advances atomically, preventing either reconstruction
-or an endless replay loop. Collection resumes from the tombstone's retained
-source frontiers; a recovered gap gets one stable discard acknowledgement and
-is then removed from the tombstone's effective gaps. Re-observing the same late
-evidence does not append another discard merely because observation time changed.
-
-Refresh/close and Telegram delivery are separate daemon children, scheduler
-states, capacity identities, and positive timeouts. The close path runs whenever
-the initialized daily digest is enabled, regardless of Telegram. Delivery is a
-second opt-in that reads only the immediately preceding closed interval at the
-configured local hour. Its intent/outcome ledger distinguishes prepared,
-sending, sent, suppressed, failed, and ambiguous unknown outcomes. See
-[[modules/daemon]] and [[commands/digest]].
-
-A prepared attempt is owned through the exact payload and amendment frontier
-until that owner starts or suppresses the effect. Competing live preparers
-cannot rewrite it, and a stale owner is fenced. Each live fiber retains its
-preparer token across garbage collection; completed fibers can be reclaimed,
-and a fork gets a new process-specific identity. Daemon startup and delivery
-child completion reconcile every dead `sending` receipt, including dates older
-than the next scheduled recap, to terminal `unknown`.
-
-## Output safety
-
-Normalized records contain only bounded allowlisted fields. Rails performs HTML
-escaping, terminal rendering strips control/ANSI/OSC sequences and embedded
-newlines, and Telegram strips controls then escapes dynamic text for HTML parse
-mode. Structured delivery logs never include the destination, token, or payload
-text. Validated task links are rebuilt from the resolved destination, including
-the archive query route when the task is in its workflow's terminal stage and
-the native unanswered-question anchor.
-
-## Backlinks
-
-- [[architecture]] · [[state-model]] · [[decisions]]
-- [[commands/digest]] · [[commands/web]] · [[modules/config]] · [[modules/daemon]]
+Focused tests cover real Store/Reader document round trips, before-setup dates,
+unchanged evidence, failed generation, midnight closure, timezone preservation,
+CLI/JSON/Web output, long Telegram attachments, and receipt reuse. Live QA must
+inspect an actual generated document as well as transport success.

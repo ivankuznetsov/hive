@@ -19,13 +19,15 @@ module Hive
       ATTENTION_KEYS = %w[kind project task_slug stage state waiting_age_seconds].freeze
 
       Rendered = Data.define(:text, :parse_mode, :payload_hash, :web_url,
-                             :amendment_frontier, :counts)
+                             :amendment_frontier, :counts, :document)
 
       def initialize(web_origin:)
         @web_origin = validate_origin(web_origin)
       end
 
       def render(record)
+        return render_document(record) if record["document"].is_a?(String)
+
         date = record.fetch("local_date")
         completeness = record["effective_completeness"] || record.fetch("completeness")
         items = PublicView.ordered_items(record)
@@ -53,11 +55,51 @@ module Hive
         Rendered.new(
           text: text, parse_mode: :html,
           payload_hash: Digest::SHA256.hexdigest(text), web_url: link,
-          amendment_frontier: amendment_frontier(amendments), counts: counts
+          amendment_frontier: amendment_frontier(amendments), counts: counts, document: false
         )
       end
 
       private
+
+      def render_document(record)
+        source = record.fetch("document")
+        html = source.lines.map do |line|
+          heading = line.match(/\A\#{1,6} (.+?)\s*\z/)
+          heading ? "<b>#{document_inline(heading[1])}</b>\n" : document_inline(line.sub(/\A[-*] /, "• "))
+        end.join.rstrip
+        visible = CGI.unescapeHTML(html.gsub(/<[^>]*>/, ""))
+        attachment = visible.encode(Encoding::UTF_16LE).bytesize / 2 > 4096
+        text = attachment ? source : html
+        Rendered.new(
+          text: text, parse_mode: attachment ? nil : :html,
+          payload_hash: Digest::SHA256.hexdigest(text), web_url: web_url(record.fetch("local_date")),
+          amendment_frontier: amendment_frontier(Array(record["amendments"])), counts: {},
+          document: attachment
+        )
+      end
+
+      # Only the document's small Markdown vocabulary becomes Telegram HTML.
+      # Everything else remains escaped text, including agent-authored HTML.
+      def document_inline(text)
+        tokens = /\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^\s)]+)\)/
+        result = +""
+        offset = 0
+        text.to_enum(:scan, tokens).each do
+          match = Regexp.last_match
+          result << Hive::Bot::Format.html_escape(text[offset...match.begin(0)])
+          if match[1]
+            result << "<b>#{Hive::Bot::Format.html_escape(match[1])}</b>"
+          elsif match[2]
+            result << "<code>#{Hive::Bot::Format.html_escape(match[2])}</code>"
+          elsif Hive::Pr.valid_http_url?(match[4])
+            result << %(<a href="#{Hive::Bot::Format.html_attr_escape(match[4])}">#{Hive::Bot::Format.html_escape(match[3])}</a>)
+          else
+            result << Hive::Bot::Format.html_escape(match[0])
+          end
+          offset = match.end(0)
+        end
+        result << Hive::Bot::Format.html_escape(text[offset..])
+      end
 
       def status_line(completeness, record)
         content = record["effective_content"] || record.fetch("content")

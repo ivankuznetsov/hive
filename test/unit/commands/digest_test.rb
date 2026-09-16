@@ -6,6 +6,23 @@ require "hive/daily_digest/project_source"
 class DigestCommandTest < Minitest::Test
   include HiveTestHelper
 
+  def test_document_text_is_exact_and_json_preserves_it
+    text = "Daily digest\n\nShipped\n<plain text> & 🚀"
+    record = digest_record.merge("document" => text)
+    reader = Object.new
+    reader.define_singleton_method(:read) { |**| record }
+    [ false, true ].each do |json|
+      output = StringIO.new
+      payload = Hive::Commands::Digest.new(
+        json: json, reader: reader, stdout: output,
+        web_config_loader: -> { { "origin" => "https://hive.example" } }
+      ).call
+      assert_equal text, payload.fetch("document")
+      assert_equal text, json ? JSON.parse(output.string).fetch("document") : output.string
+      assert_empty digest_schema.validate(payload).to_a
+    end
+  end
+
   def test_json_is_a_pure_schema_valid_view_with_canonical_web_url
     calls = []
     reader = Object.new

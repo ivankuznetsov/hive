@@ -18,6 +18,7 @@ class DailyDigestMigrationTest < Minitest::Test
 
       result = migration.call
       persisted = YAML.safe_load_file(File.join(home, "config.yml")).fetch("daily_digest")
+      assert_equal true, persisted.fetch("enabled")
       assert_equal "Europe/London", persisted.fetch("time_zone")
       assert_equal NOW.iso8601(6), persisted.fetch("coverage_started_at")
       assert_equal [ project ], persisted.fetch("initial_membership")
@@ -27,6 +28,37 @@ class DailyDigestMigrationTest < Minitest::Test
       second = migration.call
       assert_equal persisted, second
       assert_equal persisted, YAML.safe_load_file(File.join(home, "config.yml")).fetch("daily_digest")
+    end
+  end
+
+  def test_daemon_prepares_default_enabled_digest_but_never_enables_delivery
+    with_tmp_global_config do
+      before = File.read(Hive::Config.global_config_path)
+      config = Hive::Config.load_global_daily_digest
+      assert_equal true, config.fetch("enabled")
+      assert_equal before, File.read(Hive::Config.global_config_path)
+      assert_nil config["coverage_started_at"]
+
+      with_env("TZ" => "Europe/London") do
+        prepared = Hive::DailyDigest::Migration.prepare!
+        assert_equal true, prepared.fetch("enabled")
+        assert_equal false, prepared.dig("telegram", "enabled")
+        assert prepared.fetch("coverage_started_at")
+        assert_equal "Europe/London", prepared.fetch("time_zone")
+        assert_equal prepared, Hive::DailyDigest::Migration.prepare!
+      end
+    end
+  end
+
+  def test_daemon_preserves_explicit_opt_out_without_initializing
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, { "daily_digest" => { "enabled" => false } }.to_yaml)
+      before = File.read(path)
+      prepared = Hive::DailyDigest::Migration.prepare!
+      assert_equal false, prepared.fetch("enabled")
+      assert_nil prepared["coverage_started_at"]
+      assert_equal before, File.read(path)
     end
   end
 

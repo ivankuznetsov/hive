@@ -5719,14 +5719,10 @@ class ConfigTest < Minitest::Test
     Hive::Config.send(:validate_daily_digest!, { "daily_digest" => base }, path)
 
     enabled = base.merge("enabled" => true)
+    Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled }, path)
+    Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled.merge("time_zone" => "UTC") }, path)
     assert_raises(Hive::ConfigError) do
-      Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled }, path)
-    end
-    assert_raises(Hive::ConfigError) do
-      Hive::Config.send(
-        :validate_daily_digest!,
-        { "daily_digest" => enabled.merge("time_zone" => "UTC") }, path
-      )
+      Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled.merge("initial_membership" => []) }, path)
     end
 
     initialized = enabled.merge(

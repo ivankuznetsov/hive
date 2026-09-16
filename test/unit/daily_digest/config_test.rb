@@ -4,11 +4,11 @@ require "hive/config"
 class DailyDigestConfigTest < Minitest::Test
   include HiveTestHelper
 
-  def test_disabled_defaults_are_safe_and_do_not_require_initialization
+  def test_enabled_defaults_allow_daemon_initialization_and_keep_telegram_off
     with_tmp_global_config do
       config = Hive::Config.load_global_daily_digest
 
-      assert_equal false, config.fetch("enabled")
+      assert_equal true, config.fetch("enabled")
       assert_nil config.fetch("time_zone")
       assert_equal 300, config.fetch("materialization_interval_sec")
       assert_equal false, config.dig("telegram", "enabled")
@@ -16,10 +16,13 @@ class DailyDigestConfigTest < Minitest::Test
     end
   end
 
-  def test_enabled_digest_requires_valid_zone_and_coverage_frontier
+  def test_partial_initialization_is_rejected_and_configured_zone_is_validated
     with_tmp_global_config do |home|
       path = File.join(home, "config.yml")
       File.write(path, { "daily_digest" => { "enabled" => true } }.to_yaml)
+      assert_nil Hive::Config.load_global_daily_digest.fetch("time_zone")
+
+      File.write(path, { "daily_digest" => { "enabled" => true, "coverage_started_at" => "2026-09-15T00:00:00Z" } }.to_yaml)
       error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daily_digest }
       assert_match(/daily_digest\.time_zone.*required/, error.message)
 

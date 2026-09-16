@@ -26,6 +26,10 @@ class DailyDigestConfigTest < Minitest::Test
       error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daily_digest }
       assert_match(/daily_digest\.time_zone.*required/, error.message)
 
+      File.write(path, { "daily_digest" => { "enabled" => true, "time_zone" => "UTC", "initial_membership" => [] } }.to_yaml)
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daily_digest }
+      assert_match(/coverage frontier.*required/, error.message)
+
       File.write(path, { "daily_digest" => initialized_config("Mars/Olympus") }.to_yaml)
       error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daily_digest }
       assert_match(/unknown IANA time zone/, error.message)

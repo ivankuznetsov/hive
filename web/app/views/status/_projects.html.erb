@@ -28,12 +28,12 @@
               <article class="task-row">
                 <div class="task-name">
                   <%= link_to task.title, task_path(project.name, task.slug) %>
-                  <% display = TaskDisplay.new(task, fresh: @status_fresh) %>
+                  <% display = TaskDisplay.new(task, fresh: @status_display_fresh) %>
                   <% if display.detail.present? && !%w[running completed paused].include?(display.state) %><p class="task-state-detail"><%= truncate(display.detail, length: 180) %></p><% end %>
                 </div>
                 <%= stage_badge(task["stage"]) %>
                 <span class="task-meta">
-                  <%= status_dot(task, fresh: @status_fresh) %>
+                  <%= status_dot(task, fresh: @status_display_fresh) %>
                   <%= display.label %>
                 </span>
                 <span class="task-meta faint">Updated <%= relative_age(task["age_seconds"]) %></span>

@@ -8,6 +8,77 @@ require "hive/web/status_feed"
 class StatusFeedTest < Minitest::Test
   include HiveTestHelper
 
+  def test_saved_snapshot_is_available_without_scan_and_refreshes_immediately_in_background
+    Dir.mktmpdir do |dir|
+      store = Hive::Web::StatusSnapshotStore.new(path: File.join(dir, "status.json"))
+      old = { "projects" => [ { "name" => "old", "path" => "/old", "tasks" => [] } ] }
+      fresh = old.merge("refreshed" => true)
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ { "name" => "old", "path" => "/old" } ] }) do
+        first = Hive::Web::StatusFeed.new(status_command: CountingStatus.new([ old ]), snapshot_store: store)
+        saved = first.snapshot_state
+        producer = ControlledStatus.new
+        feed = Hive::Web::StatusFeed.new(status_command: producer, snapshot_store: store, interval: 60)
+        assert_equal old, feed.current_state.payload
+        assert_equal "cached", feed.current_state.availability
+        assert_equal saved.last_success_at, feed.current_state.last_success_at
+        assert_equal 0, feed.scan_count
+        states = Queue.new
+        subscriber = Thread.new { feed.each_state { |state| states << state } }
+        begin
+          assert_equal "cached", Timeout.timeout(2) { states.pop }.availability
+          producer.wait_until_started
+          assert_equal old, feed.current_state.payload, "slow refresh must not block cached reads"
+          producer.release(fresh)
+          updated = Timeout.timeout(2) { states.pop }
+          assert_equal "fresh", updated.availability
+          assert_equal fresh, updated.payload
+          assert_equal fresh, store.read.fetch("payload")
+        ensure
+          subscriber&.kill
+          subscriber&.join
+          feed.stop
+        end
+      end
+    end
+  end
+
+  def test_refresh_failure_keeps_saved_data_and_a_later_refresh_recovers
+    Dir.mktmpdir do |dir|
+      store = Hive::Web::StatusSnapshotStore.new(path: File.join(dir, "status.json"))
+      payload = { "projects" => [] }
+      saved_at = "2026-07-25T12:00:00Z"
+      store.write(payload, last_success_at: saved_at)
+      producer = CountingStatus.new([ payload ])
+      feed = Hive::Web::StatusFeed.new(status_command: producer, snapshot_store: store)
+      with_replaced_singleton_method(producer, :json_payload, ->(*) { raise IOError, "offline" }) do
+        capture_io { feed.snapshot_state }
+      end
+      assert_equal "degraded", feed.current_state.availability
+      assert_equal payload, feed.current_state.payload
+      assert_equal saved_at, store.read.fetch("last_success_at")
+      assert_equal "fresh", feed.snapshot_state.availability
+      refute_equal saved_at, store.read.fetch("last_success_at")
+    end
+  end
+
+  def test_registry_change_during_scan_cannot_label_old_rows_with_new_registry
+    Dir.mktmpdir do |dir|
+      store = Hive::Web::StatusSnapshotStore.new(path: File.join(dir, "status.json"))
+      registry = [ { "name" => "old", "path" => "/old" } ]
+      producer = CountingStatus.new([ { "projects" => [ { "name" => "old", "path" => "/old", "tasks" => [] } ] } ])
+      original = producer.method(:json_payload)
+      producer.define_singleton_method(:json_payload) do |projects|
+        registry = []
+        original.call(projects)
+      end
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { registry }) do
+        feed = Hive::Web::StatusFeed.new(status_command: producer, snapshot_store: store)
+        feed.snapshot_state
+        assert_nil store.read, "rows scanned before removal must not match the new registry"
+      end
+    end
+  end
+
   # Counts json_payload invocations and serves a script of snapshots so a
   # test can prove the shared poller scans ONCE per tick regardless of how
   # many subscribers are attached. `json_payload` is the single seam through

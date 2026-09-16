@@ -1073,7 +1073,19 @@ remain addressable and mutations revalidate current task state without a stale
 fleet cache. One process-wide `StatusFeed` owns polling,
 single-flight refresh, actual scan count, and latest-good state. Status-page
 HTTP renders never perform a fleet scan: they use the latest published state,
-or render a neutral “Loading your workspace…” panel on a cold process.
+or restore the last successful snapshot from owner-private `HIVE_HOME/web-status.json`
+after a restart. The saved view retains task labels and filters, shows its last
+successful refresh time with “Updating your workspace…”, and disables
+state-dependent actions until a fresh scan succeeds. The first subscriber
+starts an immediate background refresh; HTTP reads never wait for it.
+The cache uses atomic replacement, a versioned envelope, a 16 MiB bound, and
+exact registered-project matching. Missing, malformed, incompatible, or
+registry-mismatched caches fall back to the neutral “Loading your workspace…”
+panel. Write failures preserve the previous file without degrading a live scan.
+No archive or dependency context is restored, and mutations retain their
+existing targeted current-state validation. The five-second refresh cadence
+and TUI liveness policy are unchanged; this improves time to first display,
+not full-scan cost.
 Loading is identified by the initial `loading` version token, so normal startup
 does not display an outage warning. At phone widths, the loading panel becomes
 a compact message above the idea composer so it is visible without scrolling.

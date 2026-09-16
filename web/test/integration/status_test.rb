@@ -307,6 +307,53 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "saved board and grid render immediately while a real feed refresh is blocked" do
+    sign_in!
+    project_name = create_hive_project!("saved-status-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    payload = {
+      "projects" => [ { "name" => project_name, "path" => project_path,
+        "hive_state_path" => File.join(project_path, ".hive-state"),
+        "tasks" => [ { "slug" => "ready-card-260721-abcd", "display_name" => "Saved card",
+          "stage" => "3-plan", "workflow" => "coding", "marker" => "complete", "age_seconds" => 120 } ] } ]
+    }
+    saved_project = payload.fetch("projects").first
+    payload["projects"] = Hive::Config.registered_projects.map do |project|
+      project.fetch("name") == project_name ? saved_project : project.merge("tasks" => [])
+    end
+    store = Hive::Web::StatusSnapshotStore.new(path: File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "saved-status.json"))
+    store.write(payload, last_success_at: "2026-07-25T12:00:00Z")
+    started = Queue.new
+    release = Queue.new
+    producer = Object.new.extend(Hive::Web::StatusCommand)
+    producer.define_singleton_method(:json_payload) { |_| started << true; release.pop }
+    feed = Hive::Web::StatusFeed.new(status_command: producer, snapshot_store: store, interval: 60)
+    assert_equal "cached", feed.current_state&.availability
+    previous = StatusBroadcaster.feed
+    StatusBroadcaster.feed = feed
+    subscriber = Thread.new { feed.each_state { |_| } }
+    Timeout.timeout(2) { started.pop }
+    begin
+      [ board_path, grid_path ].each do |path|
+        Timeout.timeout(2) { get path }
+        assert_response :success
+        assert_select ".status-freshness-warning[data-status-availability=cached]", text: /Updating your workspace.*Showing saved status from/m
+        assert_select "time[datetime='2026-07-25T12:00:00Z']"
+        assert_select "a", text: "Saved card"
+        assert_select ".status-loading", 0
+        assert_select ".status-freshness-warning", { text: /unavailable/, count: 0 }
+        if path == board_path
+          assert_select ".kanban-card form button[disabled][aria-disabled=true]", text: "Approve"
+        end
+      end
+    end
+  ensure
+    subscriber&.kill
+    subscriber&.join
+    feed&.stop
+    StatusBroadcaster.feed = previous if previous
+  end
+
   test "first-load status failure renders unavailable rather than an empty fleet" do
     sign_in!
     with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do

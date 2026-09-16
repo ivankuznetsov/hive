@@ -1,3 +1,4 @@
+<% display_fresh = local_assigns.fetch(:status_display_fresh, status_fresh) %>
 <div id="status-board" class="kanban-board">
   <% if board.empty? %>
     <div class="empty-state">
@@ -54,10 +55,10 @@
                     <article id="<%= stable_dom_id("kanban-card", band.project.name, task.slug) %>"
                              class="kanban-card" data-task-slug="<%= task.slug %>">
                       <div class="kanban-card-heading">
-                        <%= status_dot(task, fresh: status_fresh) %>
+                        <%= status_dot(task, fresh: display_fresh) %>
                         <%= link_to task.title, task_path(band.project.name, task.slug) %>
                       </div>
-                      <% display = TaskDisplay.new(task, fresh: status_fresh) %>
+                      <% display = TaskDisplay.new(task, fresh: display_fresh) %>
                       <div class="kanban-card-meta">
                         <span><%= display.label %></span>
                         <span class="faint"><%= "Updated #{relative_age(task["age_seconds"])}" %></span>

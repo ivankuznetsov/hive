@@ -530,6 +530,13 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
   border-radius: var(--radius);
   background: var(--bg-sunken);
 }
+/* A saved view is normal startup, not a failed live refresh. */
+.status-freshness-warning[data-status-availability="cached"] {
+  background: var(--bg-sunken);
+  color: var(--ink-muted);
+  border-color: var(--line-strong);
+}
+.status-freshness-warning[data-status-availability="cached"] .status-dot { background: var(--ink-muted); }
 .status-loading { border-style: solid; }
 .status-loading-indicator {
   display: inline-block;

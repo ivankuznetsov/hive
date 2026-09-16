@@ -12,7 +12,12 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 The owner corrected the production hostname to `hivedev.ai` and approved
 `ivan@ikuznetsov.com` and retention until launch, capped at 12 months after signup.
 Account access, production D1 migration and Turnstile secret provisioning are
-verified. Public domain and real signup verification are pending deployment.
+verified. The public domain serves the deployed commit over valid HTTPS; public
+Cloudflare and Google DNS return its records. Live desktop/mobile demo branches,
+privacy, 404/405 handling and invalid-token rejection passed. A successful real
+signup is still unverified: the automated browser could not reach a Turnstile
+challenge host (`ERR_ADDRESS_UNREACHABLE`). Local D1 signup tests pass, but do not
+replace this final live check.
 Retention deletion and emailed removal requests remain operator responsibilities.
 See [[interactive-demo]] and `demo/README.md`.
 

@@ -66,7 +66,51 @@ mkdir -p "$SERVICE_MANAGER_BIN" "$SANDBOX/home" "$SANDBOX/hive-home" "$SANDBOX/w
 
 case "$(uname -s)" in
   Linux)
-    printf '%s\n' '#!/bin/sh' 'exit 0' > "$SERVICE_MANAGER_BIN/systemctl"
+    cat > "$SERVICE_MANAGER_BIN/systemctl" <<'SYSTEMCTL_STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == --user ]] || exit 64
+shift
+verb=${1:-}
+shift
+state="$(dirname "$0")/systemd-state"
+mkdir -p "$state"
+printf '%s\n' "$verb $*" >> "$state/commands"
+unit="${!#}"
+[[ "$unit" == *.service ]] || unit="$unit.service"
+unit_path="$HOME/.config/systemd/user/$unit"
+case "$verb" in
+  --version) printf 'systemd 256\n' ;;
+  show-environment) ;;
+  daemon-reload)
+    for path in "$HOME"/.config/systemd/user/*.service; do
+      [[ -f "$path" ]] || continue
+      cp "$path" "$state/$(basename "$path").loaded"
+    done
+    ;;
+  show)
+    loaded=not-found; fragment=; reload=no; enabled=disabled; active=inactive; pid=0
+    if [[ -f "$state/$unit.loaded" ]]; then
+      loaded=loaded; fragment=$unit_path
+      cmp -s "$unit_path" "$state/$unit.loaded" || reload=yes
+    fi
+    [[ ! -f "$state/$unit.enabled" ]] || enabled=enabled
+    if [[ -f "$state/$unit.running" ]]; then active=active; pid=1; fi
+    printf '%s\n' "LoadState=$loaded" "FragmentPath=$fragment" "NeedDaemonReload=$reload" \
+      "UnitFileState=$enabled" "ActiveState=$active" "MainPID=$pid" "ExecMainStartTimestampMonotonic=$pid"
+    ;;
+  enable)
+    touch "$state/$unit.enabled"
+    if [[ " $* " == *' --now '* ]]; then touch "$state/$unit.running"; fi
+    ;;
+  restart|start) touch "$state/$unit.running" ;;
+  stop) rm -f "$state/$unit.running" ;;
+  disable) rm -f "$state/$unit.enabled" "$state/$unit.running" ;;
+  is-enabled) [[ -f "$state/$unit.enabled" ]] ;;
+  is-active) [[ -f "$state/$unit.running" ]] ;;
+  *) exit 64 ;;
+esac
+SYSTEMCTL_STUB
     chmod 0755 "$SERVICE_MANAGER_BIN/systemctl"
     SERVICE_MANAGER_COMMAND="systemctl"
     ;;
@@ -135,11 +179,12 @@ ruby -rsocket -rjson -e '
     while (line = socket.gets)
       break if line == "\r\n"
     end
+    File.write(ARGV.fetch(1), "probed")
     body = JSON.generate("ok" => true)
     socket.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}")
     socket.close
   end
-' "$PORT_FILE" >"$SANDBOX/health.log" 2>&1 &
+' "$PORT_FILE" "$SANDBOX/health-probed" >"$SANDBOX/health.log" 2>&1 &
 HEALTH_PID=$!
 
 cleanup() {
@@ -163,6 +208,7 @@ cat > "$SANDBOX/hive-home/config.yml" <<YAML
 web:
   bind: 127.0.0.1
   port: ${HEALTH_PORT}
+  origin: http://127.0.0.1:${HEALTH_PORT}
 YAML
 
 SETUP_JSON="$SANDBOX/setup.json"
@@ -217,6 +263,12 @@ for phase in web_bundle daemon_service web_service web; do
     exit 1
   fi
 done
+
+[[ -s "$SANDBOX/health-probed" ]] || {
+  echo "verify-managed-web-setup: readiness did not probe the isolated health fixture" >&2
+  exit 1
+}
+jq -e --arg url "http://127.0.0.1:$HEALTH_PORT" '.url == $url' "$SETUP_JSON" >/dev/null
 
 PAYLOAD_OK="$(jq -r '.ok | tostring' "$SETUP_JSON")"
 if [[ "$PAYLOAD_OK" == "true" && "$SETUP_RC" -ne 0 ]] || \

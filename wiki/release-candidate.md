@@ -335,3 +335,12 @@ latest-stable alias remains v0.7.2, clearing only the candidate-version
 comparison. Previous hosted evidence belongs to its exact older candidate SHA
 and cannot qualify these bytes; a fresh trusted remote campaign is still
 required. No release action was authorized or performed.
+
+## Managed-service verification fixture
+
+The isolated managed-web verifier models systemd `show` properties and tracks
+unit reload, enablement, and running state in its private temporary directory.
+It requires readiness to hit its temporary loopback health server and report
+that server's URL. It never invokes the operator's service manager. Build-time
+Betterleaks downloads use bounded curl retries and timeouts while retaining
+exact checksum validation.

@@ -19,7 +19,10 @@ module HiveBetterleaksPackage
         url = "https://github.com/betterleaks/betterleaks/releases/download/v#{Hive::Betterleaks::VERSION}/" \
               "betterleaks_#{Hive::Betterleaks::VERSION}_#{platform}.tar.gz"
         _out, _err, status = Open3.capture3("curl", "--fail", "--location", "--silent", "--show-error",
-                                         "--proto", "=https", "--proto-redir", "=https", "--output", archive, url)
+                                         "--proto", "=https", "--proto-redir", "=https",
+                                         "--retry", "3", "--retry-max-time", "60",
+                                         "--connect-timeout", "15", "--max-time", "120",
+                                         "--output", archive, url)
         raise "Betterleaks download failed for #{platform}" unless status.success?
         raise "Betterleaks checksum mismatch for #{platform}" unless Digest::SHA256.file(archive).hexdigest == digest
 

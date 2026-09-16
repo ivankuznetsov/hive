@@ -344,3 +344,8 @@ It requires readiness to hit its temporary loopback health server and report
 that server's URL. It never invokes the operator's service manager. Build-time
 Betterleaks downloads use bounded curl retries and timeouts while retaining
 exact checksum validation.
+
+The release E2E job prepares the checksum-pinned Betterleaks bundle before
+running publication scenarios, matching ordinary CI. It retains complete
+scenario reports on success or failure for 14 days; a summary count alone
+cannot identify a failed scenario.

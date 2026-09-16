@@ -327,10 +327,21 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Bundle pinned Betterleaks
+        run: ruby packaging/betterleaks.rb
       - name: Run semantic release profile
         env:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/release-e2e
         run: bundle exec ruby bin/hive-e2e run --profile release
+      - name: Retain release E2E reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hive-release-e2e-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-e2e
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
 
   package:
     name: Candidate package verification

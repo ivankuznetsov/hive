@@ -7,13 +7,14 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
-## Public interactive demo launch configuration (2026-09-13)
+## Public interactive demo production verification (2026-09-16)
 
-The static demo and local waitlist checks do not establish hivedev.sh ownership,
-its existing deployment state, production D1/Turnstile configuration, or approved
-privacy contact/retention text. Default builds leave collection disabled. Verify
-these prerequisites before an explicitly authorized public deployment; see
-[[interactive-demo]] and `demo/README.md`.
+The owner corrected the production hostname to `hivedev.ai` and approved
+`ivan@ikuznetsov.com` and retention until launch, capped at 12 months after signup.
+Account access, production D1 migration and Turnstile secret provisioning are
+verified. Public domain and real signup verification are pending deployment.
+Retention deletion and emailed removal requests remain operator responsibilities.
+See [[interactive-demo]] and `demo/README.md`.
 
 ## Operator cancellation awaits live validation (2026-09-09)
 

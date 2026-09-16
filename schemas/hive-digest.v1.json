@@ -38,6 +38,7 @@
         "closed_at": { "type": ["string", "null"], "format": "date-time" },
         "completeness": { "enum": ["complete", "partial", "unknown"] },
         "content": { "enum": ["empty", "non_empty", "unknown"] },
+        "document": { "type": "string" },
         "last_materialized_at": { "type": ["string", "null"], "format": "date-time" },
         "stale": { "type": "boolean" },
         "selected_project": { "type": ["string", "null"] },

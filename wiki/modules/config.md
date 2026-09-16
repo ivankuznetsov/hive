@@ -645,7 +645,7 @@ reference.
    "review" => {"max_context_files" => 6, "max_owned_files" => 6}},
  "answer_digest" => {"enabled" => false, "hour" => 9},
  "daily_digest" =>
-  {"enabled" => false,
+  {"enabled" => true,
    "time_zone" => nil,
    "coverage_started_at" => nil,
    "initial_membership" => nil,
@@ -754,19 +754,18 @@ instead of silently dropping that project. See [[commands/refactor-patrol]].
 
 ## Digest config
 
-Hive's broad activity record uses a new global `daily_digest:` namespace. The
-old top-level `digest:` PRDigest-adapter block remains rejected, so an upgraded
-configuration can never silently acquire new behavior.
-
-Defaults are deliberately effect-free:
+Local document generation defaults on. An explicit `daily_digest.enabled: false`
+is preserved. Setup or daemon initialization supplies a timezone; historical
+coverage metadata from the former activity projection does not restrict PR
+queries. See [[modules/daily-digest]].
 
 ```yaml
 daily_digest:
-  enabled: false
-  time_zone: null
-  coverage_started_at: null
-  initial_membership: null
-  first_interval: null
+  enabled: true
+  time_zone: Europe/London
+  # Optional; otherwise use the configured execute agent/model route.
+  agent: opencode
+  model: opencode-go/deepseek-v4.1-flash
   materialization_interval_sec: 300
   freshness_budget_sec: 900
   telegram:
@@ -774,34 +773,10 @@ daily_digest:
     hour: 9
 ```
 
-`hive setup`, `hive migrate`, and `hive migrate --all` call the idempotent
-`DailyDigest::Migration`. Under the global config lock it detects or validates
-an IANA zone, captures the exact UTC coverage-start instant and normalized
-registered-project membership, and persists the first interval atomically. It
-preserves an existing initialized block and never flips `enabled`. Detection
-failure leaves the feature disabled with exact remediation; unrelated daemon
-automation and standalone per-project `hive migrate` work continue.
-
-When `enabled: true`, all four identity fields (`time_zone`,
-`coverage_started_at`, `initial_membership`, and `first_interval`) are required.
-The zone must exist in TZInfo, intervals must validate, cadence/freshness values
-must be positive integers, and the Telegram hour must be `0..23`. A disabled
-upgraded configuration may temporarily omit initialization fields so the daemon
-can omit only digest schedulers and continue other work.
-
-`daily_digest.enabled: false` stops refresh, catch-up, close, recovery, and
-scheduled delivery without deleting persisted records, frontiers, tombstones,
-or delivery receipts; pure CLI/Web reads remain available. Telegram requires
-both the parent feature and `daily_digest.telegram.enabled: true`. It uses the
-existing bot token environment and `Config.telegram_chat_id!`; the first
-positive ID in `bot.chat_id_allowlist` is the sole private recap destination.
-See [[modules/daily-digest]] and [[commands/digest]].
-
-Registered-project mutations append all membership evidence indefinitely and
-maintain a persisted `project_membership_event_ids` lookup alongside the
-history. This makes duplicate suppression constant-time without discarding
-history. Digest coverage parses and sorts that history once per refresh rather
-than once for every interval.
+The daemon checks for yesterday's document on the configured cadence. A saved
+closed document requires no repeated GitHub or agent work. Telegram delivery is
+separate and uses the existing bot token and first allowlisted private chat.
+Reads remain available when generation is disabled.
 
 ## Screenote config
 

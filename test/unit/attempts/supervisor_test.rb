@@ -628,7 +628,7 @@ class AttemptsSupervisorTest < Minitest::Test
         stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 1
       )
       supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
-        [ RbConfig.ruby, "-e", "sleep 10" ]
+        [ "/bin/sh", "-c", "exec sleep 10" ]
       end
       supervisor.instance_variable_set(:@cancel_reason, :signal)
       supervisor.instance_variable_set(:@cancel_signal, "TERM")

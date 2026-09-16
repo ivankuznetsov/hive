@@ -10,6 +10,24 @@ class DigestsTest < ActionDispatch::IntegrationTest
     FileUtils.rm_rf(Hive::Paths.daily_digest_root)
   end
 
+  test "persisted prose renders with readable headings and safe links" do
+    sign_in!
+    text = "# Daily digest\n\n## Shipped\n\n**Faster loading.** [#1](https://github.com/owner/repo/pull/1)\n\n<script>alert('unsafe')</script> & 🚀\n\nNext\nKeep going."
+    store = Hive::DailyDigest::Store.new
+    store.write_base(simple_record("2026-08-30").merge("document" => text, "content" => "non_empty"))
+
+    get digest_path("2026-08-30")
+
+    assert_response :success
+    assert_select ".digest-document", count: 1
+    assert_select ".digest-document h2", text: "Shipped"
+    assert_select ".digest-document strong", text: "Faster loading."
+    assert_select '.digest-document a[href="https://github.com/owner/repo/pull/1"]', text: "#1"
+    assert_select ".digest-document script", 0
+    assert_select ".digest-filter, .digest-attention, .digest-activity, .digest-amendments, .digest-badges", 0
+    assert_select "nav[aria-label='Digest date']"
+  end
+
   test "selected day is authenticated attention first filterable and read only" do
     get "/digests/2026-08-30"
     assert_redirected_to login_path

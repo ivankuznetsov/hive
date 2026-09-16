@@ -36,6 +36,13 @@ module Hive
           )
         end
 
+        if record["document"].is_a?(String)
+          return record.merge(
+            "reader_status" => "ok", "stale" => stale?(record, config),
+            "selected_project" => nil, **navigation_for(selected_date)
+          )
+        end
+
         view = project ? filter_project(record, project) : deep_copy(record)
         normalize_view_axes!(view) if project
         stale = stale?(record, config)
@@ -80,7 +87,14 @@ module Hive
         interval = @store.intervals.find do |candidate|
           utc(candidate.fetch("starts_at")) <= now && now < utc(candidate.fetch("ends_at"))
         end
-        interval && interval.fetch("local_date")
+        return interval.fetch("local_date") if interval
+
+        latest = @store.intervals.select { |entry| utc(entry.fetch("ends_at")) <= now }
+                       .max_by { |entry| utc(entry.fetch("ends_at")) }
+        return unless latest
+
+        record = @store.read(latest.fetch("local_date"))
+        latest.fetch("local_date") if record["document"].is_a?(String)
       end
 
       def navigation_for(date)
@@ -164,13 +178,9 @@ module Hive
       end
 
       def missing(date, config)
-        coverage = config["coverage_started_at"]
-        precoverage = begin
-          first_label = config.fetch("first_interval").fetch("local_date")
-          date && Date.iso8601(date.to_s) < Date.iso8601(first_label.to_s)
-        rescue Date::Error, KeyError, NoMethodError, TypeError
-          false
-        end
+        # PR evidence is queryable for dates before local digest setup.
+        coverage = nil
+        precoverage = false
         {
           "reader_status" => "missing", "local_date" => date,
           "coverage_started_at" => coverage,

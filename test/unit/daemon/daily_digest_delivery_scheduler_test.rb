@@ -33,6 +33,51 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
     end
   end
 
+  def test_previous_day_document_dispatches_at_local_hour_without_current_interval
+    with_tmp_dir do |dir|
+      store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
+      interval = Hive::DailyDigest::Calendar.new(time_zone: "Europe/London")
+                                          .interval_for("2026-08-29", sequence: 1)
+      store.write_base(record(interval, lifecycle: "closed").merge(
+        "document" => "Yesterday's digest", "content" => "non_empty"
+      ))
+      state_path = File.join(dir, "state.json")
+      scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+        state_path: state_path, enabled: true, hour: 9, store: store
+      )
+
+      assert_empty scheduler.tick(now: Time.iso8601("2026-08-30T07:59:59Z"))
+      dispatch = scheduler.tick(now: Time.iso8601("2026-08-30T08:00:00Z")).fetch(0)
+      assert_equal "2026-08-29", dispatch.fetch(:slug)
+      assert_equal "hive digest send --date 2026-08-29 --json", dispatch.fetch(:command)
+      scheduler.complete(
+        date: "2026-08-29", exit_code: 0,
+        envelope: send_envelope(store.read("2026-08-29"), "sent"),
+        now: Time.iso8601("2026-08-30T08:01:00Z")
+      )
+      restarted = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+        state_path: state_path, enabled: true, hour: 9, store: store
+      )
+      assert_empty restarted.tick(now: Time.iso8601("2026-08-30T09:00:00Z"))
+    end
+  end
+
+  def test_missing_current_interval_does_not_dispatch_older_documents_or_legacy_records
+    with_tmp_dir do |dir|
+      calendar = Hive::DailyDigest::Calendar.new(time_zone: "UTC")
+      [ [ "2026-08-28", true ], [ "2026-08-29", false ] ].each_with_index do |(date, document), index|
+        store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest-#{index}"))
+        row = record(calendar.interval_for(date, sequence: 1), lifecycle: "closed")
+        row.merge!("document" => "Older digest", "content" => "non_empty") if document
+        store.write_base(row)
+        scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+          state_path: File.join(dir, "state-#{index}.json"), enabled: true, hour: 9, store: store
+        )
+        assert_empty scheduler.tick(now: Time.iso8601("2026-08-30T09:00:00Z"))
+      end
+    end
+  end
+
   def test_sequence_navigation_survives_nonconsecutive_zone_cutover_labels
     with_tmp_dir do |dir|
       store = Hive::DailyDigest::Store.new(root: File.join(dir, "digest"))
@@ -216,6 +261,17 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
       { "lifecycle" => "closed", "record_id" => "record:one" }
     end
     assert_equal "record:one", scheduler.send(:record_id_for, "2026-08-29")
+  end
+
+  def test_previous_document_with_invalid_zone_is_not_dispatched
+    previous = Hive::DailyDigest::Calendar.new(time_zone: "UTC").interval_for("2026-08-29")
+    store = Object.new
+    store.define_singleton_method(:intervals) { [ previous ] }
+    store.define_singleton_method(:read) do |_date|
+      { "lifecycle" => "closed", "document" => "Saved digest", "time_zone" => "Mars/Olympus" }
+    end
+    scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(store: store)
+    assert_nil scheduler.send(:preceding_closed_record, Time.utc(2026, 8, 30, 12))
   end
 
   def test_invalid_delivery_hours_are_rejected

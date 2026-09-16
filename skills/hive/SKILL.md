@@ -63,7 +63,7 @@ rollback without the operator's explicit direction.
 
 ## Load the relevant reference
 
-- Read [daily-digest.md](references/daily-digest.md) when asked what happened today, yesterday, on a persisted day, or in one project's durable daily activity; use `hive digest --json` and its interval navigation rather than reconstructing history or running status first.
+- Read [daily-digest.md](references/daily-digest.md) when asked for recent merged changes; use `hive digest --json`, inspect its `local_date`, and read the saved `document`. Use an explicit date for today or yesterday.
 - Read [workflow-creator.md](references/workflow-creator.md) when ordinary language asks to create a new project-local workflow. This focused route is the `hive-workflow-creator` capability inside the single canonical `/hive` skill; it is not a second skill or package.
 - Read [workflow-creator-example.md](references/workflow-creator-example.md) for the accepted research → draft → approval editorial example.
 - Read [workflow-schema.md](references/workflow-schema.md), [workflow-stage-design.md](references/workflow-stage-design.md), [workflow-checkpoints.md](references/workflow-checkpoints.md), [workflow-permissions.md](references/workflow-permissions.md), [workflow-testing.md](references/workflow-testing.md), and [workflow-common-mistakes.md](references/workflow-common-mistakes.md) only as needed while authoring or diagnosing a newly scaffolded descriptor.

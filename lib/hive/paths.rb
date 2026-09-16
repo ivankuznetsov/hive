@@ -41,7 +41,7 @@ module Hive
     # Host-global daily activity projection. The version lives in the path so
     # future readers never have to infer a record schema from mutable config.
     def daily_digest_root
-      File.join(state_home, "daily-digest", "v1")
+      File.join(state_home, "daily-digest", "documents", "v1")
     end
 
     def daily_digest_delivery_root

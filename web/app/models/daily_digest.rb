@@ -56,7 +56,9 @@ class DailyDigest
     Hive::DailyDigest::PublicView.state(attributes).fetch("content")
   end
 
-  def selected_project = attributes["selected_project"]
+  def document = (attributes["document"] if attributes["document"].is_a?(String))
+  def document? = !document.nil?
+  def selected_project = document? ? nil : attributes["selected_project"]
   def projects = Array(attributes["projects"])
   def attention = Array(attributes["attention"])
   def items = Array(attributes["items"])

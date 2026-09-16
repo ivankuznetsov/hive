@@ -15,11 +15,19 @@ class DailyDigestDeliveryTest < Minitest::Test
   end
 
   class FakeTelegram
-    attr_reader :messages
+    attr_reader :messages, :documents
 
     def initialize(error: nil)
       @error = error
       @messages = []
+      @documents = []
+    end
+
+    def send_document(**document)
+      raise @error if @error
+
+      @documents << document
+      { "message_id" => 1 }
     end
 
     def send_message(**message)
@@ -58,6 +66,41 @@ class DailyDigestDeliveryTest < Minitest::Test
       assert_equal "sent", duplicate.outcome
       assert_equal true, duplicate.deduplicated
       assert_equal 1, telegram.messages.length
+    end
+  end
+
+  def test_document_is_sent_as_one_formatted_message
+    with_tmp_dir do |dir|
+      telegram = FakeTelegram.new
+      text = "Hive daily digest\n\nShipped\n<plain> & 🚀"
+      delivery, = build_delivery(dir, telegram: telegram, record: record.merge("document" => text))
+      assert_equal "sent", delivery.deliver(date: DATE).outcome
+      assert_equal [ { chat_id: 12_345, text: Hive::Bot::Format.html_escape(text), parse_mode: :html } ], telegram.messages
+      assert_empty telegram.documents
+    end
+  end
+
+  def test_long_document_uses_one_attachment_and_one_deduplicated_attempt
+    with_tmp_dir do |dir|
+      telegram = FakeTelegram.new
+      text = "🚀" * 2049
+      delivery, ledger = build_delivery(dir, telegram: telegram, record: record.merge("document" => text))
+      assert_equal "sent", delivery.deliver(date: DATE).outcome
+      assert_empty telegram.messages
+      assert_equal [ { chat_id: 12_345, text: text, filename: "hive-digest-#{DATE}.txt" } ], telegram.documents
+      assert_equal 1, ledger.read(DATE).fetch("attempt")
+      assert delivery.deliver(date: DATE).deduplicated
+      assert_equal 1, telegram.documents.length
+    end
+  end
+
+  def test_ambiguous_attachment_failure_is_not_automatically_retried
+    with_tmp_dir do |dir|
+      telegram = FakeTelegram.new(error: IOError.new("socket closed"))
+      delivery, ledger = build_delivery(dir, telegram: telegram, record: record.merge("document" => "x" * 4097))
+      assert_equal "unknown", delivery.deliver(date: DATE).outcome
+      assert_equal "unknown", delivery.deliver(date: DATE).outcome
+      assert_equal 1, ledger.read(DATE).fetch("attempt")
     end
   end
 

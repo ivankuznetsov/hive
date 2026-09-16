@@ -92,9 +92,16 @@ module Hive
         telegram = @telegram_factory.call(token: token, logger: logger)
         @ledger.mark_sending(record.fetch("local_date"), attempt: attempt, now: @clock.call)
         begin
-          telegram.send_message(
-            chat_id: chat_id, text: rendered.text, parse_mode: rendered.parse_mode
-          )
+          if rendered.document
+            telegram.send_document(
+              chat_id: chat_id, text: rendered.text,
+              filename: "hive-digest-#{record.fetch('local_date')}.txt"
+            )
+          else
+            telegram.send_message(
+              chat_id: chat_id, text: rendered.text, parse_mode: rendered.parse_mode
+            )
+          end
           receipt = @ledger.mark_sent(
             record.fetch("local_date"), attempt: attempt, now: @clock.call
           )
@@ -136,6 +143,8 @@ module Hive
       end
 
       def complete_empty?(record)
+        return false if record["document"].is_a?(String) && !record["document"].empty?
+
         completeness = record["effective_completeness"] || record.fetch("completeness")
         content = record["effective_content"] || record.fetch("content")
         completeness == "complete" && content == "empty"

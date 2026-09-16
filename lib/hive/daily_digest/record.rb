@@ -72,6 +72,10 @@ module Hive
           raise InvalidRecord, "sequence must be null or an integer >= 1"
         end
 
+        if data.key?("document") && (!data["document"].is_a?(String) || data["document"].strip.empty?)
+          raise InvalidRecord, "digest document must be non-empty text"
+        end
+
         data.delete("record_id")
         data["record_id"] = content_id(data, identity_key: "record_id")
         canonical_object(data).freeze

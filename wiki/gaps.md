@@ -1564,3 +1564,9 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
 - The Homebrew release-dispatch credential returned HTTP 401 during 0.7.3.
   A maintainer dispatch published the exact verified formula; the automation
   credential still needs renewal.
+
+## PRDigest document integration
+
+- PRDigest 0.4.0 and agent-cli-runtime 0.2.4 are published and clean-install
+  verified. Local Web and real test Telegram formatting/deduplication passed.
+  Installed Hive generation and presentation remain to be verified after cutover.

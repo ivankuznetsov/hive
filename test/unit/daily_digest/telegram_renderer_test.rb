@@ -64,6 +64,34 @@ class DailyDigestTelegramRendererTest < Minitest::Test
     refute_includes rendered.text, " · <1m"
   end
 
+  def test_document_preserves_visible_text_with_utf16_attachment_boundary
+    renderer = Hive::DailyDigest::TelegramRenderer.new(web_origin: "https://hive.example")
+    text = "🚀" * 2048
+    rendered = renderer.render(record.merge("document" => text))
+    assert_equal text, rendered.text
+    assert_equal :html, rendered.parse_mode
+    refute rendered.document
+    assert_equal Digest::SHA256.hexdigest(text), rendered.payload_hash
+
+    longer = renderer.render(record.merge("document" => "#{text}x"))
+    assert longer.document
+    assert_equal "#{text}x", longer.text
+    refute_equal rendered.payload_hash, longer.payload_hash
+  end
+
+  def test_document_formats_headings_emphasis_and_safe_pr_links
+    text = "# Daily digest\n\n## Hive\n\n**Faster loading.** Opens instantly with `hive digest`. [#42](https://github.com/owner/repo/pull/42)\n\n<script>alert(1)</script> [unsafe](javascript:alert)"
+    rendered = Hive::DailyDigest::TelegramRenderer.new(web_origin: "https://hive.example").render(record.merge("document" => text))
+    assert_includes rendered.text, "<b>Daily digest</b>"
+    assert_includes rendered.text, "<b>Hive</b>"
+    assert_includes rendered.text, "<b>Faster loading.</b>"
+    assert_includes rendered.text, "<code>hive digest</code>"
+    assert_includes rendered.text, '<a href="https://github.com/owner/repo/pull/42">#42</a>'
+    assert_includes rendered.text, "&lt;script&gt;"
+    refute_includes rendered.text, '<a href="javascript:'
+    refute rendered.document
+  end
+
   private
 
   def record

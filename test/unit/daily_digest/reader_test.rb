@@ -181,6 +181,7 @@ class DailyDigestReaderTest < Minitest::Test
           "ends_at" => "2026-09-02T00:00:00Z" }
       ]
     end
+    store.define_singleton_method(:read) { |_| {} }
     reader = Hive::DailyDigest::Reader.new(
       store: store, config_loader: -> { config },
       clock: -> { Time.iso8601("2026-08-30T12:00:00Z") }
@@ -193,7 +194,7 @@ class DailyDigestReaderTest < Minitest::Test
     assert_equal "2026-09-01", result.fetch("next_date")
   end
 
-  def test_precoverage_uses_first_persisted_local_label_west_of_utc
+  def test_missing_pr_document_does_not_claim_history_is_unavailable
     store = Object.new
     store.define_singleton_method(:intervals) { [] }
     config = {
@@ -203,7 +204,7 @@ class DailyDigestReaderTest < Minitest::Test
     reader = Hive::DailyDigest::Reader.new(store: store, config_loader: -> { config })
 
     assert_equal false, reader.send(:missing, "2026-08-30", config).fetch("precoverage")
-    assert_equal true, reader.send(:missing, "2026-08-29", config).fetch("precoverage")
+    assert_equal false, reader.send(:missing, "2026-08-29", config).fetch("precoverage")
   end
 
 

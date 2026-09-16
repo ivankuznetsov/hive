@@ -1,5 +1,6 @@
 require "json"
 require "net/http"
+require "stringio"
 require "telegram/bot"
 require "hive/bot/logger"
 require "hive/bot/poll_health"
@@ -104,6 +105,15 @@ module Hive
           params[:reply_markup] = inline_keyboard(reply_markup) if reply_markup && idx == chunks.length - 1
           client.api.send_message(params)
         end
+      end
+
+      # Keep long digests intact as one multipart upload and one delivery effect.
+      def send_document(chat_id:, text:, filename:)
+        content = StringIO.new(text.encode(Encoding::UTF_8))
+        document = Faraday::Multipart::FilePart.new(content, "text/plain; charset=utf-8", filename)
+        client.api.send_document(chat_id: chat_id, document: document)
+      ensure
+        content&.close
       end
 
       def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)

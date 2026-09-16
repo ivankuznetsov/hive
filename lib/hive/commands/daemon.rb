@@ -19,6 +19,7 @@ require "hive/daemon/patrol_scheduler"
 require "hive/daemon/scheduled_architecture_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/daily_digest_close_scheduler"
+require "hive/daily_digest/migration"
 require "hive/daemon/daily_digest_delivery_scheduler"
 require "hive/daemon/logger"
 require "hive/runtime_control_plane/dispatch_repository"
@@ -196,10 +197,10 @@ module Hive
         answer_digest_cfg = Hive::Config.load_global_answer_digest_block
         daily_digest_error = nil
         daily_digest_cfg = begin
-          Hive::Config.load_global_daily_digest
-        rescue Hive::ConfigError => error
+          Hive::DailyDigest::Migration.prepare!
+        rescue Hive::ConfigError, Hive::DailyDigest::Migration::InitializationError => error
           daily_digest_error = error
-          Hive::Config::DEFAULTS.fetch("daily_digest")
+          Hive::Config::DEFAULTS.fetch("daily_digest").merge("enabled" => false)
         end
         config = {
           "daemon" => daemon_cfg,

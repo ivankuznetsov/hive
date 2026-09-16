@@ -3395,7 +3395,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       "telegram" => { "enabled" => true, "hour" => 17 }
     )
 
-    with_replaced_singleton_method(Hive::Config, :load_global_daily_digest, -> { daily }) do
+    with_replaced_singleton_method(Hive::DailyDigest::Migration, :prepare!, -> { daily }) do
       dispatcher.send(:reload_config!)
     end
 
@@ -3410,8 +3410,31 @@ class HiveDaemonDispatcherTest < Minitest::Test
         with_daily_digest_delivery_scheduler: true
       )
 
-    with_replaced_singleton_method(Hive::Config, :load_global_daily_digest, lambda {
+    with_replaced_singleton_method(Hive::DailyDigest::Migration, :prepare!, lambda {
       raise Hive::ConfigError, "daily digest frontier is not initialized"
+    }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_equal({ enabled: false, interval_sec: 300 }, close_scheduler.reconfigured&.last)
+    assert_equal({ enabled: false, hour: 9 }, delivery_scheduler.reconfigured&.last)
+    assert logger.events.any? { |name, attrs|
+      name == :daily_digest_configuration_disabled &&
+        attrs[:message].include?("not initialized")
+    }
+    assert logger.events.any? { |name, _attrs| name == :config_reloaded },
+           "an invalid digest block must not prevent unrelated config reload"
+  end
+
+  def test_reload_digest_initialization_failure_disables_only_daily_schedulers
+    dispatcher, _supervisor, _controller, logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+
+    with_replaced_singleton_method(Hive::DailyDigest::Migration, :prepare!, lambda {
+      raise Hive::DailyDigest::Migration::InitializationError, "daily digest frontier is not initialized"
     }) do
       dispatcher.send(:reload_config!)
     end

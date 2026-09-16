@@ -1,105 +1,55 @@
-# Daily activity digest
+# Daily changes digest
 
-Use this route when the operator asks what happened today, yesterday, or on a
-persisted Hive day, including one project's activity, outstanding attention,
-partial history, or late amendments. The canonical source is the persisted
-global digest, not current status, logs, task-folder reconstruction, GitHub, or
-PRDigest.
+Use this route for the operator's readable summary of recent merged changes.
+Hive uses PRDigest to collect PR descriptions and relevant diffs, generates one
+text document with its configured agent, and saves it for Web, CLI and Telegram.
+The independent PRDigest product continues to work without Hive.
 
-## Read-only routing
-
-For the current persisted interval:
+## Read the saved document
 
 ```bash
 hive digest --json
-```
-
-For an explicit stored label or one project:
-
-```bash
 hive digest --date YYYY-MM-DD --json
-hive digest --date YYYY-MM-DD --project PROJECT --json
 ```
 
-Use these scenario routes exactly:
+The default selects a current preview if present, otherwise the most recent
+saved document. Inspect `local_date`; do not assume that default means today.
+Automatic generation normally writes yesterday's digest. For a requested date,
+use an explicit calendar date in the configured timezone. `previous_date` and
+`next_date` navigate saved documents, not necessarily adjacent calendar days.
 
-| Operator request | Read sequence |
-| --- | --- |
-| What happened today? | `hive digest --json` |
-| What happened yesterday? | `hive digest --json`, then `hive digest --date PREVIOUS_DATE --json` using the returned `previous_date` |
-| What happened in one project today? | `hive digest --project PROJECT --json` |
-| Is a persisted day partial? | `hive digest --date YYYY-MM-DD --json` |
-| Show a persisted day's late amendments. | `hive digest --date YYYY-MM-DD --json` |
+Read `document` as the human-facing result. It describes concrete changes and
+links them to source PRs. `items` are supporting references, not a substitute
+workflow-event report. A document covers its complete recorded repository scope;
+legacy project-filter arguments do not generate separate documents. To discuss
+one project, quote the relevant section while keeping the original date/scope.
 
-None of these read sequences begins with operational status. They do not read
-logs, refresh or send the digest, open a browser, invoke Telegram, or call the
-pending-answer digest.
+Check `reader_status` first: `ok`, `missing`, or `pruned`. A missing document does
+not mean historical GitHub changes are unavailable. A pruned document must not
+be reconstructed. `content: empty` means collection found no merged PRs, not
+that the project's other work stopped. An open document is a preview; failed
+refreshes leave the last saved text intact.
 
-To answer "yesterday", first read the current digest and follow its
-`previous_date`, then issue the explicit dated read. Never subtract a calendar
-day from `local_date`: after a time-zone cutover the labels are monotonic record
-identities and may differ from wall-clock dates.
+## Explicit mutations
 
-Project filtering is a view over the same global `record_id`. It retains global
-gaps and must not be described as a separate project-owned history.
-
-## Interpret the contract
-
-Check these dimensions independently before summarizing:
-
-- `reader_status`: `ok`, `missing`, or `pruned`;
-- `lifecycle`: `open`, `closed`, `missing`, or `pruned` in the public envelope;
-- `completeness`: `complete`, `partial`, or `unknown` for absent history;
-- `content`: `empty`, `non_empty`, or `unknown`;
-- `stale`, `last_materialized_at`, `gaps`, and `coverage_started_at`; and
-- `amendments`, including recovered gaps and late facts.
-
-A complete `empty` day is an observed no-activity result. A partial record with
-no known items is `unknown`, not empty. Say which scoped gaps constrain the
-answer. `missing` before coverage means V1 has no backfill; `pruned` means a
-tombstone exists and agents must not reconstruct the removed projection.
-
-Use `previous_date` / `next_date` for adjacent-day navigation. Preserve the
-returned `record_id`, `local_date`, persisted `time_zone`, and boundaries in the
-report. When a project has been removed or replaced, its stored label can remain
-historical and its old task URL may intentionally be absent.
-
-## Native action handoff
-
-Digest waiting items expose identity, stage/state, age, and at most a native
-task URL. They never contain the question, answer, prompt, or opaque binding.
-If the operator explicitly asks to answer, follow the native task link and
-obtain a fresh inventory with:
+Only when requested by the operator:
 
 ```bash
-hive answer TASK --project PROJECT --json
+hive digest refresh --json
+hive digest refresh --date YYYY-MM-DD --json
+hive digest send --date YYYY-MM-DD --json
 ```
 
-Then follow [brainstorm-answering.md](brainstorm-answering.md). Do not infer an
-answer from digest prose or retain a stale binding.
+Refresh without a date generates yesterday's document. Older dates can query
+GitHub evidence from before local setup; today can be previewed. Sending uses
+the saved closed document and existing Telegram settings. Short documents are
+sent as text; longer ones are complete UTF-8 text attachments. Never send or
+retry delivery merely to answer a read question.
 
-## Prohibited substitutions and effects
+Reads never call an agent, GitHub, PRDigest, refresh, or Telegram. Do not replace
+a missing document with a workflow-event dump, status scan, or log reconstruction.
+`hive answer-digest` is the unrelated pending-question delivery command.
+For current tasks needing action use the task/status routes, not digest prose.
 
-- Never reconstruct a daily record from `hive status`, task folders, logs,
-  GitHub, or PRDigest.
-- Never invoke `hive digest refresh` unless the operator explicitly requests
-  materialization or recovery; reads remain pure even when stale or missing.
-- Never invoke `hive digest send`, Telegram, or a delivery retry while answering
-  a read question.
-- Never use `hive digest --open-web` in machine mode; consume `web_url` only as
-  a human handoff.
-- Never use the sendful `hive answer-digest` as a daily activity read.
-- Never create a polling loop. A requested ongoing current-state watch belongs
-  to [status-and-watch.md](status-and-watch.md), not this historical projection.
-
-## V1 ownership and scope boundaries
-
-The daily digest is a Hive-owned record for a single authenticated Hive operator.
-It does not add team identities, team ACLs, or per-project reader ACLs.
-Agents do not configure recap schedules, destinations, or delivery-status policy;
-those remain explicit operator configuration and commands.
-No MCP-specific digest wrapper exists in V1: agents consume the stable CLI JSON contract.
-
-Reading or operating the digest does not authorize a release, version choice, publication, or deployment.
-Those actions remain outside the digest feature and require their own explicit
-operator direction.
+Reading or operating a digest does not authorize a release, version choice,
+publication, or deployment; these require explicit operator direction.

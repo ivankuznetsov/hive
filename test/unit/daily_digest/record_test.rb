@@ -11,6 +11,8 @@ class DailyDigestRecordTest < Minitest::Test
       [ base.merge("completeness" => "partial"), /empty content/ ],
       [ base.merge("source_frontiers" => []), /source_frontiers/ ],
       [ base.merge("sequence" => 0), /sequence/ ],
+      [ base.merge("document" => []), /non-empty text/ ],
+      [ base.merge("document" => " "), /non-empty text/ ],
       [ base.merge("local_date" => "bad"), /local_date/ ],
       [ base.merge("last_materialized_at" => "bad"), /ISO-8601/ ],
       [ base.merge("lifecycle" => "missing"), /must be one of/ ],

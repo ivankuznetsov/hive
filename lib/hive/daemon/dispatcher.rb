@@ -22,6 +22,7 @@ require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/daily_digest_close_scheduler"
+require "hive/daily_digest/migration"
 require "hive/daemon/daily_digest_delivery_scheduler"
 require "hive/daily_digest/hold_observer"
 require "hive/daemon/patrol_scheduler"
@@ -4183,13 +4184,13 @@ module Hive
         update_cfg = Hive::Config.load_global_update
         answer_digest_cfg = Hive::Config.load_global_answer_digest_block
         daily_digest_cfg = begin
-          Hive::Config.load_global_daily_digest
-        rescue Hive::ConfigError => error
+          Hive::DailyDigest::Migration.prepare!
+        rescue Hive::ConfigError, Hive::DailyDigest::Migration::InitializationError => error
           @logger.event(
             :daily_digest_configuration_disabled,
             error_class: error.class.name, message: error.message
           )
-          Hive::Config::DEFAULTS.fetch("daily_digest")
+          Hive::Config::DEFAULTS.fetch("daily_digest").merge("enabled" => false)
         end
         stale_agent_healer = StaleAgentHealer.new(
           controller: @controller,

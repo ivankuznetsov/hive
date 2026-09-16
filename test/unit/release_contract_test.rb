@@ -42,6 +42,19 @@ class ReleaseContractTest < Minitest::Test
     assert_equal 2, dependencies.scan("hive-cli (#{Hive::VERSION})").size
   end
 
+  def test_release_e2e_prepares_its_scanner_and_retains_failure_reports
+    workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
+    steps = workflow.fetch("jobs").fetch("release-e2e").fetch("steps")
+    scanner = steps.index { |step| step["run"] == "ruby packaging/betterleaks.rb" }
+    scenarios = steps.index { |step| step["run"] == "bundle exec ruby bin/hive-e2e run --profile release" }
+    refute_nil scanner
+    refute_nil scenarios
+    assert_operator scanner, :<, scenarios
+    reports = steps.find { |step| step["name"] == "Retain release E2E reports" }
+    assert_equal "always()", reports.fetch("if")
+    assert_equal "${{ runner.temp }}/release-e2e", reports.fetch("with").fetch("path")
+  end
+
   def test_agent_conversion_guide_is_packaged_for_installed_users
     spec = Gem::Specification.load(File.join(ROOT, "hive.gemspec"))
     assert_includes spec.files, "docs/guides/current-format-migration.md"

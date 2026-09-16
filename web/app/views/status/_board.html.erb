@@ -57,7 +57,7 @@
                              class="kanban-card" data-task-slug="<%= task.slug %>">
                       <div class="kanban-card-heading">
                         <%= status_dot(task, fresh: display_fresh) %>
-                        <%= link_to task.title, task_path(band.project.name, task.slug, source: ("archive" if local_assigns[:archived])) %>
+                        <%= link_to task.title, task_path(band.project.name, task.slug, source: ("archive" if local_assigns[:archived] || task["archive_source"])) %>
                       </div>
                       <% display = TaskDisplay.new(task, fresh: display_fresh) %>
                       <div class="kanban-card-meta">
@@ -69,7 +69,7 @@
                       <% end %>
                       <%= render "tasks/primary_actions", task:,
                             daemon_enabled: band.daemon_enabled, compact: true,
-                            mutations_enabled: status_fresh %>
+                            mutations_enabled: status_fresh && !task["archive_source"] %>
                     </article>
                   <% end %>
                 <% end %>

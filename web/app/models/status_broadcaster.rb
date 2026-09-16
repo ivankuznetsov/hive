@@ -99,8 +99,8 @@ class StatusBroadcaster
       }
     end
 
-    def archive_snapshot
-      feed.archive_snapshot
+    def archive_snapshot(project: nil)
+      project ? ProjectArchive.snapshot(project) : feed.archive_snapshot
     end
 
     def current_version?(candidate)

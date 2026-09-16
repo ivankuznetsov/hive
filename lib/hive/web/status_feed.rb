@@ -7,6 +7,7 @@ require "hive/config"
 require "hive/daemon/operational_snapshot"
 require "hive/secret_patterns"
 require "hive/tui/state_source"
+require "hive/web/status_snapshot_store"
 
 module Hive
   module Web
@@ -128,11 +129,13 @@ module Hive
 
       def initialize(
         interval: DEFAULT_INTERVAL,
+        snapshot_store: nil,
         status_command: CachedStatusCommand.new,
         archive_status_command: Hive::Commands::Status.new(json: true, archive: true),
         clock: -> { Time.now.utc }
       )
         @interval = interval
+        @snapshot_store = snapshot_store
         @status_command = status_command
         @archive_status_command = archive_status_command
         @clock = clock
@@ -148,6 +151,7 @@ module Hive
         @prime_claim = nil
         @refreshing = false
         @poller = nil
+        restore_snapshot
       end
 
       # Compatibility read for callers that only consume the status payload.
@@ -218,8 +222,11 @@ module Hive
       # State-aware subscribers receive degradation and recovery transitions
       # even when the underlying last-good rows are unchanged.
       def each_state(on_idle: nil)
+        # Preserve the restored baseline even if the first background scan
+        # finishes before this subscriber gets scheduled again.
+        initial = current_publication
         ensure_poller!
-        state, last_key, seen_generation = current_publication
+        state, last_key, seen_generation = initial.first ? initial : current_publication
         yield state
 
         loop do
@@ -276,8 +283,22 @@ module Hive
 
       private
 
-      def compute_snapshot
-        projects = Hive::Config.registered_projects
+      def restore_snapshot
+        saved = @snapshot_store&.read
+        return unless saved
+
+        payload = saved.fetch("payload")
+        @latest_good = payload
+        @latest_key = state_key("cached", payload)
+        @latest_token = token_for(@latest_key)
+        @state = State.new(
+          payload: payload, availability: "cached", token: @latest_token,
+          last_success_at: saved.fetch("last_success_at"), error: nil,
+          scan_count: 0, generation: 0
+        )
+      end
+
+      def compute_snapshot(projects)
         payload = @status_command.json_payload(projects)
         overlay_operational_recoveries(payload, projects)
       end
@@ -295,7 +316,8 @@ module Hive
         end
 
         begin
-          publish_success(compute_snapshot)
+          projects = Hive::Config.registered_projects
+          publish_success(compute_snapshot(projects), projects: projects)
         rescue StandardError => e
           publish_failure(e)
         ensure
@@ -357,15 +379,17 @@ module Hive
 
       def poll_loop
         loop do
+          refresh_state if current_state&.availability == "cached"
           sleep @interval
           refresh_state
         end
       end
 
-      def publish_success(payload)
+      def publish_success(payload, projects: Hive::Config.registered_projects)
         key = state_key("fresh", payload)
         token = cached_token_for(key)
         now = iso_time(@clock.call)
+        @snapshot_store&.write(payload, last_success_at: now, projects: projects)
         @monitor.synchronize do
           @generation += 1
           @latest_good = payload

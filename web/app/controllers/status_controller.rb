@@ -12,6 +12,7 @@ class StatusController < ApplicationController
     @payload = page_snapshot.payload
     @status_version = page_snapshot.version
     @status_fresh = page_snapshot.fresh?
+    @status_display_fresh = @status_fresh || page_snapshot.availability == "cached"
     @projects = StatusBroadcaster.projects(@payload)
     requested_project = params[:project].to_s.presence
     @selected_project = @projects.find { |project| project.name == requested_project }
@@ -21,19 +22,19 @@ class StatusController < ApplicationController
     order = TaskDisplay::STATES.keys
     @visible_projects = @visible_projects.map do |project|
       tasks = project.attributes.fetch("tasks", []).sort_by do |attributes|
-        display = TaskDisplay.new(Task.new(project: project, attributes: attributes), fresh: @status_fresh)
+        display = TaskDisplay.new(Task.new(project: project, attributes: attributes), fresh: @status_display_fresh)
         [ order.index(display.state), -Time.parse(attributes["mtime"].to_s).to_i ]
       rescue ArgumentError
         [ order.index(display.state), 0 ]
       end
       Project.new(project.attributes.merge("tasks" => tasks))
     end
-    @task_counts = @visible_projects.flat_map(&:active_tasks).map { |task| TaskDisplay.new(task, fresh: @status_fresh).state }.tally
+    @task_counts = @visible_projects.flat_map(&:active_tasks).map { |task| TaskDisplay.new(task, fresh: @status_display_fresh).state }.tally
     @task_state = params[:state].to_s.presence_in(order)
     if @task_state
       @visible_projects = @visible_projects.filter_map do |project|
         tasks = project.attributes.fetch("tasks", []).select do |attributes|
-          TaskDisplay.new(Task.new(project: project, attributes: attributes), fresh: @status_fresh).state == @task_state
+          TaskDisplay.new(Task.new(project: project, attributes: attributes), fresh: @status_display_fresh).state == @task_state
         end
         Project.new(project.attributes.merge("tasks" => tasks)) if tasks.any? || project["error"].present?
       end

@@ -112,7 +112,7 @@
 <% elsif @task_state && @visible_projects.empty? %>
   <div class="empty-state"><p>No tasks in this state.</p></div>
 <% elsif @status_view == "board" %>
-  <%= render "status/board", board: @board, status_fresh: @status_fresh %>
+  <%= render "status/board", board: @board, status_fresh: @status_fresh, status_display_fresh: @status_display_fresh %>
 <% else %>
   <%= render "status/projects", projects: @visible_projects %>
 <% end %>

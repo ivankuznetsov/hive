@@ -1,4 +1,4 @@
-<% content_for(:title, "#{web_product_name} — archive") %>
+<% content_for(:title, "#{web_product_name} — #{@board ? "done" : "archive"}") %>
 
 <div class="status-layout">
   <%= render "status/project_nav", projects: @projects,
@@ -6,7 +6,7 @@
   <div class="status-main">
     <div class="status-view-toolbar">
       <div>
-        <h1>Archive</h1>
+        <h1><%= @board ? "Done" : "Archive" %></h1>
         <p class="muted">Finished tasks and their results.</p>
       </div>
       <%= link_to "Back to status",
@@ -14,6 +14,10 @@
             class: "btn btn-ghost btn-sm" %>
     </div>
 
+    <% if @board %>
+      <%= render "status/board", board: @board, status_fresh: false,
+            status_display_fresh: true, archived: true, expand_completed: true %>
+    <% else %>
     <div id="status-archive">
       <% if @visible_projects.empty? %>
         <div class="empty-state">
@@ -58,5 +62,6 @@
         <% end %>
       <% end %>
     </div>
+    <% end %>
   </div>
 </div>

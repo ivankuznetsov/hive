@@ -51,6 +51,7 @@ class StatusController < ApplicationController
     return redirect_to status_filter_path(project: nil) if requested_project && !@selected_project
 
     @visible_projects = @selected_project ? [ @selected_project ] : @projects
+    @board = Board.new(@visible_projects) if params[:view] == "board"
   end
 
   private

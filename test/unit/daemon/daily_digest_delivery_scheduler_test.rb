@@ -263,6 +263,17 @@ class HiveDaemonDailyDigestDeliverySchedulerTest < Minitest::Test
     assert_equal "record:one", scheduler.send(:record_id_for, "2026-08-29")
   end
 
+  def test_previous_document_with_invalid_zone_is_not_dispatched
+    previous = Hive::DailyDigest::Calendar.new(time_zone: "UTC").interval_for("2026-08-29")
+    store = Object.new
+    store.define_singleton_method(:intervals) { [ previous ] }
+    store.define_singleton_method(:read) do |_date|
+      { "lifecycle" => "closed", "document" => "Saved digest", "time_zone" => "Mars/Olympus" }
+    end
+    scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(store: store)
+    assert_nil scheduler.send(:preceding_closed_record, Time.utc(2026, 8, 30, 12))
+  end
+
   def test_invalid_delivery_hours_are_rejected
     [ -1, 24, "bad" ].each do |hour|
       assert_raises(ArgumentError) do

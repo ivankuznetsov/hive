@@ -80,11 +80,12 @@ class DailyDigestTelegramRendererTest < Minitest::Test
   end
 
   def test_document_formats_headings_emphasis_and_safe_pr_links
-    text = "# Daily digest\n\n## Hive\n\n**Faster loading.** Opens instantly. [#42](https://github.com/owner/repo/pull/42)\n\n<script>alert(1)</script> [unsafe](javascript:alert)"
+    text = "# Daily digest\n\n## Hive\n\n**Faster loading.** Opens instantly with `hive digest`. [#42](https://github.com/owner/repo/pull/42)\n\n<script>alert(1)</script> [unsafe](javascript:alert)"
     rendered = Hive::DailyDigest::TelegramRenderer.new(web_origin: "https://hive.example").render(record.merge("document" => text))
     assert_includes rendered.text, "<b>Daily digest</b>"
     assert_includes rendered.text, "<b>Hive</b>"
     assert_includes rendered.text, "<b>Faster loading.</b>"
+    assert_includes rendered.text, "<code>hive digest</code>"
     assert_includes rendered.text, '<a href="https://github.com/owner/repo/pull/42">#42</a>'
     assert_includes rendered.text, "&lt;script&gt;"
     refute_includes rendered.text, '<a href="javascript:'

@@ -100,6 +100,24 @@ class DailyDigestDocumentWriterTest < Minitest::Test
     end
   end
 
+  def test_default_clock_materializes_yesterday_and_invalid_dates_fail_cleanly
+    with_tmp_global_config do |home|
+      config = { "enabled" => true, "time_zone" => "UTC" }
+      empty = { "digest" => { "repositories" => [] } }
+      writer = Hive::DailyDigest::DocumentWriter.new(
+        config_loader: -> { config }, projects_loader: -> { [] },
+        store: Hive::DailyDigest::Store.new(root: File.join(home, "documents")),
+        facts_loader: ->(**_) { empty }
+      )
+      before = Time.now.utc.to_date.prev_day.iso8601
+      result = writer.refresh.first
+      after = Time.now.utc.to_date.prev_day.iso8601
+      assert_includes [ before, after ], result.fetch("local_date")
+      assert_equal "closed", result.fetch("status")
+      assert_raises(Hive::DailyDigest::InvalidRecord) { writer.refresh(date: "invalid") }
+    end
+  end
+
   private
 
   def facts

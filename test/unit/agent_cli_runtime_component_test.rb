@@ -331,7 +331,8 @@ class AgentCliRuntimeComponentTest < Minitest::Test
 
     refute_nil dependency
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
-    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
+    refute dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.4"))
     assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.99"))
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.3.0"))
     assert File.read(File.expand_path("../../lib/hive.rb", __dir__))

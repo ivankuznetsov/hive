@@ -82,4 +82,29 @@ class DailyDigestDocumentGeneratorTest < Minitest::Test
       assert_includes error.message, "time or output limit"
     end
   end
+  def test_generated_document_redacts_secrets_and_rejects_blank_completion
+    config = Hive::Config::DEFAULTS.merge("daily_digest" => { "agent" => "claude" })
+    generator = Hive::DailyDigest::DocumentGenerator.new(config_loader: -> { config })
+    token = "ghp_#{'u' * 36}"
+    output = { type: "result", subtype: "success", is_error: false, result: "Changes: #{token}" }.to_json
+    generator.define_singleton_method(:capture) { |*_args| output }
+    assert_equal "Changes: [REDACTED:github_token]", generator.generate({})
+    output = { type: "result", subtype: "success", is_error: false, result: " " }.to_json
+    error = assert_raises(Hive::AgentError) { generator.generate({}) }
+    assert_includes error.message, "complete document"
+  end
+  def test_timeout_cleanup_preserves_the_error_if_the_agent_already_exited
+    with_tmp_global_config do
+      invocation = Struct.new(:argv, :stdin_data).new([ RbConfig.ruby, "-e", "exit 0" ], "")
+      profile = Struct.new(:subscription_environment).new({})
+      wait = Process.method(:waitpid2)
+      reaped = ->(pid, _flags) { wait.call(pid); nil }
+      with_replaced_singleton_method(Process, :waitpid2, reaped) do
+        error = assert_raises(Hive::AgentError) do
+          Hive::DailyDigest::DocumentGenerator.new(timeout_sec: 0).send(:capture, invocation, profile)
+        end
+        assert_includes error.message, "time or output limit"
+      end
+    end
+  end
 end

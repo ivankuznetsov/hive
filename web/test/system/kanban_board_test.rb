@@ -114,7 +114,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     visit board_path(project: project)
     assert_selector "#{band} [data-stage='1-inbox'].is-folded"
     assert_selector "#{band} [data-stage='9-done']:not(.is-folded)"
-    assert_no_selector "#{band} [data-stage='9-done'] .kanban-card"
+    assert_selector "#{band} [data-stage='9-done'] .kanban-card", text: "Completed card"
 
     # An untouched empty column opens when a live task arrives.
     new_slug = create_task!(project, "New brainstorm card")

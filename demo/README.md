@@ -1,9 +1,18 @@
 # Hive interactive demo
 
-A separate website for hivedev.ai, built from the real Hive Web board and task
-templates. All tasks and evidence are fictional. Browser interactions choose
-prepared states; no Rails server, daemon, provider, GitHub connection, or agent
-runs behind the public demo. Only the Cloud waitlist needs a Worker and D1.
+A separate website for hivedev.ai, built from the real Hive Web layout, status,
+archive, task, digest, workflow, module, patrol, and repository templates. Every
+record is captured from a real Hive installation into a reviewed public snapshot;
+nothing is scripted or invented, and no Rails server, daemon, provider, GitHub
+connection, or agent runs behind the public demo. Only the Cloud waitlist needs a
+Worker and D1.
+
+The visitor-facing surface is the saved snapshot: five public projects, ten
+completed feature stories with their original documents, reviews, and merged pull
+requests, two genuinely unfinished tasks with their recorded brainstorm and plan
+state, the installed Honeycomb workflow and module, selected Patrol evidence, and
+the persisted 2026-09-15 digest. A persistent notice names the capture time and
+that actions are read-only.
 
 ## Local preview
 
@@ -19,7 +28,7 @@ npm run dev
 ```
 
 Open http://127.0.0.1:8791. The default build deliberately disables email
-collection and says so in the form. The demo remains fully interactive.
+collection and says so in the form. The demo remains fully browsable.
 The checked-in Wrangler database ID is a local placeholder, not a remote binding.
 No deploy command or automatic publication is part of the build.
 Stop and restart `npm run dev` after rebuilding: the build replaces its generated
@@ -50,25 +59,48 @@ the converter.
 
 ## Data and rendering
 
-- `scenarios/notebook.json`: four tasks and both dark-mode answer branches.
-- `../web/script/export_demo.rb`: isolated, build-only Rails view renderer.
-- `../web/script/support/demo/exporter.rb`: actual board, summary, Markdown result,
-  and eager diff rendering with a restrictive HTML allowlist.
-- `src/`: accessible demo shell, navigation, story controls, and waitlist form.
+- `snapshot/selection.json`: the explicit corpus allowlist: projects, tasks,
+  selected documents, and the digest/patrol/workflow selections.
+- `snapshot/data/`, `snapshot/documents/`, `snapshot/changes/`: the reviewed
+  public dataset captured from the operator installation. Only these files are
+  checked in; `snapshot/manifest.json` records per-file hashes and redactions.
+- `script/capture_snapshot.mjs`: maintainer-only, read-only capture. It resolves
+  each selected task from native `hive` projections, verifies merged pull-request
+  evidence through the public GitHub API, applies the explicit redactions, and
+  fails closed on any forbidden content. Run it from a machine with the real
+  installation: `node script/capture_snapshot.mjs`. It never writes to Hive state.
+- `script/audit_snapshot.mjs`: reviews the checked-in dataset for local paths,
+  tokens, excluded projects, unapproved URLs, control bytes, and provenance drift.
+  Capture runs it automatically; `node script/audit_snapshot.mjs` re-audits.
+- `script/lib/snapshot.mjs`: shared selection/dataset validation and redaction rules.
+- `../web/script/support/demo/`: the isolated Rails view exporter. `snapshot.rb`
+  loads the dataset, `routes.rb` builds the canonical route graph, `static.rb`
+  hardens rendered fragments, and `views/` adapts the real templates (no auth
+  forms, streams, remote avatars, or live application imports).
+- `../web/script/export_demo.rb`: build-only Rails view renderer.
+- `src/`: the snapshot shell, saved-state action explanations, and waitlist form.
 - `worker/index.mjs`: same-origin signup handler; no public list/read endpoint.
 - `migrations/0001_waitlist.sql`: unique email key and minimal signup metadata.
 - `dist/`: generated public files only; recreated on each build.
 
-`manifest.json` records the source commit and schema version, maps nine prepared
-states to static fragments, and names fingerprinted Hive CSS. Rebuild from a
-clean, reviewed commit when refreshing the published demo. Do not edit `dist/`.
-New active controls or external asset references in a shared template fail the
-export rather than silently reconnecting the demo to a live application.
+`routes.json` is the route manifest: it maps every allowed path to its exported
+page, records the frozen capture time and UI SHA, and names the fingerprinted
+Hive CSS. Path-based filters (`/board/<project>/<state>`, `/archive/<project>`,
+`/done`, `/tasks/<project>/<slug>/documents/<name>`) give every surface a real
+URL, so deep links, reload, and Back/Forward work without client-side routing.
+Unknown paths stay 404. Rebuild from a clean, reviewed commit when refreshing the
+published demo, and never edit `dist/` by hand.
 
-Progress is stored in sessionStorage (memory if unavailable). Back/Forward
-changes the selected task/panel, not workflow progress. Reset restores the
-initial board. A stale branch panel falls back to Overview. Email is never saved
-in browser storage or URLs; resetting the story does not remove a signup.
+Every rendered fragment passes a structural allowlist. Forms, inputs, buttons
+without a snapshot explanation, scripts, lazy frames, remote media, unresolved
+local paths, executable URL schemes, and unreviewed external links fail the
+export or are replaced with a visible note. The saved-state action buttons only
+explain that the action needs a local or Cloud Hive; they never submit.
+
+Browsing performs no writes: there is no sessionStorage or localStorage state,
+no polling, WebSockets, or GitHub calls. Email is never saved in browser storage
+or URLs. Opening the waitlist dialog is the only action that loads a third-party
+asset (Turnstile).
 
 ## Preparing an authorized deployment
 
@@ -112,10 +144,11 @@ origins. Do not share the production database with preview.
 4. Deploy the reviewed bundle to the dedicated Worker, bind hivedev.ai, and enable
    only the intended public route. Static content is served asset-first; only
    `/api/waitlist` runs Worker code. Keep unknown paths as true 404s.
-5. Verify the board, both scripted branches, mobile view, both installation
-   links, a synthetic signup plus authenticated D1 readback, duplicate handling,
-   and privacy notice. Delete the synthetic record. Watch request errors during
-   the initial verification window without logging email bodies or tokens.
+5. Verify the board, the archive filters and document routes, a representative
+   long plan and review on mobile, both installation links, a synthetic signup
+   plus authenticated D1 readback, duplicate handling, and privacy notice. Delete
+   the synthetic record. Watch request errors during the initial verification
+   window without logging email bodies or tokens.
 
 There is no email delivery in v1. Signup success means the email is durably
 recorded for future Cloud availability updates, not that access was granted.

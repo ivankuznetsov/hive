@@ -166,6 +166,29 @@ test('unknown routes stay 404 and missing documents are not fabricated', async (
   await ctx.close();
 });
 
+test('crawls every exported route and carries no subscriber or operator material', async () => {
+  const ctx = await context();
+  const page = await ctx.newPage();
+  const manifest = JSON.parse(await readFile(`${root}dist/routes.json`, 'utf8'));
+  const external = [];
+  page.on('request', request => { if (!request.url().startsWith(base)) external.push(request.url()); });
+  for (const route of manifest.routes) {
+    const response = await page.request.get(`${base}${route.path}`);
+    assert.equal(response.status(), 200, `${route.path} did not load`);
+    const html = await response.text();
+    assert.doesNotMatch(html, /\/home\/|asterio|writero|hive-private/);
+    assert.doesNotMatch(html, /email_key|ghp_[A-Za-z0-9]{20,}/);
+    for (const match of html.matchAll(/(?:href|src)="(https?:[^"]+)"/g)) {
+      assert.match(match[1], /^https:\/\/(?:github\.com|hivecli\.sh)(?:\/|$)/, `${route.path} references ${match[1]}`);
+    }
+  }
+  const privacy = await page.request.get(`${base}/privacy.html`);
+  assert.equal(privacy.status(), 200);
+  assert.match(await privacy.text(), /waitlist/i);
+  assert.deepEqual(external, []);
+  await ctx.close();
+});
+
 test('mobile: long plan and review documents do not overflow, keyboard action notice works', async () => {
   const ctx = await context({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await ctx.newPage();

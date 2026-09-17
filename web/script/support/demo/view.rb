@@ -57,7 +57,7 @@ module HiveDemo
       state = changes.key?(:state) ? changes[:state] : @task_state
       case @route&.kind
       when :archive
-        @route.view == "board" ? routes.done_path(project) : routes.archive_path(project)
+        routes.archive_path(project, view: @route.view)
       else
         @status_view == "grid" ? routes.grid_path(project, state) : routes.board_path(project, state)
       end

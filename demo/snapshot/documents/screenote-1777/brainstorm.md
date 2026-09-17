@@ -3,7 +3,7 @@
 Grounding notes (from the repo, so the questions are concrete):
 - Existing REST API is thin: `POST /api/v1/screenshots` (create + direct image),
   `GET /api/v1/screenshots/:id/annotations` (index), `PUT /api/screenshots/:id/upload`
-  (signed-token upload). Auth = project API key via `Authorization: Bearer sk_proj_...`.
+  (signed-token upload). Auth = project API key via `Authorization: <redacted-credential>`.
 - A rich **MCP server** already exists (17 FastMCP tools) covering projects, pages,
   screenshots, multi-viewport upload, annotations, comments, resolve/reopen,
   collaboration. Transport auth accepts project API keys *or* OAuth 2.1 bearer tokens

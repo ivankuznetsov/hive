@@ -3,7 +3,7 @@
 <section class="empty-state" aria-labelledby="unavailable-heading">
   <h2 id="unavailable-heading">Not part of this saved snapshot</h2>
   <p><%= @surface.to_s == "telegram" ? "Telegram pairing and messaging" : "Agent login and account management" %> is an administrative surface that depends on a running Hive installation and operator credentials. Nothing from that configuration is published here.</p>
-  <p class="hint">Every other navigation @surface in this demo browses captured real work.</p>
+  <p class="hint">Every other navigation surface in this demo browses captured real work.</p>
   <p>
     <%= link_to "Back to the status board", root_path, class: "btn btn-secondary btn-sm" %>
     <a class="btn btn-ghost btn-sm" href="https://hivecli.sh" rel="noopener noreferrer">Run Hive locally</a>

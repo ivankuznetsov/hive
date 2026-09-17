@@ -24,9 +24,9 @@
     "observed_at": "2026-07-17T01:14:29.801632Z",
     "state": "current"
   },
-  "captured_at": "2026-09-17T09:28:07.265Z",
+  "captured_at": "2026-09-17T09:53:52.482Z",
   "observed_at": null,
-  "age_seconds": 1422140,
+  "age_seconds": 1423685,
   "documents": [
     {
       "name": "idea.md",
@@ -109,8 +109,8 @@
   "change": {
     "state": "available",
     "path": "changes/honeycomb-1849.patch",
-    "bytes": 392992,
-    "sha256": "28138a8c176bdf3aa89b18984eaaee61d238247ba22ce75bdf5c01838c8cbc81",
+    "bytes": 392995,
+    "sha256": "60b5ceb8f5c85b629f5c282cb66a5e3f1b77c1113e06490581a14228215e5dea",
     "truncated": false,
     "redacted": true,
     "provenance": {

@@ -1,5 +1,3 @@
-require "json"
-
 module HiveDemo
   # Canonical path-based route graph for the exported snapshot. Every internal
   # link is resolved through this map; unknown routes are not exported.
@@ -17,17 +15,7 @@ module HiveDemo
 
     def manifest
       @by_path.values.sort_by(&:path).map do |route|
-        {
-          "path" => route.path,
-          "page" => route.page,
-          "title" => route.title,
-          "kind" => route.kind.to_s,
-          "group" => route.group,
-          "project" => route.project,
-          "task" => route.task,
-          "state" => route.state,
-          "view" => route.view
-        }.compact
+        route.to_h.compact.transform_keys(&:to_s).merge("kind" => route.kind.to_s)
       end
     end
 
@@ -73,23 +61,9 @@ module HiveDemo
     end
 
     def status_states
-      @status_states ||= begin
-        all = Hash.new(0)
-        snapshot.projects.each do |project|
-          project.active_tasks.each do |task|
-            all[TaskDisplay.new(task, fresh: true).state] += 1
-          end
-        end
-        all
-      end
-    end
-
-    def project_states(project)
-      counts = Hash.new(0)
-      project.active_tasks.each do |task|
-        counts[TaskDisplay.new(task, fresh: true).state] += 1
-      end
-      counts
+      @status_states ||= snapshot.projects.flat_map(&:active_tasks)
+                                 .map { |task| TaskDisplay.new(task, fresh: true).state }
+                                 .tally
     end
 
     private
@@ -109,14 +83,15 @@ module HiveDemo
       add("/archive", "Archive", :archive, "archive")
       add("/done", "Done", :archive, "archive", view: "board")
       add("/repos", "Repositories", :repos, "repos")
-      add("/honeycombs/workflows", "Workflows", :workflows, "honeycombs", project: "hive")
-      add("/honeycombs/modules", "Modules", :modules, "honeycombs", project: "hive")
-      add("/patrol", "Patrol", :patrol, "patrol", project: "hive")
+      add("/honeycombs/workflows", "Workflows", :workflows, "honeycombs", project: snapshot.workflows.fetch("project"))
+      add("/honeycombs/modules", "Modules", :modules, "honeycombs", project: snapshot.modules.fetch("project"))
+      add("/patrol", "Patrol", :patrol, "patrol", project: snapshot.patrol.fetch("project"))
       add("/unavailable/agents", "Agents unavailable", :unavailable, "agents")
       add("/unavailable/telegram", "Telegram unavailable", :unavailable, "telegram")
 
       digest_date = snapshot.digest.fetch("local_date")
-      add("/digest/#{digest_date}", "Digest #{digest_date}", :digest, "digest", project: "hive")
+      digest_project = snapshot.digest.fetch("projects").first.fetch("name")
+      add("/digest/#{digest_date}", "Digest #{digest_date}", :digest, "digest", project: digest_project)
 
       snapshot.projects.each do |project|
         name = project.name
@@ -124,7 +99,7 @@ module HiveDemo
         add("/grid/#{name}", "#{name} grid", :status, "status", project: name, view: "grid")
         add("/archive/#{name}", "#{name} archive", :archive, "archive", project: name)
         add("/done/#{name}", "#{name} done", :archive, "archive", project: name, view: "board")
-        project_states(project).keys.concat(TaskDisplay::STATES.keys).uniq.each do |state|
+        TaskDisplay::STATES.each_key do |state|
           add("/board/#{name}/#{state}", "#{name} board · #{state}", :status, "status", project: name, view: "board", state: state)
           add("/grid/#{name}/#{state}", "#{name} grid · #{state}", :status, "status", project: name, view: "grid", state: state)
         end

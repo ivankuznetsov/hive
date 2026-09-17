@@ -24,9 +24,9 @@
     "observed_at": "2026-09-01T10:50:22.166001Z",
     "state": "partial"
   },
-  "captured_at": "2026-09-17T09:53:52.482Z",
+  "captured_at": "2026-09-17T10:12:38.939Z",
   "observed_at": "2026-09-01T10:50:09.508266Z",
-  "age_seconds": 1379010,
+  "age_seconds": 1380137,
   "documents": [
     {
       "name": "idea.md",
@@ -189,10 +189,10 @@
   "change": {
     "state": "available",
     "path": "changes/screenote-42619.patch",
-    "bytes": 495074,
-    "sha256": "34bee3a32470c45ce491c52b86c18fdad6b9a491b3f5bda6c9675c960408ec05",
+    "bytes": 495054,
+    "sha256": "88fb64b14b765cc7ef20dcb6b020bb67bb44c04adc25435fa1fa69cf01c806f8",
     "truncated": false,
-    "redacted": false,
+    "redacted": true,
     "provenance": {
       "repository": "ivankuznetsov/screenote",
       "url": "https://github.com/ivankuznetsov/screenote/pull/67",

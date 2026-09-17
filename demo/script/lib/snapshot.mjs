@@ -23,7 +23,7 @@ export const FORBIDDEN_PATTERNS = Object.freeze([
   ['prelaunch_endpoint', /\bhivedev\.sh\b/, 'pre-launch endpoint'],
   ['secret', /\b(?:gh[pous]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/, 'credential or private key'],
   ['active_content', /\b(?:javascript:|vbscript:|data:text\/html)|\bon(?:error|load|click)\s*=\s*["']/i, 'executable content'],
-  ['email', /\b[A-Za-z0-9._%+-]+@(?!example\.(?:com|org|net)\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/, 'email address'],
+  ['email', /\b[A-Za-z0-9._%+-]+@(?!example\.(?:com|org|net)(?![A-Za-z0-9.-]))[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/, 'email address'],
   ['control_bytes', /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/, 'control bytes'],
   ['null_byte', /\u0000/, 'null byte']
 ]);
@@ -82,6 +82,9 @@ export function validateSelection(selection) {
   for (const project of selection.projects || []) {
     if (EXCLUDED_PROJECTS.includes(project.name)) {
       errors.push(`project ${project.name} is not publishable`);
+    }
+    if (project.visibility !== 'public') {
+      errors.push(`project ${project.name} must be explicitly public to be published`);
     }
   }
   const selectedProjects = new Set((selection.projects || []).map((project) => project.name));
@@ -179,10 +182,34 @@ export const HOME_PATH_REDACTION = Object.freeze({
 });
 
 export const EMAIL_REDACTION = Object.freeze({
-  pattern: '\\b[A-Za-z0-9._%+-]+@(?!example\\.(?:com|org|net)\\b)[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b',
+  pattern: '\\b[A-Za-z0-9._%+-]+@(?!example\\.(?:com|org|net)(?![A-Za-z0-9.-]))[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b',
   replace: '<email>',
   kind: 'email',
   reason: 'Personal email addresses are not publishable'
+});
+
+export const PASSWORD_REDACTION = Object.freeze({
+  pattern: '\\b(?:[A-Za-z][A-Za-z0-9]*_)*(?:password|passwd|pwd)\\b[\'"]?\\s*[:=]\\s*[\'"]?[^\\s\'"]{6,}[\'"]?',
+  flags: 'gi',
+  replace: '<redacted-credential>',
+  kind: 'password',
+  reason: 'Password assignments are not publishable'
+});
+
+export const SESSION_REDACTION = Object.freeze({
+  pattern: '(?:Set-)?Cookie:\\s*[^;\\s]*(?:session(?:id)?|sid|auth)[^;=\\s]*=[^;\\s]{8,}',
+  flags: 'gi',
+  replace: '<redacted-credential>',
+  kind: 'session',
+  reason: 'Session cookie values are not publishable'
+});
+
+export const API_KEY_REDACTION = Object.freeze({
+  pattern: '\\bapi[_\\-]?key\\b[\'"]?[\\s:=]{0,3}[\'"]?[A-Za-z0-9_\\-]{20,}[\'"]?',
+  flags: 'gi',
+  replace: '<redacted-credential>',
+  kind: 'api_key',
+  reason: 'API key assignments are not publishable'
 });
 
 export const PEM_REDACTION = Object.freeze({
@@ -215,9 +242,35 @@ export const BEARER_REDACTION = Object.freeze({
   reason: 'Bearer credential examples are redacted before publication'
 });
 
+export const PASSWORD_SQL_REDACTION = Object.freeze({
+  pattern: '\\bPASSWORD\\s+[\'"][^\\s\'"]{6,}[\'"]',
+  flags: 'gi',
+  replace: '<redacted-credential>',
+  kind: 'password',
+  reason: 'SQL password literals are not publishable'
+});
+
+export const PASSWORD_XML_REDACTION = Object.freeze({
+  pattern: '<password>\\s*[^<\\s]{6,}\\s*</password>',
+  flags: 'gi',
+  replace: '<redacted-credential>',
+  kind: 'password',
+  reason: 'XML password elements are not publishable'
+});
+
+export const PASSWORD_CLI_REDACTION = Object.freeze({
+  pattern: '--password\\s+[\'"]?[^\\s\'"]{6,}[\'"]?',
+  flags: 'gi',
+  replace: '<redacted-credential>',
+  kind: 'password',
+  reason: 'CLI password arguments are not publishable'
+});
+
 export function defaultRedactions() {
   return [
     PRIVATE_PROJECT_REDACTION, LOCAL_PATH_REDACTION, REPO_PATH_REDACTION, HOME_PATH_REDACTION,
-    PEM_REDACTION, PEM_HEADER_REDACTION, AUTH_REDACTION, BEARER_REDACTION, EMAIL_REDACTION
+    PEM_REDACTION, PEM_HEADER_REDACTION, AUTH_REDACTION, BEARER_REDACTION,
+    PASSWORD_REDACTION, PASSWORD_SQL_REDACTION, PASSWORD_XML_REDACTION, PASSWORD_CLI_REDACTION,
+    SESSION_REDACTION, API_KEY_REDACTION, EMAIL_REDACTION
   ];
 }

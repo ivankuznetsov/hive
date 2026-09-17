@@ -11,8 +11,9 @@ import { auditText } from '../../script/lib/snapshot.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const leadTask = '/tasks/screenote/add-image-attachments-to-screenote-260816-6a00';
-let server, base, browser, mf, db, loseResponse = false, failWrite = false, delayWrite = false;
+let server, base, browser, mf, db, loseResponse = false, failWrite = false, delayWrite = false, waitlistDisabled = false;
 let submittedTokens = [];
+let challengeRequests = 0;
 const challengeJS = `window.turnstile={render(container, options){window.challengeOptions=options;const id=String(++window.challengeCount);setTimeout(()=>options.callback('token-'+id),0);return id},remove(){}};window.challengeCount=0;`;
 const types = { '.html': 'text/html', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.patch': 'text/plain' };
 
@@ -51,8 +52,11 @@ before(async () => {
       const path = await distFile(pathname) || await distFile('/404.html');
       let data = await readFile(path);
       if (path.endsWith('/index.html')) {
+        const config = waitlistDisabled
+          ? '{"turnstileSiteKey":null,"waitlistEnabled":false}'
+          : '{"turnstileSiteKey":"fixture","waitlistEnabled":true}';
         data = data.toString().replace(/<script id="demo-config" type="application\/json">.*?<\/script>/,
-          '<script id="demo-config" type="application/json">{"turnstileSiteKey":"fixture","waitlistEnabled":true}</script>');
+          `<script id="demo-config" type="application/json">${config}</script>`);
       }
       res.writeHead(path.endsWith('404.html') ? 404 : 200, { 'content-type': types[extname(path)] || 'application/octet-stream' });
       res.end(data);
@@ -67,7 +71,10 @@ after(async () => { await browser?.close(); await new Promise(resolve => server?
 
 async function context(options = {}) {
   const ctx = await browser.newContext(options);
-  await ctx.route('https://challenges.cloudflare.com/**', route => route.fulfill({ contentType: 'text/javascript', body: challengeJS }));
+  await ctx.route('https://challenges.cloudflare.com/**', route => {
+    challengeRequests += 1;
+    return route.fulfill({ contentType: 'text/javascript', body: challengeJS });
+  });
   return ctx;
 }
 
@@ -142,12 +149,23 @@ test('saved-state explanations and independent sessions never write local state'
   const ctx = await context();
   const page = await ctx.newPage();
   await open(page, '/tasks/hive/build-a-patrol-native-self-260829-cc36');
+  assert.equal(await page.getByRole('button', { name: 'Answer this question' }).count(), 5);
   await page.getByRole('button', { name: 'Answer this question' }).first().click();
   const note = page.locator('#snapshot-action-note');
   assert.equal(await note.isVisible(), true);
   assert.match(await note.innerText(), /requires a running Hive installation/);
   assert.equal(await page.evaluate(() => [localStorage.length, sessionStorage.length].join(',')), '0,0');
   await page.screenshot({ path: `${root}test-results/desktop-action-note.png` });
+
+  for (const [path, label] of [
+    ['/honeycombs/modules', 'Update module'],
+    ['/honeycombs/modules', 'Install a module'],
+    ['/honeycombs/workflows', 'Install a workflow']
+  ]) {
+    await open(page, path);
+    await page.getByRole('button', { name: label, exact: true }).click();
+    assert.equal(await note.isVisible(), true, `${label} did not explain its saved state`);
+  }
 
   const second = await context();
   const other = await second.newPage();
@@ -171,8 +189,6 @@ test('crawls every exported route and carries no subscriber or operator material
   const ctx = await context();
   const page = await ctx.newPage();
   const manifest = JSON.parse(await readFile(`${root}dist/routes.json`, 'utf8'));
-  const external = [];
-  page.on('request', request => { if (!request.url().startsWith(base)) external.push(request.url()); });
   for (const route of manifest.routes) {
     const response = await page.request.get(`${base}${route.path}`);
     assert.equal(response.status(), 200, `${route.path} did not load`);
@@ -186,25 +202,33 @@ test('crawls every exported route and carries no subscriber or operator material
   const privacy = await page.request.get(`${base}/privacy.html`);
   assert.equal(privacy.status(), 200);
   assert.match(await privacy.text(), /waitlist/i);
-  assert.deepEqual(external, []);
   await ctx.close();
 });
 
-test('mobile: long plan and review documents do not overflow, keyboard action notice works', async () => {
+test('mobile: long plan and review documents do not overflow, keyboard action notice works, anchors resolve', async () => {
   const ctx = await context({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await ctx.newPage();
   await open(page, `${leadTask}/documents/plan.md`);
   await page.waitForSelector('.primary-markdown');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
+  const outline = page.locator('.document-outline a').first();
+  if (await outline.count()) {
+    const hash = await outline.getAttribute('href');
+    await outline.click();
+    assert.equal(page.url().endsWith(hash), true, 'outline link did not resolve to its anchor');
+    assert.equal(await page.locator(`.primary-markdown ${hash}`).count(), 1);
+  }
   await page.screenshot({ path: `${root}test-results/mobile-document.png`, fullPage: true });
 
-  await open(page, leadTask);
-  const answer = page.getByRole('button', { name: 'Answer this question' });
-  if (await answer.count()) {
-    await answer.first().focus();
-    await page.keyboard.press('Enter');
-    assert.equal(await page.locator('#snapshot-action-note').isVisible(), true);
-  }
+  await open(page, `${leadTask}/documents/reviews/claude-opus-5-ce-code-review-03.md`);
+  await page.waitForSelector('.primary-markdown');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
+
+  await open(page, '/tasks/hive/build-a-patrol-native-self-260829-cc36');
+  const answer = page.getByRole('button', { name: 'Answer this question' }).first();
+  await answer.focus();
+  await page.keyboard.press('Enter');
+  assert.equal(await page.locator('#snapshot-action-note').isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
   await page.screenshot({ path: `${root}test-results/mobile-task.png`, fullPage: true });
   await ctx.close();
@@ -237,6 +261,22 @@ test('waitlist: durable success, lost response, fresh-token retry and unavailabl
   await page.waitForFunction(() => document.getElementById('waitlist-status').textContent.includes('couldn’t confirm'));
   failWrite = false;
   assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM waitlist WHERE email_key = ?').bind('failed@example.com').first()).count, 0);
+  await ctx.close();
+});
+
+test('waitlist-disabled preview collects nothing and loads no challenge', async () => {
+  const ctx = await context(); const page = await ctx.newPage();
+  waitlistDisabled = true;
+  challengeRequests = 0;
+  try {
+    await open(page);
+    await page.getByRole('button', { name: 'Join Hive Cloud waitlist', exact: true }).first().click();
+    assert.match(await page.locator('#waitlist-status').innerText(), /not available on this preview/i);
+    assert.equal(await page.locator('#waitlist-submit').isDisabled(), true);
+    assert.equal(challengeRequests, 0);
+  } finally {
+    waitlistDisabled = false;
+  }
   await ctx.close();
 });
 

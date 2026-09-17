@@ -19,14 +19,8 @@ module HiveDemo
       "prelaunch_endpoint" => /\bhivedev\.sh\b/,
       "active_content" => /\b(?:javascript:|vbscript:|data:text\/html)|\bon(?:error|load|click)\s*=\s*["']/i,
       "control_bytes" => /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/,
-      "email" => /\b[A-Za-z0-9._%+-]+@(?!example\.(?:com|org|net)\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/
+      "email" => /\b[A-Za-z0-9._%+-]+@(?!example\.(?:com|org|net)(?![A-Za-z0-9.-]))[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/
     }.freeze
-
-    CREDENTIAL_PATTERNS = Hive::SecretPatterns::PATTERNS.slice(
-      :github_token, :github_fine_grained_pat, :aws_access_key, :aws_secret_access_key,
-      :pem_private_key, :pem_private_key_header, :openai_api_key, :anthropic_api_key,
-      :stripe_api_key, :slack_token, :jwt
-    ).freeze
 
     TEMPLATES = {
       status: "status/index",
@@ -104,6 +98,9 @@ module HiveDemo
       projects = snapshot.projects
       selected = route.project && snapshot.project(route.project)
       visible = selected ? [ selected ] : projects
+      counts = visible.flat_map(&:active_tasks)
+                      .map { |task| TaskDisplay.new(task, fresh: true).state }
+                      .tally
       if route.state
         visible = visible.filter_map do |project|
           rows = project.rows.select do |row|
@@ -118,7 +115,7 @@ module HiveDemo
         status_view: route.view || "board", projects: projects, selected_project: selected,
         visible_projects: visible, status_fresh: true, status_display_fresh: true,
         task_state: route.state,
-        task_counts: routes.status_states,
+        task_counts: counts,
         board: (board(visible, project_tasks(visible, route.state)) if (route.view || "board") == "board")
       )
     end
@@ -227,11 +224,11 @@ module HiveDemo
         "state" => "current",
         "publication_state" => pub.fetch("state").downcase,
         "pull_request" => { "number" => pub.fetch("number"), "url" => pub.fetch("url") },
-        "remote" => { "observation" => { "state" => pub.fetch("state").downcase, "observed_at" => pub["merged_at"] } },
+        "remote" => { "observed_at" => pub["merged_at"],
+                      "observation" => { "state" => pub.fetch("state").downcase } },
         "local" => {
           "repository" => pub.fetch("repository"), "branch" => pub["branch"],
-          "base_branch" => pub["base_branch"], "head_oid" => pub["head_oid"],
-          "push" => { "state" => "published" }, "dirty" => false
+          "base_branch" => pub["base_branch"], "head_oid" => pub["head_oid"]
         },
         "diagnostics" => []
       }
@@ -300,8 +297,6 @@ module HiveDemo
         raise "Exported file #{path} contains forbidden #{kind}: #{match[0].slice(0, 80)}" if match
       end
       Hive::SecretPatterns::PATTERNS.each do |name, pattern|
-        next unless CREDENTIAL_PATTERNS.key?(name)
-
         match = pattern.match(content)
         raise "Exported file #{path} contains forbidden credential (#{name}): #{match[0].slice(0, 80)}" if match
       end
@@ -310,6 +305,12 @@ module HiveDemo
     def write(path, content)
       assert_publishable!(path, content)
       target = @destination.join(path)
+      expanded = File.expand_path(target)
+      destination = File.expand_path(@destination)
+      unless expanded.start_with?("#{destination}#{File::SEPARATOR}")
+        raise "Export path escapes the destination: #{path}"
+      end
+
       FileUtils.mkdir_p(target.dirname)
       target.write(content)
     end

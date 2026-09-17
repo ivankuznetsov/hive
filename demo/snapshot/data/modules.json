@@ -2,7 +2,7 @@
   "schema": "hive-demo-modules",
   "schema_version": 1,
   "project": "hive",
-  "captured_at": "2026-09-17T09:55:28.788Z",
+  "captured_at": "2026-09-17T10:14:21.154Z",
   "excluded": [
     "root-cause-repair"
   ],
@@ -14,7 +14,7 @@
       "enabled": true,
       "epoch": null,
       "high_water_at": null,
-      "generated_at": "2026-09-17T09:55:28.759722Z",
+      "generated_at": "2026-09-17T10:14:21.120348Z",
       "active": {
         "version": "1.0.4",
         "catalog_commit": "49a5d313c0498fe3170e71c544fc97877fe9c574",

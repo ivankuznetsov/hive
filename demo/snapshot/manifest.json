@@ -1,7 +1,7 @@
 {
   "schema": "hive-demo-snapshot-manifest",
   "schema_version": 1,
-  "captured_at": "2026-09-17T09:53:52.482Z",
+  "captured_at": "2026-09-17T10:12:38.939Z",
   "ui_sha": "9b92b6572f53a002c0761c0f91f9aebd836f043a",
   "hive_version": "0.7.4",
   "source": "Read-only native projections captured from the operator installation; the public demo never connects to live Hive state.",
@@ -79,12 +79,12 @@
       "bytes": 149
     },
     "changes/screenote-42619.patch": {
-      "sha256": "34bee3a32470c45ce491c52b86c18fdad6b9a491b3f5bda6c9675c960408ec05",
-      "bytes": 495074
+      "sha256": "88fb64b14b765cc7ef20dcb6b020bb67bb44c04adc25435fa1fa69cf01c806f8",
+      "bytes": 495054
     },
     "data/tasks/screenote-42619.json": {
-      "sha256": "4d55f6482494ce45f3767036fc716efd6ad20844a21a9c2d85a6430c88718824",
-      "bytes": 7307
+      "sha256": "c5b0d3a1e2737409ec81a08bcc4f13a12f39b9d8f130e558c9553ef9dc01e30c",
+      "bytes": 7306
     },
     "documents/hive-42430/idea.md": {
       "sha256": "77cf1c74c2ac806145fea76a1247fd50179b20c58c523e81f95b1279f9765484",
@@ -139,7 +139,7 @@
       "bytes": 149
     },
     "data/tasks/hive-42430.json": {
-      "sha256": "a2750b9d0f9dde3255b42c4119438f9b0a9824dab887cbce80d188ead95fad96",
+      "sha256": "3fef9073d6195d9dfac7151adb22c0ecc9a28eee32c0e0bb9713ffda8672da92",
       "bytes": 5406
     },
     "documents/hive-23117/idea.md": {
@@ -199,7 +199,7 @@
       "bytes": 501447
     },
     "data/tasks/hive-23117.json": {
-      "sha256": "217deb734bb61c4473f6025680a2fd4487c466d457c602a5e2f33d5898a6d632",
+      "sha256": "8a10af031b95c383e8abd4a573517d28b7f0dd35a0b085916526a4b8805df95d",
       "bytes": 5564
     },
     "documents/screenote-1777/idea.md": {
@@ -263,11 +263,11 @@
       "bytes": 2352
     },
     "changes/screenote-1777.patch": {
-      "sha256": "c0aa9a9d627d515de9835e9eeef24f04584d4b58d94d4307a98b9c35e6db0959",
-      "bytes": 163302
+      "sha256": "eafb00645c6eebd485a4d00c5a9ab82a5952b4368dead5ef631df5dbe7cf2f02",
+      "bytes": 163303
     },
     "data/tasks/screenote-1777.json": {
-      "sha256": "65442658be3ccc9a2268052f5dd2dae5958f1b216a182341d188355787e1aae8",
+      "sha256": "22d7e6da565f027fd3584f721a6b7f6791bda1ca9a3f17f658ee60c3da8a3301",
       "bytes": 6192
     },
     "documents/screenote-1778/idea.md": {
@@ -335,7 +335,7 @@
       "bytes": 118955
     },
     "data/tasks/screenote-1778.json": {
-      "sha256": "b6f4a7b84eb8fd43680c0e718e131875cb5452ea327f1d0b2f848181a326ba23",
+      "sha256": "f020c1ca5d68e9de7c751cd9691f848a235afa4e1744a8f06a4b7e9011925ebe",
       "bytes": 6232
     },
     "documents/hive-24065/idea.md": {
@@ -383,7 +383,7 @@
       "bytes": 149
     },
     "data/tasks/hive-24065.json": {
-      "sha256": "efc3b8be2f0f0bc2b1e7e43dabb8a98ed56b9d521d0792828e2e355abb848ba3",
+      "sha256": "387ef91dc999111c1e60716e7b0fcf439ad61097bec222544515c918af7fa2b8",
       "bytes": 5015
     },
     "documents/honeycomb-1848/idea.md": {
@@ -423,7 +423,7 @@
       "bytes": 190502
     },
     "data/tasks/honeycomb-1848.json": {
-      "sha256": "48eb77bca49920e34a7c81672767ebefb6b7163b2643e9e0e677de7766d7d476",
+      "sha256": "c27b3af8a5ef02a8723ef18afa95351d72bb316d1b1dc7397ba035451e51dbcc",
       "bytes": 4209
     },
     "documents/honeycomb-1849/idea.md": {
@@ -459,11 +459,11 @@
       "bytes": 109
     },
     "changes/honeycomb-1849.patch": {
-      "sha256": "60b5ceb8f5c85b629f5c282cb66a5e3f1b77c1113e06490581a14228215e5dea",
-      "bytes": 392995
+      "sha256": "daca8abe1c5b3049b5bf85bde9a6105ddec9b96bcaf10e14c2ef9e012aaa451e",
+      "bytes": 392973
     },
     "data/tasks/honeycomb-1849.json": {
-      "sha256": "b1ecf8a9667206f5ea548fdd0568dd4b3daeed6ac7df4e7d805a052b66505aab",
+      "sha256": "baa18696ee523e3c94ee29e9cfef5ec403cd06e5f1bd0ae5ea29e82507f9ded8",
       "bytes": 4167
     },
     "documents/agent-plugins-1930/idea.md": {
@@ -503,7 +503,7 @@
       "bytes": 524288
     },
     "data/tasks/agent-plugins-1930.json": {
-      "sha256": "cbe8ae05a4c9376897c26fa5089308b36ee67052c272d2e12ad22c05d8e471d1",
+      "sha256": "c168dfe6554382402adec77e6c25723751a506ef589ab8aece86110db5062433",
       "bytes": 4247
     },
     "documents/prdigest-9434/idea.md": {
@@ -555,7 +555,7 @@
       "bytes": 155071
     },
     "data/tasks/prdigest-9434.json": {
-      "sha256": "5b8df5e71cbb064db65ab6fe9f0abe52799a38a2aee07a39e3a575547ef524da",
+      "sha256": "fb5c0702d21b924470016de22dfad0e639be46e1596992963a9bdf0a9c7e1c9b",
       "bytes": 5011
     },
     "documents/hive-43064/idea.md": {
@@ -567,7 +567,7 @@
       "bytes": 3801
     },
     "data/tasks/hive-43064.json": {
-      "sha256": "3f1c6ae7fe78d112372ddedd93cdc44532997ce608a6cfa0213217a309c9fa19",
+      "sha256": "e43b04eae2693e56ddf37c0019eb83d3a7e3067c9b93a545cf2952914d88a419",
       "bytes": 6255
     },
     "documents/hive-42445/idea.md": {
@@ -587,23 +587,23 @@
       "bytes": 2006
     },
     "data/tasks/hive-42445.json": {
-      "sha256": "51c63d6449d65974f6684c8aa1d59843c294f4b964b833b6fbcb0208373ff45f",
+      "sha256": "7f18e2c437b92bee2801ce7744a0abc02c3a34cec07b5d8adfe20197e5e81294",
       "bytes": 2089
     },
     "data/status.json": {
-      "sha256": "7a86f6f7bb6fd2bef32a613af3f5435a0ea8a9ae1143d0aa6c63c097516bbf57",
+      "sha256": "59c4bbdc8deda09808cd5eef3f5cd7fb5687d93c97cfd7bce742ee99a6936a45",
       "bytes": 7952
     },
     "data/workflows.json": {
-      "sha256": "01dfb6d1fb652eb8e8d1480799893e9069d28cd95b8728a0484be61adb8024e9",
+      "sha256": "12b3180cf4de260ef53ac8cd4e305ec77c8ef1a44b4f31a5c2e3f35b6cc3c1ab",
       "bytes": 6817
     },
     "data/modules.json": {
-      "sha256": "05c34ca9b35585b596e6a19006d0f1836c724829c4f2e91bfcba1546f8759f08",
+      "sha256": "8ac432480e0bbe1c118cb867e8940a02c8a468eb218d4623a010b167dada7f0d",
       "bytes": 1790
     },
     "data/patrol.json": {
-      "sha256": "19110a409dd424c44ffdd9f789145aaf2f30bc2f3f2335b9f5db1ceda6994d82",
+      "sha256": "714883fc8612638d194bb7143e780572e685d68e2a7c16699ab7d0186b7ce322",
       "bytes": 17983
     },
     "data/digest.json": {
@@ -611,15 +611,20 @@
       "bytes": 6673
     },
     "data/repos.json": {
-      "sha256": "858c4b19a41df49958eaed5b9a9b0af86f7ee99c96e8f7c1e44ba9bfdc0f191a",
+      "sha256": "72c89f39baa1e04d749394dba31f97bb33f163b70dabce332369fa2bde162a03",
       "bytes": 3101
     },
     "data/snapshot.json": {
-      "sha256": "74f0174777fa37a6b9c78eb3ea7956ea24c0a5f26994b22c75b72a5f8a4cdaec",
+      "sha256": "4cc636875395c55a814651ed26d94871f6b475335df6679bce301df45611dda0",
       "bytes": 7812
     }
   },
   "redactions": [
+    {
+      "path": "changes/screenote-42619.patch",
+      "reason": "Password assignments are not publishable",
+      "matches": 1
+    },
     {
       "path": "documents/screenote-42619/pr.md",
       "reason": "Local repository paths are not publishable",
@@ -649,6 +654,11 @@
       "path": "changes/screenote-1777.patch",
       "reason": "Local installation paths are not publishable",
       "matches": 7
+    },
+    {
+      "path": "changes/screenote-1777.patch",
+      "reason": "Password assignments are not publishable",
+      "matches": 1
     },
     {
       "path": "changes/screenote-1777.patch",
@@ -684,6 +694,11 @@
       "path": "changes/honeycomb-1849.patch",
       "reason": "Private-key material is never publishable, including test fixtures",
       "matches": 1
+    },
+    {
+      "path": "changes/honeycomb-1849.patch",
+      "reason": "API key assignments are not publishable",
+      "matches": 2
     },
     {
       "path": "changes/honeycomb-1849.patch",

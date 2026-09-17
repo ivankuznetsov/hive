@@ -50,7 +50,12 @@ class DemoExportTest < ActiveSupport::TestCase
       assert_includes task, "https://github.com/ivankuznetsov/screenote/pull/67"
       assert_includes task, 'id="workspace-primary-result"'
       assert_includes task, "documents/reviews/grok-ce-code-review-01.md"
+      assert_includes task, "observed"
       assert_equal 1, Nokogiri::HTML.fragment(task).css("section#workspace-snapshot-documents").size
+
+      truncated = page(destination, by_path.fetch("/tasks/agent-plugins/migrate-every-agent-plugin-to-260709-3082/change"))
+      assert_includes truncated, "Partial diff"
+      assert_operator truncated.bytesize, :<, 600_000, "a truncated patch must stay bounded in the exported page"
 
       active = page(destination, by_path.fetch("/tasks/hive/build-a-patrol-native-self-260829-cc36"))
       assert_equal 9, Nokogiri::HTML.fragment(active).css("#task-questions .qa-item").size
@@ -60,6 +65,7 @@ class DemoExportTest < ActiveSupport::TestCase
       digest = page(destination, by_path.fetch("/digest/2026-09-15"))
       assert_equal 8, Nokogiri::HTML.fragment(digest).css("li.digest-item").size
       assert_includes digest, "Selected public-project view"
+      assert_not_includes digest, "Historical project"
 
       repos = page(destination, by_path.fetch("/repos"))
       assert_equal 5, Nokogiri::HTML.fragment(repos).css("article.repo-row").size
@@ -139,5 +145,22 @@ class DemoExportTest < ActiveSupport::TestCase
     assert_includes html, "snapshot-link-omitted"
     assert_includes html, "secret"
     assert_not_includes html, "example.com"
+
+    html = HiveDemo::Static.fragment('<p><a href="https://exa mple.com">broken</a></p>')
+    assert_includes html, "snapshot-link-omitted"
+  end
+
+  test "strips live bindings and unwraps static kanban toggles" do
+    html = HiveDemo::Static.fragment(<<~HTML)
+      <section data-controller="kanban-column" data-action="click->x#y" data-task-workspace-target="summary">
+        <button type="button" class="kanban-column-toggle" aria-expanded="true">
+          <span class="kanban-column-label">Inbox</span>
+        </button>
+      </section>
+    HTML
+    fragment = Nokogiri::HTML.fragment(html)
+    assert_empty fragment.css("[data-controller], [data-action], [data-task-workspace-target]")
+    assert_empty fragment.css("button")
+    assert_equal "Inbox", fragment.css(".kanban-column-label").text.strip
   end
 end

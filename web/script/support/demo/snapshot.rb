@@ -18,6 +18,18 @@ module HiveDemo
       new(root)
     end
 
+    def self.resolve(root, path)
+      raise KeyError, "snapshot path must be relative: #{path}" if Pathname.new(path.to_s).absolute?
+
+      root_path = Pathname.new(root).expand_path
+      absolute = (root_path + path.to_s).expand_path
+      unless absolute.to_s.start_with?("#{root_path}#{File::SEPARATOR}")
+        raise KeyError, "snapshot path escapes the snapshot root: #{path}"
+      end
+
+      absolute
+    end
+
     def initialize(root)
       @root = Pathname.new(root)
       @dataset = read("data/snapshot.json")
@@ -75,7 +87,7 @@ module HiveDemo
       change = task.change
       raise KeyError, "#{task['project']}:#{task['id']} has no change evidence" unless change&.fetch("path")
 
-      (@root + change.fetch("path")).read
+      Snapshot.resolve(@root, change.fetch("path")).read
     end
 
     def documents(task, role: nil)
@@ -85,7 +97,9 @@ module HiveDemo
     end
 
     def digest_view(requested_date:)
-      DailyDigest.new(@digest, requested_date: requested_date, current_projects: [], link_resolver: method(:destination))
+      DailyDigest.new(@digest, requested_date: requested_date,
+                      current_projects: @digest.fetch("projects"),
+                      link_resolver: method(:destination))
     end
 
     # A digest task link resolves only when that exact task was exported.
@@ -116,7 +130,7 @@ module HiveDemo
     end
 
     def read(path)
-      JSON.parse((@root + path).read)
+      JSON.parse(Snapshot.resolve(@root, path).read)
     end
   end
 
@@ -192,6 +206,6 @@ module HiveDemo
     def role = record.fetch("role")
     def path = record.fetch("path")
     def bytes = record.fetch("bytes")
-    def content = (@content ||= (@root + path).read)
+    def content = (@content ||= Snapshot.resolve(@root, path).read)
   end
 end

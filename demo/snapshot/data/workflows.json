@@ -2,7 +2,7 @@
   "schema": "hive-demo-workflows",
   "schema_version": 1,
   "project": "hive",
-  "captured_at": "2026-09-17T09:12:52.536Z",
+  "captured_at": "2026-09-17T09:29:42.849Z",
   "excluded": [
     "root-cause-repair"
   ],
@@ -109,7 +109,41 @@
           "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
         }
       ],
-      "optional_inputs": []
+      "optional_inputs": [],
+      "package": {
+        "description": "Turn repository and current web evidence into a concise architecture record",
+        "author": {
+          "name": "Honeycomb Maintainers",
+          "url": "https://github.com/ivankuznetsov/honeycomb"
+        },
+        "license": "MIT",
+        "hive_min_version": "0.6.0",
+        "source": {
+          "url": "https://github.com/ivankuznetsov/honeycomb/tree/77c4a4bf78e2b5b204bf83434f0f339c514e568c/packages/architecture/1.0.4",
+          "revision": "77c4a4bf78e2b5b204bf83434f0f339c514e568c"
+        },
+        "permissions": {
+          "risk": "high",
+          "capabilities": [
+            "filesystem-read",
+            "filesystem-write",
+            "network",
+            "shell"
+          ],
+          "network_hosts": [
+            "*"
+          ],
+          "filesystem_read": [
+            "*"
+          ],
+          "filesystem_write": [
+            "*"
+          ],
+          "secrets": [
+            "*"
+          ]
+        }
+      }
     },
     {
       "name": "bench",
@@ -119,7 +153,8 @@
       "catalog_visibility": null,
       "version": null,
       "source_commit": null,
-      "manifest_digest": null
+      "manifest_digest": null,
+      "package": null
     },
     {
       "name": "coding",
@@ -129,7 +164,8 @@
       "catalog_visibility": null,
       "version": null,
       "source_commit": null,
-      "manifest_digest": null
+      "manifest_digest": null,
+      "package": null
     },
     {
       "name": "content",
@@ -139,7 +175,8 @@
       "catalog_visibility": null,
       "version": null,
       "source_commit": null,
-      "manifest_digest": null
+      "manifest_digest": null,
+      "package": null
     },
     {
       "name": "patrol-fix",
@@ -149,7 +186,8 @@
       "catalog_visibility": null,
       "version": null,
       "source_commit": null,
-      "manifest_digest": null
+      "manifest_digest": null,
+      "package": null
     }
   ]
 }

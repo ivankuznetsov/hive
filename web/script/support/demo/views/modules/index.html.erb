@@ -1,0 +1,84 @@
+<% content_for(:title, "#{web_product_name} — Honeycombs — Modules") %>
+<%= render "honeycombs/header", section: :modules %>
+
+<p class="muted">Captured installed modules for <strong><%= @project.name %></strong>, including integrity, hooks, settings, and granted capabilities.</p>
+
+<section aria-labelledby="project-modules-heading">
+  <h2 id="project-modules-heading"><%= @project.name %> modules</h2>
+  <% if @modules.empty? %>
+    <p class="empty-state">No installed modules for this project.</p>
+  <% else %>
+    <div class="module-list">
+      <% @modules.each do |hive_module| %>
+        <article class="module-row" data-module-name="<%= hive_module.name %>"
+                 data-module-state="<%= hive_module.lifecycle_state %>">
+          <div>
+            <div class="module-title">
+              <strong><%= hive_module.name %></strong>
+              <span class="tag tag-module-<%= hive_module.lifecycle_state.dasherize %>"><%= hive_module.lifecycle_state.humanize %></span>
+              <% if hive_module.version %><span class="tag">v<%= hive_module.version %></span><% end %>
+            </div>
+            <p class="module-meta">
+              <% if hive_module.source_commit %><span title="<%= hive_module.source_commit %>">commit <%= hive_module.source_commit[0, 10] %></span><% end %>
+              <span>enabled: <%= hive_module.enabled? ? "yes" : "no" %></span>
+              <% if hive_module.active && hive_module.active["summary"] %><span><%= hive_module.active["summary"] %></span><% end %>
+            </p>
+            <details class="module-details">
+              <summary>Integrity, hooks, settings, grants, and runtime status</summary>
+              <h3>Generation and integrity</h3>
+              <dl class="permission-grid">
+                <% (hive_module.active || hive_module.previous || {}).each do |field, value| %>
+                  <dt><%= field.humanize %></dt><dd><%= value || "—" %></dd>
+                <% end %>
+                <% hive_module.fetch("integrity", {}).each do |check, value| %>
+                  <dt><%= check.humanize %></dt><dd><%= value ? "yes" : "no" %></dd>
+                <% end %>
+              </dl>
+              <h3>Hooks</h3>
+              <% if hive_module.hooks.empty? %>
+                <p class="muted">No hooks are registered for this module.</p>
+              <% else %>
+                <ul>
+                  <% hive_module.hooks.each do |hook| %>
+                    <li><code><%= hook.fetch("id") %></code> — <%= hook.fetch("enabled") ? "enabled" : "disabled" %>;
+                      target: <code><%= hook.dig("target", "kind") %>:<%= hook.dig("target", "id") %></code>;
+                      concurrency: <%= hook.fetch("concurrency") %>;
+                      schedules: <%= hook.fetch("schedules").presence&.join(", ") || "none" %>;
+                      events: <%= hook.fetch("event_bindings").presence&.join(", ") || "none" %></li>
+                  <% end %>
+                </ul>
+              <% end %>
+              <h3>Effective settings</h3>
+              <% if hive_module.settings.empty? %>
+                <p class="muted">No settings are recorded for this module.</p>
+              <% else %>
+                <dl class="permission-grid">
+                  <% hive_module.settings.each do |setting| %>
+                    <dt><%= setting.fetch("name") %></dt>
+                    <dd><% if setting.fetch("secret") %>binding <code><%= setting["binding"] || "not configured" %></code><% else %><%= setting["value"].inspect %><% end %></dd>
+                  <% end %>
+                </dl>
+              <% end %>
+              <h3>Granted capabilities</h3>
+              <dl class="permission-grid">
+                <% hive_module.grants.each do |category, value| %>
+                  <dt><%= category.humanize %></dt><dd><%= value.is_a?(Array) ? (value.presence&.join(", ") || "none") : value %></dd>
+                <% end %>
+              </dl>
+            </details>
+          </div>
+          <div class="module-actions">
+            <button type="button" class="demo-button" data-snapshot-action="update-module">Update module</button>
+            <button type="button" class="demo-button" data-snapshot-action="uninstall-module">Uninstall module</button>
+          </div>
+        </article>
+      <% end %>
+    </div>
+  <% end %>
+</section>
+
+<section class="card module-install-card" aria-labelledby="snapshot-module-actions-heading">
+  <h2 id="snapshot-module-actions-heading">Install reviewed module</h2>
+  <p class="muted">Module installation requires a running Hive installation, every required setting and hook choice, and explicit permission grants. The saved snapshot cannot perform it.</p>
+  <button type="button" class="demo-button" data-snapshot-action="install-module">Install a module</button>
+</section>

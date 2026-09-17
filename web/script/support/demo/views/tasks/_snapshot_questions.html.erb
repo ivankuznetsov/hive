@@ -1,0 +1,15 @@
+<section id="task-questions" class="qa" aria-labelledby="task-questions-heading">
+  <h2 id="task-questions-heading">Questions from the agent</h2>
+  <p class="muted">Answers are the recorded originals. The saved snapshot cannot submit new answers; they were answered in the live task where marked.</p>
+  <% task.questions.each do |question| %>
+    <div class="qa-item">
+      <p class="qa-question"><span class="qa-number">Q<%= question.fetch("n") %></span><%= question.fetch("question") %></p>
+      <% if question.fetch("answered") %>
+        <p class="qa-answer"><%= question.fetch("answer") %></p>
+      <% else %>
+        <p class="qa-answer muted">Unanswered in the captured task.</p>
+        <button type="button" class="demo-button" data-snapshot-action="answer">Answer this question</button>
+      <% end %>
+    </div>
+  <% end %>
+</section>

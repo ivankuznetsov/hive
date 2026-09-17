@@ -2,174 +2,307 @@ require "json"
 require "digest"
 require "ostruct"
 require "fileutils"
-require "open3"
+require "pathname"
+require "hive/stage_label"
+require_relative "snapshot"
+require_relative "routes"
+require_relative "static"
+require_relative "view"
 
 module HiveDemo
-  # A deliberately narrow presentation object: never delegates to Hive models.
-  class Task < Hash
-    def slug = fetch("slug")
-    def title = fetch("title")
-    def recovery = nil
-    def recovery_action_visible? = false
-    def recovery_action_enabled? = false
-    def passable? = false
-    def worktree? = false
-  end
-
-  class View < ActionView::Base.with_empty_template_cache
-    include ApplicationHelper
-    include Turbo::FramesHelper
-    def task_path(_project, slug, **) = "#/task/#{slug}/overview"
-    def turbo_frame_request? = true
-    def web_product_name = "Hive"
-  end
-
   class Exporter
-    ROOT = File.expand_path("../../../..", __dir__)
-    ALLOWED_TAGS = %w[div section header h1 h2 h3 h4 h5 h6 p span a article details summary ol ul li pre code em strong del hr br table thead tbody tr th td blockquote].freeze
-    ALLOWED_ATTRIBUTES = %w[id class href title role aria-label aria-labelledby aria-live aria-atomic aria-hidden hidden data-project-name data-workflow data-stage data-task-slug data-primary-artifact data-diff-section].freeze
+    LEAK_PATTERNS = {
+      "absolute_path" => %r{(?:/home/|/Users/|[A-Za-z]:\\+(?:Users|home)\\+)},
+      "operator_name" => /\basterio\b/,
+      "excluded_project" => /\b(?:writero|todero|webmail\.sh|rabatafs|hive-private)\b/i,
+      "prelaunch_endpoint" => /\bhivedev\.sh\b/,
+      "secret" => /\b(?:gh[pous]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/,
+      "email" => /\b[A-Za-z0-9._%+-]+@(?!example\.(?:com|org|net)\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/
+    }.freeze
 
-    def initialize
-      @scenario = JSON.parse(File.read(File.join(ROOT, "demo/scenarios/notebook.json")))
-      @view = View.new(ActionView::LookupContext.new([ File.join(ROOT, "web/app/views") ]), {}, nil)
-    end
+    TEMPLATES = {
+      status: "status/index",
+      archive: "status/archive",
+      repos: "repos/index",
+      workflows: "workflows/index",
+      modules: "modules/index",
+      patrol: "patrol/index",
+      digest: "digests/show",
+      task: "tasks/show",
+      document: "documents/show",
+      change: "tasks/diff",
+      unavailable: "unavailable/show"
+    }.freeze
 
-    # Deliberate fixture controls are removed structurally. Any new live control
-    # introduced by an upstream view fails the export instead of being published.
-    def static_fragment(html)
-      fragment = Nokogiri::HTML.fragment(html)
-      fragment.css("turbo-frame").each do |node|
-        raise "Lazy frame is not static" if node["src"]
-        node.replace(node.children)
-      end
-      fragment.css(".kanban-fold-icon").remove
-      fragment.css(".kanban-card-meta .faint").each { |node| node.content = "Sample task" }
-      fragment.css("button.kanban-column-toggle").each do |node|
-        node.name = "span"
-        node.attribute_nodes.each { |attribute| attribute.remove unless attribute.name == "class" }
-        node["class"] = "kanban-column-label"
-      end
-      fragment.css("*").each do |node|
-        node.attribute_nodes.each do |attribute|
-          attribute.remove if attribute.name.match?(/\Adata-(?:controller|action|kanban-column-|task-workspace-|workspace-disclosure-|turbo)/)
-        end
-      end
-      validate!(fragment)
-      fragment.to_html
-    end
+    attr_reader :snapshot, :routes
 
-    def validate!(fragment)
-      fragment.css("*").each do |node|
-        raise "Unapproved active element: #{node.name}" unless ALLOWED_TAGS.include?(node.name)
-        node.attribute_nodes.each do |attribute|
-          raise "Unapproved attribute: #{attribute.name}" unless ALLOWED_ATTRIBUTES.include?(attribute.name)
-        end
-        next unless node["href"]
-        raise "Unapproved destination: #{node['href']}" unless node["href"].match?(/\A#(?:\/task\/[a-z0-9-]+\/(?:overview|plan|diff|evidence)|[a-z0-9_-]+)?\z/)
-      end
-      true
+    def initialize(snapshot_root: Snapshot::ROOT, snapshot: nil)
+      @snapshot = snapshot || Snapshot.load(snapshot_root)
+      @routes = Routes.new(@snapshot)
     end
 
     def export(destination)
-      FileUtils.mkdir_p(destination)
-      manifest = { version: 1, source_commit: Open3.capture2("git", "-C", ROOT, "rev-parse", "HEAD").first.strip,
-                  initial: "question", featured: "dark-mode", tasks: @scenario.fetch("tasks").map { |task| task.slice("slug", "title") }, states: {} }
-      css = Dir[File.join(ROOT, "web/app/assets/stylesheets/*.css")].sort.map { |path| File.read(path) }.join("\n")
-      raise "Stylesheet imports are not static" if css.match?(/@import/i)
-      css.scan(/url\(\s*['"]?([^'")]+)/i).flatten.each do |url|
-        raise "Unapproved stylesheet asset: #{url}" unless url.start_with?("data:image/svg+xml,")
+      @destination = Pathname.new(destination)
+      FileUtils.rm_rf(@destination)
+      FileUtils.mkdir_p(@destination)
+      write_assets
+      route_manifest = routes.manifest
+      route_manifest.each do |record|
+        render(routes.fetch(record.fetch("path")))
       end
-      manifest[:stylesheet] = "assets/hive-#{Digest::SHA256.hexdigest(css)[0, 12]}.css"
-      write(destination, manifest[:stylesheet], css)
-      states.each do |id, branch, phase|
-        tasks = @scenario.fetch("tasks").map { |data| task_for(data, branch, phase) }
-        entry = { phase: phase, branch: branch, next: next_state(branch, phase), board: "fragments/#{id}/board.html", tasks: {} }
-        write(destination, entry[:board], static_fragment(@view.render(partial: "status/board", locals: { board: board(tasks), status_fresh: true })))
-        tasks.each do |task|
-          @view.assign(task: task, task_source: nil, project: OpenStruct.new(name: "Notebook"))
-          panels = { overview: overview(task), plan: document(task, "plan.md", task.fetch("plan")) }
-          if task["diff"]
-            panels[:diff] = diff(task)
-            panels[:evidence] = document(task, "test-evidence.md", task.fetch("evidence"))
-          end
-          entry[:tasks][task.slug] = panels.to_h do |panel, html|
-            path = "fragments/#{id}/#{task.slug}-#{panel}.html"
-            write(destination, path, static_fragment(html))
-            [ panel, path ]
-          end
-        end
-        manifest[:states][id] = entry
-      end
-      write(destination, "manifest.json", JSON.pretty_generate(manifest) + "\n")
-      manifest
+      write("routes.json", "#{JSON.pretty_generate({
+        'schema' => 'hive-demo-routes', 'schema_version' => 1,
+        'captured_at' => snapshot.captured_at, 'ui_sha' => snapshot.ui_sha,
+        'stylesheet' => @stylesheet,
+        'routes' => route_manifest
+      })}\n")
+      scan_exports!
+      route_manifest
     end
 
     private
 
-    def write(destination, path, content)
-      target = File.join(destination, path)
-      FileUtils.mkdir_p(File.dirname(target))
-      File.write(target, content)
+    def render(route)
+      view = View.new(routes: routes, snapshot: snapshot)
+      assign(view, route)
+      content = view.render(template: TEMPLATES.fetch(route.kind))
+      sanitized = Static.fragment(content)
+      validate_links!(route, sanitized)
+      view.instance_variable_set(:@view_flow, ActionView::OutputFlow.new)
+      view.content_for(:page_content) { sanitized.html_safe }
+      page = view.render(template: "layouts/application", layout: false)
+      write(route.page, page)
     end
 
-    def states
-      [ [ "question", nil, "question" ] ] + %w[system manual].flat_map { |branch| %w[plan implementing review completed].map { |phase| [ "#{branch}-#{phase}", branch, phase ] } }
+    def assign(view, route)
+      view.assign(
+        route: route, snapshot: snapshot, nav_section: route.group,
+        captured_at: snapshot.captured_at, ui_sha: snapshot.ui_sha,
+        source_note: snapshot.source_note, stylesheet: @stylesheet
+      )
+      case route.kind
+      when :status then assign_status(view, route)
+      when :archive then assign_archive(view, route)
+      when :repos then assign_repos(view)
+      when :workflows then assign_workflows(view)
+      when :modules then assign_modules(view)
+      when :patrol then assign_patrol(view)
+      when :digest then assign_digest(view, route)
+      when :task then assign_task(view, route)
+      when :document then assign_document(view, route)
+      when :change then assign_change(view, route)
+      when :unavailable then view.assign(surface: route.group)
+      end
     end
 
-    def next_state(branch, phase)
-      following = { "plan" => "implementing", "implementing" => "review", "review" => "completed" }[phase]
-      "#{branch}-#{following}" if following
-    end
+    def assign_status(view, route)
+      projects = snapshot.projects
+      selected = route.project && snapshot.project(route.project)
+      visible = selected ? [ selected ] : projects
+      if route.state
+        visible = visible.filter_map do |project|
+          rows = project.rows.select do |row|
+            row["role"] == "active" && TaskDisplay.new(Task.new(project: project, attributes: row), fresh: true).state == route.state
+          end
+          next if rows.empty?
 
-    def task_for(data, branch, phase)
-      values = data.dup
-      if data.fetch("slug") == "dark-mode"
-        values.merge!(@scenario.fetch("branches").fetch(branch)) if branch
-        values["phase"] = phase
-        values.delete("diff") if %w[question plan].include?(phase)
-        values["result"] = if phase == "completed"
-          values.fetch("outcome")
-        elsif phase == "question"
-          "# Add dark mode\n\nNotebook is a fictional notes app. Its users want a comfortable way to write after dark.\n\n## One decision before work starts\n\nShould it follow the system setting? Choose a prepared answer below to explore the matching plan."
-        else
-          values.fetch("plan")
+          project.with_rows(rows)
         end
       end
-      values["stage"], values["action"], values["action_label"] = {
-        "question" => [ "2-brainstorm", "needs_input", "Needs your input" ],
-        "plan" => [ "3-plan", "ready_execute", "Plan prepared" ],
-        "implementing" => [ "4-execute", "agent_running", "Implementing" ],
-        "review" => [ "6-review", "needs_input", "Ready for your review" ],
-        "completed" => [ "9-done", "archived", "Completed" ]
-      }.fetch(values.fetch("phase"))
-      values["unanswered_questions"] = phase == "question" && data["slug"] == "dark-mode" ? 1 : 0
-      values["age_seconds"] = 0
-      Task[values]
+      view.assign(
+        status_view: route.view || "board", projects: projects, selected_project: selected,
+        visible_projects: visible, status_fresh: true, status_display_fresh: true,
+        task_state: route.state,
+        task_counts: routes.status_states,
+        board: (board(visible, project_tasks(visible, route.state)) if (route.view || "board") == "board")
+      )
     end
 
-    def board(tasks)
-      columns = %w[2-brainstorm 3-plan 4-execute 6-review 9-done].map do |stage|
-        label = { "2-brainstorm" => "Needs your answer", "3-plan" => "Plan", "4-execute" => "Implementing", "6-review" => "Ready for review", "9-done" => "Completed" }.fetch(stage)
-        OpenStruct.new(stage: stage, label: label, tasks: tasks.select { |task| task["stage"] == stage }, folded_by_default?: false)
+    def project_tasks(projects, state)
+      projects.flat_map do |project|
+        tasks = project.active_tasks
+        tasks = tasks.select { |task| TaskDisplay.new(task, fresh: true).state == state } if state
+        tasks.map { |task| [ project, task ] }
       end
-      band = OpenStruct.new(project: OpenStruct.new(name: "Notebook"), workflow_id: "coding", task_count: tasks.length, hidden_archived_task_count: 0, unavailable?: false, daemon_enabled: true, columns: columns)
-      OpenStruct.new(empty?: false, bands: [ band ])
     end
 
-    def overview(task)
-      workspace = { "status" => { "freshness" => "fresh", "state" => "current" }, "task" => { "archived" => false } }
-      @view.render(partial: "tasks/workspace_summary", locals: { workspace: workspace }) + document(task, task["phase"] == "completed" ? "result.md" : "current-work.md", task.fetch("result"))
+    def archive_tasks(projects)
+      projects.flat_map { |project| project.archived_tasks.map { |task| [ project, task ] } }
     end
 
-    def document(task, name, content)
-      @view.render(partial: "tasks/primary_result", locals: { result: { "primary" => { "reference" => "demo:#{task.slug}:#{name}", "name" => name, "content" => content } } })
+    def assign_archive(view, route)
+      projects = snapshot.projects
+      selected = route.project && snapshot.project(route.project)
+      visible = selected ? [ selected ] : projects
+      view.assign(
+        projects: projects, selected_project: selected,
+        visible_projects: visible.map { |project| project.with_rows(project.rows.reject { |row| row["role"] == "active" }) },
+        board: (board(visible, archive_tasks(visible), expand_completed: true) if route.view == "board")
+      )
     end
 
-    def diff(task)
-      result = OpenStruct.new(state: "available", next_action: "Inspect this prepared diff and the sample test evidence.", truncated: false, invalid_encoding: false,
-                              sections: { "committed" => task.fetch("diff"), "staged" => "", "unstaged" => "", "untracked" => "" })
-      @view.assign(diff_result: result)
-      @view.render(template: "tasks/diff")
+    def assign_repos(view)
+      view.assign(repos: snapshot.repos.fetch("repos").map { |repo| OpenStruct.new(repo) },
+                  projects: snapshot.projects)
+    end
+
+    def assign_workflows(view)
+      payload = snapshot.workflows
+      project = snapshot.project(payload.fetch("project"))
+      view.assign(project: project, selected_project: project,
+                  workflows: payload.fetch("workflows").map { |workflow| Workflow.new(project: project, attributes: workflow) },
+                  excluded_workflows: payload.fetch("excluded"))
+    end
+
+    def assign_modules(view)
+      payload = snapshot.modules
+      project = snapshot.project(payload.fetch("project"))
+      view.assign(project: project, selected_project: project,
+                  modules: payload.fetch("modules").map { |hive_module| HiveModule.new(project: project, attributes: hive_module) })
+    end
+
+    def assign_patrol(view)
+      view.assign(project: snapshot.project(snapshot.patrol.fetch("project")),
+                  patrol: OpenStruct.new(snapshot.patrol))
+    end
+
+    def assign_digest(view, route)
+      view.assign(digest: snapshot.digest_view(requested_date: route.path.split("/").last))
+    end
+
+    def assign_task(view, route)
+      task = snapshot.task_for_slug(route.project, route.task.split("/").last)
+      documents = snapshot.documents(task)
+      primary = primary_document(task, documents)
+      view.assign(
+        task: task, project: task.project, documents: documents,
+        workspace: { "status" => { "freshness" => "fresh", "state" => "current" },
+                     "task" => { "archived" => task.archived? } },
+        result: { "primary" => primary && record(primary), "supporting" => supporting_documents(documents).map { |document| record(document) }, "warning" => nil },
+        publication: publication(task),
+        change: task.change
+      )
+    end
+
+    def assign_document(view, route)
+      task = snapshot.task_for_slug(route.project, route.task.split("/").last)
+      document = snapshot.document(task, route.path.sub("#{routes.task_path(route.project, task.slug)}/documents/", ""))
+      view.assign(task: task, project: task.project, document: document,
+                  document_html: view.render_markdown_document(document.content))
+    end
+
+    def assign_change(view, route)
+      task = snapshot.task_for_slug(route.project, route.task.split("/").last)
+      view.assign(task: task, project: task.project, task_source: task.archived? ? "archive" : nil,
+                  diff_result: diff_result(task))
+    end
+
+    def record(document)
+      { "reference" => document.name, "name" => document.name, "content" => document.content,
+        "binary" => false, "truncated" => false }
+    end
+
+    def supporting_documents(documents)
+      primary = documents.find { |document| document.role == "primary" } || documents.find { |document| document.role == "plan" }
+      documents.reject { |document| document.equal?(primary) }
+    end
+
+    def primary_document(task, documents)
+      documents.find { |document| document.path == task["primary_document"] } ||
+        documents.find { |document| document.role == "primary" } ||
+        documents.find { |document| document.role == "plan" }
+    end
+
+    def publication(task)
+      pub = task.publication
+      return nil unless pub
+
+      {
+        "state" => "current",
+        "publication_state" => pub.fetch("state").downcase,
+        "pull_request" => { "number" => pub.fetch("number"), "url" => pub.fetch("url") },
+        "remote" => { "observation" => { "state" => pub.fetch("state").downcase, "observed_at" => pub["merged_at"] } },
+        "local" => {
+          "repository" => pub.fetch("repository"), "branch" => pub["branch"],
+          "base_branch" => pub["base_branch"], "head_oid" => pub["head_oid"],
+          "push" => { "state" => "published" }, "dirty" => false
+        },
+        "diagnostics" => []
+      }
+    end
+
+    def diff_result(task)
+      change = task.change
+      if change.nil?
+        OpenStruct.new(state: "unavailable", reason: "No change evidence was selected for this task",
+                       diagnostic: "Open the public pull request from the task workspace for the complete change.",
+                       next_action: "Open the task workspace for the captured outcome evidence.",
+                       truncated: false, invalid_encoding: false, sections: {})
+      elsif change.fetch("state") == "unavailable"
+        OpenStruct.new(state: "unavailable", reason: change["reason"] || "Diff unavailable",
+                       diagnostic: change.dig("provenance", "url") ? "Open #{change.dig('provenance', 'url')} for the complete public change." : nil,
+                       next_action: "Open the public pull request for the complete change.",
+                       truncated: false, invalid_encoding: false, sections: {})
+      else
+        content = snapshot.change_content(task)
+        OpenStruct.new(
+          state: "available", next_action: "Open the public pull request for the complete change.",
+          truncated: change["truncated"] == true, invalid_encoding: false,
+          sections: { "committed" => content, "staged" => "", "unstaged" => "", "untracked" => "" }
+        )
+      end
+    end
+
+    def board(projects, task_pairs, expand_completed: false)
+      bands = projects.map do |project|
+        tasks = task_pairs.select { |pair| pair.first.name == project.name }.map(&:last)
+        columns = Hive::StageLabel::KNOWN.keys.map do |stage|
+          Board::Column.new(stage: stage, label: Hive::StageLabel.format(stage),
+                            tasks: tasks.select { |task| task["stage"] == stage }, terminal: stage == "9-done")
+        end
+        Board::Band.new(project: project, workflow_id: "coding", columns: columns,
+                        daemon_enabled: false, error: nil)
+      end
+      OpenStruct.new(bands: bands, empty?: bands.empty?, expand_completed: expand_completed)
+    end
+
+    def write_assets
+      css = Dir[File.join(Rails.root, "app/assets/stylesheets/*.css")].sort.map { |path| File.read(path) }.join("\n")
+      raise "Stylesheet imports are not static" if css.match?(/@import/i)
+
+      css.scan(/url\(\s*['"]?([^'")]+)/i).flatten.each do |url|
+        raise "Unapproved stylesheet asset: #{url}" unless url.start_with?("data:image/svg+xml,")
+      end
+      css_path = "assets/hive-#{Digest::SHA256.hexdigest(css)[0, 12]}.css"
+      write(css_path, css)
+      @stylesheet = "/#{css_path}"
+    end
+
+    def validate_links!(route, html)
+      fragment = Nokogiri::HTML.fragment(html)
+      fragment.css("a[href^='/']").each do |anchor|
+        next if routes.include?(anchor["href"])
+
+        raise "Route #{route.path} links to an unexported path: #{anchor['href']}"
+      end
+    end
+
+    def scan_exports!
+      Pathname.glob(@destination.join("**/*")).select(&:file?).each do |path|
+        next if path.extname == ".css" && path.basename.to_s.start_with?("hive-")
+
+        text = path.read
+        LEAK_PATTERNS.each do |kind, pattern|
+          match = pattern.match(text)
+          raise "Exported file #{path.relative_path_from(@destination)} contains forbidden #{kind}: #{match[0].slice(0, 80)}" if match
+        end
+      end
+    end
+
+    def write(path, content)
+      target = @destination.join(path)
+      FileUtils.mkdir_p(target.dirname)
+      target.write(content)
     end
   end
 end

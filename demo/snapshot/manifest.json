@@ -1,7 +1,7 @@
 {
   "schema": "hive-demo-snapshot-manifest",
   "schema_version": 1,
-  "captured_at": "2026-09-17T09:11:03.263Z",
+  "captured_at": "2026-09-17T09:28:07.265Z",
   "ui_sha": "9b92b6572f53a002c0761c0f91f9aebd836f043a",
   "hive_version": "0.7.4",
   "source": "Read-only native projections captured from the operator installation; the public demo never connects to live Hive state.",
@@ -83,7 +83,7 @@
       "bytes": 495074
     },
     "data/tasks/screenote-42619.json": {
-      "sha256": "d2351bbb9da9a8287806f495a75a3126df492fb93aec614131ce1d34d5264e25",
+      "sha256": "d80d7ab8e518de58cb68f6e62eb3ed52bce860c37307e4be5008481f6ad0678a",
       "bytes": 7307
     },
     "documents/hive-42430/idea.md": {
@@ -139,7 +139,7 @@
       "bytes": 149
     },
     "data/tasks/hive-42430.json": {
-      "sha256": "2ac256a0699fc52e1c5da63cfd8b9707ea70b8f84679e9bfab5900ff347066f0",
+      "sha256": "fb19a4b8de7dbfe2543b4a75a494f53daf59e72394caacfc86e0574160adf576",
       "bytes": 5406
     },
     "documents/hive-23117/idea.md": {
@@ -199,7 +199,7 @@
       "bytes": 501447
     },
     "data/tasks/hive-23117.json": {
-      "sha256": "b87449ff3cd0734d93d18c071fa865863d1ba055f72d8a1eb911bd31fc2c525f",
+      "sha256": "6e984361eb3be024d2294c1fd000bfbf1b87316e062ea1b72bb05d9ebbab17cf",
       "bytes": 5564
     },
     "documents/screenote-1777/idea.md": {
@@ -267,7 +267,7 @@
       "bytes": 163302
     },
     "data/tasks/screenote-1777.json": {
-      "sha256": "02e8cde07bc870024f9399d5a525c38d7fbe3a92c2a61d0d18ceaa03e2717b03",
+      "sha256": "eb0094698a3bd6927ba69ca0d005e16782ff0795e61141f9a333340142883052",
       "bytes": 6192
     },
     "documents/screenote-1778/idea.md": {
@@ -335,7 +335,7 @@
       "bytes": 118952
     },
     "data/tasks/screenote-1778.json": {
-      "sha256": "d60b27c0e7769f193fc207ba7a4544be4e8e69db127bb65dc2f1a15fe9f8b972",
+      "sha256": "6667f29bbf27bd97c8a5ae8d38aabc8ad54fe9523031afa32f16d278c320d1ba",
       "bytes": 6233
     },
     "documents/hive-24065/idea.md": {
@@ -383,7 +383,7 @@
       "bytes": 149
     },
     "data/tasks/hive-24065.json": {
-      "sha256": "89ec89d81d7a86c0fd76f941c9304ee5e8b07cf116940756a4299e0bfc9fe978",
+      "sha256": "d750ab1be19ec5fcacaea6b0ede2666861f8f36f4b082f877d1d902fe0889279",
       "bytes": 5015
     },
     "documents/honeycomb-1848/idea.md": {
@@ -423,7 +423,7 @@
       "bytes": 190502
     },
     "data/tasks/honeycomb-1848.json": {
-      "sha256": "cc86f8f94532971de70a4f46f88095501a5e870e4271becaeb16019bd279fc5c",
+      "sha256": "ae409a131656daff0f07c5b51be01ea81ba64219c5065a0faa4481bb85c5230f",
       "bytes": 4209
     },
     "documents/honeycomb-1849/idea.md": {
@@ -463,7 +463,7 @@
       "bytes": 392992
     },
     "data/tasks/honeycomb-1849.json": {
-      "sha256": "c9488fe08b590baff47b3b1b9d1f8da3fa4eb2fed543ec0140e1ae2eb88efc75",
+      "sha256": "b1641c174b08c5afccb7de990d8f1d99603e3f970252daab7d2e21a57a9f6796",
       "bytes": 4167
     },
     "documents/agent-plugins-1930/idea.md": {
@@ -503,7 +503,7 @@
       "bytes": 524288
     },
     "data/tasks/agent-plugins-1930.json": {
-      "sha256": "135bad5684a2cd41e33067eeda82a5551d9aba1f02f1ce4a5216df9fcbaee758",
+      "sha256": "b51b71b2b85478b22ddc18b8a364578f8f5b791b9682ff9a4f49e17864d8ec1e",
       "bytes": 4247
     },
     "documents/prdigest-9434/idea.md": {
@@ -555,7 +555,7 @@
       "bytes": 155071
     },
     "data/tasks/prdigest-9434.json": {
-      "sha256": "6c71175c9891687e3da4f76eaed1b340028eb5c298dea3370f85db3ca5b41ef5",
+      "sha256": "7866b6d88f149706d0c9a656605f866d0bc9f15c88b5b48eb35016382702d0d7",
       "bytes": 5011
     },
     "documents/hive-43064/idea.md": {
@@ -567,7 +567,7 @@
       "bytes": 3801
     },
     "data/tasks/hive-43064.json": {
-      "sha256": "96366e0fa87cb0d30476dd227d303973cdf4c4befbd8de9aa9b9e35c5c1381f5",
+      "sha256": "78a6b97369a32dca944cb5d08a0c76a2ba74bf533f64866999ee11c963996abc",
       "bytes": 6255
     },
     "documents/hive-42445/idea.md": {
@@ -587,23 +587,23 @@
       "bytes": 2006
     },
     "data/tasks/hive-42445.json": {
-      "sha256": "e46c0892ac2f86e42b8e20c6062a1b7301f4c5f28753fd47c3144e5e87799f01",
-      "bytes": 2062
+      "sha256": "f3e672e959bdae9a6d1ac1431842fb299db4d331419b6f88b54ea77d3439db9f",
+      "bytes": 2089
     },
     "data/status.json": {
-      "sha256": "bb2711a5a421d9e5ca1d3839787bf5fd6d18fd5e307ec4a6b77a9806230b58c8",
-      "bytes": 7925
+      "sha256": "0068376d5f8bb3535aaff5a272064964c03867d03869f60778702c4514eedddd",
+      "bytes": 7952
     },
     "data/workflows.json": {
-      "sha256": "22598a7c3b2431bd886dc6f48090c3e86a1b44570742674ae47ffee8504613fc",
-      "bytes": 5725
+      "sha256": "199404963933d81f26216ee05f8b0812b9e3ebfa9ea6c6e45cad750f02d9196f",
+      "bytes": 6817
     },
     "data/modules.json": {
-      "sha256": "8456f0e4c7dfe100d1b54fa0f7c9e8e848a57192c950f3ff745763c8a7ab84d4",
-      "bytes": 3321
+      "sha256": "621cecf25e8721aff8d27740a3e8373e5bc081e164e00ea69ef8c0265aa42d37",
+      "bytes": 1790
     },
     "data/patrol.json": {
-      "sha256": "bcf260f99a58bc3d0ca48e016a8c7e31822d278b9acd3138d6f1c7fce92ad1e0",
+      "sha256": "3556419b13db5e6932ffb74872e09255c2696ee2aa6fd4fe658bc70cc1ebd9be",
       "bytes": 17983
     },
     "data/digest.json": {
@@ -611,12 +611,12 @@
       "bytes": 6673
     },
     "data/repos.json": {
-      "sha256": "7c7c7f41dcf6d9faaa53c4bc7e45bc02b49c6961b6497c9ae1cd704307c7fda8",
+      "sha256": "beabc5c4e9482900328fdc5de191b9183a1ee6e35f36e466df2c06b322ccc967",
       "bytes": 3101
     },
     "data/snapshot.json": {
-      "sha256": "256e6eda6f4aa5098e624cbf30eae0addbc1ac283d4b34a38a7f5e494fdae48b",
-      "bytes": 7785
+      "sha256": "9a3a072e98ffc4c7c8e41d2d286e40dbf3f3c421fc876b6a89271db326997627",
+      "bytes": 7812
     }
   },
   "redactions": [

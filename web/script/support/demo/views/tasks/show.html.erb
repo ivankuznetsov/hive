@@ -1,0 +1,77 @@
+<% content_for(:title, "#{web_product_name} — #{@task.title}") %>
+<div class="task-header">
+  <h1><%= @task.title %></h1>
+</div>
+<p class="muted">
+  <%= link_to @task.project.name, grid_path(project: @task.project.name) %>
+  · #<%= @task.id %>
+  · <%= @task["workflow"].to_s.humanize %>
+  <% if @task.archived? %> · archived<% end %>
+</p>
+<p class="snapshot-task-meta">
+  Captured state: <strong><%= TaskDisplay.new(@task, archived: @task.archived?).label %></strong>
+  · recorded <%= relative_age(@task["age_seconds"]) %>
+  <% if @task["reason"].present? %> · <span class="muted"><%= @task["reason"] %></span><% end %>
+</p>
+
+<%= render "tasks/workspace_summary", workspace: @workspace %>
+<%= render "tasks/primary_result", result: @result %>
+
+<% if @publication %>
+  <%= render "tasks/publication", publication: @publication, refresh_available: false, refresh_notice: nil %>
+<% end %>
+
+<section id="workspace-change-evidence" class="workspace-panel workspace-wide" aria-labelledby="workspace-change-evidence-heading">
+  <div class="workspace-panel-heading">
+    <div>
+      <h2 id="workspace-change-evidence-heading">Change evidence</h2>
+      <p class="muted">Captured from the public pull request; no local worktree content is exported.</p>
+    </div>
+  </div>
+  <% change = @task.change %>
+  <% if change.nil? %>
+    <p class="workspace-empty">No change record was selected for this task.</p>
+  <% elsif change.fetch("state") == "unavailable" %>
+    <p class="state-banner" role="status"><%= change["reason"] || "Diff unavailable." %></p>
+    <% if change.dig("provenance", "url") %>
+      <p><%= link_to "Open PR ##{change.dig('provenance', 'number')} for the complete public change", change.dig("provenance", "url") %></p>
+    <% end %>
+  <% else %>
+    <dl class="workspace-facts">
+      <div><dt>Pull request</dt><dd><%= link_to "PR ##{change.dig('provenance', 'number')}", change.dig("provenance", "url") %></dd></div>
+      <div><dt>Merge commit</dt><dd><code><%= change.dig("provenance", "merge_oid")&.first(12) %></code></dd></div>
+      <div><dt>Head commit</dt><dd><code><%= change.dig("provenance", "head_oid")&.first(12) %></code></dd></div>
+      <div><dt>Patch</dt><dd><%= number_to_human_size(change.fetch("bytes")) %><%= " · truncated" if change["truncated"] %></dd></div>
+    </dl>
+    <p><%= link_to "Inspect the captured change", routes.change_path(@task.project.name, @task.slug), class: "btn btn-secondary btn-sm" %></p>
+  <% end %>
+</section>
+
+<%= render "tasks/supporting_artifacts", result: @result %>
+
+<section id="workspace-snapshot-documents" class="workspace-panel workspace-wide" aria-labelledby="workspace-snapshot-documents-heading">
+  <div class="workspace-panel-heading">
+    <div>
+      <h2 id="workspace-snapshot-documents-heading">Documents</h2>
+      <p class="muted">Every selected original document with its own saved page.</p>
+    </div>
+    <span class="workspace-state-label"><%= @documents.length %></span>
+  </div>
+  <ul class="snapshot-document-list">
+    <% @documents.each do |document| %>
+      <li>
+        <%= link_to document.name, routes.document_path(@task.project.name, @task.slug, document.name) %>
+        <span class="muted"><%= document.role.humanize %> · <%= number_to_human_size(document.bytes) %></span>
+      </li>
+    <% end %>
+  </ul>
+</section>
+
+<% if @task.questions.any? %>
+  <%= render "tasks/snapshot_questions", task: @task %>
+<% end %>
+
+<section class="snapshot-provenance" aria-labelledby="snapshot-provenance-heading">
+  <h2 id="snapshot-provenance-heading">Snapshot provenance</h2>
+  <p class="muted">This workspace was rendered from the reviewed public snapshot captured <%= @captured_at %>; the source projection observed at that time is preserved. Live Hive state may differ.</p>
+</section>

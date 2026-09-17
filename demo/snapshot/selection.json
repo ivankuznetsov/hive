@@ -352,7 +352,8 @@
     "exclude": ["root-cause-repair"]
   },
   "modules": {
-    "project": "hive"
+    "project": "hive",
+    "exclude": ["root-cause-repair"]
   },
   "patrol": {
     "project": "hive",

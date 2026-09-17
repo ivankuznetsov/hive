@@ -122,7 +122,7 @@ module Hive
           "precoverage" => view.fetch("precoverage", false) == true,
           "pruned_at" => view["pruned_at"],
           "web_url" => web_url(local_date, view["document"] ? nil : @project || view["selected_project"])
-        }.merge(view["document"].is_a?(String) ? { "document" => view["document"] } : {}))
+        }.merge(view["document"].is_a?(String) ? { "document" => view["document"], "repository_stats" => view["repository_stats"] } : {}))
       end
 
       def normalized_requested_date

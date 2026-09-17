@@ -21,6 +21,7 @@ class DailyDigestDocumentWriterTest < Minitest::Test
       record = store.read("2026-09-15")
       assert_includes record.fetch("document"), "saved snapshot"
       assert_equal "closed", record.fetch("lifecycle")
+      assert_equal [ { "name" => "ivankuznetsov/hive", "pull_requests" => 1, "additions" => 120, "deletions" => 30, "commits" => 3 } ], record.fetch("repository_stats")
       reader = Hive::DailyDigest::Reader.new(store: store, config_loader: -> { config }, clock: -> { Time.utc(2026, 9, 16, 13) })
       view = reader.read(project: "ignored-filter")
       assert_equal record.fetch("document"), view.fetch("document")
@@ -31,6 +32,58 @@ class DailyDigestDocumentWriterTest < Minitest::Test
       writer.refresh(date: "2026-09-15")
       assert_equal 1, calls.length
       assert_equal record.fetch("record_id"), store.read("2026-09-15").fetch("record_id")
+    end
+  end
+
+  def test_closed_document_gets_stats_once_without_rewriting_its_text
+    with_tmp_global_config do |home|
+      store = Hive::DailyDigest::Store.new(root: File.join(home, "documents"))
+      evidence = facts
+      generator = Object.new
+      generator.define_singleton_method(:generate) { |_| "Original text" }
+      writer = Hive::DailyDigest::DocumentWriter.new(
+        config_loader: -> { { "enabled" => true, "time_zone" => "UTC" } },
+        projects_loader: -> { [] }, store: store, facts_loader: ->(**_) { evidence },
+        generator: generator, clock: -> { Time.utc(2026, 9, 15, 13) }
+      )
+      writer.refresh(date: "2026-09-15")
+      legacy = store.read("2026-09-15").reject { |key, _| key == "repository_stats" }
+      store.write_base(legacy.merge("lifecycle" => "closed", "closed_at" => "2026-09-16T00:00:00Z"))
+      bytes = File.binread(store.base_path("2026-09-15"))
+      generator.define_singleton_method(:generate) { |_| raise "must not regenerate" }
+      evidence = { "digest" => { "repositories" => [] } }
+      assert_raises(Hive::UnavailableError) { writer.refresh(date: "2026-09-15") }
+      assert_equal bytes, File.binread(store.base_path("2026-09-15"))
+      assert_empty store.read("2026-09-15").fetch("amendments")
+      evidence = facts
+      assert_equal "enriched", writer.refresh(date: "2026-09-15").first.fetch("status")
+      reader = Hive::DailyDigest::Reader.new(store: store,
+        config_loader: -> { { "time_zone" => "UTC" } })
+      assert_equal 3, reader.read(date: "2026-09-15").fetch("repository_stats").first.fetch("commits")
+      assert_equal bytes, File.binread(store.base_path("2026-09-15"))
+      assert_equal "unchanged", writer.refresh(date: "2026-09-15").first.fetch("status")
+      assert_equal 1, store.read("2026-09-15").fetch("amendments").size
+    end
+  end
+
+  def test_missing_counts_are_unavailable_and_empty_repositories_have_no_totals
+    with_tmp_global_config do |home|
+      store = Hive::DailyDigest::Store.new(root: File.join(home, "documents"))
+      evidence = facts
+      evidence["digest"]["repositories"].first["pull_requests"].first.delete("commits")
+      evidence["digest"]["repositories"] << { "name" => "owner/empty", "pull_requests" => [] }
+      generator = Object.new
+      generator.define_singleton_method(:generate) { |_| "Saved document" }
+      writer = Hive::DailyDigest::DocumentWriter.new(
+        config_loader: -> { { "enabled" => true, "time_zone" => "UTC" } },
+        projects_loader: -> { [] }, store: store, facts_loader: ->(**_) { evidence },
+        generator: generator, clock: -> { Time.utc(2026, 9, 16, 13) }
+      )
+      writer.refresh(date: "2026-09-15")
+      stats = store.read("2026-09-15").fetch("repository_stats")
+      assert_equal 1, stats.size
+      assert_nil stats.first.fetch("commits")
+      assert_equal 120, stats.first.fetch("additions")
     end
   end
 
@@ -125,6 +178,7 @@ class DailyDigestDocumentWriterTest < Minitest::Test
       "date" => "2026-09-15", "timezone" => "UTC", "repositories" => [
         { "name" => "ivankuznetsov/hive", "pull_requests" => [
           { "number" => 1, "title" => "Improve loading", "url" => "https://github.com/ivankuznetsov/hive/pull/1",
+            "additions" => 120, "deletions" => 30, "commits" => 3,
             "merged_at" => "2026-09-15T12:00:00Z", "description" => "Use the saved snapshot", "files" => [] }
         ] }
       ]

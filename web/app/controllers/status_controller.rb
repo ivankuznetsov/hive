@@ -19,6 +19,16 @@ class StatusController < ApplicationController
     return redirect_to status_filter_path(project: nil) if requested_project && !@selected_project
 
     @visible_projects = @selected_project ? [ @selected_project ] : @projects
+    if @selected_project && @selected_project["hive_state_path"].present? && !@status_page_snapshot.unavailable?
+      history = StatusBroadcaster.projects(StatusBroadcaster.archive_snapshot(project: @selected_project)).first
+      if history
+        completed = history.attributes.fetch("tasks", []).map { |task| task.merge("archive_source" => true) }
+        tasks = (@selected_project.attributes.fetch("tasks", []) + completed).index_by { |task| task.fetch("slug") }.values
+        @visible_projects = [ Project.new(@selected_project.attributes.merge(
+          "tasks" => tasks, "error" => @selected_project["error"] || history["error"]
+        )) ]
+      end
+    end
     order = TaskDisplay::STATES.keys
     @visible_projects = @visible_projects.map do |project|
       tasks = project.attributes.fetch("tasks", []).sort_by do |attributes|
@@ -44,13 +54,19 @@ class StatusController < ApplicationController
   end
 
   def archive
-    @payload = StatusBroadcaster.archive_snapshot
-    @projects = StatusBroadcaster.projects(@payload)
     requested_project = params[:project].to_s.presence
-    @selected_project = @projects.find { |project| project.name == requested_project }
-    return redirect_to status_filter_path(project: nil) if requested_project && !@selected_project
+    if requested_project
+      @projects = Project.all
+      @selected_project = @projects.find { |project| project.name == requested_project }
+      return redirect_to status_filter_path(project: nil) unless @selected_project
 
-    @visible_projects = @selected_project ? [ @selected_project ] : @projects
+      @payload = StatusBroadcaster.archive_snapshot(project: @selected_project)
+      @visible_projects = StatusBroadcaster.projects(@payload)
+    else
+      @payload = StatusBroadcaster.archive_snapshot
+      @projects = StatusBroadcaster.projects(@payload)
+      @visible_projects = @projects
+    end
     @board = Board.new(@visible_projects) if params[:view] == "board"
   end
 

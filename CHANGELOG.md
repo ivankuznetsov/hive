@@ -2,6 +2,30 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.7.4
+
+Hive's daily digest now tells you what changed across your projects in one readable document, with source PR links and project totals.
+
+### A digest worth reading
+
+- Get a concise summary of recent merged changes, written from PR descriptions and relevant diffs using your configured agent. Hive reuses the independent PRDigest engine.
+- Read the same saved document in Web or with `hive digest`. Automatic generation is enabled by default; an explicit disabled setting is respected. Telegram delivery remains opt-in.
+- Revisit earlier days or preview today. Failed generation preserves the previous digest, and repeated refreshes keep closed documents unchanged.
+- Receive formatted Telegram messages with working PR links, or a text attachment for longer digests. Delivery receipts prevent automatic duplicates.
+
+### Clearer project summaries
+
+- Read a wider article with less empty space, smaller section headings, and one date heading.
+- Open each project's repository from its heading and see merged PR counts, commits in those PRs, and LOC changed. Added lines are green; deleted lines are red. Counts describe merged PRs, not direct commits outside them.
+- Existing saved digests gain project statistics on refresh without rewriting their text.
+
+### Completed work and installation
+
+- Fixed completed workflow tasks disappearing from the board. The Done view groups completed tasks by workflow while retaining filters and task links.
+- Fixed release distribution and verification, and updated the agent runtime dependency to 0.2.4.
+
+[Full technical changelog](https://github.com/ivankuznetsov/hive/blob/v0.7.4/docs/releases/0.7.4-technical.md) · [All changes since 0.7.3](https://github.com/ivankuznetsov/hive/compare/v0.7.3...v0.7.4)
+
 ## 0.7.3
 
 Hive 0.7.3 makes it easier to see what your agents are doing, review their work, and keep tasks moving when a provider or process fails.

@@ -1304,3 +1304,17 @@ selected project. It reads the archive on demand and renders the workflow's
 actual terminal columns, with completed cards expanded and mutations disabled.
 This includes older records without changing their completion timestamps or
 adding archive scans to active-feed polling. The Archive list remains available.
+
+### Completed tasks on project pages
+
+Selecting a project on the normal Board or Grid includes its archived tasks,
+including retained history older than the ordinary retention window. The Board
+expands populated completed columns by default; completed cards link to read-only
+archive task detail. State counts and filters include these rows. The all-project
+page and background active feed remain active-only.
+
+`ProjectArchive` reads the canonical archive projection for only the selected
+registered project. A bounded process-local cache retains each result for one
+minute; stage-directory changes invalidate it immediately. The project-scoped
+Done and Archive pages reuse this cache instead of scanning every project first.
+The all-project Archive remains the lossless fleet-wide history view.

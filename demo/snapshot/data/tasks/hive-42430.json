@@ -1,0 +1,171 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "hive",
+  "repository": "ivankuznetsov/hive",
+  "id": 42430,
+  "slug": "improve-hive-web-task-detail-260812-19e1",
+  "title": "Operator task workspace",
+  "role": "lead",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-08-15T00:29:06.962723Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T09:11:03.263Z",
+  "observed_at": null,
+  "age_seconds": 1420331,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/hive-42430/idea.md",
+      "bytes": 3814,
+      "sha256": "77cf1c74c2ac806145fea76a1247fd50179b20c58c523e81f95b1279f9765484",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/hive-42430/brainstorm.md",
+      "bytes": 12472,
+      "sha256": "50546f8211a98cf7a71ea04e6e3ce26a6d0d46b0523c960610d682952023a7d1",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/hive-42430/plan.md",
+      "bytes": 73835,
+      "sha256": "a7cf3fccfd0944786a6fff21e7f81391a45fd2b5d23667592a36cec463180da9",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/hive-42430/task.md",
+      "bytes": 2760,
+      "sha256": "a6baf1e901981d05e3764f23deb26c5a06c9869598a96dd54f38f2a487d3263a",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/hive-42430/pr.md",
+      "bytes": 2731,
+      "sha256": "9c6ebf4b5c76c48f0e452655ec4900cac157092b109ae08ab74dfc8354610232",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "artifact.md",
+      "path": "documents/hive-42430/artifact.md",
+      "bytes": 2660,
+      "sha256": "b9dc1db9e3155336570912923a2f8e83b61235e8c8965ffcce991f50253d816c",
+      "role": "artifact",
+      "format": "markdown"
+    },
+    {
+      "name": "summary.md",
+      "path": "documents/hive-42430/summary.md",
+      "bytes": 2026,
+      "sha256": "7b8e5cab4da0a746acd2867de36bcdca21193f8dc0ea11a56fb63a03ec652151",
+      "role": "outcome",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-01.md",
+      "path": "documents/hive-42430/reviews/codex-ce-code-review-01.md",
+      "bytes": 7067,
+      "sha256": "63aaf837f46939c63e98d36ae1263b3d1e49b73cfaae86af498787e64351b3bd",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-02.md",
+      "path": "documents/hive-42430/reviews/codex-ce-code-review-02.md",
+      "bytes": 8578,
+      "sha256": "a96d377791803def26ada3e45a0f9eaca7f5db1dddbee59cba78229f83d62dde",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/errors-01.md",
+      "path": "documents/hive-42430/reviews/errors-01.md",
+      "bytes": 953,
+      "sha256": "d68f9a317529ae60bf752bd12c426b07a5e34fefcc9ecdf69c74203e0b2ce955",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/errors-02.md",
+      "path": "documents/hive-42430/reviews/errors-02.md",
+      "bytes": 953,
+      "sha256": "2589eb699627e528d8af2e642c9134b49f33bc4fb7c73dfd16439f11906a08b1",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/hive-42430/reviews/escalations-01.md",
+      "bytes": 149,
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-02.md",
+      "path": "documents/hive-42430/reviews/escalations-02.md",
+      "bytes": 149,
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/hive-42430/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/hive",
+    "url": "https://github.com/ivankuznetsov/hive/pull/1015",
+    "number": 1015,
+    "state": "MERGED",
+    "merged_at": "2026-08-15T00:28:09Z",
+    "merge_oid": "7b4dd4b63a379c2b8d7c696b2511ed12b7571afa",
+    "head_oid": "18300ecc4fb713bccc47b12bd2bf5585f0dbaa23",
+    "base_branch": "main",
+    "branch": "improve-hive-web-task-detail-260812-19e1",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "unavailable",
+    "reason": "The public patch could not be captured; open the pull request for the full change.",
+    "provenance": {
+      "repository": "ivankuznetsov/hive",
+      "url": "https://github.com/ivankuznetsov/hive/pull/1015",
+      "number": 1015,
+      "state": "MERGED",
+      "merged_at": "2026-08-15T00:28:09Z",
+      "merge_oid": "7b4dd4b63a379c2b8d7c696b2511ed12b7571afa",
+      "head_oid": "18300ecc4fb713bccc47b12bd2bf5585f0dbaa23",
+      "base_branch": "main",
+      "branch": "improve-hive-web-task-detail-260812-19e1",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

@@ -1,0 +1,5221 @@
+diff --git a/README.md b/README.md
+index ae979f7..1306254 100644
+--- a/README.md
++++ b/README.md
+@@ -11,5 +11,20 @@ product.
+ - A *honeycomb* = descriptor (`workflow.yml`) + stage instructions + manifest
+   (version, author, permissions summary, sha256 integrity)
+ 
+-Status: scaffolding. Architecture tasks live in `.hive-state` (1848–1851 here,
+-1852–1853 in hive).
++The repository now ships the independent `honeycomb-manifest/v1` package
++contract and offline Ruby tooling for manifest generation, validation, and
++approval-gated catalog generation. The root catalog is intentionally empty
++until seed honeycombs land.
++
++```sh
++ruby script/honeycomb-manifest --check --all
++ruby script/honeycomb-validate --all --json
++ruby script/honeycomb-catalog --check \
++  --evidence test/fixtures/listing-evidence/empty.json
++ruby test/run.rb
++```
++
++See [the package format](docs/PACKAGE_FORMAT.md) for the complete layout,
++schemas, integrity model, evidence boundary, permission projection, and command
++exit contract. Hive install verbs remain owned by Hive tasks 1852/1853; this
++repository only publishes their future command shape.
+diff --git a/catalog.json b/catalog.json
+new file mode 100644
+index 0000000..b880323
+--- /dev/null
++++ b/catalog.json
+@@ -0,0 +1,4 @@
++{
++  "schema": "honeycomb-catalog/v1",
++  "entries": []
++}
+diff --git a/docs/PACKAGE_FORMAT.md b/docs/PACKAGE_FORMAT.md
+new file mode 100644
+index 0000000..2a58e8d
+--- /dev/null
++++ b/docs/PACKAGE_FORMAT.md
+@@ -0,0 +1,286 @@
++# Honeycomb Package Format v1
++
++This document is the authoritative contract for publishable honeycombs in this
++repository. The implementation is offline Ruby standard/default-library code;
++all three commands share the same schema, permission, integrity, evidence, and
++serialization logic.
++
++## Version directory
++
++Each release is stored directly at `packages/<name>/<semver>/`:
++
++```text
++packages/example/1.0.0/
++  workflow.yml
++  README.md
++  manifest.yml
++  instructions/
++    build.md
++```
++
++`workflow.yml`, `README.md`, `manifest.yml`, and at least one regular file below
++`instructions/` are required. Nested regular files and dotfiles are allowed and
++hashed. Symlinks, FIFOs/devices/sockets, unreadable files, backslash path
++ambiguity, absolute paths, `.`/`..` traversal, and names that collide after
++Unicode NFC normalization are rejected before hashing.
++
++An instruction reference must be a normalized relative path below the same
++version's `instructions/` directory and resolve to a regular package file.
++Merged version directories are immutable. Fixes publish a new SemVer version;
++checkout validation does not inspect Git history, so listing CI owns enforcement
++against the merge base.
++
++Names match `\A[a-z0-9][a-z0-9-]{1,62}[a-z0-9]\z` (3–64 characters).
++Versions are strict SemVer 2.0 strings and directory spelling must equal the
++manifest value. Build metadata does not affect precedence; two eligible versions
++with equal precedence but different build metadata are rejected because there
++is no unique latest version.
++
++## Manifest lifecycle
++
++Authors seed `manifest.yml` with metadata, then explicitly generate the complete
++canonical document:
++
++```sh
++ruby script/honeycomb-manifest packages/example/1.0.0
++ruby script/honeycomb-manifest --check packages/example/1.0.0
++```
++
++Generation preserves valid author fields and top-level `x-*` extensions. It
++replaces only `permissions`, `files`, and `release_sha256`. Generation writes by
++same-directory temporary file, flushes it, and atomically renames it only after
++all validation succeeds. `--check` regenerates in memory and never writes.
++
++The executable input fixture is
++[`test/fixtures/packages/valid/example/1.0.0/`](../test/fixtures/packages/valid/example/1.0.0/),
++and its exact generated output is
++[`test/fixtures/expected/manifest.yml`](../test/fixtures/expected/manifest.yml).
++
++### `honeycomb-manifest/v1` fields
++
++| Field | Owner | Contract |
++|---|---|---|
++| `schema` | Author | Exactly `honeycomb-manifest/v1`. |
++| `name` | Author | Lowercase registry name matching the version directory. |
++| `version` | Author | Strict SemVer matching the version directory spelling. |
++| `description` | Author | Non-empty text. |
++| `author` | Author | Exactly `{name, url?}`; URL is safe absolute HTTP(S). |
++| `license` | Author | One identifier from `policy/spdx-license-ids.txt`; expressions are not accepted in v1. |
++| `hive_min_version` | Author | Strict SemVer used by explicit Hive compatibility checks. |
++| `source` | Author | Exactly `{url, revision}`; revision is lowercase 40- or 64-character commit hex. |
++| `permissions` | Generator | Exact normalized worst-case permission union described below. |
++| `files` | Generator | Sorted repository-relative path to lowercase SHA-256 mapping for every regular package file except root `manifest.yml`. |
++| `release_sha256` | Generator | SHA-256 of canonical manifest YAML with this self-referential field omitted. |
++| `x-*` | Author | Optional top-level lowercase extensions containing only JSON-like primitive values. |
++
++Unknown core top-level keys are rejected unless they match safe `x-*` syntax.
++All known nested objects reject unknown keys. YAML input must be one UTF-8,
++JSON-like document with string mapping keys; duplicate keys, aliases, merge
++aliases, custom tags, non-finite numbers, timestamps/custom objects, and multiple
++documents fail before projection.
++
++Canonical YAML uses the core field order above, lexicographically sorted file
++and extension keys, UTF-8, LF newlines, one final newline, JSON-quoted strings,
++and deterministic collection indentation. It does not use Psych's emitter.
++
++### Three distinct identities
++
++- `source.revision` identifies the upstream source/provenance selected by the
++  author and becomes catalog `source_sha`.
++- `release_sha256` identifies the canonical metadata, derived permissions, and
++  exact package file hashes.
++- Evidence `head_sha` identifies the exact registry Git head reviewed by both
++  lint and the human approver.
++
++These values are deliberately not interchangeable. Catalog inclusion requires
++current evidence for the release fingerprint and agreement on the review head.
++
++## Permission projection
++
++The generator visits active stages, council reviewers, and council revise
++agents. Every contributing field produces an attributed finding. The manifest
++stores the compact union:
++
++```yaml
++permissions:
++  risk: "low"
++  capabilities:
++    - "filesystem-read"
++  network_hosts: []
++  filesystem_read:
++    - "repository"
++    - "task"
++  filesystem_write: []
++  secrets: []
++```
++
++The six keys are exact. Arrays are sorted unique sets. `*` is reserved for
++unbounded access and, when present, is the only array value.
++
++| Hive descriptor request | Projection |
++|---|---|
++| `read-only` | Repository/task read, `filesystem-read`, low risk. |
++| `scoped` + `Read`, `LS`, `Grep`, `Glob` | Bounded read scopes, low risk. |
++| `scoped` + `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | Bounded write scopes, moderate risk. |
++| `scoped` + `WebFetch`, `WebSearch` | Unbounded host `*`, network capability, high risk. |
++| Missing permissions, `yolo`, or Bash (including the Bash tool) | All four capabilities and `*` hosts/read/write/secrets, high risk. |
++
++Safe `dirs` entries are projected as `task/<relative-path>` and supplement the
++repository/task scopes for the requested file capabilities. Absolute,
++backslash, empty, null-containing, or traversing directories fail. Unknown
++presets, keys, tools, blank blocks, or future permission-bearing constructs fail
++closed rather than publishing a narrower summary.
++
++## Read-only validation and Hive compatibility
++
++Validate one version or all discovered versions:
++
++```sh
++ruby script/honeycomb-validate packages/example/1.0.0
++ruby script/honeycomb-validate --all --json
++ruby script/honeycomb-validate --all --json --require-hive
++```
++
++Validation checks package location and required content, strict manifest schema,
++directory identity, instruction references, exact file set and hashes,
++re-derived permissions, release fingerprint, canonical bytes, and filesystem
++safety without writing.
++
++When the local Hive library is installed, the validator additionally calls
++`Hive::Workflows::DescriptorParser.parse_hash` with a synthetic
++`<package-name>.yml` path in the version directory. This satisfies Hive's
++filename/ID rule while preserving relative instruction resolution. The
++installed Hive version must meet `hive_min_version`; parser rejection or an old
++runtime is an error. Absence is a non-failing warning locally. CI opts into
++`--require-hive`, where absence is an error. No ambient CI variable changes the
++mode.
++
++Human findings are the default. `--json` emits a stable array whose objects have
++exactly `path`, `code`, `message`, and `severity`, in deterministic order.
++Informational and warning findings do not fail a command.
++
++## Listing evidence
++
++`honeycomb-catalog` requires an explicit normalized JSON record set. This is an
++input boundary for listing CI, not task 1849's prescribed persistence format:
++
++```json
++{
++  "schema": "honeycomb-listing-evidence/v1",
++  "records": [
++    {
++      "name": "example",
++      "version": "1.0.0",
++      "tier": "reviewed",
++      "lint": {
++        "status": "pass",
++        "release_sha256": "<64 lowercase hex>",
++        "head_sha": "<40 or 64 lowercase hex>",
++        "checked_at": "2026-07-16T10:00:00Z"
++      },
++      "approval": {
++        "status": "approved",
++        "release_sha256": "<same release>",
++        "head_sha": "<same head>",
++        "reviewer": "registry-reviewer",
++        "reviewed_at": "2026-07-16T11:00:00Z",
++        "review_url": "https://example.test/reviews/example-1.0.0"
++      }
++    }
++  ]
++}
++```
++
++Root, record, lint, and approval keys are strict; JSON duplicate keys are
++rejected. Lint statuses are `pass`, `pending`, and `fail`; approval statuses are
++`approved`, `pending`, and `denied`. Pending verdicts may contain only their
++status. Non-pending verdicts require their identity/audit fields and RFC 3339
++timestamps. A version is eligible only for `pass` plus `approved` bound to its
++current release and the same head SHA.
++
++Missing records, a missing verdict, pending, failed lint, or denied approval omit
++the version without failing catalog generation. Malformed/duplicate records,
++unknown package identities, stale release fingerprints, or lint/approval head
++or release disagreement abort the entire build without replacing `catalog.json`.
++
++## `honeycomb-catalog/v1`
++
++The root document is:
++
++```json
++{
++  "schema": "honeycomb-catalog/v1",
++  "entries": []
++}
++```
++
++Each eligible version gets a flat entry with these exact projections:
++
++| Field | Source |
++|---|---|
++| `name`, `version`, `description`, `author`, `license`, `hive_min_version`, `permissions` | Validated manifest. |
++| `latest_version` | Highest eligible SemVer for the same name. |
++| `tier` | Listing evidence. |
++| `install_command` | Fixed `hive workflow install honeycomb/<name>`. |
++| `package_url` | Fixed registry repository URL at the evidence head SHA and exact version path. |
++| `reviews_url` | Approved evidence review URL. |
++| `source_sha` | Manifest `source.revision`. |
++| `listing_approval` | Release SHA, head SHA, lint time, approver, and approval time. |
++
++Entries sort by name then SemVer and every version carries the same eligible
++`latest_version` for its name. The catalog contains no full manifest, package
++file map, generation timestamp, or caller-supplied shell/URL projection.
++
++```sh
++ruby script/honeycomb-catalog --evidence path/to/evidence.json
++ruby script/honeycomb-catalog --check --evidence path/to/evidence.json
++```
++
++Generation validates every candidate package before evidence filtering and
++atomically replaces root `catalog.json` only on total success. `--check` compares
++in memory and never writes. `--root` is available to repository automation and
++tests; catalog `--output`, when supplied, must still resolve to that root's
++`catalog.json`.
++
++## Command terminal states
++
++| Command | Exit 0 | Exit 1 | Exit 2 |
++|---|---|---|---|
++| `honeycomb-manifest` | Generated/current | Derivation, safety, schema, or drift error | Invocation/internal failure |
++| `honeycomb-validate` | No error findings | One or more validation errors | Invocation/internal failure |
++| `honeycomb-catalog` | Generated/current | Package, evidence, SemVer, or drift error | Invocation/internal failure |
++
++In validator JSON mode, invocation/internal failure still emits a valid
++four-key finding array on stdout and places the diagnostic on stderr.
++
++## Offline verification
++
++No command fetches schemas, licenses, packages, or evidence. The complete local
++contract is:
++
++```sh
++ruby test/run.rb
++ruby script/honeycomb-manifest --check --all
++ruby script/honeycomb-validate --all --json
++ruby script/honeycomb-validate --all --json --require-hive
++ruby script/honeycomb-catalog --check \
++  --evidence test/fixtures/listing-evidence/empty.json
++```
++
++The strict Hive command succeeds only when a compatible Hive runtime is locally
++installed. The remaining commands use Ruby standard/default libraries and
++checked-in policy/fixtures only.
++
++## Design references
++
++The v1 manifest is independent rather than a copy of either upstream format.
++Compatibility and permission mappings were designed against pinned sources:
++
++- Hive commit `c727386124dd549db577431829372b811cc05dc8`:
++  [workflow documentation](https://github.com/ivankuznetsov/hive/blob/c727386124dd549db577431829372b811cc05dc8/docs/workflows.md),
++  [descriptor parser](https://github.com/ivankuznetsov/hive/blob/c727386124dd549db577431829372b811cc05dc8/lib/hive/workflows/descriptor_parser.rb),
++  [permission documentation](https://github.com/ivankuznetsov/hive/blob/c727386124dd549db577431829372b811cc05dc8/docs/permissions.md), and
++  [permission implementation](https://github.com/ivankuznetsov/hive/blob/c727386124dd549db577431829372b811cc05dc8/lib/hive/permission_scope.rb).
++- hive-bench commit `a63d66520daa8b0dfd7966932241a24b99eeb959`:
++  [corpus schema](https://github.com/ivankuznetsov/hive-bench/blob/a63d66520daa8b0dfd7966932241a24b99eeb959/corpus/SCHEMA.md) and
++  [manifest example](https://github.com/ivankuznetsov/hive-bench/blob/a63d66520daa8b0dfd7966932241a24b99eeb959/corpus/add-i-key-with-legend-260522-ca28/manifest.yml).
+diff --git a/lib/honeycomb_registry.rb b/lib/honeycomb_registry.rb
+new file mode 100644
+index 0000000..af902ac
+--- /dev/null
++++ b/lib/honeycomb_registry.rb
+@@ -0,0 +1,20 @@
++# frozen_string_literal: true
++
++require_relative "honeycomb_registry/findings"
++require_relative "honeycomb_registry/safe_yaml"
++require_relative "honeycomb_registry/semver"
++require_relative "honeycomb_registry/schema"
++require_relative "honeycomb_registry/permissions"
++require_relative "honeycomb_registry/atomic_write"
++require_relative "honeycomb_registry/canonical_yaml"
++require_relative "honeycomb_registry/package"
++require_relative "honeycomb_registry/manifest"
++require_relative "honeycomb_registry/hive_compatibility"
++require_relative "honeycomb_registry/validator"
++require_relative "honeycomb_registry/canonical_json"
++require_relative "honeycomb_registry/listing_evidence"
++require_relative "honeycomb_registry/catalog"
++
++module HoneycombRegistry
++  class InvocationError < StandardError; end
++end
+diff --git a/lib/honeycomb_registry/atomic_write.rb b/lib/honeycomb_registry/atomic_write.rb
+new file mode 100644
+index 0000000..2dd71ec
+--- /dev/null
++++ b/lib/honeycomb_registry/atomic_write.rb
+@@ -0,0 +1,33 @@
++# frozen_string_literal: true
++
++require "tempfile"
++
++module HoneycombRegistry
++  module AtomicWrite
++    module_function
++
++    def replace(path, bytes, mode: 0o644)
++      directory = File.dirname(path)
++      basename = File.basename(path)
++      temporary = Tempfile.new([".#{basename}.", ".tmp"], directory, mode: File::RDWR)
++      begin
++        temporary.binmode
++        temporary.write(bytes)
++        temporary.flush
++        temporary.fsync
++        temporary.chmod(mode)
++        temporary.close
++        File.rename(temporary.path, path)
++        fsync_directory(directory)
++      ensure
++        temporary.close! if temporary
++      end
++    end
++
++    def fsync_directory(directory)
++      File.open(directory, File::RDONLY) { |file| file.fsync }
++    rescue Errno::EINVAL, Errno::ENOTSUP
++      nil
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/canonical_json.rb b/lib/honeycomb_registry/canonical_json.rb
+new file mode 100644
+index 0000000..a02bfe2
+--- /dev/null
++++ b/lib/honeycomb_registry/canonical_json.rb
+@@ -0,0 +1,13 @@
++# frozen_string_literal: true
++
++require "json"
++
++module HoneycombRegistry
++  module CanonicalJSON
++    module_function
++
++    def dump(value)
++      JSON.pretty_generate(value, allow_nan: false) + "\n"
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/canonical_yaml.rb b/lib/honeycomb_registry/canonical_yaml.rb
+new file mode 100644
+index 0000000..7366bf1
+--- /dev/null
++++ b/lib/honeycomb_registry/canonical_yaml.rb
+@@ -0,0 +1,112 @@
++# frozen_string_literal: true
++
++require "json"
++
++module HoneycombRegistry
++  module CanonicalYAML
++    module_function
++
++    def dump_manifest(manifest, include_release: true)
++      ordered = {}
++      Schema::CORE_KEYS.each do |key|
++        next if key == "release_sha256" && !include_release
++        ordered[key] = ordered_value(key, manifest[key]) if manifest.key?(key)
++      end
++      manifest.keys.grep(Schema::EXTENSION_PATTERN).sort.each do |key|
++        ordered[key] = manifest[key]
++      end
++      dump(ordered)
++    end
++
++    def dump(value)
++      output = +""
++      emit(value, output, 0)
++      output << "\n" unless output.end_with?("\n")
++      output.encode(Encoding::UTF_8)
++    end
++
++    def ordered_value(key, value)
++      return value unless value.is_a?(Hash)
++
++      order = case key
++              when "author" then %w[name url]
++              when "source" then %w[url revision]
++              when "permissions" then Schema::PERMISSION_KEYS
++              when "files" then value.keys.sort
++              else value.keys.sort
++              end
++      order.each_with_object({}) { |child_key, result| result[child_key] = value[child_key] if value.key?(child_key) }
++    end
++
++    def emit(value, output, indent)
++      case value
++      when Hash then emit_hash(value, output, indent)
++      when Array then emit_array(value, output, indent)
++      else output << scalar(value)
++      end
++    end
++
++    def emit_hash(value, output, indent)
++      if value.empty?
++        output << "{}"
++        return
++      end
++      value.each do |key, child|
++        output << (" " * indent) << key_text(key) << ":"
++        if inline?(child)
++          output << " " << inline(child) << "\n"
++        else
++          output << "\n"
++          emit(child, output, indent + 2)
++        end
++      end
++    end
++
++    def emit_array(value, output, indent)
++      if value.empty?
++        output << "[]"
++        return
++      end
++      value.each do |child|
++        output << (" " * indent) << "-"
++        if inline?(child)
++          output << " " << inline(child) << "\n"
++        else
++          output << "\n"
++          emit(child, output, indent + 2)
++        end
++      end
++    end
++
++    def inline?(value)
++      !value.is_a?(Hash) && !value.is_a?(Array) || value.empty?
++    end
++
++    def inline(value)
++      return "{}" if value.is_a?(Hash)
++      return "[]" if value.is_a?(Array)
++
++      scalar(value)
++    end
++
++    def scalar(value)
++      case value
++      when String then JSON.generate(value)
++      when Integer then value.to_s
++      when Float
++        raise ArgumentError, "canonical YAML cannot encode non-finite numbers" unless value.finite?
++        JSON.generate(value)
++      when true then "true"
++      when false then "false"
++      when nil then "null"
++      else raise ArgumentError, "canonical YAML cannot encode #{value.class}"
++      end
++    end
++
++    def key_text(key)
++      raise ArgumentError, "canonical YAML keys must be strings" unless key.is_a?(String)
++
++      key.match?(/\A[a-zA-Z_][a-zA-Z0-9_-]*\z/) ? key : JSON.generate(key)
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/catalog.rb b/lib/honeycomb_registry/catalog.rb
+new file mode 100644
+index 0000000..7d827fb
+--- /dev/null
++++ b/lib/honeycomb_registry/catalog.rb
+@@ -0,0 +1,165 @@
++# frozen_string_literal: true
++
++require "optparse"
++
++module HoneycombRegistry
++  module Catalog
++    SCHEMA = "honeycomb-catalog/v1"
++    REPOSITORY_URL = "https://github.com/ivankuznetsov/honeycomb"
++    Result = Struct.new(:document, :bytes, :findings, keyword_init: true)
++
++    module_function
++
++    def build(root:, evidence_path:)
++      root = File.expand_path(root)
++      findings = Findings.new
++      discovery = Package.discover(root)
++      findings.concat(discovery.findings)
++
++      manifests = {}
++      unless findings.errors?
++        discovery.packages.each do |package|
++          package_findings = Validator.validate(package)
++          findings.concat(package_findings)
++          next if package_findings.errors?
++
++          manifest = SafeYAML.load_file(package.manifest_path)
++          manifests[[package.name, package.version]] = manifest
++        rescue SafeYAML::Invalid => e
++          findings.concat([e.finding])
++        end
++      end
++
++      evidence = ListingEvidence.load(evidence_path)
++      findings.concat(evidence.findings)
++      unless findings.errors?
++        findings.concat(ListingEvidence.validate_bindings(evidence, manifests))
++      end
++      return Result.new(document: nil, bytes: nil, findings: findings) if findings.errors?
++
++      eligible_records = evidence.records.select { |record| ListingEvidence.eligible?(record) }
++      latest = latest_versions(eligible_records, findings)
++      return Result.new(document: nil, bytes: nil, findings: findings) if findings.errors?
++
++      entries = eligible_records.map do |record|
++        manifest = manifests.fetch([record.fetch("name"), record.fetch("version")])
++        project_entry(manifest, record, latest.fetch(record.fetch("name")))
++      end
++      entries.sort! do |left, right|
++        name_comparison = left.fetch("name") <=> right.fetch("name")
++        name_comparison.zero? ? SemVer.parse(left.fetch("version")) <=> SemVer.parse(right.fetch("version")) : name_comparison
++      end
++      document = {"schema" => SCHEMA, "entries" => entries}
++      Result.new(document: document, bytes: CanonicalJSON.dump(document), findings: findings)
++    rescue SystemCallError, IOError => e
++      findings.add("catalog.json", "catalog.io", e.message)
++      Result.new(document: nil, bytes: nil, findings: findings)
++    end
++
++    def generate(root:, evidence_path:, output_path: File.join(root, "catalog.json"))
++      result = build(root: root, evidence_path: evidence_path)
++      AtomicWrite.replace(output_path, result.bytes) unless result.findings.errors?
++      result
++    rescue SystemCallError, IOError => e
++      result.findings.add("catalog.json", "catalog.write", e.message)
++      result
++    end
++
++    def check(root:, evidence_path:, output_path: File.join(root, "catalog.json"))
++      result = build(root: root, evidence_path: evidence_path)
++      if !result.findings.errors? && (!File.file?(output_path) || File.binread(output_path) != result.bytes)
++        result.findings.add("catalog.json", "catalog.drift",
++                            "catalog is not the current canonical generated output")
++      end
++      result
++    rescue SystemCallError, IOError => e
++      result.findings.add("catalog.json", "catalog.unreadable", e.message)
++      result
++    end
++
++    def latest_versions(records, findings)
++      records.group_by { |record| record.fetch("name") }.each_with_object({}) do |(name, grouped), result|
++        versions = grouped.map { |record| record.fetch("version") }
++        result[name] = SemVer.latest(versions).to_s
++      rescue SemVer::AmbiguousPrecedence => e
++        findings.add("catalog.json", "catalog.ambiguous_latest", e.message)
++      end
++    end
++
++    def project_entry(manifest, record, latest_version)
++      lint = record.fetch("lint")
++      approval = record.fetch("approval")
++      head_sha = lint.fetch("head_sha")
++      name = manifest.fetch("name")
++      version = manifest.fetch("version")
++      {
++        "name" => name,
++        "version" => version,
++        "latest_version" => latest_version,
++        "description" => manifest.fetch("description"),
++        "tier" => record.fetch("tier"),
++        "author" => manifest.fetch("author"),
++        "license" => manifest.fetch("license"),
++        "hive_min_version" => manifest.fetch("hive_min_version"),
++        "permissions" => manifest.fetch("permissions"),
++        "install_command" => "hive workflow install honeycomb/#{name}",
++        "package_url" => "#{REPOSITORY_URL}/tree/#{head_sha}/packages/#{name}/#{version}",
++        "reviews_url" => approval.fetch("review_url"),
++        "source_sha" => manifest.fetch("source").fetch("revision"),
++        "listing_approval" => {
++          "release_sha256" => manifest.fetch("release_sha256"),
++          "head_sha" => head_sha,
++          "lint_checked_at" => lint.fetch("checked_at"),
++          "approved_by" => approval.fetch("reviewer"),
++          "approved_at" => approval.fetch("reviewed_at")
++        }
++      }
++    end
++  end
++
++  module CatalogCLI
++    module_function
++
++    def run(argv, out: $stdout, err: $stderr, default_root: nil)
++      options = {check: false, root: default_root, evidence: nil, output: nil, help: false}
++      parser = OptionParser.new do |opts|
++        opts.banner = "Usage: honeycomb-catalog [--check] --evidence PATH"
++        opts.on("--check", "Compare canonical bytes without writing") { options[:check] = true }
++        opts.on("--evidence PATH", "Normalized listing evidence record set") { |value| options[:evidence] = value }
++        opts.on("--root PATH", "Repository root") { |value| options[:root] = value }
++        opts.on("--output PATH", "Catalog output path") { |value| options[:output] = value }
++        opts.on("-h", "--help", "Show help") do
++          out.puts opts
++          options[:help] = true
++        end
++      end
++      arguments = parser.parse(argv)
++      return 0 if options[:help]
++      raise InvocationError, "unexpected positional arguments" unless arguments.empty?
++      raise InvocationError, "--evidence PATH is required" unless options[:evidence]
++
++      root = File.expand_path(options[:root] || Dir.pwd)
++      ValidatorCLI.verify_root!(root)
++      evidence_path = File.expand_path(options[:evidence], root)
++      raise InvocationError, "evidence path does not exist: #{options[:evidence]}" unless File.file?(evidence_path)
++      output_path = File.expand_path(options[:output] || File.join(root, "catalog.json"), root)
++      unless output_path == File.join(root, "catalog.json")
++        raise InvocationError, "catalog output must be the repository root catalog.json"
++      end
++
++      result = if options[:check]
++                 Catalog.check(root: root, evidence_path: evidence_path, output_path: output_path)
++               else
++                 Catalog.generate(root: root, evidence_path: evidence_path, output_path: output_path)
++               end
++      ManifestCLI.print_findings(result.findings, out)
++      result.findings.errors? ? 1 : 0
++    rescue OptionParser::ParseError, InvocationError => e
++      err.puts "honeycomb-catalog: #{e.message}"
++      2
++    rescue StandardError => e
++      err.puts "honeycomb-catalog: internal failure: #{e.class}: #{e.message}"
++      2
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/findings.rb b/lib/honeycomb_registry/findings.rb
+new file mode 100644
+index 0000000..0a76a8e
+--- /dev/null
++++ b/lib/honeycomb_registry/findings.rb
+@@ -0,0 +1,82 @@
++# frozen_string_literal: true
++
++module HoneycombRegistry
++  Finding = Struct.new(:path, :code, :message, :severity, keyword_init: true) do
++    def to_h
++      {
++        "path" => path,
++        "code" => code,
++        "message" => message,
++        "severity" => severity
++      }
++    end
++  end
++
++  class Findings
++    include Enumerable
++
++    SEVERITY_ORDER = {"error" => 0, "warning" => 1, "info" => 2}.freeze
++    VALID_SEVERITIES = SEVERITY_ORDER.keys.freeze
++
++    def initialize(values = [])
++      @values = []
++      concat(values)
++    end
++
++    def add(path, code, message, severity = :error)
++      severity = severity.to_s
++      raise ArgumentError, "unknown finding severity: #{severity}" unless VALID_SEVERITIES.include?(severity)
++
++      @values << Finding.new(path: path.to_s, code: code.to_s,
++                             message: message.to_s, severity: severity)
++      self
++    end
++
++    def concat(values)
++      values.each do |value|
++        if value.is_a?(Finding)
++          @values << value
++        elsif value.is_a?(Findings)
++          @values.concat(value.to_a)
++        else
++          raise ArgumentError, "expected a Finding or Findings"
++        end
++      end
++      self
++    end
++
++    def each(&block)
++      sorted.each(&block)
++    end
++
++    def sorted
++      @values.sort_by do |finding|
++        [finding.path, SEVERITY_ORDER.fetch(finding.severity), finding.code, finding.message]
++      end
++    end
++
++    def errors?
++      @values.any? { |finding| finding.severity == "error" }
++    end
++
++    def codes
++      sorted.map(&:code)
++    end
++
++    def empty?
++      @values.empty?
++    end
++
++    def length
++      @values.length
++    end
++
++    def to_a
++      @values.dup
++    end
++
++    def to_h
++      sorted.map(&:to_h)
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/hive_compatibility.rb b/lib/honeycomb_registry/hive_compatibility.rb
+new file mode 100644
+index 0000000..1c982e0
+--- /dev/null
++++ b/lib/honeycomb_registry/hive_compatibility.rb
+@@ -0,0 +1,82 @@
++# frozen_string_literal: true
++
++require "stringio"
++
++module HoneycombRegistry
++  module HiveCompatibility
++    Runtime = Struct.new(:version, :parser, keyword_init: true)
++
++    module_function
++
++    def check(package, manifest, workflow:, require_hive: false, loader: method(:load_runtime))
++      findings = Findings.new
++      runtime = loader.call
++      unless runtime
++        severity = require_hive ? :error : :warning
++        findings.add(package.repository_path("workflow.yml"), "hive.missing",
++                     require_hive ? "Hive is required for strict compatibility validation" :
++                                    "Hive is not installed; descriptor compatibility was not checked",
++                     severity)
++        return findings
++      end
++
++      installed = SemVer.parse(runtime.version.to_s)
++      required = SemVer.parse(manifest.fetch("hive_min_version"))
++      if installed < required
++        findings.add(package.repository_path("workflow.yml"), "hive.version_too_old",
++                     "installed Hive #{installed} is older than declared minimum #{required}")
++        return findings
++      end
++      unless runtime.parser.respond_to?(:parse_hash)
++        findings.add(package.repository_path("workflow.yml"), "hive.parser_unavailable",
++                     "installed Hive does not expose DescriptorParser.parse_hash")
++        return findings
++      end
++
++      synthetic_path = File.join(package.path, "#{package.name}.yml")
++      warnings = capture_stderr { runtime.parser.parse_hash(workflow, path: synthetic_path) }
++      warnings.lines.map(&:strip).reject(&:empty?).each do |warning|
++        findings.add(package.repository_path("workflow.yml"), "hive.parser_warning", warning, :warning)
++      end
++      findings.add(package.repository_path("workflow.yml"), "hive.compatible",
++                   "descriptor parsed with Hive #{installed}", :info)
++      findings
++    rescue LoadError
++      severity = require_hive ? :error : :warning
++      findings.add(package.repository_path("workflow.yml"), "hive.missing",
++                   require_hive ? "Hive is required for strict compatibility validation" :
++                                  "Hive is not installed; descriptor compatibility was not checked",
++                   severity)
++    rescue SemVer::Invalid, KeyError => e
++      findings.add(package.repository_path("workflow.yml"), "hive.invalid_version", e.message)
++    rescue StandardError => e
++      findings.add(package.repository_path("workflow.yml"), "hive.parser_rejected",
++                   "Hive rejected the descriptor: #{e.message}")
++    end
++
++    def load_runtime
++      require "hive"
++      require "hive/workflows/descriptor_parser"
++      return nil unless defined?(Hive::Workflows::DescriptorParser)
++
++      version = if defined?(Hive::VERSION)
++                  Hive::VERSION
++                elsif Gem.loaded_specs["hive-cli"]
++                  Gem.loaded_specs.fetch("hive-cli").version.to_s
++                end
++      return nil unless version
++
++      Runtime.new(version: version.to_s, parser: Hive::Workflows::DescriptorParser)
++    end
++
++    def capture_stderr
++      previous = $stderr
++      captured = StringIO.new
++      $stderr = captured
++      yield
++      captured.string
++    ensure
++      $stderr = previous
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/listing_evidence.rb b/lib/honeycomb_registry/listing_evidence.rb
+new file mode 100644
+index 0000000..7faa4d5
+--- /dev/null
++++ b/lib/honeycomb_registry/listing_evidence.rb
+@@ -0,0 +1,242 @@
++# frozen_string_literal: true
++
++require "json"
++require "time"
++require "uri"
++
++module HoneycombRegistry
++  module ListingEvidence
++    SCHEMA = "honeycomb-listing-evidence/v1"
++    ROOT_KEYS = %w[schema records].freeze
++    RECORD_KEYS = %w[name version tier lint approval].freeze
++    LINT_KEYS = %w[status release_sha256 head_sha checked_at].freeze
++    APPROVAL_KEYS = %w[status release_sha256 head_sha reviewer reviewed_at review_url].freeze
++    LINT_STATUSES = %w[pass pending fail].freeze
++    APPROVAL_STATUSES = %w[approved pending denied].freeze
++    TIER_PATTERN = /\A[a-z0-9][a-z0-9-]{0,62}\z/
++    HEAD_PATTERN = Schema::REVISION_PATTERN
++
++    Result = Struct.new(:records, :findings, :path, keyword_init: true)
++
++    class DuplicateKey < JSON::ParserError; end
++
++    class StrictHash < Hash
++      def []=(key, value)
++        raise DuplicateKey, "duplicate JSON key #{key.inspect}" if key?(key)
++
++        super
++      end
++    end
++
++    module_function
++
++    def load(path)
++      findings = Findings.new
++      bytes = File.binread(path)
++      source = bytes.dup.force_encoding(Encoding::UTF_8)
++      unless source.valid_encoding?
++        findings.add(path, "evidence.invalid_encoding", "evidence JSON must be valid UTF-8")
++        return Result.new(records: [], findings: findings, path: path)
++      end
++      data = JSON.parse(source, object_class: StrictHash, array_class: Array,
++                                create_additions: false, allow_duplicate_key: false)
++      validate_root(data, path, findings)
++      records = data.is_a?(Hash) && data["records"].is_a?(Array) ? data["records"] : []
++      Result.new(records: records, findings: findings, path: path)
++    rescue DuplicateKey => e
++      findings.add(path, "evidence.duplicate_key", e.message)
++      Result.new(records: [], findings: findings, path: path)
++    rescue JSON::ParserError => e
++      code = e.message.start_with?("duplicate key") ? "evidence.duplicate_key" : "evidence.invalid_json"
++      findings.add(path, code, e.message)
++      Result.new(records: [], findings: findings, path: path)
++    rescue Errno::ENOENT, Errno::EACCES => e
++      findings.add(path, "evidence.unreadable", e.message)
++      Result.new(records: [], findings: findings, path: path)
++    end
++
++    def eligible?(record)
++      record.is_a?(Hash) && record.dig("lint", "status") == "pass" &&
++        record.dig("approval", "status") == "approved"
++    end
++
++    def validate_bindings(result, manifests)
++      findings = Findings.new
++      result.records.each_with_index do |record, index|
++        next unless record.is_a?(Hash)
++
++        record_path = "#{result.path}.records[#{index}]"
++        key = [record["name"], record["version"]]
++        manifest = manifests[key]
++        unless manifest
++          findings.add(record_path, "evidence.unknown_package",
++                       "evidence name/version does not match a discovered package")
++          next
++        end
++        %w[lint approval].each do |verdict_name|
++          verdict = record[verdict_name]
++          next unless verdict.is_a?(Hash) && verdict["release_sha256"]
++
++          unless verdict["release_sha256"] == manifest["release_sha256"]
++            findings.add("#{record_path}.#{verdict_name}.release_sha256",
++                         "evidence.stale_release",
++                         "evidence release fingerprint does not match current manifest")
++          end
++        end
++        lint = record["lint"]
++        approval = record["approval"]
++        next unless lint.is_a?(Hash) && approval.is_a?(Hash)
++
++        if lint["release_sha256"] && approval["release_sha256"] &&
++           lint["release_sha256"] != approval["release_sha256"]
++          findings.add(record_path, "evidence.release_mismatch",
++                       "lint and approval bind different release fingerprints")
++        end
++        if lint["head_sha"] && approval["head_sha"] && lint["head_sha"] != approval["head_sha"]
++          findings.add(record_path, "evidence.head_mismatch",
++                       "lint and approval bind different review head SHAs")
++        end
++      end
++      findings
++    end
++
++    def validate_root(data, path, findings)
++      unless data.is_a?(Hash)
++        findings.add(path, "evidence.invalid_type", "evidence root must be an object")
++        return
++      end
++      validate_keys(data, path, ROOT_KEYS, ROOT_KEYS, findings)
++      unless data["schema"] == SCHEMA
++        findings.add("#{path}.schema", "evidence.invalid_schema", "schema must be #{SCHEMA.inspect}")
++      end
++      unless data["records"].is_a?(Array)
++        findings.add("#{path}.records", "evidence.invalid_type", "records must be an array")
++        return
++      end
++      seen = {}
++      data["records"].each_with_index do |record, index|
++        record_path = "#{path}.records[#{index}]"
++        validate_record(record, record_path, findings)
++        next unless record.is_a?(Hash)
++
++        key = [record["name"], record["version"]]
++        if seen.key?(key)
++          findings.add(record_path, "evidence.duplicate_record",
++                       "duplicate evidence record for #{key.compact.join("/")}")
++        end
++        seen[key] = true
++      end
++    end
++
++    def validate_record(record, path, findings)
++      return invalid_type(record, path, "record", findings) unless record.is_a?(Hash)
++
++      validate_keys(record, path, %w[name version tier], RECORD_KEYS, findings)
++      validate_name(record["name"], "#{path}.name", findings)
++      validate_semver(record["version"], "#{path}.version", findings)
++      unless record["tier"].is_a?(String) && TIER_PATTERN.match?(record["tier"])
++        findings.add("#{path}.tier", "evidence.invalid_tier", "tier must be a lowercase slug")
++      end
++      validate_lint(record["lint"], "#{path}.lint", findings) if record.key?("lint")
++      validate_approval(record["approval"], "#{path}.approval", findings) if record.key?("approval")
++    end
++
++    def validate_lint(verdict, path, findings)
++      return invalid_type(verdict, path, "lint verdict", findings) unless verdict.is_a?(Hash)
++
++      validate_keys(verdict, path, %w[status], LINT_KEYS, findings)
++      status = verdict["status"]
++      unless LINT_STATUSES.include?(status)
++        findings.add("#{path}.status", "evidence.invalid_status",
++                     "lint status must be #{LINT_STATUSES.join(", ")}")
++      end
++      require_identity = status && status != "pending"
++      validate_identity(verdict, path, %w[release_sha256 head_sha checked_at],
++                        require_identity, findings)
++      validate_timestamp(verdict["checked_at"], "#{path}.checked_at", findings) if verdict.key?("checked_at")
++    end
++
++    def validate_approval(verdict, path, findings)
++      return invalid_type(verdict, path, "approval verdict", findings) unless verdict.is_a?(Hash)
++
++      validate_keys(verdict, path, %w[status], APPROVAL_KEYS, findings)
++      status = verdict["status"]
++      unless APPROVAL_STATUSES.include?(status)
++        findings.add("#{path}.status", "evidence.invalid_status",
++                     "approval status must be #{APPROVAL_STATUSES.join(", ")}")
++      end
++      identity_keys = %w[release_sha256 head_sha reviewer reviewed_at review_url]
++      require_identity = status && status != "pending"
++      validate_identity(verdict, path, identity_keys, require_identity, findings)
++      if verdict.key?("reviewer") && (!verdict["reviewer"].is_a?(String) || verdict["reviewer"].strip.empty?)
++        findings.add("#{path}.reviewer", "evidence.invalid_value", "reviewer must be a non-empty string")
++      end
++      validate_timestamp(verdict["reviewed_at"], "#{path}.reviewed_at", findings) if verdict.key?("reviewed_at")
++      validate_url(verdict["review_url"], "#{path}.review_url", findings) if verdict.key?("review_url")
++    end
++
++    def validate_identity(verdict, path, keys, required, findings)
++      present = keys.select { |key| verdict.key?(key) }
++      if required || present.any?
++        (keys - present).each do |key|
++          findings.add("#{path}.#{key}", "evidence.missing_key", "identity field #{key.inspect} is required")
++        end
++      end
++      if verdict.key?("release_sha256") &&
++         (!verdict["release_sha256"].is_a?(String) || !Schema::SHA256_PATTERN.match?(verdict["release_sha256"]))
++        findings.add("#{path}.release_sha256", "evidence.invalid_sha256",
++                     "release_sha256 must be lowercase 64-character hexadecimal")
++      end
++      if verdict.key?("head_sha") &&
++         (!verdict["head_sha"].is_a?(String) || !HEAD_PATTERN.match?(verdict["head_sha"]))
++        findings.add("#{path}.head_sha", "evidence.invalid_head_sha",
++                     "head_sha must be lowercase 40- or 64-character hexadecimal")
++      end
++    end
++
++    def validate_keys(value, path, required, allowed, findings)
++      required.each do |key|
++        findings.add("#{path}.#{key}", "evidence.missing_key", "required key #{key.inspect} is missing") unless value.key?(key)
++      end
++      (value.keys - allowed).sort.each do |key|
++        findings.add("#{path}.#{key}", "evidence.unknown_key", "unknown key #{key.inspect}")
++      end
++    end
++
++    def validate_name(value, path, findings)
++      return if value.is_a?(String) && Schema::NAME_PATTERN.match?(value)
++
++      findings.add(path, "evidence.invalid_name", "name is not a valid honeycomb name")
++    end
++
++    def validate_semver(value, path, findings)
++      SemVer.parse(value)
++    rescue SemVer::Invalid => e
++      findings.add(path, "evidence.invalid_semver", e.message)
++    end
++
++    def validate_timestamp(value, path, findings)
++      unless value.is_a?(String) && value.match?(/(?:Z|[+-]\d{2}:\d{2})\z/)
++        findings.add(path, "evidence.invalid_timestamp", "timestamp must be RFC 3339 with a timezone")
++        return
++      end
++      Time.iso8601(value)
++    rescue ArgumentError
++      findings.add(path, "evidence.invalid_timestamp", "timestamp must be valid RFC 3339")
++    end
++
++    def validate_url(value, path, findings)
++      uri = URI.parse(value.to_s)
++      valid = value.is_a?(String) && %w[http https].include?(uri.scheme) && uri.host &&
++              uri.userinfo.nil? && uri.fragment.nil?
++      findings.add(path, "evidence.invalid_url", "review_url must be an absolute safe HTTP(S) URL") unless valid
++    rescue URI::InvalidURIError
++      findings.add(path, "evidence.invalid_url", "review_url must be an absolute safe HTTP(S) URL")
++    end
++
++    def invalid_type(_value, path, label, findings)
++      findings.add(path, "evidence.invalid_type", "#{label} must be an object")
++      false
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/manifest.rb b/lib/honeycomb_registry/manifest.rb
+new file mode 100644
+index 0000000..e117e40
+--- /dev/null
++++ b/lib/honeycomb_registry/manifest.rb
+@@ -0,0 +1,188 @@
++# frozen_string_literal: true
++
++require "digest"
++require "optparse"
++
++module HoneycombRegistry
++  module Manifest
++    Result = Struct.new(:document, :bytes, :findings, keyword_init: true)
++
++    module_function
++
++    def build(package)
++      findings = Findings.new
++      inspection = package.inspect
++      findings.concat(inspection.findings)
++      return Result.new(document: nil, bytes: nil, findings: findings) if findings.errors?
++
++      metadata = load_yaml(package.manifest_path, package.relative_manifest_path, findings)
++      return Result.new(document: nil, bytes: nil, findings: findings) unless metadata
++
++      findings.concat(Schema.validate_metadata(metadata, path: package.relative_manifest_path))
++      if metadata["name"] != package.name || metadata["version"] != package.version
++        findings.add(package.relative_manifest_path, "manifest.identity",
++                     "manifest name/version must match #{package.name}/#{package.version}")
++      end
++
++      workflow_path = File.join(package.path, "workflow.yml")
++      workflow = load_yaml(workflow_path, package.repository_path("workflow.yml"), findings)
++      if workflow
++        findings.concat(package.validate_instruction_references(workflow))
++        permission_result = Permissions.derive(workflow, path: package.repository_path("workflow.yml"))
++        findings.concat(permission_result.findings)
++      end
++      return Result.new(document: nil, bytes: nil, findings: findings) if findings.errors?
++
++      files = hash_files(package, inspection.files, findings)
++      return Result.new(document: nil, bytes: nil, findings: findings) if findings.errors?
++
++      document = project(metadata, permission_result.permissions, files)
++      release_input = document.reject { |key, _value| key == "release_sha256" }
++      document["release_sha256"] = Digest::SHA256.hexdigest(
++        CanonicalYAML.dump_manifest(release_input, include_release: false)
++      )
++      document = order_document(document)
++      findings.concat(Schema.validate_manifest(document, path: package.relative_manifest_path))
++      return Result.new(document: nil, bytes: nil, findings: findings) if findings.errors?
++
++      Result.new(document: document, bytes: CanonicalYAML.dump_manifest(document), findings: findings)
++    rescue SystemCallError, IOError => e
++      findings.add(package.relative_path, "manifest.io", e.message)
++      Result.new(document: nil, bytes: nil, findings: findings)
++    rescue ArgumentError => e
++      findings.add(package.relative_path, "manifest.serialization", e.message)
++      Result.new(document: nil, bytes: nil, findings: findings)
++    end
++
++    def generate(package)
++      result = build(package)
++      AtomicWrite.replace(package.manifest_path, result.bytes) unless result.findings.errors?
++      result
++    rescue SystemCallError, IOError => e
++      result.findings.add(package.relative_manifest_path, "manifest.write", e.message)
++      result
++    end
++
++    def check(package)
++      existing = File.binread(package.manifest_path)
++      result = build(package)
++      if !result.findings.errors? && existing != result.bytes
++        result.findings.add(package.relative_manifest_path, "manifest.drift",
++                            "manifest is not the current canonical generated output")
++      end
++      result
++    rescue Errno::ENOENT, Errno::EACCES => e
++      findings = Findings.new.add(package.relative_manifest_path, "manifest.unreadable", e.message)
++      Result.new(document: nil, bytes: nil, findings: findings)
++    end
++
++    def load_yaml(file_path, finding_path, findings)
++      SafeYAML.load(File.binread(file_path), path: finding_path)
++    rescue SafeYAML::Invalid => e
++      findings.concat([e.finding])
++      nil
++    rescue Errno::ENOENT, Errno::EACCES => e
++      findings.add(finding_path, "manifest.unreadable", e.message)
++      nil
++    end
++
++    def hash_files(package, files, findings)
++      files.sort.each_with_object({}) do |repository_path, hashes|
++        absolute = package.absolute_path(repository_path)
++        stat = File.lstat(absolute)
++        unless stat.file? && !stat.symlink?
++          findings.add(repository_path, "manifest.unsafe_file",
++                       "file changed type during hashing")
++          next
++        end
++        hashes[repository_path] = Digest::SHA256.file(absolute).hexdigest
++      rescue SystemCallError, IOError => e
++        findings.add(repository_path, "manifest.hash_read", e.message)
++      end
++    end
++
++    def project(metadata, permissions, files)
++      document = {}
++      Schema::METADATA_KEYS.each { |key| document[key] = metadata[key] }
++      document["permissions"] = permissions
++      document["files"] = files.sort.to_h
++      metadata.keys.grep(Schema::EXTENSION_PATTERN).sort.each do |key|
++        document[key] = metadata[key]
++      end
++      document
++    end
++
++    def order_document(document)
++      Schema::CORE_KEYS.each_with_object({}) do |key, ordered|
++        ordered[key] = document[key]
++      end.tap do |ordered|
++        document.keys.grep(Schema::EXTENSION_PATTERN).sort.each { |key| ordered[key] = document[key] }
++      end
++    end
++  end
++
++  module ManifestCLI
++    module_function
++
++    def run(argv, out: $stdout, err: $stderr, default_root: nil)
++      options = {check: false, all: false, root: default_root}
++      parser = OptionParser.new do |opts|
++        opts.banner = "Usage: honeycomb-manifest [--check] (--all | PACKAGE_PATH)"
++        opts.on("--check", "Compare canonical bytes without writing") { options[:check] = true }
++        opts.on("--all", "Process every package under packages/") { options[:all] = true }
++        opts.on("--root PATH", "Repository root") { |value| options[:root] = value }
++        opts.on("-h", "--help", "Show help") do
++          out.puts opts
++          return 0
++        end
++      end
++      arguments = parser.parse(argv)
++      root = File.expand_path(options[:root] || Dir.pwd)
++      unless File.directory?(root) && (File.exist?(File.join(root, ".git")) || File.directory?(File.join(root, "packages")))
++        raise InvocationError, "repository root is not recognizable: #{root}"
++      end
++      if options[:all]
++        raise InvocationError, "--all cannot be combined with a package path" unless arguments.empty?
++      elsif arguments.length != 1
++        raise InvocationError, "provide exactly one package path or --all"
++      end
++
++      findings = Findings.new
++      packages = if options[:all]
++                   discovery = Package.discover(root)
++                   findings.concat(discovery.findings)
++                   discovery.packages
++                 else
++                   [Package.new(arguments.first, root: root)]
++                 end
++
++      results = if findings.errors?
++                  []
++                elsif options[:check]
++                  packages.map { |package| Manifest.check(package) }
++                else
++                  packages.map { |package| Manifest.build(package) }
++                end
++      results.each { |result| findings.concat(result.findings) }
++      if !options[:check] && !findings.errors?
++        packages.zip(results).each do |package, result|
++          AtomicWrite.replace(package.manifest_path, result.bytes)
++        end
++      end
++      print_findings(findings, out)
++      findings.errors? ? 1 : 0
++    rescue OptionParser::ParseError, InvocationError => e
++      err.puts "honeycomb-manifest: #{e.message}"
++      2
++    rescue StandardError => e
++      err.puts "honeycomb-manifest: internal failure: #{e.class}: #{e.message}"
++      2
++    end
++
++    def print_findings(findings, output)
++      findings.each do |finding|
++        output.puts "#{finding.severity.upcase} #{finding.path} #{finding.code}: #{finding.message}"
++      end
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/package.rb b/lib/honeycomb_registry/package.rb
+new file mode 100644
+index 0000000..1450d56
+--- /dev/null
++++ b/lib/honeycomb_registry/package.rb
+@@ -0,0 +1,264 @@
++# frozen_string_literal: true
++
++require "pathname"
++require "set"
++
++module HoneycombRegistry
++  class Package
++    Discovery = Struct.new(:packages, :findings, keyword_init: true)
++    Inspection = Struct.new(:files, :findings, keyword_init: true)
++
++    attr_reader :path, :root, :name, :version
++
++    def self.discover(root)
++      root = File.expand_path(root)
++      packages_root = File.join(root, "packages")
++      findings = Findings.new
++      packages = []
++      return Discovery.new(packages: packages, findings: findings) unless File.exist?(packages_root)
++
++      unless File.directory?(packages_root) && !File.symlink?(packages_root)
++        findings.add(relative(root, packages_root), "package.invalid_tree",
++                     "packages must be a real directory")
++        return Discovery.new(packages: packages, findings: findings)
++      end
++
++      Dir.children(packages_root).sort.each do |name|
++        next if name == ".gitkeep"
++
++        name_path = File.join(packages_root, name)
++        unless File.directory?(name_path) && !File.symlink?(name_path)
++          findings.add(relative(root, name_path), "package.invalid_tree",
++                       "package name entries must be real directories")
++          next
++        end
++        unless Schema::NAME_PATTERN.match?(name)
++          findings.add(relative(root, name_path), "package.invalid_name",
++                       "package directory name must match #{Schema::NAME_PATTERN.inspect}")
++          next
++        end
++
++        Dir.children(name_path).sort.each do |version|
++          version_path = File.join(name_path, version)
++          unless File.directory?(version_path) && !File.symlink?(version_path)
++            findings.add(relative(root, version_path), "package.invalid_tree",
++                         "version entries must be real directories")
++            next
++          end
++          begin
++            SemVer.parse(version)
++          rescue SemVer::Invalid => e
++            findings.add(relative(root, version_path), "package.invalid_version", e.message)
++            next
++          end
++          packages << new(version_path, root: root)
++        end
++      end
++      Discovery.new(packages: packages.sort_by { |package| [package.name, SemVer.parse(package.version)] },
++                    findings: findings)
++    rescue SystemCallError => e
++      findings.add("packages", "package.unreadable", e.message)
++      Discovery.new(packages: packages, findings: findings)
++    end
++
++    def self.relative(root, path)
++      Pathname.new(path).relative_path_from(Pathname.new(root)).to_s.tr(File::SEPARATOR, "/")
++    rescue ArgumentError
++      path.to_s
++    end
++
++    def initialize(path, root:)
++      @root = File.expand_path(root)
++      @path = File.expand_path(path, @root)
++      @name = File.basename(File.dirname(@path))
++      @version = File.basename(@path)
++    end
++
++    def manifest_path
++      File.join(path, "manifest.yml")
++    end
++
++    def relative_manifest_path
++      repository_path("manifest.yml")
++    end
++
++    def repository_path(relative)
++      "packages/#{name}/#{version}/#{relative}".tr(File::SEPARATOR, "/")
++    end
++
++    def absolute_path(repository_relative)
++      candidate = File.expand_path(repository_relative, root)
++      prefix = path + File::SEPARATOR
++      return candidate if candidate.start_with?(prefix)
++
++      raise ArgumentError, "path escapes package: #{repository_relative.inspect}"
++    end
++
++    def inspect
++      findings = Findings.new
++      return Inspection.new(files: [], findings: findings) unless validate_location(findings)
++
++      required = %w[workflow.yml README.md manifest.yml]
++      required.each do |relative|
++        required_path = File.join(path, relative)
++        unless regular_without_symlink?(required_path)
++          findings.add(repository_path(relative), "package.missing_required",
++                       "required package file #{relative} must be a regular file")
++        end
++      end
++      instructions = File.join(path, "instructions")
++      unless File.directory?(instructions) && !File.symlink?(instructions)
++        findings.add(repository_path("instructions"), "package.missing_required",
++                     "instructions must be a real directory")
++      end
++
++      files = []
++      normalized = {}
++      walk(path, "", files, normalized, findings)
++      instruction_prefix = repository_path("instructions/")
++      unless files.any? { |file| file.start_with?(instruction_prefix) }
++        findings.add(repository_path("instructions"), "package.empty_instructions",
++                     "instructions must contain at least one regular file")
++      end
++      Inspection.new(files: files.sort, findings: findings)
++    rescue SystemCallError => e
++      findings.add(relative_path, "package.unreadable", e.message)
++      Inspection.new(files: [], findings: findings)
++    end
++
++    def relative_path
++      self.class.relative(root, path)
++    end
++
++    def validate_instruction_references(workflow, workflow_path: repository_path("workflow.yml"))
++      findings = Findings.new
++      return findings unless workflow.is_a?(Hash) && workflow["stages"].is_a?(Array)
++
++      workflow["stages"].each_with_index do |stage, index|
++        next unless stage.is_a?(Hash)
++
++        stage_path = "#{workflow_path}.stages[#{index}]"
++        validate_instruction(stage["instruction"], "#{stage_path}.instruction", findings) if stage.key?("instruction")
++        if stage["reviewers"].is_a?(Array)
++          stage["reviewers"].each_with_index do |reviewer, reviewer_index|
++            next unless reviewer.is_a?(Hash) && reviewer.key?("instruction")
++
++            validate_instruction(reviewer["instruction"],
++                                 "#{stage_path}.reviewers[#{reviewer_index}].instruction", findings)
++          end
++        end
++        revise = stage.dig("council", "revise") if stage["council"].is_a?(Hash)
++        if revise.is_a?(Hash) && revise.key?("instruction")
++          validate_instruction(revise["instruction"], "#{stage_path}.council.revise.instruction", findings)
++        end
++      end
++      findings
++    end
++
++    private
++
++    def validate_location(findings)
++      packages_root = File.join(root, "packages")
++      relative = self.class.relative(root, path)
++      segments = relative.split("/")
++      unless segments.length == 3 && segments.first == "packages" &&
++             segments[1] == name && segments[2] == version &&
++             path.start_with?(packages_root + File::SEPARATOR)
++        findings.add(relative, "package.outside_root",
++                     "package path must be packages/<name>/<semver> under the repository root")
++        return false
++      end
++      unless Schema::NAME_PATTERN.match?(name)
++        findings.add(relative, "package.invalid_name", "directory name is not a valid honeycomb name")
++      end
++      begin
++        SemVer.parse(version)
++      rescue SemVer::Invalid => e
++        findings.add(relative, "package.invalid_version", e.message)
++      end
++
++      [packages_root, File.join(packages_root, name), path].each do |component|
++        stat = File.lstat(component)
++        if stat.symlink? || !stat.directory?
++          findings.add(self.class.relative(root, component), "package.symlink",
++                       "package path components must be real directories")
++        end
++      rescue Errno::ENOENT
++        findings.add(self.class.relative(root, component), "package.missing",
++                     "package path does not exist")
++      end
++      !findings.errors?
++    end
++
++    def walk(directory, relative, files, normalized, findings)
++      Dir.children(directory).sort.each do |entry|
++        child_relative = relative.empty? ? entry : "#{relative}/#{entry}"
++        child_path = File.join(directory, entry)
++        stat = File.lstat(child_path)
++        if stat.symlink?
++          findings.add(repository_path(child_relative), "package.symlink",
++                       "symlinks are not allowed in package content")
++        elsif stat.directory?
++          walk(child_path, child_relative, files, normalized, findings)
++        elsif stat.file?
++          validate_file_name(child_relative, normalized, findings)
++          next if child_relative == "manifest.yml"
++
++          if File.readable?(child_path)
++            files << repository_path(child_relative)
++          else
++            findings.add(repository_path(child_relative), "package.unreadable",
++                         "package file is not readable")
++          end
++        else
++          findings.add(repository_path(child_relative), "package.special_file",
++                       "special files are not allowed in package content")
++        end
++      end
++    end
++
++    def validate_file_name(relative, normalized, findings)
++      invalid = relative.include?("\\") || relative.start_with?("/") ||
++                relative.split("/").any? { |segment| segment.empty? || segment == "." || segment == ".." }
++      if invalid
++        findings.add(repository_path(relative), "package.ambiguous_path",
++                     "package paths must use normalized forward-slash relative names")
++      end
++      canonical = relative.unicode_normalize(:nfc)
++      if normalized.key?(canonical) && normalized[canonical] != relative
++        findings.add(repository_path(relative), "package.duplicate_path",
++                     "path normalizes to the same name as #{normalized[canonical].inspect}")
++      end
++      normalized[canonical] = relative
++    end
++
++    def regular_without_symlink?(candidate)
++      stat = File.lstat(candidate)
++      stat.file? && !stat.symlink?
++    rescue Errno::ENOENT
++      false
++    end
++
++    def validate_instruction(value, finding_path, findings)
++      unless value.is_a?(String) && !value.empty? && value == value.strip &&
++             !value.include?("\\") && !value.include?("\0") && !Pathname.new(value).absolute?
++        findings.add(finding_path, "package.invalid_instruction_path",
++                     "instruction must be a normalized relative path under instructions/")
++        return
++      end
++      segments = value.split("/")
++      clean = Pathname.new(value).cleanpath.to_s
++      unless segments.none? { |segment| segment.empty? || segment == "." || segment == ".." } &&
++             clean == value && value.start_with?("instructions/")
++        findings.add(finding_path, "package.invalid_instruction_path",
++                     "instruction must stay under the package instructions/ directory")
++        return
++      end
++      candidate = File.join(path, value)
++      unless regular_without_symlink?(candidate)
++        findings.add(finding_path, "package.invalid_instruction_path",
++                     "instruction must reference a regular package file")
++      end
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/permissions.rb b/lib/honeycomb_registry/permissions.rb
+new file mode 100644
+index 0000000..cbbe168
+--- /dev/null
++++ b/lib/honeycomb_registry/permissions.rb
+@@ -0,0 +1,316 @@
++# frozen_string_literal: true
++
++require "pathname"
++require "set"
++
++module HoneycombRegistry
++  module Permissions
++    Result = Struct.new(:permissions, :findings, keyword_init: true)
++
++    READ_TOOLS = %w[Glob Grep LS Read].freeze
++    WRITE_TOOLS = %w[Edit MultiEdit NotebookEdit Write].freeze
++    NETWORK_TOOLS = %w[WebFetch WebSearch].freeze
++    SHELL_TOOLS = %w[Bash].freeze
++    KNOWN_TOOLS = (READ_TOOLS + WRITE_TOOLS + NETWORK_TOOLS + SHELL_TOOLS).freeze
++    ALLOWED_SCOPE_KEYS = %w[preset tools dirs bash].freeze
++    RISK_ORDER = {"low" => 0, "moderate" => 1, "high" => 2}.freeze
++
++    module_function
++
++    def derive(descriptor, path: "workflow.yml")
++      findings = Findings.new
++      union = empty_union
++      recognized_paths = Set.new
++
++      unless descriptor.is_a?(Hash) && descriptor["stages"].is_a?(Array)
++        findings.add(path, "permissions.invalid_descriptor",
++                     "workflow descriptor must contain a stages array")
++        return Result.new(permissions: nil, findings: findings)
++      end
++
++      descriptor["stages"].each_with_index do |stage, index|
++        stage_path = "#{path}.stages[#{index}]"
++        unless stage.is_a?(Hash)
++          findings.add(stage_path, "permissions.invalid_descriptor", "stage must be a mapping")
++          next
++        end
++
++        if %w[agent council].include?(stage["kind"])
++          process_holder(stage, stage_path, union, findings, recognized_paths)
++        end
++        process_reviewers(stage["reviewers"], "#{stage_path}.reviewers", union,
++                          findings, recognized_paths) if stage.key?("reviewers")
++        process_revise(stage["council"], "#{stage_path}.council", union,
++                       findings, recognized_paths) if stage.key?("council")
++      end
++
++      scan_permission_constructs(descriptor, path, recognized_paths, findings)
++      permissions = findings.errors? ? nil : finalize(union)
++      Result.new(permissions: permissions, findings: findings)
++    end
++
++    def process_reviewers(reviewers, path, union, findings, recognized_paths)
++      unless reviewers.is_a?(Array)
++        findings.add(path, "permissions.invalid_descriptor", "reviewers must be an array")
++        return
++      end
++      reviewers.each_with_index do |reviewer, index|
++        reviewer_path = "#{path}[#{index}]"
++        unless reviewer.is_a?(Hash)
++          findings.add(reviewer_path, "permissions.invalid_descriptor", "reviewer must be a mapping")
++          next
++        end
++        process_holder(reviewer, reviewer_path, union, findings, recognized_paths)
++      end
++    end
++
++    def process_revise(council, path, union, findings, recognized_paths)
++      return if council.nil?
++      unless council.is_a?(Hash)
++        findings.add(path, "permissions.invalid_descriptor", "council must be a mapping")
++        return
++      end
++      return unless council.key?("revise")
++
++      revise = council["revise"]
++      revise_path = "#{path}.revise"
++      unless revise.is_a?(Hash)
++        findings.add(revise_path, "permissions.invalid_descriptor", "revise must be a mapping")
++        return
++      end
++      process_holder(revise, revise_path, union, findings, recognized_paths)
++    end
++
++    def process_holder(holder, holder_path, union, findings, recognized_paths)
++      permission_path = "#{holder_path}.permissions"
++      recognized_paths << permission_path
++      spec = holder.key?("permissions") ? holder["permissions"] : :absent
++      contribution = normalize_scope(spec, permission_path, findings)
++      return unless contribution
++
++      merge_union(union, contribution)
++      preset = contribution.fetch(:label)
++      findings.add(permission_path, "permissions.source",
++                   "#{holder_path} contributes #{preset} permissions", :info)
++      if contribution.fetch(:unbounded)
++        findings.add(permission_path, "permissions.unbounded",
++                     "#{holder_path} requests unbounded access", :warning)
++      end
++    end
++
++    def normalize_scope(spec, path, findings)
++      return unbounded("implicit yolo default") if spec == :absent
++      if spec.nil?
++        findings.add(path, "permissions.invalid", "permissions must not be blank")
++        return
++      end
++
++      normalized = case spec
++                   when String
++                     {"preset" => spec}
++                   when Hash
++                     unless spec.keys.all? { |key| key.is_a?(String) }
++                       findings.add(path, "permissions.invalid", "permission keys must be strings")
++                       return
++                     end
++                     spec
++                   else
++                     findings.add(path, "permissions.invalid",
++                                  "permissions must be a preset string or mapping")
++                     return
++                   end
++
++      preset = normalized["preset"]
++      unless %w[yolo read-only scoped].include?(preset)
++        findings.add("#{path}.preset", "permissions.invalid_preset",
++                     "preset must be yolo, read-only, or scoped")
++        return
++      end
++
++      allowed = preset == "scoped" ? ALLOWED_SCOPE_KEYS : %w[preset]
++      unknown = normalized.keys - allowed
++      unless unknown.empty?
++        findings.add(path, "permissions.unknown_key",
++                     "unsupported permission keys: #{unknown.sort.join(", ")}")
++        return
++      end
++
++      case preset
++      when "yolo" then unbounded("yolo")
++      when "read-only" then bounded_read
++      when "scoped" then normalize_scoped(normalized, path, findings)
++      end
++    end
++
++    def normalize_scoped(spec, path, findings)
++      if spec.key?("tools") && spec.key?("bash")
++        findings.add(path, "permissions.invalid", "scoped tools and bash are mutually exclusive")
++        return
++      end
++      unless spec.key?("tools") || spec.key?("bash")
++        findings.add(path, "permissions.invalid", "scoped permissions require tools or bash")
++        return
++      end
++
++      dirs = normalize_dirs(spec.fetch("dirs", []), "#{path}.dirs", findings)
++      return unless dirs
++
++      if spec.key?("bash")
++        unless spec["bash"] == true || spec["bash"] == false
++          findings.add("#{path}.bash", "permissions.invalid", "bash must be true or false")
++          return
++        end
++        return spec["bash"] ? unbounded("scoped Bash") : bounded_read("scoped bash: false", dirs)
++      end
++
++      tools = spec["tools"]
++      unless tools.is_a?(Array) && !tools.empty? && tools.all? { |tool| tool.is_a?(String) && !tool.empty? }
++        findings.add("#{path}.tools", "permissions.invalid", "tools must be a non-empty string array")
++        return
++      end
++      unknown = tools.uniq - KNOWN_TOOLS
++      unless unknown.empty?
++        findings.add("#{path}.tools", "permissions.unknown_tool",
++                     "unsupported permission-bearing tools: #{unknown.sort.join(", ")}")
++        return
++      end
++      return unbounded("scoped Bash tool") if tools.include?("Bash")
++
++      contribution = {
++        label: "scoped tools",
++        risk: "low",
++        capabilities: Set.new,
++        network_hosts: Set.new,
++        filesystem_read: Set.new,
++        filesystem_write: Set.new,
++        secrets: Set.new,
++        unbounded: false
++      }
++      unless (tools & READ_TOOLS).empty?
++        contribution[:capabilities] << "filesystem-read"
++        contribution[:filesystem_read].merge(%w[repository task] + dirs)
++      end
++      unless (tools & WRITE_TOOLS).empty?
++        contribution[:risk] = "moderate"
++        contribution[:capabilities] << "filesystem-write"
++        contribution[:filesystem_write].merge(%w[repository task] + dirs)
++      end
++      unless (tools & NETWORK_TOOLS).empty?
++        contribution[:risk] = "high"
++        contribution[:capabilities] << "network"
++        contribution[:network_hosts] << "*"
++        contribution[:unbounded] = true
++      end
++      contribution
++    end
++
++    def normalize_dirs(dirs, path, findings)
++      unless dirs.is_a?(Array)
++        findings.add(path, "permissions.invalid_dir", "dirs must be an array")
++        return
++      end
++
++      normalized = []
++      dirs.each_with_index do |dir, index|
++        unless dir.is_a?(String) && !dir.empty? && dir == dir.strip &&
++               !dir.include?("\0") && !dir.include?("\\") && !Pathname.new(dir).absolute?
++          findings.add("#{path}[#{index}]", "permissions.invalid_dir",
++                       "dir must be a normalized relative path")
++          next
++        end
++        segments = dir.split("/")
++        if segments.include?("..") || segments.any?(&:empty?)
++          findings.add("#{path}[#{index}]", "permissions.invalid_dir",
++                       "dir must not traverse or contain empty path segments")
++          next
++        end
++        clean = Pathname.new(dir).cleanpath.to_s
++        normalized << (clean == "." ? "task" : "task/#{clean.sub(%r{\A\./}, "")}")
++      end
++      return if findings.errors?
++
++      normalized.uniq.sort
++    end
++
++    def bounded_read(label = "read-only", dirs = [])
++      {
++        label: label,
++        risk: "low",
++        capabilities: Set["filesystem-read"],
++        network_hosts: Set.new,
++        filesystem_read: Set.new(%w[repository task] + dirs),
++        filesystem_write: Set.new,
++        secrets: Set.new,
++        unbounded: false
++      }
++    end
++
++    def unbounded(label)
++      {
++        label: label,
++        risk: "high",
++        capabilities: Set.new(Schema::CAPABILITIES),
++        network_hosts: Set["*"],
++        filesystem_read: Set["*"],
++        filesystem_write: Set["*"],
++        secrets: Set["*"],
++        unbounded: true
++      }
++    end
++
++    def empty_union
++      {
++        risk: "low",
++        capabilities: Set.new,
++        network_hosts: Set.new,
++        filesystem_read: Set.new,
++        filesystem_write: Set.new,
++        secrets: Set.new
++      }
++    end
++
++    def merge_union(union, contribution)
++      if RISK_ORDER.fetch(contribution[:risk]) > RISK_ORDER.fetch(union[:risk])
++        union[:risk] = contribution[:risk]
++      end
++      %i[capabilities network_hosts filesystem_read filesystem_write secrets].each do |key|
++        union[key].merge(contribution.fetch(key))
++      end
++    end
++
++    def finalize(union)
++      {
++        "risk" => union[:risk],
++        "capabilities" => canonical_set(union[:capabilities]),
++        "network_hosts" => canonical_set(union[:network_hosts]),
++        "filesystem_read" => canonical_set(union[:filesystem_read]),
++        "filesystem_write" => canonical_set(union[:filesystem_write]),
++        "secrets" => canonical_set(union[:secrets])
++      }
++    end
++
++    def canonical_set(values)
++      values.include?("*") ? ["*"] : values.to_a.sort
++    end
++
++    def scan_permission_constructs(value, path, recognized_paths, findings)
++      case value
++      when Hash
++        value.each do |key, child|
++          next unless key.is_a?(String)
++
++          child_path = "#{path}.#{key}"
++          if key.downcase.include?("permission") && !recognized_paths.include?(child_path)
++            findings.add(child_path, "permissions.unknown_construct",
++                         "unsupported permission-bearing construct #{key.inspect}")
++          end
++          scan_permission_constructs(child, child_path, recognized_paths, findings)
++        end
++      when Array
++        value.each_with_index do |child, index|
++          scan_permission_constructs(child, "#{path}[#{index}]", recognized_paths, findings)
++        end
++      end
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/safe_yaml.rb b/lib/honeycomb_registry/safe_yaml.rb
+new file mode 100644
+index 0000000..9d9f57c
+--- /dev/null
++++ b/lib/honeycomb_registry/safe_yaml.rb
+@@ -0,0 +1,109 @@
++# frozen_string_literal: true
++
++require "psych"
++
++module HoneycombRegistry
++  module SafeYAML
++    class Invalid < StandardError
++      attr_reader :path, :code
++
++      def initialize(path, code, message)
++        @path = path
++        @code = code
++        super(message)
++      end
++
++      def finding
++        Finding.new(path: path, code: code, message: message, severity: "error")
++      end
++    end
++
++    module_function
++
++    def load_file(path)
++      load(File.binread(path), path: path.to_s)
++    rescue Errno::ENOENT, Errno::EACCES => e
++      raise Invalid.new(path.to_s, "yaml.unreadable", e.message)
++    end
++
++    def load(bytes, path: "<yaml>")
++      source = bytes.dup.force_encoding(Encoding::UTF_8)
++      unless source.valid_encoding?
++        raise Invalid.new(path, "yaml.invalid_encoding", "YAML must be valid UTF-8")
++      end
++
++      stream = Psych.parse_stream(source, filename: path)
++      if stream.children.length != 1
++        raise Invalid.new(path, "yaml.document_count", "YAML must contain exactly one document")
++      end
++      document = stream.children.first
++      raise Invalid.new(path, "yaml.empty", "YAML document must not be empty") unless document&.root
++
++      inspect_node(document.root, path)
++      value = Psych.safe_load(source, permitted_classes: [], permitted_symbols: [],
++                                      aliases: false, filename: path, fallback: nil)
++      inspect_json_value(value, path)
++      value
++    rescue Invalid
++      raise
++    rescue Psych::DisallowedClass => e
++      raise Invalid.new(path, "yaml.non_json_value", e.message)
++    rescue Psych::Exception => e
++      raise Invalid.new(path, "yaml.syntax", e.message.lines.first.to_s.strip)
++    end
++
++    def inspect_node(node, path)
++      if node.is_a?(Psych::Nodes::Alias)
++        raise Invalid.new(path, "yaml.alias", "YAML aliases are not allowed")
++      end
++      if node.respond_to?(:tag) && node.tag && !node.tag.start_with?("tag:yaml.org,2002:")
++        raise Invalid.new(path, "yaml.tag", "custom YAML tags are not allowed")
++      end
++
++      case node
++      when Psych::Nodes::Mapping
++        seen = {}
++        node.children.each_slice(2) do |key, value|
++          unless key.is_a?(Psych::Nodes::Scalar)
++            raise Invalid.new(path, "yaml.non_string_key", "mapping keys must be strings")
++          end
++          key_path = join_path(path, key.value)
++          if seen.key?(key.value)
++            raise Invalid.new(key_path, "yaml.duplicate_key", "duplicate mapping key #{key.value.inspect}")
++          end
++          seen[key.value] = true
++          inspect_node(key, key_path)
++          inspect_node(value, key_path)
++        end
++      when Psych::Nodes::Sequence
++        node.children.each_with_index { |child, index| inspect_node(child, "#{path}[#{index}]") }
++      end
++    end
++
++    def inspect_json_value(value, path)
++      case value
++      when Hash
++        value.each do |key, child|
++          unless key.is_a?(String)
++            raise Invalid.new(path, "yaml.non_string_key", "mapping keys must be strings")
++          end
++          inspect_json_value(child, join_path(path, key))
++        end
++      when Array
++        value.each_with_index { |child, index| inspect_json_value(child, "#{path}[#{index}]") }
++      when String, Integer, TrueClass, FalseClass, NilClass
++        nil
++      when Float
++        unless value.finite?
++          raise Invalid.new(path, "yaml.non_json_value", "non-finite numbers are not allowed")
++        end
++      else
++        raise Invalid.new(path, "yaml.non_json_value", "#{value.class} values are not allowed")
++      end
++    end
++
++    def join_path(path, key)
++      key.match?(/\A[a-zA-Z0-9_-]+\z/) ? "#{path}.#{key}" : "#{path}[#{key.inspect}]"
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/schema.rb b/lib/honeycomb_registry/schema.rb
+new file mode 100644
+index 0000000..9d4a054
+--- /dev/null
++++ b/lib/honeycomb_registry/schema.rb
+@@ -0,0 +1,245 @@
++# frozen_string_literal: true
++
++require "pathname"
++require "set"
++require "uri"
++
++module HoneycombRegistry
++  module Schema
++    MANIFEST_SCHEMA = "honeycomb-manifest/v1"
++    CORE_KEYS = %w[
++      schema name version description author license hive_min_version source
++      permissions files release_sha256
++    ].freeze
++    METADATA_KEYS = %w[schema name version description author license hive_min_version source].freeze
++    DERIVED_KEYS = %w[permissions files release_sha256].freeze
++    NAME_PATTERN = /\A[a-z0-9][a-z0-9-]{1,62}[a-z0-9]\z/
++    EXTENSION_PATTERN = /\Ax-[a-z0-9][a-z0-9-]*\z/
++    SHA256_PATTERN = /\A[0-9a-f]{64}\z/
++    REVISION_PATTERN = /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
++    RISKS = %w[low moderate high].freeze
++    CAPABILITIES = %w[filesystem-read filesystem-write network shell].freeze
++    PERMISSION_KEYS = %w[
++      risk capabilities network_hosts filesystem_read filesystem_write secrets
++    ].freeze
++
++    module_function
++
++    def validate_metadata(data, path: "manifest.yml", policy_path: default_policy_path)
++      validate(data, path: path, policy_path: policy_path, require_derived: false)
++    end
++
++    def validate_manifest(data, path: "manifest.yml", policy_path: default_policy_path)
++      validate(data, path: path, policy_path: policy_path, require_derived: true)
++    end
++
++    def validate(data, path:, policy_path:, require_derived:)
++      findings = Findings.new
++      return invalid_type(findings, path, "manifest", data, Hash) unless data.is_a?(Hash)
++
++      required = require_derived ? CORE_KEYS : METADATA_KEYS
++      validate_keys(data, path, required, CORE_KEYS, findings, allow_extensions: true)
++      validate_exact(data["schema"], "#{path}.schema", MANIFEST_SCHEMA, findings)
++      validate_name(data["name"], "#{path}.name", findings)
++      validate_semver(data["version"], "#{path}.version", findings)
++      validate_nonempty_string(data["description"], "#{path}.description", findings)
++      validate_author(data["author"], "#{path}.author", findings)
++      validate_license(data["license"], "#{path}.license", policy_path, findings)
++      validate_semver(data["hive_min_version"], "#{path}.hive_min_version", findings)
++      validate_source(data["source"], "#{path}.source", findings)
++
++      if require_derived
++        validate_permissions(data["permissions"], "#{path}.permissions", findings)
++        validate_files(data["files"], "#{path}.files", data["name"], data["version"], findings)
++        validate_sha256(data["release_sha256"], "#{path}.release_sha256", findings)
++      end
++
++      data.each do |key, value|
++        validate_json_value(value, "#{path}.#{key}", findings) if key.is_a?(String) && key.start_with?("x-")
++      end
++      findings
++    end
++
++    def default_policy_path
++      File.expand_path("../../policy/spdx-license-ids.txt", __dir__)
++    end
++
++    def validate_keys(value, path, required, allowed, findings, allow_extensions: false)
++      return invalid_type(findings, path, path.split(".").last, value, Hash) unless value.is_a?(Hash)
++
++      required.each do |key|
++        findings.add("#{path}.#{key}", "schema.missing_key", "required key #{key.inspect} is missing") unless value.key?(key)
++      end
++      value.each_key do |key|
++        unless key.is_a?(String)
++          findings.add(path, "schema.invalid_key", "mapping keys must be strings")
++          next
++        end
++        next if allowed.include?(key)
++        next if allow_extensions && EXTENSION_PATTERN.match?(key)
++
++        findings.add("#{path}.#{key}", "schema.unknown_key", "unknown key #{key.inspect}")
++      end
++      true
++    end
++
++    def validate_name(value, path, findings)
++      return unless validate_nonempty_string(value, path, findings)
++      return if NAME_PATTERN.match?(value)
++
++      findings.add(path, "schema.invalid_name", "name must match #{NAME_PATTERN.inspect}")
++    end
++
++    def validate_semver(value, path, findings)
++      return unless validate_nonempty_string(value, path, findings)
++
++      SemVer.parse(value)
++    rescue SemVer::Invalid => e
++      findings.add(path, "schema.invalid_semver", e.message)
++    end
++
++    def validate_author(value, path, findings)
++      return unless validate_keys(value, path, %w[name], %w[name url], findings)
++
++      validate_nonempty_string(value["name"], "#{path}.name", findings)
++      validate_url(value["url"], "#{path}.url", findings) if value.key?("url")
++    end
++
++    def validate_source(value, path, findings)
++      return unless validate_keys(value, path, %w[url revision], %w[url revision], findings)
++
++      validate_url(value["url"], "#{path}.url", findings)
++      revision = value["revision"]
++      if validate_nonempty_string(revision, "#{path}.revision", findings) && !REVISION_PATTERN.match?(revision)
++        findings.add("#{path}.revision", "schema.invalid_revision",
++                     "revision must be a lowercase 40- or 64-character hexadecimal commit ID")
++      end
++    end
++
++    def validate_license(value, path, policy_path, findings)
++      return unless validate_nonempty_string(value, path, findings)
++
++      identifiers = File.readlines(policy_path, chomp: true).reject { |line| line.empty? || line.start_with?("#") }.to_set
++      return if identifiers.include?(value)
++
++      findings.add(path, "schema.invalid_license", "license must be a checked-in SPDX identifier")
++    rescue Errno::ENOENT, Errno::EACCES => e
++      findings.add(path, "schema.license_policy", "cannot read SPDX policy: #{e.message}")
++    end
++
++    def validate_url(value, path, findings)
++      return unless validate_nonempty_string(value, path, findings)
++
++      uri = URI.parse(value)
++      valid = %w[http https].include?(uri.scheme) && uri.host && !uri.host.empty? &&
++              uri.userinfo.nil? && uri.fragment.nil?
++      findings.add(path, "schema.invalid_url", "URL must be an absolute HTTP(S) URL without credentials or a fragment") unless valid
++    rescue URI::InvalidURIError
++      findings.add(path, "schema.invalid_url", "URL must be an absolute HTTP(S) URL")
++    end
++
++    def validate_permissions(value, path, findings)
++      return unless validate_keys(value, path, PERMISSION_KEYS, PERMISSION_KEYS, findings)
++
++      unless RISKS.include?(value["risk"])
++        findings.add("#{path}.risk", "schema.invalid_permission", "risk must be one of #{RISKS.join(", ")}")
++      end
++      validate_sorted_string_set(value["capabilities"], "#{path}.capabilities", findings,
++                                 allowed: CAPABILITIES)
++      %w[network_hosts filesystem_read filesystem_write secrets].each do |key|
++        validate_sorted_string_set(value[key], "#{path}.#{key}", findings)
++      end
++    end
++
++    def validate_files(value, path, name, version, findings)
++      return invalid_type(findings, path, "files", value, Hash) unless value.is_a?(Hash)
++
++      findings.add(path, "schema.empty_files", "files must contain at least one package file") if value.empty?
++      value.each do |file_path, digest|
++        unless file_path.is_a?(String)
++          findings.add(path, "schema.invalid_file_path", "file paths must be strings")
++          next
++        end
++        validate_file_path(file_path, path, name, version, findings)
++        validate_sha256(digest, "#{path}[#{file_path.inspect}]", findings)
++      end
++    end
++
++    def validate_file_path(value, path, name, version, findings)
++      invalid = value.empty? || value.include?("\\") || value.start_with?("/") || value.include?("\0")
++      segments = value.split("/")
++      invalid ||= segments.any? { |segment| segment.empty? || segment == "." || segment == ".." }
++      invalid ||= Pathname.new(value).cleanpath.to_s != value
++      prefix = "packages/#{name}/#{version}/" if name.is_a?(String) && version.is_a?(String)
++      invalid ||= prefix && !value.start_with?(prefix)
++      findings.add("#{path}[#{value.inspect}]", "schema.invalid_file_path",
++                   "file path must be a normalized repository-relative path inside the version directory") if invalid
++    end
++
++    def validate_sha256(value, path, findings)
++      if !value.is_a?(String) || !SHA256_PATTERN.match?(value)
++        findings.add(path, "schema.invalid_sha256", "value must be a lowercase 64-character SHA-256")
++      end
++    end
++
++    def validate_sorted_string_set(value, path, findings, allowed: nil)
++      unless value.is_a?(Array)
++        invalid_type(findings, path, path.split(".").last, value, Array)
++        return
++      end
++      unless value.all? { |entry| entry.is_a?(String) && !entry.empty? }
++        findings.add(path, "schema.invalid_permission", "values must be non-empty strings")
++        return
++      end
++      if value != value.uniq.sort
++        findings.add(path, "schema.noncanonical_set", "values must be unique and lexicographically sorted")
++      end
++      if value.include?("*") && value.length > 1
++        findings.add(path, "schema.noncanonical_wildcard", "wildcard must be the only value")
++      end
++      unknown = allowed ? value - allowed : []
++      unless unknown.empty?
++        findings.add(path, "schema.invalid_permission", "unknown values: #{unknown.join(", ")}")
++      end
++    end
++
++    def validate_nonempty_string(value, path, findings)
++      return true if value.is_a?(String) && !value.strip.empty?
++
++      findings.add(path, "schema.invalid_value", "value must be a non-empty string")
++      false
++    end
++
++    def validate_exact(value, path, expected, findings)
++      return if value == expected
++
++      findings.add(path, "schema.invalid_value", "value must be #{expected.inspect}")
++    end
++
++    def validate_json_value(value, path, findings)
++      case value
++      when Hash
++        value.each do |key, child|
++          unless key.is_a?(String)
++            findings.add(path, "schema.invalid_extension", "extension mapping keys must be strings")
++            next
++          end
++          validate_json_value(child, "#{path}.#{key}", findings)
++        end
++      when Array
++        value.each_with_index { |child, index| validate_json_value(child, "#{path}[#{index}]", findings) }
++      when String, Integer, TrueClass, FalseClass, NilClass
++        nil
++      when Float
++        findings.add(path, "schema.invalid_extension", "extension numbers must be finite") unless value.finite?
++      else
++        findings.add(path, "schema.invalid_extension", "extension values must be JSON-like primitives")
++      end
++    end
++
++    def invalid_type(findings, path, label, value, expected)
++      findings.add(path, "schema.invalid_type", "#{label} must be a #{expected}; got #{value.class}")
++      false
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/semver.rb b/lib/honeycomb_registry/semver.rb
+new file mode 100644
+index 0000000..c2b3508
+--- /dev/null
++++ b/lib/honeycomb_registry/semver.rb
+@@ -0,0 +1,83 @@
++# frozen_string_literal: true
++
++module HoneycombRegistry
++  class SemVer
++    include Comparable
++
++    class Invalid < ArgumentError; end
++    class AmbiguousPrecedence < ArgumentError; end
++
++    PATTERN = /\A(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\z/
++
++    attr_reader :major, :minor, :patch, :prerelease, :build
++
++    def self.parse(value)
++      raise Invalid, "version must be a string" unless value.is_a?(String)
++
++      match = PATTERN.match(value)
++      raise Invalid, "invalid SemVer 2.0 version: #{value.inspect}" unless match
++
++      new(value, match)
++    end
++
++    def self.latest(values)
++      parsed = values.map { |value| value.is_a?(self) ? value : parse(value) }
++      parsed.combination(2) do |left, right|
++        if (left <=> right).zero? && left.to_s != right.to_s
++          raise AmbiguousPrecedence,
++                "versions #{left} and #{right} have equal precedence; latest is ambiguous"
++        end
++      end
++      parsed.max
++    end
++
++    def initialize(text, match)
++      @text = text.freeze
++      @major = Integer(match[1], 10)
++      @minor = Integer(match[2], 10)
++      @patch = Integer(match[3], 10)
++      @prerelease = match[4]&.split(".")&.freeze
++      @build = match[5]&.split(".")&.freeze
++      freeze
++    end
++
++    def <=>(other)
++      return nil unless other.is_a?(SemVer)
++
++      core = [major, minor, patch] <=> [other.major, other.minor, other.patch]
++      return core unless core.zero?
++      return 0 if prerelease.nil? && other.prerelease.nil?
++      return 1 if prerelease.nil?
++      return -1 if other.prerelease.nil?
++
++      compare_prerelease(prerelease, other.prerelease)
++    end
++
++    def to_s
++      @text
++    end
++
++    private
++
++    def compare_prerelease(left, right)
++      [left.length, right.length].max.times do |index|
++        return -1 unless left[index]
++        return 1 unless right[index]
++
++        comparison = compare_identifier(left[index], right[index])
++        return comparison unless comparison.zero?
++      end
++      0
++    end
++
++    def compare_identifier(left, right)
++      left_numeric = left.match?(/\A\d+\z/)
++      right_numeric = right.match?(/\A\d+\z/)
++      return Integer(left, 10) <=> Integer(right, 10) if left_numeric && right_numeric
++      return -1 if left_numeric
++      return 1 if right_numeric
++
++      left <=> right
++    end
++  end
++end
+diff --git a/lib/honeycomb_registry/validator.rb b/lib/honeycomb_registry/validator.rb
+new file mode 100644
+index 0000000..1321c25
+--- /dev/null
++++ b/lib/honeycomb_registry/validator.rb
+@@ -0,0 +1,192 @@
++# frozen_string_literal: true
++
++require "digest"
++require "json"
++require "optparse"
++require "set"
++
++module HoneycombRegistry
++  module Validator
++    module_function
++
++    def validate(package, require_hive: false, hive_loader: HiveCompatibility.method(:load_runtime))
++      findings = Findings.new
++      inspection = package.inspect
++      findings.concat(inspection.findings)
++
++      manifest = load_yaml(package.manifest_path, package.relative_manifest_path, findings)
++      return findings unless manifest.is_a?(Hash)
++
++      schema_findings = Schema.validate_manifest(manifest, path: package.relative_manifest_path)
++      findings.concat(schema_findings)
++      if manifest["name"] != package.name || manifest["version"] != package.version
++        findings.add(package.relative_manifest_path, "manifest.identity",
++                     "manifest name/version must match #{package.name}/#{package.version}")
++      end
++
++      validate_file_integrity(package, inspection.files, manifest["files"], findings)
++
++      workflow_path = File.join(package.path, "workflow.yml")
++      workflow = load_yaml(workflow_path, package.repository_path("workflow.yml"), findings)
++      if workflow
++        findings.concat(package.validate_instruction_references(workflow))
++        permission_result = Permissions.derive(workflow, path: package.repository_path("workflow.yml"))
++        findings.concat(permission_result.findings)
++        if permission_result.permissions && manifest["permissions"] != permission_result.permissions
++          findings.add("#{package.relative_manifest_path}.permissions", "permissions.drift",
++                       "manifest permissions do not match workflow-derived permissions")
++        end
++      end
++
++      validate_release_and_canonical_bytes(package, manifest, findings) unless schema_findings.errors?
++      unless findings.errors? || !workflow
++        findings.concat(HiveCompatibility.check(
++          package, manifest, workflow: workflow, require_hive: require_hive, loader: hive_loader
++        ))
++      end
++      findings
++    end
++
++    def load_yaml(file_path, finding_path, findings)
++      SafeYAML.load(File.binread(file_path), path: finding_path)
++    rescue SafeYAML::Invalid => e
++      findings.concat([e.finding])
++      nil
++    rescue Errno::ENOENT, Errno::EACCES => e
++      findings.add(finding_path, "manifest.unreadable", e.message)
++      nil
++    end
++
++    def validate_file_integrity(package, actual_files, declared_files, findings)
++      return unless declared_files.is_a?(Hash)
++
++      actual = actual_files.to_set
++      declared = declared_files.keys.select { |key| key.is_a?(String) }.to_set
++      (actual - declared).sort.each do |path|
++        findings.add(path, "integrity.unrecorded_file", "package file is not recorded in manifest")
++      end
++      (declared - actual).sort.each do |path|
++        findings.add(path, "integrity.missing_file", "manifest records a file that is missing from package")
++      end
++      (actual & declared).sort.each do |path|
++        absolute = package.absolute_path(path)
++        stat = File.lstat(absolute)
++        unless stat.file? && !stat.symlink?
++          findings.add(path, "integrity.unsafe_file", "recorded path is not a regular package file")
++          next
++        end
++        actual_digest = Digest::SHA256.file(absolute).hexdigest
++        next if declared_files[path] == actual_digest
++
++        findings.add(path, "integrity.digest_mismatch", "SHA-256 does not match manifest")
++      rescue SystemCallError, IOError, ArgumentError => e
++        findings.add(path, "integrity.unreadable", e.message)
++      end
++    end
++
++    def validate_release_and_canonical_bytes(package, manifest, findings)
++      projection = manifest.reject { |key, _value| key == "release_sha256" }
++      expected_release = Digest::SHA256.hexdigest(
++        CanonicalYAML.dump_manifest(projection, include_release: false)
++      )
++      unless manifest["release_sha256"] == expected_release
++        findings.add("#{package.relative_manifest_path}.release_sha256",
++                     "integrity.release_sha256",
++                     "release fingerprint does not match canonical manifest content")
++      end
++      expected_bytes = CanonicalYAML.dump_manifest(manifest)
++      actual_bytes = File.binread(package.manifest_path)
++      unless actual_bytes == expected_bytes
++        findings.add(package.relative_manifest_path, "manifest.noncanonical",
++                     "manifest bytes are not canonical generated YAML")
++      end
++    rescue SystemCallError, IOError, ArgumentError => e
++      findings.add(package.relative_manifest_path, "manifest.canonicalization", e.message)
++    end
++  end
++
++  module ValidatorCLI
++    module_function
++
++    def run(argv, out: $stdout, err: $stderr, default_root: nil)
++      options = {all: false, json: false, require_hive: false, root: default_root, help: false}
++      parser = option_parser(options, out)
++      arguments = parser.parse(argv)
++      return 0 if options[:help]
++      root = File.expand_path(options[:root] || Dir.pwd)
++      verify_root!(root)
++      packages, discovery_findings = resolve_packages(root, arguments, options)
++      findings = Findings.new.concat(discovery_findings)
++      unless findings.errors?
++        packages.each do |package|
++          findings.concat(Validator.validate(package, require_hive: options[:require_hive]))
++        end
++      end
++      print_findings(findings, options[:json], out)
++      findings.errors? ? 1 : 0
++    rescue OptionParser::ParseError, InvocationError => e
++      terminal_failure(e, "invocation.error", options && options[:json], out, err)
++    rescue StandardError => e
++      terminal_failure(e, "internal.error", options && options[:json], out, err, internal: true)
++    end
++
++    def option_parser(options, out)
++      OptionParser.new do |opts|
++        opts.banner = "Usage: honeycomb-validate [--json] [--require-hive] (--all | PACKAGE_PATH)"
++        opts.on("--all", "Validate every package under packages/") { options[:all] = true }
++        opts.on("--json", "Emit a stable JSON finding array") { options[:json] = true }
++        opts.on("--require-hive", "Require compatible Hive parser validation") { options[:require_hive] = true }
++        opts.on("--root PATH", "Repository root") { |value| options[:root] = value }
++        opts.on("-h", "--help", "Show help") do
++          out.puts opts
++          options[:help] = true
++        end
++      end
++    end
++
++    def resolve_packages(root, arguments, options)
++      findings = Findings.new
++      if options[:all]
++        raise InvocationError, "--all cannot be combined with a package path" unless arguments.empty?
++
++        discovery = Package.discover(root)
++        return [discovery.packages, discovery.findings]
++      end
++      raise InvocationError, "provide exactly one package path or --all" unless arguments.length == 1
++
++      path = File.expand_path(arguments.first, root)
++      raise InvocationError, "package path does not exist: #{arguments.first}" unless File.exist?(path)
++      raise InvocationError, "package path is not a directory: #{arguments.first}" unless File.directory?(path)
++
++      [[Package.new(path, root: root)], findings]
++    end
++
++    def verify_root!(root)
++      valid = File.directory?(root) &&
++              (File.exist?(File.join(root, ".git")) || File.directory?(File.join(root, "packages")))
++      raise InvocationError, "repository root is not recognizable: #{root}" unless valid
++    end
++
++    def print_findings(findings, json, output)
++      if json
++        output.write(JSON.generate(findings.to_h))
++        output.write("\n")
++      else
++        findings.each do |finding|
++          output.puts "#{finding.severity.upcase} #{finding.path} #{finding.code}: #{finding.message}"
++        end
++      end
++    end
++
++    def terminal_failure(error, code, json, out, err, internal: false)
++      message = internal ? "#{error.class}: #{error.message}" : error.message
++      err.puts "honeycomb-validate: #{internal ? 'internal failure: ' : ''}#{message}"
++      if json
++        finding = Finding.new(path: "", code: code, message: message, severity: "error")
++        out.write(JSON.generate([finding.to_h]))
++        out.write("\n")
++      end
++      2
++    end
++  end
++end
+diff --git a/packages/.gitkeep b/packages/.gitkeep
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/packages/.gitkeep
+@@ -0,0 +1 @@
++
+diff --git a/policy/spdx-license-ids.txt b/policy/spdx-license-ids.txt
+new file mode 100644
+index 0000000..009e056
+--- /dev/null
++++ b/policy/spdx-license-ids.txt
+@@ -0,0 +1,630 @@
++# SPDX license identifier snapshot supplied with Arch Linux.
++# One identifier per line; registry validation never reads host policy files.
++0BSD
++3D-Slicer-1.0
++AAL
++ADSL
++AFL-1.1
++AFL-1.2
++AFL-2.0
++AFL-2.1
++AFL-3.0
++AGPL-1.0-only
++AGPL-1.0-or-later
++AGPL-3.0-only
++AGPL-3.0-or-later
++AMD-newlib
++AMDPLPA
++AML
++AML-glslang
++AMPAS
++ANTLR-PD
++ANTLR-PD-fallback
++APAFML
++APL-1.0
++APSL-1.0
++APSL-1.1
++APSL-1.2
++APSL-2.0
++ASWF-Digital-Assets-1.0
++ASWF-Digital-Assets-1.1
++Abstyles
++AdaCore-doc
++Adobe-2006
++Adobe-Display-PostScript
++Adobe-Glyph
++Adobe-Utopia
++Afmparse
++Aladdin
++Apache-1.0
++Apache-1.1
++Apache-2.0
++App-s2p
++Arphic-1999
++Artistic-1.0
++Artistic-1.0-Perl
++Artistic-1.0-cl8
++Artistic-2.0
++BSD-1-Clause
++BSD-2-Clause
++BSD-2-Clause-Darwin
++BSD-2-Clause-Patent
++BSD-2-Clause-Views
++BSD-2-Clause-first-lines
++BSD-3-Clause
++BSD-3-Clause-Attribution
++BSD-3-Clause-Clear
++BSD-3-Clause-HP
++BSD-3-Clause-LBNL
++BSD-3-Clause-Modification
++BSD-3-Clause-No-Military-License
++BSD-3-Clause-No-Nuclear-License
++BSD-3-Clause-No-Nuclear-License-2014
++BSD-3-Clause-No-Nuclear-Warranty
++BSD-3-Clause-Open-MPI
++BSD-3-Clause-Sun
++BSD-3-Clause-acpica
++BSD-3-Clause-flex
++BSD-4-Clause
++BSD-4-Clause-Shortened
++BSD-4-Clause-UC
++BSD-4.3RENO
++BSD-4.3TAHOE
++BSD-Advertising-Acknowledgement
++BSD-Attribution-HPND-disclaimer
++BSD-Inferno-Nettverk
++BSD-Protection
++BSD-Source-Code
++BSD-Source-beginning-file
++BSD-Systemics
++BSD-Systemics-W3Works
++BSL-1.0
++BUSL-1.1
++Baekmuk
++Bahyph
++Barr
++Beerware
++BitTorrent-1.0
++BitTorrent-1.1
++Bitstream-Charter
++Bitstream-Vera
++BlueOak-1.0.0
++Boehm-GC
++Borceux
++Brian-Gladman-2-Clause
++Brian-Gladman-3-Clause
++C-UDA-1.0
++CAL-1.0
++CAL-1.0-Combined-Work-Exception
++CATOSL-1.1
++CC-BY-1.0
++CC-BY-2.0
++CC-BY-2.5
++CC-BY-2.5-AU
++CC-BY-3.0
++CC-BY-3.0-AT
++CC-BY-3.0-AU
++CC-BY-3.0-DE
++CC-BY-3.0-IGO
++CC-BY-3.0-NL
++CC-BY-3.0-US
++CC-BY-4.0
++CC-BY-NC-1.0
++CC-BY-NC-2.0
++CC-BY-NC-2.5
++CC-BY-NC-3.0
++CC-BY-NC-3.0-DE
++CC-BY-NC-4.0
++CC-BY-NC-ND-1.0
++CC-BY-NC-ND-2.0
++CC-BY-NC-ND-2.5
++CC-BY-NC-ND-3.0
++CC-BY-NC-ND-3.0-DE
++CC-BY-NC-ND-3.0-IGO
++CC-BY-NC-ND-4.0
++CC-BY-NC-SA-1.0
++CC-BY-NC-SA-2.0
++CC-BY-NC-SA-2.0-DE
++CC-BY-NC-SA-2.0-FR
++CC-BY-NC-SA-2.0-UK
++CC-BY-NC-SA-2.5
++CC-BY-NC-SA-3.0
++CC-BY-NC-SA-3.0-DE
++CC-BY-NC-SA-3.0-IGO
++CC-BY-NC-SA-4.0
++CC-BY-ND-1.0
++CC-BY-ND-2.0
++CC-BY-ND-2.5
++CC-BY-ND-3.0
++CC-BY-ND-3.0-DE
++CC-BY-ND-4.0
++CC-BY-SA-1.0
++CC-BY-SA-2.0
++CC-BY-SA-2.0-UK
++CC-BY-SA-2.1-JP
++CC-BY-SA-2.5
++CC-BY-SA-3.0
++CC-BY-SA-3.0-AT
++CC-BY-SA-3.0-DE
++CC-BY-SA-3.0-IGO
++CC-BY-SA-4.0
++CC-PDDC
++CC0-1.0
++CDDL-1.0
++CDDL-1.1
++CDL-1.0
++CDLA-Permissive-1.0
++CDLA-Permissive-2.0
++CDLA-Sharing-1.0
++CECILL-1.0
++CECILL-1.1
++CECILL-2.0
++CECILL-2.1
++CECILL-B
++CECILL-C
++CERN-OHL-1.1
++CERN-OHL-1.2
++CERN-OHL-P-2.0
++CERN-OHL-S-2.0
++CERN-OHL-W-2.0
++CFITSIO
++CMU-Mach
++CMU-Mach-nodoc
++CNRI-Jython
++CNRI-Python
++CNRI-Python-GPL-Compatible
++COIL-1.0
++CPAL-1.0
++CPL-1.0
++CPOL-1.02
++CUA-OPL-1.0
++Caldera
++Caldera-no-preamble
++Catharon
++ClArtistic
++Clips
++Community-Spec-1.0
++Condor-1.1
++Cornell-Lossless-JPEG
++Cronyx
++Crossword
++CrystalStacker
++Cube
++D-FSL-1.0
++DEC-3-Clause
++DL-DE-BY-2.0
++DL-DE-ZERO-2.0
++DOC
++DRL-1.0
++DRL-1.1
++DSDP
++Dotseqn
++ECL-1.0
++ECL-2.0
++EFL-1.0
++EFL-2.0
++EPICS
++EPL-1.0
++EPL-2.0
++EUDatagrid
++EUPL-1.0
++EUPL-1.1
++EUPL-1.2
++Elastic-2.0
++Entessa
++ErlPL-1.1
++Eurosym
++FBM
++FDK-AAC
++FSFAP
++FSFAP-no-warranty-disclaimer
++FSFUL
++FSFULLR
++FSFULLRWD
++FTL
++Fair
++Ferguson-Twofish
++Frameworx-1.0
++FreeBSD-DOC
++FreeImage
++Furuseth
++GCR-docs
++GD
++GFDL-1.1-invariants-only
++GFDL-1.1-invariants-or-later
++GFDL-1.1-no-invariants-only
++GFDL-1.1-no-invariants-or-later
++GFDL-1.1-only
++GFDL-1.1-or-later
++GFDL-1.2-invariants-only
++GFDL-1.2-invariants-or-later
++GFDL-1.2-no-invariants-only
++GFDL-1.2-no-invariants-or-later
++GFDL-1.2-only
++GFDL-1.2-or-later
++GFDL-1.3-invariants-only
++GFDL-1.3-invariants-or-later
++GFDL-1.3-no-invariants-only
++GFDL-1.3-no-invariants-or-later
++GFDL-1.3-only
++GFDL-1.3-or-later
++GL2PS
++GLWTPL
++GPL-1.0-only
++GPL-1.0-or-later
++GPL-2.0-only
++GPL-2.0-or-later
++GPL-3.0-only
++GPL-3.0-or-later
++Giftware
++Glide
++Glulxe
++Graphics-Gems
++Gutmann
++HP-1986
++HP-1989
++HPND
++HPND-DEC
++HPND-Fenneberg-Livingston
++HPND-INRIA-IMAG
++HPND-Intel
++HPND-Kevlin-Henney
++HPND-MIT-disclaimer
++HPND-Markus-Kuhn
++HPND-Pbmplus
++HPND-UC
++HPND-UC-export-US
++HPND-doc
++HPND-doc-sell
++HPND-export-US
++HPND-export-US-acknowledgement
++HPND-export-US-modify
++HPND-export2-US
++HPND-merchantability-variant
++HPND-sell-MIT-disclaimer-xserver
++HPND-sell-regexpr
++HPND-sell-variant
++HPND-sell-variant-MIT-disclaimer
++HPND-sell-variant-MIT-disclaimer-rev
++HTMLTIDY
++HaskellReport
++Hippocratic-2.1
++IBM-pibs
++ICU
++IEC-Code-Components-EULA
++IJG
++IJG-short
++IPA
++IPL-1.0
++ISC
++ISC-Veillard
++ImageMagick
++Imlib2
++Info-ZIP
++Inner-Net-2.0
++Intel
++Intel-ACPI
++Interbase-1.0
++JPL-image
++JPNIC
++JSON
++Jam
++JasPer-2.0
++Kastrup
++Kazlib
++Knuth-CTAN
++LAL-1.2
++LAL-1.3
++LGPL-2.0-only
++LGPL-2.0-or-later
++LGPL-2.1-only
++LGPL-2.1-or-later
++LGPL-3.0-only
++LGPL-3.0-or-later
++LGPLLR
++LOOP
++LPD-document
++LPL-1.0
++LPL-1.02
++LPPL-1.0
++LPPL-1.1
++LPPL-1.2
++LPPL-1.3a
++LPPL-1.3c
++LZMA-SDK-9.11-to-9.20
++LZMA-SDK-9.22
++Latex2e
++Latex2e-translated-notice
++Leptonica
++LiLiQ-P-1.1
++LiLiQ-R-1.1
++LiLiQ-Rplus-1.1
++Libpng
++Linux-OpenIB
++Linux-man-pages-1-para
++Linux-man-pages-copyleft
++Linux-man-pages-copyleft-2-para
++Linux-man-pages-copyleft-var
++Lucida-Bitmap-Fonts
++MIT
++MIT-0
++MIT-CMU
++MIT-Festival
++MIT-Khronos-old
++MIT-Modern-Variant
++MIT-Wu
++MIT-advertising
++MIT-enna
++MIT-feh
++MIT-open-group
++MIT-testregex
++MITNFA
++MMIXware
++MPEG-SSG
++MPL-1.0
++MPL-1.1
++MPL-2.0
++MPL-2.0-no-copyleft-exception
++MS-LPL
++MS-PL
++MS-RL
++MTLL
++Mackerras-3-Clause
++Mackerras-3-Clause-acknowledgment
++MakeIndex
++Martin-Birgmeier
++McPhee-slideshow
++Minpack
++MirOS
++Motosoto
++MulanPSL-1.0
++MulanPSL-2.0
++Multics
++Mup
++NAIST-2003
++NASA-1.3
++NBPL-1.0
++NCBI-PD
++NCGL-UK-2.0
++NCL
++NCSA
++NGPL
++NICTA-1.0
++NIST-PD
++NIST-PD-fallback
++NIST-Software
++NLOD-1.0
++NLOD-2.0
++NLPL
++NOSL
++NPL-1.0
++NPL-1.1
++NPOSL-3.0
++NRL
++NTP
++NTP-0
++Naumen
++Net-SNMP
++NetCDF
++Newsletr
++Nokia
++Noweb
++O-UDA-1.0
++OAR
++OCCT-PL
++OCLC-2.0
++ODC-By-1.0
++ODbL-1.0
++OFFIS
++OFL-1.0
++OFL-1.0-RFN
++OFL-1.0-no-RFN
++OFL-1.1
++OFL-1.1-RFN
++OFL-1.1-no-RFN
++OGC-1.0
++OGDL-Taiwan-1.0
++OGL-Canada-2.0
++OGL-UK-1.0
++OGL-UK-2.0
++OGL-UK-3.0
++OGTSL
++OLDAP-1.1
++OLDAP-1.2
++OLDAP-1.3
++OLDAP-1.4
++OLDAP-2.0
++OLDAP-2.0.1
++OLDAP-2.1
++OLDAP-2.2
++OLDAP-2.2.1
++OLDAP-2.2.2
++OLDAP-2.3
++OLDAP-2.4
++OLDAP-2.5
++OLDAP-2.6
++OLDAP-2.7
++OLDAP-2.8
++OLFL-1.3
++OML
++OPL-1.0
++OPL-UK-3.0
++OPUBL-1.0
++OSET-PL-2.1
++OSL-1.0
++OSL-1.1
++OSL-2.0
++OSL-2.1
++OSL-3.0
++OpenPBS-2.3
++OpenSSL
++OpenSSL-standalone
++OpenVision
++PADL
++PDDL-1.0
++PHP-3.0
++PHP-3.01
++PPL
++PSF-2.0
++Parity-6.0.0
++Parity-7.0.0
++Pixar
++Plexus
++PolyForm-Noncommercial-1.0.0
++PolyForm-Small-Business-1.0.0
++PostgreSQL
++Python-2.0
++Python-2.0.1
++QPL-1.0
++QPL-1.0-INRIA-2004
++Qhull
++RHeCos-1.1
++RPL-1.1
++RPL-1.5
++RPSL-1.0
++RSA-MD
++RSCPL
++Rdisc
++Ruby
++SAX-PD
++SAX-PD-2.0
++SCEA
++SGI-B-1.0
++SGI-B-1.1
++SGI-B-2.0
++SGI-OpenGL
++SGP4
++SHL-0.5
++SHL-0.51
++SISSL
++SISSL-1.2
++SL
++SMLNJ
++SMPPL
++SNIA
++SPL-1.0
++SSH-OpenSSH
++SSH-short
++SSLeay-standalone
++SSPL-1.0
++SWL
++Saxpath
++SchemeReport
++Sendmail
++Sendmail-8.23
++SimPL-2.0
++Sleepycat
++Soundex
++Spencer-86
++Spencer-94
++Spencer-99
++SugarCRM-1.1.3
++Sun-PPP
++Sun-PPP-2000
++SunPro
++Symlinks
++TAPR-OHL-1.0
++TCL
++TCP-wrappers
++TGPPL-1.0
++TMate
++TORQUE-1.1
++TOSL
++TPDL
++TPL-1.0
++TTWL
++TTYP0
++TU-Berlin-1.0
++TU-Berlin-2.0
++TermReadKey
++UCAR
++UCL-1.0
++UMich-Merit
++UPL-1.0
++URT-RLE
++Unicode-3.0
++Unicode-DFS-2015
++Unicode-DFS-2016
++Unicode-TOU
++UnixCrypt
++Unlicense
++VOSTROM
++VSL-1.0
++Vim
++W3C
++W3C-19980720
++W3C-20150513
++WTFPL
++Watcom-1.0
++Widget-Workshop
++Wsuipa
++X11
++X11-distribute-modifications-variant
++XFree86-1.1
++XSkat
++Xdebug-1.03
++Xerox
++Xfig
++Xnet
++YPL-1.0
++YPL-1.1
++ZPL-1.1
++ZPL-2.0
++ZPL-2.1
++Zed
++Zeeff
++Zend-2.0
++Zimbra-1.3
++Zimbra-1.4
++Zlib
++any-OSI
++bcrypt-Solar-Designer
++blessing
++bzip2-1.0.6
++check-cvs
++checkmk
++copyleft-next-0.3.0
++copyleft-next-0.3.1
++curl
++cve-tou
++diffmark
++dtoa
++dvipdfm
++eGenix
++etalab-2.0
++fwlw
++gSOAP-1.3b
++gnuplot
++gtkbook
++hdparm
++iMatix
++libpng-2.0
++libselinux-1.0
++libtiff
++libutil-David-Nugent
++lsof
++magaz
++mailprio
++metamail
++mpi-permissive
++mpich2
++mplus
++pkgconf
++pnmstitch
++psfrag
++psutils
++python-ldap
++radvd
++snprintf
++softSurfer
++ssh-keyscan
++swrule
++threeparttable
++ulem
++w3m
++xinetd
++xkeyboard-config-Zinoviev
++xlock
++xpp
++xzoom
++zlib-acknowledgement
+diff --git a/script/honeycomb-catalog b/script/honeycomb-catalog
+new file mode 100755
+index 0000000..3e9df7e
+--- /dev/null
++++ b/script/honeycomb-catalog
+@@ -0,0 +1,8 @@
++#!/usr/bin/env ruby
++# frozen_string_literal: true
++
++root = File.expand_path("..", __dir__)
++$LOAD_PATH.unshift(File.join(root, "lib"))
++require "honeycomb_registry"
++
++exit HoneycombRegistry::CatalogCLI.run(ARGV, default_root: root)
+diff --git a/script/honeycomb-manifest b/script/honeycomb-manifest
+new file mode 100755
+index 0000000..b180b28
+--- /dev/null
++++ b/script/honeycomb-manifest
+@@ -0,0 +1,8 @@
++#!/usr/bin/env ruby
++# frozen_string_literal: true
++
++root = File.expand_path("..", __dir__)
++$LOAD_PATH.unshift(File.join(root, "lib"))
++require "honeycomb_registry"
++
++exit HoneycombRegistry::ManifestCLI.run(ARGV, default_root: root)
+diff --git a/script/honeycomb-validate b/script/honeycomb-validate
+new file mode 100755
+index 0000000..ffae56f
+--- /dev/null
++++ b/script/honeycomb-validate
+@@ -0,0 +1,8 @@
++#!/usr/bin/env ruby
++# frozen_string_literal: true
++
++root = File.expand_path("..", __dir__)
++$LOAD_PATH.unshift(File.join(root, "lib"))
++require "honeycomb_registry"
++
++exit HoneycombRegistry::ValidatorCLI.run(ARGV, default_root: root)
+diff --git a/test/catalog_cli_test.rb b/test/catalog_cli_test.rb
+new file mode 100644
+index 0000000..33cb1e7
+--- /dev/null
++++ b/test/catalog_cli_test.rb
+@@ -0,0 +1,62 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class CatalogCliTest < Minitest::Test
++  SCRIPT = File.join(ROOT, "script", "honeycomb-catalog")
++
++  def test_generate_and_check_empty_catalog_are_byte_stable
++    in_tmpdir do |root|
++      FileUtils.mkdir_p(File.join(root, "packages"))
++      evidence = fixture_path("listing-evidence", "empty.json")
++      output = File.join(root, "catalog.json")
++
++      stdout, stderr, status = capture_command(
++        SCRIPT, "--root", root, "--output", output, "--evidence", evidence
++      )
++      assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++      first = File.binread(output)
++
++      stdout, stderr, status = capture_command(
++        SCRIPT, "--root", root, "--output", output, "--check", "--evidence", evidence
++      )
++      assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++      assert_equal first, File.binread(output)
++    end
++  end
++
++  def test_check_detects_drift_without_writing_and_evidence_is_required
++    in_tmpdir do |root|
++      FileUtils.mkdir_p(File.join(root, "packages"))
++      output = File.join(root, "catalog.json")
++      File.write(output, "stale\n")
++      evidence = fixture_path("listing-evidence", "empty.json")
++
++      stdout, _stderr, status = capture_command(
++        SCRIPT, "--root", root, "--output", output, "--check", "--evidence", evidence
++      )
++      assert_equal 1, status.exitstatus
++      assert_includes stdout, "catalog.drift"
++      assert_equal "stale\n", File.read(output)
++
++      _stdout, _stderr, status = capture_command(SCRIPT, "--root", root)
++      assert_equal 2, status.exitstatus
++    end
++  end
++
++  def test_malformed_evidence_does_not_replace_existing_catalog
++    in_tmpdir do |root|
++      FileUtils.mkdir_p(File.join(root, "packages"))
++      output = File.join(root, "catalog.json")
++      File.write(output, "preserve\n")
++      evidence = File.join(root, "bad.json")
++      File.write(evidence, "not json")
++
++      _stdout, _stderr, status = capture_command(
++        SCRIPT, "--root", root, "--output", output, "--evidence", evidence
++      )
++      assert_equal 1, status.exitstatus
++      assert_equal "preserve\n", File.read(output)
++    end
++  end
++end
+diff --git a/test/catalog_test.rb b/test/catalog_test.rb
+new file mode 100644
+index 0000000..ec52acf
+--- /dev/null
++++ b/test/catalog_test.rb
+@@ -0,0 +1,150 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class CatalogTest < Minitest::Test
++  def canonical_package(root, version: "1.0.0")
++    package_path = if version == "1.0.0"
++                     install_valid_fixture(root)
++                   else
++                     source = fixture_path("packages", "valid", "example", "1.0.0")
++                     target = File.join(root, "packages", "example", version)
++                     FileUtils.mkdir_p(File.dirname(target))
++                     FileUtils.cp_r(source, target)
++                     manifest = File.join(target, "manifest.yml")
++                     File.write(manifest, File.read(manifest).sub("version: 1.0.0", "version: #{version}"))
++                     target
++                   end
++    package = HoneycombRegistry::Package.new(package_path, root: root)
++    result = HoneycombRegistry::Manifest.generate(package)
++    raise result.findings.to_h.inspect if result.findings.errors?
++    package
++  end
++
++  def evidence_record(package, lint: "pass", approval: "approved", head: "d" * 40)
++    manifest = HoneycombRegistry::SafeYAML.load_file(package.manifest_path)
++    release = manifest.fetch("release_sha256")
++    {
++      "name" => package.name,
++      "version" => package.version,
++      "tier" => "reviewed",
++      "lint" => lint == "pending" ? {"status" => "pending"} : {
++        "status" => lint,
++        "release_sha256" => release,
++        "head_sha" => head,
++        "checked_at" => "2026-07-16T10:00:00Z"
++      },
++      "approval" => approval == "pending" ? {"status" => "pending"} : {
++        "status" => approval,
++        "release_sha256" => release,
++        "head_sha" => head,
++        "reviewer" => "registry-reviewer",
++        "reviewed_at" => "2026-07-16T11:00:00Z",
++        "review_url" => "https://example.test/reviews/#{package.name}-#{package.version}"
++      }
++    }
++  end
++
++  def write_evidence(root, records)
++    path = File.join(root, "evidence.json")
++    File.write(path, JSON.pretty_generate({
++      "schema" => "honeycomb-listing-evidence/v1", "records" => records
++    }) + "\n")
++    path
++  end
++
++  def test_missing_pending_and_denied_evidence_omit_without_failure
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      cases = [[], [evidence_record(package, lint: "pending")],
++               [evidence_record(package, approval: "pending")],
++               [evidence_record(package, approval: "denied")]]
++
++      cases.each do |records|
++        result = HoneycombRegistry::Catalog.build(root: root,
++                                                  evidence_path: write_evidence(root, records))
++        refute result.findings.errors?, result.findings.to_h.inspect
++        assert_empty result.document.fetch("entries")
++      end
++    end
++  end
++
++  def test_dual_current_approval_projects_one_consumer_entry
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      evidence = write_evidence(root, [evidence_record(package)])
++      result = HoneycombRegistry::Catalog.build(root: root, evidence_path: evidence)
++
++      refute result.findings.errors?, result.findings.to_h.inspect
++      entry = result.document.fetch("entries").fetch(0)
++      assert_equal "example", entry["name"]
++      assert_equal "1.0.0", entry["latest_version"]
++      assert_equal "hive workflow install honeycomb/example", entry["install_command"]
++      assert_equal "a" * 40, entry["source_sha"]
++      assert_equal "d" * 40, entry.dig("listing_approval", "head_sha")
++      assert_equal "https://example.test/reviews/example-1.0.0", entry["reviews_url"]
++      assert_includes entry["package_url"], "/tree/#{"d" * 40}/packages/example/1.0.0"
++      refute entry.key?("files")
++    end
++  end
++
++  def test_stale_or_mismatched_evidence_aborts
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      record = evidence_record(package)
++      record["lint"]["release_sha256"] = "f" * 64
++      result = HoneycombRegistry::Catalog.build(
++        root: root, evidence_path: write_evidence(root, [record])
++      )
++      assert result.findings.errors?
++      assert_includes result.findings.codes, "evidence.stale_release"
++      assert_nil result.bytes
++    end
++
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      record = evidence_record(package)
++      record["approval"]["head_sha"] = "e" * 40
++      result = HoneycombRegistry::Catalog.build(
++        root: root, evidence_path: write_evidence(root, [record])
++      )
++      assert_includes result.findings.codes, "evidence.head_mismatch"
++    end
++  end
++
++  def test_multiple_versions_share_semver_latest_and_build_ambiguity_fails
++    in_tmpdir do |root|
++      first = canonical_package(root)
++      prerelease = canonical_package(root, version: "1.1.0-rc.1")
++      stable = canonical_package(root, version: "1.1.0")
++      records = [first, prerelease, stable].map { |package| evidence_record(package) }
++
++      result = HoneycombRegistry::Catalog.build(root: root,
++                                                evidence_path: write_evidence(root, records))
++      refute result.findings.errors?, result.findings.to_h.inspect
++      assert_equal %w[1.0.0 1.1.0-rc.1 1.1.0], result.document["entries"].map { |entry| entry["version"] }
++      assert_equal ["1.1.0"], result.document["entries"].map { |entry| entry["latest_version"] }.uniq
++    end
++
++    in_tmpdir do |root|
++      one = canonical_package(root, version: "1.0.0+one")
++      two = canonical_package(root, version: "1.0.0+two")
++      records = [one, two].map { |package| evidence_record(package) }
++      result = HoneycombRegistry::Catalog.build(root: root,
++                                                evidence_path: write_evidence(root, records))
++      assert result.findings.errors?
++      assert_includes result.findings.codes, "catalog.ambiguous_latest"
++    end
++  end
++
++  def test_invalid_package_aborts_even_when_evidence_would_omit_it
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      File.write(File.join(package.path, "extra.txt"), "unrecorded")
++      result = HoneycombRegistry::Catalog.build(root: root,
++                                                evidence_path: write_evidence(root, []))
++      assert result.findings.errors?
++      assert_nil result.bytes
++    end
++  end
++end
+diff --git a/test/end_to_end_test.rb b/test/end_to_end_test.rb
+new file mode 100644
+index 0000000..255ba81
+--- /dev/null
++++ b/test/end_to_end_test.rb
+@@ -0,0 +1,96 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class EndToEndTest < Minitest::Test
++  MANIFEST = File.join(ROOT, "script", "honeycomb-manifest")
++  VALIDATE = File.join(ROOT, "script", "honeycomb-validate")
++  CATALOG = File.join(ROOT, "script", "honeycomb-catalog")
++  EVIDENCE = File.join(ROOT, "test", "fixtures", "listing-evidence", "passing.json")
++
++  def test_author_to_approved_catalog_flow_is_repeatable_from_another_directory
++    in_tmpdir do |root|
++      package = install_valid_fixture(root)
++      outside = File.dirname(root)
++
++      stdout, stderr, status = capture_command(MANIFEST, "--root", root, package, chdir: outside)
++      assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++      manifest_bytes = File.binread(File.join(package, "manifest.yml"))
++      assert_equal File.binread(fixture_path("expected", "manifest.yml")), manifest_bytes
++
++      stdout, stderr, status = capture_command(
++        MANIFEST, "--root", root, "--check", "--all", chdir: outside
++      )
++      assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++
++      stdout, stderr, status = capture_command(
++        VALIDATE, "--root", root, "--json", package, chdir: outside
++      )
++      assert_equal 0, status.exitstatus, stderr
++      assert_kind_of Array, JSON.parse(stdout)
++
++      stdout, stderr, status = capture_command(
++        VALIDATE, "--root", root, "--json", "--require-hive", "--all", chdir: outside
++      )
++      runtime = begin
++        HoneycombRegistry::HiveCompatibility.load_runtime
++      rescue LoadError
++        nil
++      end
++      assert_equal(runtime ? 0 : 1, status.exitstatus, [stdout, stderr].join("\n"))
++      unless runtime
++        assert JSON.parse(stdout).any? { |finding| finding["code"] == "hive.missing" }
++      end
++
++      stdout, stderr, status = capture_command(
++        CATALOG, "--root", root, "--evidence", EVIDENCE, chdir: outside
++      )
++      assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++      catalog_bytes = File.binread(File.join(root, "catalog.json"))
++      assert_equal 1, JSON.parse(catalog_bytes).fetch("entries").length
++
++      stdout, stderr, status = capture_command(
++        CATALOG, "--root", root, "--check", "--evidence", EVIDENCE, chdir: outside
++      )
++      assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++      assert_equal catalog_bytes, File.binread(File.join(root, "catalog.json"))
++      assert_equal manifest_bytes, File.binread(File.join(package, "manifest.yml"))
++    end
++  end
++
++  def test_payload_tamper_breaks_manifest_validation_and_catalog_checks_without_writes
++    in_tmpdir do |root|
++      package = install_valid_fixture(root)
++      assert_equal 0, capture_command(MANIFEST, "--root", root, package).last.exitstatus
++      assert_equal 0, capture_command(CATALOG, "--root", root, "--evidence", EVIDENCE).last.exitstatus
++      manifest_before = File.binread(File.join(package, "manifest.yml"))
++      catalog_before = File.binread(File.join(root, "catalog.json"))
++      File.open(File.join(package, "README.md"), "a") { |file| file << "tamper\n" }
++
++      _stdout, _stderr, status = capture_command(MANIFEST, "--root", root, "--check", package)
++      assert_equal 1, status.exitstatus
++      _stdout, _stderr, status = capture_command(VALIDATE, "--root", root, "--json", package)
++      assert_equal 1, status.exitstatus
++      _stdout, _stderr, status = capture_command(
++        CATALOG, "--root", root, "--check", "--evidence", EVIDENCE
++      )
++      assert_equal 1, status.exitstatus
++      assert_equal manifest_before, File.binread(File.join(package, "manifest.yml"))
++      assert_equal catalog_before, File.binread(File.join(root, "catalog.json"))
++    end
++  end
++
++  def test_real_empty_registry_matches_all_committed_derived_artifacts
++    stdout, stderr, status = capture_command(MANIFEST, "--check", "--all")
++    assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++
++    stdout, stderr, status = capture_command(VALIDATE, "--all", "--json")
++    assert_equal 0, status.exitstatus, stderr
++    assert_equal [], JSON.parse(stdout)
++
++    stdout, stderr, status = capture_command(
++      CATALOG, "--check", "--evidence", fixture_path("listing-evidence", "empty.json")
++    )
++    assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++  end
++end
+diff --git a/test/findings_test.rb b/test/findings_test.rb
+new file mode 100644
+index 0000000..02bfc44
+--- /dev/null
++++ b/test/findings_test.rb
+@@ -0,0 +1,25 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class FindingsTest < Minitest::Test
++  def test_sorts_and_serializes_with_exact_public_keys
++    findings = HoneycombRegistry::Findings.new
++    findings.add("z", "later", "later", :warning)
++    findings.add("a", "info", "info", :info)
++    findings.add("a", "error", "error", :error)
++
++    assert_equal ["error", "info", "later"], findings.sorted.map(&:code)
++    assert_equal %w[path code message severity], findings.sorted.first.to_h.keys
++  end
++
++  def test_only_errors_make_the_collection_fail
++    findings = HoneycombRegistry::Findings.new
++    findings.add("manifest.yml", "notice", "notice", :info)
++    findings.add("manifest.yml", "caution", "caution", :warning)
++    refute findings.errors?
++
++    findings.add("manifest.yml", "broken", "broken", :error)
++    assert findings.errors?
++  end
++end
+diff --git a/test/fixtures/expected/manifest.yml b/test/fixtures/expected/manifest.yml
+new file mode 100644
+index 0000000..558a698
+--- /dev/null
++++ b/test/fixtures/expected/manifest.yml
+@@ -0,0 +1,31 @@
++schema: "honeycomb-manifest/v1"
++name: "example"
++version: "1.0.0"
++description: "An executable example honeycomb"
++author:
++  name: "Example Author"
++  url: "https://example.test/authors/example"
++license: "MIT"
++hive_min_version: "0.1.0"
++source:
++  url: "https://example.test/honeycombs/example"
++  revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++permissions:
++  risk: "low"
++  capabilities:
++    - "filesystem-read"
++  network_hosts: []
++  filesystem_read:
++    - "repository"
++    - "task"
++  filesystem_write: []
++  secrets: []
++files:
++  "packages/example/1.0.0/.registry-note": "4f8fac9675ae2c477ee5b51c033fec8c71eace6b3dd8e56446bdddfa3e6c54c8"
++  "packages/example/1.0.0/README.md": "a850ce238a952f37e6bbdd6b9ef6651d99c0911db8fee0b95ce31c98d7e5034b"
++  "packages/example/1.0.0/instructions/build.md": "abf25213519cfb1dc60e297b31e0685cb20931d1f1d6614d3c29357b1948ad1b"
++  "packages/example/1.0.0/instructions/nested/context.txt": "bc4958f77037e9e7357d96a28079809d42d897cd3981af74a92a7664b5c37642"
++  "packages/example/1.0.0/workflow.yml": "46f9bac069476de94b1684cf6a8b7f85c92a467eb6961ea57216e30f13d31709"
++release_sha256: "2260a4a9f7db0df2f6993ee240cfe83d9fb30d72fd09ab4e31e068c8cd73c14f"
++x-fixture:
++  purpose: "end-to-end"
+diff --git a/test/fixtures/listing-evidence/empty.json b/test/fixtures/listing-evidence/empty.json
+new file mode 100644
+index 0000000..9d350f0
+--- /dev/null
++++ b/test/fixtures/listing-evidence/empty.json
+@@ -0,0 +1,4 @@
++{
++  "schema": "honeycomb-listing-evidence/v1",
++  "records": []
++}
+diff --git a/test/fixtures/listing-evidence/passing.json b/test/fixtures/listing-evidence/passing.json
+new file mode 100644
+index 0000000..e4eeea0
+--- /dev/null
++++ b/test/fixtures/listing-evidence/passing.json
+@@ -0,0 +1,24 @@
++{
++  "schema": "honeycomb-listing-evidence/v1",
++  "records": [
++    {
++      "name": "example",
++      "version": "1.0.0",
++      "tier": "reviewed",
++      "lint": {
++        "status": "pass",
++        "release_sha256": "2260a4a9f7db0df2f6993ee240cfe83d9fb30d72fd09ab4e31e068c8cd73c14f",
++        "head_sha": "dddddddddddddddddddddddddddddddddddddddd",
++        "checked_at": "2026-07-16T10:00:00Z"
++      },
++      "approval": {
++        "status": "approved",
++        "release_sha256": "2260a4a9f7db0df2f6993ee240cfe83d9fb30d72fd09ab4e31e068c8cd73c14f",
++        "head_sha": "dddddddddddddddddddddddddddddddddddddddd",
++        "reviewer": "registry-reviewer",
++        "reviewed_at": "2026-07-16T11:00:00Z",
++        "review_url": "https://example.test/reviews/example-1.0.0"
++      }
++    }
++  ]
++}
+diff --git a/test/fixtures/packages/valid/example/1.0.0/.registry-note b/test/fixtures/packages/valid/example/1.0.0/.registry-note
+new file mode 100644
+index 0000000..46b0c84
+--- /dev/null
++++ b/test/fixtures/packages/valid/example/1.0.0/.registry-note
+@@ -0,0 +1 @@
++Dotfiles are package content.
+diff --git a/test/fixtures/packages/valid/example/1.0.0/README.md b/test/fixtures/packages/valid/example/1.0.0/README.md
+new file mode 100644
+index 0000000..8035342
+--- /dev/null
++++ b/test/fixtures/packages/valid/example/1.0.0/README.md
+@@ -0,0 +1,3 @@
++# Example honeycomb
++
++This fixture proves the registry package contract offline.
+diff --git a/test/fixtures/packages/valid/example/1.0.0/instructions/build.md b/test/fixtures/packages/valid/example/1.0.0/instructions/build.md
+new file mode 100644
+index 0000000..b287be1
+--- /dev/null
++++ b/test/fixtures/packages/valid/example/1.0.0/instructions/build.md
+@@ -0,0 +1,3 @@
++# Build
++
++Read the repository and describe the requested result.
+diff --git a/test/fixtures/packages/valid/example/1.0.0/instructions/nested/context.txt b/test/fixtures/packages/valid/example/1.0.0/instructions/nested/context.txt
+new file mode 100644
+index 0000000..8bbaff3
+--- /dev/null
++++ b/test/fixtures/packages/valid/example/1.0.0/instructions/nested/context.txt
+@@ -0,0 +1 @@
++Nested fixture content.
+diff --git a/test/fixtures/packages/valid/example/1.0.0/manifest.yml b/test/fixtures/packages/valid/example/1.0.0/manifest.yml
+new file mode 100644
+index 0000000..d1019e4
+--- /dev/null
++++ b/test/fixtures/packages/valid/example/1.0.0/manifest.yml
+@@ -0,0 +1,14 @@
++schema: honeycomb-manifest/v1
++name: example
++version: 1.0.0
++description: An executable example honeycomb
++author:
++  name: Example Author
++  url: https://example.test/authors/example
++license: MIT
++hive_min_version: 0.1.0
++source:
++  url: https://example.test/honeycombs/example
++  revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
++x-fixture:
++  purpose: end-to-end
+diff --git a/test/fixtures/packages/valid/example/1.0.0/workflow.yml b/test/fixtures/packages/valid/example/1.0.0/workflow.yml
+new file mode 100644
+index 0000000..f931c81
+--- /dev/null
++++ b/test/fixtures/packages/valid/example/1.0.0/workflow.yml
+@@ -0,0 +1,7 @@
++id: example
++stages:
++  - name: build
++    kind: agent
++    state_file: work.md
++    instruction: instructions/build.md
++    permissions: read-only
+diff --git a/test/hive_compatibility_test.rb b/test/hive_compatibility_test.rb
+new file mode 100644
+index 0000000..13b686f
+--- /dev/null
++++ b/test/hive_compatibility_test.rb
+@@ -0,0 +1,81 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class HiveCompatibilityTest < Minitest::Test
++  Runtime = HoneycombRegistry::HiveCompatibility::Runtime
++
++  class RecordingParser
++    class << self
++      attr_accessor :data, :path, :failure
++
++      def parse_hash(data, path:)
++        raise failure if failure
++
++        self.data = data
++        self.path = path
++        true
++      end
++    end
++  end
++
++  def with_package
++    in_tmpdir do |root|
++      package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++      manifest = HoneycombRegistry::SafeYAML.load_file(package.manifest_path)
++      workflow = HoneycombRegistry::SafeYAML.load_file(File.join(package.path, "workflow.yml"))
++      yield package, manifest, workflow
++    end
++  end
++
++  def test_absence_warns_locally_and_errors_when_strict
++    with_package do |package, manifest, workflow|
++      local = HoneycombRegistry::HiveCompatibility.check(
++        package, manifest, workflow: workflow, loader: -> { nil }
++      )
++      refute local.errors?
++      assert_equal "warning", local.sorted.first.severity
++      assert_includes local.codes, "hive.missing"
++
++      strict = HoneycombRegistry::HiveCompatibility.check(
++        package, manifest, workflow: workflow, require_hive: true, loader: -> { nil }
++      )
++      assert strict.errors?
++      assert_includes strict.codes, "hive.missing"
++    end
++  end
++
++  def test_old_runtime_and_parser_rejection_are_errors
++    with_package do |package, manifest, workflow|
++      old = Runtime.new(version: "0.0.9", parser: RecordingParser)
++      findings = HoneycombRegistry::HiveCompatibility.check(
++        package, manifest, workflow: workflow, loader: -> { old }
++      )
++      assert findings.errors?
++      assert_includes findings.codes, "hive.version_too_old"
++
++      RecordingParser.failure = RuntimeError.new("descriptor rejected")
++      current = Runtime.new(version: "1.0.0", parser: RecordingParser)
++      findings = HoneycombRegistry::HiveCompatibility.check(
++        package, manifest, workflow: workflow, loader: -> { current }
++      )
++      assert findings.errors?
++      assert_includes findings.codes, "hive.parser_rejected"
++    ensure
++      RecordingParser.failure = nil
++    end
++  end
++
++  def test_compatible_runtime_parses_with_synthetic_name_in_package_directory
++    with_package do |package, manifest, workflow|
++      runtime = Runtime.new(version: "1.2.3", parser: RecordingParser)
++      findings = HoneycombRegistry::HiveCompatibility.check(
++        package, manifest, workflow: workflow, loader: -> { runtime }
++      )
++
++      refute findings.errors?, findings.to_h.inspect
++      assert_equal workflow, RecordingParser.data
++      assert_equal File.join(package.path, "example.yml"), RecordingParser.path
++    end
++  end
++end
+diff --git a/test/listing_evidence_test.rb b/test/listing_evidence_test.rb
+new file mode 100644
+index 0000000..47af826
+--- /dev/null
++++ b/test/listing_evidence_test.rb
+@@ -0,0 +1,68 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class ListingEvidenceTest < Minitest::Test
++  def test_loads_strict_normalized_records
++    result = HoneycombRegistry::ListingEvidence.load(
++      fixture_path("listing-evidence", "passing.json")
++    )
++
++    refute result.findings.errors?, result.findings.to_h.inspect
++    assert_equal 1, result.records.length
++    assert HoneycombRegistry::ListingEvidence.eligible?(result.records.first)
++  end
++
++  def test_rejects_duplicate_json_keys_unknown_fields_and_duplicate_records
++    in_tmpdir do |root|
++      duplicate_key = File.join(root, "duplicate-key.json")
++      File.write(duplicate_key, '{"schema":"one","schema":"two","records":[]}')
++      assert_includes HoneycombRegistry::ListingEvidence.load(duplicate_key).findings.codes,
++                      "evidence.duplicate_key"
++
++      unknown = JSON.parse(File.read(fixture_path("listing-evidence", "passing.json")))
++      unknown["records"][0]["surprise"] = true
++      unknown_path = File.join(root, "unknown.json")
++      File.write(unknown_path, JSON.generate(unknown))
++      assert_includes HoneycombRegistry::ListingEvidence.load(unknown_path).findings.codes,
++                      "evidence.unknown_key"
++
++      duplicate = JSON.parse(File.read(fixture_path("listing-evidence", "passing.json")))
++      duplicate["records"] << duplicate["records"].first
++      duplicate_path = File.join(root, "duplicate.json")
++      File.write(duplicate_path, JSON.generate(duplicate))
++      assert_includes HoneycombRegistry::ListingEvidence.load(duplicate_path).findings.codes,
++                      "evidence.duplicate_record"
++    end
++  end
++
++  def test_pending_and_denied_records_are_well_formed_but_ineligible
++    base = JSON.parse(File.read(fixture_path("listing-evidence", "passing.json"))).fetch("records").first
++    pending = Marshal.load(Marshal.dump(base))
++    pending["approval"] = {"status" => "pending"}
++    denied = Marshal.load(Marshal.dump(base))
++    denied["approval"]["status"] = "denied"
++
++    refute HoneycombRegistry::ListingEvidence.eligible?(pending)
++    refute HoneycombRegistry::ListingEvidence.eligible?(denied)
++  end
++
++  def test_rejects_malformed_identity_timestamp_and_url_fields
++    base = JSON.parse(File.read(fixture_path("listing-evidence", "passing.json")))
++    mutations = [
++      ->(data) { data["records"][0]["lint"]["head_sha"] = "not-a-sha" },
++      ->(data) { data["records"][0]["approval"]["reviewed_at"] = "yesterday" },
++      ->(data) { data["records"][0]["approval"]["review_url"] = "javascript:bad" }
++    ]
++
++    mutations.each_with_index do |mutation, index|
++      in_tmpdir do |root|
++        data = Marshal.load(Marshal.dump(base))
++        mutation.call(data)
++        path = File.join(root, "bad-#{index}.json")
++        File.write(path, JSON.generate(data))
++        assert HoneycombRegistry::ListingEvidence.load(path).findings.errors?
++      end
++    end
++  end
++end
+diff --git a/test/manifest_cli_test.rb b/test/manifest_cli_test.rb
+new file mode 100644
+index 0000000..12f65a5
+--- /dev/null
++++ b/test/manifest_cli_test.rb
+@@ -0,0 +1,45 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class ManifestCliTest < Minitest::Test
++  SCRIPT = File.join(ROOT, "script", "honeycomb-manifest")
++
++  def test_generate_and_check_one_package_from_another_directory
++    in_tmpdir do |root|
++      package = install_valid_fixture(root)
++      stdout, stderr, status = capture_command(SCRIPT, "--root", root, package,
++                                                chdir: File.dirname(root))
++      assert status.success?, [stdout, stderr].join("\n")
++
++      before = File.binread(File.join(package, "manifest.yml"))
++      stdout, stderr, status = capture_command(SCRIPT, "--root", root, "--check", package,
++                                                chdir: File.dirname(root))
++      assert status.success?, [stdout, stderr].join("\n")
++      assert_equal before, File.binread(File.join(package, "manifest.yml"))
++    end
++  end
++
++  def test_all_mode_and_invocation_failures_have_distinct_exits
++    in_tmpdir do |root|
++      install_valid_fixture(root)
++      _stdout, _stderr, status = capture_command(SCRIPT, "--root", root, "--all")
++      assert_equal 0, status.exitstatus
++
++      _stdout, _stderr, status = capture_command(SCRIPT, "--root", root, "--all", "extra")
++      assert_equal 2, status.exitstatus
++    end
++  end
++
++  def test_check_reports_drift_and_never_writes
++    in_tmpdir do |root|
++      package = install_valid_fixture(root)
++      original = File.binread(File.join(package, "manifest.yml"))
++
++      stdout, _stderr, status = capture_command(SCRIPT, "--root", root, "--check", package)
++      assert_equal 1, status.exitstatus
++      assert_includes stdout, "manifest.drift"
++      assert_equal original, File.binread(File.join(package, "manifest.yml"))
++    end
++  end
++end
+diff --git a/test/manifest_test.rb b/test/manifest_test.rb
+new file mode 100644
+index 0000000..2a9eb81
+--- /dev/null
++++ b/test/manifest_test.rb
+@@ -0,0 +1,88 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class ManifestTest < Minitest::Test
++  def test_builds_the_checked_in_canonical_golden_bytes
++    in_tmpdir do |root|
++      package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++      result = HoneycombRegistry::Manifest.build(package)
++
++      refute result.findings.errors?, result.findings.to_h.inspect
++      assert_equal File.binread(fixture_path("expected", "manifest.yml")), result.bytes
++      assert_match(/\Arelease_sha256: ["0-9a-f]/, result.bytes.lines.grep(/release_sha256/).first)
++    end
++  end
++
++  def test_generation_is_atomic_repeatable_and_check_is_read_only
++    in_tmpdir do |root|
++      package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++      first = HoneycombRegistry::Manifest.generate(package)
++      refute first.findings.errors?, first.findings.to_h.inspect
++      bytes = File.binread(package.manifest_path)
++
++      second = HoneycombRegistry::Manifest.generate(package)
++      refute second.findings.errors?, second.findings.to_h.inspect
++      assert_equal bytes, File.binread(package.manifest_path)
++
++      checked = HoneycombRegistry::Manifest.check(package)
++      refute checked.findings.errors?, checked.findings.to_h.inspect
++      assert_equal bytes, File.binread(package.manifest_path)
++    end
++  end
++
++  def test_check_detects_payload_drift_without_rewriting_manifest
++    in_tmpdir do |root|
++      package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++      HoneycombRegistry::Manifest.generate(package)
++      manifest_before = File.binread(package.manifest_path)
++      File.open(File.join(package.path, "README.md"), "a") { |file| file << "changed\n" }
++
++      result = HoneycombRegistry::Manifest.check(package)
++      assert result.findings.errors?
++      assert_includes result.findings.codes, "manifest.drift"
++      assert_equal manifest_before, File.binread(package.manifest_path)
++    end
++  end
++
++  def test_failure_preserves_existing_manifest
++    in_tmpdir do |root|
++      package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++      original = File.binread(package.manifest_path)
++      workflow = File.join(package.path, "workflow.yml")
++      File.write(workflow, File.read(workflow).sub("read-only", "future-permission"))
++
++      result = HoneycombRegistry::Manifest.generate(package)
++      assert result.findings.errors?
++      assert_equal original, File.binread(package.manifest_path)
++    end
++  end
++
++  def test_identity_must_match_version_directory
++    in_tmpdir do |root|
++      package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++      path = package.manifest_path
++      File.write(path, File.read(path).sub("version: 1.0.0", "version: 2.0.0"))
++
++      result = HoneycombRegistry::Manifest.build(package)
++      assert result.findings.errors?
++      assert_includes result.findings.codes, "manifest.identity"
++    end
++  end
++
++  def test_generation_rejects_instruction_paths_that_escape_the_package
++    in_tmpdir do |root|
++      package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++      sentinel = File.join(root, "outside.md")
++      File.write(sentinel, "outside")
++      workflow = File.join(package.path, "workflow.yml")
++      File.write(workflow, File.read(workflow).sub("instructions/build.md", "../../../outside.md"))
++      before = File.binread(package.manifest_path)
++
++      result = HoneycombRegistry::Manifest.generate(package)
++      assert result.findings.errors?
++      assert_includes result.findings.codes, "package.invalid_instruction_path"
++      assert_equal before, File.binread(package.manifest_path)
++    end
++  end
++end
+diff --git a/test/offline_contract_test.rb b/test/offline_contract_test.rb
+new file mode 100644
+index 0000000..c7c1e80
+--- /dev/null
++++ b/test/offline_contract_test.rb
+@@ -0,0 +1,39 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class OfflineContractTest < Minitest::Test
++  MANIFEST = File.join(ROOT, "script", "honeycomb-manifest")
++  CATALOG = File.join(ROOT, "script", "honeycomb-catalog")
++
++  def test_runtime_has_no_network_or_non_optional_dependency_surface
++    runtime = Dir[File.join(ROOT, "lib", "**", "*.rb")].sort.map { |path| File.read(path) }.join("\n")
++    refute_match(/require ["'](?:net\/http|open-uri|socket|bundler)/, runtime)
++    refute_match(/(?:Net::HTTP|URI\.open|TCPSocket|Socket\.tcp)/, runtime)
++    refute File.exist?(File.join(ROOT, "Gemfile"))
++  end
++
++  def test_locale_and_timezone_do_not_change_manifest_or_catalog_bytes
++    artifacts = []
++    [
++      {"LANG" => "C", "LC_ALL" => "C", "TZ" => "UTC"},
++      {"LANG" => "C.UTF-8", "LC_ALL" => "C.UTF-8", "TZ" => "Pacific/Auckland"}
++    ].each do |environment|
++      in_tmpdir do |root|
++        package = install_valid_fixture(root)
++        stdout, stderr, status = capture_command_env(
++          environment, MANIFEST, "--root", root, package, chdir: File.dirname(root)
++        )
++        assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++        stdout, stderr, status = capture_command_env(
++          environment, CATALOG, "--root", root, "--evidence",
++          fixture_path("listing-evidence", "passing.json"), chdir: File.dirname(root)
++        )
++        assert_equal 0, status.exitstatus, [stdout, stderr].join("\n")
++        artifacts << [File.binread(File.join(package, "manifest.yml")),
++                      File.binread(File.join(root, "catalog.json"))]
++      end
++    end
++    assert_equal artifacts.first, artifacts.last
++  end
++end
+diff --git a/test/package_test.rb b/test/package_test.rb
+new file mode 100644
+index 0000000..f60cff7
+--- /dev/null
++++ b/test/package_test.rb
+@@ -0,0 +1,70 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class PackageTest < Minitest::Test
++  def test_discovers_exact_name_and_version_depth
++    in_tmpdir do |root|
++      package_path = install_valid_fixture(root)
++      discovery = HoneycombRegistry::Package.discover(root)
++
++      refute discovery.findings.errors?, discovery.findings.to_h.inspect
++      assert_equal [package_path], discovery.packages.map(&:path)
++      assert_equal "example", discovery.packages.first.name
++      assert_equal "1.0.0", discovery.packages.first.version
++    end
++  end
++
++  def test_enumerates_every_regular_file_except_root_manifest
++    in_tmpdir do |root|
++      package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++      inspection = package.inspect
++
++      refute inspection.findings.errors?, inspection.findings.to_h.inspect
++      assert_includes inspection.files, "packages/example/1.0.0/.registry-note"
++      assert_includes inspection.files,
++                      "packages/example/1.0.0/instructions/nested/context.txt"
++      refute_includes inspection.files, "packages/example/1.0.0/manifest.yml"
++    end
++  end
++
++  def test_rejects_paths_outside_packages_and_malformed_discovery_entries
++    in_tmpdir do |root|
++      FileUtils.mkdir_p(File.join(root, "packages"))
++      File.write(File.join(root, "packages", "unexpected.txt"), "bad")
++      outside = File.join(root, "outside")
++      FileUtils.mkdir_p(outside)
++
++      assert HoneycombRegistry::Package.discover(root).findings.errors?
++      assert HoneycombRegistry::Package.new(outside, root: root).inspect.findings.errors?
++    end
++  end
++
++  def test_rejects_symlinks_and_special_files_without_following_them
++    in_tmpdir do |root|
++      package_path = install_valid_fixture(root)
++      sentinel = File.join(root, "sentinel")
++      File.write(sentinel, "outside")
++      File.symlink(sentinel, File.join(package_path, "instructions", "escape"))
++
++      package = HoneycombRegistry::Package.new(package_path, root: root)
++      inspection = package.inspect
++      assert inspection.findings.errors?
++      assert_includes inspection.findings.codes, "package.symlink"
++    end
++  end
++
++  def test_requires_readme_workflow_and_nonempty_instructions
++    in_tmpdir do |root|
++      package_path = install_valid_fixture(root)
++      FileUtils.rm(File.join(package_path, "README.md"))
++      FileUtils.rm_rf(File.join(package_path, "instructions"))
++      FileUtils.mkdir(File.join(package_path, "instructions"))
++
++      inspection = HoneycombRegistry::Package.new(package_path, root: root).inspect
++      assert inspection.findings.errors?
++      assert_includes inspection.findings.codes, "package.missing_required"
++      assert_includes inspection.findings.codes, "package.empty_instructions"
++    end
++  end
++end
+diff --git a/test/permissions_test.rb b/test/permissions_test.rb
+new file mode 100644
+index 0000000..f7b3323
+--- /dev/null
++++ b/test/permissions_test.rb
+@@ -0,0 +1,135 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class PermissionsTest < Minitest::Test
++  def descriptor_with(stage)
++    {"id" => "example", "stages" => [stage]}
++  end
++
++  def active_stage(permissions: :missing)
++    stage = {
++      "name" => "build",
++      "kind" => "agent",
++      "state_file" => "work.md",
++      "instruction" => "instructions/build.md"
++    }
++    stage["permissions"] = permissions unless permissions == :missing
++    stage
++  end
++
++  def test_read_only_is_bounded_and_low_risk
++    result = HoneycombRegistry::Permissions.derive(
++      descriptor_with(active_stage(permissions: "read-only")), path: "workflow.yml"
++    )
++
++    refute result.findings.errors?
++    assert_equal(
++      {
++        "risk" => "low",
++        "capabilities" => ["filesystem-read"],
++        "network_hosts" => [],
++        "filesystem_read" => %w[repository task],
++        "filesystem_write" => [],
++        "secrets" => []
++      },
++      result.permissions
++    )
++    assert_includes result.findings.codes, "permissions.source"
++  end
++
++  def test_unions_stage_reviewer_and_revise_permissions_with_attribution
++    council = active_stage(permissions: "read-only").merge(
++      "kind" => "council",
++      "reviewers" => [
++        {
++          "name" => "writer",
++          "prompt" => "Review it",
++          "permissions" => {
++            "preset" => "scoped",
++            "tools" => %w[Read Write],
++            "dirs" => ["artifacts", "./cache"]
++          }
++        }
++      ],
++      "council" => {
++        "revise" => {
++          "prompt" => "Revise it",
++          "permissions" => {"preset" => "scoped", "tools" => ["WebFetch"]}
++        }
++      }
++    )
++
++    result = HoneycombRegistry::Permissions.derive(descriptor_with(council), path: "workflow.yml")
++
++    refute result.findings.errors?, result.findings.to_h.inspect
++    assert_equal "high", result.permissions["risk"]
++    assert_equal %w[filesystem-read filesystem-write network], result.permissions["capabilities"]
++    assert_equal ["*"], result.permissions["network_hosts"]
++    assert_equal %w[repository task task/artifacts task/cache], result.permissions["filesystem_read"]
++    assert_equal %w[repository task task/artifacts task/cache], result.permissions["filesystem_write"]
++    assert result.findings.to_h.any? { |finding| finding["path"].include?("reviewers[0]") }
++    assert result.findings.to_h.any? { |finding| finding["path"].include?("revise") }
++  end
++
++  def test_absent_yolo_and_bash_are_explicitly_unbounded
++    specs = [
++      :missing,
++      "yolo",
++      {"preset" => "scoped", "bash" => true}
++    ]
++
++    specs.each do |spec|
++      result = HoneycombRegistry::Permissions.derive(
++        descriptor_with(active_stage(permissions: spec)), path: "workflow.yml"
++      )
++      assert_equal "high", result.permissions["risk"]
++      assert_equal HoneycombRegistry::Schema::CAPABILITIES, result.permissions["capabilities"]
++      %w[network_hosts filesystem_read filesystem_write secrets].each do |key|
++        assert_equal ["*"], result.permissions[key]
++      end
++      assert_includes result.findings.codes, "permissions.unbounded"
++    end
++  end
++
++  def test_rejects_unsafe_dirs
++    ["/tmp", "../outside", "safe\\ambiguous", "bad\0dir"].each do |dir|
++      result = HoneycombRegistry::Permissions.derive(
++        descriptor_with(active_stage(permissions: {
++          "preset" => "scoped", "tools" => ["Read"], "dirs" => [dir]
++        })),
++        path: "workflow.yml"
++      )
++      assert result.findings.errors?, dir.inspect
++      assert_includes result.findings.codes, "permissions.invalid_dir"
++    end
++  end
++
++  def test_fails_closed_for_unknown_permission_shapes_and_tools
++    specs = [
++      "reckless",
++      {"preset" => "scoped", "tools" => ["UnknownTool"]},
++      {"preset" => "scoped", "tools" => ["Read"], "future" => true},
++      {"preset" => "scoped"},
++      nil
++    ]
++
++    specs.each do |spec|
++      result = HoneycombRegistry::Permissions.derive(
++        descriptor_with(active_stage(permissions: spec)), path: "workflow.yml"
++      )
++      assert result.findings.errors?, spec.inspect
++      assert_nil result.permissions
++    end
++  end
++
++  def test_rejects_permission_bearing_future_constructs
++    descriptor = descriptor_with(active_stage(permissions: "read-only"))
++    descriptor["stages"][0]["permission_overrides"] = {"network" => true}
++
++    result = HoneycombRegistry::Permissions.derive(descriptor, path: "workflow.yml")
++
++    assert result.findings.errors?
++    assert_includes result.findings.codes, "permissions.unknown_construct"
++  end
++end
+diff --git a/test/run.rb b/test/run.rb
+new file mode 100644
+index 0000000..0834540
+--- /dev/null
++++ b/test/run.rb
+@@ -0,0 +1,3 @@
++# frozen_string_literal: true
++
++Dir[File.expand_path("*_test.rb", __dir__)].sort.each { |file| require file }
+diff --git a/test/safe_yaml_test.rb b/test/safe_yaml_test.rb
+new file mode 100644
+index 0000000..153fa7a
+--- /dev/null
++++ b/test/safe_yaml_test.rb
+@@ -0,0 +1,55 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class SafeYamlTest < Minitest::Test
++  def test_loads_only_json_like_values
++    value = HoneycombRegistry::SafeYAML.load(<<~YAML, path: "input.yml")
++      name: example
++      enabled: true
++      count: 2
++      values:
++        - null
++        - "text"
++    YAML
++
++    assert_equal({"name" => "example", "enabled" => true, "count" => 2,
++                  "values" => [nil, "text"]}, value)
++  end
++
++  def test_rejects_duplicate_keys
++    error = assert_raises(HoneycombRegistry::SafeYAML::Invalid) do
++      HoneycombRegistry::SafeYAML.load("name: one\nname: two\n", path: "input.yml")
++    end
++
++    assert_equal "yaml.duplicate_key", error.code
++    assert_equal "input.yml.name", error.path
++  end
++
++  def test_rejects_aliases_custom_tags_and_non_string_keys
++    cases = {
++      "one: &value x\ntwo: *value\n" => "yaml.alias",
++      "value: !ruby/object:Object {}\n" => "yaml.tag",
++      "1: numeric\n" => "yaml.non_string_key"
++    }
++
++    cases.each do |yaml, code|
++      error = assert_raises(HoneycombRegistry::SafeYAML::Invalid) do
++        HoneycombRegistry::SafeYAML.load(yaml, path: "input.yml")
++      end
++      assert_equal code, error.code
++    end
++  end
++
++  def test_rejects_invalid_utf8_and_non_finite_numbers
++    error = assert_raises(HoneycombRegistry::SafeYAML::Invalid) do
++      HoneycombRegistry::SafeYAML.load("name: \xFF".b, path: "input.yml")
++    end
++    assert_equal "yaml.invalid_encoding", error.code
++
++    error = assert_raises(HoneycombRegistry::SafeYAML::Invalid) do
++      HoneycombRegistry::SafeYAML.load("value: .nan\n", path: "input.yml")
++    end
++    assert_equal "yaml.non_json_value", error.code
++  end
++end
+diff --git a/test/safety_boundary_test.rb b/test/safety_boundary_test.rb
+new file mode 100644
+index 0000000..181541a
+--- /dev/null
++++ b/test/safety_boundary_test.rb
+@@ -0,0 +1,66 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class SafetyBoundaryTest < Minitest::Test
++  def canonical_package(root)
++    package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++    HoneycombRegistry::Manifest.generate(package)
++    package
++  end
++
++  def test_absolute_traversal_and_backslash_manifest_keys_never_enter_the_hash_boundary
++    ["/tmp/outside", "packages/example/1.0.0/../outside", "packages\\example\\outside"].each do |unsafe|
++      in_tmpdir do |root|
++        package = canonical_package(root)
++        manifest = HoneycombRegistry::SafeYAML.load_file(package.manifest_path)
++        manifest["files"][unsafe] = "f" * 64
++        File.binwrite(package.manifest_path, HoneycombRegistry::CanonicalYAML.dump_manifest(manifest))
++
++        findings = HoneycombRegistry::Validator.validate(package, hive_loader: -> { nil })
++        assert findings.errors?, unsafe
++        assert_includes findings.codes, "schema.invalid_file_path"
++      end
++    end
++  end
++
++  def test_symlinks_special_files_and_ambiguous_names_fail_closed
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      sentinel = File.join(root, "sentinel")
++      File.write(sentinel, "outside")
++      File.symlink(sentinel, File.join(package.path, "instructions", "escape"))
++      findings = HoneycombRegistry::Validator.validate(package, hive_loader: -> { nil })
++      assert_includes findings.codes, "package.symlink"
++    end
++
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      fifo = File.join(package.path, "instructions", "pipe")
++      assert system("mkfifo", fifo)
++      findings = HoneycombRegistry::Validator.validate(package, hive_loader: -> { nil })
++      assert_includes findings.codes, "package.special_file"
++    end
++
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      File.write(File.join(package.path, "instructions", "é.txt"), "one")
++      File.write(File.join(package.path, "instructions", "e\u0301.txt"), "two")
++      findings = HoneycombRegistry::Validator.validate(package, hive_loader: -> { nil })
++      assert_includes findings.codes, "package.duplicate_path"
++    end
++  end
++
++  def test_unsafe_manifest_yaml_is_rejected_without_replacement
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      path = package.manifest_path
++      File.binwrite(path, "schema: &schema honeycomb-manifest/v1\ncopy: *schema\n")
++      before = File.binread(path)
++
++      findings = HoneycombRegistry::Validator.validate(package, hive_loader: -> { nil })
++      assert_includes findings.codes, "yaml.alias"
++      assert_equal before, File.binread(path)
++    end
++  end
++end
+diff --git a/test/schema_test.rb b/test/schema_test.rb
+new file mode 100644
+index 0000000..8c59f98
+--- /dev/null
++++ b/test/schema_test.rb
+@@ -0,0 +1,87 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class SchemaTest < Minitest::Test
++  def valid_manifest
++    {
++      "schema" => "honeycomb-manifest/v1",
++      "name" => "example",
++      "version" => "1.0.0",
++      "description" => "Example honeycomb",
++      "author" => {"name" => "Example Author", "url" => "https://example.test/author"},
++      "license" => "MIT",
++      "hive_min_version" => "0.1.0",
++      "source" => {"url" => "https://example.test/source", "revision" => "a" * 40},
++      "permissions" => {
++        "risk" => "low",
++        "capabilities" => ["filesystem-read"],
++        "network_hosts" => [],
++        "filesystem_read" => ["repository"],
++        "filesystem_write" => [],
++        "secrets" => []
++      },
++      "files" => {"packages/example/1.0.0/README.md" => "b" * 64},
++      "release_sha256" => "c" * 64,
++      "x-registry-note" => {"enabled" => true}
++    }
++  end
++
++  def test_accepts_complete_manifest_and_safe_extension
++    findings = HoneycombRegistry::Schema.validate_manifest(valid_manifest)
++    refute findings.errors?, findings.to_h.inspect
++  end
++
++  def test_rejects_missing_unknown_and_nested_unknown_keys
++    missing = valid_manifest.tap { |manifest| manifest.delete("license") }
++    assert_includes HoneycombRegistry::Schema.validate_manifest(missing).codes,
++                    "schema.missing_key"
++
++    unknown = valid_manifest.merge("surprise" => true)
++    assert_includes HoneycombRegistry::Schema.validate_manifest(unknown).codes,
++                    "schema.unknown_key"
++
++    nested = valid_manifest
++    nested["author"] = nested["author"].merge("email" => "<email>")
++    assert_includes HoneycombRegistry::Schema.validate_manifest(nested).codes,
++                    "schema.unknown_key"
++  end
++
++  def test_validates_names_urls_hashes_licenses_and_versions
++    mutations = {
++      "name" => "Bad_Name",
++      "license" => "Definitely-Not-SPDX",
++      "hive_min_version" => "01.0.0",
++      "release_sha256" => "ABC",
++      "author" => {"name" => "Author", "url" => "javascript:alert(1)"},
++      "source" => {"url" => "relative/path", "revision" => "not-a-sha"}
++    }
++
++    mutations.each do |key, value|
++      manifest = valid_manifest.merge(key => value)
++      assert HoneycombRegistry::Schema.validate_manifest(manifest).errors?, key
++    end
++  end
++
++  def test_metadata_validation_allows_generator_owned_fields_to_be_absent
++    metadata = valid_manifest.reject do |key, _value|
++      %w[permissions files release_sha256].include?(key)
++    end
++
++    refute HoneycombRegistry::Schema.validate_metadata(metadata).errors?
++  end
++
++  def test_enforces_name_boundaries
++    %w[ab -abc abc-].each do |name|
++      assert HoneycombRegistry::Schema.validate_manifest(valid_manifest.merge("name" => name)).errors?
++    end
++
++    name = "a" + ("b" * 62) + "c"
++    assert_equal 64, name.length
++    manifest = valid_manifest.merge(
++      "name" => name,
++      "files" => {"packages/#{name}/1.0.0/README.md" => "b" * 64}
++    )
++    refute HoneycombRegistry::Schema.validate_manifest(manifest).errors?
++  end
++end
+diff --git a/test/semver_test.rb b/test/semver_test.rb
+new file mode 100644
+index 0000000..2d79d41
+--- /dev/null
++++ b/test/semver_test.rb
+@@ -0,0 +1,44 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class SemVerTest < Minitest::Test
++  def test_compares_semver_2_precedence
++    ordered = %w[
++      1.0.0-alpha
++      1.0.0-alpha.1
++      1.0.0-alpha.beta
++      1.0.0-beta
++      1.0.0-beta.2
++      1.0.0-beta.11
++      1.0.0-rc.1
++      1.0.0
++    ]
++
++    parsed = ordered.reverse.map { |version| HoneycombRegistry::SemVer.parse(version) }
++    assert_equal ordered, parsed.sort.map(&:to_s)
++  end
++
++  def test_build_metadata_does_not_affect_precedence
++    first = HoneycombRegistry::SemVer.parse("1.2.3+build.1")
++    second = HoneycombRegistry::SemVer.parse("1.2.3+build.2")
++
++    assert_equal 0, first <=> second
++    refute_equal first.to_s, second.to_s
++  end
++
++  def test_rejects_malformed_versions
++    %w[1 1.2 v1.2.3 01.2.3 1.02.3 1.2.03 1.2.3-01 1.2.3-].each do |value|
++      assert_raises(HoneycombRegistry::SemVer::Invalid) do
++        HoneycombRegistry::SemVer.parse(value)
++      end
++    end
++  end
++
++  def test_latest_rejects_equal_precedence_build_variants
++    error = assert_raises(HoneycombRegistry::SemVer::AmbiguousPrecedence) do
++      HoneycombRegistry::SemVer.latest(%w[1.0.0+one 1.0.0+two])
++    end
++    assert_includes error.message, "equal precedence"
++  end
++end
+diff --git a/test/test_helper.rb b/test/test_helper.rb
+new file mode 100644
+index 0000000..15c2836
+--- /dev/null
++++ b/test/test_helper.rb
+@@ -0,0 +1,41 @@
++# frozen_string_literal: true
++
++require "fileutils"
++require "minitest/autorun"
++require "open3"
++require "rbconfig"
++require "tmpdir"
++
++ROOT = File.expand_path("..", __dir__)
++$LOAD_PATH.unshift(File.join(ROOT, "lib"))
++
++require "honeycomb_registry"
++
++module TestSupport
++  def fixture_path(*parts)
++    File.join(ROOT, "test", "fixtures", *parts)
++  end
++
++  def in_tmpdir
++    Dir.mktmpdir("honeycomb-registry-test") { |dir| yield dir }
++  end
++
++  def install_valid_fixture(root)
++    package = File.join(root, "packages", "example", "1.0.0")
++    FileUtils.mkdir_p(File.dirname(package))
++    FileUtils.cp_r(fixture_path("packages", "valid", "example", "1.0.0"), package)
++    package
++  end
++
++  def capture_command(*arguments, chdir: ROOT)
++    Open3.capture3(RbConfig.ruby, *arguments, chdir: chdir)
++  end
++
++  def capture_command_env(environment, *arguments, chdir: ROOT)
++    Open3.capture3(environment, RbConfig.ruby, *arguments, chdir: chdir)
++  end
++end
++
++class Minitest::Test
++  include TestSupport
++end
+diff --git a/test/validator_cli_test.rb b/test/validator_cli_test.rb
+new file mode 100644
+index 0000000..e7900e5
+--- /dev/null
++++ b/test/validator_cli_test.rb
+@@ -0,0 +1,54 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class ValidatorCliTest < Minitest::Test
++  SCRIPT = File.join(ROOT, "script", "honeycomb-validate")
++
++  def canonical_package(root)
++    package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++    HoneycombRegistry::Manifest.generate(package)
++    package
++  end
++
++  def test_json_one_and_all_modes_emit_exact_public_shape
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      stdout, stderr, status = capture_command(SCRIPT, "--root", root, "--json", package.path,
++                                                chdir: File.dirname(root))
++      assert_equal 0, status.exitstatus, stderr
++      findings = JSON.parse(stdout)
++      findings.each { |finding| assert_equal %w[path code message severity], finding.keys }
++
++      stdout, stderr, status = capture_command(SCRIPT, "--root", root, "--json", "--all")
++      assert_equal 0, status.exitstatus, stderr
++      assert_kind_of Array, JSON.parse(stdout)
++    end
++  end
++
++  def test_validation_errors_exit_one_without_writing
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      File.write(File.join(package.path, "extra.txt"), "extra")
++      before = File.binread(package.manifest_path)
++
++      stdout, _stderr, status = capture_command(SCRIPT, "--root", root, "--json", package.path)
++      assert_equal 1, status.exitstatus
++      assert JSON.parse(stdout).any? { |finding| finding["code"] == "integrity.unrecorded_file" }
++      assert_equal before, File.binread(package.manifest_path)
++    end
++  end
++
++  def test_invocation_failure_exits_two_and_keeps_json_stdout_valid
++    in_tmpdir do |root|
++      FileUtils.mkdir_p(File.join(root, "packages"))
++      stdout, stderr, status = capture_command(SCRIPT, "--root", root, "--json", "missing")
++
++      assert_equal 2, status.exitstatus
++      finding = JSON.parse(stdout).fetch(0)
++      assert_equal %w[path code message severity], finding.keys
++      assert_equal "invocation.error", finding["code"]
++      refute_empty stderr
++    end
++  end
++end
+diff --git a/test/validator_test.rb b/test/validator_test.rb
+new file mode 100644
+index 0000000..c511305
+--- /dev/null
++++ b/test/validator_test.rb
+@@ -0,0 +1,92 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class ValidatorTest < Minitest::Test
++  def canonical_package(root)
++    package = HoneycombRegistry::Package.new(install_valid_fixture(root), root: root)
++    result = HoneycombRegistry::Manifest.generate(package)
++    raise result.findings.to_h.inspect if result.findings.errors?
++    package
++  end
++
++  def validate_without_hive(package, require_hive: false)
++    HoneycombRegistry::Validator.validate(
++      package, require_hive: require_hive, hive_loader: -> { nil }
++    )
++  end
++
++  def test_validates_canonical_package_read_only
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      before = Dir.glob(File.join(package.path, "**", "*"), File::FNM_DOTMATCH)
++                  .reject { |path| [".", ".."].include?(File.basename(path)) }
++                  .to_h { |path| [path, File.file?(path) ? File.binread(path) : nil] }
++
++      findings = validate_without_hive(package)
++
++      refute findings.errors?, findings.to_h.inspect
++      assert_includes findings.codes, "hive.missing"
++      after = before.transform_keys(&:itself).to_h do |path, _value|
++        [path, File.file?(path) ? File.binread(path) : nil]
++      end
++      assert_equal before, after
++    end
++  end
++
++  def test_detects_changed_missing_and_unrecorded_files
++    mutations = {
++      "changed" => lambda { |package|
++        File.open(File.join(package.path, "README.md"), "a") { |file| file << "tampered\n" }
++      },
++      "missing" => ->(package) { FileUtils.rm(File.join(package.path, "README.md")) },
++      "unrecorded" => ->(package) { File.write(File.join(package.path, "extra.txt"), "extra") }
++    }
++    expected = {
++      "changed" => "integrity.digest_mismatch",
++      "missing" => "integrity.missing_file",
++      "unrecorded" => "integrity.unrecorded_file"
++    }
++
++    mutations.each do |name, mutation|
++      in_tmpdir do |root|
++        package = canonical_package(root)
++        mutation.call(package)
++        findings = validate_without_hive(package)
++        assert findings.errors?, name
++        assert_includes findings.codes, expected.fetch(name)
++      end
++    end
++  end
++
++  def test_detects_permission_fingerprint_and_canonical_byte_drift
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      path = package.manifest_path
++      bytes = File.binread(path)
++      File.binwrite(path, bytes.sub('risk: "low"', 'risk: "moderate"'))
++
++      findings = validate_without_hive(package)
++      assert findings.errors?
++      assert_includes findings.codes, "permissions.drift"
++      assert_includes findings.codes, "integrity.release_sha256"
++    end
++
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      path = package.manifest_path
++      File.binwrite(path, "# noncanonical\n" + File.binread(path))
++      findings = validate_without_hive(package)
++      assert_includes findings.codes, "manifest.noncanonical"
++    end
++  end
++
++  def test_strict_hive_mode_turns_absence_into_validation_failure
++    in_tmpdir do |root|
++      package = canonical_package(root)
++      findings = validate_without_hive(package, require_hive: true)
++      assert findings.errors?
++      assert_includes findings.codes, "hive.missing"
++    end
++  end
++end
+diff --git a/wiki/architecture.md b/wiki/architecture.md
+index 3bc434d..cdfa3c8 100644
+--- a/wiki/architecture.md
++++ b/wiki/architecture.md
+@@ -1,40 +1,48 @@
+ # Architecture
+ 
+-`honeycomb` is currently a scaffold for a reviewed library of publishable Hive
+-workflow packages called honeycombs. The repository has documentation, LLM wiki
+-maintenance files, and Hive task state, but no application source tree,
+-executable entrypoint, routes, handlers, package catalog, or CI implementation
+-yet.
++`honeycomb` is a reviewed registry for publishable Hive workflow packages called
++honeycombs. The repository now contains an independent v1 package/manifest
++contract, deterministic derived catalog, and offline author/CI command library.
++It still has no web application, static catalog renderer, or listing workflow.
+ 
+ ## Current Repository Shape
+ 
+-- `README.md` is the authoritative public description at this stage.
+-- `.hive-state/` contains inbox tasks for the initial registry, review, and
+-  catalog work.
+-- `wiki/` contains agent-facing project context and update history.
+-- `raw/notes/` is reserved for raw notes, currently empty except for
+-  `.gitkeep`.
++- `lib/honeycomb_registry/` is the shared Ruby implementation for schemas,
++  filesystem safety, manifest derivation, validation, Hive compatibility,
++  evidence loading, and catalog projection.
++- `script/honeycomb-{manifest,validate,catalog}` are thin public entrypoints.
++- `packages/<name>/<semver>/` is the immutable release store; it is empty except
++  for `.gitkeep` until seeding work lands.
++- `catalog.json` is canonical generated output and currently contains the empty
++  `honeycomb-catalog/v1` document.
++- `policy/spdx-license-ids.txt` is the offline license identifier snapshot.
++- `test/fixtures/` and `test/run.rb` prove the format without a network or gem
++  install.
++- `docs/PACKAGE_FORMAT.md` is the authoritative public format/command contract;
++  `wiki/` records agent-facing architecture and cross-task boundaries.
+ 
+ ## Intended Product Shape
+ 
+-The README describes a honeycomb as a Hive workflow package made from a
+-`workflow.yml` descriptor, stage instructions, and a manifest carrying version,
+-author, permissions summary, and sha256 integrity information.
++The shared library has three main flows:
+ 
+-The current Hive inbox tasks outline the planned implementation:
++1. Manifest generation safe-loads author metadata and `workflow.yml`, verifies
++   the package boundary, derives the worst-case permission union, hashes every
++   regular payload file except the root manifest, fingerprints the canonical
++   projection, and atomically replaces `manifest.yml`.
++2. Validation performs the same structure/derivation/integrity checks without
++   writes. It optionally loads Hive and calls its public descriptor parser;
++   strict mode makes compatibility mandatory.
++3. Catalog generation validates all packages first, strict-loads an explicit
++   normalized evidence record set, omits non-approved versions, rejects stale or
++   contradictory identities, computes eligible SemVer latest values, and
++   atomically replaces `catalog.json`.
+ 
+-- task 1848: package registry layout, manifest schema, generated `catalog.json`,
+-  and validator script;
+-- task 1849: security lint CI for submitted packages;
+-- task 1850: trust model and review process docs;
+-- task 1851: seed catalog entries.
+-
+-The README notes Hive-side tasks 1852/1853 for install verbs. Those tasks are
+-not represented as local implementation in this repository.
++`source.revision`, generated `release_sha256`, and review `head_sha` are separate
++identities. Evidence binds both lint and human approval to the latter two.
+ 
+ ## Runtime Flow Status
+ 
+-There is no confirmed runtime flow in this repository yet. The documented future
+-flow is: publish honeycombs to a reviewed catalog, expose them at
+-`hive.sh/honeycombs`, and install one through
+-`hive workflow install honeycomb/<name>` once the Hive CLI integration exists.
++Author and CI tooling is shipped and offline. The remaining consumer flow is
++future work: task 1849 produces/adapts review evidence, task 1851 seeds real
++honeycombs, a static site exposes `hive.sh/honeycombs`, and Hive tasks 1852/1853
++implement `hive workflow install honeycomb/<name>`.
+diff --git a/wiki/command-api-surface.md b/wiki/command-api-surface.md
+index 061db8d..de94d22 100644
+--- a/wiki/command-api-surface.md
++++ b/wiki/command-api-surface.md
+@@ -1,10 +1,7 @@
+ # Command and API Surface
+ 
+-This page tracks the public surfaces that are currently documented for
+-`honeycomb`. As of the README change in commit `ab7861a`, the repository is
+-still scaffolding: the command and catalog surfaces are described, but no local
+-routes, handlers, executable entrypoints, package files, or catalog generator
+-exist in this repository yet.
++This page tracks shipped registry commands plus documented future consumer
++surfaces. Full field and safety details live in `docs/PACKAGE_FORMAT.md`.
+ 
+ ## Public Terms
+ 
+@@ -14,32 +11,45 @@ exist in this repository yet.
+ 
+ ## Documented Install Command
+ 
+-The README documents the intended install form:
++The README documents the future Hive install form:
+ 
+ ```sh
+ hive workflow install honeycomb/<name>
+ ```
+ 
+-The README also says the install verbs land with Hive tasks 1852/1853, outside
+-this repository. Treat this as a documented future Hive CLI integration rather
+-than a command implemented by this repository.
++Install verbs remain outside this repository with Hive tasks 1852/1853.
+ 
+-## Package Shape
++## Shipped Registry Commands
++
++| Command | Mutating mode | Read-only mode |
++|---|---|---|
++| `ruby script/honeycomb-manifest` | Explicit canonical manifest generation | `--check` |
++| `ruby script/honeycomb-validate` | None | One path or `--all`; `--json`; `--require-hive` |
++| `ruby script/honeycomb-catalog --evidence PATH` | Approval-gated root catalog generation | `--check` |
++
++All commands resolve a repository root independently of the caller's current
++directory. `--root` supports automation/fixtures. Catalog `--output` is accepted
++only when it still resolves to root `catalog.json`.
+ 
+-The README defines a honeycomb as:
++Exit 0 means success/no error findings, exit 1 means validation or drift errors,
++and exit 2 means invocation/internal failure. Warnings and info do not fail.
++Validator `--json` always emits a stable array of exact `{path, code, message,
++severity}` objects, including exit-2 terminal findings.
++
++Local Hive absence is a warning; `--require-hive` makes absence an error. Strict
++mode is explicit and never inferred from environment variables.
++
++## Package Shape
+ 
+-- a descriptor named `workflow.yml`;
+-- stage instructions;
+-- a manifest with version, author, permissions summary, and sha256 integrity.
++The shipped version layout is:
+ 
+-The Hive inbox task `registry-layout-package-manifest-schema-260709-1f1a`
+-contains the fuller planned package layout: `packages/<name>/`, `README.md`,
+-`manifest.yml`, generated top-level `catalog.json`, and a Ruby validator script.
+-Those files are not present yet.
++- `packages/<name>/<semver>/workflow.yml`;
++- non-empty `instructions/` and `README.md`;
++- generated canonical `manifest.yml` using `honeycomb-manifest/v1`.
+ 
+ ## Catalog and API Status
+ 
+-`hive.sh/honeycombs` is documented as the catalog URL. The current repository
+-does not contain a web app, route table, API handler, generated `catalog.json`,
+-or executable entrypoint. Until implementation lands, consumers should treat the
+-catalog and install command as README-level product direction.
++Root `catalog.json` is a shipped deterministic `honeycomb-catalog/v1` artifact.
++It is empty until task 1851 seeds real packages. `hive.sh/honeycombs` remains a
++documented future static rendering surface; no route, handler, or site code is
++implemented here.
+diff --git a/wiki/decisions.md b/wiki/decisions.md
+index 3a29535..3308c1d 100644
+--- a/wiki/decisions.md
++++ b/wiki/decisions.md
+@@ -17,3 +17,54 @@ Consequence: future manifest docs, CLI output, CI comments, README catalog
+ sections, and review copy should use "honeycomb" for listed workflow packages.
+ The repository should not introduce competing terms such as "package" as the
+ primary user-facing name, except where implementation details require it.
++
++## 2026-07-16: Version Directories and Generated Manifests Are the Registry Source
++
++Context: mutable latest-only directories, hand-maintained hash summaries, and
++Git-tag-only history could each make catalog identity ambiguous.
++
++Decision: keep every release at `packages/<name>/<semver>/`. Authors own manifest
++metadata, while explicit generation replaces permissions, the complete file hash
++map, and the release fingerprint with canonical bytes. Validation/check modes
++never write. Merged releases are immutable and corrections use a new SemVer.
++
++Consequence: listing CI must enforce history-based immutability, while local
++tooling proves checkout structure and content identity.
++
++## 2026-07-16: Permissions Publish a Fail-Closed Worst-Case Union
++
++Context: per-stage details alone are cumbersome for consumers, but a coarse tier
++can hide dangerous access.
++
++Decision: publish deterministic risk, capability, network, filesystem, and
++secret sets, while findings attribute each contribution to a stage/reviewer.
++Unbounded default/yolo/Bash access is explicit `*`; unknown permission-bearing
++constructs block generation.
++
++Consequence: consumers get compact risk disclosure without silently narrowing
++future Hive behavior.
++
++## 2026-07-16: Catalog Presence Requires Two Current Review Gates
++
++Context: structural validity alone is not permission to list prompts that may
++run with repository write access.
++
++Decision: catalog generation consumes an explicit normalized evidence record
++set. Eligibility requires passing lint and affirmative human approval bound to
++the same generated release fingerprint and exact review head SHA. Missing or
++negative states omit; malformed/stale/contradictory states abort.
++
++Consequence: task 1849 may store evidence however it chooses but must emit or
++adapt the normalized reader contract before catalog generation.
++
++## 2026-07-16: Standalone Structure, Optional Hive Compatibility
++
++Context: requiring Hive for every author check would make registry validation
++less portable, while silently skipping Hive in CI would weaken compatibility.
++
++Decision: all registry structure/integrity checks use Ruby standard/default
++libraries. If installed, Hive's public descriptor parser is an additional check;
++local absence warns and explicit `--require-hive` fails.
++
++Consequence: normal author commands remain offline and dependency-light, while
++CI can prove the declared Hive minimum without duplicating Hive's full parser.
+diff --git a/wiki/dependencies.md b/wiki/dependencies.md
+index 4836616..0d4872b 100644
+--- a/wiki/dependencies.md
++++ b/wiki/dependencies.md
+@@ -1,23 +1,30 @@
+ # Dependencies
+ 
+-Confirmed project dependencies are limited because the repository is still
+-scaffolding.
++The registry implementation is deliberately offline and dependency-light.
+ 
+ ## Runtime
+ 
+-- Hive is the target consumer for honeycombs and the documented install command
+-  is `hive workflow install honeycomb/<name>`.
+-- No local runtime library, server framework, route layer, or executable
+-  dependency is present in this repository yet.
++- Ruby standard/default libraries: Psych/YAML, JSON, Digest, OptionParser,
++  Pathname, Set, Tempfile, Time, URI, and filesystem APIs.
++- Checked-in `policy/spdx-license-ids.txt`; validation never consults a host or
++  online license service.
++- Hive is an optional local compatibility dependency. When available, the
++  validator loads `hive` and `hive/workflows/descriptor_parser`; ordinary
++  absence warns, while `--require-hive` requires it and enforces the manifest's
++  SemVer minimum.
++- No Gemfile, Bundler runtime, application framework, database, network fetch,
++  schema registry, or hidden cache is used.
+ 
+-## Planned Tooling
++## Development and CI
+ 
+-The Hive inbox task for registry layout proposes a Ruby validator with no
+-dependencies beyond Ruby stdlib plus YAML. It may soft-depend on Hive's
+-`DescriptorParser` when the Hive gem is present. This is planned work, not a
+-current dependency in the repository.
++`ruby test/run.rb` uses Minitest from Ruby's default library plus stdlib helpers.
++The compatible-parser unit seam is injectable, so missing/old/rejecting Hive
++states are tested without downloading runtimes. A CI job that invokes
++`--require-hive` must install the pinned supported Hive version separately.
+ 
+ ## Services
+ 
+ - `hive.sh/honeycombs` is the documented catalog surface.
+-- No service implementation or deployment configuration is present here yet.
++- GitHub URLs in generated catalog entries are deterministic strings; catalog
++  generation never calls GitHub.
++- No service implementation or deployment configuration is present here.
+diff --git a/wiki/gaps.md b/wiki/gaps.md
+index b6e7cc9..744e8e0 100644
+--- a/wiki/gaps.md
++++ b/wiki/gaps.md
+@@ -3,6 +3,7 @@
+ | Area | Gap | Notes |
+ |------|-----|-------|
+ | Command surface | `hive workflow install honeycomb/<name>` is documented but not implemented here. | README says install verbs land with Hive tasks 1852/1853, which are outside this repository. |
+-| Catalog surface | `hive.sh/honeycombs` is documented but no route, handler, static site, or generated catalog exists here. | Await registry/catalog implementation from inbox tasks 1848 and 1851. |
+-| Package schema | README gives the high-level honeycomb shape, while manifest field details and validation rules are only in inbox task notes. | Confirm when task 1848 lands. |
+-| Security review | The review gate is documented as core product behavior, but CI, lint output, and human review workflow are not implemented here. | Await tasks 1849 and 1850. |
++| Catalog surface | Root `catalog.json` is generated, but `hive.sh/honeycombs` has no route, handler, or static renderer here. | Static site work consumes `honeycomb-catalog/v1`; task 1851 seeds real entries. |
++| Production evidence adapter | `honeycomb-listing-evidence/v1` defines normalized reader semantics, but task 1849's persisted location/serialization is not frozen. | Task 1849 must emit the normalized set directly or adapt its private records before invoking the catalog tool. |
++| Security review workflow | Identity gating is implemented, but CI lint creation, approval invalidation, labels/comments, and human process are not. | Await tasks 1849 and 1850. |
++| Trust evolution | Catalog v1 has a tier string but no signing, attestation, advisory, yanked, revoked, or historic-tier fields. | Coordinate a later version with trust/site/installer work rather than extending v1 ad hoc. |
+diff --git a/wiki/index.md b/wiki/index.md
+index 745222e..c435e39 100644
+--- a/wiki/index.md
++++ b/wiki/index.md
+@@ -11,6 +11,9 @@ change.
+   implementation status.
+ - [[decisions]] - durable design decisions and tradeoffs.
+ - [[dependencies]] - runtime, development, and service dependencies.
++- [[package-catalog-contract]] - shipped package, manifest, evidence, and catalog
++  contracts.
++- [[security-review-contract]] - identity binding and boundary with listing CI.
+ - [[gaps]] - missing, uncertain, or stale wiki coverage.
+ 
+ ## Update Protocol
+diff --git a/wiki/log.d/20260716T003803Z-registry-package-contract.md b/wiki/log.d/20260716T003803Z-registry-package-contract.md
+new file mode 100644
+index 0000000..bf406b8
+--- /dev/null
++++ b/wiki/log.d/20260716T003803Z-registry-package-contract.md
+@@ -0,0 +1,19 @@
++# Registry package and catalog contract shipped
++
++**Date:** 2026-07-16
++
++**Action:** Added the independent `honeycomb-manifest/v1` immutable version
++layout, strict offline Ruby schema/path/permission/integrity primitives, atomic
++canonical manifest generation and check mode, read-only human/JSON validation
++with optional strict Hive compatibility, normalized dual-review evidence, and
++deterministic approval-gated `honeycomb-catalog/v1` generation.
++
++**Proof:** The fixture-first test suite exercises generation, drift, exact file
++coverage, unsafe YAML/path/symlink/special-file boundaries, SemVer ambiguity,
++Hive runtime states, evidence omission/staleness, empty-root artifacts, and
++locale/timezone determinism without network access.
++
++**Documentation:** Published `docs/PACKAGE_FORMAT.md`, updated README command
++entrypoints, and refreshed architecture, command, decision, dependency, gap,
++package/catalog, and security-review wiki context. Production review evidence
++persistence remains explicitly owned by task 1849.
+diff --git a/wiki/package-catalog-contract.md b/wiki/package-catalog-contract.md
+new file mode 100644
+index 0000000..e18f05c
+--- /dev/null
++++ b/wiki/package-catalog-contract.md
+@@ -0,0 +1,42 @@
++# Package and Catalog Contract
++
++`docs/PACKAGE_FORMAT.md` is the public authority. This page records the compact
++cross-task contract for agents implementing CI, seeding, site, or installers.
++
++## Package identity
++
++- Releases live at immutable `packages/<name>/<semver>/` paths.
++- `honeycomb-manifest/v1` is strict and independent from Hive/hive-bench schemas.
++- Authors own metadata and safe top-level `x-*`; generation owns normalized
++  permissions, exact payload file SHA-256s, and `release_sha256`.
++- Only root `manifest.yml` is excluded from payload hashing. An evolving review
++  file placed inside a version would be immutable hashed package content.
++- `source.revision` is upstream provenance, not registry release or reviewed-head
++  identity.
++
++## Consumer catalog
++
++`honeycomb-catalog/v1` is a flat name-then-SemVer list. Each eligible version
++contains its own version plus the highest eligible `latest_version`. The future
++install string always selects `honeycomb/<name>`; exact-version Hive resolution
++is outside this repository.
++
++The catalog projects manifest description/author/license/Hive minimum/permission
++data, evidence tier/review metadata, deterministic package and review URLs,
++source SHA, and a compact listing-approval identity. It does not embed full
++manifests or timestamps generated at runtime.
++
++Catalog generation validates all packages before filtering. Therefore a broken
++unlisted package aborts output rather than hiding behind missing evidence.
++
++## Handoffs
++
++- Task 1849: produce/adapt normalized evidence and invoke validator/catalog
++  checks in CI.
++- Task 1850: define trust policy without mutating immutable package payloads or
++  silently accreting v1 catalog fields.
++- Task 1851: add real packages, generated manifests, evidence integration, and a
++  populated catalog.
++- Static site: consume catalog entries as generated; do not reinterpret package
++  manifests independently.
++- Hive tasks 1852/1853: consume the documented install command/latest semantics.
+diff --git a/wiki/security-review-contract.md b/wiki/security-review-contract.md
+new file mode 100644
+index 0000000..99668f2
+--- /dev/null
++++ b/wiki/security-review-contract.md
+@@ -0,0 +1,40 @@
++# Security Review Contract
++
++Registry presence is the review gate. Structural validation alone never lists a
++honeycomb.
++
++## Normalized reader boundary
++
++`honeycomb-catalog --evidence PATH` accepts
++`honeycomb-listing-evidence/v1`. Each record identifies package name/version and
++tier, with independent lint and approval verdicts. Passing/approved verdicts
++carry:
++
++- the current generated manifest `release_sha256`;
++- the same exact registry review `head_sha`;
++- RFC 3339 audit times;
++- the human reviewer and review URL for approval.
++
++The reader is strict about object keys, JSON duplicate keys, status values,
++hashes, timestamps, URLs, duplicate records, and discovered package identity.
++Missing, pending, failed, or denied gates omit. Malformed, stale, or
++contradictory identity aborts all catalog output.
++
++## Ownership boundary
++
++This repository owns the normalized reader and fixtures. Task 1849 owns the
++production writer/persistence location, lint execution, sticky PR evidence,
++approval collection, and invalidation. It may emit the reader format directly
++or adapt a private format at invocation time; it must not introduce a second
++catalog authorization meaning.
++
++Task 1850 owns reviewer/trust policy, signing/attestation decisions, promotion,
++demotion, advisories, yanking, and revocation. Those are not implicit v1 fields.
++
++## Compatibility gate
++
++Registry structure and permission derivation are standalone. CI additionally
++invokes `honeycomb-validate --require-hive` with the pinned supported Hive
++runtime. Hive absence, an installed version below `hive_min_version`, or public
++descriptor parser rejection is an error. Local non-strict absence is only a
++warning.

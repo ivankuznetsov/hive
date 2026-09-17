@@ -1,0 +1,86 @@
+{
+  "schema": "hive-demo-repos",
+  "schema_version": 1,
+  "captured_at": "2026-09-17T09:13:01.105Z",
+  "repos": [
+    {
+      "name": "screenote",
+      "repository": "ivankuznetsov/screenote",
+      "url": "https://github.com/ivankuznetsov/screenote",
+      "description": "Visual screenshot feedback for teams and coding agents — annotate, discuss, and resolve UI issues in context. Hosted or self-hosted.",
+      "language": "Ruby",
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "name": "Other"
+      },
+      "private": false,
+      "archived": false,
+      "default_branch": "main",
+      "pushed_at": "2026-09-04T19:40:34Z",
+      "stars": 0,
+      "captured_head": "d5e54a33988c4fa720c4ff60d8f15bfa33cc5730"
+    },
+    {
+      "name": "hive",
+      "repository": "ivankuznetsov/hive",
+      "url": "https://github.com/ivankuznetsov/hive",
+      "description": "An open-source agent workflow engine & meta-harness: orchestrates Claude, Codex, and Pi to run multi-step work as a folder-as-agent pipeline. Its flagship coding workflow turns a rough idea into a merge-ready PR; ships content too, and runs the workflows you author.",
+      "language": "Ruby",
+      "license": {
+        "spdx_id": "MIT",
+        "name": "MIT License"
+      },
+      "private": false,
+      "archived": false,
+      "default_branch": "main",
+      "pushed_at": "2026-09-16T21:59:10Z",
+      "stars": 31,
+      "captured_head": "cce8c398bfb2de17c62dccd36a5047ad73074a8e"
+    },
+    {
+      "name": "honeycomb",
+      "repository": "ivankuznetsov/honeycomb",
+      "url": "https://github.com/ivankuznetsov/honeycomb",
+      "description": "Honeycombs — publishable Hive workflow packages and catalog registry",
+      "language": "Ruby",
+      "license": null,
+      "private": false,
+      "archived": false,
+      "default_branch": "main",
+      "pushed_at": "2026-09-16T19:45:14Z",
+      "stars": 0,
+      "captured_head": "ca43aba830a0bf38049c0a601610427ee96e4b03"
+    },
+    {
+      "name": "agent-plugins",
+      "repository": "ivankuznetsov/agent-plugins",
+      "url": "https://github.com/ivankuznetsov/agent-plugins",
+      "description": "Cross-agent plugin marketplace for Claude Code, Codex, Pi, and OpenClaw — writing, SEO, visual feedback, project memory, and code review.",
+      "language": "Ruby",
+      "license": null,
+      "private": false,
+      "archived": false,
+      "default_branch": "main",
+      "pushed_at": "2026-09-04T22:12:55Z",
+      "stars": 3,
+      "captured_head": "19ae1fc985d3b9f60301bc4e0eb015e99787d53c"
+    },
+    {
+      "name": "prdigest",
+      "repository": "ivankuznetsov/prdigest",
+      "url": "https://github.com/ivankuznetsov/prdigest",
+      "description": "Merged pull request digests for Telegram and OpenClaw",
+      "language": "Ruby",
+      "license": {
+        "spdx_id": "MIT",
+        "name": "MIT License"
+      },
+      "private": false,
+      "archived": false,
+      "default_branch": "main",
+      "pushed_at": "2026-09-16T18:22:41Z",
+      "stars": 1,
+      "captured_head": "15da97c652e6849bbe332c2f1a16badfa27e31f7"
+    }
+  ]
+}

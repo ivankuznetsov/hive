@@ -3,23 +3,40 @@ title: Interactive public demo
 type: reference
 source: demo/**, web/script/export_demo.rb, web/script/support/demo/**
 created: 2026-09-13
-updated: 2026-09-13
-tags: [web, demo, waitlist]
+updated: 2026-09-17
+tags: [web, demo, waitlist, snapshot]
 ---
 
 # Interactive public demo
 
-The independently deployable hivedev.ai demo lives in `demo/`. It reuses Hive Web
-templates at build time and exports static HTML fragments. It does not run Hive
-agents, a daemon, or Rails in production. The source tree's normal web application
-has no demo auth bypass or changed routes.
+The independently deployable hivedev.ai demo lives in `demo/`. It renders the
+real Hive Web layout, status board/grid, archive, task workspace, repository,
+Honeycombs workflow/module, Patrol, and digest templates against a reviewed,
+checked-in public snapshot. It does not run Hive agents, a daemon, or Rails in
+production. The source tree's normal web application has no demo auth bypass or
+changed routes.
 
-`npm --prefix demo run build` invokes the isolated Rails view exporter, then
-packages the demo shell and public assets. Four fictional Notebook tasks show
-input, implementation, review, and completion. Two dark-mode branches advance
-through prepared states in the visitor's tab. Reset and browser navigation never
-affect another visitor. Actual plans, diffs and evidence panels use existing
-Rails templates; fixtures are explicitly sample data, not live work evidence.
+`demo/snapshot/selection.json` is the explicit corpus allowlist; the checked-in
+`demo/snapshot/data/`, `documents/`, and `changes/` files are the only public
+dataset. `demo/script/capture_snapshot.mjs` is a maintainer-only, read-only
+capture that resolves selected tasks from native `hive` projections, verifies
+merged pull-request evidence against the public GitHub API, applies explicit
+redactions, and fails closed on forbidden content. `demo/script/audit_snapshot.mjs`
+reviews the dataset for local paths, credentials, excluded projects, unapproved
+URLs, control bytes, and provenance drift. Nothing from the operator
+installation is read by a normal build or by CI.
+
+`npm --prefix demo run build` invokes the isolated Rails view exporter in
+`web/script/support/demo/`, which builds a canonical path-based route graph
+(`/board/<project>/<state>`, `/grid`, `/archive`, `/done`, `/repos`,
+`/honeycombs/workflows|modules`, `/patrol`, `/digest/<date>`,
+`/tasks/<project>/<slug>[/documents/<name>|/change]`, `/unavailable/*`) and
+renders each route through adapted real templates. Fragments pass a structural
+allowlist: live forms, streams, lazy frames, remote media, unresolved paths,
+executable schemes, and unreviewed external links fail the export or become
+visible notes. Render-time helpers that would mutate live Hive raise. Unknown
+paths stay 404, and saved-state action buttons only explain the missing local or
+Cloud runtime.
 
 The Cloud waitlist is a same-origin Worker endpoint with server-side Turnstile
 validation and a dedicated D1 table. An atomic unique email key deduplicates

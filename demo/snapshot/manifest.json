@@ -1,0 +1,699 @@
+{
+  "schema": "hive-demo-snapshot-manifest",
+  "schema_version": 1,
+  "captured_at": "2026-09-17T09:11:03.263Z",
+  "ui_sha": "9b92b6572f53a002c0761c0f91f9aebd836f043a",
+  "hive_version": "0.7.4",
+  "source": "Read-only native projections captured from the operator installation; the public demo never connects to live Hive state.",
+  "files": {
+    "documents/screenote-42619/idea.md": {
+      "sha256": "65d3d24e2b395396ca0623de43d87bdc0d29417a33b880e318a83bc618dd1968",
+      "bytes": 1592
+    },
+    "documents/screenote-42619/brainstorm.md": {
+      "sha256": "adc5087050af2c5b3f369a3a4f08b8a5297c8237f9e041e35a9a1ba1ce1ebacd",
+      "bytes": 9429
+    },
+    "documents/screenote-42619/plan.md": {
+      "sha256": "492298c6cab08c765c02e2bbc1e9302a24854920139508f843a3b4575b88c4bb",
+      "bytes": 26234
+    },
+    "documents/screenote-42619/task.md": {
+      "sha256": "d7bf73169ae9b20e6964ca5ef57317590f2c290c62e771b42ca50aa16d70fe75",
+      "bytes": 10035
+    },
+    "documents/screenote-42619/pr.md": {
+      "sha256": "5a29d5d4ecfb6c417e6b01db6a0b7a6cbc76e3d949e6aec7fa289fb219dbe143",
+      "bytes": 765
+    },
+    "documents/screenote-42619/artifact.md": {
+      "sha256": "a66b8b29b6eb6d8d6ac137234cb5d8f49f9bb4507a678c7f3ff97659a36ae3b0",
+      "bytes": 27
+    },
+    "documents/screenote-42619/reviews/grok-ce-code-review-01.md": {
+      "sha256": "cfc12f7abb24327a4d049d0879e6f750d7da30cf2ce053155022a3a73206b429",
+      "bytes": 6625
+    },
+    "documents/screenote-42619/reviews/grok-ce-code-review-02.md": {
+      "sha256": "5286eb00cb13d5c6afeb9a60483f4137e9077f1e54724379d8344ac393520307",
+      "bytes": 7342
+    },
+    "documents/screenote-42619/reviews/grok-ce-code-review-adversarial-01.md": {
+      "sha256": "45c8f69ddc124d73ad52d25298921e6820f296a7ad680ca59dcdfa74e4e1e1c4",
+      "bytes": 9414
+    },
+    "documents/screenote-42619/reviews/grok-ce-code-review-adversarial-02.md": {
+      "sha256": "940a7f7140b3b0ed5e6d89874a19cc94235d8449dda494f310c1540e4ec22c55",
+      "bytes": 4622
+    },
+    "documents/screenote-42619/reviews/claude-opus-5-ce-code-review-03.md": {
+      "sha256": "3fd4ac13e7782a3a0d57c445b893c17cd9e7222214a4b90b71b495e0e85a952a",
+      "bytes": 16770
+    },
+    "documents/screenote-42619/reviews/claude-opus-5-ce-code-review-adversarial-03.md": {
+      "sha256": "9f2de72e595f533832f07302b55f4aa12ada1870255e0a408af0535017e39168",
+      "bytes": 7185
+    },
+    "documents/screenote-42619/reviews/codex-ce-code-review-04.md": {
+      "sha256": "e848257892b44eff4841ec0bc43d9fcec3b8bbac497632a616f4159db5d141df",
+      "bytes": 8811
+    },
+    "documents/screenote-42619/reviews/codex-native-review-04.md": {
+      "sha256": "a556df2e1c0cd2b665e6260d6ad24de58e419454f00afb25767d641eab7c7079",
+      "bytes": 5538
+    },
+    "documents/screenote-42619/reviews/escalations-01.md": {
+      "sha256": "080581924bb7624e4f108759d43b290cb3eb90324254f16f60b5e25f4606d9a6",
+      "bytes": 2594
+    },
+    "documents/screenote-42619/reviews/escalations-02.md": {
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "bytes": 149
+    },
+    "documents/screenote-42619/reviews/escalations-03.md": {
+      "sha256": "90b2e28d8517d9c7e325e50ff7ae9d1aaf68342dea011dd1929f139ea8071f31",
+      "bytes": 149
+    },
+    "documents/screenote-42619/reviews/escalations-04.md": {
+      "sha256": "be661dd6ece0356cc293058b0d3b0ee5c211252a18ec81635b31fdfd1148e954",
+      "bytes": 149
+    },
+    "changes/screenote-42619.patch": {
+      "sha256": "34bee3a32470c45ce491c52b86c18fdad6b9a491b3f5bda6c9675c960408ec05",
+      "bytes": 495074
+    },
+    "data/tasks/screenote-42619.json": {
+      "sha256": "d2351bbb9da9a8287806f495a75a3126df492fb93aec614131ce1d34d5264e25",
+      "bytes": 7307
+    },
+    "documents/hive-42430/idea.md": {
+      "sha256": "77cf1c74c2ac806145fea76a1247fd50179b20c58c523e81f95b1279f9765484",
+      "bytes": 3814
+    },
+    "documents/hive-42430/brainstorm.md": {
+      "sha256": "50546f8211a98cf7a71ea04e6e3ce26a6d0d46b0523c960610d682952023a7d1",
+      "bytes": 12472
+    },
+    "documents/hive-42430/plan.md": {
+      "sha256": "a7cf3fccfd0944786a6fff21e7f81391a45fd2b5d23667592a36cec463180da9",
+      "bytes": 73835
+    },
+    "documents/hive-42430/task.md": {
+      "sha256": "a6baf1e901981d05e3764f23deb26c5a06c9869598a96dd54f38f2a487d3263a",
+      "bytes": 2760
+    },
+    "documents/hive-42430/pr.md": {
+      "sha256": "9c6ebf4b5c76c48f0e452655ec4900cac157092b109ae08ab74dfc8354610232",
+      "bytes": 2731
+    },
+    "documents/hive-42430/artifact.md": {
+      "sha256": "b9dc1db9e3155336570912923a2f8e83b61235e8c8965ffcce991f50253d816c",
+      "bytes": 2660
+    },
+    "documents/hive-42430/summary.md": {
+      "sha256": "7b8e5cab4da0a746acd2867de36bcdca21193f8dc0ea11a56fb63a03ec652151",
+      "bytes": 2026
+    },
+    "documents/hive-42430/reviews/codex-ce-code-review-01.md": {
+      "sha256": "63aaf837f46939c63e98d36ae1263b3d1e49b73cfaae86af498787e64351b3bd",
+      "bytes": 7067
+    },
+    "documents/hive-42430/reviews/codex-ce-code-review-02.md": {
+      "sha256": "a96d377791803def26ada3e45a0f9eaca7f5db1dddbee59cba78229f83d62dde",
+      "bytes": 8578
+    },
+    "documents/hive-42430/reviews/errors-01.md": {
+      "sha256": "d68f9a317529ae60bf752bd12c426b07a5e34fefcc9ecdf69c74203e0b2ce955",
+      "bytes": 953
+    },
+    "documents/hive-42430/reviews/errors-02.md": {
+      "sha256": "2589eb699627e528d8af2e642c9134b49f33bc4fb7c73dfd16439f11906a08b1",
+      "bytes": 953
+    },
+    "documents/hive-42430/reviews/escalations-01.md": {
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "bytes": 149
+    },
+    "documents/hive-42430/reviews/escalations-02.md": {
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "bytes": 149
+    },
+    "data/tasks/hive-42430.json": {
+      "sha256": "2ac256a0699fc52e1c5da63cfd8b9707ea70b8f84679e9bfab5900ff347066f0",
+      "bytes": 5406
+    },
+    "documents/hive-23117/idea.md": {
+      "sha256": "502953fa28abfb2619e44dbd2c6959ecd55175de4a7e4d6de702acf7c0f6f78e",
+      "bytes": 5232
+    },
+    "documents/hive-23117/brainstorm.md": {
+      "sha256": "3a30840ed90f6d8142317ac259e73ba508d15d065b901645896c4823354d4d48",
+      "bytes": 10314
+    },
+    "documents/hive-23117/plan.md": {
+      "sha256": "8248088f4be1398d7dae35ff18979876d70ec59ed365a95c1832f25e8a5f0807",
+      "bytes": 36056
+    },
+    "documents/hive-23117/task.md": {
+      "sha256": "dbf77f01b958a25ec46c5a0fcb6304672122a2239f773bafd08886a8ead92428",
+      "bytes": 1268
+    },
+    "documents/hive-23117/pr.md": {
+      "sha256": "ee504e6686fdf5ab6c1f7ac48026ead570185c7e6cef6e9bcff7249fd05abb84",
+      "bytes": 2673
+    },
+    "documents/hive-23117/artifact.md": {
+      "sha256": "d0b12aecc14dd648d9395fac40011cf17908fbf70d971bb945a56438d387f9c7",
+      "bytes": 1574
+    },
+    "documents/hive-23117/summary.md": {
+      "sha256": "b3b01b23db6d140673a8d68959bcbc0d2a53bb195156aac591a064eefb4564d4",
+      "bytes": 1813
+    },
+    "documents/hive-23117/reviews/codex-ce-code-review-01.md": {
+      "sha256": "13fa351e6b536a368f81b20501433c2a5461f5c370fd76c1bc7730f42ee4fcd8",
+      "bytes": 3322
+    },
+    "documents/hive-23117/reviews/codex-ce-code-review-02.md": {
+      "sha256": "5096827d2410dd5e9e31e430b0564eec1f949afac38ec814c0e02a83ee321016",
+      "bytes": 5403
+    },
+    "documents/hive-23117/reviews/grok-ce-code-review-01.md": {
+      "sha256": "6b0a4440f06114db7b454c1ec980a8a2f97733cbdbaca3272f4ee59a9b80a7f7",
+      "bytes": 2083
+    },
+    "documents/hive-23117/reviews/grok-ce-code-review-02.md": {
+      "sha256": "665c54feef4e91837da0cc0bfb385aebf978453e8f5bd56258b6b7a9aa5bbeaf",
+      "bytes": 4878
+    },
+    "documents/hive-23117/reviews/escalations-01.md": {
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "bytes": 149
+    },
+    "documents/hive-23117/reviews/escalations-02.md": {
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "bytes": 149
+    },
+    "changes/hive-23117.patch": {
+      "sha256": "10a62f38b3542c831471262a9a357aee778d89177895672f939ac262c7c9b4eb",
+      "bytes": 501447
+    },
+    "data/tasks/hive-23117.json": {
+      "sha256": "b87449ff3cd0734d93d18c071fa865863d1ba055f72d8a1eb911bd31fc2c525f",
+      "bytes": 5564
+    },
+    "documents/screenote-1777/idea.md": {
+      "sha256": "8de890bc5888eb938bafbd6aa95d60f6e583de90587d9e94176ef48219a9ae57",
+      "bytes": 2303
+    },
+    "documents/screenote-1777/brainstorm.md": {
+      "sha256": "0fd80a3957d666b0536d7c8751f2ee7e8b3dd5fd701ef970ecb14f44c92fc9f1",
+      "bytes": 7447
+    },
+    "documents/screenote-1777/plan.md": {
+      "sha256": "95b12e1a5b0fe94b3bdf06dd69a5562382f1c03f01731936c36365f8246728ae",
+      "bytes": 17628
+    },
+    "documents/screenote-1777/task.md": {
+      "sha256": "41e1ab7c26aed759fe9909bb1208ebc47775043d7e5bd1eec40f5d5ae33a7715",
+      "bytes": 1536
+    },
+    "documents/screenote-1777/pr.md": {
+      "sha256": "0faac69eada6cf322b3450fc4e17fdb6131cef4d38c6539da64092039d7bf3d1",
+      "bytes": 1573
+    },
+    "documents/screenote-1777/artifact.md": {
+      "sha256": "fc22c324e78518c65aa36c65585a22ec0b618e6e57e14e7e30c6defae26527c7",
+      "bytes": 2790
+    },
+    "documents/screenote-1777/summary.md": {
+      "sha256": "14e4215313e2ada96df45f82ba7c24d0a944eaf2bea69db057d36e524f3f4291",
+      "bytes": 1722
+    },
+    "documents/screenote-1777/reviews/claude-ce-code-review-01.md": {
+      "sha256": "421b760af5f9545e1ac61fd4f92c40804c9a88c2c06b2aaf540bf591d54a5f61",
+      "bytes": 3376
+    },
+    "documents/screenote-1777/reviews/claude-ce-code-review-02.md": {
+      "sha256": "5506fa638637d5f75c4886d424e83d6dec32c50ead952b5a4c8dc13da731f838",
+      "bytes": 4270
+    },
+    "documents/screenote-1777/reviews/codex-ce-code-review-01.md": {
+      "sha256": "8e6b2e3e7b1d4fd55bd84433769489a1d1bd99b2515bc58c04e62598bc78ee2b",
+      "bytes": 1664
+    },
+    "documents/screenote-1777/reviews/codex-ce-code-review-02.md": {
+      "sha256": "377d75f8bc65a40c717c0560763ca72f8ed8d8931b9b2063219be72d89bf76d5",
+      "bytes": 1550
+    },
+    "documents/screenote-1777/reviews/pr-review-toolkit-01.md": {
+      "sha256": "89ae230833d0fbd18312926add37718300ca5349f9975c327d3bdbb681afc131",
+      "bytes": 5733
+    },
+    "documents/screenote-1777/reviews/pr-review-toolkit-02.md": {
+      "sha256": "ab0635fe5d946731ae0522bee4e45e241e733ed837c63f915ab53d5a81e41c27",
+      "bytes": 4627
+    },
+    "documents/screenote-1777/reviews/escalations-01.md": {
+      "sha256": "63a137a3047cba0b05cdfa0735cf2c6128093c9f245b0f0f1d44eb0c9e965f36",
+      "bytes": 1250
+    },
+    "documents/screenote-1777/reviews/escalations-02.md": {
+      "sha256": "230c516b97eb9ddd139e9f70c386296eda8fdbc108b0d45c4bec31adc9c1b124",
+      "bytes": 2352
+    },
+    "changes/screenote-1777.patch": {
+      "sha256": "c0aa9a9d627d515de9835e9eeef24f04584d4b58d94d4307a98b9c35e6db0959",
+      "bytes": 163302
+    },
+    "data/tasks/screenote-1777.json": {
+      "sha256": "02e8cde07bc870024f9399d5a525c38d7fbe3a92c2a61d0d18ceaa03e2717b03",
+      "bytes": 6192
+    },
+    "documents/screenote-1778/idea.md": {
+      "sha256": "d2cf4e1101ad1e0e2d332b1c3eb79f908cb238abb41122c8e3d8c292c979c80d",
+      "bytes": 1812
+    },
+    "documents/screenote-1778/brainstorm.md": {
+      "sha256": "fa31365ef3ea5c07f0d2378506dab067d16fdfaeeb8adf34def115d0bc45066a",
+      "bytes": 9828
+    },
+    "documents/screenote-1778/plan.md": {
+      "sha256": "3ae9844fb50033c92f6e0db7bbf003a906d87ff4ba9b8fd743f8cfc368b1e6db",
+      "bytes": 20356
+    },
+    "documents/screenote-1778/task.md": {
+      "sha256": "412b47dc255ae3b6e67c143b1f12f1d4fcd0031c6e1ad4730b874e3f4b00b80c",
+      "bytes": 915
+    },
+    "documents/screenote-1778/pr.md": {
+      "sha256": "b2c521df56fee3e0778e8921f30f943f5198a124d0709e277e0245dff0bedfe0",
+      "bytes": 4641
+    },
+    "documents/screenote-1778/artifact.md": {
+      "sha256": "34d7e78b692b438f69a90aed2b5a7656947bd2414dc81a3645deb1dbec6ab885",
+      "bytes": 3019
+    },
+    "documents/screenote-1778/summary.md": {
+      "sha256": "29f117dd20526985009a389a86dc3cf1273d4a3bc95f4d8e09d44f3e5cd91255",
+      "bytes": 3146
+    },
+    "documents/screenote-1778/reviews/claude-ce-code-review-01.md": {
+      "sha256": "dbe90fee124b9fb90f8b022ca82b697bdc28f73536f8c4f289b020d07aed8f0a",
+      "bytes": 4586
+    },
+    "documents/screenote-1778/reviews/claude-ce-code-review-02.md": {
+      "sha256": "5e70d78e9f4a767f467f2ee10033c70c8e05161b33d082aa4746c033f7574508",
+      "bytes": 3147
+    },
+    "documents/screenote-1778/reviews/codex-ce-code-review-01.md": {
+      "sha256": "df5468c0b75dedbaa4323c646d6b6a30a6bc0f054902c143675bf5b58a651bb7",
+      "bytes": 945
+    },
+    "documents/screenote-1778/reviews/codex-ce-code-review-02.md": {
+      "sha256": "6453c707d3ee7186b019fc389b3b9299f609cef65aff7be57031ed522e6108fc",
+      "bytes": 515
+    },
+    "documents/screenote-1778/reviews/pr-review-toolkit-01.md": {
+      "sha256": "258c742145c89fc3dde310ff6d43c7460a757d8b5081eeeec60ce2038c920824",
+      "bytes": 3894
+    },
+    "documents/screenote-1778/reviews/pr-review-toolkit-02.md": {
+      "sha256": "75722677b6e06e36f4fc6d25693950475021db0e029d99313fbeee8256156305",
+      "bytes": 3208
+    },
+    "documents/screenote-1778/reviews/escalations-01.md": {
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "bytes": 149
+    },
+    "documents/screenote-1778/reviews/escalations-02.md": {
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "bytes": 149
+    },
+    "changes/screenote-1778.patch": {
+      "sha256": "cf0c2edb2e1e180b596f222cf7f13073859f3b305e62f31e9feed612a6449ae5",
+      "bytes": 118952
+    },
+    "data/tasks/screenote-1778.json": {
+      "sha256": "d60b27c0e7769f193fc207ba7a4544be4e8e69db127bb65dc2f1a15fe9f8b972",
+      "bytes": 6233
+    },
+    "documents/hive-24065/idea.md": {
+      "sha256": "13822c492b0ba72a62fba35cd576e3ddf7de455c0eea292d369687db9f3e00f3",
+      "bytes": 4152
+    },
+    "documents/hive-24065/brainstorm.md": {
+      "sha256": "ae9a7a195b837f1281c023b60a144193825847d64d3e519fdeb7c1d5f9962aa5",
+      "bytes": 15118
+    },
+    "documents/hive-24065/plan.md": {
+      "sha256": "c93a277fe0f60239f6ee323fb6f515fc5e3519653b45f20ad1d209ed71baec22",
+      "bytes": 71759
+    },
+    "documents/hive-24065/task.md": {
+      "sha256": "5e8b1a288f9739eccec598d03b569bc1892f7f20e8ebae9ad462725359f8b9cd",
+      "bytes": 2339
+    },
+    "documents/hive-24065/pr.md": {
+      "sha256": "3d18eefe687583eeba7af28414288afa168ea202c94fefae815951c7c35c2123",
+      "bytes": 3409
+    },
+    "documents/hive-24065/reviews/codex-ce-code-review-01.md": {
+      "sha256": "ee90f6d88971e71b3ea90b7544bcf847a68f271ee213e232093dd7cb001c6f5a",
+      "bytes": 9212
+    },
+    "documents/hive-24065/reviews/codex-ce-code-review-02.md": {
+      "sha256": "27154123dcac499743daf75bb99f21b82a8055691009f4b237767d8db3d016de",
+      "bytes": 7443
+    },
+    "documents/hive-24065/reviews/grok-ce-code-review-01.md": {
+      "sha256": "2faf89033cad9a1ba5aa3b4b49d960edaf76d49b8823d4e7f4f214ce2a2d74ec",
+      "bytes": 10195
+    },
+    "documents/hive-24065/reviews/grok-ce-code-review-02.md": {
+      "sha256": "0a3c25c0dfd14b8ed88617bccb2bef087216a2772d1fe93bbf851b693aef8e51",
+      "bytes": 8041
+    },
+    "documents/hive-24065/reviews/escalations-01.md": {
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "bytes": 149
+    },
+    "documents/hive-24065/reviews/escalations-02.md": {
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "bytes": 149
+    },
+    "data/tasks/hive-24065.json": {
+      "sha256": "89ec89d81d7a86c0fd76f941c9304ee5e8b07cf116940756a4299e0bfc9fe978",
+      "bytes": 5015
+    },
+    "documents/honeycomb-1848/idea.md": {
+      "sha256": "142cffd4c515ebb93a0579ee0a2dc7425f139a1035f2ccc2427cc4057873fda5",
+      "bytes": 2061
+    },
+    "documents/honeycomb-1848/brainstorm.md": {
+      "sha256": "432e61c994890aed075de4dc848b302b23f08eeb50df32fe76a0f32d3d04d4cd",
+      "bytes": 7752
+    },
+    "documents/honeycomb-1848/plan.md": {
+      "sha256": "dbeb44c0ebcec99599255e3d4b28498b1c5c170c1eb8e21e9b3eec640d13987b",
+      "bytes": 42502
+    },
+    "documents/honeycomb-1848/task.md": {
+      "sha256": "cde063237e9119cd4c5d2ba9be1c258c33f88bd0ba2268a89ffa461d49ea412b",
+      "bytes": 862
+    },
+    "documents/honeycomb-1848/pr.md": {
+      "sha256": "7981fe6c0455b8a700a32077adb388b4a9b10570141593dfb2c0261d87979eac",
+      "bytes": 2714
+    },
+    "documents/honeycomb-1848/artifact.md": {
+      "sha256": "50763c675a43609d877e9d083455a5b77143444b409df56414e8eb46699d512f",
+      "bytes": 3136
+    },
+    "documents/honeycomb-1848/summary.md": {
+      "sha256": "957458c32a4e2bca7ed15d2f5ce78472ed81062af1cb08532cd9ff606a7d53b3",
+      "bytes": 1780
+    },
+    "documents/honeycomb-1848/reviews/escalations-01.md": {
+      "sha256": "594bd4eec4f5fef8cc4bd5b5e4f933163ebc28951dc26cd5a862828130b6573f",
+      "bytes": 109
+    },
+    "changes/honeycomb-1848.patch": {
+      "sha256": "9de6d66c6dc28de08b5826a3c1093ff946ca2394f55b61e61a457be6893696e6",
+      "bytes": 190502
+    },
+    "data/tasks/honeycomb-1848.json": {
+      "sha256": "cc86f8f94532971de70a4f46f88095501a5e870e4271becaeb16019bd279fc5c",
+      "bytes": 4209
+    },
+    "documents/honeycomb-1849/idea.md": {
+      "sha256": "d2b7925c31be5c0634c5b38890c763907a093424c2d3906d4d80f2d90e37ffdb",
+      "bytes": 2149
+    },
+    "documents/honeycomb-1849/brainstorm.md": {
+      "sha256": "2af3303b1a0de66efc15df5b78c2551110cb33ff6b305b3862f9e8698245eb27",
+      "bytes": 7404
+    },
+    "documents/honeycomb-1849/plan.md": {
+      "sha256": "d2d483fbe5fc62107d513ff6f6cf3998d2fad1e224f53bdc14a63889ae4c3a70",
+      "bytes": 48695
+    },
+    "documents/honeycomb-1849/task.md": {
+      "sha256": "87ddeb6673c121d61726a221bc7b089b1210f97dfd18fa74c8fefe6027df9386",
+      "bytes": 2095
+    },
+    "documents/honeycomb-1849/pr.md": {
+      "sha256": "98e85d4e7fff28be499875d0dfeb252981322432eb6cbd8bbdd97cb91c7d4b97",
+      "bytes": 2419
+    },
+    "documents/honeycomb-1849/artifact.md": {
+      "sha256": "17e3eb92f5375e4ac9cb05ab23f67bb29b6d6fa96d9402bd120c842e0c5fdf46",
+      "bytes": 4696
+    },
+    "documents/honeycomb-1849/summary.md": {
+      "sha256": "8ca5fc3625a80ae70363294831b3bbeaaf09e2c791ba87c149cee72eae3d84ad",
+      "bytes": 1423
+    },
+    "documents/honeycomb-1849/reviews/escalations-01.md": {
+      "sha256": "594bd4eec4f5fef8cc4bd5b5e4f933163ebc28951dc26cd5a862828130b6573f",
+      "bytes": 109
+    },
+    "changes/honeycomb-1849.patch": {
+      "sha256": "28138a8c176bdf3aa89b18984eaaee61d238247ba22ce75bdf5c01838c8cbc81",
+      "bytes": 392992
+    },
+    "data/tasks/honeycomb-1849.json": {
+      "sha256": "c9488fe08b590baff47b3b1b9d1f8da3fa4eb2fed543ec0140e1ae2eb88efc75",
+      "bytes": 4167
+    },
+    "documents/agent-plugins-1930/idea.md": {
+      "sha256": "78b02ffa9d8f775887b3f63bec6bb3f58551119b3044cb17c54bacfac3c08e97",
+      "bytes": 3406
+    },
+    "documents/agent-plugins-1930/brainstorm.md": {
+      "sha256": "6c8c271c2b145b718780826d52d187f39265ef4004c516dffc1f56a903f68eb5",
+      "bytes": 13190
+    },
+    "documents/agent-plugins-1930/plan.md": {
+      "sha256": "c8edaf01e571a9320d2ae069e28f0bf07d9702f2162ff10df3ec5464a43d366c",
+      "bytes": 57958
+    },
+    "documents/agent-plugins-1930/task.md": {
+      "sha256": "2736cff9461e1039e2593ecda54b81f34be5e95c1f581e1c9d4f17f397551663",
+      "bytes": 1017
+    },
+    "documents/agent-plugins-1930/pr.md": {
+      "sha256": "1d6f9392664fcd1018f08de55c4b5adfa11c3571db54b42723c4c93f640c72b0",
+      "bytes": 2444
+    },
+    "documents/agent-plugins-1930/artifact.md": {
+      "sha256": "c7a981e261410636accddb73bb05910ece584faedfefb92e54dc961820ce25f1",
+      "bytes": 1608
+    },
+    "documents/agent-plugins-1930/summary.md": {
+      "sha256": "70f86eff438975513858722ba249f42567f8b30cdc11648101f8012686ad489d",
+      "bytes": 1966
+    },
+    "documents/agent-plugins-1930/reviews/escalations-01.md": {
+      "sha256": "594bd4eec4f5fef8cc4bd5b5e4f933163ebc28951dc26cd5a862828130b6573f",
+      "bytes": 109
+    },
+    "changes/agent-plugins-1930.patch": {
+      "sha256": "8ad4e8176b8781ef1d41359adaf64429b3c7e17df07bbd8fef350351e14423cc",
+      "bytes": 524288
+    },
+    "data/tasks/agent-plugins-1930.json": {
+      "sha256": "135bad5684a2cd41e33067eeda82a5551d9aba1f02f1ce4a5216df9fcbaee758",
+      "bytes": 4247
+    },
+    "documents/prdigest-9434/idea.md": {
+      "sha256": "e81cd1ae14d1a99c49fc0c25595b83583cbb098132217509ad915d5819a247e7",
+      "bytes": 5528
+    },
+    "documents/prdigest-9434/brainstorm.md": {
+      "sha256": "ec353d57dd04b50dd1d213b8def5956cebf46f6c2c3f7b9582d27d305e9a7e68",
+      "bytes": 10885
+    },
+    "documents/prdigest-9434/plan.md": {
+      "sha256": "85303a2818e122ff8738245986829dd4b43ecce17d1fdf6cad8cbc3ba1aa076e",
+      "bytes": 54323
+    },
+    "documents/prdigest-9434/task.md": {
+      "sha256": "408ef3ee8ee6a32dfab1ef42f9434173c2475921c0cf7db37135a009f9c30796",
+      "bytes": 1072
+    },
+    "documents/prdigest-9434/pr.md": {
+      "sha256": "2403accc88f66af23e1944186f9a0cb4b19e8cba912c674a7e2eb24bf8dd1ba2",
+      "bytes": 2757
+    },
+    "documents/prdigest-9434/artifact.md": {
+      "sha256": "a91ec2c818533e94e36b5316f2c4f87b08aeaadfd5240115b39ea27aa8191c0a",
+      "bytes": 1296
+    },
+    "documents/prdigest-9434/summary.md": {
+      "sha256": "6479b929510c5673b78fefc336844f5377fbe8fe4a05c81eaeeec36cbb2ed184",
+      "bytes": 1672
+    },
+    "documents/prdigest-9434/reviews/codex-ce-code-review-01.md": {
+      "sha256": "0f03c3f247178d1d95c6c9f01785fea22c18ddfcc5aa14d912c9b6fc7b6bb289",
+      "bytes": 4112
+    },
+    "documents/prdigest-9434/reviews/codex-ce-code-review-02.md": {
+      "sha256": "cda65fdb6a3fe0269c6b7e8da28c5e08a2d0cdfbcf095c8d554832a6451b3900",
+      "bytes": 4655
+    },
+    "documents/prdigest-9434/reviews/escalations-01.md": {
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "bytes": 149
+    },
+    "documents/prdigest-9434/reviews/escalations-02.md": {
+      "sha256": "51a495d934a97468205c5d91459dc566fbb824f6117ed55713767081b78c0750",
+      "bytes": 992
+    },
+    "changes/prdigest-9434.patch": {
+      "sha256": "27e98a6e8a85774b01f9eaf21ce7a8d68fed38d5a72a20ac18cb296a925b32c2",
+      "bytes": 155071
+    },
+    "data/tasks/prdigest-9434.json": {
+      "sha256": "6c71175c9891687e3da4f76eaed1b340028eb5c298dea3370f85db3ca5b41ef5",
+      "bytes": 5011
+    },
+    "documents/hive-43064/idea.md": {
+      "sha256": "1309556ed17569a6cbb33c5a43a4ca10fa849a61adcf6c508895bb35c10b28c2",
+      "bytes": 8170
+    },
+    "documents/hive-43064/brainstorm.md": {
+      "sha256": "7c5ca453260b7ae745db373b4ae0055976423fed6e6dc74d9d141a844275b9a7",
+      "bytes": 3801
+    },
+    "data/tasks/hive-43064.json": {
+      "sha256": "96366e0fa87cb0d30476dd227d303973cdf4c4befbd8de9aa9b9e35c5c1381f5",
+      "bytes": 6255
+    },
+    "documents/hive-42445/idea.md": {
+      "sha256": "d26fb59174f2d37be420283f1f3add1879c4bd1b2bf7053a30075b080a71a302",
+      "bytes": 6648
+    },
+    "documents/hive-42445/brainstorm.md": {
+      "sha256": "f9f0385e0406da173730fed3d1b04e82234d8771c1789f9f08a415b8d947ab94",
+      "bytes": 7196
+    },
+    "documents/hive-42445/plan.md": {
+      "sha256": "d3b563c42d1d68ad204b391a7e2b43cb207d7067ce2ade83326c856c3d658996",
+      "bytes": 28512
+    },
+    "documents/hive-42445/task.md": {
+      "sha256": "baada3f128c03a386d3c27fb564b12d393fe7c340d513d3643ebabef9996cbcc",
+      "bytes": 2006
+    },
+    "data/tasks/hive-42445.json": {
+      "sha256": "e46c0892ac2f86e42b8e20c6062a1b7301f4c5f28753fd47c3144e5e87799f01",
+      "bytes": 2062
+    },
+    "data/status.json": {
+      "sha256": "bb2711a5a421d9e5ca1d3839787bf5fd6d18fd5e307ec4a6b77a9806230b58c8",
+      "bytes": 7925
+    },
+    "data/workflows.json": {
+      "sha256": "22598a7c3b2431bd886dc6f48090c3e86a1b44570742674ae47ffee8504613fc",
+      "bytes": 5725
+    },
+    "data/modules.json": {
+      "sha256": "8456f0e4c7dfe100d1b54fa0f7c9e8e848a57192c950f3ff745763c8a7ab84d4",
+      "bytes": 3321
+    },
+    "data/patrol.json": {
+      "sha256": "bcf260f99a58bc3d0ca48e016a8c7e31822d278b9acd3138d6f1c7fce92ad1e0",
+      "bytes": 17983
+    },
+    "data/digest.json": {
+      "sha256": "06ba8cce2aee91fc9a7015784191b32b63b6101641c5a88516f69ee78d7adf3a",
+      "bytes": 6673
+    },
+    "data/repos.json": {
+      "sha256": "7c7c7f41dcf6d9faaa53c4bc7e45bc02b49c6961b6497c9ae1cd704307c7fda8",
+      "bytes": 3101
+    },
+    "data/snapshot.json": {
+      "sha256": "256e6eda6f4aa5098e624cbf30eae0addbc1ac283d4b34a38a7f5e494fdae48b",
+      "bytes": 7785
+    }
+  },
+  "redactions": [
+    {
+      "path": "documents/screenote-42619/pr.md",
+      "reason": "Local repository paths are not publishable",
+      "matches": 1
+    },
+    {
+      "path": "documents/screenote-42619/reviews/codex-native-review-04.md",
+      "reason": "Local task worktree paths are not publishable",
+      "matches": 10
+    },
+    {
+      "path": "documents/hive-42430/task.md",
+      "reason": "Local installation paths are not publishable",
+      "matches": 1
+    },
+    {
+      "path": "documents/hive-42430/reviews/codex-ce-code-review-02.md",
+      "reason": "Local installation paths are not publishable",
+      "matches": 1
+    },
+    {
+      "path": "changes/screenote-1777.patch",
+      "reason": "Local repository paths are not publishable",
+      "matches": 14
+    },
+    {
+      "path": "changes/screenote-1777.patch",
+      "reason": "Local installation paths are not publishable",
+      "matches": 7
+    },
+    {
+      "path": "changes/screenote-1777.patch",
+      "reason": "Personal email addresses are not publishable",
+      "matches": 5
+    },
+    {
+      "path": "changes/honeycomb-1848.patch",
+      "reason": "Personal email addresses are not publishable",
+      "matches": 1
+    },
+    {
+      "path": "documents/honeycomb-1848/task.md",
+      "reason": "Local task worktree paths are not publishable",
+      "matches": 1
+    },
+    {
+      "path": "changes/honeycomb-1849.patch",
+      "reason": "Personal email addresses are not publishable",
+      "matches": 5
+    },
+    {
+      "path": "documents/honeycomb-1849/task.md",
+      "reason": "Local task worktree paths are not publishable",
+      "matches": 2
+    },
+    {
+      "path": "documents/prdigest-9434/idea.md",
+      "reason": "Local repository paths are not publishable",
+      "matches": 4
+    },
+    {
+      "path": "documents/hive-42445/task.md",
+      "reason": "Local repository paths are not publishable",
+      "matches": 1
+    }
+  ],
+  "omissions": [
+    {
+      "reason": "Review bookkeeping sentinels, suppression ledgers, and machine status chatter are excluded from reader evidence.",
+      "count": 41
+    },
+    {
+      "reason": "Internal outcome-evidence generations and execution logs remain private; public merge evidence is captured separately.",
+      "count": 1
+    }
+  ]
+}

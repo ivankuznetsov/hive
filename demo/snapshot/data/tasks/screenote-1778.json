@@ -1,0 +1,191 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "screenote",
+  "repository": "ivankuznetsov/screenote",
+  "id": 1778,
+  "slug": "replace-screenote-cli-api-key-260708-545b",
+  "title": "OAuth-first CLI authentication",
+  "role": "supporting",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-07-10T00:16:52.954782Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T09:11:03.263Z",
+  "observed_at": null,
+  "age_seconds": 1526624,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/screenote-1778/idea.md",
+      "bytes": 1812,
+      "sha256": "d2cf4e1101ad1e0e2d332b1c3eb79f908cb238abb41122c8e3d8c292c979c80d",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/screenote-1778/brainstorm.md",
+      "bytes": 9828,
+      "sha256": "fa31365ef3ea5c07f0d2378506dab067d16fdfaeeb8adf34def115d0bc45066a",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/screenote-1778/plan.md",
+      "bytes": 20356,
+      "sha256": "3ae9844fb50033c92f6e0db7bbf003a906d87ff4ba9b8fd743f8cfc368b1e6db",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/screenote-1778/task.md",
+      "bytes": 915,
+      "sha256": "412b47dc255ae3b6e67c143b1f12f1d4fcd0031c6e1ad4730b874e3f4b00b80c",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/screenote-1778/pr.md",
+      "bytes": 4641,
+      "sha256": "b2c521df56fee3e0778e8921f30f943f5198a124d0709e277e0245dff0bedfe0",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "artifact.md",
+      "path": "documents/screenote-1778/artifact.md",
+      "bytes": 3019,
+      "sha256": "34d7e78b692b438f69a90aed2b5a7656947bd2414dc81a3645deb1dbec6ab885",
+      "role": "artifact",
+      "format": "markdown"
+    },
+    {
+      "name": "summary.md",
+      "path": "documents/screenote-1778/summary.md",
+      "bytes": 3146,
+      "sha256": "29f117dd20526985009a389a86dc3cf1273d4a3bc95f4d8e09d44f3e5cd91255",
+      "role": "outcome",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/claude-ce-code-review-01.md",
+      "path": "documents/screenote-1778/reviews/claude-ce-code-review-01.md",
+      "bytes": 4586,
+      "sha256": "dbe90fee124b9fb90f8b022ca82b697bdc28f73536f8c4f289b020d07aed8f0a",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/claude-ce-code-review-02.md",
+      "path": "documents/screenote-1778/reviews/claude-ce-code-review-02.md",
+      "bytes": 3147,
+      "sha256": "5e70d78e9f4a767f467f2ee10033c70c8e05161b33d082aa4746c033f7574508",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-01.md",
+      "path": "documents/screenote-1778/reviews/codex-ce-code-review-01.md",
+      "bytes": 945,
+      "sha256": "df5468c0b75dedbaa4323c646d6b6a30a6bc0f054902c143675bf5b58a651bb7",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-02.md",
+      "path": "documents/screenote-1778/reviews/codex-ce-code-review-02.md",
+      "bytes": 515,
+      "sha256": "6453c707d3ee7186b019fc389b3b9299f609cef65aff7be57031ed522e6108fc",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/pr-review-toolkit-01.md",
+      "path": "documents/screenote-1778/reviews/pr-review-toolkit-01.md",
+      "bytes": 3894,
+      "sha256": "258c742145c89fc3dde310ff6d43c7460a757d8b5081eeeec60ce2038c920824",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/pr-review-toolkit-02.md",
+      "path": "documents/screenote-1778/reviews/pr-review-toolkit-02.md",
+      "bytes": 3208,
+      "sha256": "75722677b6e06e36f4fc6d25693950475021db0e029d99313fbeee8256156305",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/screenote-1778/reviews/escalations-01.md",
+      "bytes": 149,
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-02.md",
+      "path": "documents/screenote-1778/reviews/escalations-02.md",
+      "bytes": 149,
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/screenote-1778/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/screenote",
+    "url": "https://github.com/ivankuznetsov/screenote/pull/37",
+    "number": 37,
+    "state": "MERGED",
+    "merged_at": "2026-07-09T22:03:40Z",
+    "merge_oid": "8d64ebb4a5d3d9f98d575da70c97750d15f7ae82",
+    "head_oid": "9048f104717edb9cbbcd1c4ce7d503257cbd08ee",
+    "base_branch": "main",
+    "branch": "replace-screenote-cli-api-key-260708-545b",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "available",
+    "path": "changes/screenote-1778.patch",
+    "bytes": 118952,
+    "sha256": "cf0c2edb2e1e180b596f222cf7f13073859f3b305e62f31e9feed612a6449ae5",
+    "truncated": false,
+    "redacted": false,
+    "provenance": {
+      "repository": "ivankuznetsov/screenote",
+      "url": "https://github.com/ivankuznetsov/screenote/pull/37",
+      "number": 37,
+      "state": "MERGED",
+      "merged_at": "2026-07-09T22:03:40Z",
+      "merge_oid": "8d64ebb4a5d3d9f98d575da70c97750d15f7ae82",
+      "head_oid": "9048f104717edb9cbbcd1c4ce7d503257cbd08ee",
+      "base_branch": "main",
+      "branch": "replace-screenote-cli-api-key-260708-545b",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

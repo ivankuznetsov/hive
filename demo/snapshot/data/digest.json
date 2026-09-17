@@ -1,0 +1,187 @@
+{
+  "schema": "hive-digest",
+  "schema_version": 1,
+  "ok": true,
+  "reader_status": "ok",
+  "record_id": "6955d234cfbf4a73bddea557c30bb3e5652d5f177ee17ce56871b1580f4cd35f",
+  "interval_id": "5e317af199bef148b0375df15fcfce5627dfdc3636334026cb9e61a7636c0a24",
+  "local_date": "2026-09-15",
+  "sequence": null,
+  "time_zone": "Europe/London",
+  "starts_at": "2026-09-14T23:00:00.000000Z",
+  "ends_at": "2026-09-15T23:00:00.000000Z",
+  "duration_seconds": 86400,
+  "boundary_kind": "calendar_day",
+  "lifecycle": "closed",
+  "closed_at": "2026-09-16T18:36:20.771230Z",
+  "completeness": "complete",
+  "content": "non_empty",
+  "last_materialized_at": "2026-09-16T18:36:20.771230Z",
+  "stale": false,
+  "selected_project": null,
+  "projects": [
+    {
+      "project_id": "43bc4dce-186b-4cb6-af28-5f5b0733835e",
+      "registration_id": "legacy:43bc4dce-186b-4cb6-af28-5f5b0733835e",
+      "name": "agent-plugins",
+      "repository_identity": "github.com/ivankuznetsov/agent-plugins"
+    },
+    {
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "name": "hive",
+      "repository_identity": "github.com/ivankuznetsov/hive"
+    },
+    {
+      "project_id": "f33d0fd5-9deb-4f77-a7ca-31eb3ece0f1c",
+      "registration_id": "legacy:f33d0fd5-9deb-4f77-a7ca-31eb3ece0f1c",
+      "name": "honeycomb",
+      "repository_identity": "github.com/ivankuznetsov/honeycomb"
+    },
+    {
+      "project_id": "01cee3db-d804-4eff-9760-b3fb8641f6d3",
+      "registration_id": "legacy:01cee3db-d804-4eff-9760-b3fb8641f6d3",
+      "name": "prdigest",
+      "repository_identity": "github.com/ivankuznetsov/prdigest"
+    },
+    {
+      "project_id": "8b92d0dd-b9bb-4c6f-8767-27961c08501e",
+      "registration_id": "legacy:8b92d0dd-b9bb-4c6f-8767-27961c08501e",
+      "name": "screenote",
+      "repository_identity": "github.com/ivankuznetsov/screenote"
+    }
+  ],
+  "attention": [],
+  "items": [
+    {
+      "fact_id": "https://github.com/ivankuznetsov/hive/pull/1423",
+      "kind": "pr_merged",
+      "category": "completed",
+      "summary": "fix(archive): cancel unwanted tasks without claiming delivery",
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "project": "hive",
+      "occurred_at": "2026-09-15T09:20:53Z",
+      "source": "prdigest",
+      "pr": {
+        "number": 1423,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1423"
+      }
+    },
+    {
+      "fact_id": "https://github.com/ivankuznetsov/hive/pull/1428",
+      "kind": "pr_merged",
+      "category": "completed",
+      "summary": "Fix benchmark runner dropping command arguments",
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "project": "hive",
+      "occurred_at": "2026-09-15T10:17:03Z",
+      "source": "prdigest",
+      "pr": {
+        "number": 1428,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1428"
+      }
+    },
+    {
+      "fact_id": "https://github.com/ivankuznetsov/hive/pull/1431",
+      "kind": "pr_merged",
+      "category": "completed",
+      "summary": "Escape babysitter branch arguments and pin the push lease",
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "project": "hive",
+      "occurred_at": "2026-09-15T11:02:47Z",
+      "source": "prdigest",
+      "pr": {
+        "number": 1431,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1431"
+      }
+    },
+    {
+      "fact_id": "https://github.com/ivankuznetsov/hive/pull/1438",
+      "kind": "pr_merged",
+      "category": "completed",
+      "summary": "Stop benchmark execution when the planner fails",
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "project": "hive",
+      "occurred_at": "2026-09-15T11:19:45Z",
+      "source": "prdigest",
+      "pr": {
+        "number": 1438,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1438"
+      }
+    },
+    {
+      "fact_id": "https://github.com/ivankuznetsov/hive/pull/1440",
+      "kind": "pr_merged",
+      "category": "completed",
+      "summary": "chore(deps)(deps-dev): bump rubocop from 1.90.0 to 1.91.0",
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "project": "hive",
+      "occurred_at": "2026-09-15T13:46:03Z",
+      "source": "prdigest",
+      "pr": {
+        "number": 1440,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1440"
+      }
+    },
+    {
+      "fact_id": "https://github.com/ivankuznetsov/hive/pull/1295",
+      "kind": "pr_merged",
+      "category": "completed",
+      "summary": "fix(patrol): park secret-blocked publications",
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "project": "hive",
+      "occurred_at": "2026-09-15T17:57:13Z",
+      "source": "prdigest",
+      "pr": {
+        "number": 1295,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1295"
+      }
+    },
+    {
+      "fact_id": "https://github.com/ivankuznetsov/hive/pull/1442",
+      "kind": "pr_merged",
+      "category": "completed",
+      "summary": "fix(web): group workflows and modules under Honeycombs",
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "project": "hive",
+      "occurred_at": "2026-09-15T20:35:50Z",
+      "source": "prdigest",
+      "pr": {
+        "number": 1442,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1442"
+      }
+    },
+    {
+      "fact_id": "https://github.com/ivankuznetsov/hive/pull/1443",
+      "kind": "pr_merged",
+      "category": "completed",
+      "summary": "fix(web): improve loading layout and mobile navigation",
+      "project_id": "516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "registration_id": "legacy:516a2c82-e87b-4f67-b33d-3fe6030fcb2d",
+      "project": "hive",
+      "occurred_at": "2026-09-15T22:17:00Z",
+      "source": "prdigest",
+      "pr": {
+        "number": 1443,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1443"
+      }
+    }
+  ],
+  "amendments": [],
+  "previous_date": null,
+  "next_date": null,
+  "coverage_started_at": null,
+  "pruned_at": null,
+  "document": null,
+  "selected_project_view": true,
+  "view_label": "Selected public-project view",
+  "filtered_item_count": 3,
+  "source_total_items": 11
+}

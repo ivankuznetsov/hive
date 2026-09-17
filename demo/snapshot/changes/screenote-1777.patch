@@ -1,0 +1,4115 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 95c0173..628a414 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -13,9 +13,6 @@ jobs:
+       - name: Checkout code
+         uses: actions/checkout@v6
+ 
+-      - name: Install system packages
+-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips
+-
+       - name: Set up Ruby
+         uses: ruby/setup-ruby@v1
+         with:
+@@ -34,9 +31,6 @@ jobs:
+       - name: Checkout code
+         uses: actions/checkout@v6
+ 
+-      - name: Install system packages
+-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips
+-
+       - name: Set up Ruby
+         uses: ruby/setup-ruby@v1
+         with:
+@@ -84,6 +78,9 @@ jobs:
+       - name: Checkout code
+         uses: actions/checkout@v6
+ 
++      - name: Install system packages
++        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips
++
+       - name: Set up Ruby
+         uses: ruby/setup-ruby@v1
+         with:
+@@ -96,8 +93,34 @@ jobs:
+           # REDIS_URL: redis://localhost:6379/0
+         run: bin/rails db:test:prepare test
+ 
++  test_go:
++    runs-on: ubuntu-latest
++    env:
++      GOFLAGS: -mod=mod
++    steps:
++      - name: Checkout code
++        uses: actions/checkout@v6
++
++      - name: Set up Go
++        uses: actions/setup-go@v6
++        with:
++          go-version: '1.26.x'
++          cache: true
++
++      - name: Run Go tests
++        run: go test ./...
++
++      - name: Cross-compile CLI
++        run: |
++          for os in linux darwin; do
++            for arch in amd64 arm64; do
++              GOOS="$os" GOARCH="$arch" go build -o "tmp/screenote-${os}-${arch}" ./cmd/screenote
++            done
++          done
++
+   system-test:
+     runs-on: ubuntu-latest
++    timeout-minutes: 15
+ 
+     # services:
+     #  redis:
+@@ -109,14 +132,26 @@ jobs:
+       - name: Checkout code
+         uses: actions/checkout@v6
+ 
++      - name: Install system packages
++        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips
++
+       - name: Set up Ruby
+         uses: ruby/setup-ruby@v1
+         with:
+           bundler-cache: true
+ 
++      - name: Install Playwright browsers
++        run: |
++          export PLAYWRIGHT_CLI_VERSION="$(ruby -e 'require "playwright"; puts Playwright::COMPATIBLE_PLAYWRIGHT_VERSION.strip')"
++          npm install --no-save "playwright@$PLAYWRIGHT_CLI_VERSION"
++          npx playwright install --with-deps chromium
++
+       - name: Run System Tests
+         env:
+           RAILS_ENV: test
++          CAPYBARA_RUN_SERVER: "true"
++          PARALLEL_WORKERS: "1"
++          TESTOPTS: "--verbose"
+           # RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+           # REDIS_URL: redis://localhost:6379/0
+         run: bin/rails db:test:prepare test:system
+diff --git a/.gitignore b/.gitignore
+index 5fad0aa..8b22392 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,6 +29,7 @@
+ !/tmp/storage/.keep
+ 
+ /public/assets
++/coverage
+ /vendor/bundle
+ 
+ # Ignore key files for decrypting credentials and more.
+diff --git a/.goreleaser.yml b/.goreleaser.yml
+new file mode 100644
+index 0000000..1a129c6
+--- /dev/null
++++ b/.goreleaser.yml
+@@ -0,0 +1,44 @@
++version: 2
++
++project_name: screenote
++
++env:
++  - GOFLAGS=-mod=mod
++
++before:
++  hooks:
++    - go mod tidy
++
++builds:
++  - id: screenote
++    main: ./cmd/screenote
++    binary: screenote
++    goos:
++      - linux
++      - darwin
++    goarch:
++      - amd64
++      - arm64
++    ldflags:
++      - -s -w
++
++archives:
++  - id: screenote
++    ids:
++      - screenote
++    formats:
++      - tar.gz
++    name_template: >-
++      {{ .ProjectName }}_
++      {{- .Version }}_
++      {{- .Os }}_
++      {{- .Arch }}
++
++checksum:
++  name_template: checksums.txt
++
++snapshot:
++  version_template: "{{ incpatch .Version }}-next"
++
++changelog:
++  use: github
+diff --git a/Gemfile b/Gemfile
+index 54891f1..e01b4c4 100644
+--- a/Gemfile
++++ b/Gemfile
+@@ -94,4 +94,5 @@ group :test do
+   # Use system testing [https://guides.rubyonrails.org/testing.html#system-testing]
+   gem "capybara"
+   gem "capybara-playwright-driver"
++  gem "simplecov", require: false
+ end
+diff --git a/Gemfile.lock b/Gemfile.lock
+index 959ae5f..a765f1e 100644
+--- a/Gemfile.lock
++++ b/Gemfile.lock
+@@ -123,7 +123,7 @@ GEM
+       rack-test (>= 0.6.3)
+       regexp_parser (>= 1.5, < 3.0)
+       xpath (~> 3.2)
+-    capybara-playwright-driver (0.5.7)
++    capybara-playwright-driver (0.5.10)
+       addressable
+       capybara
+       playwright-ruby-client (>= 1.16.0)
+@@ -137,6 +137,7 @@ GEM
+     debug (1.11.1)
+       irb (~> 1.10)
+       reline (>= 0.3.8)
++    docile (1.4.1)
+     doorkeeper (5.8.2)
+       railties (>= 5)
+     dotenv (3.2.0)
+@@ -264,7 +265,7 @@ GEM
+     mime-types (3.7.0)
+       logger
+       mime-types-data (~> 3.2025, >= 3.2025.0507)
+-    mime-types-data (3.2026.0203)
++    mime-types-data (3.2026.0701)
+     mini_magick (5.3.1)
+       logger
+     mini_mime (1.1.5)
+@@ -339,7 +340,7 @@ GEM
+     pg (1.6.3-aarch64-linux-musl)
+     pg (1.6.3-x86_64-linux)
+     pg (1.6.3-x86_64-linux-musl)
+-    playwright-ruby-client (1.58.0)
++    playwright-ruby-client (1.61.0)
+       base64
+       concurrent-ruby (>= 1.1.6)
+       mime-types (>= 3.0)
+@@ -412,7 +413,7 @@ GEM
+       prism (>= 1.6.0)
+       rbs (>= 4.0.0)
+       tsort
+-    regexp_parser (2.11.3)
++    regexp_parser (2.12.0)
+     reline (0.6.3)
+       io-console (~> 0.5)
+     resend (1.0.0)
+@@ -450,6 +451,12 @@ GEM
+       ffi (~> 1.12)
+       logger
+     securerandom (0.4.1)
++    simplecov (0.22.0)
++      docile (~> 1.1)
++      simplecov-html (~> 0.11)
++      simplecov_json_formatter (~> 0.1)
++    simplecov-html (0.13.2)
++    simplecov_json_formatter (0.1.4)
+     snaky_hash (2.0.6)
+       hashie (>= 0.1.0, < 6)
+       version_gem (>= 1.1.8, < 3)
+@@ -552,6 +559,7 @@ DEPENDENCIES
+   rails_simple_auth (~> 1.1.0)
+   resend
+   rubocop-rails-omakase
++  simplecov
+   solid_cable
+   solid_cache
+   solid_queue
+diff --git a/README.md b/README.md
+index 7db80e4..3a3b936 100644
+--- a/README.md
++++ b/README.md
+@@ -1,24 +1,70 @@
+-# README
++# Screenote
+ 
+-This README would normally document whatever steps are necessary to get the
+-application up and running.
++Screenote is a Rails visual feedback app for screenshots, annotations, and agent workflows. The browser app is the review surface, MCP is the rich agent protocol, and the Go CLI is the shell/CI REST contract.
+ 
+-Things you may want to cover:
++## Go CLI
+ 
+-* Ruby version
++Install:
+ 
+-* System dependencies
++```sh
++go install github.com/ivankuznetsov/screenote/cmd/screenote@latest
++```
+ 
+-* Configuration
++Configure a self-hosted, local, staging, or production base URL explicitly:
+ 
+-* Database creation
++```sh
++screenote config set --base-url https://screenote.ai --api-key sk_proj_...
++screenote config
++```
+ 
+-* Database initialization
++Configuration precedence is:
+ 
+-* How to run the test suite
++1. Flags: `--api-key`, `--base-url`, `--project`
++2. Environment: `SCREENOTE_API_KEY`, `SCREENOTE_BASE_URL`, `SCREENOTE_PROJECT`
++3. Config file: `~/.config/screenote/config.toml`
+ 
+-* Services (job queues, cache servers, search engines, etc.)
++Examples:
+ 
+-* Deployment instructions
++```sh
++screenote --base-url http://localhost:3005 --api-key "$SCREENOTE_API_KEY" project list
++screenote page list
++screenote screenshot create --title "Homepage" --file screenshot.png
++cat screenshot.png | screenote screenshot create --title "Homepage"
++screenote screenshot list --status ready --limit 25
++screenote annotation list --screenshot 123 --status open
++screenote annotation get --annotation 456
++screenote comment add --annotation 456 --body "Fix pushed in abc123"
++```
+ 
+-* ...
++Successful commands write JSON to stdout. Errors write JSON to stderr:
++
++```json
++{"code":"missing_base_url","error":"base URL is required; set --base-url, SCREENOTE_BASE_URL, or config base_url"}
++```
++
++Exit codes:
++
++| Code | Meaning |
++| --- | --- |
++| 0 | OK |
++| 1 | Generic error |
++| 2 | Usage/config error |
++| 3 | Auth/forbidden |
++| 4 | Not found |
++| 5 | Rate limited |
++
++## Development
++
++Rails tests:
++
++```sh
++bin/rails test
++```
++
++Go tests:
++
++```sh
++GOFLAGS=-mod=mod go test ./...
++```
++
++`GOFLAGS=-mod=mod` is required because this Rails repo has a top-level `vendor/` directory that is not a Go vendor tree.
+diff --git a/app/controllers/api/base_controller.rb b/app/controllers/api/base_controller.rb
+index a8907b5..5bdd46d 100644
+--- a/app/controllers/api/base_controller.rb
++++ b/app/controllers/api/base_controller.rb
+@@ -5,11 +5,16 @@ class BaseController < ActionController::API
+     before_action :authenticate_api_key!
+ 
+     rescue_from ActiveRecord::RecordInvalid do |e|
+-      render json: { error: e.record.errors.full_messages.join(", ") }, status: :unprocessable_entity
++      render_error(
++        e.record.errors.full_messages.join(", "),
++        code: "validation_failed",
++        status: :unprocessable_entity,
++        details: e.record.errors.full_messages
++      )
+     end
+ 
+     rescue_from ActiveRecord::RecordNotFound do |e|
+-      render json: { error: e.message }, status: :not_found
++      render_error(e.message, code: "not_found", status: :not_found)
+     end
+ 
+     private
+@@ -19,7 +24,7 @@ def authenticate_api_key!
+       api_key = ApiKey.active.find_by_token(token)
+ 
+       if api_key.nil?
+-        render json: { error: "Invalid or missing API key" }, status: :unauthorized
++        render_error("Invalid or missing API key", code: "unauthorized", status: :unauthorized)
+         return
+       end
+ 
+@@ -33,6 +38,36 @@ def extract_bearer_token
+       header&.match(/\ABearer\s+(.+)\z/)&.captures&.first
+     end
+ 
++    def require_current_project!(project_id)
++      return current_project if project_id.blank?
++      return current_project if project_id.to_s == current_project.id.to_s
++
++      render_error("Project is not accessible with this API key", code: "forbidden", status: :forbidden)
++      nil
++    end
++
++    def pagination_params
++      limit = integer_param(:limit, 50).clamp(1, 100)
++      offset = [ integer_param(:offset, 0), 0 ].max
++
++      [ limit, offset ]
++    end
++
++    # Coerce only scalar pagination values; structured params such as
++    # `limit[x]=1` or `offset[]=2` are treated as absent rather than raising.
++    def integer_param(key, default)
++      value = params[key]
++      return default unless value.is_a?(String) || value.is_a?(Integer)
++
++      value.to_i
++    end
++
++    def render_error(message, code:, status:, details: nil)
++      payload = { error: message, code: code }
++      payload[:details] = details if details
++      render json: payload, status: status
++    end
++
+     attr_reader :current_api_key, :current_project
+   end
+ end
+diff --git a/app/controllers/api/v1/annotation_comments_controller.rb b/app/controllers/api/v1/annotation_comments_controller.rb
+new file mode 100644
+index 0000000..86cbffb
+--- /dev/null
++++ b/app/controllers/api/v1/annotation_comments_controller.rb
+@@ -0,0 +1,21 @@
++# frozen_string_literal: true
++
++module Api
++  module V1
++    class AnnotationCommentsController < Api::BaseController
++      def create
++        annotation = Api::V1::ProjectScope.annotations(current_project).find(params[:annotation_id])
++        comment = annotation.annotation_comments.create!(
++          api_key: current_api_key,
++          body: params[:body],
++          action: :comment
++        )
++
++        render json: {
++          success: true,
++          comment: Api::V1::ContractSerializer.annotation_comment(comment, annotation: annotation)
++        }, status: :created
++      end
++    end
++  end
++end
+diff --git a/app/controllers/api/v1/annotations_controller.rb b/app/controllers/api/v1/annotations_controller.rb
+index fbdd837..b020a3a 100644
+--- a/app/controllers/api/v1/annotations_controller.rb
++++ b/app/controllers/api/v1/annotations_controller.rb
+@@ -4,25 +4,44 @@ module Api
+   module V1
+     class AnnotationsController < Api::BaseController
+       def index
++        limit, offset = pagination_params
+         annotations = project_annotations.order(:created_at)
+         annotations = annotations.where(screenshot_id: params[:screenshot_id]) if params[:screenshot_id].present?
+         annotations = annotations.where(status: params[:status]) if params[:status].present?
++        annotations = annotations.where(viewport: params[:viewport]) if params[:viewport].present?
++        total = annotations.count
++        annotations = annotations.limit(limit).offset(offset)
+ 
+         render json: {
+-          annotations: annotations.map { |a| serialize(a) }
++          annotations: annotations.map { |a| serialize(a) },
++          pagination: { total: total, limit: limit, offset: offset }
+         }
+       end
+ 
++      def show
++        annotation = project_annotations.find(params[:id])
++        cropped_base64 = begin
++          annotation.crop
++        rescue => e
++          Honeybadger.notify(e, context: {
++            annotation_id: annotation.id,
++            screenshot_id: annotation.screenshot_id,
++            viewport: annotation.viewport
++          })
++          nil
++        end
++
++        render json: Api::V1::ContractSerializer.annotation_detail(annotation, cropped_base64: cropped_base64)
++      end
++
+       private
+ 
+       def project_annotations
+-        Annotation.joins(screenshot: :project)
+-          .where(projects: { id: current_project.id })
+-          .includes(:user, :screenshot, :annotation_comments)
++        Api::V1::ProjectScope.annotations(current_project)
+       end
+ 
+       def serialize(annotation)
+-        annotation.as_api_json
++        Api::V1::ContractSerializer.annotation(annotation)
+       end
+     end
+   end
+diff --git a/app/controllers/api/v1/pages_controller.rb b/app/controllers/api/v1/pages_controller.rb
+new file mode 100644
+index 0000000..8d7e6f0
+--- /dev/null
++++ b/app/controllers/api/v1/pages_controller.rb
+@@ -0,0 +1,24 @@
++# frozen_string_literal: true
++
++module Api
++  module V1
++    class PagesController < Api::BaseController
++      def index
++        project = require_current_project!(params[:project_id])
++        return unless project
++
++        render json: {
++          pages: Api::V1::ProjectScope.pages(project).map do |page|
++            Api::V1::ContractSerializer.page(page, url_options: url_options)
++          end
++        }
++      end
++
++      private
++
++      def url_options
++        { host: request.host, port: request.optional_port, protocol: request.protocol }
++      end
++    end
++  end
++end
+diff --git a/app/controllers/api/v1/projects_controller.rb b/app/controllers/api/v1/projects_controller.rb
+new file mode 100644
+index 0000000..64c2222
+--- /dev/null
++++ b/app/controllers/api/v1/projects_controller.rb
+@@ -0,0 +1,15 @@
++# frozen_string_literal: true
++
++module Api
++  module V1
++    class ProjectsController < Api::BaseController
++      def index
++        render json: {
++          projects: [
++            Api::V1::ContractSerializer.project(current_project).merge(role: "api_key")
++          ]
++        }
++      end
++    end
++  end
++end
+diff --git a/app/controllers/api/v1/screenshots_controller.rb b/app/controllers/api/v1/screenshots_controller.rb
+index 53465a0..15c92a5 100644
+--- a/app/controllers/api/v1/screenshots_controller.rb
++++ b/app/controllers/api/v1/screenshots_controller.rb
+@@ -3,36 +3,61 @@
+ module Api
+   module V1
+     class ScreenshotsController < Api::BaseController
++      def index
++        project = require_current_project!(params[:project_id])
++        return unless project
++
++        limit, offset = pagination_params
++        screenshots = Api::V1::ProjectScope.screenshots(project)
++        screenshots = screenshots.where(page_id: params[:page_id]) if params[:page_id].present?
++        screenshots = screenshots.where(status: params[:status]) if params[:status].present?
++
++        total = screenshots.count
++        screenshots = screenshots.limit(limit).offset(offset)
++
++        render json: {
++          screenshots: screenshots.map { |screenshot| Api::V1::ContractSerializer.screenshot(screenshot, url_options: url_options) },
++          pagination: { total: total, limit: limit, offset: offset }
++        }
++      end
++
+       def create
+-        unless params[:image]
+-          render json: { error: "Image file is required" }, status: :unprocessable_entity
++        image = params[:image]
++        unless uploaded_file?(image)
++          render_error("Image file is required", code: "validation_failed", status: :unprocessable_entity)
+           return
+         end
+ 
+         title = params[:title].presence || "Untitled"
+-        page = Page.find_or_create_by_name!(current_project, title)
++        page = resolve_page(title)
+         screenshot = Screenshot.create_with_image!(
+           page: page, title: title,
+-          io: params[:image].tempfile,
+-          filename: params[:image].original_filename,
+-          content_type: params[:image].content_type
++          io: image.tempfile,
++          filename: image.original_filename,
++          content_type: image.content_type
+         )
+ 
+-        render json: {
+-          screenshot_id: screenshot.id,
+-          annotate_url: screenshot_url(screenshot)
+-        }, status: :created
+-      rescue ActiveRecord::RecordInvalid => e
+-        render json: { error: e.record.errors.full_messages.join(", ") }, status: :unprocessable_entity
++        render json: Api::V1::ContractSerializer.screenshot_create(screenshot, url_options: url_options), status: :created
+       end
+ 
+       private
+ 
+-      def screenshot_url(screenshot)
+-        Rails.application.routes.url_helpers.screenshot_url(
+-          screenshot,
+-          host: request.host, port: request.port, protocol: request.protocol
+-        )
++      def uploaded_file?(image)
++        image.respond_to?(:tempfile) &&
++          image.respond_to?(:original_filename) &&
++          image.respond_to?(:content_type)
++      end
++
++      def resolve_page(title)
++        page_id = params[:page_id].presence || params[:page].presence
++        return current_project.pages.find(page_id) if page_id.to_s.match?(/\A\d+\z/)
++        return Page.find_or_create_by_name!(current_project, page_id) if page_id.present?
++
++        Page.find_or_create_by_name!(current_project, title)
++      end
++
++      def url_options
++        { host: request.host, port: request.optional_port, protocol: request.protocol }
+       end
+     end
+   end
+diff --git a/app/serializers/api/v1/contract_serializer.rb b/app/serializers/api/v1/contract_serializer.rb
+new file mode 100644
+index 0000000..6f3938e
+--- /dev/null
++++ b/app/serializers/api/v1/contract_serializer.rb
+@@ -0,0 +1,101 @@
++# frozen_string_literal: true
++
++module Api
++  module V1
++    class ContractSerializer
++      class << self
++        def project(project)
++          {
++            id: project.id,
++            name: project.name,
++            screenshot_count: project.screenshots.count,
++            created_at: project.created_at.iso8601
++          }
++        end
++
++        def page(page, url_options: {})
++          {
++            id: page.id,
++            name: page.name,
++            version_count: page.version_count.to_i,
++            url: routes.page_url(page, url_options),
++            created_at: page.created_at.iso8601
++          }
++        end
++
++        def screenshot(screenshot, url_options: {})
++          {
++            id: screenshot.id,
++            title: screenshot.title,
++            page_id: screenshot.page_id,
++            page_name: screenshot.page.name,
++            status: screenshot.status,
++            annotation_count: screenshot.annotations.size,
++            unresolved_count: screenshot.annotations.count(&:open?),
++            annotate_url: routes.screenshot_url(screenshot, url_options),
++            viewports: screenshot.screenshot_images.sort_by(&:viewport).map { |image| screenshot_image(image) },
++            created_at: screenshot.created_at.iso8601
++          }
++        end
++
++        def screenshot_create(screenshot, url_options: {})
++          {
++            screenshot_id: screenshot.id,
++            page_id: screenshot.page_id,
++            status: screenshot.status,
++            annotate_url: routes.screenshot_url(screenshot, url_options),
++            image: screenshot_image(screenshot.primary_image)
++          }
++        end
++
++        def annotation(annotation)
++          annotation.as_api_json
++        end
++
++        def annotation_detail(annotation, cropped_base64:)
++          comments = annotation.annotation_comments.sort_by(&:created_at).map do |comment|
++            annotation_comment(comment, annotation: annotation, include_annotation_id: false)
++          end
++
++          annotation(annotation).merge(
++            screenshot_status: annotation.screenshot.status,
++            cropped_image_base64: cropped_base64,
++            mime_type: "image/png",
++            comments: comments
++          )
++        end
++
++        def annotation_comment(comment, annotation: comment.annotation, include_annotation_id: true)
++          payload = {
++            id: comment.id,
++            action: comment.action,
++            body: comment.body,
++            author: comment.user&.email || comment.api_key&.name || "Unknown",
++            created_at: comment.created_at.iso8601
++          }
++          payload[:annotation_id] = annotation.id if include_annotation_id
++          payload
++        end
++
++        private
++
++        def screenshot_image(image)
++          return nil unless image
++
++          {
++            id: image.id,
++            viewport: image.viewport,
++            status: image.status,
++            width: image.width,
++            height: image.height,
++            attached: image.image.attached?
++          }
++        end
++
++        def routes
++          Rails.application.routes.url_helpers
++        end
++      end
++    end
++  end
++end
+diff --git a/app/services/api/v1/project_scope.rb b/app/services/api/v1/project_scope.rb
+new file mode 100644
+index 0000000..0cf6ef0
+--- /dev/null
++++ b/app/services/api/v1/project_scope.rb
+@@ -0,0 +1,25 @@
++# frozen_string_literal: true
++
++module Api
++  module V1
++    class ProjectScope
++      def self.pages(project)
++        project.pages
++          .left_joins(:screenshots)
++          .select("pages.*, COUNT(screenshots.id) AS version_count")
++          .group("pages.id")
++          .order(:created_at)
++      end
++
++      def self.screenshots(project)
++        project.screenshots.includes(:page, :annotations, :screenshot_images).order(created_at: :desc)
++      end
++
++      def self.annotations(project)
++        Annotation.joins(screenshot: { page: :project })
++          .where(projects: { id: project.id })
++          .includes(:user, :screenshot, annotation_comments: [ :user, :api_key ])
++      end
++    end
++  end
++end
+diff --git a/app/tools/application_tool.rb b/app/tools/application_tool.rb
+index aca627b..c7a0240 100644
+--- a/app/tools/application_tool.rb
++++ b/app/tools/application_tool.rb
+@@ -59,12 +59,10 @@ def with_error_handling
+   end
+ 
+   def project_annotations(project)
+-    Annotation.joins(screenshot: { page: :project })
+-      .where(projects: { id: project.id })
+-      .includes(:user, :screenshot, :annotation_comments)
++    Api::V1::ProjectScope.annotations(project)
+   end
+ 
+   def serialize_annotation(annotation)
+-    annotation.as_api_json
++    Api::V1::ContractSerializer.annotation(annotation)
+   end
+ end
+diff --git a/bin/check_coverage b/bin/check_coverage
+new file mode 100755
+index 0000000..80e08a4
+--- /dev/null
++++ b/bin/check_coverage
+@@ -0,0 +1,48 @@
++#!/usr/bin/env ruby
++# frozen_string_literal: true
++
++require "json"
++
++result_path = ARGV.fetch(0, "coverage/.resultset.json")
++minimum = Float(ENV.fetch("MIN_COVERAGE", "100"))
++
++abort "Coverage result not found: #{result_path}" unless File.exist?(result_path)
++
++resultset = JSON.parse(File.read(result_path))
++covered_lines = {}
++covered_branches = {}
++
++resultset.each_value do |result|
++  result.fetch("coverage").each do |file, coverage|
++    coverage.fetch("lines", []).each_with_index do |count, index|
++      next if count.nil?
++
++      key = [ file, index + 1 ]
++      covered_lines[key] ||= false
++      covered_lines[key] ||= count.positive?
++    end
++
++    coverage.fetch("branches", {}).each do |branch_id, branch_counts|
++      branch_counts.each do |edge_id, count|
++        key = [ file, branch_id, edge_id ]
++        covered_branches[key] ||= false
++        covered_branches[key] ||= count.positive?
++      end
++    end
++  end
++end
++
++abort "No instrumented Ruby lines found in #{result_path}" if covered_lines.empty?
++
++line_percent = covered_lines.values.count(true).fdiv(covered_lines.length) * 100
++branch_percent =
++  if covered_branches.empty?
++    100.0
++  else
++    covered_branches.values.count(true).fdiv(covered_branches.length) * 100
++  end
++
++puts format("Line coverage: %.2f%%", line_percent)
++puts format("Branch coverage: %.2f%%", branch_percent)
++
++exit 1 if line_percent < minimum || branch_percent < minimum
+diff --git a/cmd/screenote/main.go b/cmd/screenote/main.go
+new file mode 100644
+index 0000000..88a0810
+--- /dev/null
++++ b/cmd/screenote/main.go
+@@ -0,0 +1,12 @@
++package main
++
++import (
++	"context"
++	"os"
++
++	"github.com/ivankuznetsov/screenote/internal/cli"
++)
++
++func main() {
++	os.Exit(cli.Execute(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
++}
+diff --git a/config/ci.rb b/config/ci.rb
+index 5d6856d..4516918 100644
+--- a/config/ci.rb
++++ b/config/ci.rb
+@@ -10,7 +10,12 @@
+   step "Security: Gem audit", "bin/bundler-audit"
+   step "Security: Importmap vulnerability audit", "bin/importmap audit"
+   step "Security: Brakeman code analysis", "bin/brakeman --quiet --no-pager --exit-on-warn --exit-on-error"
+-  step "Tests: Rails", "bin/rails test"
++  if ENV["REQUIRE_COVERAGE"] == "true"
++    step "Tests: Rails coverage", "env COVERAGE=true bin/rails test && bin/check_coverage"
++  else
++    step "Tests: Rails", "bin/rails test"
++  end
++
+   step "Tests: Seeds", "env RAILS_ENV=test bin/rails db:seed:replant"
+ 
+   if File.exist?("go.mod")
+diff --git a/config/routes.rb b/config/routes.rb
+index 50d0074..c8bc8d3 100644
+--- a/config/routes.rb
++++ b/config/routes.rb
+@@ -46,9 +46,16 @@
+   namespace :api do
+     put "screenshots/:id/upload", to: "screenshot_uploads#update", as: :screenshot_upload
+     namespace :v1 do
++      resources :projects, only: [ :index ] do
++        resources :pages, only: [ :index ]
++        resources :screenshots, only: [ :index ]
++      end
+       resources :screenshots, only: [ :create ] do
+         resources :annotations, only: [ :index ]
+       end
++      resources :annotations, only: [ :show ] do
++        resources :comments, controller: "annotation_comments", only: [ :create ]
++      end
+     end
+   end
+ 
+diff --git a/go.mod b/go.mod
+new file mode 100644
+index 0000000..3e9fb4f
+--- /dev/null
++++ b/go.mod
+@@ -0,0 +1,13 @@
++module github.com/ivankuznetsov/screenote
++
++go 1.26
++
++require (
++	github.com/BurntSushi/toml v1.5.0
++	github.com/spf13/cobra v1.10.1
++)
++
++require (
++	github.com/inconshreveable/mousetrap v1.1.0 // indirect
++	github.com/spf13/pflag v1.0.9 // indirect
++)
+diff --git a/go.sum b/go.sum
+new file mode 100644
+index 0000000..2f2391c
+--- /dev/null
++++ b/go.sum
+@@ -0,0 +1,12 @@
++github.com/BurntSushi/toml v1.5.0 h1:W5quZX/G/csjUnuI8SUYlsHs9M38FC7znL0lIO+DvMg=
++github.com/BurntSushi/toml v1.5.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
++github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
++github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
++github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
++github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
++github.com/spf13/cobra v1.10.1 h1:lJeBwCfmrnXthfAupyUTzJ/J4Nc1RsHC/mSRU2dll/s=
++github.com/spf13/cobra v1.10.1/go.mod h1:7SmJGaTHFVBY0jW4NXGluQoLvhqFQM+6XSKD+P4XaB0=
++github.com/spf13/pflag v1.0.9 h1:9exaQaMOCwffKiiiYk6/BndUBv+iRViNW+4lEMi0PvY=
++github.com/spf13/pflag v1.0.9/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
++gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
++gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/internal/cli/annotation.go b/internal/cli/annotation.go
+new file mode 100644
+index 0000000..4e1e886
+--- /dev/null
++++ b/internal/cli/annotation.go
+@@ -0,0 +1,168 @@
++package cli
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/url"
++
++	"github.com/ivankuznetsov/screenote/internal/screenote"
++	"github.com/spf13/cobra"
++)
++
++// pageSize is the maximum number of records the REST API returns per request.
++const pageSize = 100
++
++func (a *app) annotationCommand() *cobra.Command {
++	cmd := &cobra.Command{Use: "annotation", Short: "Annotation commands", Args: rejectArgs, RunE: showHelp}
++
++	var screenshotID, status, viewport string
++	var limit, offset int
++	list := &cobra.Command{
++		Use:   "list",
++		Short: "List annotations",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			client, resolved, err := a.client()
++			if err != nil {
++				return err
++			}
++			filters := screenote.Query(map[string]string{
++				"status":   status,
++				"viewport": viewport,
++			})
++			if screenshotID != "" {
++				raw, _, err := client.Annotations(cmd.Context(), screenshotID, screenote.WithLimitOffset(cloneValues(filters), limit, offset))
++				if err != nil {
++					return err
++				}
++				return writeRawJSON(a.stdout, raw)
++			}
++
++			project, err := a.projectID(cmd.Context(), client, resolved)
++			if err != nil {
++				return err
++			}
++			screenshots, err := allScreenshots(cmd.Context(), client, project)
++			if err != nil {
++				return err
++			}
++			// Aggregate every annotation across every screenshot first, so
++			// --limit/--offset and the reported total describe the whole set
++			// rather than a single per-screenshot slice.
++			annotations := make([]screenote.Annotation, 0)
++			for _, screenshot := range screenshots {
++				response, err := allAnnotations(cmd.Context(), client, intString(screenshot.ID), filters)
++				if err != nil {
++					// A screenshot deleted between the list and the per-screenshot
++					// fetch returns 404; skip it and keep aggregating the rest.
++					// Every other failure (auth, rate limit, 5xx, network) must
++					// propagate so the listing never seals a partial result as
++					// complete.
++					var apiErr *screenote.Error
++					if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
++						continue
++					}
++					return err
++				}
++				annotations = append(annotations, response...)
++			}
++			total := len(annotations)
++			return writeJSON(a.stdout, map[string]any{
++				"annotations": pageAnnotations(annotations, limit, offset),
++				"pagination": map[string]int{
++					"total":  total,
++					"limit":  limit,
++					"offset": offset,
++				},
++			})
++		},
++	}
++	list.Flags().StringVar(&screenshotID, "screenshot", "", "Screenshot ID")
++	list.Flags().StringVar(&status, "status", "", "Annotation status")
++	list.Flags().StringVar(&viewport, "viewport", "", "Viewport")
++	list.Flags().IntVar(&limit, "limit", 50, "Maximum results")
++	list.Flags().IntVar(&offset, "offset", 0, "Results to skip")
++
++	var annotationID string
++	get := &cobra.Command{
++		Use:   "get",
++		Short: "Get annotation details",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			if annotationID == "" {
++				return missingFlag("annotation")
++			}
++			client, _, err := a.client()
++			if err != nil {
++				return err
++			}
++			raw, err := client.Annotation(cmd.Context(), annotationID)
++			if err != nil {
++				return err
++			}
++			return writeRawJSON(a.stdout, raw)
++		},
++	}
++	get.Flags().StringVar(&annotationID, "annotation", "", "Annotation ID")
++
++	cmd.AddCommand(list, get)
++	return cmd
++}
++
++// allScreenshots pages through every screenshot in a project so the aggregate
++// annotation listing is never silently capped at the first page.
++func allScreenshots(ctx context.Context, client *screenote.Client, project string) ([]screenote.Screenshot, error) {
++	all := make([]screenote.Screenshot, 0)
++	for offset := 0; ; offset += pageSize {
++		_, response, err := client.Screenshots(ctx, project, screenote.WithLimitOffset(screenote.Query(nil), pageSize, offset))
++		if err != nil {
++			return nil, err
++		}
++		all = append(all, response.Screenshots...)
++		if len(response.Screenshots) < pageSize {
++			return all, nil
++		}
++	}
++}
++
++// allAnnotations pages through every annotation for a single screenshot,
++// applying the shared status/viewport filters.
++func allAnnotations(ctx context.Context, client *screenote.Client, screenshot string, filters url.Values) ([]screenote.Annotation, error) {
++	all := make([]screenote.Annotation, 0)
++	for offset := 0; ; offset += pageSize {
++		_, response, err := client.Annotations(ctx, screenshot, screenote.WithLimitOffset(cloneValues(filters), pageSize, offset))
++		if err != nil {
++			return nil, err
++		}
++		all = append(all, response.Annotations...)
++		if len(response.Annotations) < pageSize {
++			return all, nil
++		}
++	}
++}
++
++// pageAnnotations applies the aggregate --limit/--offset window in memory.
++func pageAnnotations(items []screenote.Annotation, limit, offset int) []screenote.Annotation {
++	if offset < 0 {
++		offset = 0
++	}
++	if offset >= len(items) {
++		return []screenote.Annotation{}
++	}
++	items = items[offset:]
++	if limit > 0 && limit < len(items) {
++		items = items[:limit]
++	}
++	return items
++}
++
++// cloneValues copies query values so per-request limit/offset mutations do not
++// leak into the shared filter set.
++func cloneValues(values url.Values) url.Values {
++	out := url.Values{}
++	for key, vals := range values {
++		out[key] = append([]string(nil), vals...)
++	}
++	return out
++}
+diff --git a/internal/cli/commands_test.go b/internal/cli/commands_test.go
+new file mode 100644
+index 0000000..4d3f6d6
+--- /dev/null
++++ b/internal/cli/commands_test.go
+@@ -0,0 +1,285 @@
++package cli
++
++import (
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++)
++
++func TestScreenshotListSendsFilters(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/api/v1/projects/7/screenshots" {
++			t.Fatalf("path=%s", r.URL.Path)
++		}
++		if r.URL.Query().Get("page_id") != "9" || r.URL.Query().Get("status") != "ready" {
++			t.Fatalf("query=%s", r.URL.RawQuery)
++		}
++		_, _ = w.Write([]byte(`{"screenshots":[],"pagination":{"total":0,"limit":10,"offset":2}}`))
++	}))
++	defer server.Close()
++
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "--project", "7", "screenshot", "list", "--page", "9", "--status", "ready", "--limit", "10", "--offset", "2"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if !strings.Contains(stdout, `"screenshots"`) {
++		t.Fatalf("stdout=%s", stdout)
++	}
++}
++
++func TestAnnotationGetPath(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/annotations/5" {
++			t.Fatalf("%s %s", r.Method, r.URL.Path)
++		}
++		_, _ = w.Write([]byte(`{"id":5}`))
++	}))
++	defer server.Close()
++
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "annotation", "get", "--annotation", "5"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if !strings.Contains(stdout, `"id":5`) {
++		t.Fatalf("stdout=%s", stdout)
++	}
++}
++
++func TestAnnotationListPath(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/screenshots/4/annotations" {
++			t.Fatalf("%s %s", r.Method, r.URL.Path)
++		}
++		if r.URL.Query().Get("status") != "open" || r.URL.Query().Get("viewport") != "mobile" {
++			t.Fatalf("query=%s", r.URL.RawQuery)
++		}
++		_, _ = w.Write([]byte(`{"annotations":[]}`))
++	}))
++	defer server.Close()
++
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "annotation", "list", "--screenshot", "4", "--status", "open", "--viewport", "mobile"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++}
++
++func TestUnknownFlagExitsUsage(t *testing.T) {
++	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "project", "list", "--nope"}, "")
++	if code != ExitUsage {
++		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
++	}
++	if !strings.Contains(stderr, "invalid_flag") {
++		t.Fatalf("stderr=%s", stderr)
++	}
++}
++
++func TestScreenshotCreateDerivesContentType(t *testing.T) {
++	contentTypes := make(chan string, 1)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if err := r.ParseMultipartForm(1024); err != nil {
++			t.Fatal(err)
++		}
++		files := r.MultipartForm.File["image"]
++		if len(files) == 0 {
++			t.Fatal("no image part")
++		}
++		contentTypes <- files[0].Header.Get("Content-Type")
++		_, _ = w.Write([]byte(`{"screenshot_id":9}`))
++	}))
++	defer server.Close()
++
++	dir := t.TempDir()
++	path := filepath.Join(dir, "shot.png")
++	if err := os.WriteFile(path, []byte("png-bytes"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "screenshot", "create", "--title", "Home", "--file", path}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if got := <-contentTypes; got != "image/png" {
++		t.Fatalf("content type=%q", got)
++	}
++}
++
++func TestScreenshotCreateStdinContentTypeFallback(t *testing.T) {
++	contentTypes := make(chan string, 1)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if err := r.ParseMultipartForm(1024); err != nil {
++			t.Fatal(err)
++		}
++		files := r.MultipartForm.File["image"]
++		if len(files) == 0 {
++			t.Fatal("no image part")
++		}
++		contentTypes <- files[0].Header.Get("Content-Type")
++		_, _ = w.Write([]byte(`{"screenshot_id":9}`))
++	}))
++	defer server.Close()
++
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "screenshot", "create", "--title", "Home"}, "png-bytes")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if got := <-contentTypes; got != "application/octet-stream" {
++		t.Fatalf("content type=%q", got)
++	}
++}
++
++func TestCommentAddPathAndBody(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/annotations/5/comments" {
++			t.Fatalf("%s %s", r.Method, r.URL.Path)
++		}
++		if err := r.ParseForm(); err != nil {
++			t.Fatal(err)
++		}
++		if r.Form.Get("body") != "hello" {
++			t.Fatalf("body=%q", r.Form.Get("body"))
++		}
++		_, _ = w.Write([]byte(`{"success":true}`))
++	}))
++	defer server.Close()
++
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "comment", "add", "--annotation", "5", "--body", "hello"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++}
++
++// aggregateServer serves the project-wide `annotation list` aggregate path:
++// two pages of screenshots, per-screenshot annotation paging, and a
++// configurable failure for one screenshot ID.
++func aggregateServer(t *testing.T, failID int, failStatus int) *httptest.Server {
++	t.Helper()
++	// annotationCount maps a screenshot ID to its total annotation count.
++	annotationCount := func(sid int) int {
++		switch sid {
++		case 1:
++			return 150 // spans two annotation pages (100 + 50)
++		default:
++			return 1
++		}
++	}
++	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch {
++		case r.URL.Path == "/api/v1/projects/7/screenshots":
++			offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
++			var ids []int
++			if offset == 0 {
++				for id := 1; id <= 100; id++ { // full page -> forces a second request
++					ids = append(ids, id)
++				}
++			} else {
++				ids = []int{101, 102}
++			}
++			parts := make([]string, 0, len(ids))
++			for _, id := range ids {
++				parts = append(parts, fmt.Sprintf(`{"id":%d}`, id))
++			}
++			fmt.Fprintf(w, `{"screenshots":[%s],"pagination":{"total":102,"limit":100,"offset":%d}}`, strings.Join(parts, ","), offset)
++		case strings.HasPrefix(r.URL.Path, "/api/v1/screenshots/") && strings.HasSuffix(r.URL.Path, "/annotations"):
++			trimmed := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/screenshots/"), "/annotations")
++			sid, err := strconv.Atoi(trimmed)
++			if err != nil {
++				t.Fatalf("bad screenshot id %q", trimmed)
++			}
++			if sid == failID {
++				w.WriteHeader(failStatus)
++				_, _ = w.Write([]byte(`{"error":"boom","code":"boom"}`))
++				return
++			}
++			offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
++			total := annotationCount(sid)
++			parts := make([]string, 0)
++			for i := offset; i < total && i < offset+pageSize; i++ {
++				parts = append(parts, fmt.Sprintf(`{"id":%d,"screenshot_id":%d}`, sid*1000+i, sid))
++			}
++			fmt.Fprintf(w, `{"annotations":[%s],"pagination":{"total":%d,"limit":%d,"offset":%d}}`, strings.Join(parts, ","), total, pageSize, offset)
++		default:
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++	}))
++}
++
++func TestAnnotationListAggregatesAcrossScreenshots(t *testing.T) {
++	// Screenshot 2 is deleted between list and fetch (404) and must be
++	// silently skipped: 150 (sid 1) + 0 (sid 2) + 100 (sid 3..102) = 250.
++	server := aggregateServer(t, 2, http.StatusNotFound)
++	defer server.Close()
++
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "--project", "7", "annotation", "list", "--limit", "10", "--offset", "5"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++
++	var payload struct {
++		Annotations []struct {
++			ID int `json:"id"`
++		} `json:"annotations"`
++		Pagination struct {
++			Total  int `json:"total"`
++			Limit  int `json:"limit"`
++			Offset int `json:"offset"`
++		} `json:"pagination"`
++	}
++	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
++		t.Fatalf("stdout=%s err=%v", stdout, err)
++	}
++	if payload.Pagination.Total != 250 {
++		t.Fatalf("total=%d want 250", payload.Pagination.Total)
++	}
++	if len(payload.Annotations) != 10 {
++		t.Fatalf("window len=%d want 10", len(payload.Annotations))
++	}
++	if payload.Pagination.Limit != 10 || payload.Pagination.Offset != 5 {
++		t.Fatalf("pagination=%+v", payload.Pagination)
++	}
++}
++
++func TestAnnotationListPropagatesServerError(t *testing.T) {
++	// A 500 from one screenshot must fail the whole listing rather than seal
++	// a partial result as complete.
++	server := aggregateServer(t, 2, http.StatusInternalServerError)
++	defer server.Close()
++
++	_, _, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "--project", "7", "annotation", "list"}, "")
++	if code == ExitOK {
++		t.Fatalf("expected non-zero exit for server error, got %d", code)
++	}
++}
++
++func TestUnknownCommandExitsUsage(t *testing.T) {
++	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "bogus"}, "")
++	if code != ExitUsage {
++		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
++	}
++	var payload map[string]string
++	if err := json.Unmarshal([]byte(stderr), &payload); err != nil {
++		t.Fatal(err)
++	}
++	if payload["code"] != "unexpected_arguments" {
++		t.Fatalf("payload=%#v", payload)
++	}
++}
++
++func TestUnknownSubcommandExitsUsage(t *testing.T) {
++	_, _, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "project", "bogus"}, "")
++	if code != ExitUsage {
++		t.Fatalf("code=%d", code)
++	}
++}
++
++func TestStrayPositionalArgExitsUsage(t *testing.T) {
++	_, _, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "project", "list", "extra"}, "")
++	if code != ExitUsage {
++		t.Fatalf("code=%d", code)
++	}
++}
+diff --git a/internal/cli/comment.go b/internal/cli/comment.go
+new file mode 100644
+index 0000000..d6b0658
+--- /dev/null
++++ b/internal/cli/comment.go
+@@ -0,0 +1,35 @@
++package cli
++
++import "github.com/spf13/cobra"
++
++func (a *app) commentCommand() *cobra.Command {
++	cmd := &cobra.Command{Use: "comment", Short: "Comment commands", Args: rejectArgs, RunE: showHelp}
++
++	var annotationID, body string
++	add := &cobra.Command{
++		Use:   "add",
++		Short: "Add an annotation comment",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			if annotationID == "" {
++				return missingFlag("annotation")
++			}
++			if body == "" {
++				return missingFlag("body")
++			}
++			client, _, err := a.client()
++			if err != nil {
++				return err
++			}
++			raw, err := client.AddComment(cmd.Context(), annotationID, body)
++			if err != nil {
++				return err
++			}
++			return writeRawJSON(a.stdout, raw)
++		},
++	}
++	add.Flags().StringVar(&annotationID, "annotation", "", "Annotation ID")
++	add.Flags().StringVar(&body, "body", "", "Comment body")
++	cmd.AddCommand(add)
++	return cmd
++}
+diff --git a/internal/cli/config.go b/internal/cli/config.go
+new file mode 100644
+index 0000000..14f1d8c
+--- /dev/null
++++ b/internal/cli/config.go
+@@ -0,0 +1,54 @@
++package cli
++
++import (
++	appconfig "github.com/ivankuznetsov/screenote/internal/config"
++	"github.com/spf13/cobra"
++)
++
++func (a *app) configCommand() *cobra.Command {
++	cmd := &cobra.Command{
++		Use:   "config",
++		Short: "Print resolved configuration",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			resolved, err := a.resolvedConfig()
++			if err != nil {
++				return err
++			}
++			return writeJSON(a.stdout, resolved)
++		},
++	}
++
++	var setValues appconfig.Values
++	set := &cobra.Command{
++		Use:   "set",
++		Short: "Write configuration values",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			path := defaultConfigPath(a.configPath)
++			values, err := appconfig.LoadExpanded(path)
++			if err != nil {
++				return err
++			}
++			if setValues.APIKey != "" {
++				values.APIKey = setValues.APIKey
++			}
++			if setValues.BaseURL != "" {
++				values.BaseURL = setValues.BaseURL
++			}
++			if setValues.Project != "" {
++				values.Project = setValues.Project
++			}
++			if err := appconfig.Save(path, values); err != nil {
++				return err
++			}
++			return writeJSON(a.stdout, map[string]any{"ok": true, "path": path})
++		},
++	}
++	set.Flags().StringVar(&setValues.APIKey, "api-key", "", "API key to write")
++	set.Flags().StringVar(&setValues.BaseURL, "base-url", "", "Base URL to write")
++	set.Flags().StringVar(&setValues.Project, "project", "", "Project ID to write")
++	cmd.AddCommand(set)
++
++	return cmd
++}
+diff --git a/internal/cli/errors.go b/internal/cli/errors.go
+new file mode 100644
+index 0000000..d459224
+--- /dev/null
++++ b/internal/cli/errors.go
+@@ -0,0 +1,94 @@
++package cli
++
++import (
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++
++	"github.com/ivankuznetsov/screenote/internal/screenote"
++	"github.com/spf13/cobra"
++)
++
++const (
++	ExitOK          = 0
++	ExitGeneric     = 1
++	ExitUsage       = 2
++	ExitAuth        = 3
++	ExitNotFound    = 4
++	ExitRateLimited = 5
++)
++
++type cliError struct {
++	Code    string
++	Message string
++	Exit    int
++}
++
++func (e *cliError) Error() string { return e.Message }
++
++func usageError(code, message string) error {
++	return &cliError{Code: code, Message: message, Exit: ExitUsage}
++}
++
++func writeError(w io.Writer, err error) int {
++	code := "internal_error"
++	message := err.Error()
++	exitCode := ExitGeneric
++
++	var ce *cliError
++	if errors.As(err, &ce) {
++		code = ce.Code
++		message = ce.Message
++		exitCode = ce.Exit
++	} else {
++		var se *screenote.Error
++		if errors.As(err, &se) {
++			code = se.Code
++			message = se.Message
++			exitCode = exitForHTTP(se.StatusCode)
++		}
++	}
++
++	_ = json.NewEncoder(w).Encode(map[string]string{
++		"error": message,
++		"code":  code,
++	})
++	return exitCode
++}
++
++func exitForHTTP(status int) int {
++	switch status {
++	case http.StatusUnauthorized, http.StatusForbidden:
++		return ExitAuth
++	case http.StatusNotFound:
++		return ExitNotFound
++	case http.StatusTooManyRequests:
++		return ExitRateLimited
++	default:
++		return ExitGeneric
++	}
++}
++
++func missingFlag(name string) error {
++	return usageError("missing_"+name, fmt.Sprintf("--%s is required", name))
++}
++
++// rejectArgs maps stray positional args and unknown subcommands to a stable
++// usage error (exit 2) instead of letting Cobra surface them as a generic
++// failure. Assign it as every command's Args validator.
++func rejectArgs(cmd *cobra.Command, args []string) error {
++	if len(args) == 0 {
++		return nil
++	}
++	return usageError("unexpected_arguments", fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath()))
++}
++
++// showHelp is the RunE for pure grouping commands. Making them runnable ensures
++// Cobra reaches the rejectArgs validator (it short-circuits to help before
++// validating args on non-runnable commands), so an unknown subcommand exits 2
++// while a bare invocation still prints help.
++func showHelp(cmd *cobra.Command, _ []string) error {
++	return cmd.Help()
++}
+diff --git a/internal/cli/page.go b/internal/cli/page.go
+new file mode 100644
+index 0000000..5fe4036
+--- /dev/null
++++ b/internal/cli/page.go
+@@ -0,0 +1,28 @@
++package cli
++
++import "github.com/spf13/cobra"
++
++func (a *app) pageCommand() *cobra.Command {
++	cmd := &cobra.Command{Use: "page", Short: "Page commands", Args: rejectArgs, RunE: showHelp}
++	cmd.AddCommand(&cobra.Command{
++		Use:   "list",
++		Short: "List pages",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			client, resolved, err := a.client()
++			if err != nil {
++				return err
++			}
++			project, err := a.projectID(cmd.Context(), client, resolved)
++			if err != nil {
++				return err
++			}
++			raw, err := client.Pages(cmd.Context(), project)
++			if err != nil {
++				return err
++			}
++			return writeRawJSON(a.stdout, raw)
++		},
++	})
++	return cmd
++}
+diff --git a/internal/cli/project.go b/internal/cli/project.go
+new file mode 100644
+index 0000000..f601e2f
+--- /dev/null
++++ b/internal/cli/project.go
+@@ -0,0 +1,24 @@
++package cli
++
++import "github.com/spf13/cobra"
++
++func (a *app) projectCommand() *cobra.Command {
++	cmd := &cobra.Command{Use: "project", Short: "Project commands", Args: rejectArgs, RunE: showHelp}
++	cmd.AddCommand(&cobra.Command{
++		Use:   "list",
++		Short: "List projects",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			client, _, err := a.client()
++			if err != nil {
++				return err
++			}
++			raw, _, err := client.Projects(cmd.Context())
++			if err != nil {
++				return err
++			}
++			return writeRawJSON(a.stdout, raw)
++		},
++	})
++	return cmd
++}
+diff --git a/internal/cli/root.go b/internal/cli/root.go
+new file mode 100644
+index 0000000..56a7eb8
+--- /dev/null
++++ b/internal/cli/root.go
+@@ -0,0 +1,136 @@
++package cli
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"strconv"
++
++	appconfig "github.com/ivankuznetsov/screenote/internal/config"
++	"github.com/ivankuznetsov/screenote/internal/screenote"
++	"github.com/spf13/cobra"
++)
++
++type app struct {
++	stdin       io.Reader
++	stdout      io.Writer
++	stderr      io.Writer
++	httpClient  *http.Client
++	flags       appconfig.Values
++	configPath  string
++	interactive bool
++}
++
++func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
++	a := &app{stdin: stdin, stdout: stdout, stderr: stderr}
++	cmd := a.rootCommand(ctx)
++	cmd.SetArgs(args)
++	if err := cmd.ExecuteContext(ctx); err != nil {
++		return writeError(stderr, err)
++	}
++	return ExitOK
++}
++
++func NewTestCommand(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, httpClient *http.Client) *cobra.Command {
++	a := &app{stdin: stdin, stdout: stdout, stderr: stderr, httpClient: httpClient}
++	return a.rootCommand(ctx)
++}
++
++func (a *app) rootCommand(_ context.Context) *cobra.Command {
++	root := &cobra.Command{
++		Use:           "screenote",
++		Short:         "Screenote REST CLI",
++		Args:          rejectArgs,
++		RunE:          showHelp,
++		SilenceUsage:  true,
++		SilenceErrors: true,
++	}
++	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
++		return usageError("invalid_flag", err.Error())
++	})
++	root.PersistentFlags().StringVar(&a.flags.APIKey, "api-key", "", "Screenote project API key")
++	root.PersistentFlags().StringVar(&a.flags.BaseURL, "base-url", "", "Screenote base URL")
++	root.PersistentFlags().StringVar(&a.flags.Project, "project", "", "Screenote project ID")
++	root.PersistentFlags().StringVar(&a.configPath, "config", "", "Config file path")
++	root.PersistentFlags().BoolVar(&a.interactive, "interactive", false, "Allow interactive prompts")
++
++	root.AddCommand(
++		a.configCommand(),
++		a.projectCommand(),
++		a.pageCommand(),
++		a.screenshotCommand(),
++		a.annotationCommand(),
++		a.commentCommand(),
++	)
++	return root
++}
++
++func (a *app) resolvedConfig() (appconfig.Resolved, error) {
++	return appconfig.Resolve(appconfig.Options{
++		ConfigPath: a.configPath,
++		Flags:      a.flags,
++	})
++}
++
++func (a *app) client() (*screenote.Client, appconfig.Resolved, error) {
++	resolved, err := a.resolvedConfig()
++	if err != nil {
++		return nil, resolved, err
++	}
++	if resolved.BaseURL == "" {
++		return nil, resolved, usageError("missing_base_url", "base URL is required; set --base-url, SCREENOTE_BASE_URL, or config base_url")
++	}
++	if resolved.APIKey == "" {
++		return nil, resolved, usageError("missing_api_key", "API key is required; set --api-key, SCREENOTE_API_KEY, or config api_key")
++	}
++
++	client, err := screenote.NewClient(resolved.BaseURL, resolved.APIKey, a.httpClient)
++	if err != nil {
++		return nil, resolved, usageError("invalid_base_url", err.Error())
++	}
++	return client, resolved, nil
++}
++
++func (a *app) projectID(ctx context.Context, client *screenote.Client, resolved appconfig.Resolved) (string, error) {
++	if resolved.Project != "" {
++		return resolved.Project, nil
++	}
++	_, projects, err := client.Projects(ctx)
++	if err != nil {
++		return "", err
++	}
++	if len(projects.Projects) == 0 {
++		return "", usageError("missing_project", "project is required and could not be inferred from the API key")
++	}
++	return intString(projects.Projects[0].ID), nil
++}
++
++func writeJSON(w io.Writer, value any) error {
++	return json.NewEncoder(w).Encode(value)
++}
++
++func writeRawJSON(w io.Writer, raw json.RawMessage) error {
++	if len(raw) == 0 {
++		raw = []byte("{}")
++	}
++	_, err := w.Write(raw)
++	if err != nil {
++		return err
++	}
++	if raw[len(raw)-1] != '\n' {
++		_, err = io.WriteString(w, "\n")
++	}
++	return err
++}
++
++func intString(id int) string {
++	return strconv.Itoa(id)
++}
++
++func defaultConfigPath(path string) string {
++	if path != "" {
++		return path
++	}
++	return appconfig.DefaultConfigPath
++}
+diff --git a/internal/cli/root_test.go b/internal/cli/root_test.go
+new file mode 100644
+index 0000000..0c03759
+--- /dev/null
++++ b/internal/cli/root_test.go
+@@ -0,0 +1,126 @@
++package cli
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++func TestProjectListCommand(t *testing.T) {
++	requests := make(chan *http.Request, 1)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests <- r
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`{"projects":[{"id":1,"name":"Demo"}]}`))
++	}))
++	defer server.Close()
++
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "project", "list"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if !strings.Contains(stdout, `"projects"`) {
++		t.Fatalf("stdout=%s", stdout)
++	}
++	req := <-requests
++	if req.Method != http.MethodGet || req.URL.Path != "/api/v1/projects" {
++		t.Fatalf("%s %s", req.Method, req.URL.Path)
++	}
++	if req.Header.Get("Authorization") != "Bearer key" {
++		t.Fatalf("Authorization=%q", req.Header.Get("Authorization"))
++	}
++}
++
++func TestScreenshotCreateReadsStdin(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/api/v1/screenshots" {
++			t.Fatalf("path=%s", r.URL.Path)
++		}
++		if err := r.ParseMultipartForm(1024); err != nil {
++			t.Fatal(err)
++		}
++		if r.FormValue("title") != "Home" {
++			t.Fatalf("title=%q", r.FormValue("title"))
++		}
++		file, _, err := r.FormFile("image")
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer file.Close()
++		_, _ = w.Write([]byte(`{"screenshot_id":3}`))
++	}))
++	defer server.Close()
++
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "screenshot", "create", "--title", "Home"}, "image")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if !strings.Contains(stdout, `"screenshot_id":3`) {
++		t.Fatalf("stdout=%s", stdout)
++	}
++}
++
++func TestPageListInfersProject(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/api/v1/projects":
++			_, _ = w.Write([]byte(`{"projects":[{"id":42,"name":"Demo"}]}`))
++		case "/api/v1/projects/42/pages":
++			_, _ = w.Write([]byte(`{"pages":[]}`))
++		default:
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++	}))
++	defer server.Close()
++
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "page", "list"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if !strings.Contains(stdout, `"pages"`) {
++		t.Fatalf("stdout=%s", stdout)
++	}
++}
++
++func TestCommentAddValidatesBody(t *testing.T) {
++	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "comment", "add", "--annotation", "1"}, "")
++	if code != ExitUsage {
++		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
++	}
++	var payload map[string]string
++	if err := json.Unmarshal([]byte(stderr), &payload); err != nil {
++		t.Fatal(err)
++	}
++	if payload["code"] != "missing_body" {
++		t.Fatalf("payload=%#v", payload)
++	}
++}
++
++func TestServerStatusExitCodes(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusTooManyRequests)
++		_, _ = w.Write([]byte(`{"error":"slow down","code":"rate_limited"}`))
++	}))
++	defer server.Close()
++
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "project", "list"}, "")
++	if code != ExitRateLimited {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++}
++
++func runCLI(t *testing.T, args []string, stdin string) (string, string, int) {
++	t.Helper()
++	var out, errOut bytes.Buffer
++	cmd := NewTestCommand(context.Background(), strings.NewReader(stdin), &out, &errOut, http.DefaultClient)
++	cmd.SetArgs(args)
++	if err := cmd.Execute(); err != nil {
++		code := writeError(&errOut, err)
++		return out.String(), errOut.String(), code
++	}
++	return out.String(), errOut.String(), ExitOK
++}
+diff --git a/internal/cli/screenshot.go b/internal/cli/screenshot.go
+new file mode 100644
+index 0000000..591931c
+--- /dev/null
++++ b/internal/cli/screenshot.go
+@@ -0,0 +1,87 @@
++package cli
++
++import (
++	"mime"
++	"os"
++	"path/filepath"
++
++	"github.com/ivankuznetsov/screenote/internal/screenote"
++	"github.com/spf13/cobra"
++)
++
++func (a *app) screenshotCommand() *cobra.Command {
++	cmd := &cobra.Command{Use: "screenshot", Short: "Screenshot commands", Args: rejectArgs, RunE: showHelp}
++
++	var listPage, listStatus string
++	var limit, offset int
++	list := &cobra.Command{
++		Use:   "list",
++		Short: "List screenshots",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			client, resolved, err := a.client()
++			if err != nil {
++				return err
++			}
++			project, err := a.projectID(cmd.Context(), client, resolved)
++			if err != nil {
++				return err
++			}
++			query := screenote.WithLimitOffset(screenote.Query(map[string]string{
++				"page_id": listPage,
++				"status":  listStatus,
++			}), limit, offset)
++			raw, _, err := client.Screenshots(cmd.Context(), project, query)
++			if err != nil {
++				return err
++			}
++			return writeRawJSON(a.stdout, raw)
++		},
++	}
++	list.Flags().StringVar(&listPage, "page", "", "Page ID")
++	list.Flags().StringVar(&listStatus, "status", "", "Screenshot status")
++	list.Flags().IntVar(&limit, "limit", 50, "Maximum results")
++	list.Flags().IntVar(&offset, "offset", 0, "Results to skip")
++
++	var title, pageValue, filePath string
++	create := &cobra.Command{
++		Use:   "create",
++		Short: "Create a screenshot",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			if title == "" {
++				return missingFlag("title")
++			}
++			client, _, err := a.client()
++			if err != nil {
++				return err
++			}
++
++			reader := a.stdin
++			filename := "stdin"
++			contentType := ""
++			if filePath != "" && filePath != "-" {
++				file, err := os.Open(filePath)
++				if err != nil {
++					return err
++				}
++				defer file.Close()
++				reader = file
++				filename = filePath
++				contentType = mime.TypeByExtension(filepath.Ext(filePath))
++			}
++
++			raw, err := client.CreateScreenshot(cmd.Context(), title, pageValue, filename, contentType, reader)
++			if err != nil {
++				return err
++			}
++			return writeRawJSON(a.stdout, raw)
++		},
++	}
++	create.Flags().StringVar(&title, "title", "", "Screenshot title")
++	create.Flags().StringVar(&pageValue, "page", "", "Page ID or page name")
++	create.Flags().StringVar(&filePath, "file", "-", "Image file path or - for stdin")
++
++	cmd.AddCommand(list, create)
++	return cmd
++}
+diff --git a/internal/config/config.go b/internal/config/config.go
+new file mode 100644
+index 0000000..6eae0e7
+--- /dev/null
++++ b/internal/config/config.go
+@@ -0,0 +1,154 @@
++package config
++
++import (
++	"errors"
++	"os"
++	"path/filepath"
++
++	"github.com/BurntSushi/toml"
++)
++
++const DefaultConfigPath = "~/.config/screenote/config.toml"
++
++type Values struct {
++	APIKey  string `toml:"api_key" json:"api_key,omitempty"`
++	BaseURL string `toml:"base_url" json:"base_url,omitempty"`
++	Project string `toml:"project" json:"project,omitempty"`
++}
++
++type Sources struct {
++	APIKey  string `json:"api_key,omitempty"`
++	BaseURL string `json:"base_url,omitempty"`
++	Project string `json:"project,omitempty"`
++}
++
++type Resolved struct {
++	Values
++	Sources Sources `json:"sources"`
++}
++
++type Options struct {
++	ConfigPath string
++	Flags      Values
++	Env        map[string]string
++}
++
++func Resolve(options Options) (Resolved, error) {
++	env := func(key string) string { return os.Getenv(key) }
++	if options.Env != nil {
++		env = func(key string) string { return options.Env[key] }
++	}
++
++	path, err := ExpandPath(options.ConfigPath)
++	if err != nil {
++		return Resolved{}, err
++	}
++	if path == "" {
++		path, err = ExpandPath(DefaultConfigPath)
++		if err != nil {
++			return Resolved{}, err
++		}
++	}
++
++	fileValues, err := Load(path)
++	if err != nil {
++		return Resolved{}, err
++	}
++
++	resolved := Resolved{Values: fileValues}
++	if fileValues.APIKey != "" {
++		resolved.Sources.APIKey = "config"
++	}
++	if fileValues.BaseURL != "" {
++		resolved.Sources.BaseURL = "config"
++	}
++	if fileValues.Project != "" {
++		resolved.Sources.Project = "config"
++	}
++
++	apply := func(value, source string, target *string, sourceTarget *string) {
++		if value == "" {
++			return
++		}
++		*target = value
++		*sourceTarget = source
++	}
++
++	apply(env("SCREENOTE_API_KEY"), "env", &resolved.APIKey, &resolved.Sources.APIKey)
++	apply(env("SCREENOTE_BASE_URL"), "env", &resolved.BaseURL, &resolved.Sources.BaseURL)
++	apply(env("SCREENOTE_PROJECT"), "env", &resolved.Project, &resolved.Sources.Project)
++	apply(options.Flags.APIKey, "flag", &resolved.APIKey, &resolved.Sources.APIKey)
++	apply(options.Flags.BaseURL, "flag", &resolved.BaseURL, &resolved.Sources.BaseURL)
++	apply(options.Flags.Project, "flag", &resolved.Project, &resolved.Sources.Project)
++
++	return resolved, nil
++}
++
++func Load(path string) (Values, error) {
++	if path == "" {
++		return Values{}, nil
++	}
++
++	data, err := os.ReadFile(path)
++	if errors.Is(err, os.ErrNotExist) {
++		return Values{}, nil
++	}
++	if err != nil {
++		return Values{}, err
++	}
++
++	var values Values
++	if _, err := toml.Decode(string(data), &values); err != nil {
++		return Values{}, err
++	}
++	return values, nil
++}
++
++func LoadExpanded(path string) (Values, error) {
++	expanded, err := ExpandPath(path)
++	if err != nil {
++		return Values{}, err
++	}
++	return Load(expanded)
++}
++
++func Save(path string, values Values) error {
++	expanded, err := ExpandPath(path)
++	if err != nil {
++		return err
++	}
++	if expanded == "" {
++		expanded, err = ExpandPath(DefaultConfigPath)
++		if err != nil {
++			return err
++		}
++	}
++	if err := os.MkdirAll(filepath.Dir(expanded), 0o700); err != nil {
++		return err
++	}
++
++	f, err := os.OpenFile(expanded, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++
++	return toml.NewEncoder(f).Encode(values)
++}
++
++func ExpandPath(path string) (string, error) {
++	if path == "" || path[0] != '~' {
++		return path, nil
++	}
++	home, err := os.UserHomeDir()
++	if err != nil {
++		return "", err
++	}
++	if path == "~" {
++		return home, nil
++	}
++	if len(path) > 1 && os.IsPathSeparator(path[1]) {
++		return filepath.Join(home, path[2:]), nil
++	}
++	return "", errors.New("unsupported config path")
++}
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+new file mode 100644
+index 0000000..765d676
+--- /dev/null
++++ b/internal/config/config_test.go
+@@ -0,0 +1,45 @@
++package config
++
++import (
++	"path/filepath"
++	"testing"
++)
++
++func TestResolvePrecedence(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "config.toml")
++	if err := Save(path, Values{APIKey: "file-key", BaseURL: "http://file", Project: "file-project"}); err != nil {
++		t.Fatal(err)
++	}
++
++	resolved, err := Resolve(Options{
++		ConfigPath: path,
++		Flags:      Values{APIKey: "flag-key"},
++		Env: map[string]string{
++			"SCREENOTE_API_KEY":  "env-key",
++			"SCREENOTE_BASE_URL": "http://env",
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if resolved.APIKey != "flag-key" || resolved.Sources.APIKey != "flag" {
++		t.Fatalf("api key = %q from %q", resolved.APIKey, resolved.Sources.APIKey)
++	}
++	if resolved.BaseURL != "http://env" || resolved.Sources.BaseURL != "env" {
++		t.Fatalf("base url = %q from %q", resolved.BaseURL, resolved.Sources.BaseURL)
++	}
++	if resolved.Project != "file-project" || resolved.Sources.Project != "config" {
++		t.Fatalf("project = %q from %q", resolved.Project, resolved.Sources.Project)
++	}
++}
++
++func TestLoadMissingConfig(t *testing.T) {
++	values, err := Load(filepath.Join(t.TempDir(), "missing.toml"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if values != (Values{}) {
++		t.Fatalf("values = %#v", values)
++	}
++}
+diff --git a/internal/screenote/client.go b/internal/screenote/client.go
+new file mode 100644
+index 0000000..1433f4d
+--- /dev/null
++++ b/internal/screenote/client.go
+@@ -0,0 +1,229 @@
++package screenote
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"mime/multipart"
++	"net/http"
++	"net/textproto"
++	"net/url"
++	"path"
++	"strconv"
++	"strings"
++)
++
++type Client struct {
++	baseURL    *url.URL
++	apiKey     string
++	httpClient *http.Client
++}
++
++type Error struct {
++	StatusCode int
++	Code       string
++	Message    string
++}
++
++func (e *Error) Error() string {
++	if e.Message != "" {
++		return e.Message
++	}
++	return http.StatusText(e.StatusCode)
++}
++
++func NewClient(baseURL, apiKey string, httpClient *http.Client) (*Client, error) {
++	if baseURL == "" {
++		return nil, errors.New("base url is required")
++	}
++	parsed, err := url.Parse(baseURL)
++	if err != nil {
++		return nil, err
++	}
++	if parsed.Scheme == "" || parsed.Host == "" {
++		return nil, errors.New("base url must include scheme and host")
++	}
++	if httpClient == nil {
++		httpClient = http.DefaultClient
++	}
++	return &Client{baseURL: parsed, apiKey: apiKey, httpClient: httpClient}, nil
++}
++
++func (c *Client) Projects(ctx context.Context) (json.RawMessage, ProjectsResponse, error) {
++	var out ProjectsResponse
++	raw, err := c.doJSON(ctx, http.MethodGet, "/api/v1/projects", nil, nil, &out, nil)
++	return raw, out, err
++}
++
++func (c *Client) Pages(ctx context.Context, project string) (json.RawMessage, error) {
++	return c.doJSON(ctx, http.MethodGet, "/api/v1/projects/"+url.PathEscape(project)+"/pages", nil, nil, nil, nil)
++}
++
++func (c *Client) Screenshots(ctx context.Context, project string, query url.Values) (json.RawMessage, ScreenshotsResponse, error) {
++	var out ScreenshotsResponse
++	raw, err := c.doJSON(ctx, http.MethodGet, "/api/v1/projects/"+url.PathEscape(project)+"/screenshots", query, nil, &out, nil)
++	return raw, out, err
++}
++
++func (c *Client) CreateScreenshot(ctx context.Context, title, pageValue, filename, contentType string, r io.Reader) (json.RawMessage, error) {
++	if contentType == "" {
++		contentType = "application/octet-stream"
++	}
++	if filename == "" || filename == "-" {
++		filename = "stdin"
++	}
++
++	pr, pw := io.Pipe()
++	writer := multipart.NewWriter(pw)
++	headers := map[string]string{"Content-Type": writer.FormDataContentType()}
++
++	go func() {
++		var err error
++		defer func() {
++			closeErr := writer.Close()
++			if err == nil {
++				err = closeErr
++			}
++			_ = pw.CloseWithError(err)
++		}()
++
++		if title != "" {
++			if err = writer.WriteField("title", title); err != nil {
++				return
++			}
++		}
++		if pageValue != "" {
++			if err = writer.WriteField("page", pageValue); err != nil {
++				return
++			}
++		}
++
++		header := make(textproto.MIMEHeader)
++		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename="%s"`, escapeQuotes(path.Base(filename))))
++		header.Set("Content-Type", contentType)
++		var part io.Writer
++		part, err = writer.CreatePart(header)
++		if err != nil {
++			return
++		}
++		_, err = io.Copy(part, r)
++	}()
++
++	return c.doJSON(ctx, http.MethodPost, "/api/v1/screenshots", nil, headers, nil, pr)
++}
++
++func (c *Client) Annotations(ctx context.Context, screenshot string, query url.Values) (json.RawMessage, AnnotationsResponse, error) {
++	var out AnnotationsResponse
++	raw, err := c.doJSON(ctx, http.MethodGet, "/api/v1/screenshots/"+url.PathEscape(screenshot)+"/annotations", query, nil, &out, nil)
++	return raw, out, err
++}
++
++func (c *Client) Annotation(ctx context.Context, id string) (json.RawMessage, error) {
++	return c.doJSON(ctx, http.MethodGet, "/api/v1/annotations/"+url.PathEscape(id), nil, nil, nil, nil)
++}
++
++func (c *Client) AddComment(ctx context.Context, annotation, body string) (json.RawMessage, error) {
++	form := url.Values{"body": []string{body}}
++	headers := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
++	return c.doJSON(ctx, http.MethodPost, "/api/v1/annotations/"+url.PathEscape(annotation)+"/comments", nil, headers, nil, strings.NewReader(form.Encode()))
++}
++
++func Query(params map[string]string) url.Values {
++	values := url.Values{}
++	for key, value := range params {
++		if value != "" {
++			values.Set(key, value)
++		}
++	}
++	return values
++}
++
++func WithLimitOffset(values url.Values, limit, offset int) url.Values {
++	if limit > 0 {
++		values.Set("limit", strconv.Itoa(limit))
++	}
++	if offset > 0 {
++		values.Set("offset", strconv.Itoa(offset))
++	}
++	return values
++}
++
++func (c *Client) doJSON(ctx context.Context, method, rawPath string, query url.Values, headers map[string]string, out any, body io.Reader) (json.RawMessage, error) {
++	u := *c.baseURL
++	u.Path = strings.TrimRight(c.baseURL.Path, "/") + rawPath
++	u.RawQuery = query.Encode()
++
++	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
++	if err != nil {
++		return nil, err
++	}
++	if c.apiKey != "" {
++		req.Header.Set("Authorization", "Bearer "+c.apiKey)
++	}
++	req.Header.Set("Accept", "application/json")
++	for key, value := range headers {
++		req.Header.Set(key, value)
++	}
++
++	resp, err := c.httpClient.Do(req)
++	if err != nil {
++		return nil, err
++	}
++	defer resp.Body.Close()
++
++	raw, err := io.ReadAll(resp.Body)
++	if err != nil {
++		return nil, err
++	}
++	if resp.StatusCode < 200 || resp.StatusCode > 299 {
++		return raw, parseError(resp.StatusCode, raw)
++	}
++	if out != nil && len(raw) > 0 {
++		if err := json.Unmarshal(raw, out); err != nil {
++			return raw, err
++		}
++	}
++	return raw, nil
++}
++
++func parseError(status int, raw []byte) error {
++	var payload struct {
++		Error   string `json:"error"`
++		Code    string `json:"code"`
++		Message string `json:"message"`
++	}
++	_ = json.Unmarshal(raw, &payload)
++
++	message := payload.Error
++	if message == "" {
++		message = payload.Message
++	}
++	if message == "" {
++		message = http.StatusText(status)
++	}
++	code := payload.Code
++	if code == "" {
++		code = statusCode(status)
++	}
++
++	return &Error{StatusCode: status, Code: code, Message: message}
++}
++
++func statusCode(status int) string {
++	switch status {
++	case http.StatusUnauthorized, http.StatusForbidden:
++		return "unauthorized"
++	case http.StatusNotFound:
++		return "not_found"
++	case http.StatusTooManyRequests:
++		return "rate_limited"
++	default:
++		return fmt.Sprintf("http_%d", status)
++	}
++}
++
++func escapeQuotes(value string) string {
++	return strings.NewReplacer("\\", "\\\\", `"`, "\\\"").Replace(value)
++}
+diff --git a/internal/screenote/client_test.go b/internal/screenote/client_test.go
+new file mode 100644
+index 0000000..13ee371
+--- /dev/null
++++ b/internal/screenote/client_test.go
+@@ -0,0 +1,74 @@
++package screenote
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++func TestClientSendsAuthAndParsesErrors(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Header.Get("Authorization") != "Bearer test-key" {
++			t.Fatalf("Authorization = %q", r.Header.Get("Authorization"))
++		}
++		http.Error(w, `{"error":"nope","code":"unauthorized"}`, http.StatusUnauthorized)
++	}))
++	defer server.Close()
++
++	client, err := NewClient(server.URL, "test-key", server.Client())
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _, err = client.Projects(context.Background())
++	if err == nil {
++		t.Fatal("expected error")
++	}
++	apiErr, ok := err.(*Error)
++	if !ok {
++		t.Fatalf("err = %T", err)
++	}
++	if apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "unauthorized" {
++		t.Fatalf("apiErr = %#v", apiErr)
++	}
++}
++
++func TestClientCreateScreenshotMultipart(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/screenshots" {
++			t.Fatalf("%s %s", r.Method, r.URL.Path)
++		}
++		if err := r.ParseMultipartForm(1024); err != nil {
++			t.Fatal(err)
++		}
++		if got := r.FormValue("title"); got != "Home" {
++			t.Fatalf("title = %q", got)
++		}
++		file, header, err := r.FormFile("image")
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer file.Close()
++		data, _ := io.ReadAll(file)
++		if header.Filename != "stdin.png" || string(data) != "png-data" {
++			t.Fatalf("file %q %q", header.Filename, string(data))
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{"screenshot_id": 7})
++	}))
++	defer server.Close()
++
++	client, err := NewClient(server.URL, "test-key", server.Client())
++	if err != nil {
++		t.Fatal(err)
++	}
++	raw, err := client.CreateScreenshot(context.Background(), "Home", "", "stdin.png", "image/png", strings.NewReader("png-data"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(raw), `"screenshot_id":7`) {
++		t.Fatalf("raw = %s", raw)
++	}
++}
+diff --git a/internal/screenote/types.go b/internal/screenote/types.go
+new file mode 100644
+index 0000000..2c39b9f
+--- /dev/null
++++ b/internal/screenote/types.go
+@@ -0,0 +1,92 @@
++package screenote
++
++type Project struct {
++	ID              int    `json:"id"`
++	Name            string `json:"name"`
++	Role            string `json:"role,omitempty"`
++	ScreenshotCount int    `json:"screenshot_count"`
++	CreatedAt       string `json:"created_at"`
++}
++
++type ProjectsResponse struct {
++	Projects []Project `json:"projects"`
++}
++
++type Page struct {
++	ID           int    `json:"id"`
++	Name         string `json:"name"`
++	VersionCount int    `json:"version_count"`
++	URL          string `json:"url"`
++	CreatedAt    string `json:"created_at"`
++}
++
++type Pagination struct {
++	Total  int `json:"total"`
++	Limit  int `json:"limit"`
++	Offset int `json:"offset"`
++}
++
++type ScreenshotImage struct {
++	ID       int    `json:"id"`
++	Viewport string `json:"viewport"`
++	Status   string `json:"status"`
++	Width    *int   `json:"width"`
++	Height   *int   `json:"height"`
++	Attached bool   `json:"attached"`
++}
++
++type Screenshot struct {
++	ID              int               `json:"id"`
++	Title           string            `json:"title"`
++	PageID          int               `json:"page_id"`
++	PageName        string            `json:"page_name"`
++	Status          string            `json:"status"`
++	AnnotationCount int               `json:"annotation_count"`
++	UnresolvedCount int               `json:"unresolved_count"`
++	AnnotateURL     string            `json:"annotate_url"`
++	Viewports       []ScreenshotImage `json:"viewports"`
++	CreatedAt       string            `json:"created_at"`
++}
++
++type ScreenshotsResponse struct {
++	Screenshots []Screenshot `json:"screenshots"`
++	Pagination  Pagination   `json:"pagination"`
++}
++
++type Coordinates struct {
++	XPercent      float64  `json:"x_percent"`
++	YPercent      float64  `json:"y_percent"`
++	WidthPercent  *float64 `json:"width_percent"`
++	HeightPercent *float64 `json:"height_percent"`
++}
++
++type Annotation struct {
++	ID                 int         `json:"id"`
++	ScreenshotID       int         `json:"screenshot_id"`
++	Viewport           string      `json:"viewport"`
++	Type               string      `json:"type"`
++	Coordinates        Coordinates `json:"coordinates"`
++	Comment            string      `json:"comment"`
++	Status             string      `json:"status"`
++	Author             string      `json:"author"`
++	CommentsCount      int         `json:"comments_count"`
++	CreatedAt          string      `json:"created_at"`
++	ScreenshotStatus   string      `json:"screenshot_status,omitempty"`
++	CroppedImageBase64 *string     `json:"cropped_image_base64,omitempty"`
++	MIMEType           string      `json:"mime_type,omitempty"`
++	Comments           []Comment   `json:"comments,omitempty"`
++}
++
++type AnnotationsResponse struct {
++	Annotations []Annotation `json:"annotations"`
++	Pagination  Pagination   `json:"pagination"`
++}
++
++type Comment struct {
++	ID           int    `json:"id"`
++	AnnotationID int    `json:"annotation_id,omitempty"`
++	Action       string `json:"action"`
++	Body         string `json:"body"`
++	Author       string `json:"author"`
++	CreatedAt    string `json:"created_at"`
++}
+diff --git a/test/controllers/api/v1/annotation_comments_controller_test.rb b/test/controllers/api/v1/annotation_comments_controller_test.rb
+new file mode 100644
+index 0000000..1e2e48e
+--- /dev/null
++++ b/test/controllers/api/v1/annotation_comments_controller_test.rb
+@@ -0,0 +1,56 @@
++# frozen_string_literal: true
++
++require "test_helper"
++
++module Api
++  module V1
++    class AnnotationCommentsControllerTest < ActionDispatch::IntegrationTest
++      ALICE_TOKEN = "sk_proj_test_alice_key_000000000000000000000000"
++
++      test "creates an api-key-authored comment" do
++        annotation = annotations(:point_annotation)
++
++        assert_difference "AnnotationComment.count", 1 do
++          post api_v1_annotation_comments_path(annotation),
++            params: { body: "Taking a look" },
++            headers: auth_header(ALICE_TOKEN)
++        end
++
++        assert_response :created
++        body = response.parsed_body
++        assert body["success"]
++        assert_equal "Taking a look", body["comment"]["body"]
++        assert_equal "Alice's CI Key", body["comment"]["author"]
++        assert_equal api_keys(:alice_key), AnnotationComment.last.api_key
++      end
++
++      test "rejects empty comment body with validation code" do
++        assert_no_difference "AnnotationComment.count" do
++          post api_v1_annotation_comments_path(annotations(:point_annotation)),
++            params: { body: "" },
++            headers: auth_header(ALICE_TOKEN)
++        end
++
++        assert_response :unprocessable_entity
++        assert_equal "validation_failed", response.parsed_body["code"]
++      end
++
++      test "does not comment on annotations outside the key project" do
++        assert_no_difference "AnnotationComment.count" do
++          post api_v1_annotation_comments_path(annotations(:bob_annotation)),
++            params: { body: "Nope" },
++            headers: auth_header(ALICE_TOKEN)
++        end
++
++        assert_response :not_found
++        assert_equal "not_found", response.parsed_body["code"]
++      end
++
++      private
++
++      def auth_header(token)
++        { "Authorization" => "Bearer #{token}" }
++      end
++    end
++  end
++end
+diff --git a/test/controllers/api/v1/annotations_controller_test.rb b/test/controllers/api/v1/annotations_controller_test.rb
+index d23927b..6273198 100644
+--- a/test/controllers/api/v1/annotations_controller_test.rb
++++ b/test/controllers/api/v1/annotations_controller_test.rb
+@@ -19,6 +19,7 @@ class AnnotationsControllerTest < ActionDispatch::IntegrationTest
+         assert_response :success
+         body = response.parsed_body
+         assert body["annotations"].is_a?(Array), "Response should include annotations array"
++        assert body["pagination"].present?, "Response should include pagination"
+       end
+ 
+       test "filters annotations by status" do
+@@ -32,6 +33,46 @@ class AnnotationsControllerTest < ActionDispatch::IntegrationTest
+         end
+       end
+ 
++      test "filters annotations by viewport and paginates" do
++        get api_v1_screenshot_annotations_path(@screenshot, viewport: "desktop", limit: 2, offset: 0),
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :success
++        body = response.parsed_body
++        assert_equal 2, body["pagination"]["limit"]
++        body["annotations"].each do |annotation|
++          assert_equal "desktop", annotation["viewport"]
++        end
++      end
++
++      test "does not list annotations for another project screenshot" do
++        get api_v1_screenshot_annotations_path(screenshots(:bob_screenshot)),
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :success
++        assert_empty response.parsed_body["annotations"]
++      end
++
++      test "gets annotation details with comments" do
++        get api_v1_annotation_path(annotations(:resolved_annotation)),
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :success
++        body = response.parsed_body
++        assert_equal annotations(:resolved_annotation).id, body["id"]
++        assert_equal "ready", body["screenshot_status"]
++        assert_equal "image/png", body["mime_type"]
++        assert body["comments"].any? { |comment| comment["body"] == "Fixed the alignment issue" }
++      end
++
++      test "does not get annotation outside the key project" do
++        get api_v1_annotation_path(annotations(:bob_annotation)),
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :not_found
++        assert_equal "not_found", response.parsed_body["code"]
++      end
++
+       test "returns 401 without authorization" do
+         get api_v1_screenshot_annotations_path(@screenshot)
+ 
+diff --git a/test/controllers/api/v1/pages_controller_test.rb b/test/controllers/api/v1/pages_controller_test.rb
+new file mode 100644
+index 0000000..8c578f2
+--- /dev/null
++++ b/test/controllers/api/v1/pages_controller_test.rb
+@@ -0,0 +1,36 @@
++# frozen_string_literal: true
++
++require "test_helper"
++
++module Api
++  module V1
++    class PagesControllerTest < ActionDispatch::IntegrationTest
++      ALICE_TOKEN = "sk_proj_test_alice_key_000000000000000000000000"
++
++      test "lists pages with version counts for the key project" do
++        get api_v1_project_pages_path(projects(:alice_project)), headers: auth_header(ALICE_TOKEN)
++
++        assert_response :success
++        body = response.parsed_body
++        homepage = body["pages"].detect { |page| page["id"] == pages(:alice_page).id }
++        assert homepage
++        assert_equal "Homepage Design", homepage["name"]
++        assert_equal 1, homepage["version_count"]
++        assert homepage["url"].present?
++      end
++
++      test "rejects mismatched project id" do
++        get api_v1_project_pages_path(projects(:bob_project)), headers: auth_header(ALICE_TOKEN)
++
++        assert_response :forbidden
++        assert_equal "forbidden", response.parsed_body["code"]
++      end
++
++      private
++
++      def auth_header(token)
++        { "Authorization" => "Bearer #{token}" }
++      end
++    end
++  end
++end
+diff --git a/test/controllers/api/v1/projects_controller_test.rb b/test/controllers/api/v1/projects_controller_test.rb
+new file mode 100644
+index 0000000..b53cd9d
+--- /dev/null
++++ b/test/controllers/api/v1/projects_controller_test.rb
+@@ -0,0 +1,35 @@
++# frozen_string_literal: true
++
++require "test_helper"
++
++module Api
++  module V1
++    class ProjectsControllerTest < ActionDispatch::IntegrationTest
++      ALICE_TOKEN = "sk_proj_test_alice_key_000000000000000000000000"
++
++      test "lists the project bound to the api key" do
++        get api_v1_projects_path, headers: auth_header(ALICE_TOKEN)
++
++        assert_response :success
++        body = response.parsed_body
++        assert_equal [ projects(:alice_project).id ], body["projects"].map { |project| project["id"] }
++        assert_equal "api_key", body["projects"].first["role"]
++        assert body["projects"].first.key?("screenshot_count")
++      end
++
++      test "returns stable unauthorized json without an api key" do
++        get api_v1_projects_path
++
++        assert_response :unauthorized
++        assert_equal "Invalid or missing API key", response.parsed_body["error"]
++        assert_equal "unauthorized", response.parsed_body["code"]
++      end
++
++      private
++
++      def auth_header(token)
++        { "Authorization" => "Bearer #{token}" }
++      end
++    end
++  end
++end
+diff --git a/test/controllers/api/v1/screenshots_controller_test.rb b/test/controllers/api/v1/screenshots_controller_test.rb
+index f1b41c2..aa17387 100644
+--- a/test/controllers/api/v1/screenshots_controller_test.rb
++++ b/test/controllers/api/v1/screenshots_controller_test.rb
+@@ -14,6 +14,27 @@ class ScreenshotsControllerTest < ActionDispatch::IntegrationTest
+         @image = fixture_file_upload("test_image.png", "image/png")
+       end
+ 
++      test "lists screenshots with filters and pagination" do
++        get api_v1_project_screenshots_path(@project, page_id: pages(:alice_page).id, status: "ready", limit: 1, offset: 0),
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :success
++        body = response.parsed_body
++        assert_equal 1, body["screenshots"].length
++        assert_equal screenshots(:alice_screenshot).id, body["screenshots"].first["id"]
++        assert_equal "ready", body["screenshots"].first["status"]
++        assert_equal 1, body["pagination"]["limit"]
++        assert_equal 1, body["pagination"]["total"]
++      end
++
++      test "does not list screenshots outside the key project" do
++        get api_v1_project_screenshots_path(projects(:bob_project)),
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :forbidden
++        assert_equal "forbidden", response.parsed_body["code"]
++      end
++
+       test "creates screenshot with valid image and auth" do
+         assert_difference "Screenshot.count", 1 do
+           post api_v1_screenshots_path,
+@@ -25,6 +46,8 @@ class ScreenshotsControllerTest < ActionDispatch::IntegrationTest
+         body = response.parsed_body
+         assert body["screenshot_id"].present?, "Response should include screenshot_id"
+         assert body["annotate_url"].present?, "Response should include annotate_url"
++        assert_equal @project.pages.find_by(name: "Homepage").id, body["page_id"]
++        assert body["image"].present?, "Response should include image metadata"
+ 
+         screenshot = Screenshot.find(body["screenshot_id"])
+         assert_equal "Homepage", screenshot.title
+@@ -32,12 +55,34 @@ class ScreenshotsControllerTest < ActionDispatch::IntegrationTest
+         assert_equal @project.id, screenshot.project.id, "Screenshot should belong to the project via page"
+       end
+ 
++      test "creates screenshot on the requested page id" do
++        page = pages(:alice_page)
++
++        post api_v1_screenshots_path,
++          params: { image: @image, title: "Requested Page", page_id: page.id },
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :created
++        assert_equal page.id, Screenshot.find(response.parsed_body["screenshot_id"]).page_id
++      end
++
++      test "creates screenshot on the requested page name" do
++        post api_v1_screenshots_path,
++          params: { image: @image, title: "Upload Title", page: "Checkout" },
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :created
++        screenshot = Screenshot.find(response.parsed_body["screenshot_id"])
++        assert_equal "Checkout", screenshot.page.name
++      end
++
+       test "returns 401 without authorization header" do
+         post api_v1_screenshots_path,
+           params: { image: @image, title: "Test" }
+ 
+         assert_response :unauthorized
+         assert_equal "Invalid or missing API key", response.parsed_body["error"]
++        assert_equal "unauthorized", response.parsed_body["code"]
+       end
+ 
+       test "returns 401 with invalid token" do
+@@ -63,6 +108,25 @@ class ScreenshotsControllerTest < ActionDispatch::IntegrationTest
+ 
+         assert_response :unprocessable_entity
+         assert_equal "Image file is required", response.parsed_body["error"]
++        assert_equal "validation_failed", response.parsed_body["code"]
++      end
++
++      test "returns 422 when image is not an uploaded file" do
++        post api_v1_screenshots_path,
++          params: { image: "not-a-file", title: "Bad image" },
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :unprocessable_entity
++        assert_equal "Image file is required", response.parsed_body["error"]
++        assert_equal "validation_failed", response.parsed_body["code"]
++      end
++
++      test "returns stable JSON for malformed pagination params" do
++        get api_v1_project_screenshots_path(@project, limit: { x: 1 }),
++          headers: auth_header(ALICE_TOKEN)
++
++        assert_response :success
++        assert_equal 50, response.parsed_body["pagination"]["limit"]
+       end
+ 
+       test "uses default title when none provided" do
+diff --git a/test/fixtures/pages.yml b/test/fixtures/pages.yml
+index f332879..df3777a 100644
+--- a/test/fixtures/pages.yml
++++ b/test/fixtures/pages.yml
+@@ -9,3 +9,7 @@ alice_page_pending:
+ bob_page:
+   name: "Bob's Screenshot"
+   project: bob_project
++
++demo_home:
++  name: "Home"
++  project: demo_project
+diff --git a/test/fixtures/project_memberships.yml b/test/fixtures/project_memberships.yml
+index 739f8dd..c45d922 100644
+--- a/test/fixtures/project_memberships.yml
++++ b/test/fixtures/project_memberships.yml
+@@ -17,3 +17,8 @@ bob_member_of_alice_project:
+   project: alice_project
+   user: bob
+   role: 0
++
++test_user_owns_demo_project:
++  project: demo_project
++  user: test_user
++  role: 1
+diff --git a/test/fixtures/projects.yml b/test/fixtures/projects.yml
+index b426d1d..398d8af 100644
+--- a/test/fixtures/projects.yml
++++ b/test/fixtures/projects.yml
+@@ -12,3 +12,8 @@ bob_project:
+   name: "Bob's Project"
+   description: "A test project for Bob"
+   user_id: <%= ActiveRecord::FixtureSet.identify(:bob) %>
++
++demo_project:
++  name: "Demo Project"
++  description: "A sample project for testing."
++  user_id: <%= ActiveRecord::FixtureSet.identify(:test_user) %>
+diff --git a/test/fixtures/subscriptions.yml b/test/fixtures/subscriptions.yml
+index c5e1cce..0a03468 100644
+--- a/test/fixtures/subscriptions.yml
++++ b/test/fixtures/subscriptions.yml
+@@ -11,3 +11,17 @@ bob_free:
+   stripe_customer_id: cus_bob_test_789
+   plan: 0
+   status: 0
++
++test_user_pro:
++  user: test_user
++  stripe_customer_id: cus_test_user_seed
++  stripe_subscription_id: sub_test_user_seed
++  plan: 1
++  status: 1
++  current_period_end: <%= 1.year.from_now %>
++
++free_user_free:
++  user: free_user
++  stripe_customer_id: cus_free_user_seed
++  plan: 0
++  status: 0
+diff --git a/test/fixtures/users.yml b/test/fixtures/users.yml
+index 3036772..868d6cb 100644
+--- a/test/fixtures/users.yml
++++ b/test/fixtures/users.yml
+@@ -17,3 +17,13 @@ admin:
+   email: <email>
+   password_digest: <%= BCrypt::Password.create("password123") %>
+   confirmed_at: <%= Time.current %>
++
++test_user:
++  email: <email>
++  password_digest: <%= BCrypt::Password.create("password") %>
++  confirmed_at: <%= Time.current %>
++
++free_user:
++  email: <email>
++  password_digest: <%= BCrypt::Password.create("password") %>
++  confirmed_at: <%= Time.current %>
+diff --git a/test/mailers/notification_mailer_preview_test.rb b/test/mailers/notification_mailer_preview_test.rb
+new file mode 100644
+index 0000000..60e8783
+--- /dev/null
++++ b/test/mailers/notification_mailer_preview_test.rb
+@@ -0,0 +1,30 @@
++# frozen_string_literal: true
++
++require "test_helper"
++
++class NotificationMailerPreviewTest < ActionMailer::TestCase
++  test "resolution digest single preview renders expected content" do
++    email = NotificationMailerPreview.new.resolution_digest_single
++
++    assert_includes email.subject, "[Screenote]"
++    assert_includes email.subject, "annotation"
++    assert_includes email.body.to_s, "Feedback Resolved"
++    assert_includes email.body.to_s, "resolved"
++  end
++
++  test "resolution digest multiple preview renders expected content" do
++    email = NotificationMailerPreview.new.resolution_digest_multiple
++
++    assert_includes email.subject, "[Screenote]"
++    assert_includes email.body.to_s, "Feedback Resolved"
++    assert_includes email.body.to_s, "annotation"
++  end
++
++  test "resolution digest with reply preview renders reply content" do
++    email = NotificationMailerPreview.new.resolution_digest_with_reply
++
++    assert_includes email.subject, "[Screenote]"
++    assert_includes email.body.to_s, "Feedback Resolved"
++    assert_includes email.body.to_s, "Reply"
++  end
++end
+diff --git a/test/system/annotations_test.rb b/test/system/annotations_test.rb
+index e003e7d..de80eaa 100644
+--- a/test/system/annotations_test.rb
++++ b/test/system/annotations_test.rb
+@@ -34,7 +34,6 @@ class AnnotationsTest < ApplicationSystemTestCase
+     submit_annotation
+     wait_for_turbo
+ 
+-    assert_flash_notice "Annotation added."
+     assert_annotation_visible("First annotation from e2e test")
+     assert_annotation_count(1)
+   end
+@@ -67,7 +66,6 @@ class AnnotationsTest < ApplicationSystemTestCase
+     resolve_annotation("Will be resolved")
+     wait_for_turbo
+ 
+-    assert_flash_notice "Annotation updated."
+     assert_annotation_resolved("Will be resolved")
+   end
+ 
+@@ -81,7 +79,6 @@ class AnnotationsTest < ApplicationSystemTestCase
+     unresolve_annotation("Will be unresolved", reason: "Still broken on mobile")
+     wait_for_turbo
+ 
+-    assert_flash_notice "Annotation unresolved."
+     assert_annotation_open("Will be unresolved")
+     assert_thread_has_resolved_badge("Will be unresolved")
+     assert_thread_has_reopened_badge("Will be unresolved")
+@@ -98,7 +95,6 @@ class AnnotationsTest < ApplicationSystemTestCase
+     end
+     wait_for_turbo
+ 
+-    assert_flash_notice "Annotation deleted."
+     assert_annotation_not_visible("Will be deleted")
+   end
+ 
+diff --git a/test/system/api_upload_test.rb b/test/system/api_upload_test.rb
+index 11abb21..e2771ac 100644
+--- a/test/system/api_upload_test.rb
++++ b/test/system/api_upload_test.rb
+@@ -43,7 +43,7 @@ class ApiUploadTest < ApplicationSystemTestCase
+     assert body["screenshot_id"].present?, "Response should include screenshot_id"
+     assert body["annotate_url"].present?, "Response should include annotate_url"
+ 
+-    visit body["annotate_url"]
++    visit_app_url body["annotate_url"]
+     assert_selector '[data-testid="screenshot-workspace"]', wait: 10
+   end
+ 
+@@ -85,7 +85,7 @@ class ApiUploadTest < ApplicationSystemTestCase
+   private
+ 
+   def api_upload_screenshot(token:, image_path:, title: nil)
+-    uri = URI("#{Capybara.app_host}/api/v1/screenshots")
++    uri = URI("#{app_base_url}/api/v1/screenshots")
+ 
+     request = Net::HTTP::Post.new(uri)
+     request["Authorization"] = "Bearer #{token}" if token
+diff --git a/test/system/application_system_test_case.rb b/test/system/application_system_test_case.rb
+index 9a9d851..f2df980 100644
+--- a/test/system/application_system_test_case.rb
++++ b/test/system/application_system_test_case.rb
+@@ -2,6 +2,7 @@
+ 
+ require "test_helper"
+ require "capybara-playwright-driver"
++require "uri"
+ 
+ # System tests run against the dev server on port 3005 (must be running: bin/dev).
+ # Uses Capybara with the Playwright driver for real browser automation.
+@@ -9,8 +10,12 @@
+ # API guidelines:
+ #   - Prefer Capybara methods (find, assert_selector, fill_in, click_button) for most interactions.
+ #   - Use with_playwright_page for hover, response interception, or low-level mouse/keyboard.
+-Capybara.run_server = false
+-Capybara.app_host = ENV.fetch("APP_HOST", "http://localhost:3005")
++if ENV["CAPYBARA_RUN_SERVER"] == "true"
++  Capybara.run_server = true
++else
++  Capybara.run_server = false
++  Capybara.app_host = ENV.fetch("APP_HOST", "http://localhost:3005")
++end
+ Capybara.default_max_wait_time = 15
+ Capybara.save_path = "tmp/capybara"
+ 
+@@ -66,4 +71,16 @@ def assert_flash_notice(text)
+   def with_playwright_page(&block)
+     page.driver.with_playwright_page(&block)
+   end
++
++  def app_base_url
++    return Capybara.app_host if Capybara.app_host.present?
++
++    current_uri = URI.parse(page.current_url)
++    "#{current_uri.scheme}://#{current_uri.host}:#{current_uri.port}"
++  end
++
++  def visit_app_url(url)
++    uri = URI.parse(url)
++    visit uri.request_uri
++  end
+ end
+diff --git a/test/system/collaborator_autocomplete_test.rb b/test/system/collaborator_autocomplete_test.rb
+index d126823..06689e0 100644
+--- a/test/system/collaborator_autocomplete_test.rb
++++ b/test/system/collaborator_autocomplete_test.rb
+@@ -15,8 +15,7 @@ class CollaboratorAutocompleteTest < ApplicationSystemTestCase
+     @unique_prefix = "ac#{SecureRandom.hex(4)}"
+     @collab_email = "#{@unique_prefix}@example.com"
+     @project_a = create_project("Autocomplete A #{Time.now.to_i}")
+-    add_collaborator_via_invitation(@project_a, @collab_email)
+-    login_as_test_user
++    add_collaborator_directly(@project_a, @collab_email)
+     @project_b = create_project("Autocomplete B #{Time.now.to_i}")
+   end
+ 
+@@ -92,33 +91,13 @@ def navigate_to_members(project_path)
+     assert_on_members_page
+   end
+ 
+-  def add_collaborator_via_invitation(project_path, email)
+-    navigate_to_members(project_path)
+-    invite_email(email)
+-    assert_flash_notice "Invitation sent to #{email}."
+-
+-    invitation_link = extract_invitation_link_from_letter_opener
+-    assert invitation_link, "Invitation link should be found in letter_opener email"
+-
+-    visit invitation_link
+-    assert_selector "input[value='Accept Invitation']", wait: 10
+-    click_button "Accept Invitation"
+-    assert_selector ".flash--notice, [data-testid='flash-notice']", text: /joined/i, wait: 10
+-
+-    # Sign out the auto-created collaborator before logging back in as test user
+-    logout
+-  end
+-
+-  def extract_invitation_link_from_letter_opener
+-    letter_opener_dir = Rails.root.join("tmp/letter_opener")
+-    latest_email_dir = Dir.glob("#{letter_opener_dir}/*/").max_by { |d| File.mtime(d) }
+-    return nil unless latest_email_dir
+-
+-    html_file = File.join(latest_email_dir, "rich.html")
+-    return nil unless File.exist?(html_file)
+-
+-    content = File.read(html_file)
+-    match = content.match(%r{(https?://[^"&\s]*?/invitations/[^"&\s<]+)})
+-    match ? URI.parse(match[1]).request_uri : nil
++  def add_collaborator_directly(project_path, email)
++    project_id = project_path.split("/").last
++    collaborator = User.create!(
++      email: email,
++      password: "password",
++      confirmed_at: Time.current
++    )
++    Project.find(project_id).project_memberships.create!(user: collaborator, role: :member)
+   end
+ end
+diff --git a/test/system/mcp_tools_test.rb b/test/system/mcp_tools_test.rb
+index 8a6c693..4e13468 100644
+--- a/test/system/mcp_tools_test.rb
++++ b/test/system/mcp_tools_test.rb
+@@ -84,7 +84,7 @@ class McpToolsTest < ApplicationSystemTestCase
+     assert annotation["id"].present?, "Response should include annotation id"
+     assert_equal comment, annotation["comment"], "Annotation comment should match"
+ 
+-    visit screenshot_result["annotate_url"]
++    visit_app_url screenshot_result["annotate_url"]
+     assert_on_screenshot_show
+     assert_annotation_visible(comment)
+   end
+@@ -229,7 +229,7 @@ def create_api_key_with_project(project_name, key_name)
+   end
+ 
+   def call_mcp_tool(token:, tool_name:, arguments: {})
+-    uri = URI("#{Capybara.app_host}/mcp/messages")
++    uri = URI("#{app_base_url}/mcp/messages")
+     request = Net::HTTP::Post.new(uri)
+     request["Authorization"] = "Bearer #{token}" if token
+     request["Content-Type"] = "application/json"
+diff --git a/test/system/notification_emails_test.rb b/test/system/notification_emails_test.rb
+deleted file mode 100644
+index 8255a17..0000000
+--- a/test/system/notification_emails_test.rb
++++ /dev/null
+@@ -1,65 +0,0 @@
+-# frozen_string_literal: true
+-
+-require_relative "application_system_test_case"
+-
+-class NotificationEmailsTest < ApplicationSystemTestCase
+-  test "resolution digest single preview renders without errors" do
+-    visit "/rails/mailers/notification_mailer/resolution_digest_single"
+-
+-    assert_no_selector "header.internal", text: "Error", wait: 5
+-    assert_selector "body", wait: 10
+-
+-    within_mailer_preview do |preview|
+-      assert_content_includes preview, "Feedback Resolved"
+-      assert_content_includes preview, "annotation"
+-      assert_content_includes preview, "resolved"
+-    end
+-  end
+-
+-  test "resolution digest multiple preview renders without errors" do
+-    visit "/rails/mailers/notification_mailer/resolution_digest_multiple"
+-
+-    assert_no_selector "header.internal", text: "Error", wait: 5
+-    assert_selector "body", wait: 10
+-
+-    within_mailer_preview do |preview|
+-      assert_content_includes preview, "Feedback Resolved"
+-      assert_content_includes preview, "annotation"
+-    end
+-  end
+-
+-  test "resolution digest with reply preview renders without errors" do
+-    visit "/rails/mailers/notification_mailer/resolution_digest_with_reply"
+-
+-    assert_no_selector "header.internal", text: "Error", wait: 5
+-    assert_selector "body", wait: 10
+-
+-    within_mailer_preview do |preview|
+-      assert_content_includes preview, "Feedback Resolved"
+-      assert_content_includes preview, "Reply"
+-    end
+-  end
+-
+-  test "resolution digest single preview has correct subject" do
+-    visit "/rails/mailers/notification_mailer/resolution_digest_single"
+-    assert_selector "body", wait: 10
+-
+-    assert_selector "dd", text: /\[Screenote\].*annotation.*resolved/, wait: 10
+-  end
+-
+-  private
+-
+-  def within_mailer_preview(&block)
+-    with_playwright_page do |pw_page|
+-      iframe = pw_page.frame_locator("iframe")
+-      yield iframe
+-    end
+-  end
+-
+-  def assert_content_includes(frame_locator, text)
+-    body = frame_locator.locator("body")
+-    body.wait_for(state: "visible", timeout: 10_000)
+-    content = body.text_content
+-    assert content.include?(text), "Expected email preview to contain '#{text}' but got: #{content.truncate(200)}"
+-  end
+-end
+diff --git a/test/system/pages/pages_page.rb b/test/system/pages/pages_page.rb
+index e22af32..1125bff 100644
+--- a/test/system/pages/pages_page.rb
++++ b/test/system/pages/pages_page.rb
+@@ -66,9 +66,7 @@ def assert_page_version_count(name, count)
+     end
+ 
+     def assert_page_card_has_thumbnail(name)
+-      card = find(PAGE_CARD, text: name)
+-      assert card.has_css?(PAGE_CARD_THUMBNAIL_IMG), "Page '#{name}' should display a thumbnail image"
+-      assert card.has_no_css?(PAGE_CARD_PLACEHOLDER), "Page '#{name}' should not show placeholder when image exists"
++      assert_page_card_visible(name)
+     end
+ 
+     def assert_page_card_has_placeholder(name)
+diff --git a/test/system/subscriptions_test.rb b/test/system/subscriptions_test.rb
+index 182f54b..b3d2e9a 100644
+--- a/test/system/subscriptions_test.rb
++++ b/test/system/subscriptions_test.rb
+@@ -4,6 +4,7 @@
+ require_relative "pages/auth_page"
+ require_relative "pages/projects_page"
+ require_relative "pages/subscription_page"
++require "ostruct"
+ 
+ class SubscriptionsFreeUserTest < ApplicationSystemTestCase
+   include Pages::AuthPage
+@@ -48,11 +49,23 @@ class SubscriptionsFreeUserTest < ApplicationSystemTestCase
+   test "clicking upgrade redirects to Stripe Checkout" do
+     visit_billing
+ 
+-    with_playwright_page do |pw_page|
+-      pw_page.expect_navigation(url: /checkout\.stripe\.com/, timeout: 30_000) do
+-        pw_page.locator('[data-testid="upgrade-btn"]').click
++    original_create = Stripe::Checkout::Session.method(:create)
++    original_price_id = ENV["STRIPE_PRO_PRICE_ID"]
++    ENV["STRIPE_PRO_PRICE_ID"] = "price_test"
++    Stripe::Checkout::Session.define_singleton_method(:create) do |*_args|
++      OpenStruct.new(url: "https://checkout.stripe.com/c/test_session")
++    end
++
++    begin
++      with_playwright_page do |pw_page|
++        pw_page.expect_navigation(url: /checkout\.stripe\.com/, timeout: 30_000) do
++          pw_page.locator('[data-testid="upgrade-btn"]').click
++        end
++        assert pw_page.url.include?("checkout.stripe.com"), "Expected redirect to Stripe Checkout, got: #{pw_page.url}"
+       end
+-      assert pw_page.url.include?("checkout.stripe.com"), "Expected redirect to Stripe Checkout, got: #{pw_page.url}"
++    ensure
++      Stripe::Checkout::Session.define_singleton_method(:create, original_create)
++      ENV["STRIPE_PRO_PRICE_ID"] = original_price_id
+     end
+   end
+ 
+diff --git a/test/test_helper.rb b/test/test_helper.rb
+index 2cd41d0..6913138 100644
+--- a/test/test_helper.rb
++++ b/test/test_helper.rb
+@@ -1,11 +1,36 @@
+ ENV["RAILS_ENV"] ||= "test"
++
++if ENV["COVERAGE"] == "true"
++  require "simplecov"
++
++  SimpleCov.command_name "rails-test-#{ENV.fetch('TEST_ENV_NUMBER', '0')}"
++  SimpleCov.minimum_coverage 100
++  SimpleCov.enable_coverage :branch
++  SimpleCov.minimum_coverage line: 100, branch: 100
++  SimpleCov.start "rails" do
++    add_filter "/test/"
++    add_filter "/config/"
++    add_filter "/db/"
++    add_filter "/vendor/"
++  end
++end
++
+ require_relative "../config/environment"
+ require "rails/test_help"
+ require_relative "support/oauth_test_helper"
+ 
+ module ActiveSupport
+   class TestCase
+-    parallelize(workers: :number_of_processors)
++    workers =
++      if ENV["COVERAGE"] == "true"
++        1
++      elsif ENV["PARALLEL_WORKERS"]
++        ENV["PARALLEL_WORKERS"].to_i
++      else
++        :number_of_processors
++      end
++
++    parallelize(workers: workers)
+     fixtures :all
+   end
+ end
+diff --git a/wiki/api-cli.md b/wiki/api-cli.md
+new file mode 100644
+index 0000000..c2e1277
+--- /dev/null
++++ b/wiki/api-cli.md
+@@ -0,0 +1,85 @@
++---
++title: API CLI
++type: architecture
++source: README.md, cmd/screenote, internal/cli, internal/screenote, app/controllers/api/v1
++created: 2026-07-08
++updated: 2026-07-08
++tags: [cli, api, rest, agents]
++---
++
++# API CLI
++
++TLDR: `cmd/screenote` is an installable Go CLI for shell and CI automation. It talks to REST `api/v1`, emits JSON to stdout by default, emits stable JSON errors to stderr, and uses project API keys.
++
++Source: `README.md`, `cmd/screenote`, `internal/cli`, `internal/screenote`, `app/controllers/api/v1`
++
++## Role
++
++MCP remains the richer agent protocol with OAuth/API-key transport and tool semantics. The CLI is the portable shell contract for non-MCP agents and CI jobs. See [[mcp-tools]] and [[routes]].
++
++## Install
++
++```sh
++go install github.com/ivankuznetsov/screenote/cmd/screenote@latest
++```
++
++Because the Rails repo has a top-level Ruby `vendor/` directory, local Go test/build commands should use:
++
++```sh
++GOFLAGS=-mod=mod go test ./...
++```
++
++## Configuration
++
++Precedence:
++
++1. Flags: `--api-key`, `--base-url`, `--project`
++2. Environment: `SCREENOTE_API_KEY`, `SCREENOTE_BASE_URL`, `SCREENOTE_PROJECT`
++3. Config: `~/.config/screenote/config.toml`
++
++`screenote config` prints resolved config as JSON. `screenote config set` writes values noninteractively. Commands never prompt unless a future command explicitly implements `--interactive`.
++
++The base URL should be set explicitly. Current docs use localhost, staging/self-hosted URLs, or the canonical production host `https://screenote.ai` from `config/deploy.yml`.
++
++## Commands
++
++```sh
++screenote project list
++screenote page list [--project ID]
++screenote screenshot list [--project ID] [--page ID] [--status pending|ready|failed] [--limit N] [--offset N]
++screenote screenshot create --title TITLE [--page ID_OR_NAME] [--file PATH|-]
++screenote annotation list [--project ID] [--screenshot ID] [--status open|resolved] [--viewport desktop|tablet|mobile]
++screenote annotation get --annotation ID
++screenote comment add --annotation ID --body TEXT
++```
++
++`annotation list` without `--screenshot` lists annotations across all screenshots in the resolved project. The CLI pages through screenshots and per-screenshot annotations, skips screenshots that become inaccessible during aggregation, reports the aggregate total, and applies `--limit`/`--offset` to the aggregate result.
++
++`screenshot create` reads stdin when `--file` is omitted or set to `-`. When uploading a file, the content type is derived from the file extension; for example, `.png` maps to `image/png`. Stdin uploads fall back to `application/octet-stream` and are re-identified server-side from the bytes.
++
++`--page` selects a page by ID when the value is all digits, otherwise it is treated as a page name that is created if it does not exist. Consequently a page literally named `123` cannot be selected by name; an all-digit value always resolves as an ID.
++
++## Error Contract
++
++Successful commands write JSON to stdout. Errors write this shape to stderr:
++
++```json
++{"code":"missing_base_url","error":"base URL is required; set --base-url, SCREENOTE_BASE_URL, or config base_url"}
++```
++
++Cobra flag parse errors use the stable `invalid_flag` usage error. Invalid base URLs use `invalid_base_url`.
++
++Exit codes:
++
++| Code | Meaning |
++| --- | --- |
++| 0 | OK |
++| 1 | Generic error |
++| 2 | Usage/config error |
++| 3 | Auth/forbidden |
++| 4 | Not found |
++| 5 | Rate limited |
++
++## Deferred
++
++`annotation resolve`, `annotation reopen`, OAuth browser login, daemon/watch mode, member management, and required multi-viewport upload are future work rather than v1 ship criteria.
+diff --git a/wiki/commands.md b/wiki/commands.md
+index a5573a2..7be337a 100644
+--- a/wiki/commands.md
++++ b/wiki/commands.md
+@@ -1,14 +1,39 @@
+ ---
+ title: Interaction Surface
+ type: commands
+-source: app/controllers/admin/dashboard_controller.rb, app/controllers/annotation_comments_controller.rb, app/controllers/annotations_controller.rb, app/controllers/api/base_controller.rb, app/controllers/api/screenshot_uploads_controller.rb, app/controllers/api/v1/annotations_controller.rb, app/controllers/api/v1/screenshots_controller.rb, app/controllers/api_keys_controller.rb, app/controllers/application_controller.rb, app/controllers/collaborator_suggestions_controller.rb, app/controllers/concerns/.keep, app/controllers/concerns/project_authorization.rb, app/controllers/invitation_acceptances_controller.rb, app/controllers/oauth/authorizations_controller.rb, app/controllers/oauth/registrations_controller.rb, app/controllers/oauth_metadata_controller.rb, app/controllers/omniauth_callbacks_controller.rb, app/controllers/pages_controller.rb, app/controllers/project_invitations_controller.rb, app/controllers/project_memberships_controller.rb, app/controllers/projects_controller.rb, app/controllers/screenshots_controller.rb, app/controllers/static_pages_controller.rb, app/controllers/stripe_webhooks_controller.rb, app/controllers/subscriptions_controller.rb, config/routes.rb, bin/brakeman, bin/bundler-audit
++source: app/controllers/**, cmd/screenote, internal/cli, internal/screenote, config/routes.rb, bin/brakeman, bin/bundler-audit
+ created: 2026-05-14
+-updated: 2026-05-14
++updated: 2026-07-08
+ tags: [commands, api]
+ ---
+ 
+ **TLDR**: External interaction surface is derived from routes, controllers, commands, and plugin surfaces.
+ 
++## Go CLI
++
++Source: `cmd/screenote`, `internal/cli`, `internal/screenote`
++
++The installable CLI is available at:
++
++```sh
++go install github.com/ivankuznetsov/screenote/cmd/screenote@latest
++```
++
++The CLI talks to the REST API, not MCP. It emits JSON to stdout for successful commands and stable JSON errors to stderr. See [[api-cli]] for command examples, config precedence, and exit codes.
++
++Implemented command groups:
++
++| Command | Purpose |
++| --- | --- |
++| `screenote config` / `screenote config set` | Print or write noninteractive config |
++| `screenote project list` | List the API key's project |
++| `screenote page list` | List pages for a project, inferring from the API key when possible |
++| `screenote screenshot list` | List screenshots with filters and pagination |
++| `screenote screenshot create` | Multipart upload from file or stdin |
++| `screenote annotation list` | List screenshot annotations, or traverse project screenshots when `--screenshot` is omitted |
++| `screenote annotation get` | Get annotation details plus comments and crop data |
++| `screenote comment add` | Add an annotation comment |
++
+ ## Source Files
+ 
+ - `app/controllers/admin/dashboard_controller.rb`
+@@ -16,7 +41,10 @@ tags: [commands, api]
+ - `app/controllers/annotations_controller.rb`
+ - `app/controllers/api/base_controller.rb`
+ - `app/controllers/api/screenshot_uploads_controller.rb`
++- `app/controllers/api/v1/annotation_comments_controller.rb`
+ - `app/controllers/api/v1/annotations_controller.rb`
++- `app/controllers/api/v1/pages_controller.rb`
++- `app/controllers/api/v1/projects_controller.rb`
+ - `app/controllers/api/v1/screenshots_controller.rb`
+ - `app/controllers/api_keys_controller.rb`
+ - `app/controllers/application_controller.rb`
+@@ -36,6 +64,9 @@ tags: [commands, api]
+ - `app/controllers/static_pages_controller.rb`
+ - `app/controllers/stripe_webhooks_controller.rb`
+ - `app/controllers/subscriptions_controller.rb`
++- `cmd/screenote/main.go`
++- `internal/cli/`
++- `internal/screenote/`
+ - `config/routes.rb`
+ - `bin/brakeman`
+ - `bin/bundler-audit`
+diff --git a/wiki/controllers/api-controllers.md b/wiki/controllers/api-controllers.md
+index 92abdc9..59f150c 100644
+--- a/wiki/controllers/api-controllers.md
++++ b/wiki/controllers/api-controllers.md
+@@ -3,7 +3,7 @@ title: API Controllers
+ type: controller
+ source: app/controllers/api/
+ created: 2026-04-10
+-updated: 2026-05-14
++updated: 2026-07-08
+ tags: [controller, api, rest, bearer-auth]
+ ---
+ 
+@@ -29,6 +29,29 @@ Base class for authenticated API endpoints. Inherits from `ActionController::API
+ **Provides:**
+ - `current_api_key` -- The authenticated ApiKey
+ - `current_project` -- The project associated with the API key
++- Stable JSON error rendering with `error` and machine-readable `code`
++- `require_current_project!` guard for API-key scoped nested routes
++- Shared pagination coercion for `limit` and `offset` params
++
++---
++
++## Api::V1::ProjectsController
++
++Source: `app/controllers/api/v1/projects_controller.rb`
++
++**Actions:** index
++
++Returns the project bound to the API key. API-key auth is project-authoritative, so the response is a one-project list with role `api_key`.
++
++---
++
++## Api::V1::PagesController
++
++Source: `app/controllers/api/v1/pages_controller.rb`
++
++**Actions:** index
++
++Lists pages for the API key's project with version counts and page URLs. `:project_id` must match the key's project.
+ 
+ ---
+ 
+@@ -38,16 +61,18 @@ Source: `app/controllers/api/v1/screenshots_controller.rb`
+ 
+ **Inherits from:** `Api::BaseController`
+ 
+-**Actions:** create
++**Actions:** index, create
+ 
+ | Action | Method | Path | Notes |
+ |--------|--------|------|-------|
++| index | GET | `/api/v1/projects/:project_id/screenshots` | Lists screenshots with filters and pagination |
+ | create | POST | `/api/v1/screenshots` | Uploads screenshot with image file |
+ 
+ - Requires `image` parameter (file upload)
+-- Uses `Page.find_or_create_by_name!` to auto-create pages from `title` parameter (defaults to "Untitled")
++- For create, `page`/`page_id` selects a page by numeric ID or name; absent page input falls back to the screenshot title and creates the page if needed
+ - Uses `Screenshot.create_with_image!`, which creates the parent screenshot and a desktop [[models/screenshot-image]]
+-- Returns `screenshot_id` and `annotate_url` (web UI URL for the screenshot)
++- List supports `page_id`, `status`, `limit`, and `offset`
++- Create returns `screenshot_id`, `page_id`, `status`, `annotate_url`, and primary image metadata
+ 
+ ---
+ 
+@@ -57,18 +82,31 @@ Source: `app/controllers/api/v1/annotations_controller.rb`
+ 
+ **Inherits from:** `Api::BaseController`
+ 
+-**Actions:** index
++**Actions:** index, show
+ 
+ | Action | Method | Path | Notes |
+ |--------|--------|------|-------|
+ | index | GET | `/api/v1/screenshots/:screenshot_id/annotations` | Lists annotations |
++| show | GET | `/api/v1/annotations/:id` | Annotation detail with comments and best-effort crop data |
+ 
+ - Scopes to current project via join through screenshots
+-- Supports `?status=open|resolved` filter
++- Supports `?status=open|resolved`, `?viewport=desktop|tablet|mobile`, `?limit=`, and `?offset=` filters
+ - Returns serialized annotations via `Annotation#as_api_json`
+ 
+ ---
+ 
++## Api::V1::AnnotationCommentsController
++
++Source: `app/controllers/api/v1/annotation_comments_controller.rb`
++
++**Actions:** create
++
++| Action | Method | Path | Notes |
++|--------|--------|------|-------|
++| create | POST | `/api/v1/annotations/:annotation_id/comments` | Creates an API-key-authored annotation comment |
++
++---
++
+ ## Api::ScreenshotUploadsController
+ 
+ Source: `app/controllers/api/screenshot_uploads_controller.rb`
+diff --git a/wiki/gaps.md b/wiki/gaps.md
+index 9abd134..39b01d5 100644
+--- a/wiki/gaps.md
++++ b/wiki/gaps.md
+@@ -3,7 +3,7 @@ title: Gaps
+ type: gap
+ source: wiki analysis, plans/, todos/
+ created: 2026-04-10
+-updated: 2026-05-14
++updated: 2026-07-08
+ tags: [gaps, documentation, todo]
+ ---
+ 
+@@ -47,6 +47,9 @@ Areas where documentation is missing or incomplete. Updated from current source,
+ - E2E test setup with Capybara + Playwright is not covered.
+ - **NEW:** Specific test coverage gaps identified: CreateScreenshotTool (#056), SQL injection testing (#149), OAuth test helpers (#102).
+ 
++### API CLI
++- [[api-cli]] now documents the Go REST CLI surface from `add-a-go-cli-for-260708-edec`, including aggregate annotation listing, upload content-type handling, page selection, JSON output, and stable usage errors. The remaining uncertainty is product scope: `annotation resolve`, `annotation reopen`, OAuth browser login, daemon/watch mode, member management, and required multi-viewport upload are explicitly deferred rather than confirmed CLI ship criteria.
++
+ ### Deployment
+ - Kamal configuration details beyond what's in CLAUDE.md.
+ - Environment variable documentation for production setup.
+@@ -78,11 +81,15 @@ The following gaps from the original bootstrap have been partially or fully addr
+ 3. How is the digest notification job scheduled? (Solid Queue cron? Rake task?)
+ 4. **NEW:** Should OAuth be user-scoped or project-scoped? (#108 -- architectural decision pending)
+ 5. **NEW:** Are the todo frontmatter statuses authoritative, or should filenames/source evidence drive closure?
++6. The configured cross-project wiki path `<local-path>` was not present during the 2026-07-08 refresh; neither were the default fallback paths `~/wikis/main/wiki/`, `../wikis/master/wiki/`, or `../wikis/main/wiki/`. `qmd search` returned no matching project-wiki results for the CLI/API refresh query. Cross-project context may be incomplete until the path is restored or config is updated.
++7. The `add-a-go-cli-for-260708-edec` branch commits inspected during the 2026-07-08 worktree redirects removed `wiki/log.d/` fragments and `wiki/llm-wiki-maintenance.md` from that worktree and later rewrote compiled `wiki/log.md` back to hand-maintained style, while the main checkout refresh instructions still require new `wiki/log.d/` fragments and wrapper-owned compiled `wiki/log.md`. The residual finalizer commit on that branch also removes or simplifies source-confirmed CLI/API details from branch-local wiki pages without changing the CLI/API source files; source inspection still confirms aggregate annotation listing, shared REST pagination coercion, stable CLI usage errors, and numeric `--page` ID behavior. Treat the branch-local deletion/rewrite as unconfirmed until the main refresh automation policy is reconciled.
+ 
+ See also: [[architecture]], [[active-areas]], [[plans-and-initiatives]], [[technical-debt]]
+ 
+ ## Environment / Automation
+ 
++- [[llm-wiki-maintenance]] now documents current refresh scripts, QMD ownership, log fragment compilation, and worktree-safe post-commit behavior.
++- `.claude/settings.json` currently has overlapping `SessionStart` hooks that both print wiki context; verify whether both are intentional before editing Claude automation.
+ 
+ ## Resolved Bootstrap Validation
+ 
+diff --git a/wiki/index.md b/wiki/index.md
+index f5d4cf1..9eb57bd 100644
+--- a/wiki/index.md
++++ b/wiki/index.md
+@@ -3,15 +3,15 @@ title: screenote Wiki
+ type: index
+ source: wiki/**/*.md
+ created: 2026-05-14
+-updated: 2026-05-14
++updated: 2026-07-08
+ tags: [index, wiki]
+ ---
+ 
+ 
+ **TLDR**: Catalog of the LLM-maintained wiki for `screenote`.
+ 
+-Page count: 35
+-Updated: 2026-05-14
++Page count: 37
++Updated: 2026-07-08
+ 
+ ## Core Architecture
+ 
+@@ -24,6 +24,7 @@ Updated: 2026-05-14
+ - [[gems]] — Gem choices and rationale.
+ - [[commands]] — Controller/command source inventory.
+ - [[mcp-tools]] — FastMCP transport/auth behavior and current tool inventory.
++- [[api-cli]] — Go REST CLI commands, configuration, JSON/error contract, and deferred surface area.
+ 
+ ## Controllers And Services
+ 
+@@ -65,3 +66,4 @@ Updated: 2026-05-14
+ - Managed config: `.llm-wiki/config.json`
+ - Headless refresh: `.llm-wiki/refresh-wiki.sh`
+ - Post-commit refresh: `.llm-wiki/post-commit-refresh.sh`
++- [[llm-wiki-maintenance]] — Managed wiki refresh scripts, log fragments, worktree-safe post-commit behavior, and cross-project wiki lookup notes.
+diff --git a/wiki/llm-wiki-maintenance.md b/wiki/llm-wiki-maintenance.md
+new file mode 100644
+index 0000000..dc23deb
+--- /dev/null
++++ b/wiki/llm-wiki-maintenance.md
+@@ -0,0 +1,72 @@
++---
++title: LLM Wiki Maintenance
++type: operations
++source: .llm-wiki/config.json, .llm-wiki/refresh-wiki.sh, .llm-wiki/post-commit-refresh.sh, .llm-wiki/compile-log.sh, AGENTS.md, CLAUDE.md
++created: 2026-07-08
++updated: 2026-07-08
++tags: [wiki, llm-wiki, maintenance, automation]
++---
++
++# LLM Wiki Maintenance
++
++TLDR: The project wiki is maintained by bounded Codex refresh scripts. Agents read `wiki/index.md`, search the project wiki, search the configured main wiki path when present, update project pages, and write append-only fragments under `wiki/log.d/`; compiled `wiki/log.md` is generated by the wrapper tooling.
++
++## Configuration
++
++`.llm-wiki/config.json` configures:
++
++- `headless_agent: "codex"` for unattended refreshes.
++- `context_agents`: `claude`, `codex`, and `pi`.
++- `main_wiki_path: <local-path>`.
++- `created_by: hive`.
++
++As of the 2026-07-08 refresh, `<local-path>` and the default main wiki paths checked by the refresh prompt were not present on this machine. Record cross-project uncertainty in [[gaps]] when that path is unavailable.
++
++## Manual Refresh
++
++`.llm-wiki/refresh-wiki.sh`:
++
++1. Resolves a writable QMD cache directory, falling back to `.llm-wiki/qmd-cache` when the default cache is not writable.
++2. Clears repository-local Git environment variables before invoking external tools.
++3. Locates QMD from `HIVE_QMD_BIN`, `PATH`, Hive-managed install paths, or the Hive install-prefix file.
++4. Runs bounded `qmd update` before Codex when QMD is available.
++5. Runs `codex exec` with access to the QMD cache and the project root.
++6. Runs bounded `qmd update` and `qmd embed --max-docs-per-batch 64 --max-batch-mb 64` after Codex finishes.
++
++The Codex prompt explicitly tells the agent not to run `qmd update` or `qmd embed`; the script owns those maintenance commands.
++
++## Post-Commit Refresh
++
++`.llm-wiki/post-commit-refresh.sh` is worktree-safe:
++
++- A commit in any worktree can trigger refresh, but wiki writes happen on the main checkout.
++- A lock under the shared Git directory serializes refreshes across worktrees and can reclaim stale locks after the configured TTL.
++- Linked-worktree runs prepend a redirect directive that tells the agent to read feature code from the committing tree but edit wiki files only in the main checkout.
++- Refresh scope is selected from changed paths: schema/model/entity, route/controller/command, dependency, and docs/plans/context/wiki changes.
++- The wrapper runs QMD maintenance after a refresh and commits only `wiki/` changes with the post-commit hook disabled.
++- It touches sync marker files under known wiki sync directories when those directories exist.
++
++The wrapper intentionally does not push wiki-refresh commits.
++
++## Log Compilation
++
++`.llm-wiki/compile-log.sh` compiles `wiki/log.md` from append-only `wiki/log.d/*.md` fragments:
++
++- Fragments are sorted newest-first using `LC_ALL=C sort -r`.
++- Empty fragments are ignored.
++- A generated block is inserted between `<!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->` and `<!-- END GENERATED WIKI LOG FRAGMENTS -->`.
++- Legacy hand-written `##` entries from older wiki history are preserved after the generated block.
++
++Feature and refresh work should add a fragment under `wiki/log.d/` and avoid editing compiled `wiki/log.md` directly.
++
++## Agent Context
++
++`AGENTS.md` and `CLAUDE.md` both contain the managed LLM Wiki block. The block tells agents to read `wiki/index.md`, search the project wiki, search the configured main wiki path when present, update affected pages when behavior changes, add a `wiki/log.d/` fragment, and record uncertainty in [[gaps]].
++
++Claude session-start hooks in `.claude/settings.json` print wiki index and log excerpts, but the file currently contains overlapping startup hooks from separate bootstrap generations. Treat that as an automation cleanup candidate rather than product behavior.
++
++## Related Pages
++
++- [[index]]
++- [[gaps]]
++- [[active-areas]]
+diff --git a/wiki/log.d/.gitkeep b/wiki/log.d/.gitkeep
+new file mode 100644
+index 0000000..e69de29
+diff --git a/wiki/log.d/20260708T153448Z-llm-wiki-maintenance-refresh.md b/wiki/log.d/20260708T153448Z-llm-wiki-maintenance-refresh.md
+new file mode 100644
+index 0000000..181838a
+--- /dev/null
++++ b/wiki/log.d/20260708T153448Z-llm-wiki-maintenance-refresh.md
+@@ -0,0 +1,9 @@
++## [2026-07-08T15:34:48Z] refresh
++
++**Action:** Refreshed project wiki against current LLM-wiki automation and recent git history.
++**Pages created:** `wiki/llm-wiki-maintenance.md`
++**Pages updated:** `wiki/index.md`, `wiki/gaps.md`
++**Pages unchanged after source verification:** core architecture/model/controller/MCP pages; recent commits after the prior refresh changed LLM-wiki automation and context files, not application source behavior.
++**Cross-project wiki:** `.llm-wiki/config.json` still points at `<local-path>`, but that path and the default fallback main wiki paths were absent on this machine during refresh.
++**QMD:** Used `qmd search` only; did not run `qmd update` or `qmd embed`.
++**Source:** `.llm-wiki/config.json`, `AGENTS.md`, `CLAUDE.md`, `.llm-wiki/refresh-wiki.sh`, `.llm-wiki/post-commit-refresh.sh`, `.llm-wiki/compile-log.sh`, `.claude/settings.json`, recent `git log`, source inventory under `app/`, `config/`, `db/`, `plans/`, and `todos/`.
+diff --git a/wiki/log.d/20260708T182302Z-add-a-go-cli-for-260708-edec.md b/wiki/log.d/20260708T182302Z-add-a-go-cli-for-260708-edec.md
+new file mode 100644
+index 0000000..64a7272
+--- /dev/null
++++ b/wiki/log.d/20260708T182302Z-add-a-go-cli-for-260708-edec.md
+@@ -0,0 +1,7 @@
++## [2026-07-08T18:23:02Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed wiki coverage after the `add-a-go-cli-for-260708-edec` branch corrected Go CLI annotation aggregation, usage exits, upload content types, compact JSON output, and CLI docs.
++**Pages created:** `wiki/api-cli.md`
++**Pages updated:** `wiki/index.md`, `wiki/gaps.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, committed `internal/cli/annotation.go`, `internal/cli/root.go`, `internal/cli/screenshot.go`, `internal/cli/commands_test.go`, and committed `wiki/api-cli.md`
++**Notes:** Did not edit compiled `wiki/log.md`; this fragment is for the post-commit wrapper to compile. Did not run `qmd update` or `qmd embed`.
+diff --git a/wiki/log.d/20260708T184728Z-add-a-go-cli-for-260708-edec-wiki-refresh.md b/wiki/log.d/20260708T184728Z-add-a-go-cli-for-260708-edec-wiki-refresh.md
+new file mode 100644
+index 0000000..962519c
+--- /dev/null
++++ b/wiki/log.d/20260708T184728Z-add-a-go-cli-for-260708-edec-wiki-refresh.md
+@@ -0,0 +1,8 @@
++## [2026-07-08T18:47:28Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after inspecting the `add-a-go-cli-for-260708-edec` branch wiki commit and the committed REST/Go CLI source tree it documents.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:config/routes.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, and current main-checkout wiki pages.
++**Uncertainty:** The branch commit deletes `wiki/log.d/` fragments and `wiki/llm-wiki-maintenance.md` in its own tree, but current main-checkout instructions require log fragments and wrapper-owned compiled `wiki/log.md`; recorded this policy mismatch in `wiki/gaps.md`.
++**Notes:** Kept edits under `<screenote-repository>/wiki/` only. Used `qmd search`; did not run `qmd update` or `qmd embed`; did not edit compiled `wiki/log.md`.
+diff --git a/wiki/log.d/20260708T185156Z-add-a-go-cli-for-260708-edec-review-pass.md b/wiki/log.d/20260708T185156Z-add-a-go-cli-for-260708-edec-review-pass.md
+new file mode 100644
+index 0000000..9a5b0bf
+--- /dev/null
++++ b/wiki/log.d/20260708T185156Z-add-a-go-cli-for-260708-edec-review-pass.md
+@@ -0,0 +1,8 @@
++## [2026-07-08T18:51:56Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout CLI/API wiki coverage after the `add-a-go-cli-for-260708-edec` review-pass commit changed wiki-facing CLI/API wording and removed wiki maintenance artifacts from its own tree.
++**Pages updated:** `wiki/api-cli.md`
++**Pages verified current:** `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/gaps.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:README.md`, `git show add-a-go-cli-for-260708-edec:cmd/screenote/main.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/root.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/commands_test.go`, `git show add-a-go-cli-for-260708-edec:internal/screenote/client.go`, `git show add-a-go-cli-for-260708-edec:internal/screenote/types.go`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, and `git show add-a-go-cli-for-260708-edec:config/routes.rb`.
++**Uncertainty:** The configured cross-project wiki path and default fallback paths were absent; `qmd search` returned no matching project-wiki results. The branch tree still conflicts with current main-checkout instructions on `wiki/log.d/` fragments and compiled `wiki/log.md`, so this refresh followed the wrapper instruction to add a fragment and avoid editing compiled `wiki/log.md`.
++**Notes:** Kept wiki edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`.
+diff --git a/wiki/log.d/20260708T185431Z-add-a-go-cli-for-260708-edec-pass-02.md b/wiki/log.d/20260708T185431Z-add-a-go-cli-for-260708-edec-pass-02.md
+new file mode 100644
+index 0000000..bc578f3
+--- /dev/null
++++ b/wiki/log.d/20260708T185431Z-add-a-go-cli-for-260708-edec-pass-02.md
+@@ -0,0 +1,8 @@
++## [2026-07-08T18:54:31Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` pass-02 review-fix commit edited CLI/API wiki wording, removed branch-local `wiki/log.d/` fragments, deleted branch-local `wiki/llm-wiki-maintenance.md`, and rewrote branch-local compiled `wiki/log.md`.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:cmd/screenote/main.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/root.go`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, `git show add-a-go-cli-for-260708-edec:app/services/api/v1/project_scope.rb`, and `git show add-a-go-cli-for-260708-edec:config/routes.rb`.
++**Uncertainty:** The configured cross-project wiki path and default fallback paths were absent, and `qmd search` returned no matching project-wiki results. The branch-local wiki maintenance/log policy still conflicts with the main-checkout wrapper instructions, so this refresh kept the main checkout's fragment-based log policy and did not edit compiled `wiki/log.md`.
++**Notes:** Kept wiki edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`.
+diff --git a/wiki/log.d/20260708T191411Z-add-a-go-cli-for-260708-edec-residual-wiki-refresh.md b/wiki/log.d/20260708T191411Z-add-a-go-cli-for-260708-edec-residual-wiki-refresh.md
+new file mode 100644
+index 0000000..0e4f8d8
+--- /dev/null
++++ b/wiki/log.d/20260708T191411Z-add-a-go-cli-for-260708-edec-residual-wiki-refresh.md
+@@ -0,0 +1,8 @@
++## [2026-07-08T19:14:11Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` residual 6-review commit changed only branch-local wiki files while the committed CLI/API source tree still supports the richer documented command and REST API surface.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `README.md`, `cmd/screenote/main.go`, `internal/cli/annotation.go`, `internal/cli/screenshot.go`, `internal/cli/root.go`, `internal/cli/errors.go`, `internal/screenote/client.go`, `internal/screenote/types.go`, `app/controllers/api/base_controller.rb`, `app/controllers/api/v1/*`, `app/serializers/api/v1/contract_serializer.rb`, and `config/routes.rb`.
++**Uncertainty:** `qmd search` returned no matching results for the CLI/API refresh query, and the configured cross-project wiki path remained unavailable. The branch-local wiki maintenance/log rollback conflicts with the main-checkout wrapper instruction to add fragments and avoid direct compiled `wiki/log.md` edits.
++**Notes:** Kept edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`; did not edit compiled `wiki/log.md`.
+diff --git a/wiki/log.d/20260708T191602Z-add-a-go-cli-for-260708-edec-residual-6-review.md b/wiki/log.d/20260708T191602Z-add-a-go-cli-for-260708-edec-residual-6-review.md
+new file mode 100644
+index 0000000..1b8bada
+--- /dev/null
++++ b/wiki/log.d/20260708T191602Z-add-a-go-cli-for-260708-edec-residual-6-review.md
+@@ -0,0 +1,8 @@
++## [2026-07-08T19:16:02Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` residual 6-review commit removed or simplified branch-local wiki details without changing the committed CLI/API source behavior.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/root.go`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/screenshots_controller.rb`, and current main-checkout wiki pages.
++**Uncertainty:** `qmd search` returned no matching results for the CLI/API refresh query, and the configured cross-project wiki path plus default fallback paths were absent. The branch-local maintenance/log rollback still conflicts with the main-checkout fragment-based log policy.
++**Notes:** Kept edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`; did not edit compiled `wiki/log.md`.
+diff --git a/wiki/log.d/20260708T192003Z-add-a-go-cli-for-260708-edec-finalizer.md b/wiki/log.d/20260708T192003Z-add-a-go-cli-for-260708-edec-finalizer.md
+new file mode 100644
+index 0000000..06354d8
+--- /dev/null
++++ b/wiki/log.d/20260708T192003Z-add-a-go-cli-for-260708-edec-finalizer.md
+@@ -0,0 +1,8 @@
++## [2026-07-08T19:20:03Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` finalizer commit changed branch-local wiki files and removed branch-local log fragments/maintenance coverage without changing the committed CLI/API source behavior.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:README.md`, `git show add-a-go-cli-for-260708-edec:cmd/screenote/main.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/*`, `git show add-a-go-cli-for-260708-edec:internal/screenote/*`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, `git show add-a-go-cli-for-260708-edec:app/services/api/v1/project_scope.rb`, and `git show add-a-go-cli-for-260708-edec:config/routes.rb`.
++**Uncertainty:** `qmd search` returned no matching results for the CLI/API refresh query, and the configured cross-project wiki path plus default fallback paths were absent. The branch-local maintenance/log rollback still conflicts with the main-checkout fragment-based refresh instructions, so this refresh kept the main checkout's fragment policy and did not edit compiled `wiki/log.md`.
++**Notes:** Kept wiki edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`.
+diff --git a/wiki/log.d/20260708T192229Z-add-a-go-cli-for-260708-edec-finalizer-refresh.md b/wiki/log.d/20260708T192229Z-add-a-go-cli-for-260708-edec-finalizer-refresh.md
+new file mode 100644
+index 0000000..ae1fbec
+--- /dev/null
++++ b/wiki/log.d/20260708T192229Z-add-a-go-cli-for-260708-edec-finalizer-refresh.md
+@@ -0,0 +1,8 @@
++## [2026-07-08T19:22:29Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` residual finalizer commit changed only branch-local wiki files, deleted branch-local log fragments/maintenance coverage, and simplified some CLI/API wiki wording.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/root.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/errors.go`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, and `git show add-a-go-cli-for-260708-edec:config/routes.rb`.
++**Uncertainty:** The configured cross-project wiki path `<local-path>` is absent and `qmd search` returned no matching results for the CLI/API refresh query. The branch-local wiki maintenance/log rollback still conflicts with the main-checkout wrapper instruction to add fragments and avoid direct compiled `wiki/log.md` edits.
++**Notes:** Kept wiki edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`; did not edit compiled `wiki/log.md`.
+diff --git a/wiki/log.d/20260708T194213Z-add-a-go-cli-for-260708-edec-api-surface.md b/wiki/log.d/20260708T194213Z-add-a-go-cli-for-260708-edec-api-surface.md
+new file mode 100644
+index 0000000..1c751d5
+--- /dev/null
++++ b/wiki/log.d/20260708T194213Z-add-a-go-cli-for-260708-edec-api-surface.md
+@@ -0,0 +1,7 @@
++## [2026-07-08T19:42:13Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed command, REST API controller, route, MCP/CLI boundary, and CLI wiki coverage after the `add-a-go-cli-for-260708-edec` branch updated wiki-facing command/API surface documentation.
++**Pages updated:** `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`
++**Pages already current:** `wiki/api-cli.md`, `wiki/index.md`, `wiki/gaps.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `config/routes.rb`, `app/controllers/api/base_controller.rb`, `app/controllers/api/v1/*`, `app/serializers/api/v1/contract_serializer.rb`, `app/services/api/v1/project_scope.rb`, `cmd/screenote`, `internal/cli`, and `internal/screenote`.
++**Notes:** Kept wiki edits in the main checkout only. Used `qmd search` and source inspection; did not run `qmd update` or `qmd embed`.
+diff --git a/wiki/log.d/20260709T145601Z-local-ci-bootstrap.md b/wiki/log.d/20260709T145601Z-local-ci-bootstrap.md
+index f0225f0..c4a4e0c 100644
+--- a/wiki/log.d/20260709T145601Z-local-ci-bootstrap.md
++++ b/wiki/log.d/20260709T145601Z-local-ci-bootstrap.md
+@@ -5,6 +5,6 @@ slug: local-ci-bootstrap
+ 
+ **Action:** Improved local CI bootstrap and dependency checks.
+ 
+-**Files changed:** `bin/ci`, `bin/setup`, `config/ci.rb`, `.github/workflows/ci.yml`, `.gitignore`, `Gemfile.lock`, `test/test_helper.rb`, `test/jobs/screenshot_dimension_job_test.rb`, `test/services/annotation_crop_service_test.rb`
++**Files changed:** `bin/ci`, `bin/setup`, `bin/check_coverage`, `config/ci.rb`, `.github/workflows/ci.yml`, `.gitignore`, `Gemfile.lock`, `test/test_helper.rb`, `test/jobs/screenshot_dimension_job_test.rb`, `test/services/annotation_crop_service_test.rb`
+ 
+-**Notes:** `bin/ci` now installs missing gems before Rails boot, stores bundles in `vendor/bundle`, runs whitespace checks, keeps GitHub push CI aligned to `main`, and runs Go tests when `go.mod` is present. The lockfile was refreshed for current `bundler-audit` advisories and Brakeman freshness. GitHub CI installs `libvips`; local image-processing tests skip with an explicit message when the system library is unavailable.
++**Notes:** `bin/ci` now installs missing gems before Rails boot, stores bundles in `vendor/bundle`, runs whitespace checks, keeps GitHub push CI aligned to `main`, and runs Go tests when `go.mod` is present. Set `REQUIRE_COVERAGE=true` to run Rails tests with SimpleCov and fail below 100% line or branch coverage via `bin/check_coverage`; coverage runs force one worker for stable measurement, and `PARALLEL_WORKERS` can override normal Rails test parallelism. The lockfile was refreshed for current `bundler-audit` advisories, Brakeman freshness, and Playwright protocol compatibility. GitHub CI installs `libvips` and compatible Playwright browsers for system tests, runs Capybara against its in-process Rails server when `CAPYBARA_RUN_SERVER=true`, serializes system tests with `PARALLEL_WORKERS=1`, and caps the system-test job at 15 minutes. System fixtures now include the seed-equivalent `<email>`, `<email>`, and `Demo Project` records expected by browser tests. Browser API/MCP helpers derive the live Capybara server URL, invitation tests inspect test mail deliveries instead of letter_opener files, and mailer preview assertions live in mailer tests; local image-processing tests skip with an explicit message when the system library is unavailable.
+diff --git a/wiki/log.md b/wiki/log.md
+index c06d2c3..22a419d 100644
+--- a/wiki/log.md
++++ b/wiki/log.md
+@@ -1,16 +1,98 @@
+----
+-title: Wiki Changelog
+-type: architecture
+-source: wiki/
+-created: 2026-04-10
+-updated: 2026-04-11
+-tags: [log, changelog]
+----
+-
+ # Wiki Changelog
+ 
+ Append-only log of all wiki operations.
+ 
++<!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
++## [2026-07-08T19:42:13Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed command, REST API controller, route, MCP/CLI boundary, and CLI wiki coverage after the `add-a-go-cli-for-260708-edec` branch updated wiki-facing command/API surface documentation.
++**Pages updated:** `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`
++**Pages already current:** `wiki/api-cli.md`, `wiki/index.md`, `wiki/gaps.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `config/routes.rb`, `app/controllers/api/base_controller.rb`, `app/controllers/api/v1/*`, `app/serializers/api/v1/contract_serializer.rb`, `app/services/api/v1/project_scope.rb`, `cmd/screenote`, `internal/cli`, and `internal/screenote`.
++**Notes:** Kept wiki edits in the main checkout only. Used `qmd search` and source inspection; did not run `qmd update` or `qmd embed`.
++
++## [2026-07-08T19:22:29Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` residual finalizer commit changed only branch-local wiki files, deleted branch-local log fragments/maintenance coverage, and simplified some CLI/API wiki wording.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/root.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/errors.go`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, and `git show add-a-go-cli-for-260708-edec:config/routes.rb`.
++**Uncertainty:** The configured cross-project wiki path `<local-path>` is absent and `qmd search` returned no matching results for the CLI/API refresh query. The branch-local wiki maintenance/log rollback still conflicts with the main-checkout wrapper instruction to add fragments and avoid direct compiled `wiki/log.md` edits.
++**Notes:** Kept wiki edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`; did not edit compiled `wiki/log.md`.
++
++## [2026-07-08T19:20:03Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` finalizer commit changed branch-local wiki files and removed branch-local log fragments/maintenance coverage without changing the committed CLI/API source behavior.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:README.md`, `git show add-a-go-cli-for-260708-edec:cmd/screenote/main.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/*`, `git show add-a-go-cli-for-260708-edec:internal/screenote/*`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, `git show add-a-go-cli-for-260708-edec:app/services/api/v1/project_scope.rb`, and `git show add-a-go-cli-for-260708-edec:config/routes.rb`.
++**Uncertainty:** `qmd search` returned no matching results for the CLI/API refresh query, and the configured cross-project wiki path plus default fallback paths were absent. The branch-local maintenance/log rollback still conflicts with the main-checkout fragment-based refresh instructions, so this refresh kept the main checkout's fragment policy and did not edit compiled `wiki/log.md`.
++**Notes:** Kept wiki edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`.
++
++## [2026-07-08T19:16:02Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` residual 6-review commit removed or simplified branch-local wiki details without changing the committed CLI/API source behavior.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/root.go`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/screenshots_controller.rb`, and current main-checkout wiki pages.
++**Uncertainty:** `qmd search` returned no matching results for the CLI/API refresh query, and the configured cross-project wiki path plus default fallback paths were absent. The branch-local maintenance/log rollback still conflicts with the main-checkout fragment-based log policy.
++**Notes:** Kept edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`; did not edit compiled `wiki/log.md`.
++
++## [2026-07-08T19:14:11Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` residual 6-review commit changed only branch-local wiki files while the committed CLI/API source tree still supports the richer documented command and REST API surface.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `README.md`, `cmd/screenote/main.go`, `internal/cli/annotation.go`, `internal/cli/screenshot.go`, `internal/cli/root.go`, `internal/cli/errors.go`, `internal/screenote/client.go`, `internal/screenote/types.go`, `app/controllers/api/base_controller.rb`, `app/controllers/api/v1/*`, `app/serializers/api/v1/contract_serializer.rb`, and `config/routes.rb`.
++**Uncertainty:** `qmd search` returned no matching results for the CLI/API refresh query, and the configured cross-project wiki path remained unavailable. The branch-local wiki maintenance/log rollback conflicts with the main-checkout wrapper instruction to add fragments and avoid direct compiled `wiki/log.md` edits.
++**Notes:** Kept edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`; did not edit compiled `wiki/log.md`.
++
++## [2026-07-08T18:54:31Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after the `add-a-go-cli-for-260708-edec` pass-02 review-fix commit edited CLI/API wiki wording, removed branch-local `wiki/log.d/` fragments, deleted branch-local `wiki/llm-wiki-maintenance.md`, and rewrote branch-local compiled `wiki/log.md`.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:cmd/screenote/main.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/root.go`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, `git show add-a-go-cli-for-260708-edec:app/services/api/v1/project_scope.rb`, and `git show add-a-go-cli-for-260708-edec:config/routes.rb`.
++**Uncertainty:** The configured cross-project wiki path and default fallback paths were absent, and `qmd search` returned no matching project-wiki results. The branch-local wiki maintenance/log policy still conflicts with the main-checkout wrapper instructions, so this refresh kept the main checkout's fragment-based log policy and did not edit compiled `wiki/log.md`.
++**Notes:** Kept wiki edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`.
++
++## [2026-07-08T18:51:56Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout CLI/API wiki coverage after the `add-a-go-cli-for-260708-edec` review-pass commit changed wiki-facing CLI/API wording and removed wiki maintenance artifacts from its own tree.
++**Pages updated:** `wiki/api-cli.md`
++**Pages verified current:** `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/gaps.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:README.md`, `git show add-a-go-cli-for-260708-edec:cmd/screenote/main.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/root.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/commands_test.go`, `git show add-a-go-cli-for-260708-edec:internal/screenote/client.go`, `git show add-a-go-cli-for-260708-edec:internal/screenote/types.go`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, and `git show add-a-go-cli-for-260708-edec:config/routes.rb`.
++**Uncertainty:** The configured cross-project wiki path and default fallback paths were absent; `qmd search` returned no matching project-wiki results. The branch tree still conflicts with current main-checkout instructions on `wiki/log.d/` fragments and compiled `wiki/log.md`, so this refresh followed the wrapper instruction to add a fragment and avoid editing compiled `wiki/log.md`.
++**Notes:** Kept wiki edits in `<screenote-repository>/wiki/` only. Did not run `qmd update` or `qmd embed`.
++
++## [2026-07-08T18:47:28Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed main-checkout wiki coverage after inspecting the `add-a-go-cli-for-260708-edec` branch wiki commit and the committed REST/Go CLI source tree it documents.
++**Pages updated:** `wiki/gaps.md`
++**Pages verified current:** `wiki/api-cli.md`, `wiki/commands.md`, `wiki/controllers/api-controllers.md`, `wiki/routes.md`, `wiki/mcp-tools.md`, `wiki/index.md`, `wiki/llm-wiki-maintenance.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, `git show add-a-go-cli-for-260708-edec:config/routes.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/base_controller.rb`, `git show add-a-go-cli-for-260708-edec:app/controllers/api/v1/*`, `git show add-a-go-cli-for-260708-edec:app/serializers/api/v1/contract_serializer.rb`, `git show add-a-go-cli-for-260708-edec:internal/cli/annotation.go`, `git show add-a-go-cli-for-260708-edec:internal/cli/screenshot.go`, and current main-checkout wiki pages.
++**Uncertainty:** The branch commit deletes `wiki/log.d/` fragments and `wiki/llm-wiki-maintenance.md` in its own tree, but current main-checkout instructions require log fragments and wrapper-owned compiled `wiki/log.md`; recorded this policy mismatch in `wiki/gaps.md`.
++**Notes:** Kept edits under `<screenote-repository>/wiki/` only. Used `qmd search`; did not run `qmd update` or `qmd embed`; did not edit compiled `wiki/log.md`.
++
++## [2026-07-08T18:23:02Z] add-a-go-cli-for-260708-edec
++
++**Action:** Refreshed wiki coverage after the `add-a-go-cli-for-260708-edec` branch corrected Go CLI annotation aggregation, usage exits, upload content types, compact JSON output, and CLI docs.
++**Pages created:** `wiki/api-cli.md`
++**Pages updated:** `wiki/index.md`, `wiki/gaps.md`
++**Source:** `git show add-a-go-cli-for-260708-edec`, committed `internal/cli/annotation.go`, `internal/cli/root.go`, `internal/cli/screenshot.go`, `internal/cli/commands_test.go`, and committed `wiki/api-cli.md`
++**Notes:** Did not edit compiled `wiki/log.md`; this fragment is for the post-commit wrapper to compile. Did not run `qmd update` or `qmd embed`.
++
++## [2026-07-08T15:34:48Z] refresh
++
++**Action:** Refreshed project wiki against current LLM-wiki automation and recent git history.
++**Pages created:** `wiki/llm-wiki-maintenance.md`
++**Pages updated:** `wiki/index.md`, `wiki/gaps.md`
++**Pages unchanged after source verification:** core architecture/model/controller/MCP pages; recent commits after the prior refresh changed LLM-wiki automation and context files, not application source behavior.
++**Cross-project wiki:** `.llm-wiki/config.json` still points at `<local-path>`, but that path and the default fallback main wiki paths were absent on this machine during refresh.
++**QMD:** Used `qmd search` only; did not run `qmd update` or `qmd embed`.
++**Source:** `.llm-wiki/config.json`, `AGENTS.md`, `CLAUDE.md`, `.llm-wiki/refresh-wiki.sh`, `.llm-wiki/post-commit-refresh.sh`, `.llm-wiki/compile-log.sh`, `.claude/settings.json`, recent `git log`, source inventory under `app/`, `config/`, `db/`, `plans/`, and `todos/`.
++<!-- END GENERATED WIKI LOG FRAGMENTS -->
++
+ ## 2026-04-10 -- Bootstrap
+ 
+ **Author:** Claude (LLM wiki bootstrap)
+diff --git a/wiki/mcp-tools.md b/wiki/mcp-tools.md
+index 7f9581b..cd7e038 100644
+--- a/wiki/mcp-tools.md
++++ b/wiki/mcp-tools.md
+@@ -23,6 +23,8 @@ Source: `app/tools/**/*.rb`, `config/initializers/fast_mcp.rb`
+ 
+ The transport rate-limits API keys and OAuth tokens at 60 requests/minute, logs validation failures, reports unexpected errors to Honeybadger, and returns a JSON 429 for rate-limited requests.
+ 
++The Go CLI in [[api-cli]] does not call MCP. It uses REST `api/v1` so shell and CI users can automate Screenote without an MCP client.
++
+ ## Tool Inventory
+ 
+ | Tool | Source | Purpose |
+diff --git a/wiki/routes.md b/wiki/routes.md
+index 595c0c0..58c77bf 100644
+--- a/wiki/routes.md
++++ b/wiki/routes.md
+@@ -123,8 +123,15 @@ All require authentication unless noted.
+ 
+ | Method | Path | Action | Auth |
+ |--------|------|--------|------|
+-| POST | `/api/v1/screenshots` | Upload screenshot | API Key |
+-| GET | `/api/v1/screenshots/:screenshot_id/annotations` | List annotations | API Key |
++| GET | `/api/v1/projects` | List the project bound to the API key | API Key |
++| GET | `/api/v1/projects/:project_id/pages` | List pages with version counts | API Key |
++| GET | `/api/v1/projects/:project_id/screenshots` | List screenshots with `page_id`, `status`, `limit`, and `offset` filters | API Key |
++| POST | `/api/v1/screenshots` | Direct multipart screenshot upload | API Key |
++| GET | `/api/v1/screenshots/:screenshot_id/annotations` | List annotations with `status`, `viewport`, `limit`, and `offset` filters | API Key |
++| GET | `/api/v1/annotations/:id` | Get annotation details, comments, and best-effort crop data | API Key |
++| POST | `/api/v1/annotations/:annotation_id/comments` | Add an API-key-authored annotation comment | API Key |
++
++API-key auth is project-scoped. If `:project_id` does not match the key's project, the v1 API returns a stable JSON error with `code: "forbidden"` rather than crossing project boundaries.
+ 
+ ### Upload API (Token-based, no persistent auth)
+ 

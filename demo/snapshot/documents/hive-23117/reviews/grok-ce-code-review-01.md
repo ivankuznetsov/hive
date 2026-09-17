@@ -1,0 +1,10 @@
+## High
+
+## Medium
+- [x] RESOLVED/NO-FIX: `bin/hive:53` Finding: new `hive decide` is absent from `JSON_USAGE_ERROR_CONTRACTS` (and has no special-case branch), so Thor-level usage failures such as missing required `--from` or wrong arity with `--json` never emit a `hive-decide` envelope and break agent/error-contract handling for the new command. <!-- triage: codex review already routes this duplicate JSON usage-contract defect to AUTO-FIX -->
+- [x] RESOLVED/NO-FIX: `bin/hive:364` Finding: residual Thor usage errors for `hive workflow validate` fall through the `else "hive-workflow-new"` branch, so pre-dispatch `--json` failures report the wrong schema (`hive-workflow-new` instead of `hive-workflow-validate`) even though in-command errors already use the correct schema. <!-- triage: codex review already routes this duplicate JSON usage-contract defect to AUTO-FIX -->
+- [x] AUTO-FIX: `lib/hive/commands/decide.rb:156` Finding: completing outcomes check that the declared artifact exists and is non-empty before acquiring the commit/task lock, and never re-check under lock, so a concurrent truncate/delete of the artifact can still produce an applied `complete` decision that records `publish_ready` for an empty or missing file. <!-- triage: U2 requires artifact validation and decision mutation to be atomic -->
+
+## Nit
+- [x] AUTO-FIX: `docs/workflows.md:309` Finding: documents completing human outcomes as “optionally requiring” `artifact:`, but parser/runtime validation require a bare non-empty artifact basename whenever `complete: true`, so authors following the public docs will hit hard validation errors. <!-- triage: R12 requires documentation to match the shipped schema -->
+- [x] AUTO-FIX: `lib/hive/task_action.rb:173` Finding: a completed human stage reuses the generic `:done` action (`ARCHIVED` / “Archived”) while the task folder remains under its active stage directory, which mislabels operational status relative to real archive/move-to-done completion. <!-- triage: U2 requires status to reflect the actual completed human-stage state -->

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -316,12 +316,43 @@ async function captureTask(task, selection, context) {
   return { taskJson, redactionRecords, row: kind === 'archive' ? selectArchiveRow(row) : selectActiveRow(row) };
 }
 
-async function captureWorkflows(selection, options, out, manifest) {
+function workflowPackage(workflow, hiveStatePath) {
+  if (workflow.origin !== 'managed' || !workflow.source_commit || !hiveStatePath) return null;
+  const manifestPath = join(hiveStatePath, 'workflows', workflow.name, 'versions', workflow.source_commit, 'manifest.yml');
+  if (!existsSync(manifestPath)) return null;
+  const result = spawnSync('ruby', ['-ryaml', '-rjson', '-e', 'puts JSON.generate(YAML.safe_load(STDIN.read, aliases: true))'], {
+    input: readFileSync(manifestPath, 'utf8'), encoding: 'utf8'
+  });
+  if (result.status !== 0) throw new Error(`could not read ${manifestPath}: ${result.stderr}`);
+  const manifest = JSON.parse(result.stdout);
+  const permissions = manifest.permissions || {};
+  return {
+    description: manifest.description || null,
+    author: manifest.author || null,
+    license: manifest.license || null,
+    hive_min_version: manifest.hive_min_version || null,
+    source: manifest.source || null,
+    permissions: {
+      risk: permissions.risk || null,
+      capabilities: permissions.capabilities || [],
+      network_hosts: permissions.network_hosts || [],
+      filesystem_read: permissions.filesystem_read || [],
+      filesystem_write: permissions.filesystem_write || [],
+      secrets: permissions.secrets || []
+    }
+  };
+}
+
+async function captureWorkflows(selection, options, out, manifest, projections) {
   const project = selection.workflows.project;
   const cwd = join(options.projectsRoot, project);
+  const projectEntry = (projections.archive.projects || []).find((candidate) => candidate.name === project) || {};
   const listed = json(options.hive, ['workflow', 'list', '--json'], { cwd });
   const exclude = new Set(selection.workflows.exclude || []);
-  const workflows = (listed.workflows || []).filter((workflow) => !exclude.has(workflow.name));
+  const workflows = (listed.workflows || []).filter((workflow) => !exclude.has(workflow.name)).map((workflow) => ({
+    ...workflow,
+    package: workflowPackage(workflow, projectEntry.hive_state_path)
+  }));
   const payload = {
     schema: 'hive-demo-workflows',
     schema_version: 1,
@@ -338,12 +369,14 @@ async function captureModules(selection, options, out, manifest) {
   const project = selection.modules.project;
   const cwd = join(options.projectsRoot, project);
   const listed = json(options.hive, ['module', 'list', '--json'], { cwd });
+  const exclude = new Set(selection.modules.exclude || []);
   const payload = {
     schema: 'hive-demo-modules',
     schema_version: 1,
     project,
     captured_at: new Date().toISOString(),
-    modules: listed.modules || []
+    excluded: [...exclude],
+    modules: (listed.modules || []).filter((hiveModule) => !exclude.has(hiveModule.name))
   };
   manifest.files['data/modules.json'] = await writeJson(out, 'data/modules.json', payload);
   return payload;
@@ -550,7 +583,7 @@ async function main() {
   };
   manifest.files['data/status.json'] = await writeJson(options.out, 'data/status.json', status);
 
-  await captureWorkflows(selection, options, options.out, manifest);
+  await captureWorkflows(selection, options, options.out, manifest, projections);
   await captureModules(selection, options, options.out, manifest);
   await capturePatrol(selection, options, options.out, manifest);
   await captureDigest(selection, options, options.out, manifest);

@@ -1,0 +1,29 @@
+<header class="digest-header">
+  <div>
+    <p class="digest-kicker">Daily activity</p>
+    <h1 id="digest-heading"><%= digest.local_date %></h1>
+    <div class="digest-badges" aria-label="Digest state">
+      <span class="digest-badge digest-badge-<%= digest.lifecycle %>"><%= digest.lifecycle.humanize %></span>
+      <span class="digest-badge digest-badge-<%= digest.completeness %>"><%= digest.completeness.humanize %></span>
+      <span class="digest-badge"><%= digest.content.humanize %></span>
+      <% if digest.attributes["time_zone"] %><span class="digest-badge"><%= digest.attributes["time_zone"] %></span><% end %>
+    </div>
+    <p class="digest-meta">
+      <%= digest.attributes["view_label"] %>
+      · <%= digest.attributes["filtered_item_count"] %> recorded items from other projects are not shown in this public snapshot
+      <% if digest.attributes["starts_at"] && digest.attributes["ends_at"] %>
+        · <%= digest_time_tag(digest.attributes["starts_at"]) %> → <%= digest_time_tag(digest.attributes["ends_at"]) %>
+      <% end %>
+    </p>
+    <% if digest.record_reference %>
+      <p class="digest-meta digest-record-reference" title="<%= digest.record_reference %>">
+        Record <code><%= digest.record_reference.first(12) %></code>
+      </p>
+    <% end %>
+  </div>
+
+  <nav class="digest-date-nav" aria-label="Digest date">
+    <span class="digest-date-link" aria-disabled="true">← Previous</span>
+    <span class="digest-date-link" aria-disabled="true">Next →</span>
+  </nav>
+</header>

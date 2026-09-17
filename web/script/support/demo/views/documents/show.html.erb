@@ -1,0 +1,27 @@
+<% content_for(:title, "#{@document.name} · #{@task.title}") %>
+<p class="muted">
+  <%= link_to @task.project.name, grid_path(project: @task.project.name) %>
+  · <%= link_to @task.title, task_path(@task.project.name, @task.slug) %>
+  · <%= @document.role.humanize %>
+</p>
+<section id="workspace-primary-result" class="workspace-panel workspace-wide primary-work-product" aria-labelledby="snapshot-document-heading">
+  <div class="workspace-panel-heading">
+    <div>
+      <p class="workspace-eyebrow"><%= @document.role.humanize %></p>
+      <h1 id="snapshot-document-heading"><%= @document.name %></h1>
+    </div>
+    <span class="workspace-state-label"><%= number_to_human_size(@document.bytes) %></span>
+  </div>
+  <% if @document_html.fetch(:outline).any? %>
+    <details class="document-outline" aria-label="Document outline" data-workspace-disclosure-key="document-outline" open>
+      <summary class="document-outline-title">On this page</summary>
+      <ol>
+        <% @document_html.fetch(:outline).each do |heading| %>
+          <li><a href="#<%= heading.fetch(:id) %>"><%= heading.fetch(:label) %></a></li>
+        <% end %>
+      </ol>
+    </details>
+  <% end %>
+  <article class="markdown primary-markdown"><%= @document_html.fetch(:html) %></article>
+</section>
+<p><%= link_to "← Back to task", task_path(@task.project.name, @task.slug) %></p>

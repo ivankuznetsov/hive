@@ -24,9 +24,9 @@
     "observed_at": "2026-07-18T19:42:00.939611Z",
     "state": "current"
   },
-  "captured_at": "2026-09-17T09:11:03.263Z",
+  "captured_at": "2026-09-17T09:28:07.265Z",
   "observed_at": null,
-  "age_seconds": 1421113,
+  "age_seconds": 1422137,
   "documents": [
     {
       "name": "idea.md",

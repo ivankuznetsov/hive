@@ -1,0 +1,86 @@
+<% content_for(:title, "#{web_product_name} — Honeycombs — Workflows") %>
+<%= render "honeycombs/header", section: :workflows %>
+
+<p class="muted">Captured from the real <strong><%= @project.name %></strong> installation. Installed packages show their recorded version, commit, mappings, and declared permissions.</p>
+
+<section aria-labelledby="project-workflows-heading">
+  <h2 id="project-workflows-heading"><%= @project.name %> workflows</h2>
+  <div class="workflow-list">
+    <% @workflows.each do |workflow| %>
+      <article class="workflow-row" data-workflow-origin="<%= workflow.origin %>"
+               data-workflow-selection="<%= workflow.selection %>">
+        <div>
+          <div class="workflow-title">
+            <strong><%= workflow.name %></strong>
+            <span class="tag"><%= workflow.origin.humanize %></span>
+            <% if workflow["default"] %><span class="tag tag-registered">default</span><% end %>
+            <% if workflow.selection %><span class="tag tag-registered"><%= workflow.selection %></span><% end %>
+            <% if workflow.integrity %>
+              <span class="tag <%= "tag-health-conflicting" unless workflow.integrity == "verified" %>"><%= workflow.integrity %></span>
+            <% end %>
+          </div>
+          <p class="workflow-meta">
+            <% if workflow.version %><span>version <%= workflow.version %></span><% end %>
+            <% if workflow.source_commit %>
+              <span title="<%= workflow.source_commit %>">commit <%= workflow.source_commit[0, 10] %></span>
+            <% end %>
+            <% if workflow.catalog_visibility %><span><%= workflow.catalog_visibility.humanize %></span><% end %>
+          </p>
+          <% package = workflow["package"] %>
+          <% if package %>
+            <p class="workflow-meta"><%= package["description"] %></p>
+            <details class="workflow-package">
+              <summary>Package metadata and permissions</summary>
+              <dl class="permission-grid">
+                <dt>Author</dt><dd><%= package.dig("author", "name") %></dd>
+                <dt>License</dt><dd><%= package["license"] %></dd>
+                <dt>Hive minimum</dt><dd><%= package["hive_min_version"] %></dd>
+                <dt>Risk</dt><dd><%= package.dig("permissions", "risk") %></dd>
+                <dt>Capabilities</dt><dd><%= Array(package.dig("permissions", "capabilities")).join(", ") %></dd>
+                <dt>Network hosts</dt><dd><%= Array(package.dig("permissions", "network_hosts")).join(", ") %></dd>
+                <dt>Filesystem read</dt><dd><%= Array(package.dig("permissions", "filesystem_read")).join(", ") %></dd>
+                <dt>Filesystem write</dt><dd><%= Array(package.dig("permissions", "filesystem_write")).join(", ") %></dd>
+                <dt>Secrets</dt><dd><%= Array(package.dig("permissions", "secrets")).join(", ") %></dd>
+              </dl>
+              <p class="muted">
+                Manifest digest <code><%= workflow["manifest_digest"]&.first(12) %></code>
+                <% if package.dig("source", "url") %> · <%= link_to "package source", package.dig("source", "url") %><% end %>
+              </p>
+            </details>
+          <% end %>
+          <% if workflow["mappings"].present? %>
+            <details class="workflow-mappings">
+              <summary>Package stages and mappings (<%= workflow["mappings"].length %>)</summary>
+              <div class="workspace-table-scroll" tabindex="0" role="region" aria-label="Workflow stage mappings">
+                <table class="workspace-table">
+                  <thead><tr><th scope="col">Stage</th><th scope="col">Role</th><th scope="col">Contract</th><th scope="col">Agent</th><th scope="col">Model</th><th scope="col">Effort</th></tr></thead>
+                  <tbody>
+                    <% workflow["mappings"].each do |mapping| %>
+                      <tr>
+                        <td><code><%= mapping["slot"] %></code></td>
+                        <td><%= mapping["mapping_role"] %></td>
+                        <td><%= mapping["mapping_contract"] %></td>
+                        <td><%= mapping["agent"] %></td>
+                        <td><%= mapping["model"] %></td>
+                        <td><%= mapping["effort"] %></td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          <% end %>
+        </div>
+      </article>
+    <% end %>
+  </div>
+</section>
+
+<section class="card workflow-management-card" aria-labelledby="snapshot-workflow-actions-heading">
+  <h2 id="snapshot-workflow-actions-heading">Install and edit workflows</h2>
+  <p class="muted">Installing from Honeycomb, creating owner-authored workflows, and updating selections need a running Hive installation with the reviewed package. The saved snapshot cannot perform them.</p>
+  <button type="button" class="demo-button" data-snapshot-action="install-workflow">Install a workflow</button>
+  <% if @excluded_workflows.any? %>
+    <p class="faint"><%= @excluded_workflows.length %> fixture workflow is excluded from this snapshot because its own summary identifies it as an execution fixture.</p>
+  <% end %>
+</section>

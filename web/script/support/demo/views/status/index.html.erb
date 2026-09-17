@@ -1,0 +1,53 @@
+<% content_for(:title, "#{web_product_name} — status") %>
+<div class="status-layout">
+  <%= render "status/project_nav", projects: @projects, selected_project: @selected_project&.name %>
+  <div class="status-main">
+    <% unless @task_state || @selected_project %>
+      <section class="snapshot-scope" aria-labelledby="snapshot-scope-heading">
+        <div>
+          <h1 id="snapshot-scope-heading">Explore 10 completed tasks across 5 projects</h1>
+          <p class="muted">This frozen workspace contains two genuinely unfinished tasks. Everything else is archived real work with its original documents, reviews, and merged pull requests.</p>
+        </div>
+        <div class="snapshot-scope-actions">
+          <%= link_to "Start with image attachments", task_path("screenote", "add-image-attachments-to-screenote-260816-6a00"), class: "btn btn-secondary" %>
+          <%= link_to "Browse the archive", archive_path, class: "btn btn-ghost" %>
+        </div>
+      </section>
+    <% end %>
+
+    <div class="status-view-toolbar">
+      <div>
+        <h1><%= @status_view.titleize %></h1>
+        <p class="muted">What is running, what needs you, and what is ready to continue.</p>
+      </div>
+      <div class="status-view-actions">
+        <%= link_to "Done", archive_path(project: @selected_project&.name, view: "board"),
+              class: "btn btn-ghost btn-sm status-done-link" %>
+        <%= link_to "Archive", archive_path(project: @selected_project&.name),
+              class: "btn btn-ghost btn-sm status-archive-link" %>
+        <%= render "status/view_switch", status_view: @status_view %>
+      </div>
+    </div>
+
+    <nav class="task-state-filters" aria-label="Task state">
+      <% { nil => "All tasks" }.merge(TaskDisplay::STATES).each do |state, label| %>
+        <% count = state ? @task_counts.fetch(state, 0) : @task_counts.values.sum %>
+        <% next if count.zero? && state && state != "running" && state != @task_state %>
+        <%= link_to status_filter_path(state: state),
+              class: class_names("task-state-filter", "active": state == @task_state),
+              aria: { current: ("page" if state == @task_state) } do %>
+          <%= label %> <strong><%= count %></strong>
+        <% end %>
+      <% end %>
+    </nav>
+
+    <% if @task_state && @visible_projects.empty? %>
+      <div class="empty-state"><p>No tasks in this state.</p></div>
+    <% elsif @status_view == "board" %>
+      <%= render "status/board", board: @board, status_fresh: @status_fresh,
+            status_display_fresh: @status_display_fresh %>
+    <% else %>
+      <%= render "status/projects", projects: @visible_projects %>
+    <% end %>
+  </div>
+</div>

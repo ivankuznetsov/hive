@@ -1,0 +1,102 @@
+<% content_for(:title, "#{web_product_name} — patrol") %>
+<h1>Patrol</h1>
+<p class="muted">Captured read-only health and finding evidence from ordinary and Architecture Patrol for <strong><%= @project.name %></strong>.</p>
+
+<div class="patrol-grid">
+  <% ordinary = @patrol.ordinary %>
+  <section class="card patrol-section" aria-labelledby="ordinary-patrol-heading">
+    <div class="patrol-heading">
+      <div>
+        <h2 id="ordinary-patrol-heading">Ordinary Patrol</h2>
+        <p class="muted">Defect findings from repository sweeps.</p>
+      </div>
+      <span class="tag tag-health-<%= ordinary["items"].any? ? "attention" : "healthy" %>"><%= ordinary["items"].any? ? "Attention" : "Healthy" %></span>
+    </div>
+    <div class="patrol-summary">
+      <span><strong><%= ordinary.fetch("selected_count") %></strong> selected from <%= ordinary.fetch("source_total") %> recorded findings</span>
+      <% if ordinary["last_run_at"] %><span>last run <%= ordinary["last_run_at"] %></span><% end %>
+    </div>
+    <p class="faint">Source totals describe the captured installation; only the selected findings below are browsable in this snapshot.</p>
+    <% if ordinary.fetch("items").empty? %>
+      <div class="empty-state"><p>No ordinary Patrol findings were selected.</p></div>
+    <% else %>
+      <div class="patrol-list">
+        <% ordinary.fetch("items").each do |finding| %>
+          <article class="patrol-row">
+            <div class="patrol-row-title">
+              <strong><%= finding["title"].presence || finding["category"].to_s.humanize %></strong>
+              <span class="tag"><%= finding["lifecycle_state"].presence || "active" %></span>
+            </div>
+            <p class="patrol-meta"><%= finding["severity"] %> · <%= finding["confidence"] %> confidence · <%= finding["feature_id"] %></p>
+            <% if finding["description"].present? %><p><%= truncate(finding["description"], length: 280) %></p><% end %>
+            <% if finding["target_sha"] %><p class="faint">target <code><%= finding["target_sha"][0, 12] %></code> · lifecycle updated <%= finding["lifecycle_updated_at"] %></p><% end %>
+          </article>
+        <% end %>
+      </div>
+    <% end %>
+  </section>
+
+  <% architecture = @patrol.architecture %>
+  <section class="card patrol-section" aria-labelledby="architecture-patrol-heading">
+    <div class="patrol-heading">
+      <div>
+        <h2 id="architecture-patrol-heading">Architecture Patrol</h2>
+        <p class="muted">Post-merge architecture jobs and their recorded outcomes.</p>
+      </div>
+      <span class="tag tag-health-<%= architecture.fetch("state") == "complete" ? "healthy" : "running" %>"><%= architecture.fetch("state").humanize %></span>
+    </div>
+    <div class="patrol-summary">
+      <span><strong><%= architecture.dig("counts", "features") %></strong> features inspected</span>
+      <span><strong><%= architecture.dig("counts", "fix") %></strong> fix</span>
+      <span><strong><%= architecture.dig("counts", "discuss") %></strong> discuss</span>
+      <span><strong><%= architecture.dig("counts", "dismiss") %></strong> dismiss</span>
+      <% if architecture["updated_at"] %><span>updated <%= architecture["updated_at"] %></span><% end %>
+    </div>
+    <article class="patrol-row">
+      <div class="patrol-row-title">
+        <strong><%= architecture.fetch("job_id") %></strong>
+        <span class="tag"><%= architecture.fetch("state") %></span>
+      </div>
+      <p class="patrol-meta">
+        <%= link_to "PR ##{architecture.dig('source', 'number')}", architecture.dig("source", "url") %>
+        · <%= architecture.dig("counts", "pending_actions") %> pending actions
+        · base <code><%= architecture.dig("source", "base_sha")&.first(10) %></code>
+        · merged <code><%= architecture.dig("source", "merge_sha")&.first(10) %></code>
+      </p>
+      <p class="faint">Job completion does not mean every proposed fix shipped; the recorded action outcomes and selected theses below are the captured evidence. This snapshot presents <%= architecture.fetch("selected_theses").length %> selected theses from <%= architecture.dig("counts", "features") %> inspected features.</p>
+      <% if architecture.fetch("selected_theses").any? %>
+        <ul class="patrol-findings">
+          <% architecture.fetch("selected_theses").each do |thesis| %>
+            <li>
+              <span class="tag"><%= thesis.fetch("route") %></span>
+              <strong><%= thesis["problem"].presence || thesis["id"] %></strong>
+              <% if thesis["proposed_refactor"].present? %> — <%= truncate(thesis["proposed_refactor"], length: 220) %><% end %>
+            </li>
+          <% end %>
+        </ul>
+      <% end %>
+      <% if architecture.fetch("actions").any? %>
+        <details class="patrol-actions">
+          <summary>Recorded action outcomes (<%= architecture.fetch("actions").length %>)</summary>
+          <div class="workspace-table-scroll" tabindex="0" role="region" aria-label="Architecture patrol action outcomes">
+            <table class="workspace-table">
+              <thead><tr><th scope="col">Thesis</th><th scope="col">Kind</th><th scope="col">Outcome</th><th scope="col">Updated</th></tr></thead>
+              <tbody>
+                <% architecture.fetch("actions").each do |action| %>
+                  <tr>
+                    <td><code><%= action["thesis_id"] %></code></td>
+                    <td><%= action["kind"] %></td>
+                    <td><%= action["outcome"] %></td>
+                    <td><%= action["updated_at"] %></td>
+                  </tr>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
+        </details>
+      <% end %>
+    </article>
+  </section>
+</div>
+
+<p class="snapshot-note">Running a new patrol cycle requires the local Hive runtime. The finding projection still reports these selections as active; that captured state is preserved rather than derived from later pull requests.</p>

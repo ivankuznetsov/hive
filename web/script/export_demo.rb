@@ -12,5 +12,5 @@ Dir.mktmpdir("hive-static-demo-") do |home|
   require_relative "support/demo/exporter"
   destination = ARGV.first || File.expand_path("../../demo/dist", __dir__)
   HiveDemo::Exporter.new.export(destination)
-  puts "Exported fictional Hive views to #{destination}"
+  puts "Exported the saved Hive snapshot views to #{destination}"
 end

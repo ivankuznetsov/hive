@@ -8219,7 +8219,7 @@ index 0000000..1614776
 +      "xoxb-" + "1-aB" * 5,
 +      "AIza" + "A1_" * 10,
 +      "eyJ" + "A" * 10 + "." + "B" * 10 + "." + "C" * 10,
-+      "-----BEGIN PRIVATE KEY-----",
++      "<private-key-material-removed>",
 +      "api_key='A1b2C3d4E5f6G7h8I9j0K1l2'"
 +    ]
 +    text = secrets.join("\n")

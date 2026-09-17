@@ -1,7 +1,7 @@
 {
   "schema": "hive-demo-snapshot-manifest",
   "schema_version": 1,
-  "captured_at": "2026-09-17T09:28:07.265Z",
+  "captured_at": "2026-09-17T09:53:52.482Z",
   "ui_sha": "9b92b6572f53a002c0761c0f91f9aebd836f043a",
   "hive_version": "0.7.4",
   "source": "Read-only native projections captured from the operator installation; the public demo never connects to live Hive state.",
@@ -83,7 +83,7 @@
       "bytes": 495074
     },
     "data/tasks/screenote-42619.json": {
-      "sha256": "d80d7ab8e518de58cb68f6e62eb3ed52bce860c37307e4be5008481f6ad0678a",
+      "sha256": "4d55f6482494ce45f3767036fc716efd6ad20844a21a9c2d85a6430c88718824",
       "bytes": 7307
     },
     "documents/hive-42430/idea.md": {
@@ -139,7 +139,7 @@
       "bytes": 149
     },
     "data/tasks/hive-42430.json": {
-      "sha256": "fb19a4b8de7dbfe2543b4a75a494f53daf59e72394caacfc86e0574160adf576",
+      "sha256": "a2750b9d0f9dde3255b42c4119438f9b0a9824dab887cbce80d188ead95fad96",
       "bytes": 5406
     },
     "documents/hive-23117/idea.md": {
@@ -199,7 +199,7 @@
       "bytes": 501447
     },
     "data/tasks/hive-23117.json": {
-      "sha256": "6e984361eb3be024d2294c1fd000bfbf1b87316e062ea1b72bb05d9ebbab17cf",
+      "sha256": "217deb734bb61c4473f6025680a2fd4487c466d457c602a5e2f33d5898a6d632",
       "bytes": 5564
     },
     "documents/screenote-1777/idea.md": {
@@ -207,8 +207,8 @@
       "bytes": 2303
     },
     "documents/screenote-1777/brainstorm.md": {
-      "sha256": "0fd80a3957d666b0536d7c8751f2ee7e8b3dd5fd701ef970ecb14f44c92fc9f1",
-      "bytes": 7447
+      "sha256": "f8d51ff71fd1c11cfa8c19d4dfc3435a538f1c8183a9edda25eefa3accac9005",
+      "bytes": 7450
     },
     "documents/screenote-1777/plan.md": {
       "sha256": "95b12e1a5b0fe94b3bdf06dd69a5562382f1c03f01731936c36365f8246728ae",
@@ -267,7 +267,7 @@
       "bytes": 163302
     },
     "data/tasks/screenote-1777.json": {
-      "sha256": "eb0094698a3bd6927ba69ca0d005e16782ff0795e61141f9a333340142883052",
+      "sha256": "65442658be3ccc9a2268052f5dd2dae5958f1b216a182341d188355787e1aae8",
       "bytes": 6192
     },
     "documents/screenote-1778/idea.md": {
@@ -279,8 +279,8 @@
       "bytes": 9828
     },
     "documents/screenote-1778/plan.md": {
-      "sha256": "3ae9844fb50033c92f6e0db7bbf003a906d87ff4ba9b8fd743f8cfc368b1e6db",
-      "bytes": 20356
+      "sha256": "04d427f3706d0a31105cebbfc23f764cada113cc174857fb8560e9b7c0a90bcb",
+      "bytes": 20359
     },
     "documents/screenote-1778/task.md": {
       "sha256": "412b47dc255ae3b6e67c143b1f12f1d4fcd0031c6e1ad4730b874e3f4b00b80c",
@@ -331,12 +331,12 @@
       "bytes": 149
     },
     "changes/screenote-1778.patch": {
-      "sha256": "cf0c2edb2e1e180b596f222cf7f13073859f3b305e62f31e9feed612a6449ae5",
-      "bytes": 118952
+      "sha256": "e19a7701c7b2d1301de3a70788710f24e287b178680f5de88081ff126cc3918f",
+      "bytes": 118955
     },
     "data/tasks/screenote-1778.json": {
-      "sha256": "6667f29bbf27bd97c8a5ae8d38aabc8ad54fe9523031afa32f16d278c320d1ba",
-      "bytes": 6233
+      "sha256": "b6f4a7b84eb8fd43680c0e718e131875cb5452ea327f1d0b2f848181a326ba23",
+      "bytes": 6232
     },
     "documents/hive-24065/idea.md": {
       "sha256": "13822c492b0ba72a62fba35cd576e3ddf7de455c0eea292d369687db9f3e00f3",
@@ -383,7 +383,7 @@
       "bytes": 149
     },
     "data/tasks/hive-24065.json": {
-      "sha256": "d750ab1be19ec5fcacaea6b0ede2666861f8f36f4b082f877d1d902fe0889279",
+      "sha256": "efc3b8be2f0f0bc2b1e7e43dabb8a98ed56b9d521d0792828e2e355abb848ba3",
       "bytes": 5015
     },
     "documents/honeycomb-1848/idea.md": {
@@ -423,7 +423,7 @@
       "bytes": 190502
     },
     "data/tasks/honeycomb-1848.json": {
-      "sha256": "ae409a131656daff0f07c5b51be01ea81ba64219c5065a0faa4481bb85c5230f",
+      "sha256": "48eb77bca49920e34a7c81672767ebefb6b7163b2643e9e0e677de7766d7d476",
       "bytes": 4209
     },
     "documents/honeycomb-1849/idea.md": {
@@ -459,11 +459,11 @@
       "bytes": 109
     },
     "changes/honeycomb-1849.patch": {
-      "sha256": "28138a8c176bdf3aa89b18984eaaee61d238247ba22ce75bdf5c01838c8cbc81",
-      "bytes": 392992
+      "sha256": "60b5ceb8f5c85b629f5c282cb66a5e3f1b77c1113e06490581a14228215e5dea",
+      "bytes": 392995
     },
     "data/tasks/honeycomb-1849.json": {
-      "sha256": "b1641c174b08c5afccb7de990d8f1d99603e3f970252daab7d2e21a57a9f6796",
+      "sha256": "b1ecf8a9667206f5ea548fdd0568dd4b3daeed6ac7df4e7d805a052b66505aab",
       "bytes": 4167
     },
     "documents/agent-plugins-1930/idea.md": {
@@ -503,7 +503,7 @@
       "bytes": 524288
     },
     "data/tasks/agent-plugins-1930.json": {
-      "sha256": "b51b71b2b85478b22ddc18b8a364578f8f5b791b9682ff9a4f49e17864d8ec1e",
+      "sha256": "cbe8ae05a4c9376897c26fa5089308b36ee67052c272d2e12ad22c05d8e471d1",
       "bytes": 4247
     },
     "documents/prdigest-9434/idea.md": {
@@ -555,7 +555,7 @@
       "bytes": 155071
     },
     "data/tasks/prdigest-9434.json": {
-      "sha256": "7866b6d88f149706d0c9a656605f866d0bc9f15c88b5b48eb35016382702d0d7",
+      "sha256": "5b8df5e71cbb064db65ab6fe9f0abe52799a38a2aee07a39e3a575547ef524da",
       "bytes": 5011
     },
     "documents/hive-43064/idea.md": {
@@ -567,7 +567,7 @@
       "bytes": 3801
     },
     "data/tasks/hive-43064.json": {
-      "sha256": "78a6b97369a32dca944cb5d08a0c76a2ba74bf533f64866999ee11c963996abc",
+      "sha256": "3f1c6ae7fe78d112372ddedd93cdc44532997ce608a6cfa0213217a309c9fa19",
       "bytes": 6255
     },
     "documents/hive-42445/idea.md": {
@@ -587,23 +587,23 @@
       "bytes": 2006
     },
     "data/tasks/hive-42445.json": {
-      "sha256": "f3e672e959bdae9a6d1ac1431842fb299db4d331419b6f88b54ea77d3439db9f",
+      "sha256": "51c63d6449d65974f6684c8aa1d59843c294f4b964b833b6fbcb0208373ff45f",
       "bytes": 2089
     },
     "data/status.json": {
-      "sha256": "0068376d5f8bb3535aaff5a272064964c03867d03869f60778702c4514eedddd",
+      "sha256": "7a86f6f7bb6fd2bef32a613af3f5435a0ea8a9ae1143d0aa6c63c097516bbf57",
       "bytes": 7952
     },
     "data/workflows.json": {
-      "sha256": "199404963933d81f26216ee05f8b0812b9e3ebfa9ea6c6e45cad750f02d9196f",
+      "sha256": "01dfb6d1fb652eb8e8d1480799893e9069d28cd95b8728a0484be61adb8024e9",
       "bytes": 6817
     },
     "data/modules.json": {
-      "sha256": "621cecf25e8721aff8d27740a3e8373e5bc081e164e00ea69ef8c0265aa42d37",
+      "sha256": "05c34ca9b35585b596e6a19006d0f1836c724829c4f2e91bfcba1546f8759f08",
       "bytes": 1790
     },
     "data/patrol.json": {
-      "sha256": "3556419b13db5e6932ffb74872e09255c2696ee2aa6fd4fe658bc70cc1ebd9be",
+      "sha256": "19110a409dd424c44ffdd9f789145aaf2f30bc2f3f2335b9f5db1ceda6994d82",
       "bytes": 17983
     },
     "data/digest.json": {
@@ -611,11 +611,11 @@
       "bytes": 6673
     },
     "data/repos.json": {
-      "sha256": "beabc5c4e9482900328fdc5de191b9183a1ee6e35f36e466df2c06b322ccc967",
+      "sha256": "858c4b19a41df49958eaed5b9a9b0af86f7ee99c96e8f7c1e44ba9bfdc0f191a",
       "bytes": 3101
     },
     "data/snapshot.json": {
-      "sha256": "9a3a072e98ffc4c7c8e41d2d286e40dbf3f3c421fc876b6a89271db326997627",
+      "sha256": "74f0174777fa37a6b9c78eb3ea7956ea24c0a5f26994b22c75b72a5f8a4cdaec",
       "bytes": 7812
     }
   },
@@ -656,6 +656,21 @@
       "matches": 5
     },
     {
+      "path": "documents/screenote-1777/brainstorm.md",
+      "reason": "Authorization header values are not publishable",
+      "matches": 1
+    },
+    {
+      "path": "changes/screenote-1778.patch",
+      "reason": "Authorization header values are not publishable",
+      "matches": 1
+    },
+    {
+      "path": "documents/screenote-1778/plan.md",
+      "reason": "Authorization header values are not publishable",
+      "matches": 1
+    },
+    {
       "path": "changes/honeycomb-1848.patch",
       "reason": "Personal email addresses are not publishable",
       "matches": 1
@@ -663,6 +678,11 @@
     {
       "path": "documents/honeycomb-1848/task.md",
       "reason": "Local task worktree paths are not publishable",
+      "matches": 1
+    },
+    {
+      "path": "changes/honeycomb-1849.patch",
+      "reason": "Private-key material is never publishable, including test fixtures",
       "matches": 1
     },
     {

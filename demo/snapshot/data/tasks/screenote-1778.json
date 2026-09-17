@@ -24,9 +24,9 @@
     "observed_at": "2026-07-10T00:16:52.954782Z",
     "state": "current"
   },
-  "captured_at": "2026-09-17T09:28:07.265Z",
+  "captured_at": "2026-09-17T09:53:52.482Z",
   "observed_at": null,
-  "age_seconds": 1527648,
+  "age_seconds": 1529193,
   "documents": [
     {
       "name": "idea.md",
@@ -47,8 +47,8 @@
     {
       "name": "plan.md",
       "path": "documents/screenote-1778/plan.md",
-      "bytes": 20356,
-      "sha256": "3ae9844fb50033c92f6e0db7bbf003a906d87ff4ba9b8fd743f8cfc368b1e6db",
+      "bytes": 20359,
+      "sha256": "04d427f3706d0a31105cebbfc23f764cada113cc174857fb8560e9b7c0a90bcb",
       "role": "plan",
       "format": "markdown"
     },
@@ -165,10 +165,10 @@
   "change": {
     "state": "available",
     "path": "changes/screenote-1778.patch",
-    "bytes": 118952,
-    "sha256": "cf0c2edb2e1e180b596f222cf7f13073859f3b305e62f31e9feed612a6449ae5",
+    "bytes": 118955,
+    "sha256": "e19a7701c7b2d1301de3a70788710f24e287b178680f5de88081ff126cc3918f",
     "truncated": false,
-    "redacted": false,
+    "redacted": true,
     "provenance": {
       "repository": "ivankuznetsov/screenote",
       "url": "https://github.com/ivankuznetsov/screenote/pull/37",

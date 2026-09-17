@@ -81,6 +81,6 @@
   <p class="muted">Installing from Honeycomb, creating owner-authored workflows, and updating selections need a running Hive installation with the reviewed package. The saved snapshot cannot perform them.</p>
   <button type="button" class="demo-button" data-snapshot-action="install-workflow">Install a workflow</button>
   <% if @excluded_workflows.any? %>
-    <p class="faint"><%= @excluded_workflows.length %> fixture workflow is excluded from this snapshot because its own summary identifies it as an execution fixture.</p>
+    <p class="faint"><%= pluralize(@excluded_workflows.length, "fixture workflow") %> excluded from this snapshot because its own summary identifies it as an execution fixture.</p>
   <% end %>
 </section>

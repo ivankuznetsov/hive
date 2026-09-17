@@ -1,6 +1,5 @@
 require "nokogiri"
 require "uri"
-require "digest"
 
 module HiveDemo
   # Structural hardening for exported fragments. Live controls, remote media,
@@ -36,6 +35,7 @@ module HiveDemo
       strip_live_attributes!(node)
       rewrite_destinations!(node)
       validate!(node)
+      yield node if block_given?
       node.to_html
     end
 

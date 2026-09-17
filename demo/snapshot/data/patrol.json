@@ -2,7 +2,7 @@
   "schema": "hive-demo-patrol",
   "schema_version": 1,
   "project": "hive",
-  "captured_at": "2026-09-17T09:29:47.319Z",
+  "captured_at": "2026-09-17T09:55:31.717Z",
   "ordinary": {
     "state": "captured",
     "source_total": 230,

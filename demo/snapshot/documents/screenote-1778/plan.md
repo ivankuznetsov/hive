@@ -112,7 +112,7 @@ Approach:
 
 Test scenarios:
 
-- Client sends `Authorization: Bearer oauth-token`.
+- Client sends `Authorization: <redacted-credential>`.
 - Empty token does not set the Authorization header when constructing lower-level tests, while CLI command validation still prevents missing token before ordinary requests.
 - 401/403 server responses produce code `unauthorized` or server-provided code and auth exit behavior.
 

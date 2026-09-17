@@ -4,6 +4,7 @@ require "ostruct"
 require "fileutils"
 require "pathname"
 require "hive/stage_label"
+require "hive/secret_patterns"
 require_relative "snapshot"
 require_relative "routes"
 require_relative "static"
@@ -16,9 +17,16 @@ module HiveDemo
       "operator_name" => /\basterio\b/,
       "excluded_project" => /\b(?:writero|todero|webmail\.sh|rabatafs|hive-private)\b/i,
       "prelaunch_endpoint" => /\bhivedev\.sh\b/,
-      "secret" => /\b(?:gh[pous]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/,
+      "active_content" => /\b(?:javascript:|vbscript:|data:text\/html)|\bon(?:error|load|click)\s*=\s*["']/i,
+      "control_bytes" => /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/,
       "email" => /\b[A-Za-z0-9._%+-]+@(?!example\.(?:com|org|net)\b)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/
     }.freeze
+
+    CREDENTIAL_PATTERNS = Hive::SecretPatterns::PATTERNS.slice(
+      :github_token, :github_fine_grained_pat, :aws_access_key, :aws_secret_access_key,
+      :pem_private_key, :pem_private_key_header, :openai_api_key, :anthropic_api_key,
+      :stripe_api_key, :slack_token, :jwt
+    ).freeze
 
     TEMPLATES = {
       status: "status/index",
@@ -56,7 +64,6 @@ module HiveDemo
         'stylesheet' => @stylesheet,
         'routes' => route_manifest
       })}\n")
-      scan_exports!
       route_manifest
     end
 
@@ -66,9 +73,7 @@ module HiveDemo
       view = View.new(routes: routes, snapshot: snapshot)
       assign(view, route)
       content = view.render(template: TEMPLATES.fetch(route.kind))
-      sanitized = Static.fragment(content)
-      validate_links!(route, sanitized)
-      view.instance_variable_set(:@view_flow, ActionView::OutputFlow.new)
+      sanitized = Static.fragment(content) { |node| validate_links!(route, node) }
       view.content_for(:page_content) { sanitized.html_safe }
       page = view.render(template: "layouts/application", layout: false)
       write(route.page, page)
@@ -178,7 +183,9 @@ module HiveDemo
         task: task, project: task.project, documents: documents,
         workspace: { "status" => { "freshness" => "fresh", "state" => "current" },
                      "task" => { "archived" => task.archived? } },
-        result: { "primary" => primary && record(primary), "supporting" => supporting_documents(documents).map { |document| record(document) }, "warning" => nil },
+        result: { "primary" => primary && record(primary),
+                  "supporting" => supporting_documents(documents, primary).map { |document| record(document) },
+                  "warning" => nil },
         publication: publication(task),
         change: task.change
       )
@@ -202,8 +209,7 @@ module HiveDemo
         "binary" => false, "truncated" => false }
     end
 
-    def supporting_documents(documents)
-      primary = documents.find { |document| document.role == "primary" } || documents.find { |document| document.role == "plan" }
+    def supporting_documents(documents, primary)
       documents.reject { |document| document.equal?(primary) }
     end
 
@@ -278,8 +284,7 @@ module HiveDemo
       @stylesheet = "/#{css_path}"
     end
 
-    def validate_links!(route, html)
-      fragment = Nokogiri::HTML.fragment(html)
+    def validate_links!(route, fragment)
       fragment.css("a[href^='/']").each do |anchor|
         next if routes.include?(anchor["href"])
 
@@ -287,19 +292,23 @@ module HiveDemo
       end
     end
 
-    def scan_exports!
-      Pathname.glob(@destination.join("**/*")).select(&:file?).each do |path|
-        next if path.extname == ".css" && path.basename.to_s.start_with?("hive-")
+    def assert_publishable!(path, content)
+      LEAK_PATTERNS.each do |kind, pattern|
+        next if kind == "active_content" && path.include?("/change/")
 
-        text = path.read
-        LEAK_PATTERNS.each do |kind, pattern|
-          match = pattern.match(text)
-          raise "Exported file #{path.relative_path_from(@destination)} contains forbidden #{kind}: #{match[0].slice(0, 80)}" if match
-        end
+        match = pattern.match(content)
+        raise "Exported file #{path} contains forbidden #{kind}: #{match[0].slice(0, 80)}" if match
+      end
+      Hive::SecretPatterns::PATTERNS.each do |name, pattern|
+        next unless CREDENTIAL_PATTERNS.key?(name)
+
+        match = pattern.match(content)
+        raise "Exported file #{path} contains forbidden credential (#{name}): #{match[0].slice(0, 80)}" if match
       end
     end
 
     def write(path, content)
+      assert_publishable!(path, content)
       target = @destination.join(path)
       FileUtils.mkdir_p(target.dirname)
       target.write(content)

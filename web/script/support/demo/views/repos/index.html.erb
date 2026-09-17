@@ -1,6 +1,6 @@
 <% content_for(:title, "#{web_product_name} — repos") %>
 <h1>Repos</h1>
-<p class="muted">The five public repositories selected for this snapshot. Clone, setup, and settings controls require a running Hive installation.</p>
+<p class="muted">The <%= @repos.length %> public repositories selected for this snapshot. Clone, setup, and settings controls require a running Hive installation.</p>
 
 <section aria-labelledby="registered-repos-heading">
   <h2 id="registered-repos-heading">Selected repositories</h2>

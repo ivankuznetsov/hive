@@ -58,12 +58,7 @@ function assertSafe(path, text, extra = []) {
 }
 
 async function writeJson(root, path, value) {
-  const text = `${JSON.stringify(value, null, 2)}\n`;
-  assertSafe(path, text);
-  const target = join(root, path);
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, text);
-  return { sha256: sha256(text), bytes: Buffer.byteLength(text) };
+  return writeText(root, path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function writeText(root, path, text) {
@@ -134,21 +129,7 @@ async function loadProjections(options) {
   return { archive, status, archiveRows, statusRows };
 }
 
-function selectArchiveRow(row) {
-  return {
-    id: row.id,
-    slug: row.slug,
-    display_name: row.display_name || null,
-    workflow: row.workflow,
-    stage: row.stage,
-    marker: row.marker || null,
-    action: row.action,
-    action_label: row.action_label || null,
-    pr_url: row.pr_url || null
-  };
-}
-
-function selectActiveRow(row) {
+function activeAction(row) {
   const reason = (row.reasons || [])[0] || {};
   const actionByReason = {
     wait_for_answers: 'needs_input',
@@ -156,21 +137,11 @@ function selectActiveRow(row) {
     plan_review_retry_scheduled: 'plan_review_retry',
     plan_reviewing: 'plan_reviewing'
   };
-  const action = actionByReason[reason.code] || (row.state === 'waiting_on_you' ? 'needs_input' : 'plan_review_retry');
-  return {
-    id: row.id,
-    slug: row.slug,
-    display_name: row.identity.display_name || null,
-    workflow: row.workflow,
-    stage: row.position?.stage || null,
-    marker: row.position?.marker || null,
-    action,
-    action_label: null,
-    blocker_owner: row.blocker_owner || null,
-    reason: row.reason || null,
-    state: row.state,
-    unanswered_questions: null
-  };
+  return actionByReason[reason.code] || (row.state === 'waiting_on_you' ? 'needs_input' : 'plan_review_retry');
+}
+
+function activeReason(row) {
+  return row.reason || null;
 }
 
 async function captureDocument(folder, source, redactions, out, projectDir) {
@@ -188,7 +159,7 @@ async function captureDocument(folder, source, redactions, out, projectDir) {
   };
 }
 
-function verifyPublication(task, options) {
+function verifyPublication(task) {
   if (task.role === 'active') return null;
   const api = json('gh', ['api', `repos/${task.outcome.repository}/pulls/${task.outcome.number}`], { cwd: ROOT });
   if (api.merged !== true || api.state !== 'closed') {
@@ -251,7 +222,7 @@ function sanitizeQuestion(slot) {
   };
 }
 
-async function captureTask(task, selection, context) {
+async function captureTask(task, context) {
   const { options, projections, capturedAt, out, projects, manifest } = context;
   const { row, kind } = taskRowSource(projections.archiveRows, projections.statusRows, task);
   const folder = row.folder;
@@ -279,9 +250,9 @@ async function captureTask(task, selection, context) {
     }
   }
 
-  const publication = verifyPublication(task, options);
+  const publication = verifyPublication(task);
   const change = await captureChange(task.change, publication, out, projectDir, manifest, redactions);
-  const activeRow = kind === 'active' ? selectActiveRow(row) : null;
+  const archived = kind === 'archive';
 
   const taskJson = {
     schema: 'hive-demo-task',
@@ -293,16 +264,16 @@ async function captureTask(task, selection, context) {
     title: task.title || row.display_name || displayTitle({ slug: row.slug }),
     role: task.role,
     workflow: row.workflow || 'coding',
-    stage: kind === 'archive' ? row.stage : row.position?.stage || null,
-    archived: kind === 'archive',
-    action: kind === 'archive' ? row.action : activeRow.action,
-    action_label: kind === 'archive' ? row.action_label : null,
-    reason: activeRow?.reason || null,
+    stage: archived ? row.stage : row.position?.stage || null,
+    archived,
+    action: archived ? row.action : activeAction(row),
+    action_label: archived ? row.action_label : null,
+    reason: archived ? null : activeReason(row),
     unanswered_questions: questions.filter((question) => !question.answered).length,
     headline: workspace.headline || null,
     status: workspace.status || null,
     captured_at: capturedAt,
-    observed_at: row.source === 'archive' ? (row.closure?.confirmed_at || null) : (row.position ? capturedAt : null),
+    observed_at: archived ? (row.closure?.confirmed_at || null) : capturedAt,
     age_seconds: await folderAge(folder, Date.parse(capturedAt) / 1000),
     documents,
     primary_document: primaryDocument ? primaryDocument.path : null,
@@ -313,7 +284,7 @@ async function captureTask(task, selection, context) {
   };
   const taskPath = `data/tasks/${projectDir}.json`;
   manifest.files[taskPath] = await writeJson(out, taskPath, taskJson);
-  return { taskJson, redactionRecords, row: kind === 'archive' ? selectArchiveRow(row) : selectActiveRow(row) };
+  return { taskJson, redactionRecords, marker: archived ? (row.marker || null) : (row.position?.marker || null) };
 }
 
 function workflowPackage(workflow, hiveStatePath) {
@@ -542,7 +513,7 @@ async function main() {
   const taskRows = [];
   const context = { options, projections, capturedAt, out: options.out, projects, manifest };
   for (const task of selection.tasks) {
-    const { taskJson, redactionRecords, row } = await captureTask(task, selection, context);
+    const { taskJson, redactionRecords, marker } = await captureTask(task, context);
     manifest.redactions.push(...redactionRecords);
     taskRows.push({
       project: taskJson.project,
@@ -552,12 +523,12 @@ async function main() {
       role: taskJson.role,
       workflow: taskJson.workflow,
       stage: taskJson.stage,
-      marker: row.marker || null,
+      marker,
       action: taskJson.action,
       action_label: taskJson.action_label,
       archived: taskJson.archived,
       age_seconds: taskJson.age_seconds,
-      reason: row.reason || null,
+      reason: taskJson.reason,
       unanswered_questions: taskJson.questions.filter((question) => !question.answered).length,
       path: `data/tasks/${taskJson.project}-${taskJson.id}.json`,
       repository: taskJson.repository

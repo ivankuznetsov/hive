@@ -24,9 +24,9 @@
     "observed_at": "2026-07-09T17:00:14.576612Z",
     "state": "current"
   },
-  "captured_at": "2026-09-17T09:28:07.265Z",
+  "captured_at": "2026-09-17T09:53:52.482Z",
   "observed_at": null,
-  "age_seconds": 1527648,
+  "age_seconds": 1529193,
   "documents": [
     {
       "name": "idea.md",
@@ -39,8 +39,8 @@
     {
       "name": "brainstorm.md",
       "path": "documents/screenote-1777/brainstorm.md",
-      "bytes": 7447,
-      "sha256": "0fd80a3957d666b0536d7c8751f2ee7e8b3dd5fd701ef970ecb14f44c92fc9f1",
+      "bytes": 7450,
+      "sha256": "f8d51ff71fd1c11cfa8c19d4dfc3435a538f1c8183a9edda25eefa3accac9005",
       "role": "brainstorm",
       "format": "markdown"
     },

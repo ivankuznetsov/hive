@@ -5,8 +5,8 @@
     <% unless @task_state || @selected_project %>
       <section class="snapshot-scope" aria-labelledby="snapshot-scope-heading">
         <div>
-          <h1 id="snapshot-scope-heading">Explore 10 completed tasks across 5 projects</h1>
-          <p class="muted">This frozen workspace contains two genuinely unfinished tasks. Everything else is archived real work with its original documents, reviews, and merged pull requests.</p>
+          <h1 id="snapshot-scope-heading">Explore <%= @snapshot.scope.fetch("completed_count") %> completed tasks across <%= @snapshot.scope.fetch("project_count") %> projects</h1>
+          <p class="muted">This frozen workspace contains <%= @snapshot.scope.fetch("active_count") %> genuinely unfinished tasks. Everything else is archived real work with its original documents, reviews, and merged pull requests.</p>
         </div>
         <div class="snapshot-scope-actions">
           <%= link_to "Start with image attachments", task_path("screenote", "add-image-attachments-to-screenote-260816-6a00"), class: "btn btn-secondary" %>

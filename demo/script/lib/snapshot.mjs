@@ -35,7 +35,6 @@ export function sha256(value) {
 export function auditText(text, { allow = [] } = {}) {
   const findings = [];
   for (const [kind, pattern, description] of FORBIDDEN_PATTERNS) {
-    if (kind === 'absolute_path' && allow.includes('absolute_path')) continue;
     if (allow.includes(kind)) continue;
     const match = pattern.exec(text);
     if (match) {
@@ -47,16 +46,6 @@ export function auditText(text, { allow = [] } = {}) {
 
 export function auditOptionsFor(path) {
   return path.endsWith('.patch') ? { allow: ['active_content'] } : {};
-}
-
-export function auditDataset(files) {
-  const findings = [];
-  for (const [path, content] of Object.entries(files)) {
-    for (const finding of auditText(content)) {
-      findings.push({ path, ...finding });
-    }
-  }
-  return findings;
 }
 
 export function validateSelection(selection) {
@@ -120,8 +109,10 @@ export function validateDataset(dataset) {
   const tasks = dataset.tasks || [];
   const completed = tasks.filter((task) => task.role !== 'active');
   const active = tasks.filter((task) => task.role === 'active');
-  if (tasks.length !== completed.length + active.length) errors.push('task roles are inconsistent');
   for (const task of tasks) {
+    if (!['lead', 'supporting', 'active'].includes(task.role)) {
+      errors.push(`${task.project}:${task.id} has an invalid role`);
+    }
     if (!task.path?.startsWith('data/tasks/')) errors.push(`${task.project}:${task.id} has no task data path`);
     if (task.role === 'active' && task.archived) errors.push(`${task.project}:${task.id} is active and must not be marked archived`);
   }
@@ -194,6 +185,39 @@ export const EMAIL_REDACTION = Object.freeze({
   reason: 'Personal email addresses are not publishable'
 });
 
+export const PEM_REDACTION = Object.freeze({
+  pattern: '-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY( BLOCK)?-----',
+  replace: '<private-key-material-removed>',
+  kind: 'pem',
+  reason: 'Private-key material is never publishable, including test fixtures'
+});
+
+export const PEM_HEADER_REDACTION = Object.freeze({
+  pattern: '-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----',
+  replace: '<private-key-material-removed>',
+  kind: 'pem',
+  reason: 'Private-key material is never publishable, including test fixtures'
+});
+
+export const AUTH_REDACTION = Object.freeze({
+  pattern: '(authorization\\s*[:=]\\s*[\'"]?)(?:bearer|basic|token)\\s+[A-Za-z0-9._\\-+/=]{8,}',
+  flags: 'gi',
+  replace: '$1<redacted-credential>',
+  kind: 'authorization',
+  reason: 'Authorization header values are not publishable'
+});
+
+export const BEARER_REDACTION = Object.freeze({
+  pattern: '\\bbearer\\s+[A-Za-z0-9._\\-+/=]{20,}',
+  flags: 'gi',
+  replace: 'Bearer <redacted-credential>',
+  kind: 'authorization',
+  reason: 'Bearer credential examples are redacted before publication'
+});
+
 export function defaultRedactions() {
-  return [PRIVATE_PROJECT_REDACTION, LOCAL_PATH_REDACTION, REPO_PATH_REDACTION, HOME_PATH_REDACTION, EMAIL_REDACTION];
+  return [
+    PRIVATE_PROJECT_REDACTION, LOCAL_PATH_REDACTION, REPO_PATH_REDACTION, HOME_PATH_REDACTION,
+    PEM_REDACTION, PEM_HEADER_REDACTION, AUTH_REDACTION, BEARER_REDACTION, EMAIL_REDACTION
+  ];
 }

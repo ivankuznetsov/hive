@@ -1,5 +1,4 @@
 require "json"
-require "ostruct"
 require "pathname"
 
 module HiveDemo
@@ -43,16 +42,11 @@ module HiveDemo
 
     def project(name) = projects.find { |candidate| candidate.name == name }
 
-    def project_names = projects.map(&:name)
+    def scope = @dataset.fetch("scope")
 
-    def task_rows(role: nil)
-      rows = @dataset.fetch("tasks")
-      role ? rows.select { |row| row["role"] == role } : rows
+    def task_rows
+      @dataset.fetch("tasks")
     end
-
-    def completed_rows = task_rows(role: nil).reject { |row| row["role"] == "active" }
-
-    def active_rows = task_rows(role: "active")
 
     def task(project, id)
       row = @tasks.fetch([ project, id ])
@@ -148,10 +142,6 @@ module HiveDemo
 
     def [](key) = attributes[key]
 
-    def error = nil
-
-    def task_count = @rows.length
-
     private
 
     def task_rows(role)
@@ -172,9 +162,6 @@ module HiveDemo
     def title = attributes.fetch("title")
     def id = attributes.fetch("id")
     def archived? = attributes["archived"] == true
-    def terminal? = archived?
-    def documents = attributes.fetch("documents")
-    def role = attributes["role"]
 
     def [](key) = key == "project" ? project.name : attributes[key]
     def dig(*keys) = attributes.dig(*keys)
@@ -188,12 +175,9 @@ module HiveDemo
     def dispatch_action = nil
     def run_verb = nil
 
-    def captured_at = attributes.fetch("captured_at")
     def publication = attributes["publication"]
     def change = attributes["change"]
     def questions = attributes.fetch("questions", [])
-    def stage = attributes.fetch("stage")
-    def action = attributes.fetch("action")
   end
 
   class Document
@@ -208,8 +192,6 @@ module HiveDemo
     def role = record.fetch("role")
     def path = record.fetch("path")
     def bytes = record.fetch("bytes")
-    def sha256 = record.fetch("sha256")
-    def markdown? = name.end_with?(".md")
     def content = (@content ||= (@root + path).read)
   end
 end

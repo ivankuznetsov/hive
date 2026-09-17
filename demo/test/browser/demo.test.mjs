@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { signup } from '../../worker/index.mjs';
+import { auditText } from '../../script/lib/snapshot.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const leadTask = '/tasks/screenote/add-image-attachments-to-screenote-260816-6a00';
@@ -176,8 +177,8 @@ test('crawls every exported route and carries no subscriber or operator material
     const response = await page.request.get(`${base}${route.path}`);
     assert.equal(response.status(), 200, `${route.path} did not load`);
     const html = await response.text();
-    assert.doesNotMatch(html, /\/home\/|asterio|writero|hive-private/);
-    assert.doesNotMatch(html, /email_key|ghp_[A-Za-z0-9]{20,}/);
+    const allow = route.path.endsWith('/change') ? { allow: ['active_content'] } : {};
+    assert.deepEqual(auditText(html, allow), [], `${route.path} contains forbidden content`);
     for (const match of html.matchAll(/(?:href|src)="(https?:[^"]+)"/g)) {
       assert.match(match[1], /^https:\/\/(?:github\.com|hivecli\.sh)(?:\/|$)/, `${route.path} references ${match[1]}`);
     }

@@ -3022,7 +3022,7 @@ index 59f150c..055b4e3 100644
  
  | Endpoint | Auth Method |
  |----------|------------|
--| `Api::V1::*` | Bearer token (ApiKey) via `Authorization: Bearer sk_proj_...` |
+-| `Api::V1::*` | Bearer token (ApiKey) via `Authorization: <redacted-credential>` |
 +| `Api::V1::*` | Bearer token via project API key or Doorkeeper OAuth access token |
  | `Api::ScreenshotUploadsController` | One-time upload token via query param `?token=...` |
  

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title><%= content_for(:title) || web_product_name %></title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="description" content="Explore real work managed by Hive: plans, reviews, patrol evidence, and merged pull requests from a saved snapshot.">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="<%= @stylesheet %>">
+    <link rel="stylesheet" href="/demo.css">
+  </head>
+  <body class="demo-snapshot">
+    <a class="demo-skip" href="#demo-content">Skip to content</a>
+    <div class="snapshot-banner" role="note">
+      <div>
+        <strong>Saved Hive snapshot</strong>
+        <span class="snapshot-banner-meta">
+          captured <time datetime="<%= @captured_at %>"><%= Time.iso8601(@captured_at).utc.strftime("%Y-%m-%d %H:%M UTC") %></time>
+          · UI <%= @ui_sha[0, 10] %>
+          · read-only
+        </span>
+      </div>
+      <p><%= @source_note %></p>
+    </div>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <%= link_to root_path, class: "brand" do %>
+          <span class="brand-mark" aria-hidden="true">H</span>
+          <span>Hive</span>
+        <% end %>
+        <div id="primary-menu" class="topbar-menu demo-nav">
+          <nav aria-label="Primary">
+            <%= link_to "Status", root_path, class: nav_class(:status) %>
+            <%= link_to "Digest", digest_path(@snapshot.digest.fetch("local_date")), class: nav_class(:digest) %>
+            <%= link_to "Repos", repos_path, class: nav_class(:repos) %>
+            <%= link_to "Honeycombs", honeycombs_path, class: nav_class(:honeycombs) %>
+            <%= link_to "Patrol", patrol_path, class: nav_class(:patrol) %>
+            <%= link_to "Agents", "/unavailable/agents", class: nav_class(:agents) %>
+            <%= link_to "Telegram", "/unavailable/telegram", class: nav_class(:telegram) %>
+          </nav>
+          <div class="topbar-session demo-topbar-actions">
+            <button type="button" class="btn btn-ghost btn-sm" data-waitlist-open>Join Hive Cloud waitlist</button>
+            <a class="btn btn-ghost btn-sm" href="https://hivecli.sh" rel="noopener noreferrer">Run locally</a>
+          </div>
+        </div>
+      </div>
+    </header>
+    <p id="snapshot-action-note" class="snapshot-action-note" role="status" hidden></p>
+    <main id="demo-content" tabindex="-1">
+      <%= content_for(:page_content) %>
+    </main>
+    <footer class="demo-footer">
+      <span>Frozen workspace · no live agents · all records captured from a real Hive installation</span>
+      <span><a href="/privacy.html">Privacy</a> · <a href="https://hivecli.sh" rel="noopener noreferrer">Run Hive locally</a></span>
+    </footer>
+    <template id="snapshot-action-template">
+      <span>This saved snapshot can browse captured work but cannot run actions. Start a local Hive or join the Cloud waitlist to continue working.</span>
+      <a href="https://hivecli.sh" rel="noopener noreferrer">Run Hive locally</a>
+    </template>
+    <dialog id="waitlist-dialog" aria-labelledby="waitlist-title" aria-describedby="waitlist-purpose">
+      <div class="demo-dialog-heading"><h2 id="waitlist-title">Hive Cloud, when it’s ready.</h2><button type="button" id="waitlist-close" class="demo-text-button" aria-label="Close waitlist">✕</button></div>
+      <p id="waitlist-purpose">Join the waitlist to hear when you can run Hive in the cloud. We’ll use your email for Hive Cloud availability updates.</p>
+      <form id="waitlist-form">
+        <label for="waitlist-email">Email address</label>
+        <input id="waitlist-email" name="email" type="email" autocomplete="email" required maxlength="254" placeholder="you@example.com">
+        <div id="waitlist-challenge"></div>
+        <p id="waitlist-status" role="status" aria-live="polite"></p>
+        <button id="waitlist-submit" class="demo-button demo-primary" type="submit" disabled>Join Hive Cloud waitlist</button>
+      </form>
+      <p class="demo-privacy">Read our <a href="/privacy.html">privacy notice</a>.</p>
+    </dialog>
+    <noscript>
+      <p class="snapshot-note">JavaScript is off. Browsing, links, and documents remain available; action controls explain their saved state inline.</p>
+    </noscript>
+    <!-- DEMO_CONFIG -->
+    <script type="module" src="/app.mjs"></script>
+  </body>
+</html>

@@ -1,0 +1,73 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "hive",
+  "repository": "ivankuznetsov/hive",
+  "id": 42445,
+  "slug": "add-a-polished-token-usage-260813-f194",
+  "title": "Token usage analytics",
+  "role": "active",
+  "workflow": "coding",
+  "stage": "3-plan",
+  "archived": false,
+  "action": "plan_review_retry",
+  "action_label": null,
+  "reason": "retry primary review automatically after 2026-09-18T10:11:20.000000Z",
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "Canonical workflow status is current.",
+    "label": "Plan review retry scheduled",
+    "state": "plan_review_retry"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-09-14T08:37:58.387277Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": "2026-09-17T10:12:38.939Z",
+  "age_seconds": 3688,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/hive-42445/idea.md",
+      "bytes": 6648,
+      "sha256": "d26fb59174f2d37be420283f1f3add1879c4bd1b2bf7053a30075b080a71a302",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/hive-42445/brainstorm.md",
+      "bytes": 7196,
+      "sha256": "f9f0385e0406da173730fed3d1b04e82234d8771c1789f9f08a415b8d947ab94",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/hive-42445/plan.md",
+      "bytes": 28512,
+      "sha256": "d3b563c42d1d68ad204b391a7e2b43cb207d7067ce2ade83326c856c3d658996",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/hive-42445/task.md",
+      "bytes": 2006,
+      "sha256": "baada3f128c03a386d3c27fb564b12d393fe7c340d513d3643ebabef9996cbcc",
+      "role": "primary",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/hive-42445/task.md",
+  "publication": null,
+  "change": null,
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

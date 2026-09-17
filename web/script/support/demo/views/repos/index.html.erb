@@ -1,0 +1,34 @@
+<% content_for(:title, "#{web_product_name} — repos") %>
+<h1>Repos</h1>
+<p class="muted">The <%= @repos.length %> public repositories selected for this snapshot. Clone, setup, and settings controls require a running Hive installation.</p>
+
+<section aria-labelledby="registered-repos-heading">
+  <h2 id="registered-repos-heading">Selected repositories</h2>
+  <div class="repo-list">
+    <% @repos.each do |repo| %>
+      <article class="repo-row">
+        <div>
+          <span class="repo-name"><%= link_to repo.repository, repo.url %></span>
+          <% if repo.description.present? %><span class="repo-desc"><%= repo.description %></span><% end %>
+          <span class="repo-tags">
+            <span class="tag"><%= repo.private ? "private" : "public" %></span>
+            <% if repo.language.present? %><span class="tag"><%= repo.language %></span><% end %>
+            <% spdx = repo.license && repo.license["spdx_id"] %>
+            <span class="tag"><%= spdx && spdx != "NOASSERTION" ? spdx : "see repository license" %></span>
+            <% if repo.pushed_at.present? %><span>pushed <%= repo.pushed_at[0, 10] %></span><% end %>
+          </span>
+        </div>
+        <%= link_to "Open on GitHub", repo.url, class: "btn btn-ghost btn-sm" %>
+      </article>
+    <% end %>
+  </div>
+</section>
+
+<section aria-labelledby="snapshot-repos-note-heading">
+  <h2 id="snapshot-repos-note-heading">Installation</h2>
+  <p class="muted">Hive registers a repository locally before tasks run. That setup step is unavailable in the saved snapshot.</p>
+  <p>
+    <a href="https://hivecli.sh" rel="noopener noreferrer">Run Hive locally</a>
+    to clone and register a repository.
+  </p>
+</section>

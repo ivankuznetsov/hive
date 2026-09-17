@@ -1,0 +1,155 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "hive",
+  "repository": "ivankuznetsov/hive",
+  "id": 24065,
+  "slug": "make-patrol-and-architecture-patrol-260720-b7b3",
+  "title": "Installable Patrol modules",
+  "role": "supporting",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-08-06T10:53:46.793223Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": "2026-08-06T10:53:19.556316Z",
+  "age_seconds": 3626332,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/hive-24065/idea.md",
+      "bytes": 4152,
+      "sha256": "13822c492b0ba72a62fba35cd576e3ddf7de455c0eea292d369687db9f3e00f3",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/hive-24065/brainstorm.md",
+      "bytes": 15118,
+      "sha256": "ae9a7a195b837f1281c023b60a144193825847d64d3e519fdeb7c1d5f9962aa5",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/hive-24065/plan.md",
+      "bytes": 71759,
+      "sha256": "c93a277fe0f60239f6ee323fb6f515fc5e3519653b45f20ad1d209ed71baec22",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/hive-24065/task.md",
+      "bytes": 2339,
+      "sha256": "5e8b1a288f9739eccec598d03b569bc1892f7f20e8ebae9ad462725359f8b9cd",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/hive-24065/pr.md",
+      "bytes": 3409,
+      "sha256": "3d18eefe687583eeba7af28414288afa168ea202c94fefae815951c7c35c2123",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-01.md",
+      "path": "documents/hive-24065/reviews/codex-ce-code-review-01.md",
+      "bytes": 9212,
+      "sha256": "ee90f6d88971e71b3ea90b7544bcf847a68f271ee213e232093dd7cb001c6f5a",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-02.md",
+      "path": "documents/hive-24065/reviews/codex-ce-code-review-02.md",
+      "bytes": 7443,
+      "sha256": "27154123dcac499743daf75bb99f21b82a8055691009f4b237767d8db3d016de",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/grok-ce-code-review-01.md",
+      "path": "documents/hive-24065/reviews/grok-ce-code-review-01.md",
+      "bytes": 10195,
+      "sha256": "2faf89033cad9a1ba5aa3b4b49d960edaf76d49b8823d4e7f4f214ce2a2d74ec",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/grok-ce-code-review-02.md",
+      "path": "documents/hive-24065/reviews/grok-ce-code-review-02.md",
+      "bytes": 8041,
+      "sha256": "0a3c25c0dfd14b8ed88617bccb2bef087216a2772d1fe93bbf851b693aef8e51",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/hive-24065/reviews/escalations-01.md",
+      "bytes": 149,
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-02.md",
+      "path": "documents/hive-24065/reviews/escalations-02.md",
+      "bytes": 149,
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/hive-24065/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/hive",
+    "url": "https://github.com/ivankuznetsov/hive/pull/886",
+    "number": 886,
+    "state": "MERGED",
+    "merged_at": "2026-07-28T01:50:09Z",
+    "merge_oid": "2373fe012ec3e22b5c0b6f91e342df3151460fde",
+    "head_oid": "58b96f54c671a621c0986987bcebff4a0fe53db6",
+    "base_branch": "main",
+    "branch": "make-patrol-and-architecture-patrol-260720-b7b3",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "unavailable",
+    "reason": "The public patch could not be captured; open the pull request for the full change.",
+    "provenance": {
+      "repository": "ivankuznetsov/hive",
+      "url": "https://github.com/ivankuznetsov/hive/pull/886",
+      "number": 886,
+      "state": "MERGED",
+      "merged_at": "2026-07-28T01:50:09Z",
+      "merge_oid": "2373fe012ec3e22b5c0b6f91e342df3151460fde",
+      "head_oid": "58b96f54c671a621c0986987bcebff4a0fe53db6",
+      "base_branch": "main",
+      "branch": "make-patrol-and-architecture-patrol-260720-b7b3",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "schema": "hive-demo-modules",
+  "schema_version": 1,
+  "project": "hive",
+  "captured_at": "2026-09-17T10:14:21.154Z",
+  "excluded": [
+    "root-cause-repair"
+  ],
+  "modules": [
+    {
+      "name": "architecture",
+      "lifecycle_state": "active",
+      "installed": true,
+      "enabled": true,
+      "epoch": null,
+      "high_water_at": null,
+      "generated_at": "2026-09-17T10:14:21.120348Z",
+      "active": {
+        "version": "1.0.4",
+        "catalog_commit": "49a5d313c0498fe3170e71c544fc97877fe9c574",
+        "source_commit": "49a5d313c0498fe3170e71c544fc97877fe9c574",
+        "manifest_digest": "d8a16220f7ec557b6ad315f59040b90db67feeacf38e41c8e13cfe6d8c72a781",
+        "configuration_digest": "91d4b326698b5276c1f95bb56eade55b82196db41308a8786f80037a5d2bcc87",
+        "summary": "Turn repository and current web evidence into a concise architecture record",
+        "origin": "legacy_workflow"
+      },
+      "previous": null,
+      "integrity": {
+        "configuration_valid": true,
+        "generation_present": true,
+        "activation_fenced": false,
+        "journal_present": false
+      },
+      "settings": [],
+      "grants": {
+        "repository_write": true,
+        "github_mutations": [],
+        "external_commands": [
+          "*"
+        ],
+        "network_hosts": [
+          "*"
+        ],
+        "filesystem_read": [
+          "*"
+        ],
+        "filesystem_write": [
+          "*"
+        ],
+        "secrets": [
+          "*"
+        ]
+      },
+      "grant_digest": "2b980a38a6f8d22530abefe4966bc5dead47ae4847a28e8ef3e831e74d7aa29e",
+      "hooks": [],
+      "latest_decision": null,
+      "latest_attempt": null,
+      "retry": null,
+      "artifacts": [],
+      "failure_reason": null,
+      "history_available": true
+    }
+  ]
+}

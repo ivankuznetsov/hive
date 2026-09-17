@@ -7,6 +7,33 @@ updated: 2026-09-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Real snapshot corpus review remains a release gate (2026-09-17)
+
+The hivedev.ai demo now renders a checked-in snapshot of real work instead of
+fictional tasks. Capture is a maintainer-only, read-only operation and the
+dataset passed the automated audit, but automated scanning cannot prove a
+document safe: the selected corpus, redactions, and omissions still need the
+operator's publication review before any deployment, and the deployed bundle
+must be rebuilt from the exact reviewed commit. Deployment of this snapshot is
+not yet performed; the current Worker version remains the rollback authority.
+Selected diffs for two large pull requests (hive PRs 1015 and 886) could not be
+captured and are shown as unavailable with their public PR links rather than
+fabricated.
+
+## Public interactive demo production verification (2026-09-16)
+
+The owner corrected the production hostname to `hivedev.ai` and approved
+`ivan@ikuznetsov.com` and retention until launch, capped at 12 months after signup.
+Account access, production D1 migration and Turnstile secret provisioning are
+verified. The public domain serves the deployed commit over valid HTTPS; public
+Cloudflare and Google DNS return its records. Live desktop/mobile demo branches,
+privacy, 404/405 handling and invalid-token rejection passed. A successful real
+signup is still unverified: the automated browser could not reach a Turnstile
+challenge host (`ERR_ADDRESS_UNREACHABLE`). Local D1 signup tests pass, but do not
+replace this final live check.
+Retention deletion and emailed removal requests remain operator responsibilities.
+See [[interactive-demo]] and `demo/README.md`.
+
 ## Operator cancellation awaits live validation (2026-09-09)
 
 `archive --reason cancelled` is covered locally for cancellation without GitHub

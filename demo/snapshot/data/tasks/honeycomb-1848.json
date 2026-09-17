@@ -1,0 +1,135 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "honeycomb",
+  "repository": "ivankuznetsov/honeycomb",
+  "id": 1848,
+  "slug": "registry-layout-package-manifest-schema-260709-1f1a",
+  "title": "Package manifest and registry contract",
+  "role": "supporting",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-07-16T01:31:56.839480Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": null,
+  "age_seconds": 1424812,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/honeycomb-1848/idea.md",
+      "bytes": 2061,
+      "sha256": "142cffd4c515ebb93a0579ee0a2dc7425f139a1035f2ccc2427cc4057873fda5",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/honeycomb-1848/brainstorm.md",
+      "bytes": 7752,
+      "sha256": "432e61c994890aed075de4dc848b302b23f08eeb50df32fe76a0f32d3d04d4cd",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/honeycomb-1848/plan.md",
+      "bytes": 42502,
+      "sha256": "dbeb44c0ebcec99599255e3d4b28498b1c5c170c1eb8e21e9b3eec640d13987b",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/honeycomb-1848/task.md",
+      "bytes": 862,
+      "sha256": "cde063237e9119cd4c5d2ba9be1c258c33f88bd0ba2268a89ffa461d49ea412b",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/honeycomb-1848/pr.md",
+      "bytes": 2714,
+      "sha256": "7981fe6c0455b8a700a32077adb388b4a9b10570141593dfb2c0261d87979eac",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "artifact.md",
+      "path": "documents/honeycomb-1848/artifact.md",
+      "bytes": 3136,
+      "sha256": "50763c675a43609d877e9d083455a5b77143444b409df56414e8eb46699d512f",
+      "role": "artifact",
+      "format": "markdown"
+    },
+    {
+      "name": "summary.md",
+      "path": "documents/honeycomb-1848/summary.md",
+      "bytes": 1780,
+      "sha256": "957458c32a4e2bca7ed15d2f5ce78472ed81062af1cb08532cd9ff606a7d53b3",
+      "role": "outcome",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/honeycomb-1848/reviews/escalations-01.md",
+      "bytes": 109,
+      "sha256": "594bd4eec4f5fef8cc4bd5b5e4f933163ebc28951dc26cd5a862828130b6573f",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/honeycomb-1848/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/honeycomb",
+    "url": "https://github.com/ivankuznetsov/honeycomb/pull/1",
+    "number": 1,
+    "state": "MERGED",
+    "merged_at": "2026-07-16T01:25:34Z",
+    "merge_oid": "abf05187cfe4fdbb5c97e98c0cab685e04c1d1f4",
+    "head_oid": "bace705f65e039c06d6878d86e1fa492e47558d8",
+    "base_branch": "main",
+    "branch": "registry-layout-package-manifest-schema-260709-1f1a",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "available",
+    "path": "changes/honeycomb-1848.patch",
+    "bytes": 190502,
+    "sha256": "9de6d66c6dc28de08b5826a3c1093ff946ca2394f55b61e61a457be6893696e6",
+    "truncated": false,
+    "redacted": true,
+    "provenance": {
+      "repository": "ivankuznetsov/honeycomb",
+      "url": "https://github.com/ivankuznetsov/honeycomb/pull/1",
+      "number": 1,
+      "state": "MERGED",
+      "merged_at": "2026-07-16T01:25:34Z",
+      "merge_oid": "abf05187cfe4fdbb5c97e98c0cab685e04c1d1f4",
+      "head_oid": "bace705f65e039c06d6878d86e1fa492e47558d8",
+      "base_branch": "main",
+      "branch": "registry-layout-package-manifest-schema-260709-1f1a",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

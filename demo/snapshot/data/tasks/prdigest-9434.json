@@ -1,0 +1,159 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "prdigest",
+  "repository": "ivankuznetsov/prdigest",
+  "id": 9434,
+  "slug": "implement-prdigest-v0-1-0-260715-fe8f",
+  "title": "Daily merged-PR digests",
+  "role": "supporting",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-07-24T15:57:56.202047Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": null,
+  "age_seconds": 1424808,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/prdigest-9434/idea.md",
+      "bytes": 5528,
+      "sha256": "e81cd1ae14d1a99c49fc0c25595b83583cbb098132217509ad915d5819a247e7",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/prdigest-9434/brainstorm.md",
+      "bytes": 10885,
+      "sha256": "ec353d57dd04b50dd1d213b8def5956cebf46f6c2c3f7b9582d27d305e9a7e68",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/prdigest-9434/plan.md",
+      "bytes": 54323,
+      "sha256": "85303a2818e122ff8738245986829dd4b43ecce17d1fdf6cad8cbc3ba1aa076e",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/prdigest-9434/task.md",
+      "bytes": 1072,
+      "sha256": "408ef3ee8ee6a32dfab1ef42f9434173c2475921c0cf7db37135a009f9c30796",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/prdigest-9434/pr.md",
+      "bytes": 2757,
+      "sha256": "2403accc88f66af23e1944186f9a0cb4b19e8cba912c674a7e2eb24bf8dd1ba2",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "artifact.md",
+      "path": "documents/prdigest-9434/artifact.md",
+      "bytes": 1296,
+      "sha256": "a91ec2c818533e94e36b5316f2c4f87b08aeaadfd5240115b39ea27aa8191c0a",
+      "role": "artifact",
+      "format": "markdown"
+    },
+    {
+      "name": "summary.md",
+      "path": "documents/prdigest-9434/summary.md",
+      "bytes": 1672,
+      "sha256": "6479b929510c5673b78fefc336844f5377fbe8fe4a05c81eaeeec36cbb2ed184",
+      "role": "outcome",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-01.md",
+      "path": "documents/prdigest-9434/reviews/codex-ce-code-review-01.md",
+      "bytes": 4112,
+      "sha256": "0f03c3f247178d1d95c6c9f01785fea22c18ddfcc5aa14d912c9b6fc7b6bb289",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-02.md",
+      "path": "documents/prdigest-9434/reviews/codex-ce-code-review-02.md",
+      "bytes": 4655,
+      "sha256": "cda65fdb6a3fe0269c6b7e8da28c5e08a2d0cdfbcf095c8d554832a6451b3900",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/prdigest-9434/reviews/escalations-01.md",
+      "bytes": 149,
+      "sha256": "a740deff9c29c69740f26d650fab86d6a3553c932b62f3f66247f56eefee3c48",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-02.md",
+      "path": "documents/prdigest-9434/reviews/escalations-02.md",
+      "bytes": 992,
+      "sha256": "51a495d934a97468205c5d91459dc566fbb824f6117ed55713767081b78c0750",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/prdigest-9434/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/prdigest",
+    "url": "https://github.com/ivankuznetsov/prdigest/pull/1",
+    "number": 1,
+    "state": "MERGED",
+    "merged_at": "2026-07-24T15:45:07Z",
+    "merge_oid": "e3778f64ecbaaaa6289439c44c02bcefb2ae6f35",
+    "head_oid": "29f3d11d7630ba5e153a2b715dfa6f4d11cb1af9",
+    "base_branch": "main",
+    "branch": "implement-prdigest-v0-1-0-260715-fe8f",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "available",
+    "path": "changes/prdigest-9434.patch",
+    "bytes": 155071,
+    "sha256": "27e98a6e8a85774b01f9eaf21ce7a8d68fed38d5a72a20ac18cb296a925b32c2",
+    "truncated": false,
+    "redacted": false,
+    "provenance": {
+      "repository": "ivankuznetsov/prdigest",
+      "url": "https://github.com/ivankuznetsov/prdigest/pull/1",
+      "number": 1,
+      "state": "MERGED",
+      "merged_at": "2026-07-24T15:45:07Z",
+      "merge_oid": "e3778f64ecbaaaa6289439c44c02bcefb2ae6f35",
+      "head_oid": "29f3d11d7630ba5e153a2b715dfa6f4d11cb1af9",
+      "base_branch": "main",
+      "branch": "implement-prdigest-v0-1-0-260715-fe8f",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

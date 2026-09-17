@@ -1,0 +1,4321 @@
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+index 0000000..e1cf323
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,9 @@
++**
++!Dockerfile
++!.dockerignore
++!Gemfile
++!prdigest.gemspec
++!lib/
++!lib/**
++!exe/
++!exe/**
+diff --git a/.env.example b/.env.example
+index 4a80ac7..63b6299 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,3 +1,5 @@
+-GITHUB_TOKEN=***
+-TELEGRAM_BOT_TOKEN=***
++# Secrets are read from the environment only; never put them in config.yml.
++GITHUB_TOKEN=replace-with-read-only-token
++TELEGRAM_BOT_TOKEN=replace-with-dedicated-bot-token
++# Optional when /etc/prdigest/config.yml exists or --config is supplied:
+ # PRDIGEST_CONFIG=/etc/prdigest/config.yml
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index e3e402f..239da59 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -6,10 +6,33 @@ on:
+ jobs:
+   test:
+     runs-on: ubuntu-latest
++    strategy:
++      fail-fast: false
++      matrix:
++        ruby: ["3.2", "3.3", "3.4"]
+     steps:
+       - uses: actions/checkout@v4
+       - uses: ruby/setup-ruby@v1
+         with:
+-          ruby-version: "3.3"
++          ruby-version: ${{ matrix.ruby }}
+           bundler-cache: true
+       - run: bundle exec rake test
++  gem-smoke:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: ruby/setup-ruby@v1
++        with:
++          ruby-version: "3.4"
++          bundler-cache: true
++      - run: test/smoke/gem_install.sh
++  docker-smoke:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - run: test/smoke/docker.sh
++  systemd-smoke:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - run: test/smoke/systemd.sh
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000..659b995
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,14 @@
++# Changelog
++
++## 0.1.0 - 2026-07-16
++
++- Add timezone-correct daily windows, atomic versioned state, and capped catch-up.
++- Fetch complete merged-PR results with deterministic ordering and optional stats.
++- Render safe, bounded Telegram HTML and deliver only to an allowlisted chat.
++- Persist stable rendered chunks and resume at the next definitely-unsent chunk.
++- Park permanent and ambiguous Telegram failures instead of replaying accepted messages.
++- Add repeatable `--repo owner/name` input and a versioned JSON embedding contract.
++- Add scheduled, explicit replay, dry-run, JSON, and stable exit-code contracts.
++- Add non-root container, hardened systemd units, offline tests, and release smokes.
++
++No tag, gem publication, or GitHub release is created by this preparation.
+diff --git a/Dockerfile b/Dockerfile
+index 0468def..e3a9799 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,7 +1,20 @@
+-FROM ruby:3.3-alpine
+-RUN apk add --no-cache build-base git
++FROM ruby:3.4-alpine
++
++RUN apk add --no-cache ca-certificates tzdata \
++    && apk add --no-cache --virtual .build-deps build-base \
++    && addgroup -S prdigest \
++    && adduser -S -D -H -G prdigest prdigest \
++    && install -d -m 0700 -o prdigest -g prdigest /var/lib/prdigest \
++    && install -d -m 0750 -o root -g prdigest /etc/prdigest
++
+ WORKDIR /app
+-COPY . .
+-RUN bundle install --without development
++COPY Gemfile prdigest.gemspec ./
++COPY lib ./lib
++COPY exe ./exe
++RUN bundle config set without development \
++    && bundle install \
++    && apk del .build-deps
++
++USER prdigest
+ ENTRYPOINT ["bundle", "exec", "prdigest"]
+ CMD ["run", "--config", "/etc/prdigest/config.yml"]
+diff --git a/README.md b/README.md
+index 7f29c13..5502dc0 100644
+--- a/README.md
++++ b/README.md
+@@ -1,91 +1,225 @@
+-# prdigest
++# PRDigest
+ 
+-Standalone **daily merged-PR digests** for any GitHub repos you list.
++PRDigest is a deterministic Ruby oneshot that sends a daily digest of merged
++GitHub pull requests to one allowlisted Telegram chat. It is designed for a
++single operator on a small VPS: repositories are explicit, secrets stay in the
++environment, and a hardened systemd timer owns scheduling.
+ 
+-Ruby CLI gem. Put it on a VPS with:
++## Requirements and installation
+ 
+-1. repo list  
+-2. GitHub token  
+-3. Telegram bot + allowlisted chats  
++- Ruby 3.2–3.4 and `tzdata`
++- a fine-grained GitHub token with read-only access to the listed repositories
++- a dedicated Telegram bot and one destination chat ID
+ 
+-…and it sends digests like Hive’s merged-PR report **without installing Hive**.
++For development:
+ 
+-## Stack
+-
+-- **Ruby 3.2+**
+-- **Thor** CLI
+-- **Octokit** for GitHub (no local `gh` required on the VPS)
+-- plain Telegram Bot API `sendMessage`
+-- YAML config + env secrets
+-- **v1 schedule:** systemd timer + `prdigest run` (boring, reliable)
+-- optional later: long-running `serve`
+-
+-## Install (dev)
+-
+-```bash
+-git clone https://github.com/ivankuznetsov/prdigest
+-cd prdigest
++```sh
+ bundle install
+ bundle exec prdigest version
+-bundle exec prdigest run --dry-run --config configs/config.example.yml
++GITHUB_TOKEN=... bundle exec prdigest run --config configs/config.example.yml --dry-run
++```
++
++To build and install the prepared gem without publishing it:
++
++```sh
++gem build prdigest.gemspec
++gem install prdigest-0.1.0.gem
++prdigest version
+ ```
+ 
+-## Config
++## Configuration and secrets
+ 
+-See `configs/config.example.yml`.
++Configuration lookup is strict: an explicit `--config PATH` wins, then
++`PRDIGEST_CONFIG`, then an existing `/etc/prdigest/config.yml`. PRDigest refuses
++to run when none exists. See `configs/config.example.yml` for every setting.
+ 
+ ```yaml
+ timezone: Europe/London
++schedule:
++  max_catchup_days: 7
+ github:
++  token_env: GITHUB_TOKEN
+   repos:
+-    - ivankuznetsov/hive
+-    - ivankuznetsov/agent-plugins
++    - owner/repo-one
++    - owner/repo-two
+ telegram:
+-  chat_id_allowlist: [-1003827075639]
+-  chat_id: -1003827075639
++  token_env: TELEGRAM_BOT_TOKEN
++  chat_id_allowlist: [-1001234567890]
++  chat_id: -1001234567890
+ digest:
+   line_stats: true
+   send_empty: true
++  empty_message: "Merged PR digest — {date}\nTotal: 0 PRs"
++state:
++  path: /var/lib/prdigest/state.json
++  delivery_path: /var/lib/prdigest/deliveries
+ ```
+ 
+-Tokens in env only: `GITHUB_TOKEN`, `TELEGRAM_BOT_TOKEN`.
++Repository order controls digest order. `max_catchup_days` must be `1..30`.
++`chat_id` must appear in the non-empty allowlist; extra allowlisted IDs are
++accepted for schema compatibility but v0.1.0 sends only to `chat_id`. Token
++values belong in environment variables, never YAML.
+ 
+-## Commands
++## Commands and results
+ 
+-```bash
+-prdigest run [--config PATH] [--date YYYY-MM-DD] [--dry-run] [--json]
+-prdigest serve   # deferred; use systemd timer for v1
++```sh
++prdigest run [--config PATH] [--date YYYY-MM-DD] [--dry-run] [--json] [--repo OWNER/NAME ...]
++prdigest serve
+ prdigest version
+ ```
+ 
+-## VPS sketch
++An ordinary `run` reads state, processes owed dates oldest-first, and writes
++state after each settled day. `--date` replays exactly that local date and never
++reads or writes state. `--dry-run` previews the explicit date or yesterday,
++requires GitHub access, and constructs neither state nor Telegram delivery.
++`serve` remains a compatibility stub; use the supplied timer.
++Repeatable `--repo` values replace the configured repository list for that run.
++They use the same strict `owner/name` validation and deterministic order as the
++configuration, which lets callers such as Hive supply their registered projects
++without owning a second digest implementation.
++
++`--json` emits a versioned `prdigest-result` document with `status`, `mode`, `requested_days`,
++`settled_days`, `skipped_days`, `failed_date`, `remaining_days`, nullable
++`error`, dry-run `chunks`, and nullable structured `delivery` progress.
++`delivery` reports `accepted_chunks`, `total_chunks`, `status`, and, on failure,
++`failed_chunk`. Modes are `scheduled` and
++`explicit_date_replay`; statuses are `success`, `dry_run`, `failure`, and
++`partial_failure`.
++
++| Exit | Meaning |
++|---:|---|
++| 0 | completed or dry-run |
++| 1 | unexpected or render failure |
++| 2 | CLI/configuration refusal |
++| 3 | GitHub failure |
++| 4 | Telegram failure |
++| 5 | state failure |
++| 6 | failure after earlier durable progress |
++
++## Delivery and state semantics
++
++Each local day is converted to independent UTC midnight boundaries, including
++DST gaps and repeats. GitHub results are completely fetched and rendered before
++the first Telegram message. A day is settled only after every chunk succeeds,
++an enabled empty message succeeds, or an empty message is intentionally
++suppressed.
++
++Before sending, PRDigest stores the complete rendered chunk list in
++`state.delivery_path`. It marks one chunk in flight before each request and
++advances `next_chunk` only after Telegram definitely accepts it. A definite
++429/5xx rejection receives at most three attempts; a later invocation resumes
++the original rendered payload at the next unsent chunk. If the date cursor write
++fails after complete delivery, the retry observes the completed delivery
++checkpoint and sends nothing before repairing the cursor.
++
++Telegram 400/invalid-response failures are permanent. Transport failures are
++ambiguous because Telegram might have accepted the request before the
++connection failed. Both cases remain parked and never replay automatically.
++Inspect the checkpoint and Telegram chat, reconcile the uncertain chunk, then
++move the checkpoint aside only when an intentional operator replay is safe.
++Changing the chat or repository scope for an existing date also fails closed.
++Explicit `--date` uses this same safety ledger, so a completed date is a no-op
++unless its checkpoint is deliberately archived first.
++
++State is secret-free JSON version 1:
++
++```json
++{"version":1,"timezone":"Europe/London","last_digested_date":"2026-07-15"}
++```
+ 
+-```bash
+-# install ruby + gem or clone + bundle
+-cp configs/config.example.yml /etc/prdigest/config.yml
+-cp .env.example /etc/prdigest/.env
+-# edit repos + chats; put tokens in .env
++It may include a `last_skip` audit with `start_date`, `end_date`, and
++`notice_pending`. Writes use an atomic mode-`0600` replacement and directory
++fsync. Delivery directories are mode `0700`; delivery files and locks are mode
++`0600`, and a per-date lock prevents concurrent sends for the same checkpoint.
++Missing state means first run and requests yesterday only. Malformed,
++future, unsupported, unreadable, or timezone-mismatched state fails closed with
++exit 5.
++
++When backlog exceeds the cap, PRDigest durably skips the oldest prefix and
++processes only the newest window. That loss is intentional and reported. For a
++timezone migration, stop the timer, preserve the old state for audit, move it
++aside, change the configured timezone, use explicit replay for any required
++dates, then restart the timer. Never silently edit a corrupt checkpoint; inspect
++and repair ownership/JSON or restore a known-good copy first.
++
++GitHub does not publish a search-index freshness guarantee. Keep the host
++timezone equal to the configured digest timezone; the supplied 09:05 timer then
++leaves about nine hours after local midnight. If a later audit finds a delayed
++merge, use `--date YYYY-MM-DD` to replay it.
++
++## systemd deployment
++
++On Ubuntu, install Ruby, `tzdata`, the gem, and then:
++
++```sh
++sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin prdigest
++sudo install -d -o root -g prdigest -m 0750 /etc/prdigest
++sudo install -o root -g prdigest -m 0640 configs/config.example.yml /etc/prdigest/config.yml
++sudo install -o root -g root -m 0600 .env.example /etc/prdigest/.env
++sudo install -o root -g root -m 0644 scripts/systemd/prdigest.service /etc/systemd/system/
++sudo install -o root -g root -m 0644 scripts/systemd/prdigest.timer /etc/systemd/system/
++sudo systemctl daemon-reload
++sudo systemctl start prdigest.service
++sudo systemctl enable --now prdigest.timer
++```
+ 
+-# oneshot + timer
+-cp scripts/systemd/prdigest.service /etc/systemd/system/
+-cp scripts/systemd/prdigest.timer /etc/systemd/system/
+-systemctl enable --now prdigest.timer
++Edit the installed config and environment file before starting. systemd creates
++`/var/lib/prdigest` as `prdigest:prdigest` mode `0700`; state files are `0600`.
++Inspect with `systemctl status prdigest.service`, `systemctl list-timers
++prdigest.timer`, and `journalctl -u prdigest.service`. Test a missed-day catch-up
++by stopping the timer for a day, then starting the service. Journal output can
++contain repository/date context, so restrict journal group membership and
++retention.
++
++Rollback by stopping the timer, installing the prior gem/image, restoring the
++matching config and a known-good state backup, and restarting. Replay omitted
++dates explicitly; do not move a checkpoint forward by hand.
++
++## Container
++
++The Alpine image includes `tzdata` and runs as the unprivileged `prdigest` user.
++Initialize mounted ownership with the image before normal use:
++
++```sh
++docker build -t prdigest:0.1.0 .
++docker volume create prdigest-state
++docker run --rm --user root --entrypoint sh -v prdigest-state:/var/lib/prdigest prdigest:0.1.0 \
++  -c 'chown -R prdigest:prdigest /var/lib/prdigest && chmod 0700 /var/lib/prdigest'
++docker run --rm --env-file /etc/prdigest/.env \
++  -v /etc/prdigest/config.yml:/etc/prdigest/config.yml:ro \
++  -v prdigest-state:/var/lib/prdigest prdigest:0.1.0
+ ```
+ 
+-## Non-goals (v1)
++## Verification and troubleshooting
++
++`bundle exec rake test` is fully offline. Release preparation also supplies
++`test/smoke/gem_install.sh`, `test/smoke/docker.sh`, and
++`test/smoke/systemd.sh`. Live GitHub boundary and Telegram allowlist smokes are
++manual gates: retain timestamps and pass/fail only, never credentials, response
++bodies, message text, or private titles.
+ 
+-- No Hive dependency / registered projects
+-- No shipped-task narration
+-- No org-wide auto-discovery (explicit repo list only)
++- Exit 2: check config discovery, YAML, timezone, cap, chat allowlist, and env.
++- Exit 3: check repository access, rate/search limits, and replay later.
++- Exit 4: inspect `error.kind` and `delivery`. Retry ordinary `telegram` failures;
++  reconcile `telegram_ambiguous`, `telegram_permanent`, and
++  `delivery_checkpoint_permanent` before moving any checkpoint.
++- Exit 5: check `/var/lib/prdigest`, mode/owner, JSON version, date, and timezone.
++- Exit 6: earlier dates or a skipped prefix are durable; inspect the result before retry.
+ 
+-## Relationship to Hive
++Concurrent scheduled runs remain unsupported because date-cursor scheduling is
++single-owner. Delivery itself takes a nonblocking per-date lock, so a competing
++sender fails instead of duplicating the same payload. The systemd oneshot is the
++normal run coordination mechanism.
+ 
+-Hive keeps an integrated digest for Hive users.  
+-`prdigest` is the portable multi-repo extract for any GitHub repos on a VPS.
++See [SECURITY.md](SECURITY.md) for token scope, rotation, and private-data flow.
+ 
+-## Status
++## Non-goals
+ 
+-Ruby scaffold + config validation. GitHub fetch / Telegram send / line stats next.
++v0.1.0 has no built-in Hive configuration discovery, LLM content, web UI,
++interactive bot commands,
++multi-chat routing, organization discovery, non-GitHub forge support, or
++long-running scheduler. This repository prepares v0.1.0 without tagging,
++publishing the gem, or creating a release.
+ 
+ ## License
+ 
+diff --git a/Rakefile b/Rakefile
+index 6d5767d..92ebee9 100644
+--- a/Rakefile
++++ b/Rakefile
+@@ -1,6 +1,7 @@
+ # frozen_string_literal: true
+ 
+ require "rake/testtask"
++require "bundler/gem_tasks"
+ 
+ Rake::TestTask.new(:test) do |t|
+   t.libs << "test"
+@@ -9,3 +10,8 @@ Rake::TestTask.new(:test) do |t|
+ end
+ 
+ task default: :test
++
++desc "Run the release package smoke test"
++task smoke: :test do
++  sh "test/smoke/gem_install.sh"
++end
+diff --git a/SECURITY.md b/SECURITY.md
+new file mode 100644
+index 0000000..177b0b7
+--- /dev/null
++++ b/SECURITY.md
+@@ -0,0 +1,28 @@
++# Security
++
++## Credentials
++
++PRDigest reads tokens only from environment variables. Keep `/etc/prdigest/.env`
++owned by `root:root` with mode `0600`; never put tokens in YAML, command-line
++arguments, fixtures, logs, or issue reports.
++
++Use a fine-grained GitHub personal access token limited to the repositories in
++`github.repos`, with read-only metadata and pull-request access. Use a dedicated
++Telegram bot whose `chat_id` is the only delivery target in the allowlist. Rotate
++either token immediately if it may have appeared in output, then inspect and
++restrict journal retention.
++
++Private pull-request titles and author names cross from GitHub into the configured
++Telegram chat. Treat that chat and its members as having access to repository
++metadata. PRDigest refuses non-allowlisted chat IDs before opening a connection.
++
++## Reporting
++
++Report vulnerabilities privately to the maintainer address in the gem metadata.
++Do not include credentials, token-bearing URLs, private PR content, config files,
++state files, or unredacted journal output.
++
++## Supported release
++
++Security fixes target the latest published release. v0.1.0 is prepared here but
++is not published, tagged, or released by the build process.
+diff --git a/bin/prdigest b/bin/prdigest
+index 7b44524..93d83f5 100755
+--- a/bin/prdigest
++++ b/bin/prdigest
+@@ -4,4 +4,4 @@
+ $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+ require "prdigest"
+ 
+-Prdigest::CLI.start(ARGV)
++exit Prdigest::CLI.invoke(ARGV)
+diff --git a/configs/config.example.yml b/configs/config.example.yml
+index e79a12d..76fb4eb 100644
+--- a/configs/config.example.yml
++++ b/configs/config.example.yml
+@@ -5,6 +5,7 @@ schedule:
+   # Prefer systemd timer + `prdigest run` for v1.
+   # serve mode may honor this later.
+   cron: "5 9 * * *"
++  # Newest retained catch-up window; valid range is 1..30.
+   max_catchup_days: 7
+ 
+ github:
+@@ -27,3 +28,5 @@ digest:
+ 
+ state:
+   path: /var/lib/prdigest/state.json
++  # Stable rendered chunks and next-unsent position, separate from the date cursor.
++  delivery_path: /var/lib/prdigest/deliveries
+diff --git a/exe/prdigest b/exe/prdigest
+index d378d10..30a49fa 100755
+--- a/exe/prdigest
++++ b/exe/prdigest
+@@ -3,4 +3,4 @@
+ 
+ require "prdigest"
+ 
+-Prdigest::CLI.start(ARGV)
++exit Prdigest::CLI.invoke(ARGV)
+diff --git a/lib/prdigest.rb b/lib/prdigest.rb
+index f730ae4..0bff5fc 100644
+--- a/lib/prdigest.rb
++++ b/lib/prdigest.rb
+@@ -1,11 +1,46 @@
+ # frozen_string_literal: true
+ 
+-require_relative "prdigest/version"
+-require_relative "prdigest/cli"
+-require_relative "prdigest/config"
+-require_relative "prdigest/runner"
+-
+ module Prdigest
+   class Error < StandardError; end
+   class ConfigError < Error; end
++  class StateError < Error; end
++  class FetchError < Error
++    attr_reader :kind
++
++    def initialize(message, kind: "github")
++      @kind = kind
++      super(message)
++    end
++  end
++  class RenderError < Error
++    attr_reader :kind
++
++    def initialize(message, kind: "render")
++      @kind = kind
++      super(message)
++    end
++  end
++  class SendError < Error
++    attr_reader :kind, :delivery
++
++    def initialize(message, kind: "telegram", delivery: {})
++      @kind = kind
++      @delivery = delivery.transform_keys(&:to_sym).freeze
++      super(message)
++    end
++  end
+ end
++
++require_relative "prdigest/version"
++require_relative "prdigest/clock"
++require_relative "prdigest/config"
++require_relative "prdigest/digest"
++require_relative "prdigest/github"
++require_relative "prdigest/renderer"
++require_relative "prdigest/delivery_checkpoint_store"
++require_relative "prdigest/telegram"
++require_relative "prdigest/result"
++require_relative "prdigest/schedule"
++require_relative "prdigest/state"
++require_relative "prdigest/runner"
++require_relative "prdigest/cli"
+diff --git a/lib/prdigest/cli.rb b/lib/prdigest/cli.rb
+index 14198e9..9c9a293 100644
+--- a/lib/prdigest/cli.rb
++++ b/lib/prdigest/cli.rb
+@@ -1,45 +1,169 @@
+ # frozen_string_literal: true
+ 
++require "date"
+ require "json"
+ require "thor"
+ 
+ module Prdigest
+   class CLI < Thor
+-    class_option :config,
+-                 type: :string,
+-                 default: ENV.fetch("PRDIGEST_CONFIG", "configs/config.example.yml"),
+-                 desc: "Path to config.yml"
++    class ParseError < StandardError; end
+ 
+     desc "run", "Build and send (or dry-run) a merged-PR digest for one local day"
+-    method_option :date, type: :string, desc: "Local day YYYY-MM-DD (default: yesterday in config timezone)"
+-    method_option :dry_run, type: :boolean, default: false, desc: "Print message, do not send"
+-    method_option :json, type: :boolean, default: false, desc: "Emit JSON on stdout"
+-    def run_cmd
+-      cfg = Config.load(options[:config])
+-      result = Runner.new(config: cfg, date: options[:date], dry_run: options[:dry_run]).call
+-      if options[:json]
+-        puts JSON.generate(result)
+-      else
+-        puts result[:message]
+-        warn "prdigest: scaffold only (#{result[:status]}); dry_run=#{result[:dry_run]}"
+-      end
+-    end
++    def run_cmd; end
+     map "run" => :run_cmd
+ 
+     desc "version", "Print version"
+-    def version
+-      puts "prdigest #{VERSION}"
+-    end
++    def version; end
+ 
+-    desc "serve", "Long-running scheduler (not implemented in scaffold)"
+-    def serve
+-      Config.load(options[:config])
+-      warn "prdigest serve: not implemented yet — use systemd timer + `prdigest run` for v1"
+-      exit 0
+-    end
++    desc "serve", "Compatibility stub; use the systemd timer"
++    def serve; end
++
++    class << self
++      def invoke(argv = ARGV, out: $stdout, err: $stderr, env: ENV,
++                 system_path: "/etc/prdigest/config.yml", runner_factory: nil)
++        json_intent = Array(argv).any? { |arg| arg == "--json" || arg.start_with?("--json=") }
++        parsed = parse(argv)
++        return print_version(out) if parsed[:command] == "version"
++        return print_help(out) if %w[help --help -h].include?(parsed[:command])
++
++        unless %w[run serve].include?(parsed[:command])
++          raise ParseError, "unknown command"
++        end
++
++        path = Config.resolve_path(explicit: parsed[:config], env: env, system_path: system_path)
++        config = Config.load(path)
++        if parsed[:command] == "serve"
++          err.puts "prdigest serve: deferred in v0.1.0 — use systemd timer + `prdigest run`"
++          return 0
++        end
++
++        validate_date!(parsed[:date]) if parsed[:date]
++        repositories = if parsed[:repos].empty?
++                         nil
++                       else
++                         Config.normalize_repos(parsed[:repos], label: "--repo")
++                       end
++        raise ConfigError, "GitHub token is missing" if config.github_token(env).empty?
++        if !parsed[:dry_run] && config.telegram_token(env).empty?
++          raise ConfigError, "Telegram bot token is missing"
++        end
++
++        factory = runner_factory || ->(**options) { Runner.new(**options) }
++        result = factory.call(
++          config: config,
++          date: parsed[:date],
++          dry_run: parsed[:dry_run],
++          repositories: repositories,
++          env: env
++        ).call
++        present(result, json: parsed[:json], out: out, err: err)
++        result.exit_code
++      rescue ParseError => e
++        result = Result.failure(mode: "scheduled", error_kind: "cli", message: e.message)
++        present(result, json: json_intent, out: out, err: err)
++        result.exit_code
++      rescue ConfigError => e
++        result = Result.failure(mode: parsed && parsed[:date] ? "explicit_date_replay" : "scheduled", error_kind: "config", message: e.message)
++        present(result, json: parsed ? parsed[:json] : json_intent, out: out, err: err)
++        result.exit_code
++      rescue StandardError => e
++        result = Result.failure(
++          mode: parsed && parsed[:date] ? "explicit_date_replay" : "scheduled",
++          error_kind: "internal",
++          message: "unexpected CLI failure (#{e.class})"
++        )
++        present(result, json: parsed ? parsed[:json] : json_intent, out: out, err: err)
++        result.exit_code
++      end
++
++      alias start invoke
++
++      def exit_on_failure?
++        true
++      end
+ 
+-    def self.exit_on_failure?
+-      true
++      private
++
++      def parse(argv)
++        parsed = { command: nil, config: nil, date: nil, dry_run: false, json: false, repos: [] }
++        args = Array(argv).dup
++        until args.empty?
++          argument = args.shift
++          case argument
++          when "--help", "-h"
++            parsed[:command] = "help"
++          when "--dry-run"
++            parsed[:dry_run] = true
++          when "--json"
++            parsed[:json] = true
++          when "--config", "--date", "--repo"
++            value = args.shift
++            raise ParseError, "missing value for #{argument}" if value.nil? || value.start_with?("--")
++            if argument == "--repo"
++              parsed[:repos] << value
++            else
++              parsed[argument.delete_prefix("--").tr("-", "_").to_sym] = value
++            end
++          when /\A--config=(.*)\z/
++            raise ParseError, "missing value for --config" if Regexp.last_match(1).empty?
++            parsed[:config] = Regexp.last_match(1)
++          when /\A--date=(.*)\z/
++            raise ParseError, "missing value for --date" if Regexp.last_match(1).empty?
++            parsed[:date] = Regexp.last_match(1)
++          when /\A--repo=(.*)\z/
++            raise ParseError, "missing value for --repo" if Regexp.last_match(1).empty?
++            parsed[:repos] << Regexp.last_match(1)
++          when /\A-/
++            raise ParseError, "unknown option"
++          else
++            raise ParseError, "unexpected argument" if parsed[:command]
++            parsed[:command] = argument
++          end
++        end
++        parsed
++      end
++
++      def validate_date!(value)
++        unless value.match?(/\A\d{4}-\d{2}-\d{2}\z/) && Date.iso8601(value).iso8601 == value
++          raise ConfigError, "date must use YYYY-MM-DD"
++        end
++      rescue Date::Error
++        raise ConfigError, "date must use YYYY-MM-DD"
++      end
++
++      def present(result, json:, out:, err:)
++        if json
++          out.puts JSON.generate(result.to_h)
++        elsif result.exit_code.zero?
++          if result.status == "dry_run"
++            out.puts result.chunks.join("\n\n")
++          else
++            out.puts "prdigest: success; settled=#{result.settled_days.length} skipped=#{result.skipped_days.length}"
++          end
++        else
++          if result.status == "partial_failure"
++            err.puts "prdigest: progress; settled=#{human_dates(result.settled_days)} " \
++                     "skipped=#{human_dates(result.skipped_days)} remaining=#{human_dates(result.remaining_days)}"
++          end
++          err.puts "prdigest: #{result.error[:kind]}: #{result.error[:message]}"
++        end
++      end
++
++      def human_dates(dates)
++        values = Array(dates)
++        values.empty? ? "none" : values.join(",")
++      end
++
++      def print_version(out)
++        out.puts "prdigest #{VERSION}"
++        0
++      end
++
++      def print_help(out)
++        out.puts "Usage: prdigest run [--config PATH] [--date YYYY-MM-DD] [--repo owner/name] [--dry-run] [--json]"
++        out.puts "       prdigest serve | version"
++        0
++      end
+     end
+   end
+ end
+diff --git a/lib/prdigest/clock.rb b/lib/prdigest/clock.rb
+new file mode 100644
+index 0000000..1d58e0b
+--- /dev/null
++++ b/lib/prdigest/clock.rb
+@@ -0,0 +1,50 @@
++# frozen_string_literal: true
++
++require "date"
++require "time"
++require "tzinfo"
++
++module Prdigest
++  class Clock
++    Window = Data.define(:local_date, :start_time, :end_time) do
++      def cover?(time)
++        time >= start_time && time < end_time
++      end
++
++      def zero_length?
++        start_time == end_time
++      end
++    end
++
++    def initialize(timezone:, now: -> { Time.now })
++      @timezone = TZInfo::Timezone.get(timezone)
++      @now = now
++    end
++
++    def yesterday
++      (@timezone.to_local(@now.call.utc).to_date - 1)
++    end
++
++    def window(local_date)
++      date = Date.iso8601(local_date.to_s)
++      Window.new(date, resolve_midnight(date), resolve_midnight(date + 1))
++    end
++
++    private
++
++    def resolve_midnight(date)
++      local = Time.utc(date.year, date.month, date.day)
++      periods = @timezone.periods_for_local(local)
++      return periods.map { |period| (local - period.utc_total_offset).utc }.min unless periods.empty?
++
++      transition = @timezone.transitions_up_to(local + 172_800, local - 172_800).find do |candidate|
++        before = Time.at(candidate.timestamp_value + candidate.previous_offset.utc_total_offset).utc
++        after = Time.at(candidate.timestamp_value + candidate.offset.utc_total_offset).utc
++        after > before && local >= before && local < after
++      end
++      raise ConfigError, "cannot resolve local midnight for #{date}" unless transition
++
++      Time.at(transition.timestamp_value).utc
++    end
++  end
++end
+diff --git a/lib/prdigest/config.rb b/lib/prdigest/config.rb
+index da6a159..2339ba5 100644
+--- a/lib/prdigest/config.rb
++++ b/lib/prdigest/config.rb
+@@ -2,11 +2,24 @@
+ 
+ require "yaml"
+ require "pathname"
++require "tzinfo"
+ 
+ module Prdigest
+   class Config
+     attr_reader :raw, :path
+ 
++    REPOSITORY_SEGMENT = /\A[A-Za-z0-9_.-]+\z/
++
++    def self.resolve_path(explicit: nil, env: ENV, system_path: "/etc/prdigest/config.yml")
++      return File.expand_path(explicit) if explicit && !explicit.to_s.empty?
++
++      from_env = env["PRDIGEST_CONFIG"].to_s
++      return File.expand_path(from_env) unless from_env.empty?
++      return system_path if File.file?(system_path)
++
++      raise ConfigError, "config path is required (--config, PRDIGEST_CONFIG, or /etc/prdigest/config.yml)"
++    end
++
+     def self.load(path)
+       path = File.expand_path(path)
+       raise ConfigError, "config not found: #{path}" unless File.file?(path)
+@@ -15,6 +28,26 @@ def self.load(path)
+       raise ConfigError, "config root must be a mapping" unless raw.is_a?(Hash)
+ 
+       new(raw, path: path).tap(&:validate!)
++    rescue ConfigError
++      raise
++    rescue StandardError => e
++      raise ConfigError, "cannot load config: #{e.class}"
++    end
++
++    def self.normalize_repos(values, label: "repository")
++      normalized = Array(values).map { |value| value.to_s.strip }
++      raise ConfigError, "#{label} must list at least one owner/name" if normalized.empty?
++
++      invalid = normalized.find do |repository|
++        parts = repository.split("/", -1)
++        parts.length != 2 ||
++          parts.any? { |part| part.empty? || %w[. ..].include?(part) || !part.match?(REPOSITORY_SEGMENT) }
++      end
++      raise ConfigError, "#{label} entry must be owner/name; got #{invalid.inspect}" if invalid
++
++      normalized.each_with_object({}) do |repository, unique|
++        unique[repository.downcase] ||= repository
++      end.values.freeze
+     end
+ 
+     def initialize(raw, path: nil)
+@@ -27,25 +60,29 @@ def timezone
+     end
+ 
+     def repos
+-      Array(raw.dig("github", "repos")).map(&:to_s).map(&:strip).reject(&:empty?)
++      self.class.normalize_repos(raw.dig("github", "repos"), label: "github.repos")
+     end
+ 
+-    def github_token
++    def github_token(env = ENV)
+       env_name = raw.dig("github", "token_env") || "GITHUB_TOKEN"
+-      ENV[env_name.to_s].to_s
++      env[env_name.to_s].to_s
+     end
+ 
+-    def telegram_token
++    def telegram_token(env = ENV)
+       env_name = raw.dig("telegram", "token_env") || "TELEGRAM_BOT_TOKEN"
+-      ENV[env_name.to_s].to_s
++      env[env_name.to_s].to_s
+     end
+ 
+     def chat_id
+-      raw.dig("telegram", "chat_id")
++      Integer(raw.dig("telegram", "chat_id"))
++    rescue TypeError, ArgumentError
++      nil
+     end
+ 
+     def chat_id_allowlist
+       Array(raw.dig("telegram", "chat_id_allowlist")).map { |id| Integer(id) }
++    rescue TypeError, ArgumentError
++      []
+     end
+ 
+     def line_stats?
+@@ -56,28 +93,41 @@ def send_empty?
+       raw.dig("digest", "send_empty") != false
+     end
+ 
++    def empty_message
++      raw.dig("digest", "empty_message") || "Merged PR digest — {date}\nTotal: 0 PRs"
++    end
++
+     def state_path
+       raw.dig("state", "path") || File.expand_path("~/.local/share/prdigest/state.json")
+     end
+ 
++    def delivery_state_path
++      raw.dig("state", "delivery_path") || File.join(File.dirname(state_path), "deliveries")
++    end
++
+     def schedule_cron
+       raw.dig("schedule", "cron") || "5 9 * * *"
+     end
+ 
+     def max_catchup_days
+       Integer(raw.dig("schedule", "max_catchup_days") || 7)
++    rescue TypeError, ArgumentError
++      raise ConfigError, "schedule.max_catchup_days must be an integer from 1 to 30"
+     end
+ 
+     def validate!
+-      raise ConfigError, "github.repos must list at least one owner/name" if repos.empty?
+-      repos.each do |repo|
+-        next if repo.match?(%r{\A[^/\s]+/[^/\s]+\z})
+-
+-        raise ConfigError, "github.repos entry must be owner/name; got #{repo.inspect}"
++      begin
++        TZInfo::Timezone.get(timezone)
++      rescue TZInfo::InvalidTimezoneIdentifier
++        raise ConfigError, "timezone must be a resolvable IANA identifier"
++      end
++      unless (1..30).cover?(max_catchup_days)
++        raise ConfigError, "schedule.max_catchup_days must be from 1 to 30"
+       end
++      repos
+       raise ConfigError, "telegram.chat_id is required" if chat_id.nil?
+       raise ConfigError, "telegram.chat_id_allowlist must not be empty" if chat_id_allowlist.empty?
+-      unless chat_id_allowlist.include?(Integer(chat_id))
++      unless chat_id_allowlist.include?(chat_id)
+         raise ConfigError, "telegram.chat_id must be present in chat_id_allowlist"
+       end
+       self
+diff --git a/lib/prdigest/delivery_checkpoint_store.rb b/lib/prdigest/delivery_checkpoint_store.rb
+new file mode 100644
+index 0000000..a6af037
+--- /dev/null
++++ b/lib/prdigest/delivery_checkpoint_store.rb
+@@ -0,0 +1,272 @@
++# frozen_string_literal: true
++
++require "date"
++require "digest"
++require "fileutils"
++require "json"
++require "time"
++
++module Prdigest
++  class DeliveryCheckpointStore
++    SCHEMA = "prdigest-delivery-checkpoint"
++    SCHEMA_VERSION = 1
++
++    class Session
++      def initialize(path:, data:)
++        @path = path
++        @data = data
++      end
++
++      def chunks
++        @data.fetch("chunks")
++      end
++
++      def next_chunk
++        @data.fetch("next_chunk")
++      end
++
++      def completed?
++        @data.fetch("status") == "completed"
++      end
++
++      def begin_attempt(index)
++        require_next_chunk!(index)
++        @data["in_flight"] = { "chunk" => index, "started_at" => timestamp }
++        persist!
++      end
++
++      def accept(index)
++        require_in_flight!(index)
++        @data["next_chunk"] = index + 1
++        @data["in_flight"] = nil
++        @data["status"] = next_chunk == chunks.length ? "completed" : "pending"
++        @data["permanent_error"] = nil
++        persist!
++      end
++
++      def reject(index, kind:, message:, permanent:)
++        require_in_flight!(index)
++        @data["in_flight"] = nil
++        if permanent
++          @data["status"] = "blocked"
++          @data["permanent_error"] = {
++            "kind" => kind.to_s,
++            "message" => message.to_s,
++            "failed_chunk" => index
++          }
++        else
++          @data["permanent_error"] = nil
++        end
++        persist!
++      end
++
++      def delivery(failed_chunk: nil)
++        result = {
++          accepted_chunks: next_chunk,
++          total_chunks: chunks.length,
++          status: @data.fetch("status")
++        }
++        result[:failed_chunk] = failed_chunk unless failed_chunk.nil?
++        result
++      end
++
++      private
++
++      def require_next_chunk!(index)
++        return if index == next_chunk && @data["in_flight"].nil? && !completed?
++
++        raise StateError, "delivery checkpoint transition is invalid"
++      end
++
++      def require_in_flight!(index)
++        return if @data.dig("in_flight", "chunk") == index
++
++        raise StateError, "delivery checkpoint transition is invalid"
++      end
++
++      def persist!
++        @data["updated_at"] = timestamp
++        DeliveryCheckpointStore.atomic_write(@path, JSON.pretty_generate(@data))
++      rescue StateError
++        raise
++      rescue StandardError => e
++        raise StateError, "cannot persist delivery checkpoint (#{e.class})"
++      end
++
++      def timestamp
++        Time.now.utc.iso8601(6)
++      end
++    end
++
++    def initialize(root:)
++      @root = File.expand_path(root)
++    end
++
++    def with_checkpoint(date:, chat_id:, scope:, chunks:)
++      normalized_date = Date.iso8601(date.to_s)
++      ensure_root!
++      path = File.join(@root, "#{normalized_date}.json")
++      lock_path = File.join(@root, "#{normalized_date}.lock")
++
++      File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
++        File.chmod(0o600, lock_path)
++        unless lock.flock(File::LOCK_EX | File::LOCK_NB)
++          raise SendError.new(
++            "delivery checkpoint is already active",
++            kind: "delivery_checkpoint",
++            delivery: { accepted_chunks: 0, total_chunks: Array(chunks).length, status: "pending" }
++          )
++        end
++
++        data = load_or_create(
++          path,
++          date: normalized_date,
++          chat_id: Integer(chat_id),
++          scope: Array(scope).map(&:to_s),
++          chunks: Array(chunks).map(&:to_s)
++        )
++        fail_if_unavailable!(data)
++        yield Session.new(path: path, data: data)
++      ensure
++        lock.flock(File::LOCK_UN)
++      end
++    rescue SendError, StateError
++      raise
++    rescue StandardError => e
++      raise StateError, "cannot access delivery checkpoint (#{e.class})"
++    end
++
++    def self.atomic_write(path, content)
++      directory = File.dirname(path)
++      temporary = "#{path}.tmp-#{Process.pid}-#{Thread.current.object_id}"
++      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
++        file.write(content)
++        file.flush
++        file.fsync
++      end
++      File.rename(temporary, path)
++      File.chmod(0o600, path)
++      File.open(directory, File::RDONLY, &:fsync)
++    ensure
++      File.unlink(temporary) if temporary && File.exist?(temporary)
++    end
++
++    private
++
++    def ensure_root!
++      FileUtils.mkdir_p(@root, mode: 0o700)
++      File.chmod(0o700, @root)
++    end
++
++    def load_or_create(path, date:, chat_id:, scope:, chunks:)
++      if File.file?(path)
++        data = JSON.parse(File.read(path))
++        validate!(data, date: date, chat_id: chat_id, scope: scope)
++        data
++      else
++        data = {
++          "schema" => SCHEMA,
++          "schema_version" => SCHEMA_VERSION,
++          "date" => date.to_s,
++          "chat_id" => chat_id,
++          "scope" => scope,
++          "chunks" => chunks,
++          "chunks_sha256" => chunk_digest(chunks),
++          "next_chunk" => 0,
++          "status" => chunks.empty? ? "completed" : "pending",
++          "in_flight" => nil,
++          "permanent_error" => nil,
++          "created_at" => Time.now.utc.iso8601(6),
++          "updated_at" => Time.now.utc.iso8601(6)
++        }
++        self.class.atomic_write(path, JSON.pretty_generate(data))
++        data
++      end
++    rescue SendError
++      raise
++    rescue JSON::ParserError, KeyError, TypeError, ArgumentError => e
++      raise SendError.new(
++        "delivery checkpoint is invalid (#{e.class})",
++        kind: "delivery_checkpoint_permanent"
++      )
++    end
++
++    def validate!(data, date:, chat_id:, scope:)
++      expected = {
++        "schema" => SCHEMA,
++        "schema_version" => SCHEMA_VERSION,
++        "date" => date.to_s,
++        "chat_id" => chat_id,
++        "scope" => scope
++      }
++      unless expected.all? { |key, value| data.fetch(key) == value }
++        raise SendError.new(
++          "delivery checkpoint does not match this digest",
++          kind: "delivery_checkpoint_permanent"
++        )
++      end
++
++      chunks = data.fetch("chunks")
++      next_chunk = data.fetch("next_chunk")
++      status = data.fetch("status")
++      valid = chunks.is_a?(Array) && chunks.all? { |chunk| chunk.is_a?(String) } &&
++              data.fetch("chunks_sha256") == chunk_digest(chunks) &&
++              next_chunk.is_a?(Integer) && next_chunk.between?(0, chunks.length) &&
++              valid_transition_state?(data, status: status, next_chunk: next_chunk, total_chunks: chunks.length)
++      raise KeyError, "invalid delivery checkpoint fields" unless valid
++    end
++
++    def valid_transition_state?(data, status:, next_chunk:, total_chunks:)
++      in_flight = data.fetch("in_flight")
++      permanent_error = data.fetch("permanent_error")
++      case status
++      when "pending"
++        next_chunk < total_chunks &&
++          valid_in_flight?(in_flight, next_chunk) &&
++          permanent_error.nil?
++      when "completed"
++        next_chunk == total_chunks && in_flight.nil? && permanent_error.nil?
++      when "blocked"
++        next_chunk < total_chunks && in_flight.nil? &&
++          permanent_error.is_a?(Hash) &&
++          permanent_error["kind"].is_a?(String) &&
++          permanent_error["message"].is_a?(String) &&
++          permanent_error["failed_chunk"] == next_chunk
++      else
++        false
++      end
++    end
++
++    def valid_in_flight?(in_flight, next_chunk)
++      in_flight.nil? ||
++        (in_flight.is_a?(Hash) &&
++         in_flight["chunk"] == next_chunk &&
++         in_flight["started_at"].is_a?(String))
++    end
++
++    def fail_if_unavailable!(data)
++      session = Session.new(path: "", data: data)
++      if data["in_flight"]
++        failed_chunk = data.dig("in_flight", "chunk")
++        raise SendError.new(
++          "Telegram delivery outcome is ambiguous; operator reconciliation is required",
++          kind: "telegram_ambiguous",
++          delivery: session.delivery(failed_chunk: failed_chunk)
++        )
++      end
++
++      return unless data["status"] == "blocked"
++
++      failure = data.fetch("permanent_error")
++      raise SendError.new(
++        failure.fetch("message"),
++        kind: failure.fetch("kind"),
++        delivery: session.delivery(failed_chunk: failure.fetch("failed_chunk"))
++      )
++    end
++
++    def chunk_digest(chunks)
++      ::Digest::SHA256.hexdigest(JSON.generate(chunks))
++    end
++  end
++end
+diff --git a/lib/prdigest/digest.rb b/lib/prdigest/digest.rb
+new file mode 100644
+index 0000000..625d1ae
+--- /dev/null
++++ b/lib/prdigest/digest.rb
+@@ -0,0 +1,60 @@
++# frozen_string_literal: true
++
++require "date"
++
++module Prdigest
++  PullRequest = Data.define(
++    :repository, :number, :title, :url, :author, :merged_at,
++    :additions, :deletions, :commits
++  ) do
++    def initialize(repository:, number:, title:, url:, author:, merged_at:, additions: nil, deletions: nil, commits: nil)
++      super(
++        repository: repository.to_s.freeze,
++        number: Integer(number),
++        title: title.to_s.freeze,
++        url: url.to_s.freeze,
++        author: author.to_s.freeze,
++        merged_at: merged_at.utc.freeze,
++        additions: additions && Integer(additions),
++        deletions: deletions && Integer(deletions),
++        commits: commits && Integer(commits)
++      )
++    end
++  end
++
++  RepositoryDigest = Data.define(:name, :pull_requests)
++
++  DayDigest = Data.define(:date, :repositories, :line_stats) do
++    def self.build(date:, repository_order:, pulls:, line_stats: false)
++      grouped = pulls.group_by(&:repository)
++      sections = repository_order.map do |name|
++        sorted = Array(grouped[name]).sort_by { |pull| [pull.merged_at, pull.number] }.freeze
++        RepositoryDigest.new(name.to_s.freeze, sorted)
++      end.freeze
++      new(Date.iso8601(date.to_s), sections, line_stats == true)
++    end
++
++    def total_prs
++      repositories.sum { |section| section.pull_requests.length }
++    end
++
++    def total_additions
++      stat_total(:additions)
++    end
++
++    def total_deletions
++      stat_total(:deletions)
++    end
++
++    def total_commits
++      stat_total(:commits)
++    end
++
++    private
++
++    def stat_total(name)
++      return nil unless line_stats
++      repositories.sum { |section| section.pull_requests.sum { |pull| pull.public_send(name) } }
++    end
++  end
++end
+diff --git a/lib/prdigest/github.rb b/lib/prdigest/github.rb
+new file mode 100644
+index 0000000..b1db54c
+--- /dev/null
++++ b/lib/prdigest/github.rb
+@@ -0,0 +1,199 @@
++# frozen_string_literal: true
++
++require "octokit"
++require "set"
++require "time"
++
++module Prdigest
++  class GitHub
++    SEARCH_CAP = 1_000
++    MAX_ATTEMPTS = 3
++
++    def initialize(token:, client: nil, sleeper: ->(seconds) { sleep(seconds) }, now: -> { Time.now.to_i })
++      @token = token.to_s
++      @client = client || default_client
++      @sleeper = sleeper
++      @now = now
++    end
++
++    def fetch(date:, window:, repositories:, line_stats: false)
++      pulls = repositories.flat_map do |repository|
++        fetch_repository(repository, date, window, line_stats)
++      end
++      DayDigest.build(date: date, repository_order: repositories, pulls: pulls, line_stats: line_stats)
++    end
++
++    def inspect
++      "#<#{self.class} token=[REDACTED]>"
++    end
++
++    alias to_s inspect
++
++    private
++
++    def default_client
++      middleware = Octokit::Default::MIDDLEWARE.dup
++      middleware.handlers.reject! { |handler| retry_middleware?(handler.klass) }
++      Octokit::Client.new(
++        access_token: @token,
++        middleware: middleware,
++        connection_options: { request: { open_timeout: 10, timeout: 30, write_timeout: 30 } }
++      )
++    end
++
++    def retry_middleware?(middleware)
++      %w[Faraday::Request::Retry Faraday::Retry::Middleware].include?(middleware.name)
++    end
++
++    def fetch_repository(repository, date, window, line_stats)
++      return [] if window.zero_length?
++
++      query = build_query(repository, window)
++      page = 1
++      items = []
++      seen_numbers = Set.new
++      total = nil
++      loop do
++        response = request(repository, date) { @client.search_issues(query, per_page: 100, page: page) }
++        incomplete = field(response, :incomplete_results)
++        fail_fetch!(repository, date, "incomplete search results") if incomplete
++        response_total = Integer(field(response, :total_count))
++        fail_fetch!(repository, date, "search result cap exceeded") if response_total > SEARCH_CAP
++        total ||= response_total
++        fail_fetch!(repository, date, "search total changed during pagination") unless total == response_total
++
++        page_items = Array(field(response, :items))
++        page_items.each do |item|
++          number = Integer(field(item, :number))
++          fail_fetch!(repository, date, "pagination repeated a pull request") unless seen_numbers.add?(number)
++        end
++        items.concat(page_items)
++        fail_fetch!(repository, date, "pagination exceeded total") if items.length > total
++        break if items.length == total
++        fail_fetch!(repository, date, "pagination stopped before total") if page_items.empty?
++        page += 1
++      end
++
++      mapped = items.map { |item| map_item(item, repository, date, window) }
++      return mapped unless line_stats
++
++      mapped.map do |pull|
++        detail = request(repository, date) { @client.pull_request(repository, pull.number) }
++        PullRequest.new(
++          **pull.to_h,
++          additions: Integer(field(detail, :additions)),
++          deletions: Integer(field(detail, :deletions)),
++          commits: Integer(field(detail, :commits))
++        )
++      end
++    rescue FetchError
++      raise
++    rescue StandardError => e
++      fail_fetch!(repository, date, "malformed GitHub response (#{e.class})")
++    end
++
++    def build_query(repository, window)
++      finish = window.end_time - 1
++      "repo:#{repository} is:pr is:merged merged:#{timestamp(window.start_time)}..#{timestamp(finish)}"
++    end
++
++    def timestamp(time)
++      time.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
++    end
++
++    def map_item(item, repository, date, window)
++      actual_repository = repository_name(item)
++      merged_at = Time.iso8601(field(field(item, :pull_request), :merged_at).to_s).utc
++      unless actual_repository.casecmp?(repository) && window.cover?(merged_at)
++        fail_fetch!(repository, date, "result outside requested repository or UTC window")
++      end
++
++      PullRequest.new(
++        repository: repository,
++        number: Integer(field(item, :number)),
++        title: field(item, :title),
++        url: field(item, :html_url),
++        author: field(field(item, :user), :login),
++        merged_at: merged_at
++      )
++    end
++
++    def repository_name(item)
++      repository = optional_field(item, :repository)
++      full_name = optional_field(repository, :full_name) if repository
++      return full_name.to_s unless full_name.to_s.empty?
++
++      url = field(item, :repository_url).to_s
++      match = url.match(%r{/repos/([^/]+/[^/]+)\z})
++      raise KeyError, "repository identity missing" unless match
++      match[1]
++    end
++
++    def field(object, key)
++      value = optional_field(object, key)
++      raise KeyError, key if value.nil?
++      value
++    end
++
++    def optional_field(object, key)
++      if object.respond_to?(:key?)
++        return object[key] if object.key?(key)
++        return object[key.to_s] if object.key?(key.to_s)
++      end
++      return object.public_send(key) if object.respond_to?(key)
++    end
++
++    def request(repository, date)
++      attempts = 0
++      begin
++        attempts += 1
++        yield
++      rescue StandardError => e
++        unless transient?(e) && attempts < MAX_ATTEMPTS
++          fail_fetch!(repository, date, error_kind(e))
++        end
++        delay = retry_delay(e) || attempts
++        fail_fetch!(repository, date, "retry delay exceeds 60 seconds") if delay > 60
++        @sleeper.call(delay)
++        retry
++      end
++    end
++
++    def transient?(error)
++      error.is_a?(Octokit::ServerError) ||
++        rate_limited?(error) ||
++        (defined?(Faraday::ConnectionFailed) && error.is_a?(Faraday::ConnectionFailed)) ||
++        (defined?(Faraday::TimeoutError) && error.is_a?(Faraday::TimeoutError))
++    end
++
++    def rate_limited?(error)
++      error.is_a?(Octokit::TooManyRequests) ||
++        (error.respond_to?(:response_status) && Integer(error.response_status, exception: false) == 429)
++    end
++
++    def retry_delay(error)
++      headers = error.respond_to?(:response_headers) ? error.response_headers : nil
++      retry_after = Integer(response_header(headers, "retry-after"), exception: false)
++      return retry_after if retry_after
++
++      reset_at = Integer(response_header(headers, "x-ratelimit-reset"), exception: false)
++      [reset_at - Integer(@now.call), 0].max if reset_at
++    rescue StandardError
++      nil
++    end
++
++    def response_header(headers, name)
++      return unless headers
++
++      Faraday::Utils::Headers.from(headers)[name]
++    end
++
++    def error_kind(error)
++      transient?(error) ? "GitHub request retries exhausted" : "GitHub request refused"
++    end
++
++    def fail_fetch!(repository, date, reason)
++      raise FetchError.new("GitHub fetch failed for #{repository} on #{date}: #{reason}", kind: "github")
++    end
++  end
++end
+diff --git a/lib/prdigest/renderer.rb b/lib/prdigest/renderer.rb
+new file mode 100644
+index 0000000..ea9b726
+--- /dev/null
++++ b/lib/prdigest/renderer.rb
+@@ -0,0 +1,134 @@
++# frozen_string_literal: true
++
++require "cgi"
++
++module Prdigest
++  class Renderer
++    Output = Data.define(:chunks, :outcome)
++    SUPPORTED_TAG = %r{</?(?:b|a)(?:\s+href="[^"]*")?>}.freeze
++
++    def self.parsed_length(html)
++      CGI.unescapeHTML(html.gsub(SUPPORTED_TAG, "")).length
++    end
++
++    def initialize(send_empty:, empty_message:, limit: 4_096)
++      @send_empty = send_empty
++      @empty_message = empty_message.to_s
++      @limit = Integer(limit)
++    end
++
++    def render(digest)
++      return render_empty(digest) if digest.total_prs.zero?
++
++      pack(digest)
++    rescue RenderError
++      raise
++    rescue StandardError => e
++      raise RenderError, "digest rendering failed: #{e.class}"
++    end
++
++    private
++
++    def render_empty(digest)
++      return Output.new([].freeze, "suppressed_empty") unless @send_empty
++
++      text = escape(@empty_message.gsub("{date}", digest.date.iso8601))
++      raise RenderError, "configured empty message exceeds Telegram limit" unless fits_text?(text)
++      Output.new([text.freeze].freeze, "rendered")
++    end
++
++    def pack(digest)
++      chunks = []
++      heading = "<b>Merged PR digest — #{digest.date.iso8601}</b>"
++      continuation = "<b>Merged PR digest — #{digest.date.iso8601} (cont.)</b>"
++      current = [heading]
++
++      digest.repositories.each do |section|
++        next if section.pull_requests.empty?
++        current = add_section(chunks, current, continuation, section)
++      end
++
++      footer = render_footer(digest)
++      unless fits_parts?(current + [footer])
++        flush!(chunks, current)
++        current = [continuation, footer]
++        raise RenderError, "digest footer exceeds Telegram limit" unless fits_parts?(current)
++      else
++        current << footer
++      end
++      flush!(chunks, current)
++      Output.new(chunks.map(&:freeze).freeze, "rendered")
++    end
++
++    def add_section(chunks, current, continuation, section)
++      header = "<b>#{escape(section.name)}</b>"
++      entries = section.pull_requests.map { |pull| render_pull(pull) }
++      whole = ([header] + entries).join("\n")
++      if fits_parts?(current + [whole])
++        current << whole
++        return current
++      end
++
++      if current.length > 1
++        flush!(chunks, current)
++        current = [continuation]
++        if fits_parts?(current + [whole])
++          current << whole
++          return current
++        end
++      end
++
++      section_part = header
++      entries.each do |entry|
++        proposed = "#{section_part}\n#{entry}"
++        if fits_parts?(current + [proposed])
++          section_part = proposed
++          next
++        end
++
++        if section_part == header
++          raise RenderError, "pull request entry exceeds Telegram limit"
++        end
++        current << section_part
++        flush!(chunks, current)
++        current = [continuation]
++        section_part = "<b>#{escape(section.name)} (cont.)</b>\n#{entry}"
++        raise RenderError, "pull request entry exceeds Telegram limit" unless fits_parts?(current + [section_part])
++      end
++      current << section_part
++      current
++    end
++
++    def render_pull(pull)
++      number_and_title = "##{pull.number} #{pull.title}"
++      "• <a href=\"#{escape(pull.url)}\">#{escape(number_and_title)}</a> — @#{escape(pull.author)}"
++    end
++
++    def render_footer(digest)
++      label = digest.total_prs == 1 ? "PR" : "PRs"
++      footer = "<b>Total:</b> #{digest.total_prs} #{label}"
++      if digest.line_stats
++        footer += " · +#{digest.total_additions}/−#{digest.total_deletions} · #{digest.total_commits} commits"
++      end
++      footer
++    end
++
++    def flush!(chunks, parts)
++      text = parts.join("\n\n")
++      raise RenderError, "rendered chunk exceeds Telegram limit" unless fits_text?(text)
++      chunks << text
++    end
++
++    def fits_parts?(parts)
++      fits_text?(parts.join("\n\n"))
++    end
++
++    def fits_text?(text)
++      self.class.parsed_length(text) <= @limit
++    end
++
++    def escape(value)
++      CGI.escapeHTML(value.to_s)
++    end
++  end
++end
+diff --git a/lib/prdigest/result.rb b/lib/prdigest/result.rb
+new file mode 100644
+index 0000000..3e62e02
+--- /dev/null
++++ b/lib/prdigest/result.rb
+@@ -0,0 +1,82 @@
++# frozen_string_literal: true
++
++module Prdigest
++  class Result
++    SCHEMA = "prdigest-result"
++    SCHEMA_VERSION = 1
++    REQUIRED_FIELDS = %i[
++      status mode requested_days settled_days skipped_days failed_date remaining_days error
++    ].freeze
++    EXIT_CODES = {
++      "config" => 2, "cli" => 2, "refusal" => 2,
++      "github" => 3,
++      "telegram" => 4, "telegram_refused" => 4, "telegram_permanent" => 4,
++      "telegram_ambiguous" => 4, "delivery_checkpoint" => 4,
++      "delivery_checkpoint_permanent" => 4,
++      "state" => 5
++    }.freeze
++
++    attr_reader(*REQUIRED_FIELDS, :chunks, :delivery)
++
++    def initialize(status:, mode:, requested_days: [], settled_days: [], skipped_days: [],
++                   failed_date: nil, remaining_days: [], error: nil, chunks: [], delivery: nil)
++      @status = status.to_s.freeze
++      @mode = mode.to_s.freeze
++      @requested_days = Array(requested_days).freeze
++      @settled_days = Array(settled_days).freeze
++      @skipped_days = Array(skipped_days).freeze
++      @failed_date = failed_date
++      @remaining_days = Array(remaining_days).freeze
++      @error = error&.transform_keys(&:to_sym)&.freeze
++      @chunks = Array(chunks).map(&:to_s).freeze
++      @delivery = delivery&.transform_keys(&:to_sym)&.freeze
++      freeze
++    end
++
++    def self.failure(mode:, error_kind:, message:, requested_days: [], settled_days: [], skipped_days: [],
++                     failed_date: nil, remaining_days: [], chunks: [], delivery: nil)
++      progress = !settled_days.empty? || !skipped_days.empty?
++      new(
++        status: progress ? "partial_failure" : "failure",
++        mode: mode,
++        requested_days: requested_days,
++        settled_days: settled_days,
++        skipped_days: skipped_days,
++        failed_date: failed_date,
++        remaining_days: remaining_days,
++        error: { kind: error_kind.to_s, message: message.to_s },
++        chunks: chunks,
++        delivery: delivery
++      )
++    end
++
++    def exit_code
++      return 0 if %w[success dry_run].include?(status)
++      return 6 if status == "partial_failure"
++      EXIT_CODES.fetch(error && error[:kind], 1)
++    end
++
++    def to_h
++      {
++        schema: SCHEMA,
++        schema_version: SCHEMA_VERSION,
++        status: status,
++        mode: mode,
++        requested_days: serialize_dates(requested_days),
++        settled_days: serialize_dates(settled_days),
++        skipped_days: serialize_dates(skipped_days),
++        failed_date: failed_date&.to_s,
++        remaining_days: serialize_dates(remaining_days),
++        error: error,
++        chunks: chunks,
++        delivery: delivery
++      }
++    end
++
++    private
++
++    def serialize_dates(values)
++      values.map(&:to_s)
++    end
++  end
++end
+diff --git a/lib/prdigest/runner.rb b/lib/prdigest/runner.rb
+index 231767b..e600502 100644
+--- a/lib/prdigest/runner.rb
++++ b/lib/prdigest/runner.rb
+@@ -1,34 +1,173 @@
+ # frozen_string_literal: true
+ 
++require "date"
++
+ module Prdigest
+-  # Placeholder runner. Real GitHub fetch + Telegram send come next.
+   class Runner
+-    def initialize(config:, date: nil, dry_run: false)
++    def initialize(config:, date: nil, dry_run: false, clock: nil, state_factory: nil,
++                   github: nil, renderer: nil, telegram_factory: nil, repositories: nil, env: ENV)
+       @config = config
+-      @date = date
++      @date = date && Date.iso8601(date.to_s)
+       @dry_run = dry_run
++      @clock = clock || Clock.new(timezone: config.timezone)
++      @state_factory = state_factory || -> { State.new(path: config.state_path, timezone: config.timezone) }
++      @env = env
++      @repositories = repositories || config.repos
++      @github = github || GitHub.new(token: config.github_token(env))
++      @renderer = renderer || Renderer.new(send_empty: config.send_empty?, empty_message: config.empty_message)
++      @delivery_checkpoint_store_factory = lambda {
++        DeliveryCheckpointStore.new(root: config.delivery_state_path)
++      }
++      @telegram_factory = telegram_factory || lambda {
++        Telegram.new(
++          token: config.telegram_token(env),
++          chat_id: config.chat_id,
++          allowlist: config.chat_id_allowlist
++        )
++      }
+     end
+ 
+     def call
+-      {
+-        ok: true,
+-        status: "not_implemented",
+-        date: @date,
+-        dry_run: @dry_run,
+-        repos: @config.repos,
+-        chat_id: @config.chat_id,
+-        message: scaffold_message
+-      }
++      mode = @date ? "explicit_date_replay" : "scheduled"
++      requested = []
++      settled = []
++      skipped = []
++      chunks = []
++      failed_date = nil
++      delivery = nil
++      state = nil
++      skip_audit = nil
++
++      if @dry_run || @date
++        requested = [@date || @clock.yesterday]
++      else
++        state = @state_factory.call
++        yesterday = @clock.yesterday
++        record = state.read(yesterday: yesterday)
++        skip_audit = record.last_skip
++        skipped.concat(expand_skip(skip_audit)) if skip_audit && skip_audit[:notice_pending]
++        schedule = Schedule.new(
++          yesterday: yesterday,
++          last_digested_date: record.last_digested_date,
++          max_catchup_days: @config.max_catchup_days
++        ).call
++        requested = schedule.requested_days
++        unless schedule.skipped_days.empty?
++          skip_audit = merge_skip_audit(skip_audit, schedule.skipped_days)
++          state.write(last_digested_date: schedule.skipped_days.last, last_skip: skip_audit)
++          skipped |= schedule.skipped_days
++        end
++      end
++
++      telegram = nil
++      requested.each do |date|
++        failed_date = date
++        window = @clock.window(date)
++        digest = if window.zero_length?
++                     DayDigest.build(date: date, repository_order: @repositories, pulls: [], line_stats: @config.line_stats?)
++                 else
++                   @github.fetch(
++                     date: date,
++                     window: window,
++                     repositories: @repositories,
++                     line_stats: @config.line_stats?
++                   )
++                 end
++        rendered = @renderer.render(digest)
++        if @dry_run
++          chunks.concat(rendered.chunks)
++          next
++        end
++
++        unless rendered.chunks.empty?
++          telegram ||= @telegram_factory.call
++          delivery = telegram.deliver(
++            rendered.chunks,
++            digest_date: date,
++            checkpoint_store: @delivery_checkpoint_store_factory.call,
++            scope: @repositories
++          )
++        end
++        if state
++          if skip_audit
++            skip_audit = skip_audit.merge(notice_pending: false)
++          end
++          state.write(last_digested_date: date, last_skip: skip_audit)
++        end
++        settled << date
++        failed_date = nil
++      end
++
++      Result.new(
++        status: @dry_run ? "dry_run" : "success",
++        mode: mode,
++        requested_days: requested,
++        settled_days: settled,
++        skipped_days: skipped,
++        chunks: chunks,
++        delivery: delivery
++      )
++    rescue StandardError => e
++      Result.failure(
++        mode: mode || (@date ? "explicit_date_replay" : "scheduled"),
++        error_kind: error_kind(e),
++        message: safe_message(e),
++        requested_days: requested || [],
++        settled_days: settled || [],
++        skipped_days: skipped || [],
++        failed_date: failed_date,
++        remaining_days: remaining_days(requested || [], failed_date),
++        chunks: chunks || [],
++        delivery: e.is_a?(SendError) ? e.delivery : delivery
++      )
++    end
++
++    def inspect
++      "#<#{self.class} mode=#{@date ? "explicit_date_replay" : "scheduled"} " \
++        "dry_run=#{@dry_run} credentials=[REDACTED]>"
+     end
+ 
++    alias to_s inspect
++
+     private
+ 
+-    def scaffold_message
+-      day = @date || "yesterday"
+-      "Merged PR digest — #{day}\n" \
+-        "Total: 0 PRs\n" \
+-        "(scaffold only — implementation next)\n" \
+-        "Repos: #{@config.repos.join(', ')}"
++    def expand_skip(audit)
++      return [] unless audit
++      (audit.fetch(:start_date)..audit.fetch(:end_date)).to_a
++    end
++
++    def merge_skip_audit(existing, dates)
++      start_date = if existing && existing[:notice_pending]
++                     [existing[:start_date], dates.first].min
++                   else
++                     dates.first
++                   end
++      { start_date: start_date, end_date: dates.last, notice_pending: true }
++    end
++
++    def remaining_days(requested, failed_date)
++      return requested unless failed_date
++      index = requested.index(failed_date)
++      index ? requested.drop(index) : [failed_date]
++    end
++
++    def error_kind(error)
++      case error
++      when ConfigError then "config"
++      when FetchError then error.kind
++      when SendError then error.kind
++      when StateError then "state"
++      when RenderError then error.kind
++      else "internal"
++      end
++    end
++
++    def safe_message(error)
++      message = error.is_a?(Error) ? error.message : "unexpected failure (#{error.class})"
++      secrets = []
++      secrets << @config.github_token(@env) if @config.respond_to?(:github_token)
++      secrets << @config.telegram_token(@env) if @config.respond_to?(:telegram_token)
++      secrets.compact.reject(&:empty?).reduce(message.dup) { |safe, secret| safe.gsub(secret, "[REDACTED]") }
+     end
+   end
+ end
+diff --git a/lib/prdigest/schedule.rb b/lib/prdigest/schedule.rb
+new file mode 100644
+index 0000000..099b511
+--- /dev/null
++++ b/lib/prdigest/schedule.rb
+@@ -0,0 +1,30 @@
++# frozen_string_literal: true
++
++require "date"
++
++module Prdigest
++  class Schedule
++    Result = Data.define(:skipped_days, :requested_days)
++
++    def initialize(yesterday:, last_digested_date:, max_catchup_days:)
++      @yesterday = Date.iso8601(yesterday.to_s)
++      @last_digested_date = last_digested_date && Date.iso8601(last_digested_date.to_s)
++      @max_catchup_days = Integer(max_catchup_days)
++    end
++
++    def call
++      raise ArgumentError, "max_catchup_days must be from 1 to 30" unless (1..30).cover?(@max_catchup_days)
++      raise ArgumentError, "last digested date is in the future" if @last_digested_date && @last_digested_date > @yesterday
++
++      owed = if @last_digested_date.nil?
++               [@yesterday]
++             elsif @last_digested_date == @yesterday
++               []
++             else
++               ((@last_digested_date + 1)..@yesterday).to_a
++             end
++      split = [owed.length - @max_catchup_days, 0].max
++      Result.new(owed.first(split).freeze, owed.drop(split).freeze)
++    end
++  end
++end
+diff --git a/lib/prdigest/state.rb b/lib/prdigest/state.rb
+new file mode 100644
+index 0000000..2ebaf95
+--- /dev/null
++++ b/lib/prdigest/state.rb
+@@ -0,0 +1,147 @@
++# frozen_string_literal: true
++
++require "date"
++require "fileutils"
++require "json"
++require "securerandom"
++
++module Prdigest
++  class State
++    VERSION = 1
++    Record = Data.define(:last_digested_date, :last_skip)
++
++    def initialize(path:, timezone:, rename: File.method(:rename), directory_sync: nil)
++      @path = File.expand_path(path)
++      @timezone = timezone
++      @rename = rename
++      @directory_sync = directory_sync || method(:sync_directory)
++    end
++
++    def read(yesterday: nil)
++      return Record.new(nil, nil) unless File.exist?(@path)
++
++      payload = JSON.parse(File.binread(@path))
++      validate_payload!(payload, yesterday: yesterday)
++    rescue StateError
++      raise
++    rescue StandardError => e
++      raise StateError, "cannot read state: #{e.class}"
++    end
++
++    def write(last_digested_date:, last_skip: nil)
++      directory = File.dirname(@path)
++      FileUtils.mkdir_p(directory, mode: 0o700)
++      temp_path = File.join(directory, ".#{File.basename(@path)}.tmp-#{SecureRandom.hex(8)}")
++      payload = JSON.generate(serialize(last_digested_date, last_skip)) << "\n"
++
++      File.open(temp_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
++        file.write(payload)
++        file.chmod(0o600)
++        file.flush
++        file.fsync
++      end
++      rollback_path = preserve_previous_checkpoint(directory)
++      @rename.call(temp_path, @path)
++      begin
++        @directory_sync.call(directory)
++      rescue StandardError
++        restore_previous_checkpoint(rollback_path)
++        raise
++      end
++      Record.new(Date.iso8601(last_digested_date.to_s), normalize_skip(last_skip))
++    rescue StandardError => e
++      raise StateError, "cannot write state: #{e.class}"
++    ensure
++      File.unlink(temp_path) if defined?(temp_path) && temp_path && File.exist?(temp_path)
++      discard_rollback(rollback_path) if defined?(rollback_path) && rollback_path
++    end
++
++    private
++
++    def sync_directory(directory)
++      File.open(directory, File::RDONLY) { |dir| dir.fsync }
++    end
++
++    def preserve_previous_checkpoint(directory)
++      rollback_path = File.join(directory, ".#{File.basename(@path)}.rollback-#{SecureRandom.hex(8)}")
++      File.link(@path, rollback_path)
++      rollback_path
++    rescue Errno::ENOENT
++      nil
++    end
++
++    def restore_previous_checkpoint(rollback_path)
++      if rollback_path
++        File.rename(rollback_path, @path)
++      else
++        File.unlink(@path)
++      end
++    rescue Errno::ENOENT
++      raise if rollback_path
++      nil
++    end
++
++    def discard_rollback(rollback_path)
++      FileUtils.rm_f(rollback_path) if rollback_path
++    end
++
++    def validate_payload!(payload, yesterday:)
++      raise StateError, "state root must be an object" unless payload.is_a?(Hash)
++      raise StateError, "unsupported state version" unless payload["version"] == VERSION
++      raise StateError, "state timezone does not match config" unless payload["timezone"] == @timezone
++      raise StateError, "state last_digested_date is required" unless payload.key?("last_digested_date")
++
++      value = payload["last_digested_date"]
++      last_date = Date.iso8601(value)
++      raise StateError, "state date is in the future" if yesterday && last_date && last_date > Date.iso8601(yesterday.to_s)
++
++      skip = parse_skip(payload["last_skip"])
++      if skip && (skip[:start_date] > skip[:end_date] || skip[:end_date] > last_date)
++        raise StateError, "state last_skip range is invalid"
++      end
++      Record.new(last_date, skip)
++    rescue Date::Error, TypeError
++      raise StateError, "state contains an invalid date"
++    end
++
++    def parse_skip(value)
++      return nil if value.nil?
++      raise StateError, "state last_skip is invalid" unless value.is_a?(Hash)
++
++      pending = value.fetch("notice_pending")
++      raise StateError, "state last_skip is invalid" unless pending == true || pending == false
++      {
++        start_date: Date.iso8601(value.fetch("start_date")),
++        end_date: Date.iso8601(value.fetch("end_date")),
++        notice_pending: pending
++      }
++    rescue KeyError
++      raise StateError, "state last_skip is invalid"
++    end
++
++    def normalize_skip(skip)
++      return nil unless skip
++      {
++        start_date: Date.iso8601(skip.fetch(:start_date).to_s),
++        end_date: Date.iso8601(skip.fetch(:end_date).to_s),
++        notice_pending: skip.fetch(:notice_pending) == true
++      }
++    end
++
++    def serialize(last_date, last_skip)
++      payload = {
++        version: VERSION,
++        timezone: @timezone,
++        last_digested_date: Date.iso8601(last_date.to_s).iso8601
++      }
++      if (skip = normalize_skip(last_skip))
++        payload[:last_skip] = {
++          start_date: skip[:start_date].iso8601,
++          end_date: skip[:end_date].iso8601,
++          notice_pending: skip[:notice_pending]
++        }
++      end
++      payload
++    end
++  end
++end
+diff --git a/lib/prdigest/telegram.rb b/lib/prdigest/telegram.rb
+new file mode 100644
+index 0000000..c386633
+--- /dev/null
++++ b/lib/prdigest/telegram.rb
+@@ -0,0 +1,180 @@
++# frozen_string_literal: true
++
++require "json"
++require "net/http"
++require "openssl"
++require "timeout"
++require "uri"
++
++module Prdigest
++  class Telegram
++    MAX_ATTEMPTS = 3
++    MAX_RETRY_WAIT = 60
++    API_ORIGIN = "https://api.telegram.org"
++
++    class NetHTTPTransport
++      def call(uri:, request:, open_timeout:, read_timeout:, write_timeout:)
++        http = Net::HTTP.new(uri.host, uri.port)
++        http.use_ssl = true
++        http.verify_mode = OpenSSL::SSL::VERIFY_PEER
++        http.verify_hostname = true if http.respond_to?(:verify_hostname=)
++        http.open_timeout = open_timeout
++        http.read_timeout = read_timeout
++        http.write_timeout = write_timeout if http.respond_to?(:write_timeout=)
++        http.request(request)
++      end
++    end
++
++    def initialize(token:, chat_id:, allowlist:, transport: NetHTTPTransport.new, sleeper: ->(seconds) { sleep(seconds) })
++      @token = token.to_s
++      @chat_id = Integer(chat_id)
++      @allowlist = Array(allowlist).map { |id| Integer(id) }.freeze
++      @transport = transport
++      @sleeper = sleeper
++      @delivered_chunk = false
++    end
++
++    def deliver(chunks, digest_date:, checkpoint_store:, scope:)
++      refuse_unlisted_chat! unless @allowlist.include?(@chat_id)
++      checkpoint_store.with_checkpoint(
++        date: digest_date,
++        chat_id: @chat_id,
++        scope: scope,
++        chunks: chunks
++      ) do |delivery|
++        @delivered_chunk ||= delivery.next_chunk.positive?
++        (delivery.next_chunk...delivery.chunks.length).each do |index|
++          @sleeper.call(1) if @delivered_chunk
++          deliver_chunk(delivery, index)
++          @delivered_chunk = true
++        end
++        delivery.delivery
++      end
++    end
++
++    def inspect
++      "#<#{self.class} chat_id=#{@chat_id} token=[REDACTED]>"
++    end
++
++    alias to_s inspect
++
++    private
++
++    def deliver_chunk(delivery, index)
++      attempts = 0
++      waited = 0
++      loop do
++        attempts += 1
++        delivery.begin_attempt(index)
++        begin
++          response = @transport.call(
++            uri: request_uri,
++            request: build_request(delivery.chunks.fetch(index)),
++            open_timeout: 10,
++            read_timeout: 30,
++            write_timeout: 30
++          )
++        rescue StandardError => e
++          fail_ambiguous!(delivery, index, e)
++        end
++
++        disposition, delay, kind = classify_response(response)
++        if disposition == :success
++          delivery.accept(index)
++          return true
++        end
++
++        permanent = disposition == :failure
++        delivery.reject(
++          index,
++          kind: permanent ? "telegram_permanent" : "telegram",
++          message: failure_message(kind),
++          permanent: permanent
++        )
++        fail_send!(
++          delivery,
++          index,
++          kind: permanent ? "telegram_permanent" : "telegram",
++          reason: kind
++        ) if permanent || attempts >= MAX_ATTEMPTS
++
++        waited = wait!(delay || attempts, kind, waited, delivery, index)
++      end
++    end
++
++    def build_request(text)
++      request = Net::HTTP::Post.new(request_uri.request_uri)
++      request["Content-Type"] = "application/json"
++      request.body = JSON.generate(
++        chat_id: @chat_id,
++        text: text,
++        parse_mode: "HTML",
++        link_preview_options: { is_disabled: true }
++      )
++      request
++    end
++
++    def request_uri
++      URI("#{API_ORIGIN}/bot#{@token}/sendMessage")
++    end
++
++    def classify_response(response)
++      code = Integer(response.code)
++      payload = JSON.parse(response.body.to_s)
++      return [:success, nil, nil] if (200..299).cover?(code) && payload["ok"] == true
++
++      if code == 429
++        delay = Integer(payload.dig("parameters", "retry_after"), exception: false)
++        return [:retry, delay, "rate_limited"]
++      end
++      return [:retry, nil, "server"] if (500..599).cover?(code)
++
++      [:failure, nil, "http_#{code}"]
++    rescue JSON::ParserError, TypeError, ArgumentError
++      code && (500..599).cover?(code) ? [:retry, nil, "server"] : [:failure, nil, "invalid_response"]
++    end
++
++    def wait!(seconds, kind, waited, delivery, index)
++      delay = Integer(seconds, exception: false)
++      total = waited + delay.to_i
++      fail_send!(delivery, index, reason: "retry_wait_exceeded") unless delay && total <= MAX_RETRY_WAIT
++      @sleeper.call(delay)
++      total
++    rescue SendError
++      raise
++    rescue StandardError
++      fail_send!(delivery, index, reason: kind)
++    end
++
++    def refuse_unlisted_chat!
++      raise SendError.new("Telegram delivery refused: chat is not allowlisted", kind: "telegram_refused")
++    end
++
++    def fail_ambiguous!(delivery, index, error)
++      reason = case error
++               when Timeout::Error then "timeout"
++               when IOError then "io"
++               when SocketError then "socket"
++               when SystemCallError then "system"
++               else "transport"
++               end
++      raise SendError.new(
++        "Telegram send outcome is ambiguous (#{reason})",
++        kind: "telegram_ambiguous",
++        delivery: delivery.delivery(failed_chunk: index)
++      )
++    end
++
++    def fail_send!(delivery, index, kind: "telegram", reason:)
++      raise SendError.new(
++        failure_message(reason),
++        kind: kind,
++        delivery: delivery.delivery(failed_chunk: index)
++      )
++    end
++
++    def failure_message(reason)
++      "Telegram send failed (#{reason})"
++    end
++  end
++end
+diff --git a/lib/prdigest/version.rb b/lib/prdigest/version.rb
+index 1d761f8..1bd8b69 100644
+--- a/lib/prdigest/version.rb
++++ b/lib/prdigest/version.rb
+@@ -1,5 +1,5 @@
+ # frozen_string_literal: true
+ 
+ module Prdigest
+-  VERSION = "0.0.1"
++  VERSION = "0.1.0"
+ end
+diff --git a/prdigest.gemspec b/prdigest.gemspec
+index bb89b3c..b6b72a1 100644
+--- a/prdigest.gemspec
++++ b/prdigest.gemspec
+@@ -16,14 +16,16 @@ Gem::Specification.new do |spec|
+   spec.required_ruby_version = ">= 3.2.0"
+ 
+   spec.metadata["homepage_uri"] = spec.homepage
+-  spec.metadata["source_code_uri"] = spec.homepage
++  spec.metadata["source_code_uri"] = "#{spec.homepage}/tree/main"
+   spec.metadata["bug_tracker_uri"] = "#{spec.homepage}/issues"
+   spec.metadata["rubygems_mfa_required"] = "true"
+ 
+   spec.files = Dir.chdir(__dir__) do
+-    `git ls-files -z`.split("\x0").reject do |f|
+-      f.start_with?("test/", ".git", "bin/prdigest") || f == "Gemfile.lock"
+-    end
++    patterns = [
++      "lib/**/*.rb", "exe/prdigest", "configs/config.example.yml",
++      "scripts/systemd/*", "README.md", "SECURITY.md", "CHANGELOG.md", "LICENSE"
++    ]
++    patterns.flat_map { |pattern| Dir.glob(pattern) }.select { |path| File.file?(path) }.uniq.sort
+   end
+   spec.bindir        = "exe"
+   spec.executables   = ["prdigest"]
+@@ -32,7 +34,10 @@ Gem::Specification.new do |spec|
+   spec.add_dependency "thor", "~> 1.3"
+   spec.add_dependency "octokit", "~> 9.0"
+   spec.add_dependency "faraday-retry", "~> 2.2"
++  spec.add_dependency "tzinfo", "~> 2.0"
++  spec.add_dependency "erb", ">= 4.0", "< 7.0"
+ 
+   spec.add_development_dependency "minitest", "~> 5.25"
+   spec.add_development_dependency "rake", "~> 13.0"
++  spec.add_development_dependency "webmock", "~> 3.25"
+ end
+diff --git a/scripts/systemd/prdigest.service b/scripts/systemd/prdigest.service
+index b33cdb6..e389bc1 100644
+--- a/scripts/systemd/prdigest.service
++++ b/scripts/systemd/prdigest.service
+@@ -7,11 +7,21 @@ Wants=network-online.target
+ Type=oneshot
+ User=prdigest
+ Group=prdigest
+-EnvironmentFile=-/etc/prdigest/.env
++EnvironmentFile=/etc/prdigest/.env
+ ExecStart=/usr/local/bin/prdigest run --config /etc/prdigest/config.yml
++StateDirectory=prdigest
++StateDirectoryMode=0700
++UMask=0077
++TimeoutStartSec=1h
+ Nice=10
+ NoNewPrivileges=true
+ ProtectSystem=strict
+ ProtectHome=true
+ ReadWritePaths=/var/lib/prdigest
+ PrivateTmp=true
++PrivateDevices=true
++ProtectKernelTunables=true
++ProtectKernelModules=true
++ProtectControlGroups=true
++RestrictSUIDSGID=true
++LockPersonality=true
+diff --git a/scripts/systemd/prdigest.timer b/scripts/systemd/prdigest.timer
+index 9175eb3..d64c5f1 100644
+--- a/scripts/systemd/prdigest.timer
++++ b/scripts/systemd/prdigest.timer
+@@ -2,6 +2,8 @@
+ Description=Daily prdigest merged-PR digest
+ 
+ [Timer]
++# Uses the host timezone. Match it to config.yml so 09:05 leaves a nine-hour
++# indexing buffer after the previous local day.
+ OnCalendar=*-*-* 09:05:00
+ Persistent=true
+ Unit=prdigest.service
+diff --git a/test/cli_test.rb b/test/cli_test.rb
+new file mode 100644
+index 0000000..4674ef3
+--- /dev/null
++++ b/test/cli_test.rb
+@@ -0,0 +1,166 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++require "stringio"
++require "tmpdir"
++require "yaml"
++
++class CliTest < Minitest::Test
++  def test_exposes_thor_tasks_and_help_switches
++    %w[run_cmd serve version].each { |command| assert_includes Prdigest::CLI.tasks.keys, command }
++    assert_equal :run_cmd, Prdigest::CLI.send(:map).fetch("run")
++
++    [["help"], ["--help"], ["-h"]].each do |argv|
++      out = StringIO.new
++      assert_equal 0, Prdigest::CLI.invoke(argv, out: out, err: StringIO.new)
++      assert_match(/Usage: prdigest run/, out.string)
++    end
++  end
++
++  def test_config_discovery_precedence
++    Dir.mktmpdir do |dir|
++      explicit = File.join(dir, "explicit.yml")
++      env_path = File.join(dir, "env.yml")
++      system = File.join(dir, "system.yml")
++      [explicit, env_path, system].each { |path| File.write(path, "--- {}\n") }
++      env = { "PRDIGEST_CONFIG" => env_path }
++      assert_equal explicit, Prdigest::Config.resolve_path(explicit: explicit, env: env, system_path: system)
++      assert_equal env_path, Prdigest::Config.resolve_path(env: env, system_path: system)
++      assert_equal system, Prdigest::Config.resolve_path(env: {}, system_path: system)
++      File.unlink(system)
++      assert_raises(Prdigest::ConfigError) { Prdigest::Config.resolve_path(env: {}, system_path: system) }
++    end
++  end
++
++  def test_unknown_command_json_is_one_complete_refusal
++    out = StringIO.new
++    err = StringIO.new
++    code = Prdigest::CLI.invoke(["wat", "--json"], out: out, err: err)
++    assert_equal 2, code
++    payload = JSON.parse(out.string)
++    assert_equal "failure", payload["status"]
++    assert_equal "cli", payload.dig("error", "kind")
++    assert_empty err.string
++  end
++
++  def test_dry_run_requires_github_but_not_telegram_token
++    path = write_config
++    out = StringIO.new
++    code = Prdigest::CLI.invoke(
++      ["run", "--config", path, "--dry-run", "--json"], out: out, err: StringIO.new,
++      env: {}, runner_factory: ->(**) { flunk "runner must not start" }
++    )
++    assert_equal 2, code
++    assert_equal "config", JSON.parse(out.string).dig("error", "kind")
++
++    result = Prdigest::Result.new(status: "dry_run", mode: "scheduled", requested_days: [Date.new(2026, 1, 1)], chunks: ["preview"])
++    factory = ->(**) { Struct.new(:result) { def call = result }.new(result) }
++    out = StringIO.new
++    code = Prdigest::CLI.invoke(
++      ["run", "--config=#{path}", "--dry-run", "--json"], out: out, err: StringIO.new,
++      env: { "GITHUB_TOKEN" => "synthetic" }, runner_factory: factory
++    )
++    assert_equal 0, code
++    assert_equal "dry_run", JSON.parse(out.string)["status"]
++  end
++
++  def test_repeatable_repo_flags_override_config_for_embedding_callers
++    path = write_config
++    captured = nil
++    result = Prdigest::Result.new(
++      status: "dry_run",
++      mode: "explicit_date_replay",
++      requested_days: [Date.new(2026, 1, 1)],
++      chunks: ["preview"]
++    )
++    factory = lambda do |**options|
++      captured = options
++      Struct.new(:result) { def call = result }.new(result)
++    end
++
++    out = StringIO.new
++    code = Prdigest::CLI.invoke(
++      [
++        "run", "--config", path, "--date", "2026-01-01", "--dry-run", "--json",
++        "--repo", "Owner/One", "--repo=other/two", "--repo", "owner/one"
++      ],
++      out: out,
++      err: StringIO.new,
++      env: { "GITHUB_TOKEN" => "synthetic" },
++      runner_factory: factory
++    )
++
++    assert_equal 0, code
++    assert_equal ["Owner/One", "other/two"], captured.fetch(:repositories)
++    assert_equal "prdigest-result", JSON.parse(out.string).fetch("schema")
++  end
++
++  def test_repo_flags_reject_malformed_repository_names
++    path = write_config
++    out = StringIO.new
++
++    code = Prdigest::CLI.invoke(
++      ["run", "--config", path, "--dry-run", "--json", "--repo", "../escape"],
++      out: out,
++      err: StringIO.new,
++      env: { "GITHUB_TOKEN" => "synthetic" },
++      runner_factory: ->(**) { flunk "runner must not start" }
++    )
++
++    assert_equal 2, code
++    assert_equal "config", JSON.parse(out.string).dig("error", "kind")
++  end
++
++  def test_real_send_requires_telegram_token_and_date_is_strict
++    path = write_config
++    env = { "GITHUB_TOKEN" => "synthetic" }
++    [["run", "--config", path, "--json"], ["run", "--config", path, "--date", "2026-1-1", "--json"]].each do |argv|
++      out = StringIO.new
++      assert_equal 2, Prdigest::CLI.invoke(argv, out: out, err: StringIO.new, env: env)
++      assert_equal "config", JSON.parse(out.string).dig("error", "kind")
++    end
++  end
++
++  def test_human_failure_reports_progress_and_error
++    path = write_config
++    result = Prdigest::Result.failure(
++      mode: "scheduled",
++      error_kind: "github",
++      message: "synthetic failure",
++      requested_days: [Date.new(2026, 1, 1), Date.new(2026, 1, 2), Date.new(2026, 1, 3)],
++      settled_days: [Date.new(2026, 1, 1)],
++      skipped_days: [Date.new(2025, 12, 31)],
++      failed_date: Date.new(2026, 1, 2),
++      remaining_days: [Date.new(2026, 1, 2), Date.new(2026, 1, 3)]
++    )
++    factory = ->(**) { Struct.new(:result) { def call = result }.new(result) }
++    out = StringIO.new
++    err = StringIO.new
++
++    code = Prdigest::CLI.invoke(
++      ["run", "--config", path],
++      out: out,
++      err: err,
++      env: { "GITHUB_TOKEN" => "synthetic", "TELEGRAM_BOT_TOKEN" => "synthetic" },
++      runner_factory: factory
++    )
++
++    assert_equal 6, code
++    assert_empty out.string
++    assert_includes err.string, "settled=2026-01-01"
++    assert_includes err.string, "skipped=2025-12-31"
++    assert_includes err.string, "remaining=2026-01-02,2026-01-03"
++    assert_includes err.string, "github: synthetic failure"
++  end
++
++  private
++
++  def write_config
++    path = File.join(Dir.mktmpdir, "config.yml")
++    File.write(path, YAML.dump(
++      "timezone" => "UTC", "github" => { "repos" => ["o/r"] },
++      "telegram" => { "chat_id" => 1, "chat_id_allowlist" => [1] }
++    ))
++    path
++  end
++end
+diff --git a/test/clock_test.rb b/test/clock_test.rb
+new file mode 100644
+index 0000000..3ee012a
+--- /dev/null
++++ b/test/clock_test.rb
+@@ -0,0 +1,47 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class ClockTest < Minitest::Test
++  def test_london_spring_window_is_23_hours
++    window = clock("Europe/London").window(Date.new(2026, 3, 29))
++    assert_equal Time.utc(2026, 3, 29), window.start_time
++    assert_equal Time.utc(2026, 3, 29, 23), window.end_time
++  end
++
++  def test_london_fall_window_is_25_hours
++    window = clock("Europe/London").window(Date.new(2026, 10, 25))
++    assert_equal Time.utc(2026, 10, 24, 23), window.start_time
++    assert_equal Time.utc(2026, 10, 26), window.end_time
++  end
++
++  def test_tokyo_window_crosses_utc_date
++    window = clock("Asia/Tokyo").window(Date.new(2026, 1, 15))
++    assert_equal Time.utc(2026, 1, 14, 15), window.start_time
++    assert_equal Time.utc(2026, 1, 15, 15), window.end_time
++    assert window.cover?(window.start_time)
++    refute window.cover?(window.end_time)
++  end
++
++  def test_yesterday_uses_configured_zone
++    now = Time.utc(2026, 1, 15, 23, 30)
++    assert_equal Date.new(2026, 1, 15), clock("Asia/Tokyo", now).yesterday
++    assert_equal Date.new(2026, 1, 14), clock("America/Los_Angeles", now).yesterday
++  end
++
++  def test_nonexistent_and_ambiguous_midnights
++    santiago = clock("America/Santiago").window(Date.new(2026, 9, 6))
++    assert_equal Time.utc(2026, 9, 6, 4), santiago.start_time
++    assert_equal Time.utc(2026, 9, 7, 3), santiago.end_time
++
++    havana = clock("America/Havana").window(Date.new(2026, 11, 1))
++    assert_equal Time.utc(2026, 11, 1, 4), havana.start_time
++    assert_equal Time.utc(2026, 11, 2, 5), havana.end_time
++  end
++
++  private
++
++  def clock(zone, now = Time.utc(2026, 1, 16))
++    Prdigest::Clock.new(timezone: zone, now: -> { now })
++  end
++end
+diff --git a/test/config_test.rb b/test/config_test.rb
+index cea68e9..66b1ce3 100644
+--- a/test/config_test.rb
++++ b/test/config_test.rb
+@@ -32,6 +32,51 @@ def test_loads_valid_config
+     cfg = Prdigest::Config.load(path)
+     assert_equal ["ivankuznetsov/hive"], cfg.repos
+     assert_equal(-1001, Integer(cfg.chat_id))
++    assert_equal 7, cfg.max_catchup_days
++    assert_equal File.expand_path("~/.local/share/prdigest/deliveries"), cfg.delivery_state_path
++  end
++
++  def test_delivery_state_defaults_next_to_cursor_and_can_be_overridden
++    path = write_config(
++      "github" => { "repos" => ["o/r"] },
++      "telegram" => { "chat_id" => 1, "chat_id_allowlist" => [1] },
++      "state" => { "path" => "/var/lib/prdigest/cursor.json" }
++    )
++    assert_equal "/var/lib/prdigest/deliveries", Prdigest::Config.load(path).delivery_state_path
++
++    raw = YAML.safe_load_file(path)
++    raw["state"]["delivery_path"] = "/run/prdigest/delivery"
++    assert_equal "/run/prdigest/delivery", Prdigest::Config.new(raw).delivery_state_path
++  end
++
++  def test_validates_timezone_cap_and_repository_shape
++    base = {
++      "github" => { "repos" => ["owner/repo"] },
++      "telegram" => { "chat_id" => 1, "chat_id_allowlist" => [1, 2] }
++    }
++
++    [0, 31].each do |cap|
++      path = write_config(base.merge("schedule" => { "max_catchup_days" => cap }))
++      assert_raises(Prdigest::ConfigError) { Prdigest::Config.load(path) }
++    end
++
++    path = write_config(base.merge("timezone" => "Mars/Olympus_Mons"))
++    assert_raises(Prdigest::ConfigError) { Prdigest::Config.load(path) }
++
++    path = write_config(base.merge("github" => { "repos" => ["not-a-repo"] }))
++    assert_raises(Prdigest::ConfigError) { Prdigest::Config.load(path) }
++  end
++
++  def test_accepts_cap_boundaries_and_extra_allowlisted_chats
++    [1, 30].each do |cap|
++      path = write_config(
++        "timezone" => "UTC",
++        "schedule" => { "max_catchup_days" => cap },
++        "github" => { "repos" => ["o/r"] },
++        "telegram" => { "chat_id" => 2, "chat_id_allowlist" => [1, 2] }
++      )
++      assert_equal cap, Prdigest::Config.load(path).max_catchup_days
++    end
+   end
+ 
+   private
+diff --git a/test/delivery_checkpoint_store_test.rb b/test/delivery_checkpoint_store_test.rb
+new file mode 100644
+index 0000000..37cd6cc
+--- /dev/null
++++ b/test/delivery_checkpoint_store_test.rb
+@@ -0,0 +1,97 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++require "tmpdir"
++
++class DeliveryCheckpointStoreTest < Minitest::Test
++  DATE = Date.new(2026, 7, 23)
++
++  def test_persists_stable_chunks_and_resumes_at_next_unsent_chunk
++    with_store do |store, root|
++      store.with_checkpoint(
++        date: DATE, chat_id: -1001, scope: %w[acme/one acme/two], chunks: %w[one two three]
++      ) do |delivery|
++        assert_equal %w[one two three], delivery.chunks
++        assert_equal 0, delivery.next_chunk
++        delivery.begin_attempt(0)
++        delivery.accept(0)
++      end
++
++      store.with_checkpoint(
++        date: DATE, chat_id: -1001, scope: %w[acme/one acme/two], chunks: %w[regenerated content]
++      ) do |delivery|
++        assert_equal %w[one two three], delivery.chunks
++        assert_equal 1, delivery.next_chunk
++      end
++
++      assert_equal 0o700, File.stat(root).mode & 0o777
++      assert_equal 0o600, File.stat(File.join(root, "#{DATE}.json")).mode & 0o777
++    end
++  end
++
++  def test_completed_checkpoint_makes_delivery_a_noop
++    with_store do |store, _root|
++      store.with_checkpoint(date: DATE, chat_id: 1, scope: ["acme/one"], chunks: %w[one two]) do |delivery|
++        2.times do |index|
++          delivery.begin_attempt(index)
++          delivery.accept(index)
++        end
++        assert delivery.completed?
++      end
++
++      store.with_checkpoint(date: DATE, chat_id: 1, scope: ["acme/one"], chunks: %w[new body]) do |delivery|
++        assert delivery.completed?
++        assert_equal 2, delivery.next_chunk
++        assert_equal %w[one two], delivery.chunks
++      end
++    end
++  end
++
++  def test_in_flight_attempt_is_parked_as_ambiguous
++    with_store do |store, _root|
++      store.with_checkpoint(date: DATE, chat_id: 1, scope: ["acme/one"], chunks: ["one"]) do |delivery|
++        delivery.begin_attempt(0)
++      end
++
++      error = assert_raises(Prdigest::SendError) do
++        store.with_checkpoint(date: DATE, chat_id: 1, scope: ["acme/one"], chunks: ["one"]) { flunk }
++      end
++      assert_equal "telegram_ambiguous", error.kind
++      assert_equal 0, error.delivery.fetch(:failed_chunk)
++    end
++  end
++
++  def test_permanent_rejection_stays_blocked_without_reopening_delivery
++    with_store do |store, _root|
++      store.with_checkpoint(date: DATE, chat_id: 1, scope: ["acme/one"], chunks: ["one"]) do |delivery|
++        delivery.begin_attempt(0)
++        delivery.reject(0, kind: "telegram_permanent", message: "HTTP 400", permanent: true)
++      end
++
++      error = assert_raises(Prdigest::SendError) do
++        store.with_checkpoint(date: DATE, chat_id: 1, scope: ["acme/one"], chunks: ["one"]) { flunk }
++      end
++      assert_equal "telegram_permanent", error.kind
++      assert_equal 0, error.delivery.fetch(:failed_chunk)
++    end
++  end
++
++  def test_scope_change_for_same_date_fails_closed
++    with_store do |store, _root|
++      store.with_checkpoint(date: DATE, chat_id: 1, scope: ["acme/one"], chunks: ["one"]) { }
++
++      error = assert_raises(Prdigest::SendError) do
++        store.with_checkpoint(date: DATE, chat_id: 1, scope: ["acme/two"], chunks: ["two"]) { flunk }
++      end
++      assert_equal "delivery_checkpoint_permanent", error.kind
++    end
++  end
++
++  private
++
++  def with_store
++    Dir.mktmpdir do |root|
++      yield Prdigest::DeliveryCheckpointStore.new(root: root), root
++    end
++  end
++end
+diff --git a/test/digest_test.rb b/test/digest_test.rb
+new file mode 100644
+index 0000000..c9ae31b
+--- /dev/null
++++ b/test/digest_test.rb
+@@ -0,0 +1,36 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class DigestTest < Minitest::Test
++  def test_totals_and_immutability
++    pull = Prdigest::PullRequest.new(
++      repository: "o/r", number: 1, title: "One", url: "https://github.com/o/r/pull/1",
++      author: "dev", merged_at: Time.utc(2026, 1, 1), additions: 4, deletions: 2, commits: 3
++    )
++    digest = Prdigest::DayDigest.build(date: Date.new(2026, 1, 1), repository_order: ["o/r"], pulls: [pull], line_stats: true)
++    assert_equal 1, digest.total_prs
++    assert_equal 4, digest.total_additions
++    assert_equal 2, digest.total_deletions
++    assert_equal 3, digest.total_commits
++    assert_predicate digest, :frozen?
++    assert_predicate digest.repositories.first.pull_requests, :frozen?
++  end
++
++  def test_preserves_repository_order_and_sorts_pulls
++    pulls = [
++      pull("b/r", 4, Time.utc(2026, 1, 1, 2)),
++      pull("a/r", 3, Time.utc(2026, 1, 1, 2)),
++      pull("a/r", 2, Time.utc(2026, 1, 1, 1))
++    ]
++    digest = Prdigest::DayDigest.build(date: Date.new(2026, 1, 1), repository_order: ["a/r", "b/r"], pulls: pulls)
++    assert_equal ["a/r", "b/r"], digest.repositories.map(&:name)
++    assert_equal [2, 3], digest.repositories.first.pull_requests.map(&:number)
++  end
++
++  private
++
++  def pull(repo, number, merged_at)
++    Prdigest::PullRequest.new(repository: repo, number: number, title: "PR", url: "https://example.test/#{number}", author: "dev", merged_at: merged_at)
++  end
++end
+diff --git a/test/fixtures/github/pull_detail.json b/test/fixtures/github/pull_detail.json
+new file mode 100644
+index 0000000..ea96a31
+--- /dev/null
++++ b/test/fixtures/github/pull_detail.json
+@@ -0,0 +1 @@
++{"additions":12,"deletions":4,"commits":3}
+diff --git a/test/fixtures/github/search_page_1.json b/test/fixtures/github/search_page_1.json
+new file mode 100644
+index 0000000..3ca3432
+--- /dev/null
++++ b/test/fixtures/github/search_page_1.json
+@@ -0,0 +1 @@
++{"total_count":2,"incomplete_results":false,"items":[{"number":2,"title":"Synthetic second PR","html_url":"https://github.com/example/project/pull/2","user":{"login":"developer-two"},"repository_url":"https://api.github.com/repos/example/project","pull_request":{"merged_at":"2026-01-15T10:00:00Z"}}]}
+diff --git a/test/fixtures/github/search_page_2.json b/test/fixtures/github/search_page_2.json
+new file mode 100644
+index 0000000..af197ba
+--- /dev/null
++++ b/test/fixtures/github/search_page_2.json
+@@ -0,0 +1 @@
++{"total_count":2,"incomplete_results":false,"items":[{"number":1,"title":"Synthetic first PR","html_url":"https://github.com/example/project/pull/1","user":{"login":"developer-one"},"repository_url":"https://api.github.com/repos/example/project","pull_request":{"merged_at":"2026-01-15T09:00:00Z"}}]}
+diff --git a/test/fixtures/renderer/empty_day.html b/test/fixtures/renderer/empty_day.html
+new file mode 100644
+index 0000000..961af90
+--- /dev/null
++++ b/test/fixtures/renderer/empty_day.html
+@@ -0,0 +1 @@
++Nothing &lt;merged&gt; on 2026-01-15 &amp; done
+diff --git a/test/fixtures/renderer/hostile_titles.html b/test/fixtures/renderer/hostile_titles.html
+new file mode 100644
+index 0000000..fc7ab5a
+--- /dev/null
++++ b/test/fixtures/renderer/hostile_titles.html
+@@ -0,0 +1,6 @@
++<b>Merged PR digest — 2026-01-15</b>
++
++<b>o&amp;/&lt;r&gt;</b>
++• <a href="https://github.com/o%26%2F%3Cr%3E/pull/1?q=&quot;&amp;x=&lt;tag&gt;">#1 &lt;b&gt;x &amp; &quot;y&quot;&lt;/b&gt; 😀</a> — @a&lt;&amp;
++
++<b>Total:</b> 1 PR
+diff --git a/test/fixtures/renderer/multi_repo_day.html b/test/fixtures/renderer/multi_repo_day.html
+new file mode 100644
+index 0000000..a19c98e
+--- /dev/null
++++ b/test/fixtures/renderer/multi_repo_day.html
+@@ -0,0 +1,9 @@
++<b>Merged PR digest — 2026-01-15</b>
++
++<b>first/repo</b>
++• <a href="https://github.com/first%2Frepo/pull/1?q=&quot;&amp;x=&lt;tag&gt;">#1 First</a> — @alice
++
++<b>second/repo</b>
++• <a href="https://github.com/second%2Frepo/pull/2?q=&quot;&amp;x=&lt;tag&gt;">#2 Second</a> — @bob
++
++<b>Total:</b> 2 PRs · +7/−3 · 3 commits
+diff --git a/test/fixtures/renderer/normal_day.html b/test/fixtures/renderer/normal_day.html
+new file mode 100644
+index 0000000..7383033
+--- /dev/null
++++ b/test/fixtures/renderer/normal_day.html
+@@ -0,0 +1,6 @@
++<b>Merged PR digest — 2026-01-15</b>
++
++<b>owner/repo</b>
++• <a href="https://github.com/owner%2Frepo/pull/7?q=&quot;&amp;x=&lt;tag&gt;">#7 Ship feature</a> — @alice
++
++<b>Total:</b> 1 PR
+diff --git a/test/fixtures/telegram/rate_limited.json b/test/fixtures/telegram/rate_limited.json
+new file mode 100644
+index 0000000..f6bae6b
+--- /dev/null
++++ b/test/fixtures/telegram/rate_limited.json
+@@ -0,0 +1 @@
++{"ok":false,"error_code":429,"description":"Synthetic flood control","parameters":{"retry_after":2}}
+diff --git a/test/fixtures/telegram/send_error.json b/test/fixtures/telegram/send_error.json
+new file mode 100644
+index 0000000..c0748e8
+--- /dev/null
++++ b/test/fixtures/telegram/send_error.json
+@@ -0,0 +1 @@
++{"ok":false,"error_code":400,"description":"Synthetic bad request"}
+diff --git a/test/fixtures/telegram/send_ok.json b/test/fixtures/telegram/send_ok.json
+new file mode 100644
+index 0000000..e8319a1
+--- /dev/null
++++ b/test/fixtures/telegram/send_ok.json
+@@ -0,0 +1 @@
++{"ok":true,"result":{"message_id":42}}
+diff --git a/test/github_test.rb b/test/github_test.rb
+new file mode 100644
+index 0000000..7b07db4
+--- /dev/null
++++ b/test/github_test.rb
+@@ -0,0 +1,209 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class GithubTest < Minitest::Test
++  Response = Struct.new(:total_count, :incomplete_results, :items, keyword_init: true)
++
++  class FakeClient
++    attr_reader :searches, :details
++
++    def initialize(search_responses:, detail_responses: [])
++      @search_responses = search_responses.dup
++      @detail_responses = detail_responses.dup
++      @searches = []
++      @details = []
++    end
++
++    def search_issues(query, options)
++      @searches << [query, options]
++      value = @search_responses.shift
++      raise value if value.is_a?(Exception)
++      value
++    end
++
++    def pull_request(repo, number)
++      @details << [repo, number]
++      value = @detail_responses.shift
++      raise value if value.is_a?(Exception)
++      value
++    end
++  end
++
++  def test_builds_half_open_query_and_follows_pages
++    first = Response.new(total_count: 2, incomplete_results: false, items: [item(2, "2026-01-15T10:00:00Z")])
++    second = Response.new(total_count: 2, incomplete_results: false, items: [item(1, "2026-01-14T15:00:00Z")])
++    client = FakeClient.new(search_responses: [first, second])
++    digest = github(client).fetch(date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false)
++
++    expected = "repo:o/r is:pr is:merged merged:2026-01-14T15:00:00Z..2026-01-15T14:59:59Z"
++    assert_equal expected, client.searches.first.first
++    assert_equal [1, 2], client.searches.map { |call| call.last[:page] }
++    assert_equal [1, 2], digest.repositories.first.pull_requests.map(&:number)
++    assert_empty client.details
++  end
++
++  def test_rejects_repeated_items_during_pagination
++    first = Response.new(total_count: 2, incomplete_results: false, items: [item(1)])
++    second = Response.new(total_count: 2, incomplete_results: false, items: [item(1)])
++    client = FakeClient.new(search_responses: [first, second])
++
++    error = assert_raises(Prdigest::FetchError) do
++      github(client).fetch(
++        date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false
++      )
++    end
++
++    assert_match(/pagination repeated a pull request/, error.message)
++    assert_equal 2, client.searches.length
++  end
++
++  def test_accepts_false_and_zero_fields_from_json_hashes
++    response = JSON.parse('{"total_count":0,"incomplete_results":false,"items":[]}')
++    digest = github(FakeClient.new(search_responses: [response])).fetch(
++      date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false
++    )
++    assert_equal 0, digest.total_prs
++  end
++
++  def test_rejects_incomplete_over_cap_wrong_repo_and_outside_window
++    invalid = [
++      Response.new(total_count: 1, incomplete_results: true, items: []),
++      Response.new(total_count: 1001, incomplete_results: false, items: []),
++      Response.new(total_count: 1, incomplete_results: false, items: [item(1, "2026-01-15T00:00:00Z", repo: "x/y")]),
++      Response.new(total_count: 1, incomplete_results: false, items: [item(1, "2026-01-15T15:00:00Z")])
++    ]
++    invalid.each do |response|
++      error = assert_raises(Prdigest::FetchError) do
++        github(FakeClient.new(search_responses: [response])).fetch(
++          date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false
++        )
++      end
++      assert_match(/o\/r.*2026-01-15/, error.message)
++    end
++  end
++
++  def test_enriches_every_pull_or_fails_whole_day
++    response = Response.new(total_count: 2, incomplete_results: false, items: [item(1), item(2)])
++    details = [{ additions: 3, deletions: 1, commits: 2 }, { additions: 4, deletions: 2, commits: 1 }]
++    digest = github(FakeClient.new(search_responses: [response], detail_responses: details)).fetch(
++      date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: true
++    )
++    assert_equal [7, 3, 3], [digest.total_additions, digest.total_deletions, digest.total_commits]
++
++    client = FakeClient.new(search_responses: [response], detail_responses: [details.first, Octokit::ServerError.new])
++    assert_raises(Prdigest::FetchError) do
++      github(client).fetch(date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: true)
++    end
++  end
++
++  def test_retries_transient_failures_three_total_attempts
++    sleeps = []
++    response = Response.new(total_count: 0, incomplete_results: false, items: [])
++    client = FakeClient.new(search_responses: [Octokit::ServerError.new, response])
++    digest = github(client, sleeper: ->(seconds) { sleeps << seconds }).fetch(
++      date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false
++    )
++    assert_equal 0, digest.total_prs
++    assert_equal [1], sleeps
++
++    client = FakeClient.new(search_responses: Array.new(3) { Faraday::ConnectionFailed.new("token-secret") })
++    error = assert_raises(Prdigest::FetchError) do
++      github(client, token: "token-secret").fetch(
++        date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false
++      )
++    end
++    refute_includes error.message, "token-secret"
++    assert_equal 3, client.searches.length
++  end
++
++  def test_default_octokit_transport_is_bounded_to_three_http_attempts
++    request = stub_request(:get, %r{\Ahttps://api\.github\.com/search/issues\?}).to_return(
++      status: 500,
++      headers: { "Content-Type" => "application/json" },
++      body: JSON.generate(message: "synthetic server failure")
++    )
++
++    assert_raises(Prdigest::FetchError) do
++      github.fetch(
++        date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false
++      )
++    end
++
++    assert_requested request, times: 3
++  end
++
++  def test_retries_real_429_responses_using_retry_after
++    sleeps = []
++    stub_request(:get, %r{\Ahttps://api\.github\.com/search/issues\?}).to_return(
++      {
++        status: 429,
++        headers: { "Content-Type" => "application/json", "Retry-After" => "2" },
++        body: JSON.generate(message: "synthetic rate limit")
++      },
++      {
++        status: 200,
++        headers: { "Content-Type" => "application/json" },
++        body: JSON.generate(total_count: 0, incomplete_results: false, items: [])
++      }
++    )
++
++    digest = github(sleeper: ->(seconds) { sleeps << seconds }).fetch(
++      date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false
++    )
++
++    assert_equal 0, digest.total_prs
++    assert_equal [2], sleeps
++  end
++
++  def test_uses_rate_limit_reset_when_retry_after_is_absent
++    sleeps = []
++    stub_request(:get, %r{\Ahttps://api\.github\.com/search/issues\?}).to_return(
++      {
++        status: 429,
++        headers: { "Content-Type" => "application/json", "X-RateLimit-Reset" => "1045" },
++        body: JSON.generate(message: "synthetic rate limit")
++      },
++      {
++        status: 200,
++        headers: { "Content-Type" => "application/json" },
++        body: JSON.generate(total_count: 0, incomplete_results: false, items: [])
++      }
++    )
++
++    digest = github(sleeper: ->(seconds) { sleeps << seconds }, now: -> { 1_000 }).fetch(
++      date: Date.new(2026, 1, 15), window: tokyo_window, repositories: ["o/r"], line_stats: false
++    )
++
++    assert_equal 0, digest.total_prs
++    assert_equal [45], sleeps
++  end
++
++  def test_inspection_redacts_token
++    token = "synthetic-secret"
++    client = github(FakeClient.new(search_responses: []), token: token)
++
++    [client.inspect, client.to_s].each { |surface| refute_includes surface, token }
++  end
++
++  private
++
++  def github(client = nil, sleeper: ->(*) {}, token: "synthetic-token", now: -> { Time.now.to_i })
++    Prdigest::GitHub.new(token: token, client: client, sleeper: sleeper, now: now)
++  end
++
++  def tokyo_window
++    Prdigest::Clock.new(timezone: "Asia/Tokyo").window(Date.new(2026, 1, 15))
++  end
++
++  def item(number, merged_at = "2026-01-15T01:00:00Z", repo: "o/r")
++    {
++      number: number,
++      title: "Synthetic PR #{number}",
++      html_url: "https://github.com/#{repo}/pull/#{number}",
++      user: { login: "developer" },
++      repository_url: "https://api.github.com/repos/#{repo}",
++      pull_request: { merged_at: merged_at }
++    }
++  end
++end
+diff --git a/test/integration/run_test.rb b/test/integration/run_test.rb
+new file mode 100644
+index 0000000..601efe2
+--- /dev/null
++++ b/test/integration/run_test.rb
+@@ -0,0 +1,35 @@
++# frozen_string_literal: true
++
++require_relative "../test_helper"
++require "stringio"
++require "tmpdir"
++require "yaml"
++
++class RunIntegrationTest < Minitest::Test
++  def test_real_layers_complete_offline_dry_run
++    Dir.mktmpdir do |dir|
++      config_path = File.join(dir, "config.yml")
++      File.write(config_path, YAML.dump(
++        "timezone" => "UTC",
++        "github" => { "repos" => ["example/project"] },
++        "telegram" => { "chat_id" => 1, "chat_id_allowlist" => [1] },
++        "digest" => { "line_stats" => false, "send_empty" => true, "empty_message" => "No merges for {date}" }
++      ))
++      stub_request(:get, %r{https://api.github.com/search/issues}).to_return(
++        status: 200,
++        headers: { "Content-Type" => "application/json" },
++        body: JSON.generate(total_count: 0, incomplete_results: false, items: [])
++      )
++      out = StringIO.new
++      code = Prdigest::CLI.invoke(
++        ["run", "--config", config_path, "--date", "2026-01-15", "--dry-run", "--json"],
++        out: out, err: StringIO.new, env: { "GITHUB_TOKEN" => "synthetic-token" }
++      )
++      payload = JSON.parse(out.string)
++      assert_equal 0, code
++      assert_equal "dry_run", payload["status"]
++      assert_equal ["2026-01-15"], payload["requested_days"]
++      assert_equal ["No merges for 2026-01-15"], payload["chunks"]
++    end
++  end
++end
+diff --git a/test/packaging_test.rb b/test/packaging_test.rb
+new file mode 100644
+index 0000000..7a255ad
+--- /dev/null
++++ b/test/packaging_test.rb
+@@ -0,0 +1,45 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class PackagingTest < Minitest::Test
++  ROOT = File.expand_path("..", __dir__)
++
++  def test_release_version_and_deterministic_gem_manifest
++    assert_equal "0.1.0", Prdigest::VERSION
++    spec = Gem::Specification.load(File.join(ROOT, "prdigest.gemspec"))
++    %w[exe/prdigest README.md LICENSE CHANGELOG.md SECURITY.md lib/prdigest/runner.rb].each do |path|
++      assert_includes spec.files, path
++    end
++    refute spec.files.any? { |path| path.start_with?("test/", "bin/") }
++  end
++
++  def test_container_is_non_root_and_includes_timezone_data
++    dockerfile = File.read(File.join(ROOT, "Dockerfile"))
++    assert_match(/apk add .*tzdata/, dockerfile)
++    assert_match(/^USER prdigest$/, dockerfile)
++    refute_match(/^COPY \. \.$/, dockerfile)
++
++    dockerignore = File.readlines(File.join(ROOT, ".dockerignore"), chomp: true).reject do |line|
++      line.empty? || line.start_with?("#")
++    end
++    assert_equal "**", dockerignore.first
++    %w[!Dockerfile !Gemfile !prdigest.gemspec !lib/** !exe/**].each do |entry|
++      assert_includes dockerignore, entry
++    end
++  end
++
++  def test_systemd_owns_state_and_bounds_runtime
++    service = File.read(File.join(ROOT, "scripts/systemd/prdigest.service"))
++    assert_match(/^StateDirectory=prdigest$/, service)
++    assert_match(/^StateDirectoryMode=0700$/, service)
++    assert_match(/^UMask=0077$/, service)
++    assert_match(/^TimeoutStartSec=1h$/, service)
++  end
++
++  def test_webmock_blocks_unstubbed_network
++    assert_raises(WebMock::NetConnectNotAllowedError) do
++      Net::HTTP.get(URI("https://example.invalid/prdigest-offline-proof"))
++    end
++  end
++end
+diff --git a/test/renderer_test.rb b/test/renderer_test.rb
+new file mode 100644
+index 0000000..6c3da44
+--- /dev/null
++++ b/test/renderer_test.rb
+@@ -0,0 +1,130 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++require "cgi"
++
++class RendererTest < Minitest::Test
++  def test_renders_normal_day_from_golden_file
++    digest = day([pull("owner/repo", 7, "Ship feature", "alice")])
++    output = renderer.render(digest)
++    assert_equal fixture("normal_day.html"), output.chunks.fetch(0)
++    assert_equal "rendered", output.outcome
++  end
++
++  def test_renders_repositories_in_config_order_and_complete_stats
++    digest = day([
++      pull("second/repo", 2, "Second", "bob", additions: 3, deletions: 1, commits: 1),
++      pull("first/repo", 1, "First", "alice", additions: 4, deletions: 2, commits: 2)
++    ], repositories: ["first/repo", "second/repo"], line_stats: true)
++    assert_equal fixture("multi_repo_day.html"), renderer.render(digest).chunks.fetch(0)
++  end
++
++  def test_escapes_hostile_text_and_attributes
++    digest = day([pull("o&/<r>", 1, "<b>x & \"y\"</b> 😀", "a<&")], repositories: ["o&/<r>"])
++    chunk = renderer.render(digest).chunks.fetch(0)
++    assert_equal fixture("hostile_titles.html"), chunk
++    refute_includes chunk, "<b>x"
++    assert_equal 1, chunk.scan("<a href=").length
++  end
++
++  def test_empty_day_is_sent_or_intentionally_suppressed
++    digest = day([])
++    output = renderer(send_empty: true, empty_message: "Nothing <merged> on {date} & done").render(digest)
++    assert_equal fixture("empty_day.html"), output.chunks.fetch(0)
++
++    suppressed = renderer(send_empty: false).render(digest)
++    assert_empty suppressed.chunks
++    assert_equal "suppressed_empty", suppressed.outcome
++  end
++
++  def test_splits_large_repository_with_valid_bounded_chunks
++    pulls = 18.times.map { |index| pull("owner/repo", index + 1, "T" * 350, "developer") }
++    chunks = renderer(limit: 900).render(day(pulls)).chunks
++    assert_operator chunks.length, :>, 1
++    chunks.each do |chunk|
++      assert_operator Prdigest::Renderer.parsed_length(chunk), :<=, 900
++      assert_equal chunk.scan("<b>").length, chunk.scan("</b>").length
++      assert_equal chunk.scan("<a ").length, chunk.scan("</a>").length
++    end
++    rendered_numbers = chunks.flat_map { |chunk| chunk.scan(/#(\d+)/).flatten.map(&:to_i) }
++    assert_equal (1..18).to_a, rendered_numbers
++    assert_equal 1, chunks.sum { |chunk| chunk.scan("<b>Total:</b>").length }
++    assert_includes chunks.last, "<b>Total:</b>"
++  end
++
++  def test_two_project_five_pr_digest_keeps_every_section_and_footer_once
++    repositories = %w[honeycomb/project hive/project]
++    pulls = [
++      pull(repositories[0], 35, "Escape _ * [ brackets ] <tags> & code `one` " * 4, "alice",
++           additions: 1, deletions: 1, commits: 1),
++      pull(repositories[0], 36, "Second linked change " * 8, "bob",
++           additions: 1, deletions: 1, commits: 1),
++      pull(repositories[1], 101, "First Hive change " * 8, "carol",
++           additions: 1, deletions: 1, commits: 1),
++      pull(repositories[1], 102, "Second Hive change " * 8, "dan",
++           additions: 1, deletions: 1, commits: 1),
++      pull(repositories[1], 103, "Final Hive change " * 8, "erin",
++           additions: 1, deletions: 1, commits: 1)
++    ]
++
++    chunks = renderer(limit: 520).render(
++      day(pulls, repositories: repositories, line_stats: true)
++    ).chunks
++
++    assert_operator chunks.length, :>, 1
++    chunks.each do |chunk|
++      assert_operator Prdigest::Renderer.parsed_length(chunk), :<=, 520
++      assert_supported_html_is_balanced(chunk)
++    end
++    combined = chunks.join("\n")
++    assert_equal [35, 36, 101, 102, 103], combined.scan(/#(\d+)/).flatten.map(&:to_i)
++    repositories.each { |repository| assert_includes combined, repository }
++    assert_equal 1, combined.scan("<b>Total:</b> 5 PRs").length
++    assert_includes chunks.last, "<b>Total:</b> 5 PRs"
++  end
++
++  def test_rejects_an_impossible_single_entry
++    digest = day([pull("o/r", 1, "X" * 1_000, "dev")])
++    assert_raises(Prdigest::RenderError) { renderer(limit: 100).render(digest) }
++  end
++
++  private
++
++  def renderer(limit: 4096, send_empty: true, empty_message: "unused")
++    Prdigest::Renderer.new(send_empty: send_empty, empty_message: empty_message, limit: limit)
++  end
++
++  def day(pulls, repositories: nil, line_stats: false)
++    Prdigest::DayDigest.build(
++      date: Date.new(2026, 1, 15),
++      repository_order: repositories || pulls.map(&:repository).uniq.then { |repos| repos.empty? ? ["owner/repo"] : repos },
++      pulls: pulls,
++      line_stats: line_stats
++    )
++  end
++
++  def pull(repo, number, title, author, additions: nil, deletions: nil, commits: nil)
++    Prdigest::PullRequest.new(
++      repository: repo, number: number, title: title,
++      url: "https://github.com/#{CGI.escape(repo)}/pull/#{number}?q=\"&x=<tag>", author: author,
++      merged_at: Time.utc(2026, 1, 15, 10, number % 60), additions: additions, deletions: deletions, commits: commits
++    )
++  end
++
++  def fixture(name)
++    File.read(File.join(__dir__, "fixtures", "renderer", name)).chomp
++  end
++
++  def assert_supported_html_is_balanced(chunk)
++    stack = []
++    chunk.scan(%r{</?(?:b|a)(?:\s+href="[^"]*")?>}).each do |tag|
++      name = tag[%r{\A</?([a-z]+)}, 1]
++      if tag.start_with?("</")
++        assert_equal name, stack.pop
++      else
++        stack << name
++      end
++    end
++    assert_empty stack
++  end
++end
+diff --git a/test/result_test.rb b/test/result_test.rb
+new file mode 100644
+index 0000000..44b799c
+--- /dev/null
++++ b/test/result_test.rb
+@@ -0,0 +1,31 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class ResultTest < Minitest::Test
++  def test_envelope_always_contains_required_fields
++    result = Prdigest::Result.new(status: "success", mode: "scheduled")
++    assert_equal "prdigest-result", result.to_h.fetch(:schema)
++    assert_equal 1, result.to_h.fetch(:schema_version)
++    assert_equal %i[status mode requested_days settled_days skipped_days failed_date remaining_days error],
++                 result.to_h.keys.drop(2).first(8)
++    assert_equal 0, result.exit_code
++  end
++
++  def test_maps_failures_and_partial_progress_to_public_exits
++    {
++      "config" => 2, "cli" => 2, "github" => 3,
++      "telegram" => 4, "telegram_refused" => 4, "telegram_permanent" => 4,
++      "telegram_ambiguous" => 4, "delivery_checkpoint" => 4,
++      "delivery_checkpoint_permanent" => 4,
++      "state" => 5, "render" => 1
++    }.each do |kind, code|
++      result = Prdigest::Result.failure(mode: "scheduled", error_kind: kind, message: "safe")
++      assert_equal code, result.exit_code
++    end
++    result = Prdigest::Result.failure(mode: "scheduled", error_kind: "github", message: "safe", settled_days: [Date.new(2026, 1, 1)])
++    assert_equal "partial_failure", result.status
++    assert_equal 6, result.exit_code
++    assert_equal "github", result.error.fetch(:kind)
++  end
++end
+diff --git a/test/runner_test.rb b/test/runner_test.rb
+new file mode 100644
+index 0000000..4ea18c2
+--- /dev/null
++++ b/test/runner_test.rb
+@@ -0,0 +1,265 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++require "tmpdir"
++
++class RunnerTest < Minitest::Test
++  Window = Prdigest::Clock::Window
++
++  class FakeClock
++    def initialize(yesterday)
++      @yesterday = yesterday
++    end
++
++    attr_reader :yesterday
++
++    def window(date)
++      Window.new(date, Time.utc(date.year, date.month, date.day), Time.utc(date.year, date.month, date.day) + 86_400)
++    end
++  end
++
++  class FakeState
++    attr_reader :writes, :reads
++
++    def initialize(record, write_error: nil)
++      @record = record
++      @write_error = write_error
++      @writes = []
++      @reads = 0
++    end
++
++    def read(yesterday:)
++      @reads += 1
++      @record
++    end
++
++    def write(**attributes)
++      raise @write_error if @write_error
++      @writes << attributes
++      Prdigest::State::Record.new(attributes[:last_digested_date], attributes[:last_skip])
++    end
++  end
++
++  class FakeGitHub
++    attr_reader :dates
++
++    def initialize(error: nil)
++      @error = error
++      @dates = []
++    end
++
++    def fetch(date:, repositories:, line_stats:, window:)
++      @dates << date
++      raise @error if @error
++      Prdigest::DayDigest.build(date: date, repository_order: repositories, pulls: [], line_stats: line_stats)
++    end
++  end
++
++  class FakeRenderer
++    def initialize(chunks: ["digest"], outcome: "rendered", error: nil)
++      @output = Prdigest::Renderer::Output.new(chunks, outcome)
++      @error = error
++    end
++
++    def render(_digest)
++      raise @error if @error
++      @output
++    end
++  end
++
++  class FakeTelegram
++    attr_reader :batches
++
++    def initialize(error: nil)
++      @error = error
++      @batches = []
++    end
++
++    def deliver(chunks, digest_date:, checkpoint_store:, scope:)
++      @batches << chunks
++      raise @error if @error
++      {
++        accepted_chunks: chunks.length,
++        total_chunks: chunks.length,
++        status: "completed"
++      }
++    end
++  end
++
++  class CheckpointingTelegram
++    attr_reader :network_sends
++
++    def initialize
++      @network_sends = []
++    end
++
++    def deliver(chunks, digest_date:, checkpoint_store:, scope:)
++      checkpoint_store.with_checkpoint(
++        date: digest_date, chat_id: 1, scope: scope, chunks: chunks
++      ) do |delivery|
++        (delivery.next_chunk...delivery.chunks.length).each do |index|
++          delivery.begin_attempt(index)
++          @network_sends << delivery.chunks.fetch(index)
++          delivery.accept(index)
++        end
++        delivery.delivery
++      end
++    end
++  end
++
++  def test_first_scheduled_run_sends_and_checkpoints_yesterday
++    state = FakeState.new(Prdigest::State::Record.new(nil, nil))
++    github = FakeGitHub.new
++    telegram = FakeTelegram.new
++    result = runner(state: state, github: github, telegram: telegram).call
++    assert_equal "success", result.status
++    assert_equal [date(10)], result.requested_days
++    assert_equal [date(10)], result.settled_days
++    assert_equal [date(10)], github.dates
++    assert_equal [date(10)], state.writes.map { |write| write[:last_digested_date] }
++    assert_equal [["digest"]], telegram.batches
++    assert_equal 1, result.delivery.fetch(:accepted_chunks)
++  end
++
++  def test_over_cap_skip_is_checkpointed_before_fetch_failure
++    state = FakeState.new(Prdigest::State::Record.new(date(0), nil))
++    github = FakeGitHub.new(error: Prdigest::FetchError.new("safe", kind: "github"))
++    result = runner(state: state, github: github, max_catchup_days: 7).call
++    assert_equal "partial_failure", result.status
++    assert_equal 6, result.exit_code
++    assert_equal [date(1), date(2), date(3)], result.skipped_days
++    assert_equal date(4), result.failed_date
++    assert_equal date(3), state.writes.first[:last_digested_date]
++    assert_equal true, state.writes.first[:last_skip][:notice_pending]
++  end
++
++  def test_skip_checkpoint_failure_preserves_all_requested_days_as_remaining
++    state = FakeState.new(
++      Prdigest::State::Record.new(date(0), nil),
++      write_error: Prdigest::StateError.new("safe")
++    )
++
++    result = runner(state: state, github: FakeGitHub.new, max_catchup_days: 7).call
++
++    assert_equal "failure", result.status
++    assert_equal (date(4)..date(10)).to_a, result.requested_days
++    assert_equal result.requested_days, result.remaining_days
++    assert_nil result.failed_date
++  end
++
++  def test_recovered_skip_notice_is_cleared_after_next_settlement
++    audit = { start_date: date(1), end_date: date(3), notice_pending: true }
++    state = FakeState.new(Prdigest::State::Record.new(date(3), audit))
++    result = runner(state: state, github: FakeGitHub.new, max_catchup_days: 7).call
++    assert_equal [date(1), date(2), date(3)], result.skipped_days
++    assert_equal false, state.writes.first[:last_skip][:notice_pending]
++  end
++
++  def test_delivery_or_state_failure_leaves_current_day_unsettled
++    state = FakeState.new(Prdigest::State::Record.new(nil, nil))
++    telegram = FakeTelegram.new(error: Prdigest::SendError.new("safe"))
++    result = runner(state: state, github: FakeGitHub.new, telegram: telegram).call
++    assert_equal date(10), result.failed_date
++    assert_empty result.settled_days
++    assert_empty state.writes
++    assert_equal 4, result.exit_code
++
++    failing_state = FakeState.new(Prdigest::State::Record.new(nil, nil), write_error: Prdigest::StateError.new("safe"))
++    result = runner(state: failing_state, github: FakeGitHub.new).call
++    assert_equal 5, result.exit_code
++    assert_empty result.settled_days
++  end
++
++  def test_state_failure_after_delivery_does_not_resend_completed_chunks
++    Dir.mktmpdir do |root|
++      telegram = CheckpointingTelegram.new
++      failing_state = FakeState.new(
++        Prdigest::State::Record.new(nil, nil),
++        write_error: Prdigest::StateError.new("state unavailable")
++      )
++
++      first = runner(
++        state: failing_state,
++        github: FakeGitHub.new,
++        telegram: telegram,
++        delivery_state_path: File.join(root, "deliveries")
++      ).call
++      assert_equal "state", first.error.fetch(:kind)
++      assert_equal ["digest"], telegram.network_sends
++      assert_equal "completed", first.delivery.fetch(:status)
++
++      recovered_state = FakeState.new(Prdigest::State::Record.new(nil, nil))
++      second = runner(
++        state: recovered_state,
++        github: FakeGitHub.new,
++        telegram: telegram,
++        renderer: FakeRenderer.new(chunks: ["regenerated"]),
++        delivery_state_path: File.join(root, "deliveries")
++      ).call
++      assert_equal "success", second.status
++      assert_equal ["digest"], telegram.network_sends
++      assert_equal [date(10)], recovered_state.writes.map { |write| write.fetch(:last_digested_date) }
++    end
++  end
++
++  def test_replay_and_dry_run_never_construct_state_or_telegram
++    github = FakeGitHub.new
++    forbidden = -> { flunk "dependency must not be constructed" }
++    replay = runner(
++      date: "2025-01-01", dry_run: true, github: github,
++      state_factory: forbidden, telegram_factory: forbidden
++    ).call
++    assert_equal "explicit_date_replay", replay.mode
++    assert_equal "dry_run", replay.status
++    assert_equal [Date.new(2025, 1, 1)], replay.requested_days
++    assert_equal ["digest"], replay.chunks
++
++    scheduled = runner(dry_run: true, github: github, state_factory: forbidden, telegram_factory: forbidden).call
++    assert_equal "scheduled", scheduled.mode
++    assert_equal [date(10)], scheduled.requested_days
++  end
++
++  def test_suppressed_empty_settles_without_telegram
++    state = FakeState.new(Prdigest::State::Record.new(nil, nil))
++    result = runner(
++      state: state, github: FakeGitHub.new,
++      renderer: FakeRenderer.new(chunks: [], outcome: "suppressed_empty"),
++      telegram_factory: -> { flunk "Telegram must not be constructed" }
++    ).call
++    assert_equal "success", result.status
++    assert_equal [date(10)], result.settled_days
++  end
++
++  def test_inspection_does_not_expose_retained_environment_tokens
++    github_token = "synthetic-github-secret"
++    telegram_token = "synthetic-telegram-secret"
++    instance = runner(
++      github: FakeGitHub.new,
++      env: { "GITHUB_TOKEN" => github_token, "TELEGRAM_BOT_TOKEN" => telegram_token }
++    )
++
++    [instance.inspect, instance.to_s].each do |surface|
++      refute_includes surface, github_token
++      refute_includes surface, telegram_token
++    end
++  end
++
++  private
++
++  def runner(state: nil, github:, telegram: FakeTelegram.new, renderer: FakeRenderer.new,
++             date: nil, dry_run: false, max_catchup_days: 7,
++             state_factory: nil, telegram_factory: nil, env: {},
++             delivery_state_path: "/tmp/prdigest-test-deliveries")
++    config = Struct.new(:timezone, :repos, :line_stats?, :max_catchup_days, :delivery_state_path)
++                   .new("UTC", ["o/r"], false, max_catchup_days, delivery_state_path)
++    Prdigest::Runner.new(
++      config: config, date: date, dry_run: dry_run, clock: FakeClock.new(self.date(10)),
++      state_factory: state_factory || -> { state || FakeState.new(Prdigest::State::Record.new(nil, nil)) },
++      github: github, renderer: renderer, telegram_factory: telegram_factory || -> { telegram }, env: env
++    )
++  end
++
++  def date(day)
++    Date.new(2026, 1, 1) + day
++  end
++end
+diff --git a/test/schedule_test.rb b/test/schedule_test.rb
+new file mode 100644
+index 0000000..f2a8dc9
+--- /dev/null
++++ b/test/schedule_test.rb
+@@ -0,0 +1,45 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++
++class ScheduleTest < Minitest::Test
++  def test_first_run_only_requests_yesterday
++    result = Prdigest::Schedule.new(yesterday: date(10), last_digested_date: nil, max_catchup_days: 7).call
++    assert_equal [date(10)], result.requested_days
++    assert_empty result.skipped_days
++  end
++
++  def test_current_state_requests_nothing
++    result = schedule(last: 10, cap: 7)
++    assert_empty result.requested_days
++    assert_empty result.skipped_days
++  end
++
++  def test_backlog_is_oldest_first
++    result = schedule(last: 5, cap: 7)
++    assert_equal (6..10).map { |day| date(day) }, result.requested_days
++  end
++
++  def test_ten_day_backlog_skips_oldest_three
++    result = Prdigest::Schedule.new(yesterday: date(10), last_digested_date: date(0), max_catchup_days: 7).call
++    assert_equal (1..3).map { |day| date(day) }, result.skipped_days
++    assert_equal (4..10).map { |day| date(day) }, result.requested_days
++  end
++
++  def test_rejects_invalid_caps_and_future_state
++    [0, 31].each do |cap|
++      assert_raises(ArgumentError) { schedule(last: 1, cap: cap) }
++    end
++    assert_raises(ArgumentError) { schedule(last: 11, cap: 7) }
++  end
++
++  private
++
++  def schedule(last:, cap:)
++    Prdigest::Schedule.new(yesterday: date(10), last_digested_date: date(last), max_catchup_days: cap).call
++  end
++
++  def date(day)
++    Date.new(2026, 1, 1) + day
++  end
++end
+diff --git a/test/smoke/docker.sh b/test/smoke/docker.sh
+new file mode 100755
+index 0000000..10be044
+--- /dev/null
++++ b/test/smoke/docker.sh
+@@ -0,0 +1,35 @@
++#!/bin/sh
++set -eu
++
++root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
++tag="prdigest-smoke:0.1.0"
++volume="prdigest-smoke-$$"
++smoke_config=$(mktemp)
++trap 'rm -f "$smoke_config"; docker volume rm -f "$volume" >/dev/null 2>&1 || true; docker image rm -f "$tag" >/dev/null 2>&1 || true' EXIT HUP INT TERM
++
++sed -e 's/line_stats: true/line_stats: false/' -e 's/send_empty: true/send_empty: false/' \
++  "$root/configs/config.example.yml" > "$smoke_config"
++chmod 0644 "$smoke_config"
++
++docker build -t "$tag" "$root"
++test "$(docker run --rm --entrypoint id "$tag" -u)" != "0"
++docker run --rm --entrypoint ruby "$tag" -rtzinfo -e 'abort unless TZInfo::Timezone.get("Europe/London")'
++
++docker volume create "$volume" >/dev/null
++docker run --rm --user root --entrypoint sh -v "$volume:/var/lib/prdigest" "$tag" \
++  -c 'chown -R prdigest:prdigest /var/lib/prdigest && chmod 0700 /var/lib/prdigest'
++
++docker run --rm \
++  -e GITHUB_TOKEN=synthetic-smoke-token \
++  -e TELEGRAM_BOT_TOKEN=synthetic-smoke-token \
++  -e RUBYOPT=-r/opt/prdigest/offline_smoke_stubs.rb \
++  -v "$smoke_config:/etc/prdigest/config.yml:ro" \
++  -v "$root/test/support/offline_smoke_stubs.rb:/opt/prdigest/offline_smoke_stubs.rb:ro" \
++  -v "$volume:/var/lib/prdigest" \
++  "$tag" run --config /etc/prdigest/config.yml --json \
++  | grep -F '"status":"success"'
++
++docker run --rm --entrypoint sh -v "$volume:/var/lib/prdigest" "$tag" -c \
++  'test -f /var/lib/prdigest/state.json &&
++   test "$(stat -c %a /var/lib/prdigest/state.json)" = 600 &&
++   test "$(stat -c %u /var/lib/prdigest/state.json)" = "$(id -u)"'
+diff --git a/test/smoke/gem_install.sh b/test/smoke/gem_install.sh
+new file mode 100755
+index 0000000..c7ebe42
+--- /dev/null
++++ b/test/smoke/gem_install.sh
+@@ -0,0 +1,23 @@
++#!/bin/sh
++set -eu
++
++root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++
++gem build "$root/prdigest.gemspec" --output "$tmp/prdigest.gem"
++GEM_HOME="$tmp/gems" GEM_PATH="$tmp/gems" \
++  gem install "$tmp/prdigest.gem" --install-dir "$tmp/gems" --bindir "$tmp/bin" --no-document
++
++PATH="$tmp/bin:$PATH" GEM_HOME="$tmp/gems" GEM_PATH="$tmp/gems" \
++  prdigest version | grep -F "prdigest 0.1.0"
++
++mkdir -p "$tmp/config"
++cp "$root/configs/config.example.yml" "$tmp/config/config.yml"
++GITHUB_TOKEN=synthetic-smoke-token \
++  RUBYOPT="-r$root/test/support/offline_smoke_stubs.rb" \
++  PATH="$tmp/bin:$PATH" \
++  GEM_HOME="$tmp/gems" \
++  GEM_PATH="$tmp/gems" \
++  prdigest run --config "$tmp/config/config.yml" --date 2026-01-15 --dry-run --json \
++  | grep -F '"status":"dry_run"'
+diff --git a/test/smoke/systemd.sh b/test/smoke/systemd.sh
+new file mode 100755
+index 0000000..dce4943
+--- /dev/null
++++ b/test/smoke/systemd.sh
+@@ -0,0 +1,11 @@
++#!/bin/sh
++set -eu
++
++root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++
++sed "s#/usr/local/bin/prdigest#$root/exe/prdigest#" \
++  "$root/scripts/systemd/prdigest.service" >"$tmp/prdigest.service"
++cp "$root/scripts/systemd/prdigest.timer" "$tmp/prdigest.timer"
++systemd-analyze verify "$tmp/prdigest.service" "$tmp/prdigest.timer"
+diff --git a/test/state_test.rb b/test/state_test.rb
+new file mode 100644
+index 0000000..2f5bcaf
+--- /dev/null
++++ b/test/state_test.rb
+@@ -0,0 +1,84 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++require "tmpdir"
++
++class StateTest < Minitest::Test
++  def setup
++    @dir = Dir.mktmpdir
++    @path = File.join(@dir, "state.json")
++    @state = Prdigest::State.new(path: @path, timezone: "Europe/London")
++  end
++
++  def teardown
++    FileUtils.remove_entry(@dir)
++  end
++
++  def test_missing_state_is_first_run
++    assert_nil @state.read(yesterday: Date.new(2026, 1, 10)).last_digested_date
++  end
++
++  def test_round_trips_versioned_state_with_restrictive_permissions
++    skip_audit = { start_date: Date.new(2026, 1, 1), end_date: Date.new(2026, 1, 3), notice_pending: true }
++    @state.write(last_digested_date: Date.new(2026, 1, 3), last_skip: skip_audit)
++    record = @state.read(yesterday: Date.new(2026, 1, 10))
++    assert_equal Date.new(2026, 1, 3), record.last_digested_date
++    assert_equal skip_audit, record.last_skip
++    assert_equal 0o600, File.stat(@path).mode & 0o777
++    assert_empty Dir.glob(File.join(@dir, ".state.json.tmp-*"))
++  end
++
++  def test_rejects_malformed_unsupported_mismatched_and_future_state
++    invalid = [
++      "not json",
++      JSON.generate(version: 2, timezone: "Europe/London", last_digested_date: "2026-01-01"),
++      JSON.generate(version: 1, timezone: "UTC", last_digested_date: "2026-01-01"),
++      JSON.generate(version: 1, timezone: "Europe/London", last_digested_date: "bad"),
++      JSON.generate(version: 1, timezone: "Europe/London", last_digested_date: "2026-01-11"),
++      JSON.generate(version: 1, timezone: "Europe/London"),
++      JSON.generate(
++        version: 1, timezone: "Europe/London", last_digested_date: "2026-01-03",
++        last_skip: { start_date: "2026-01-01", end_date: "2026-01-04", notice_pending: true }
++      )
++    ]
++    invalid.each do |payload|
++      File.write(@path, payload)
++      assert_raises(Prdigest::StateError) { @state.read(yesterday: Date.new(2026, 1, 10)) }
++    end
++  end
++
++  def test_failed_atomic_replace_preserves_previous_file
++    @state.write(last_digested_date: Date.new(2026, 1, 1))
++    original = File.binread(@path)
++    state = Prdigest::State.new(path: @path, timezone: "Europe/London", rename: ->(*) { raise Errno::EACCES })
++    assert_raises(Prdigest::StateError) { state.write(last_digested_date: Date.new(2026, 1, 2)) }
++    assert_equal original, File.binread(@path)
++    assert_empty Dir.glob(File.join(@dir, ".state.json.tmp-*"))
++  end
++
++  def test_failed_post_rename_directory_sync_restores_previous_file
++    @state.write(last_digested_date: Date.new(2026, 1, 1))
++    original = File.binread(@path)
++    state = Prdigest::State.new(
++      path: @path,
++      timezone: "Europe/London",
++      directory_sync: ->(*) { raise Errno::EIO }
++    )
++
++    assert_raises(Prdigest::StateError) { state.write(last_digested_date: Date.new(2026, 1, 2)) }
++    assert_equal original, File.binread(@path)
++    assert_empty Dir.glob(File.join(@dir, ".state.json.*-*"))
++  end
++
++  def test_failed_first_post_rename_directory_sync_removes_new_file
++    state = Prdigest::State.new(
++      path: @path,
++      timezone: "Europe/London",
++      directory_sync: ->(*) { raise Errno::EIO }
++    )
++
++    assert_raises(Prdigest::StateError) { state.write(last_digested_date: Date.new(2026, 1, 1)) }
++    refute_path_exists @path
++    assert_empty Dir.glob(File.join(@dir, ".state.json.*-*"))
++  end
++end
+diff --git a/test/support/offline_smoke_stubs.rb b/test/support/offline_smoke_stubs.rb
+new file mode 100644
+index 0000000..43cf740
+--- /dev/null
++++ b/test/support/offline_smoke_stubs.rb
+@@ -0,0 +1,18 @@
++# frozen_string_literal: true
++
++# Loaded with RUBYOPT by package/container smokes. It replaces the only network
++# read used by dry-run and then refuses every lower-level HTTP request.
++require "octokit"
++require "net/http"
++
++class Octokit::Client
++  def search_issues(_query, _options = {})
++    { total_count: 0, incomplete_results: false, items: [] }
++  end
++end
++
++class Net::HTTP
++  def request(*)
++    raise "offline smoke attempted external HTTP"
++  end
++end
+diff --git a/test/telegram_test.rb b/test/telegram_test.rb
+new file mode 100644
+index 0000000..662ad65
+--- /dev/null
++++ b/test/telegram_test.rb
+@@ -0,0 +1,263 @@
++# frozen_string_literal: true
++
++require_relative "test_helper"
++require "tmpdir"
++
++class TelegramTest < Minitest::Test
++  Response = Struct.new(:code, :body, keyword_init: true)
++
++  class FakeHTTP
++    attr_accessor :use_ssl, :verify_mode, :verify_hostname, :open_timeout, :read_timeout, :write_timeout
++    attr_reader :requests
++
++    def initialize(response)
++      @response = response
++      @requests = []
++    end
++
++    def request(request)
++      @requests << request
++      @response
++    end
++  end
++
++  class FakeTransport
++    attr_reader :calls
++
++    def initialize(responses)
++      @responses = responses.dup
++      @calls = []
++    end
++
++    def call(uri:, request:, open_timeout:, read_timeout:, write_timeout:)
++      @calls << { uri: uri, request: request, timeouts: [open_timeout, read_timeout, write_timeout] }
++      response = @responses.shift
++      raise response if response.is_a?(Exception)
++      response
++    end
++  end
++
++  def test_sends_expected_json_to_fixed_tls_origin
++    transport = FakeTransport.new([ok])
++    deliver(sender(transport: transport), ["<b>Hello</b>"])
++    call = transport.calls.fetch(0)
++    assert_equal "https", call[:uri].scheme
++    assert_equal "api.telegram.org", call[:uri].host
++    assert_equal "/botsynthetic-secret/sendMessage", call[:uri].path
++    payload = JSON.parse(call[:request].body)
++    assert_equal(-1001, payload["chat_id"])
++    assert_equal "<b>Hello</b>", payload["text"]
++    assert_equal "HTML", payload["parse_mode"]
++    assert_equal true, payload["link_preview_options"]["is_disabled"]
++    assert_equal [10, 30, 30], call[:timeouts]
++  end
++
++  def test_refuses_unlisted_chat_before_transport
++    transport = FakeTransport.new([ok])
++    error = assert_raises(Prdigest::SendError) do
++      deliver(sender(transport: transport, chat_id: 2, allowlist: [1]), ["hello"])
++    end
++    assert_equal "telegram_refused", error.kind
++    assert_empty transport.calls
++  end
++
++  def test_honors_rate_limit_and_caps_attempts
++    sleeps = []
++    limited = Response.new(code: "429", body: fixture("rate_limited.json"))
++    transport = FakeTransport.new([limited, ok])
++    deliver(sender(transport: transport, sleeper: ->(seconds) { sleeps << seconds }), ["hello"])
++    assert_equal [2], sleeps
++    assert_equal 2, transport.calls.length
++
++    excessive = Response.new(code: "429", body: JSON.generate(ok: false, parameters: { retry_after: 61 }))
++    error = assert_raises(Prdigest::SendError) do
++      deliver(
++        sender(transport: FakeTransport.new([excessive]), sleeper: ->(*) { flunk "must not sleep" }),
++        ["hello"]
++      )
++    end
++    assert_match(/retry_wait_exceeded/, error.message)
++
++    repeated = FakeTransport.new([limited, limited, limited])
++    assert_raises(Prdigest::SendError) do
++      deliver(sender(transport: repeated, sleeper: ->(*) {}), ["hello"])
++    end
++    assert_equal 3, repeated.calls.length
++  end
++
++  def test_retry_waits_share_one_sixty_second_budget
++    sleeps = []
++    limited = Response.new(
++      code: "429",
++      body: JSON.generate(ok: false, parameters: { retry_after: 31 })
++    )
++    transport = FakeTransport.new([limited, limited, ok])
++
++    error = assert_raises(Prdigest::SendError) do
++      deliver(sender(transport: transport, sleeper: ->(seconds) { sleeps << seconds }), ["hello"])
++    end
++
++    assert_match(/retry_wait_exceeded/, error.message)
++    assert_equal [31], sleeps
++    assert_equal 2, transport.calls.length
++  end
++
++  def test_retries_server_errors_but_not_permanent_failures
++    transport = FakeTransport.new([Response.new(code: "500", body: "{}"), ok])
++    deliver(sender(transport: transport, sleeper: ->(*) {}), ["hello"])
++    assert_equal 2, transport.calls.length
++
++    [Response.new(code: "400", body: fixture("send_error.json")), Response.new(code: "200", body: fixture("send_error.json"))].each do |response|
++      transport = FakeTransport.new([response, ok])
++      error = assert_raises(Prdigest::SendError) { deliver(sender(transport: transport), ["hello"]) }
++      assert_equal "telegram_permanent", error.kind
++      assert_equal 1, transport.calls.length
++    end
++  end
++
++  def test_paces_chunks_and_stops_on_later_failure
++    sleeps = []
++    transport = FakeTransport.new([ok, Response.new(code: "400", body: "{}")])
++    assert_raises(Prdigest::SendError) do
++      deliver(sender(transport: transport, sleeper: ->(seconds) { sleeps << seconds }), ["one", "two", "three"])
++    end
++    assert_equal [1], sleeps
++    assert_equal %w[one two], transport.calls.map { |call| JSON.parse(call[:request].body).fetch("text") }
++  end
++
++  def test_retrying_a_failed_later_chunk_never_resends_the_accepted_prefix
++    Dir.mktmpdir do |root|
++      store = Prdigest::DeliveryCheckpointStore.new(root: root)
++      server_error = Response.new(code: "500", body: "{}")
++      first_transport = FakeTransport.new([ok, server_error, server_error, server_error])
++
++      error = assert_raises(Prdigest::SendError) do
++        sender(transport: first_transport, sleeper: ->(*) {}).deliver(
++          %w[one two three],
++          digest_date: Date.new(2026, 7, 23),
++          checkpoint_store: store,
++          scope: %w[acme/one acme/two]
++        )
++      end
++      assert_equal "telegram", error.kind
++      assert_equal 1, error.delivery.fetch(:accepted_chunks)
++      assert_equal 1, error.delivery.fetch(:failed_chunk)
++
++      second_transport = FakeTransport.new([ok, ok])
++      result = sender(transport: second_transport, sleeper: ->(*) {}).deliver(
++        %w[regenerated body],
++        digest_date: Date.new(2026, 7, 23),
++        checkpoint_store: store,
++        scope: %w[acme/one acme/two]
++      )
++
++      assert_equal %w[one two two two two three],
++                   (first_transport.calls + second_transport.calls).map {
++                     |call| JSON.parse(call[:request].body).fetch("text")
++                   }
++      assert_equal 3, result.fetch(:accepted_chunks)
++      assert_equal "completed", result.fetch(:status)
++    end
++  end
++
++  def test_ambiguous_transport_failure_and_permanent_400_never_replay
++    [
++      [Timeout::Error.new("response lost"), "telegram_ambiguous"],
++      [Response.new(code: "400", body: fixture("send_error.json")), "telegram_permanent"]
++    ].each do |failure, expected_kind|
++      Dir.mktmpdir do |root|
++        store = Prdigest::DeliveryCheckpointStore.new(root: root)
++        first_transport = FakeTransport.new([failure])
++        error = assert_raises(Prdigest::SendError) do
++          sender(transport: first_transport, sleeper: ->(*) {}).deliver(
++            ["one"],
++            digest_date: Date.new(2026, 7, 23),
++            checkpoint_store: store,
++            scope: ["acme/one"]
++          )
++        end
++        assert_equal expected_kind, error.kind
++
++        replay_transport = FakeTransport.new([ok])
++        replay = assert_raises(Prdigest::SendError) do
++          sender(transport: replay_transport, sleeper: ->(*) {}).deliver(
++            ["one"],
++            digest_date: Date.new(2026, 7, 23),
++            checkpoint_store: store,
++            scope: ["acme/one"]
++          )
++        end
++        assert_equal expected_kind, replay.kind
++        assert_empty replay_transport.calls
++      end
++    end
++  end
++
++  def test_paces_chunks_across_consecutive_deliver_calls
++    sleeps = []
++    transport = FakeTransport.new([ok, ok])
++    client = sender(transport: transport, sleeper: ->(seconds) { sleeps << seconds })
++
++    deliver(client, ["day one"], date: Date.new(2026, 7, 22))
++    deliver(client, ["day two"], date: Date.new(2026, 7, 23))
++
++    assert_equal [1], sleeps
++  end
++
++  def test_net_http_transport_enforces_tls_and_does_not_follow_redirects
++    redirect = Response.new(code: "302", body: "synthetic redirect")
++    http = FakeHTTP.new(redirect)
++    uri = URI("https://api.telegram.org/botsynthetic/sendMessage")
++    request = Net::HTTP::Post.new(uri.request_uri)
++
++    response = Net::HTTP.stub(:new, ->(host, port) {
++      assert_equal "api.telegram.org", host
++      assert_equal 443, port
++      http
++    }) do
++      Prdigest::Telegram::NetHTTPTransport.new.call(
++        uri: uri, request: request, open_timeout: 10, read_timeout: 30, write_timeout: 30
++      )
++    end
++
++    assert_same redirect, response
++    assert_equal true, http.use_ssl
++    assert_equal OpenSSL::SSL::VERIFY_PEER, http.verify_mode
++    assert_equal true, http.verify_hostname
++    assert_equal [10, 30, 30], [http.open_timeout, http.read_timeout, http.write_timeout]
++    assert_equal [request], http.requests
++  end
++
++  def test_public_errors_and_inspection_redact_token
++    token = "synthetic-secret"
++    transport = FakeTransport.new(Array.new(3) { IOError.new("#{token} https://api.telegram.org/bot#{token}/sendMessage") })
++    client = sender(transport: transport, token: token, sleeper: ->(*) {})
++    error = assert_raises(Prdigest::SendError) { deliver(client, ["hello"]) }
++    [error.message, error.inspect, client.inspect].each { |surface| refute_includes surface, token }
++  end
++
++  private
++
++  def sender(transport:, token: "synthetic-secret", chat_id: -1001, allowlist: [-1001], sleeper: ->(*) {})
++    Prdigest::Telegram.new(token: token, chat_id: chat_id, allowlist: allowlist, transport: transport, sleeper: sleeper)
++  end
++
++  def deliver(client, chunks, date: Date.new(2026, 7, 23), scope: ["acme/one"])
++    Dir.mktmpdir do |root|
++      client.deliver(
++        chunks,
++        digest_date: date,
++        checkpoint_store: Prdigest::DeliveryCheckpointStore.new(root: root),
++        scope: scope
++      )
++    end
++  end
++
++  def ok
++    Response.new(code: "200", body: fixture("send_ok.json"))
++  end
++
++  def fixture(name)
++    File.read(File.join(__dir__, "fixtures", "telegram", name))
++  end
++end
+diff --git a/test/test_helper.rb b/test/test_helper.rb
+index ce815dc..5064d20 100644
+--- a/test/test_helper.rb
++++ b/test/test_helper.rb
+@@ -2,4 +2,7 @@
+ 
+ $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+ require "minitest/autorun"
++require "webmock/minitest"
+ require "prdigest"
++
++WebMock.disable_net_connect!
+diff --git a/wiki/architecture.md b/wiki/architecture.md
+new file mode 100644
+index 0000000..80f5400
+--- /dev/null
++++ b/wiki/architecture.md
+@@ -0,0 +1,26 @@
++# Architecture
++
++PRDigest is a synchronous oneshot. `CLI` resolves configuration and secrets,
++then `Runner` coordinates pure time/schedule logic, atomic `State`, the `GitHub`
++client, `Renderer`, and allowlist-guarded `Telegram` delivery. Dependencies are
++injectable so the automated suite never contacts a real service.
++
++Scheduled real runs read timezone-bound state, checkpoint an over-cap skipped
++prefix, and process retained dates oldest-first. For each date, the clock derives
++a half-open UTC window, GitHub pagination and optional details complete, rendering
++produces every valid HTML chunk, delivery finishes, and only then state advances.
++Before the first request, a separate per-date delivery checkpoint durably stores
++the rendered payload, chat, repository scope, and next unsent chunk. Definite
++acceptance advances that checkpoint; bounded retry applies only to definite
++429/5xx rejection. Permanent responses and ambiguous transport outcomes park the
++checkpoint and fail closed. A date-cursor failure after complete delivery can
++therefore be retried without sending accepted chunks again.
++
++Explicit replay and dry-run bypass state. Dry-run also bypasses Telegram. Empty
++days either send the configured escaped message or settle through an explicit
++suppression outcome. The systemd oneshot is the date-scheduling concurrency
++boundary. A nonblocking per-date delivery lock additionally prevents two
++processes from sending the same checkpoint. The repeatable CLI
++`--repo owner/name` override is the embedding boundary for an external project
++registry such as Hive; PRDigest remains the only fetch, render, chunk, and
++delivery engine.
+diff --git a/wiki/decisions.md b/wiki/decisions.md
+new file mode 100644
+index 0000000..c0cfcf6
+--- /dev/null
++++ b/wiki/decisions.md
+@@ -0,0 +1,15 @@
++# Decisions
++
++- State version 1 binds progress to the configured IANA timezone and fails closed.
++- Catch-up keeps the newest capped window and durably audits the skipped prefix.
++- Search queries convert `[start, end)` into GitHub's inclusive whole-second range,
++  then validate every returned repository and merge timestamp again.
++- Optional line statistics are all-or-nothing; partial enrichment never renders.
++- Telegram HTML is built from escaped semantic fragments and measured after entity
++  parsing before chunks are sent.
++- Delivery is at least once. A later chunk or state failure may duplicate earlier
++  messages on retry rather than silently lose a day.
++- Stable result data is separate from presentation; the CLI maps it to human/JSON
++  output and public exit codes.
++- systemd remains the only scheduler for v0.1.0; `serve` is a compatibility stub.
++- Release preparation is reversible and never tags, publishes, or creates a release.
+diff --git a/wiki/dependencies.md b/wiki/dependencies.md
+new file mode 100644
+index 0000000..778cb66
+--- /dev/null
++++ b/wiki/dependencies.md
+@@ -0,0 +1,12 @@
++# Dependencies
++
++Runtime dependencies are Thor for the CLI surface, Octokit for GitHub REST,
++Faraday Retry as part of the HTTP stack, TZInfo for IANA civil-time conversion,
++and ERB because Octokit loads it on supported Ruby versions. Telegram delivery
++uses Ruby's `Net::HTTP` with peer verification and no redirect handling.
++
++Minitest, Rake, and WebMock are development-only. WebMock disables external
++connections for every automated test. Linux/container deployments require the
++system `tzdata` database; the Alpine image installs it explicitly.
++
++The supported Ruby matrix is 3.2, 3.3, and 3.4.
+diff --git a/wiki/gaps.md b/wiki/gaps.md
+new file mode 100644
+index 0000000..1580578
+--- /dev/null
++++ b/wiki/gaps.md
+@@ -0,0 +1,16 @@
++# Known gaps
++
++- GitHub publishes no search-index freshness SLA. The 09:05 host-local timer and
++  explicit replay reduce the risk but cannot prove a merge was indexed on time.
++- GitHub search's 1,000-result ceiling is a hard v0.1.0 operating limit; PRDigest
++  refuses incomplete/over-cap days instead of truncating.
++- Concurrent scheduled invocations still have no global date-cursor lock and are
++  unsupported. Per-date delivery is locked and checkpointed, so a competing
++  sender cannot duplicate the same stored payload.
++- Ambiguous Telegram transport outcomes require operator reconciliation. PRDigest
++  deliberately does not guess whether Telegram accepted an in-flight chunk.
++- Authenticated GitHub/Telegram smokes and the clean Ubuntu walkthrough require
++  operator infrastructure and credentials. Their checklist is documented in the
++  README; retain only redacted timestamp/status evidence when performed.
++- Independent review is owned by the stage-6 autonomous review loop and is not
++  claimed by the implementation stage.
+diff --git a/wiki/index.md b/wiki/index.md
+new file mode 100644
+index 0000000..30fd58f
+--- /dev/null
++++ b/wiki/index.md
+@@ -0,0 +1,7 @@
++# PRDigest wiki
++
++- [Architecture](architecture.md)
++- [Dependencies](dependencies.md)
++- [Decisions](decisions.md)
++- [Known gaps](gaps.md)
++- [v0.1.0 implementation log](log.d/20260716-prdigest-v0-1-0.md)
+diff --git a/wiki/log.d/20260716-prdigest-v0-1-0.md b/wiki/log.d/20260716-prdigest-v0-1-0.md
+new file mode 100644
+index 0000000..f6c1a85
+--- /dev/null
++++ b/wiki/log.d/20260716-prdigest-v0-1-0.md
+@@ -0,0 +1,14 @@
++# 2026-07-16 — PRDigest v0.1.0 implementation
++
++Implemented the production oneshot from the Ruby scaffold: timezone-correct
++windows, atomic state and catch-up, complete GitHub fetching, deterministic
++Telegram HTML, guarded delivery, runner modes, result/exit contracts, and
++production packaging.
++
++Automated verification is offline and covers Ruby behavior, deterministic gem
++contents, container/systemd contracts, and clean-install smoke scripts. The CI
++matrix runs Ruby 3.2–3.4 plus isolated gem, Docker, and systemd gates.
++
++Manual credentialed smokes, the clean VPS walkthrough, and independent review
++remain release gates. No tag, publication, release, or live external request was
++created during implementation.
+diff --git a/wiki/log.d/20260724-durable-delivery-contract.md b/wiki/log.d/20260724-durable-delivery-contract.md
+new file mode 100644
+index 0000000..2fee5d9
+--- /dev/null
++++ b/wiki/log.d/20260724-durable-delivery-contract.md
+@@ -0,0 +1,11 @@
++# 2026-07-24 — Durable delivery and embedding contract
++
++- Added repeatable `--repo owner/name` overrides and the versioned
++  `prdigest-result` JSON contract for registry-driven callers such as Hive.
++- Made the rendered chunk list durable per digest date and resume delivery at the
++  next definitely-unsent chunk.
++- Classified deterministic Telegram failures as permanent, parked ambiguous
++  transport outcomes, and retained bounded retry only for definite transient
++  responses.
++- Added a two-project, five-PR multi-chunk regression covering escaped content,
++  links, balanced HTML, complete sections, and the final footer.

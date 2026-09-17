@@ -1,0 +1,135 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "agent-plugins",
+  "repository": "ivankuznetsov/agent-plugins",
+  "id": 1930,
+  "slug": "migrate-every-agent-plugin-to-260709-3082",
+  "title": "Portable plugins on four agent hosts",
+  "role": "supporting",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-07-18T19:42:00.939611Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": null,
+  "age_seconds": 1424808,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/agent-plugins-1930/idea.md",
+      "bytes": 3406,
+      "sha256": "78b02ffa9d8f775887b3f63bec6bb3f58551119b3044cb17c54bacfac3c08e97",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/agent-plugins-1930/brainstorm.md",
+      "bytes": 13190,
+      "sha256": "6c8c271c2b145b718780826d52d187f39265ef4004c516dffc1f56a903f68eb5",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/agent-plugins-1930/plan.md",
+      "bytes": 57958,
+      "sha256": "c8edaf01e571a9320d2ae069e28f0bf07d9702f2162ff10df3ec5464a43d366c",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/agent-plugins-1930/task.md",
+      "bytes": 1017,
+      "sha256": "2736cff9461e1039e2593ecda54b81f34be5e95c1f581e1c9d4f17f397551663",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/agent-plugins-1930/pr.md",
+      "bytes": 2444,
+      "sha256": "1d6f9392664fcd1018f08de55c4b5adfa11c3571db54b42723c4c93f640c72b0",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "artifact.md",
+      "path": "documents/agent-plugins-1930/artifact.md",
+      "bytes": 1608,
+      "sha256": "c7a981e261410636accddb73bb05910ece584faedfefb92e54dc961820ce25f1",
+      "role": "artifact",
+      "format": "markdown"
+    },
+    {
+      "name": "summary.md",
+      "path": "documents/agent-plugins-1930/summary.md",
+      "bytes": 1966,
+      "sha256": "70f86eff438975513858722ba249f42567f8b30cdc11648101f8012686ad489d",
+      "role": "outcome",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/agent-plugins-1930/reviews/escalations-01.md",
+      "bytes": 109,
+      "sha256": "594bd4eec4f5fef8cc4bd5b5e4f933163ebc28951dc26cd5a862828130b6573f",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/agent-plugins-1930/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/agent-plugins",
+    "url": "https://github.com/ivankuznetsov/agent-plugins/pull/21",
+    "number": 21,
+    "state": "MERGED",
+    "merged_at": "2026-07-18T19:18:20Z",
+    "merge_oid": "03c4f3786ae677a489f295947406dac7cc331681",
+    "head_oid": "0740d3855d45c6e996984125f7521385a275b596",
+    "base_branch": "main",
+    "branch": "migrate-every-agent-plugin-to-260709-3082",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "truncated",
+    "path": "changes/agent-plugins-1930.patch",
+    "bytes": 524288,
+    "sha256": "8ad4e8176b8781ef1d41359adaf64429b3c7e17df07bbd8fef350351e14423cc",
+    "truncated": true,
+    "redacted": false,
+    "provenance": {
+      "repository": "ivankuznetsov/agent-plugins",
+      "url": "https://github.com/ivankuznetsov/agent-plugins/pull/21",
+      "number": 21,
+      "state": "MERGED",
+      "merged_at": "2026-07-18T19:18:20Z",
+      "merge_oid": "03c4f3786ae677a489f295947406dac7cc331681",
+      "head_oid": "0740d3855d45c6e996984125f7521385a275b596",
+      "base_branch": "main",
+      "branch": "migrate-every-agent-plugin-to-260709-3082",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

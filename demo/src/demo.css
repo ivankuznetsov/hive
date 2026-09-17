@@ -1,0 +1,79 @@
+/* Snapshot chrome around the real exported Hive interface. */
+.demo-snapshot { margin: 0; min-width: 0; }
+.demo-snapshot *, .demo-snapshot *::before, .demo-snapshot *::after { box-sizing: border-box; }
+.demo-snapshot [hidden] { display: none !important; }
+#demo-content { min-width: 0; max-width: 100%; padding-inline: var(--page-gutter, 24px); padding-bottom: 32px; }
+#demo-content:focus { outline: none; }
+#demo-content pre { max-width: 100%; overflow-x: auto; }
+.demo-snapshot :focus-visible { outline: 3px solid var(--accent, #b3522f); outline-offset: 3px; }
+
+.snapshot-banner { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 20px; padding: 10px var(--page-gutter, 24px); background: var(--bg-sunken, #f4f1e8); color: var(--ink-muted); font-size: 13px; border-bottom: 1px solid var(--line); }
+.snapshot-banner strong { color: var(--ink); }
+.snapshot-banner p { margin: 0; max-width: 900px; line-height: 1.5; }
+.snapshot-banner-meta { margin-left: 8px; }
+.snapshot-banner-meta time { font-variant-numeric: tabular-nums; }
+
+.demo-snapshot .topbar-menu { display: flex !important; flex-wrap: wrap; align-items: center; gap: 4px 18px; }
+.demo-snapshot .topbar-session { display: flex; align-items: center; gap: 8px; }
+.demo-snapshot .brand-mark { display: grid; place-items: center; width: 30px; height: 32px; background: #f4cc44; color: #211e12; font-size: 19px; font-weight: 750; border-radius: 8px; }
+
+.snapshot-scope { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin-block: 20px; padding: 20px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--panel); }
+.snapshot-scope h1 { font-size: clamp(20px, 2.6vw, 28px); margin: 0 0 6px; }
+.snapshot-scope p { margin: 0; line-height: 1.6; }
+.snapshot-scope-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.snapshot-action-note { margin: 12px var(--page-gutter, 24px) 0; padding: 12px 16px; border: 1px solid #bc941d; border-radius: 10px; background: #fdf5dc; color: var(--ink); font-size: 14px; line-height: 1.6; }
+.snapshot-action-note a { margin-left: 6px; }
+.snapshot-action-note:focus { outline: none; }
+
+.snapshot-task-meta { color: var(--ink-muted); font-size: 14px; line-height: 1.6; }
+.snapshot-document-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.snapshot-document-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.snapshot-document-list a { word-break: break-word; }
+.snapshot-provenance { margin-block: 24px; padding: 16px; border: 1px dashed var(--line-strong); border-radius: 12px; }
+.snapshot-provenance h2 { margin-top: 0; font-size: 18px; }
+.snapshot-media-omitted, .snapshot-link-omitted { color: var(--ink-muted); font-style: italic; }
+.snapshot-media-omitted { display: inline-block; padding: 6px 10px; border: 1px dashed var(--line-strong); border-radius: 8px; }
+.snapshot-note { color: var(--ink-muted); font-size: 14px; line-height: 1.6; margin-block: 16px; }
+.snapshot-note a { color: inherit; }
+
+.demo-button { display: inline-flex; justify-content: center; align-items: center; min-height: 44px; padding: 10px 16px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--panel); color: var(--ink); font: 600 14px/1.4 var(--font-sans, sans-serif); text-decoration: none; cursor: pointer; }
+.demo-button:hover { border-color: var(--ink-muted); }
+.demo-primary { background: #f4cc44; color: #211e12; border-color: #c7a636; }
+.demo-primary:hover { background: #ffdc62; border-color: #997b1c; }
+.demo-button:disabled { opacity: .6; cursor: default; }
+.demo-text-button { min-height: 44px; border: 0; background: transparent; color: var(--ink); text-decoration: underline; text-underline-offset: 3px; font: inherit; cursor: pointer; padding: 8px; }
+
+.demo-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 24px var(--page-gutter, 24px); color: var(--ink-muted); font-size: 13px; border-top: 1px solid var(--line); margin-top: 24px; }
+.demo-footer a, .demo-privacy a { color: inherit; }
+.demo-info { max-width: 760px; margin: 48px auto; padding: 24px; line-height: 1.7; }
+.demo-info h1 { font-family: var(--font-serif, serif); font-weight: 500; line-height: 1.2; }
+.demo-skip { position: fixed; top: 8px; left: 8px; transform: translateY(-160%); z-index: 20; background: var(--panel); color: var(--ink); padding: 12px; }
+.demo-skip:focus { transform: none; }
+
+#waitlist-dialog { width: min(480px, calc(100% - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 16px; padding: 28px; background: var(--panel); color: var(--ink); box-shadow: 0 20px 80px #0004; }
+#waitlist-dialog::backdrop { background: #16151088; }
+.demo-dialog-heading { display: flex; align-items: start; gap: 16px; justify-content: space-between; }
+.demo-dialog-heading h2 { font-family: var(--font-serif, serif); font-size: 28px; font-weight: 500; line-height: 1.2; margin: 0; }
+.demo-dialog-heading button { margin: -10px -8px 0 0; text-decoration: none; }
+#waitlist-purpose { color: var(--ink-muted); line-height: 1.6; }
+#waitlist-form label { display: block; font-weight: 600; margin-bottom: 8px; }
+#waitlist-email { display: block; width: 100%; min-height: 46px; border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px 12px; background: var(--bg); color: var(--ink); font: 16px var(--font-sans, sans-serif); }
+#waitlist-challenge { margin-top: 16px; max-width: 100%; }
+#waitlist-status { line-height: 1.5; font-size: 14px; }
+#waitlist-submit { width: 100%; }
+.demo-privacy { font-size: 13px; color: var(--ink-muted); margin-bottom: 0; }
+
+@media (max-width: 900px) {
+  .demo-snapshot .topbar-inner { flex-wrap: wrap; }
+  .demo-snapshot .topbar-menu { gap: 4px 12px; }
+}
+@media (max-width: 720px) {
+  .snapshot-banner { align-items: flex-start; flex-direction: column; }
+  .snapshot-scope { padding: 16px; }
+  .demo-snapshot .topbar-menu { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); width: 100%; }
+  .demo-snapshot .topbar-session { grid-column: 1 / -1; }
+  .demo-footer { flex-direction: column; }
+  #waitlist-dialog { padding: 20px; }
+}
+@media (prefers-reduced-motion: reduce) { .demo-snapshot *, .demo-snapshot *::before, .demo-snapshot *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }

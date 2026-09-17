@@ -1,0 +1,21 @@
+# Code Review — add-a-go-cli-for-260708-edec (Pass 2)
+
+Scope: `git diff origin/main..HEAD` (43 files: Go CLI under `cmd/`+`internal/`, `api/v1` REST expansion, shared serializer/scope, wiki/docs, CI, GoReleaser).
+Intent: Ship an installable Go REST CLI plus the `api/v1` endpoints it needs, mirroring MCP behavior via shared serializers/scopes.
+
+Verification this pass: Go tests pass (`GOFLAGS=-mod=mod go test ./...` → all green). All Pass-1 findings are resolved and confirmed in the current tree (aggregate paging, serializer N+1, content-type derivation, dead code). All must-have commands (A3) and the output/exit-code contract (A6) are present; project scoping is correct (cross-project access returns 403/404, never leaks). No plan-required item is missing.
+
+## High
+_None._
+
+## Medium
+- [x] AUTO-FIX: `annotation list` (no `--screenshot`) swallows every per-screenshot error, not just "deleted/inaccessible" ones (`internal/cli/annotation.go:52-57`): the `continue` on any `allAnnotations` error masks 429 rate-limits, 5xx, and network failures, so the command returns silently incomplete results with a wrong `pagination.total` and exit 0 — the opposite of the deterministic contract a CI/agent caller relies on. Restrict the skip to `screenote.Error` with `StatusCode` 404 (the deleted-between-list-and-fetch case the comment describes) and propagate everything else. <!-- triage: clear bug vs A6 determinism; obvious 404-only fix -->
+
+
+- [x] RESOLVED/NO-FIX: Root `vendor/` (Rails importmap tree, only `.keep` files, no `modules.txt`) collides with the root Go module: bare `go build ./...`, `go test ./...`, and `gopls`/IDE tooling fail with "inconsistent vendoring" and only work with `GOFLAGS=-mod=mod` (reproduced locally). Mitigated everywhere it matters (CI job, `.goreleaser.yml`, and a README note all set the flag), but it is a persistent papercut for any contributor who doesn't export it; next stage should also smoke-test `go install ...@latest` from a clean cache to confirm the published module's committed `vendor/` doesn't break the headline install path (A1/A8). <!-- triage: worktree — already mitigated in CI/goreleaser/README; remaining item is a next-stage smoke-test note, not a code change -->>
+- [x] AUTO-FIX: No test covers the aggregate `annotation list` path (no `--screenshot`) in `internal/cli/annotation.go` — the most complex CLI logic (multi-page screenshot fetch, per-screenshot annotation paging, error-skip, in-memory `--limit`/`--offset` windowing, `total` computation) is untested, and it was the exact area reworked to fix the Pass-1 truncation bug. Add an httptest case with >1 screenshot page and an aggregate window to lock in the fix. <!-- triage: plan Unit 4 requires command tests; missing test for defined behavior -->>
+
+## Nit
+- [x] RESOLVED/NO-FIX: `annotation list` output shape is inconsistent between paths: the `--screenshot` path streams raw server JSON via `writeRawJSON`, while the aggregate path re-encodes through `screenote.Annotation` structs (`author` null becomes `""`, key order changes, and any future server field absent from the struct is silently dropped). Consider normalizing both through the same shape. <!-- triage: worktree — fields currently align (no defect); aggregate path must decode to window in memory, so "normalize" has no clean direction without regressing passthrough fidelity; latent-only nit -->>
+- [ ] ESCALATE: `screenote config` prints the resolved API key in cleartext to stdout (`internal/cli/config.go` → `config.Resolved` with `api_key` json tag), which can leak into CI logs; plan intends printing resolved config, but masking the key (or gating full value behind `--interactive`/an explicit flag) would be safer for the CI use case. <!-- triage: unresolved after checking plan Unit 3, brainstorm A4/A6, pass-1 escalation Q1 (left unanswered) — product/security posture decision -->>
+- [x] AUTO-FIX: CI `on: push` targets `branches: [ master ]` (`.github/workflows/ci.yml:6`) while the repo's default branch is `main`, so the new `test_go` job never runs on pushes to `main` — only on PRs. Pre-existing config, but the added Go job inherits the gap; align to `main` (or `[main, master]`). <!-- triage: obvious config fix; default branch is main -->>

@@ -1,0 +1,193 @@
+{
+  "schema": "hive-demo-workflows",
+  "schema_version": 1,
+  "project": "hive",
+  "captured_at": "2026-09-17T10:14:19.491Z",
+  "excluded": [
+    "root-cause-repair"
+  ],
+  "workflows": [
+    {
+      "name": "architecture",
+      "origin": "managed",
+      "selection": "selected",
+      "integrity": "verified",
+      "catalog_visibility": "unknown_offline",
+      "version": "1.0.4",
+      "source_commit": "49a5d313c0498fe3170e71c544fc97877fe9c574",
+      "manifest_digest": "d8a16220f7ec557b6ad315f59040b90db67feeacf38e41c8e13cfe6d8c72a781",
+      "configuration_digest": "91d4b326698b5276c1f95bb56eade55b82196db41308a8786f80037a5d2bcc87",
+      "mappings": [
+        {
+          "slot": "stages.architecture",
+          "mapping_role": "planning",
+          "mapping_contract": "architecture-delivery-v2",
+          "agent": "claude",
+          "model": "claude-fable-5",
+          "effort": "xhigh",
+          "profile_fingerprint": "763c059b47779d088901e3fdef449fc77a0b60e0a7aff1ca627ef9bd5b4a5cee",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        },
+        {
+          "slot": "stages.draft",
+          "mapping_role": "planning",
+          "mapping_contract": "architecture-draft-v2",
+          "agent": "claude",
+          "model": "claude-fable-5",
+          "effort": "xhigh",
+          "profile_fingerprint": "763c059b47779d088901e3fdef449fc77a0b60e0a7aff1ca627ef9bd5b4a5cee",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        },
+        {
+          "slot": "stages.repo-research",
+          "mapping_role": "planning",
+          "mapping_contract": "architecture-repo-research-v2",
+          "agent": "claude",
+          "model": "claude-fable-5",
+          "effort": "xhigh",
+          "profile_fingerprint": "763c059b47779d088901e3fdef449fc77a0b60e0a7aff1ca627ef9bd5b4a5cee",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        },
+        {
+          "slot": "stages.research",
+          "mapping_role": "planning",
+          "mapping_contract": "architecture-synthesis-v2",
+          "agent": "claude",
+          "model": "claude-fable-5",
+          "effort": "xhigh",
+          "profile_fingerprint": "763c059b47779d088901e3fdef449fc77a0b60e0a7aff1ca627ef9bd5b4a5cee",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        },
+        {
+          "slot": "stages.review",
+          "mapping_role": "planning",
+          "mapping_contract": "architecture-council-v2",
+          "agent": "claude",
+          "model": "claude-fable-5",
+          "effort": "xhigh",
+          "profile_fingerprint": "763c059b47779d088901e3fdef449fc77a0b60e0a7aff1ca627ef9bd5b4a5cee",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        },
+        {
+          "slot": "stages.review.reviewers.constraints",
+          "mapping_role": "reviewer",
+          "mapping_contract": "architecture-review-v2",
+          "agent": "codex",
+          "model": "gpt-5.6-sol",
+          "effort": "xhigh",
+          "profile_fingerprint": "de818240adca5df3818fd5cc7e763db7cc1e9b8a42954e68483b802cd0df6097",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        },
+        {
+          "slot": "stages.review.reviewers.operations",
+          "mapping_role": "reviewer",
+          "mapping_contract": "architecture-review-v2",
+          "agent": "codex",
+          "model": "gpt-5.6-sol",
+          "effort": "xhigh",
+          "profile_fingerprint": "de818240adca5df3818fd5cc7e763db7cc1e9b8a42954e68483b802cd0df6097",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        },
+        {
+          "slot": "stages.review.revise",
+          "mapping_role": "planning",
+          "mapping_contract": "architecture-revise-v2",
+          "agent": "claude",
+          "model": "claude-fable-5",
+          "effort": "xhigh",
+          "profile_fingerprint": "763c059b47779d088901e3fdef449fc77a0b60e0a7aff1ca627ef9bd5b4a5cee",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        },
+        {
+          "slot": "stages.web-research",
+          "mapping_role": "planning",
+          "mapping_contract": "architecture-web-research-v2",
+          "agent": "claude",
+          "model": "claude-fable-5",
+          "effort": "xhigh",
+          "profile_fingerprint": "763c059b47779d088901e3fdef449fc77a0b60e0a7aff1ca627ef9bd5b4a5cee",
+          "policy_fingerprint": "c073109823a8af5a8353149d864c55f540ce443d970801cebefb0fc6728b7c66"
+        }
+      ],
+      "optional_inputs": [],
+      "package": {
+        "description": "Turn repository and current web evidence into a concise architecture record",
+        "author": {
+          "name": "Honeycomb Maintainers",
+          "url": "https://github.com/ivankuznetsov/honeycomb"
+        },
+        "license": "MIT",
+        "hive_min_version": "0.6.0",
+        "source": {
+          "url": "https://github.com/ivankuznetsov/honeycomb/tree/77c4a4bf78e2b5b204bf83434f0f339c514e568c/packages/architecture/1.0.4",
+          "revision": "77c4a4bf78e2b5b204bf83434f0f339c514e568c"
+        },
+        "permissions": {
+          "risk": "high",
+          "capabilities": [
+            "filesystem-read",
+            "filesystem-write",
+            "network",
+            "shell"
+          ],
+          "network_hosts": [
+            "*"
+          ],
+          "filesystem_read": [
+            "*"
+          ],
+          "filesystem_write": [
+            "*"
+          ],
+          "secrets": [
+            "*"
+          ]
+        }
+      }
+    },
+    {
+      "name": "bench",
+      "origin": "built_in",
+      "selection": null,
+      "integrity": null,
+      "catalog_visibility": null,
+      "version": null,
+      "source_commit": null,
+      "manifest_digest": null,
+      "package": null
+    },
+    {
+      "name": "coding",
+      "origin": "built_in",
+      "selection": null,
+      "integrity": null,
+      "catalog_visibility": null,
+      "version": null,
+      "source_commit": null,
+      "manifest_digest": null,
+      "package": null
+    },
+    {
+      "name": "content",
+      "origin": "built_in",
+      "selection": null,
+      "integrity": null,
+      "catalog_visibility": null,
+      "version": null,
+      "source_commit": null,
+      "manifest_digest": null,
+      "package": null
+    },
+    {
+      "name": "patrol-fix",
+      "origin": "built_in",
+      "selection": null,
+      "integrity": null,
+      "catalog_visibility": null,
+      "version": null,
+      "source_commit": null,
+      "manifest_digest": null,
+      "package": null
+    }
+  ]
+}

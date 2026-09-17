@@ -1,0 +1,215 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "screenote",
+  "repository": "ivankuznetsov/screenote",
+  "id": 42619,
+  "slug": "add-image-attachments-to-screenote-260816-6a00",
+  "title": "Image attachments in comments and replies",
+  "role": "lead",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-09-01T10:50:22.166001Z",
+    "state": "partial"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": "2026-09-01T10:50:09.508266Z",
+  "age_seconds": 1380137,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/screenote-42619/idea.md",
+      "bytes": 1592,
+      "sha256": "65d3d24e2b395396ca0623de43d87bdc0d29417a33b880e318a83bc618dd1968",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/screenote-42619/brainstorm.md",
+      "bytes": 9429,
+      "sha256": "adc5087050af2c5b3f369a3a4f08b8a5297c8237f9e041e35a9a1ba1ce1ebacd",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/screenote-42619/plan.md",
+      "bytes": 26234,
+      "sha256": "492298c6cab08c765c02e2bbc1e9302a24854920139508f843a3b4575b88c4bb",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/screenote-42619/task.md",
+      "bytes": 10035,
+      "sha256": "d7bf73169ae9b20e6964ca5ef57317590f2c290c62e771b42ca50aa16d70fe75",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/screenote-42619/pr.md",
+      "bytes": 765,
+      "sha256": "5a29d5d4ecfb6c417e6b01db6a0b7a6cbc76e3d949e6aec7fa289fb219dbe143",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "artifact.md",
+      "path": "documents/screenote-42619/artifact.md",
+      "bytes": 27,
+      "sha256": "a66b8b29b6eb6d8d6ac137234cb5d8f49f9bb4507a678c7f3ff97659a36ae3b0",
+      "role": "artifact",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/grok-ce-code-review-01.md",
+      "path": "documents/screenote-42619/reviews/grok-ce-code-review-01.md",
+      "bytes": 6625,
+      "sha256": "cfc12f7abb24327a4d049d0879e6f750d7da30cf2ce053155022a3a73206b429",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/grok-ce-code-review-02.md",
+      "path": "documents/screenote-42619/reviews/grok-ce-code-review-02.md",
+      "bytes": 7342,
+      "sha256": "5286eb00cb13d5c6afeb9a60483f4137e9077f1e54724379d8344ac393520307",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/grok-ce-code-review-adversarial-01.md",
+      "path": "documents/screenote-42619/reviews/grok-ce-code-review-adversarial-01.md",
+      "bytes": 9414,
+      "sha256": "45c8f69ddc124d73ad52d25298921e6820f296a7ad680ca59dcdfa74e4e1e1c4",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/grok-ce-code-review-adversarial-02.md",
+      "path": "documents/screenote-42619/reviews/grok-ce-code-review-adversarial-02.md",
+      "bytes": 4622,
+      "sha256": "940a7f7140b3b0ed5e6d89874a19cc94235d8449dda494f310c1540e4ec22c55",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/claude-opus-5-ce-code-review-03.md",
+      "path": "documents/screenote-42619/reviews/claude-opus-5-ce-code-review-03.md",
+      "bytes": 16770,
+      "sha256": "3fd4ac13e7782a3a0d57c445b893c17cd9e7222214a4b90b71b495e0e85a952a",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/claude-opus-5-ce-code-review-adversarial-03.md",
+      "path": "documents/screenote-42619/reviews/claude-opus-5-ce-code-review-adversarial-03.md",
+      "bytes": 7185,
+      "sha256": "9f2de72e595f533832f07302b55f4aa12ada1870255e0a408af0535017e39168",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-04.md",
+      "path": "documents/screenote-42619/reviews/codex-ce-code-review-04.md",
+      "bytes": 8811,
+      "sha256": "e848257892b44eff4841ec0bc43d9fcec3b8bbac497632a616f4159db5d141df",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-native-review-04.md",
+      "path": "documents/screenote-42619/reviews/codex-native-review-04.md",
+      "bytes": 5538,
+      "sha256": "a556df2e1c0cd2b665e6260d6ad24de58e419454f00afb25767d641eab7c7079",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/screenote-42619/reviews/escalations-01.md",
+      "bytes": 2594,
+      "sha256": "080581924bb7624e4f108759d43b290cb3eb90324254f16f60b5e25f4606d9a6",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-02.md",
+      "path": "documents/screenote-42619/reviews/escalations-02.md",
+      "bytes": 149,
+      "sha256": "a42506fa987d172386ab5c400a9acdce3ca5ca9e09e09cecb6990d629bb8c5f8",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-03.md",
+      "path": "documents/screenote-42619/reviews/escalations-03.md",
+      "bytes": 149,
+      "sha256": "90b2e28d8517d9c7e325e50ff7ae9d1aaf68342dea011dd1929f139ea8071f31",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-04.md",
+      "path": "documents/screenote-42619/reviews/escalations-04.md",
+      "bytes": 149,
+      "sha256": "be661dd6ece0356cc293058b0d3b0ee5c211252a18ec81635b31fdfd1148e954",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/screenote-42619/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/screenote",
+    "url": "https://github.com/ivankuznetsov/screenote/pull/67",
+    "number": 67,
+    "state": "MERGED",
+    "merged_at": "2026-08-31T23:11:04Z",
+    "merge_oid": "164164c3d5b761dac006d76cdac4e53cfb9b5df6",
+    "head_oid": "6034f5f2384a3e05c4984c821a5f5d0f0896fe4b",
+    "base_branch": "main",
+    "branch": "add-image-attachments-to-screenote-260816-6a00",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "available",
+    "path": "changes/screenote-42619.patch",
+    "bytes": 495054,
+    "sha256": "88fb64b14b765cc7ef20dcb6b020bb67bb44c04adc25435fa1fa69cf01c806f8",
+    "truncated": false,
+    "redacted": true,
+    "provenance": {
+      "repository": "ivankuznetsov/screenote",
+      "url": "https://github.com/ivankuznetsov/screenote/pull/67",
+      "number": 67,
+      "state": "MERGED",
+      "merged_at": "2026-08-31T23:11:04Z",
+      "merge_oid": "164164c3d5b761dac006d76cdac4e53cfb9b5df6",
+      "head_oid": "6034f5f2384a3e05c4984c821a5f5d0f0896fe4b",
+      "base_branch": "main",
+      "branch": "add-image-attachments-to-screenote-260816-6a00",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

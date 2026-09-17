@@ -1,0 +1,20 @@
+{
+  "name": "hivedev-demo",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node script/build.mjs",
+    "dev": "wrangler dev --local --ip 127.0.0.1 --port 8791",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "node --test test/browser/*.test.mjs",
+    "build:production": "node --env-file=production.env script/build.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "5.20260911.0-alpha",
+    "playwright": "1.60.0",
+    "wrangler": "4.131.1"
+  }
+}

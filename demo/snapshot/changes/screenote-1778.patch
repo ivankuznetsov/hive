@@ -1,0 +1,3085 @@
+diff --git a/README.md b/README.md
+index 3a3b936..77c8d0f 100644
+--- a/README.md
++++ b/README.md
+@@ -10,30 +10,44 @@ Install:
+ go install github.com/ivankuznetsov/screenote/cmd/screenote@latest
+ ```
+ 
+-Configure a self-hosted, local, staging, or production base URL explicitly:
++Configure a self-hosted, local, staging, or production base URL explicitly. CI and agents can use a pre-provisioned OAuth bearer token:
+ 
+ ```sh
+-screenote config set --base-url https://screenote.ai --api-key sk_proj_...
++screenote config set --base-url https://screenote.ai --token "$SCREENOTE_TOKEN"
+ screenote config
+ ```
+ 
++`screenote config` reports whether a token is set and where it came from, but never prints the bearer token itself.
++
++Developers can also store OAuth login credentials explicitly:
++
++```sh
++screenote --base-url https://screenote.ai login
++screenote logout
++```
++
++Login aligns the saved base URL with the authorized server and stores the config with owner-only permissions. If the browser cannot be opened, the CLI writes a JSON message containing `authorization_url` to stderr so the URL can be opened manually.
++
+ Configuration precedence is:
+ 
+-1. Flags: `--api-key`, `--base-url`, `--project`
+-2. Environment: `SCREENOTE_API_KEY`, `SCREENOTE_BASE_URL`, `SCREENOTE_PROJECT`
++1. Flags: `--token`, `--base-url`, `--project`
++2. Environment: `SCREENOTE_TOKEN`, `SCREENOTE_BASE_URL`, `SCREENOTE_PROJECT`
+ 3. Config file: `~/.config/screenote/config.toml`
++4. Stored login credentials from `screenote login`
++
++Ordinary commands never prompt or open a browser. Project-scoped commands require `--project`, `SCREENOTE_PROJECT`, or config `project`.
+ 
+ Examples:
+ 
+ ```sh
+-screenote --base-url http://localhost:3005 --api-key "$SCREENOTE_API_KEY" project list
+-screenote page list
+-screenote screenshot create --title "Homepage" --file screenshot.png
+-cat screenshot.png | screenote screenshot create --title "Homepage"
+-screenote screenshot list --status ready --limit 25
+-screenote annotation list --screenshot 123 --status open
+-screenote annotation get --annotation 456
+-screenote comment add --annotation 456 --body "Fix pushed in abc123"
++screenote --base-url http://localhost:3005 --token "$SCREENOTE_TOKEN" project list
++screenote --project 7 page list
++screenote --project 7 screenshot create --title "Homepage" --file screenshot.png
++cat screenshot.png | screenote --project 7 screenshot create --title "Homepage"
++screenote --project 7 screenshot list --status ready --limit 25
++screenote --project 7 annotation list --screenshot 123 --status open
++screenote --project 7 annotation get --annotation 456
++screenote --project 7 comment add --annotation 456 --body "Fix pushed in abc123"
+ ```
+ 
+ Successful commands write JSON to stdout. Errors write JSON to stderr:
+@@ -49,7 +63,7 @@ Exit codes:
+ | 0 | OK |
+ | 1 | Generic error |
+ | 2 | Usage/config error |
+-| 3 | Auth/forbidden |
++| 3 | Auth/forbidden, including invalid or expired tokens |
+ | 4 | Not found |
+ | 5 | Rate limited |
+ 
+diff --git a/app/controllers/api/base_controller.rb b/app/controllers/api/base_controller.rb
+index 5bdd46d..65ee961 100644
+--- a/app/controllers/api/base_controller.rb
++++ b/app/controllers/api/base_controller.rb
+@@ -2,7 +2,7 @@
+ 
+ module Api
+   class BaseController < ActionController::API
+-    before_action :authenticate_api_key!
++    before_action :authenticate_bearer!
+ 
+     rescue_from ActiveRecord::RecordInvalid do |e|
+       render_error(
+@@ -19,18 +19,19 @@ class BaseController < ActionController::API
+ 
+     private
+ 
+-    def authenticate_api_key!
++    def authenticate_bearer!
+       token = extract_bearer_token
+-      api_key = ApiKey.active.find_by_token(token)
++      result = Api::BearerAuthenticator.call(token)
+ 
+-      if api_key.nil?
+-        render_error("Invalid or missing API key", code: "unauthorized", status: :unauthorized)
++      if result.nil?
++        render_error("Invalid or missing bearer token", code: "unauthorized", status: :unauthorized)
+         return
+       end
+ 
+-      api_key.touch_last_used!
+-      @current_api_key = api_key
+-      @current_project = api_key.project
++      @current_api_key = result.api_key
++      @current_oauth_token = result.oauth_token
++      @current_user = result.user
++      @current_project = result.api_key&.project
+     end
+ 
+     def extract_bearer_token
+@@ -39,13 +40,50 @@ def extract_bearer_token
+     end
+ 
+     def require_current_project!(project_id)
+-      return current_project if project_id.blank?
+-      return current_project if project_id.to_s == current_project.id.to_s
++      if api_key_authenticated?
++        if current_project.present? && (project_id.blank? || project_id.to_s == current_project.id.to_s)
++          return current_project
++        end
+ 
+-      render_error("Project is not accessible with this API key", code: "forbidden", status: :forbidden)
++        render_error("Project is not accessible with this API key", code: "forbidden", status: :forbidden)
++        return nil
++      end
++
++      if project_id.blank?
++        render_error("Project is required", code: "missing_project", status: :unprocessable_entity)
++        return nil
++      end
++
++      project = Project.find_by(id: project_id)
++      if project&.member?(current_user)
++        @current_project = project
++        return project
++      end
++
++      render_error("Project is not accessible with this OAuth token", code: "forbidden", status: :forbidden)
+       nil
+     end
+ 
++    def require_scope!(scope)
++      return true if api_key_authenticated?
++      return true if oauth_scope?(scope)
++
++      render_error("OAuth token is missing required scope #{scope}", code: "insufficient_scope", status: :forbidden)
++      false
++    end
++
++    def api_key_authenticated?
++      current_api_key.present?
++    end
++
++    def oauth_authenticated?
++      current_oauth_token.present?
++    end
++
++    def oauth_scope?(scope)
++      current_oauth_token&.scopes&.include?(scope.to_s)
++    end
++
+     def pagination_params
+       limit = integer_param(:limit, 50).clamp(1, 100)
+       offset = [ integer_param(:offset, 0), 0 ].max
+@@ -68,6 +106,6 @@ def render_error(message, code:, status:, details: nil)
+       render json: payload, status: status
+     end
+ 
+-    attr_reader :current_api_key, :current_project
++    attr_reader :current_api_key, :current_oauth_token, :current_user, :current_project
+   end
+ end
+diff --git a/app/controllers/api/v1/annotation_comments_controller.rb b/app/controllers/api/v1/annotation_comments_controller.rb
+index 86cbffb..10cce76 100644
+--- a/app/controllers/api/v1/annotation_comments_controller.rb
++++ b/app/controllers/api/v1/annotation_comments_controller.rb
+@@ -4,9 +4,15 @@ module Api
+   module V1
+     class AnnotationCommentsController < Api::BaseController
+       def create
+-        annotation = Api::V1::ProjectScope.annotations(current_project).find(params[:annotation_id])
++        return unless require_scope!("mcp_write")
++
++        project = require_current_project!(params[:project_id])
++        return unless project
++
++        annotation = Api::V1::ProjectScope.annotations(project).find(params[:annotation_id])
+         comment = annotation.annotation_comments.create!(
+           api_key: current_api_key,
++          user: current_user,
+           body: params[:body],
+           action: :comment
+         )
+diff --git a/app/controllers/api/v1/annotations_controller.rb b/app/controllers/api/v1/annotations_controller.rb
+index b020a3a..7dd4f10 100644
+--- a/app/controllers/api/v1/annotations_controller.rb
++++ b/app/controllers/api/v1/annotations_controller.rb
+@@ -4,8 +4,13 @@ module Api
+   module V1
+     class AnnotationsController < Api::BaseController
+       def index
++        return unless require_scope!("mcp_read")
++
++        project = require_current_project!(params[:project_id])
++        return unless project
++
+         limit, offset = pagination_params
+-        annotations = project_annotations.order(:created_at)
++        annotations = project_annotations(project).order(:created_at)
+         annotations = annotations.where(screenshot_id: params[:screenshot_id]) if params[:screenshot_id].present?
+         annotations = annotations.where(status: params[:status]) if params[:status].present?
+         annotations = annotations.where(viewport: params[:viewport]) if params[:viewport].present?
+@@ -19,7 +24,12 @@ def index
+       end
+ 
+       def show
+-        annotation = project_annotations.find(params[:id])
++        return unless require_scope!("mcp_read")
++
++        project = require_current_project!(params[:project_id])
++        return unless project
++
++        annotation = project_annotations(project).find(params[:id])
+         cropped_base64 = begin
+           annotation.crop
+         rescue => e
+@@ -36,8 +46,8 @@ def show
+ 
+       private
+ 
+-      def project_annotations
+-        Api::V1::ProjectScope.annotations(current_project)
++      def project_annotations(project)
++        Api::V1::ProjectScope.annotations(project)
+       end
+ 
+       def serialize(annotation)
+diff --git a/app/controllers/api/v1/pages_controller.rb b/app/controllers/api/v1/pages_controller.rb
+index 8d7e6f0..59a3e3e 100644
+--- a/app/controllers/api/v1/pages_controller.rb
++++ b/app/controllers/api/v1/pages_controller.rb
+@@ -4,6 +4,8 @@ module Api
+   module V1
+     class PagesController < Api::BaseController
+       def index
++        return unless require_scope!("mcp_read")
++
+         project = require_current_project!(params[:project_id])
+         return unless project
+ 
+diff --git a/app/controllers/api/v1/projects_controller.rb b/app/controllers/api/v1/projects_controller.rb
+index 64c2222..365c77d 100644
+--- a/app/controllers/api/v1/projects_controller.rb
++++ b/app/controllers/api/v1/projects_controller.rb
+@@ -4,6 +4,25 @@ module Api
+   module V1
+     class ProjectsController < Api::BaseController
+       def index
++        return unless require_scope!("mcp_read")
++
++        if oauth_authenticated?
++          memberships = current_user.project_memberships.includes(:project).to_a
++          screenshot_counts = Screenshot.joins(:page)
++            .where(pages: { project_id: memberships.map(&:project_id) })
++            .group("pages.project_id").count
++
++          render json: {
++            projects: memberships.map do |membership|
++              Api::V1::ContractSerializer.project(
++                membership.project,
++                screenshot_count: screenshot_counts.fetch(membership.project_id, 0)
++              ).merge(role: membership.role)
++            end
++          }
++          return
++        end
++
+         render json: {
+           projects: [
+             Api::V1::ContractSerializer.project(current_project).merge(role: "api_key")
+diff --git a/app/controllers/api/v1/screenshots_controller.rb b/app/controllers/api/v1/screenshots_controller.rb
+index 15c92a5..c342524 100644
+--- a/app/controllers/api/v1/screenshots_controller.rb
++++ b/app/controllers/api/v1/screenshots_controller.rb
+@@ -4,6 +4,8 @@ module Api
+   module V1
+     class ScreenshotsController < Api::BaseController
+       def index
++        return unless require_scope!("mcp_read")
++
+         project = require_current_project!(params[:project_id])
+         return unless project
+ 
+@@ -22,6 +24,11 @@ def index
+       end
+ 
+       def create
++        return unless require_scope!("mcp_write")
++
++        project = require_current_project!(params[:project_id])
++        return unless project
++
+         image = params[:image]
+         unless uploaded_file?(image)
+           render_error("Image file is required", code: "validation_failed", status: :unprocessable_entity)
+@@ -29,7 +36,7 @@ def create
+         end
+ 
+         title = params[:title].presence || "Untitled"
+-        page = resolve_page(title)
++        page = resolve_page(project, title)
+         screenshot = Screenshot.create_with_image!(
+           page: page, title: title,
+           io: image.tempfile,
+@@ -48,12 +55,12 @@ def uploaded_file?(image)
+           image.respond_to?(:content_type)
+       end
+ 
+-      def resolve_page(title)
++      def resolve_page(project, title)
+         page_id = params[:page_id].presence || params[:page].presence
+-        return current_project.pages.find(page_id) if page_id.to_s.match?(/\A\d+\z/)
+-        return Page.find_or_create_by_name!(current_project, page_id) if page_id.present?
++        return project.pages.find(page_id) if page_id.to_s.match?(/\A\d+\z/)
++        return Page.find_or_create_by_name!(project, page_id) if page_id.present?
+ 
+-        Page.find_or_create_by_name!(current_project, title)
++        Page.find_or_create_by_name!(project, title)
+       end
+ 
+       def url_options
+diff --git a/app/serializers/api/v1/contract_serializer.rb b/app/serializers/api/v1/contract_serializer.rb
+index 6f3938e..5ffc61c 100644
+--- a/app/serializers/api/v1/contract_serializer.rb
++++ b/app/serializers/api/v1/contract_serializer.rb
+@@ -4,11 +4,11 @@ module Api
+   module V1
+     class ContractSerializer
+       class << self
+-        def project(project)
++        def project(project, screenshot_count: project.screenshots.count)
+           {
+             id: project.id,
+             name: project.name,
+-            screenshot_count: project.screenshots.count,
++            screenshot_count: screenshot_count,
+             created_at: project.created_at.iso8601
+           }
+         end
+diff --git a/app/services/api/bearer_authenticator.rb b/app/services/api/bearer_authenticator.rb
+new file mode 100644
+index 0000000..707f34f
+--- /dev/null
++++ b/app/services/api/bearer_authenticator.rb
+@@ -0,0 +1,52 @@
++# frozen_string_literal: true
++
++module Api
++  class BearerAuthenticator
++    Result = Data.define(:api_key, :oauth_token, :user) do
++      def api_key?
++        api_key.present?
++      end
++
++      def oauth?
++        oauth_token.present?
++      end
++    end
++
++    def self.call(token)
++      new(token).call
++    end
++
++    def initialize(token)
++      @token = token
++    end
++
++    def call
++      return nil if token.blank?
++
++      authenticate_api_key || authenticate_oauth_token
++    end
++
++    private
++
++    attr_reader :token
++
++    def authenticate_api_key
++      api_key = ApiKey.active.find_by_token(token)
++      return nil unless api_key
++
++      api_key.touch_last_used!
++      Result.new(api_key: api_key, oauth_token: nil, user: nil)
++    end
++
++    def authenticate_oauth_token
++      access_token = Doorkeeper::AccessToken.by_token(token)
++      return nil unless access_token
++      return nil if access_token.revoked? || access_token.expired?
++
++      user = User.find_by(id: access_token.resource_owner_id)
++      return nil unless user
++
++      Result.new(api_key: nil, oauth_token: access_token, user: user)
++    end
++  end
++end
+diff --git a/cmd/screenote/main.go b/cmd/screenote/main.go
+index 88a0810..58a2ff5 100644
+--- a/cmd/screenote/main.go
++++ b/cmd/screenote/main.go
+@@ -3,10 +3,14 @@ package main
+ import (
+ 	"context"
+ 	"os"
++	"os/signal"
++	"syscall"
+ 
+ 	"github.com/ivankuznetsov/screenote/internal/cli"
+ )
+ 
+ func main() {
+-	os.Exit(cli.Execute(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
++	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
++	defer stop()
++	os.Exit(cli.Execute(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+ }
+diff --git a/internal/cli/annotation.go b/internal/cli/annotation.go
+index 4e1e886..f6898ec 100644
+--- a/internal/cli/annotation.go
++++ b/internal/cli/annotation.go
+@@ -23,7 +23,7 @@ func (a *app) annotationCommand() *cobra.Command {
+ 		Short: "List annotations",
+ 		Args:  rejectArgs,
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+-			client, resolved, err := a.client()
++			client, project, err := a.clientForProject(cmd.Context())
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -32,17 +32,13 @@ func (a *app) annotationCommand() *cobra.Command {
+ 				"viewport": viewport,
+ 			})
+ 			if screenshotID != "" {
+-				raw, _, err := client.Annotations(cmd.Context(), screenshotID, screenote.WithLimitOffset(cloneValues(filters), limit, offset))
++				raw, _, err := client.Annotations(cmd.Context(), screenshotID, project, screenote.WithLimitOffset(cloneValues(filters), limit, offset))
+ 				if err != nil {
+ 					return err
+ 				}
+ 				return writeRawJSON(a.stdout, raw)
+ 			}
+ 
+-			project, err := a.projectID(cmd.Context(), client, resolved)
+-			if err != nil {
+-				return err
+-			}
+ 			screenshots, err := allScreenshots(cmd.Context(), client, project)
+ 			if err != nil {
+ 				return err
+@@ -52,7 +48,7 @@ func (a *app) annotationCommand() *cobra.Command {
+ 			// rather than a single per-screenshot slice.
+ 			annotations := make([]screenote.Annotation, 0)
+ 			for _, screenshot := range screenshots {
+-				response, err := allAnnotations(cmd.Context(), client, intString(screenshot.ID), filters)
++				response, err := allAnnotations(cmd.Context(), client, intString(screenshot.ID), project, filters)
+ 				if err != nil {
+ 					// A screenshot deleted between the list and the per-screenshot
+ 					// fetch returns 404; skip it and keep aggregating the rest.
+@@ -93,11 +89,11 @@ func (a *app) annotationCommand() *cobra.Command {
+ 			if annotationID == "" {
+ 				return missingFlag("annotation")
+ 			}
+-			client, _, err := a.client()
++			client, project, err := a.clientForProject(cmd.Context())
+ 			if err != nil {
+ 				return err
+ 			}
+-			raw, err := client.Annotation(cmd.Context(), annotationID)
++			raw, err := client.Annotation(cmd.Context(), annotationID, project)
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -128,10 +124,10 @@ func allScreenshots(ctx context.Context, client *screenote.Client, project strin
+ 
+ // allAnnotations pages through every annotation for a single screenshot,
+ // applying the shared status/viewport filters.
+-func allAnnotations(ctx context.Context, client *screenote.Client, screenshot string, filters url.Values) ([]screenote.Annotation, error) {
++func allAnnotations(ctx context.Context, client *screenote.Client, screenshot, project string, filters url.Values) ([]screenote.Annotation, error) {
+ 	all := make([]screenote.Annotation, 0)
+ 	for offset := 0; ; offset += pageSize {
+-		_, response, err := client.Annotations(ctx, screenshot, screenote.WithLimitOffset(cloneValues(filters), pageSize, offset))
++		_, response, err := client.Annotations(ctx, screenshot, project, screenote.WithLimitOffset(cloneValues(filters), pageSize, offset))
+ 		if err != nil {
+ 			return nil, err
+ 		}
+diff --git a/internal/cli/commands_test.go b/internal/cli/commands_test.go
+index 4d3f6d6..9b27dfa 100644
+--- a/internal/cli/commands_test.go
++++ b/internal/cli/commands_test.go
+@@ -24,7 +24,7 @@ func TestScreenshotListSendsFilters(t *testing.T) {
+ 	}))
+ 	defer server.Close()
+ 
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "--project", "7", "screenshot", "list", "--page", "9", "--status", "ready", "--limit", "10", "--offset", "2"}, "")
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "screenshot", "list", "--page", "9", "--status", "ready", "--limit", "10", "--offset", "2"}, "")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+@@ -38,11 +38,14 @@ func TestAnnotationGetPath(t *testing.T) {
+ 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/annotations/5" {
+ 			t.Fatalf("%s %s", r.Method, r.URL.Path)
+ 		}
++		if r.URL.Query().Get("project_id") != "7" {
++			t.Fatalf("query=%s", r.URL.RawQuery)
++		}
+ 		_, _ = w.Write([]byte(`{"id":5}`))
+ 	}))
+ 	defer server.Close()
+ 
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "annotation", "get", "--annotation", "5"}, "")
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "annotation", "get", "--annotation", "5"}, "")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+@@ -56,21 +59,21 @@ func TestAnnotationListPath(t *testing.T) {
+ 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/screenshots/4/annotations" {
+ 			t.Fatalf("%s %s", r.Method, r.URL.Path)
+ 		}
+-		if r.URL.Query().Get("status") != "open" || r.URL.Query().Get("viewport") != "mobile" {
++		if r.URL.Query().Get("status") != "open" || r.URL.Query().Get("viewport") != "mobile" || r.URL.Query().Get("project_id") != "7" {
+ 			t.Fatalf("query=%s", r.URL.RawQuery)
+ 		}
+ 		_, _ = w.Write([]byte(`{"annotations":[]}`))
+ 	}))
+ 	defer server.Close()
+ 
+-	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "annotation", "list", "--screenshot", "4", "--status", "open", "--viewport", "mobile"}, "")
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "annotation", "list", "--screenshot", "4", "--status", "open", "--viewport", "mobile"}, "")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+ }
+ 
+ func TestUnknownFlagExitsUsage(t *testing.T) {
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "project", "list", "--nope"}, "")
++	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--token", "key", "project", "list", "--nope"}, "")
+ 	if code != ExitUsage {
+ 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+ 	}
+@@ -79,12 +82,63 @@ func TestUnknownFlagExitsUsage(t *testing.T) {
+ 	}
+ }
+ 
++func TestLegacyAPIKeyFlagIsRejected(t *testing.T) {
++	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "project", "list"}, "")
++	if code != ExitUsage {
++		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
++	}
++	if !strings.Contains(stderr, "unknown flag: --api-key") {
++		t.Fatalf("stderr=%s", stderr)
++	}
++}
++
++func TestMissingTokenUsesStableUsageError(t *testing.T) {
++	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "project", "list"}, "")
++	if code != ExitUsage {
++		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
++	}
++	if !strings.Contains(stderr, "missing_token") {
++		t.Fatalf("stderr=%s", stderr)
++	}
++}
++
++func TestConfigMasksBearerToken(t *testing.T) {
++	configPath := filepath.Join(t.TempDir(), "config.toml")
++	stdout, stderr, code := runCLI(t, []string{
++		"--config", configPath,
++		"--base-url", "https://screenote.test",
++		"--token", "super-secret-token",
++		"config",
++	}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if strings.Contains(stdout, "super-secret-token") {
++		t.Fatalf("stdout leaked token: %s", stdout)
++	}
++	var payload struct {
++		TokenSet bool `json:"token_set"`
++		Sources  struct {
++			Token string `json:"token"`
++		} `json:"sources"`
++	}
++	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
++		t.Fatalf("stdout=%s err=%v", stdout, err)
++	}
++	if !payload.TokenSet || payload.Sources.Token != "flag" {
++		t.Fatalf("payload=%#v", payload)
++	}
++}
++
+ func TestScreenshotCreateDerivesContentType(t *testing.T) {
+ 	contentTypes := make(chan string, 1)
+ 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		if err := r.ParseMultipartForm(1024); err != nil {
+ 			t.Fatal(err)
+ 		}
++		if r.FormValue("project_id") != "7" {
++			t.Fatalf("project_id=%q", r.FormValue("project_id"))
++		}
+ 		files := r.MultipartForm.File["image"]
+ 		if len(files) == 0 {
+ 			t.Fatal("no image part")
+@@ -100,7 +154,7 @@ func TestScreenshotCreateDerivesContentType(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "screenshot", "create", "--title", "Home", "--file", path}, "")
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "screenshot", "create", "--title", "Home", "--file", path}, "")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+@@ -115,6 +169,9 @@ func TestScreenshotCreateStdinContentTypeFallback(t *testing.T) {
+ 		if err := r.ParseMultipartForm(1024); err != nil {
+ 			t.Fatal(err)
+ 		}
++		if r.FormValue("project_id") != "7" {
++			t.Fatalf("project_id=%q", r.FormValue("project_id"))
++		}
+ 		files := r.MultipartForm.File["image"]
+ 		if len(files) == 0 {
+ 			t.Fatal("no image part")
+@@ -124,7 +181,7 @@ func TestScreenshotCreateStdinContentTypeFallback(t *testing.T) {
+ 	}))
+ 	defer server.Close()
+ 
+-	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "screenshot", "create", "--title", "Home"}, "png-bytes")
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "screenshot", "create", "--title", "Home"}, "png-bytes")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+@@ -144,11 +201,14 @@ func TestCommentAddPathAndBody(t *testing.T) {
+ 		if r.Form.Get("body") != "hello" {
+ 			t.Fatalf("body=%q", r.Form.Get("body"))
+ 		}
++		if r.Form.Get("project_id") != "7" {
++			t.Fatalf("project_id=%q", r.Form.Get("project_id"))
++		}
+ 		_, _ = w.Write([]byte(`{"success":true}`))
+ 	}))
+ 	defer server.Close()
+ 
+-	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "comment", "add", "--annotation", "5", "--body", "hello"}, "")
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "comment", "add", "--annotation", "5", "--body", "hello"}, "")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+@@ -186,6 +246,9 @@ func aggregateServer(t *testing.T, failID int, failStatus int) *httptest.Server
+ 			}
+ 			fmt.Fprintf(w, `{"screenshots":[%s],"pagination":{"total":102,"limit":100,"offset":%d}}`, strings.Join(parts, ","), offset)
+ 		case strings.HasPrefix(r.URL.Path, "/api/v1/screenshots/") && strings.HasSuffix(r.URL.Path, "/annotations"):
++			if r.URL.Query().Get("project_id") != "7" {
++				t.Fatalf("query=%s", r.URL.RawQuery)
++			}
+ 			trimmed := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/screenshots/"), "/annotations")
+ 			sid, err := strconv.Atoi(trimmed)
+ 			if err != nil {
+@@ -215,7 +278,7 @@ func TestAnnotationListAggregatesAcrossScreenshots(t *testing.T) {
+ 	server := aggregateServer(t, 2, http.StatusNotFound)
+ 	defer server.Close()
+ 
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "--project", "7", "annotation", "list", "--limit", "10", "--offset", "5"}, "")
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "annotation", "list", "--limit", "10", "--offset", "5"}, "")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+@@ -250,14 +313,14 @@ func TestAnnotationListPropagatesServerError(t *testing.T) {
+ 	server := aggregateServer(t, 2, http.StatusInternalServerError)
+ 	defer server.Close()
+ 
+-	_, _, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "--project", "7", "annotation", "list"}, "")
++	_, _, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "annotation", "list"}, "")
+ 	if code == ExitOK {
+ 		t.Fatalf("expected non-zero exit for server error, got %d", code)
+ 	}
+ }
+ 
+ func TestUnknownCommandExitsUsage(t *testing.T) {
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "bogus"}, "")
++	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--token", "key", "bogus"}, "")
+ 	if code != ExitUsage {
+ 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+ 	}
+@@ -271,14 +334,14 @@ func TestUnknownCommandExitsUsage(t *testing.T) {
+ }
+ 
+ func TestUnknownSubcommandExitsUsage(t *testing.T) {
+-	_, _, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "project", "bogus"}, "")
++	_, _, code := runCLI(t, []string{"--base-url", "http://example.test", "--token", "key", "project", "bogus"}, "")
+ 	if code != ExitUsage {
+ 		t.Fatalf("code=%d", code)
+ 	}
+ }
+ 
+ func TestStrayPositionalArgExitsUsage(t *testing.T) {
+-	_, _, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "project", "list", "extra"}, "")
++	_, _, code := runCLI(t, []string{"--base-url", "http://example.test", "--token", "key", "project", "list", "extra"}, "")
+ 	if code != ExitUsage {
+ 		t.Fatalf("code=%d", code)
+ 	}
+diff --git a/internal/cli/comment.go b/internal/cli/comment.go
+index d6b0658..0c53cbe 100644
+--- a/internal/cli/comment.go
++++ b/internal/cli/comment.go
+@@ -17,11 +17,11 @@ func (a *app) commentCommand() *cobra.Command {
+ 			if body == "" {
+ 				return missingFlag("body")
+ 			}
+-			client, _, err := a.client()
++			client, project, err := a.clientForProject(cmd.Context())
+ 			if err != nil {
+ 				return err
+ 			}
+-			raw, err := client.AddComment(cmd.Context(), annotationID, body)
++			raw, err := client.AddComment(cmd.Context(), annotationID, project, body)
+ 			if err != nil {
+ 				return err
+ 			}
+diff --git a/internal/cli/config.go b/internal/cli/config.go
+index 14f1d8c..f1fb5a4 100644
+--- a/internal/cli/config.go
++++ b/internal/cli/config.go
+@@ -15,7 +15,17 @@ func (a *app) configCommand() *cobra.Command {
+ 			if err != nil {
+ 				return err
+ 			}
+-			return writeJSON(a.stdout, resolved)
++			return writeJSON(a.stdout, struct {
++				BaseURL  string            `json:"base_url,omitempty"`
++				Project  string            `json:"project,omitempty"`
++				TokenSet bool              `json:"token_set"`
++				Sources  appconfig.Sources `json:"sources"`
++			}{
++				BaseURL:  resolved.BaseURL,
++				Project:  resolved.Project,
++				TokenSet: resolved.Token != "",
++				Sources:  resolved.Sources,
++			})
+ 		},
+ 	}
+ 
+@@ -30,8 +40,8 @@ func (a *app) configCommand() *cobra.Command {
+ 			if err != nil {
+ 				return err
+ 			}
+-			if setValues.APIKey != "" {
+-				values.APIKey = setValues.APIKey
++			if setValues.Token != "" {
++				values.Token = setValues.Token
+ 			}
+ 			if setValues.BaseURL != "" {
+ 				values.BaseURL = setValues.BaseURL
+@@ -45,7 +55,7 @@ func (a *app) configCommand() *cobra.Command {
+ 			return writeJSON(a.stdout, map[string]any{"ok": true, "path": path})
+ 		},
+ 	}
+-	set.Flags().StringVar(&setValues.APIKey, "api-key", "", "API key to write")
++	set.Flags().StringVar(&setValues.Token, "token", "", "OAuth bearer token to write")
+ 	set.Flags().StringVar(&setValues.BaseURL, "base-url", "", "Base URL to write")
+ 	set.Flags().StringVar(&setValues.Project, "project", "", "Project ID to write")
+ 	cmd.AddCommand(set)
+diff --git a/internal/cli/errors.go b/internal/cli/errors.go
+index d459224..42d546c 100644
+--- a/internal/cli/errors.go
++++ b/internal/cli/errors.go
+@@ -32,6 +32,10 @@ func usageError(code, message string) error {
+ 	return &cliError{Code: code, Message: message, Exit: ExitUsage}
+ }
+ 
++func authError(code, message string) error {
++	return &cliError{Code: code, Message: message, Exit: ExitAuth}
++}
++
+ func writeError(w io.Writer, err error) int {
+ 	code := "internal_error"
+ 	message := err.Error()
+diff --git a/internal/cli/login.go b/internal/cli/login.go
+new file mode 100644
+index 0000000..06f517d
+--- /dev/null
++++ b/internal/cli/login.go
+@@ -0,0 +1,209 @@
++package cli
++
++import (
++	"context"
++	"net"
++	"net/http"
++	"os/exec"
++	"runtime"
++	"time"
++
++	appconfig "github.com/ivankuznetsov/screenote/internal/config"
++	"github.com/ivankuznetsov/screenote/internal/screenote"
++	"github.com/spf13/cobra"
++)
++
++const oauthScope = "mcp_read mcp_write"
++
++var openBrowser = func(rawURL string) error {
++	var cmd *exec.Cmd
++	switch runtime.GOOS {
++	case "darwin":
++		cmd = exec.Command("open", rawURL)
++	case "windows":
++		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
++	default:
++		cmd = exec.Command("xdg-open", rawURL)
++	}
++	return cmd.Start()
++}
++
++func (a *app) loginCommand() *cobra.Command {
++	return &cobra.Command{
++		Use:   "login",
++		Short: "Authorize the CLI with OAuth",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			resolved, err := a.resolvedConfig()
++			if err != nil {
++				return err
++			}
++			if resolved.BaseURL == "" {
++				return usageError("missing_base_url", "base URL is required; set --base-url, SCREENOTE_BASE_URL, or config base_url")
++			}
++			credentials, err := a.runLogin(cmd.Context(), resolved.BaseURL)
++			if err != nil {
++				return err
++			}
++			path, err := a.saveLoginCredentials(resolved.BaseURL, credentials)
++			if err != nil {
++				return err
++			}
++			return writeJSON(a.stdout, map[string]any{"ok": true, "path": path})
++		},
++	}
++}
++
++func (a *app) saveLoginCredentials(baseURL string, credentials *appconfig.LoginCredentials) (string, error) {
++	path := defaultConfigPath(a.configPath)
++	values, err := appconfig.LoadExpanded(path)
++	if err != nil {
++		return "", err
++	}
++	values.Login = credentials
++	// There is one stored login credential set, so keep the configured server
++	// aligned with it even when login used a flag/env override.
++	values.BaseURL = baseURL
++	if err := appconfig.Save(path, values); err != nil {
++		return "", err
++	}
++	return path, nil
++}
++
++func (a *app) logoutCommand() *cobra.Command {
++	return &cobra.Command{
++		Use:   "logout",
++		Short: "Remove stored OAuth login credentials",
++		Args:  rejectArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			path := defaultConfigPath(a.configPath)
++			values, err := appconfig.LoadExpanded(path)
++			if err != nil {
++				return err
++			}
++			values.Login = nil
++			if err := appconfig.Save(path, values); err != nil {
++				return err
++			}
++			return writeJSON(a.stdout, map[string]any{"ok": true, "path": path})
++		},
++	}
++}
++
++func (a *app) runLogin(ctx context.Context, baseURL string) (*appconfig.LoginCredentials, error) {
++	metadata, err := screenote.DiscoverOAuth(ctx, baseURL, a.httpClient)
++	if err != nil {
++		return nil, err
++	}
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		return nil, err
++	}
++	defer listener.Close()
++
++	redirectURI := "http://" + listener.Addr().String() + "/callback"
++	registration, err := screenote.RegisterOAuthClient(ctx, metadata, redirectURI, a.httpClient)
++	if err != nil {
++		return nil, err
++	}
++	verifier, err := screenote.RandomToken(32)
++	if err != nil {
++		return nil, err
++	}
++	state, err := screenote.RandomToken(24)
++	if err != nil {
++		return nil, err
++	}
++	authURL, err := screenote.AuthorizationURL(metadata, registration.ClientID, redirectURI, verifier, state, oauthScope)
++	if err != nil {
++		return nil, err
++	}
++
++	result := make(chan callbackResult, 1)
++	server := &http.Server{Handler: callbackHandler(state, result)}
++	go func() {
++		_ = server.Serve(listener)
++	}()
++	defer func() {
++		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++		defer cancel()
++		_ = server.Shutdown(shutdownCtx)
++	}()
++
++	if err := openBrowser(authURL); err != nil {
++		if writeErr := writeJSON(a.stderr, map[string]string{
++			"code":              "browser_open_failed",
++			"message":           "browser could not be opened; open authorization_url to continue login",
++			"authorization_url": authURL,
++		}); writeErr != nil {
++			return nil, writeErr
++		}
++	}
++
++	select {
++	case <-ctx.Done():
++		return nil, ctx.Err()
++	case received := <-result:
++		if received.err != nil {
++			return nil, received.err
++		}
++		response, err := screenote.ExchangeCode(ctx, metadata, registration.ClientID, redirectURI, received.code, verifier, a.httpClient)
++		if err != nil {
++			return nil, err
++		}
++		return &appconfig.LoginCredentials{
++			AccessToken:  response.AccessToken,
++			RefreshToken: response.RefreshToken,
++			ExpiresAt:    screenote.ExpiresAt(response, time.Now()),
++			ClientID:     registration.ClientID,
++			BaseURL:      baseURL,
++			Issuer:       metadata.Issuer,
++		}, nil
++	}
++}
++
++type callbackResult struct {
++	code string
++	err  error
++}
++
++func callbackHandler(expectedState string, result chan<- callbackResult) http.Handler {
++	// send never blocks: result is buffered for one value, so a second callback
++	// after the first result is consumed is dropped rather than wedging the
++	// handler (which would stall the deferred server.Shutdown indefinitely).
++	send := func(r callbackResult) {
++		select {
++		case result <- r:
++		default:
++		}
++	}
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/callback" {
++			http.NotFound(w, r)
++			return
++		}
++		query := r.URL.Query()
++		if query.Get("state") != expectedState {
++			http.Error(w, "Invalid OAuth state", http.StatusBadRequest)
++			send(callbackResult{err: usageError("invalid_oauth_state", "OAuth callback state did not match")})
++			return
++		}
++		if errText := query.Get("error"); errText != "" {
++			http.Error(w, errText, http.StatusBadRequest)
++			send(callbackResult{err: authError("oauth_error", errText)})
++			return
++		}
++		code := query.Get("code")
++		if code == "" {
++			http.Error(w, "Missing OAuth code", http.StatusBadRequest)
++			send(callbackResult{err: usageError("missing_oauth_code", "OAuth callback did not include an authorization code")})
++			return
++		}
++		// Write the success page before signaling so the deferred shutdown, which
++		// runs once runLogin consumes this result, cannot race ahead of the write
++		// and truncate the response.
++		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
++		_, _ = w.Write([]byte("Screenote login complete. You can close this window."))
++		send(callbackResult{code: code})
++	})
++}
+diff --git a/internal/cli/login_test.go b/internal/cli/login_test.go
+new file mode 100644
+index 0000000..52eccb5
+--- /dev/null
++++ b/internal/cli/login_test.go
+@@ -0,0 +1,353 @@
++package cli
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	appconfig "github.com/ivankuznetsov/screenote/internal/config"
++)
++
++func TestRunLoginRegistersOpensBrowserAndStoresTokenResponse(t *testing.T) {
++	originalOpenBrowser := openBrowser
++	defer func() { openBrowser = originalOpenBrowser }()
++
++	var openedURL string
++	var authorizeQuery url.Values
++	openBrowser = func(rawURL string) error {
++		openedURL = rawURL
++		parsed, err := url.Parse(rawURL)
++		if err != nil {
++			return err
++		}
++		authorizeQuery = parsed.Query()
++		go func() {
++			redirectURI := authorizeQuery.Get("redirect_uri")
++			_, _ = http.Get(redirectURI + "?state=" + url.QueryEscape(authorizeQuery.Get("state")) + "&code=code-1")
++		}()
++		return nil
++	}
++
++	var registeredRedirect string
++	var tokenForm url.Values
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/.well-known/oauth-authorization-server":
++			_ = json.NewEncoder(w).Encode(map[string]string{
++				"issuer":                 serverURL(r),
++				"authorization_endpoint": serverURL(r) + "/oauth/authorize",
++				"token_endpoint":         serverURL(r) + "/oauth/token",
++				"registration_endpoint":  serverURL(r) + "/oauth/register",
++			})
++		case "/oauth/register":
++			var payload struct {
++				RedirectURIs []string `json:"redirect_uris"`
++			}
++			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
++				t.Fatal(err)
++			}
++			registeredRedirect = payload.RedirectURIs[0]
++			_ = json.NewEncoder(w).Encode(map[string]string{"client_id": "client-1"})
++		case "/oauth/token":
++			if err := r.ParseForm(); err != nil {
++				t.Fatal(err)
++			}
++			tokenForm = r.Form
++			_ = json.NewEncoder(w).Encode(map[string]any{
++				"access_token":  "access-1",
++				"refresh_token": "refresh-1",
++				"expires_in":    3600,
++			})
++		default:
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++	}))
++	defer server.Close()
++
++	var stderr bytes.Buffer
++	a := &app{stderr: &stderr, httpClient: server.Client()}
++	credentials, err := a.runLogin(context.Background(), server.URL)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if openedURL == "" || authorizeQuery.Get("scope") != oauthScope || authorizeQuery.Get("code_challenge_method") != "S256" {
++		t.Fatalf("openedURL=%q query=%v", openedURL, authorizeQuery)
++	}
++	if registeredRedirect == "" || authorizeQuery.Get("redirect_uri") != registeredRedirect {
++		t.Fatalf("registered=%q authorize redirect=%q", registeredRedirect, authorizeQuery.Get("redirect_uri"))
++	}
++	if tokenForm.Get("grant_type") != "authorization_code" || tokenForm.Get("code") != "code-1" || tokenForm.Get("code_verifier") == "" {
++		t.Fatalf("tokenForm=%v", tokenForm)
++	}
++	if credentials.AccessToken != "access-1" || credentials.RefreshToken != "refresh-1" || credentials.ClientID != "client-1" || credentials.BaseURL != server.URL {
++		t.Fatalf("credentials=%#v", credentials)
++	}
++}
++
++func TestCallbackRejectsMismatchedState(t *testing.T) {
++	result := make(chan callbackResult, 1)
++	server := httptest.NewServer(callbackHandler("expected", result))
++	defer server.Close()
++
++	resp, err := server.Client().Get(server.URL + "/callback?state=wrong&code=abc")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusBadRequest {
++		t.Fatalf("status=%d", resp.StatusCode)
++	}
++	received := <-result
++	if received.err == nil || !strings.Contains(received.err.Error(), "state") {
++		t.Fatalf("result=%#v", received)
++	}
++}
++
++func TestRunLoginBrowserFallbackUsesJSONStderr(t *testing.T) {
++	originalOpenBrowser := openBrowser
++	defer func() { openBrowser = originalOpenBrowser }()
++
++	ctx, cancel := context.WithCancel(context.Background())
++	openBrowser = func(rawURL string) error {
++		cancel()
++		return errors.New("no browser")
++	}
++
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/.well-known/oauth-authorization-server":
++			_ = json.NewEncoder(w).Encode(map[string]string{
++				"issuer":                 serverURL(r),
++				"authorization_endpoint": serverURL(r) + "/oauth/authorize",
++				"token_endpoint":         serverURL(r) + "/oauth/token",
++				"registration_endpoint":  serverURL(r) + "/oauth/register",
++			})
++		case "/oauth/register":
++			_ = json.NewEncoder(w).Encode(map[string]string{"client_id": "client-1"})
++		default:
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++	}))
++	defer server.Close()
++
++	var stderr bytes.Buffer
++	a := &app{stderr: &stderr, httpClient: server.Client()}
++	_, err := a.runLogin(ctx, server.URL)
++	if !errors.Is(err, context.Canceled) {
++		t.Fatalf("err=%v", err)
++	}
++	var payload map[string]string
++	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
++		t.Fatalf("stderr=%q err=%v", stderr.String(), err)
++	}
++	if payload["code"] != "browser_open_failed" || payload["authorization_url"] == "" {
++		t.Fatalf("payload=%#v", payload)
++	}
++}
++
++func TestSaveLoginCredentialsSwitchesConfiguredBaseURL(t *testing.T) {
++	configPath := filepath.Join(t.TempDir(), "config.toml")
++	if err := appconfig.Save(configPath, appconfig.Values{BaseURL: "https://old.example"}); err != nil {
++		t.Fatal(err)
++	}
++
++	a := &app{configPath: configPath}
++	credentials := &appconfig.LoginCredentials{
++		AccessToken: "access-1",
++		ClientID:    "client-1",
++		BaseURL:     "https://new.example",
++	}
++	path, err := a.saveLoginCredentials("https://new.example", credentials)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if path != configPath {
++		t.Fatalf("path=%q", path)
++	}
++	values, err := appconfig.Load(configPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if values.BaseURL != "https://new.example" || values.Login == nil || values.Login.AccessToken != "access-1" {
++		t.Fatalf("values=%#v", values)
++	}
++}
++
++func TestStoredExpiredCredentialsRefreshBeforeCommand(t *testing.T) {
++	configPath := filepath.Join(t.TempDir(), "config.toml")
++	var refreshed bool
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/.well-known/oauth-authorization-server":
++			_ = json.NewEncoder(w).Encode(map[string]string{
++				"authorization_endpoint": serverURL(r) + "/oauth/authorize",
++				"token_endpoint":         serverURL(r) + "/oauth/token",
++				"registration_endpoint":  serverURL(r) + "/oauth/register",
++			})
++		case "/oauth/token":
++			refreshed = true
++			if err := r.ParseForm(); err != nil {
++				t.Fatal(err)
++			}
++			if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "refresh-1" {
++				t.Fatalf("form=%v", r.Form)
++			}
++			_ = json.NewEncoder(w).Encode(map[string]any{
++				"access_token":  "access-2",
++				"refresh_token": "refresh-2",
++				"expires_in":    3600,
++			})
++		case "/api/v1/projects":
++			if r.Header.Get("Authorization") != "Bearer access-2" {
++				t.Fatalf("Authorization=%q", r.Header.Get("Authorization"))
++			}
++			_, _ = w.Write([]byte(`{"projects":[]}`))
++		default:
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++	}))
++	defer server.Close()
++
++	err := appconfig.Save(configPath, appconfig.Values{
++		BaseURL: server.URL,
++		Login: &appconfig.LoginCredentials{
++			AccessToken:  "access-1",
++			RefreshToken: "refresh-1",
++			ExpiresAt:    time.Now().Add(-time.Hour),
++			ClientID:     "client-1",
++			BaseURL:      server.URL,
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	_, stderr, code := runCLI(t, []string{"--config", configPath, "project", "list"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if !refreshed {
++		t.Fatal("expected refresh request")
++	}
++	values, err := appconfig.Load(configPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if values.Login.AccessToken != "access-2" || values.Login.RefreshToken != "refresh-2" {
++		t.Fatalf("login=%#v", values.Login)
++	}
++}
++
++func TestStoredExpiredCredentialsFailedRefreshReturnsAuthError(t *testing.T) {
++	configPath := filepath.Join(t.TempDir(), "config.toml")
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/.well-known/oauth-authorization-server":
++			_ = json.NewEncoder(w).Encode(map[string]string{
++				"authorization_endpoint": serverURL(r) + "/oauth/authorize",
++				"token_endpoint":         serverURL(r) + "/oauth/token",
++				"registration_endpoint":  serverURL(r) + "/oauth/register",
++			})
++		case "/oauth/token":
++			w.WriteHeader(http.StatusBadRequest)
++			_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
++		default:
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++	}))
++	defer server.Close()
++
++	err := appconfig.Save(configPath, appconfig.Values{
++		BaseURL: server.URL,
++		Login: &appconfig.LoginCredentials{
++			AccessToken:  "access-1",
++			RefreshToken: "refresh-1",
++			ExpiresAt:    time.Now().Add(-time.Hour),
++			ClientID:     "client-1",
++			BaseURL:      server.URL,
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	_, stderr, code := runCLI(t, []string{"--config", configPath, "project", "list"}, "")
++	if code != ExitAuth {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	if !strings.Contains(stderr, "invalid_token") {
++		t.Fatalf("stderr=%s", stderr)
++	}
++}
++
++func TestExplicitTokenSkipsStoredRefresh(t *testing.T) {
++	configPath := filepath.Join(t.TempDir(), "config.toml")
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/oauth/token" {
++			t.Fatal("unexpected refresh")
++		}
++		if r.URL.Path != "/api/v1/projects" {
++			t.Fatalf("unexpected path %s", r.URL.Path)
++		}
++		if r.Header.Get("Authorization") != "Bearer explicit" {
++			t.Fatalf("Authorization=%q", r.Header.Get("Authorization"))
++		}
++		_, _ = w.Write([]byte(`{"projects":[]}`))
++	}))
++	defer server.Close()
++
++	err := appconfig.Save(configPath, appconfig.Values{
++		BaseURL: server.URL,
++		Login: &appconfig.LoginCredentials{
++			AccessToken:  "access-1",
++			RefreshToken: "refresh-1",
++			ExpiresAt:    time.Now().Add(-time.Hour),
++			ClientID:     "client-1",
++			BaseURL:      server.URL,
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	_, stderr, code := runCLI(t, []string{"--config", configPath, "--token", "explicit", "project", "list"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++}
++
++func TestLogoutRemovesStoredCredentials(t *testing.T) {
++	configPath := filepath.Join(t.TempDir(), "config.toml")
++	if err := appconfig.Save(configPath, appconfig.Values{
++		Token:   "explicit",
++		BaseURL: "http://example.test",
++		Login:   &appconfig.LoginCredentials{AccessToken: "stored"},
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	_, stderr, code := runCLI(t, []string{"--config", configPath, "logout"}, "")
++	if code != ExitOK {
++		t.Fatalf("code=%d stderr=%s", code, stderr)
++	}
++	values, err := appconfig.Load(configPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if values.Login != nil || values.Token != "explicit" || values.BaseURL != "http://example.test" {
++		t.Fatalf("values=%#v", values)
++	}
++}
++
++func serverURL(r *http.Request) string {
++	u := url.URL{Scheme: "http", Host: r.Host}
++	return u.String()
++}
+diff --git a/internal/cli/page.go b/internal/cli/page.go
+index 5fe4036..846f9de 100644
+--- a/internal/cli/page.go
++++ b/internal/cli/page.go
+@@ -9,11 +9,7 @@ func (a *app) pageCommand() *cobra.Command {
+ 		Short: "List pages",
+ 		Args:  rejectArgs,
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+-			client, resolved, err := a.client()
+-			if err != nil {
+-				return err
+-			}
+-			project, err := a.projectID(cmd.Context(), client, resolved)
++			client, project, err := a.clientForProject(cmd.Context())
+ 			if err != nil {
+ 				return err
+ 			}
+diff --git a/internal/cli/project.go b/internal/cli/project.go
+index f601e2f..40d190d 100644
+--- a/internal/cli/project.go
++++ b/internal/cli/project.go
+@@ -9,7 +9,7 @@ func (a *app) projectCommand() *cobra.Command {
+ 		Short: "List projects",
+ 		Args:  rejectArgs,
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+-			client, _, err := a.client()
++			client, _, err := a.client(cmd.Context())
+ 			if err != nil {
+ 				return err
+ 			}
+diff --git a/internal/cli/root.go b/internal/cli/root.go
+index 56a7eb8..ea81a5b 100644
+--- a/internal/cli/root.go
++++ b/internal/cli/root.go
+@@ -5,7 +5,10 @@ import (
+ 	"encoding/json"
+ 	"io"
+ 	"net/http"
++	"net/url"
+ 	"strconv"
++	"strings"
++	"time"
+ 
+ 	appconfig "github.com/ivankuznetsov/screenote/internal/config"
+ 	"github.com/ivankuznetsov/screenote/internal/screenote"
+@@ -13,13 +16,12 @@ import (
+ )
+ 
+ type app struct {
+-	stdin       io.Reader
+-	stdout      io.Writer
+-	stderr      io.Writer
+-	httpClient  *http.Client
+-	flags       appconfig.Values
+-	configPath  string
+-	interactive bool
++	stdin      io.Reader
++	stdout     io.Writer
++	stderr     io.Writer
++	httpClient *http.Client
++	flags      appconfig.Values
++	configPath string
+ }
+ 
+ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+@@ -49,14 +51,15 @@ func (a *app) rootCommand(_ context.Context) *cobra.Command {
+ 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+ 		return usageError("invalid_flag", err.Error())
+ 	})
+-	root.PersistentFlags().StringVar(&a.flags.APIKey, "api-key", "", "Screenote project API key")
++	root.PersistentFlags().StringVar(&a.flags.Token, "token", "", "Screenote OAuth bearer token")
+ 	root.PersistentFlags().StringVar(&a.flags.BaseURL, "base-url", "", "Screenote base URL")
+ 	root.PersistentFlags().StringVar(&a.flags.Project, "project", "", "Screenote project ID")
+ 	root.PersistentFlags().StringVar(&a.configPath, "config", "", "Config file path")
+-	root.PersistentFlags().BoolVar(&a.interactive, "interactive", false, "Allow interactive prompts")
+ 
+ 	root.AddCommand(
+ 		a.configCommand(),
++		a.loginCommand(),
++		a.logoutCommand(),
+ 		a.projectCommand(),
+ 		a.pageCommand(),
+ 		a.screenshotCommand(),
+@@ -73,7 +76,7 @@ func (a *app) resolvedConfig() (appconfig.Resolved, error) {
+ 	})
+ }
+ 
+-func (a *app) client() (*screenote.Client, appconfig.Resolved, error) {
++func (a *app) client(ctx context.Context) (*screenote.Client, appconfig.Resolved, error) {
+ 	resolved, err := a.resolvedConfig()
+ 	if err != nil {
+ 		return nil, resolved, err
+@@ -81,29 +84,104 @@ func (a *app) client() (*screenote.Client, appconfig.Resolved, error) {
+ 	if resolved.BaseURL == "" {
+ 		return nil, resolved, usageError("missing_base_url", "base URL is required; set --base-url, SCREENOTE_BASE_URL, or config base_url")
+ 	}
+-	if resolved.APIKey == "" {
+-		return nil, resolved, usageError("missing_api_key", "API key is required; set --api-key, SCREENOTE_API_KEY, or config api_key")
++	if resolved.Token == "" {
++		token, err := a.storedLoginToken(ctx, resolved)
++		if err != nil {
++			return nil, resolved, err
++		}
++		resolved.Token = token
+ 	}
+ 
+-	client, err := screenote.NewClient(resolved.BaseURL, resolved.APIKey, a.httpClient)
++	client, err := screenote.NewClient(resolved.BaseURL, resolved.Token, a.httpClient)
+ 	if err != nil {
+ 		return nil, resolved, usageError("invalid_base_url", err.Error())
+ 	}
+ 	return client, resolved, nil
+ }
+ 
+-func (a *app) projectID(ctx context.Context, client *screenote.Client, resolved appconfig.Resolved) (string, error) {
+-	if resolved.Project != "" {
+-		return resolved.Project, nil
++// clientForProject resolves the required project locally before constructing a
++// client, so a missing project fails with the local usage error without first
++// triggering OAuth discovery/refresh network calls or mutating stored config.
++func (a *app) clientForProject(ctx context.Context) (*screenote.Client, string, error) {
++	resolved, err := a.resolvedConfig()
++	if err != nil {
++		return nil, "", err
+ 	}
+-	_, projects, err := client.Projects(ctx)
++	project, err := a.projectID(resolved)
++	if err != nil {
++		return nil, "", err
++	}
++	client, _, err := a.client(ctx)
++	if err != nil {
++		return nil, "", err
++	}
++	return client, project, nil
++}
++
++func (a *app) storedLoginToken(ctx context.Context, resolved appconfig.Resolved) (string, error) {
++	path := defaultConfigPath(a.configPath)
++	values, err := appconfig.LoadExpanded(path)
+ 	if err != nil {
+ 		return "", err
+ 	}
+-	if len(projects.Projects) == 0 {
+-		return "", usageError("missing_project", "project is required and could not be inferred from the API key")
++	credentials := values.Login
++	if credentials == nil || credentials.AccessToken == "" {
++		return "", usageError("missing_token", "OAuth bearer token is required; set --token, SCREENOTE_TOKEN, config token, or run screenote login")
++	}
++	if credentials.BaseURL != "" && resolved.BaseURL != "" && !sameBaseURL(credentials.BaseURL, resolved.BaseURL) {
++		return "", authError("invalid_token", "stored login credentials are for a different base URL")
++	}
++	if credentials.ExpiresAt.IsZero() || time.Until(credentials.ExpiresAt) > time.Minute {
++		return credentials.AccessToken, nil
++	}
++	if credentials.RefreshToken == "" {
++		return "", authError("invalid_token", "stored OAuth token is expired and has no refresh token")
++	}
++
++	metadata, err := screenote.DiscoverOAuth(ctx, resolved.BaseURL, a.httpClient)
++	if err != nil {
++		return "", authError("invalid_token", "stored OAuth token refresh failed: "+err.Error())
++	}
++	if credentials.Issuer != "" && metadata.Issuer != credentials.Issuer {
++		return "", authError("invalid_token", "stored OAuth issuer does not match discovered issuer")
++	}
++	response, err := screenote.RefreshAccessToken(ctx, metadata, credentials.ClientID, credentials.RefreshToken, a.httpClient)
++	if err != nil {
++		return "", authError("invalid_token", "stored OAuth token refresh failed: "+err.Error())
++	}
++	credentials.AccessToken = response.AccessToken
++	if response.RefreshToken != "" {
++		credentials.RefreshToken = response.RefreshToken
++	}
++	credentials.ExpiresAt = screenote.ExpiresAt(response, time.Now())
++	values.Login = credentials
++	if err := appconfig.Save(path, values); err != nil {
++		return "", err
++	}
++	return credentials.AccessToken, nil
++}
++
++// sameBaseURL compares two base URLs ignoring trailing-slash differences so a
++// stored "https://x" and a resolved "https://x/" don't force an unnecessary
++// re-login. It fails closed: unparseable inputs fall back to trimmed strings.
++func sameBaseURL(a, b string) bool {
++	return normalizeBaseURL(a) == normalizeBaseURL(b)
++}
++
++func normalizeBaseURL(raw string) string {
++	parsed, err := url.Parse(raw)
++	if err != nil {
++		return strings.TrimRight(raw, "/")
++	}
++	parsed.Path = strings.TrimRight(parsed.Path, "/")
++	return parsed.String()
++}
++
++func (a *app) projectID(resolved appconfig.Resolved) (string, error) {
++	if resolved.Project != "" {
++		return resolved.Project, nil
+ 	}
+-	return intString(projects.Projects[0].ID), nil
++	return "", usageError("missing_project", "project is required; set --project, SCREENOTE_PROJECT, or config project")
+ }
+ 
+ func writeJSON(w io.Writer, value any) error {
+diff --git a/internal/cli/root_test.go b/internal/cli/root_test.go
+index 0c03759..090b075 100644
+--- a/internal/cli/root_test.go
++++ b/internal/cli/root_test.go
+@@ -19,7 +19,7 @@ func TestProjectListCommand(t *testing.T) {
+ 	}))
+ 	defer server.Close()
+ 
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "project", "list"}, "")
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "project", "list"}, "")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+@@ -46,6 +46,9 @@ func TestScreenshotCreateReadsStdin(t *testing.T) {
+ 		if r.FormValue("title") != "Home" {
+ 			t.Fatalf("title=%q", r.FormValue("title"))
+ 		}
++		if r.FormValue("project_id") != "7" {
++			t.Fatalf("project_id=%q", r.FormValue("project_id"))
++		}
+ 		file, _, err := r.FormFile("image")
+ 		if err != nil {
+ 			t.Fatal(err)
+@@ -55,7 +58,7 @@ func TestScreenshotCreateReadsStdin(t *testing.T) {
+ 	}))
+ 	defer server.Close()
+ 
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "screenshot", "create", "--title", "Home"}, "image")
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "--project", "7", "screenshot", "create", "--title", "Home"}, "image")
+ 	if code != ExitOK {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+@@ -64,30 +67,28 @@ func TestScreenshotCreateReadsStdin(t *testing.T) {
+ 	}
+ }
+ 
+-func TestPageListInfersProject(t *testing.T) {
++func TestPageListRequiresProjectWithoutInference(t *testing.T) {
++	called := false
+ 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		switch r.URL.Path {
+-		case "/api/v1/projects":
+-			_, _ = w.Write([]byte(`{"projects":[{"id":42,"name":"Demo"}]}`))
+-		case "/api/v1/projects/42/pages":
+-			_, _ = w.Write([]byte(`{"pages":[]}`))
+-		default:
+-			t.Fatalf("unexpected path %s", r.URL.Path)
+-		}
++		called = true
++		t.Fatalf("unexpected request %s", r.URL.Path)
+ 	}))
+ 	defer server.Close()
+ 
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "page", "list"}, "")
+-	if code != ExitOK {
++	stdout, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "page", "list"}, "")
++	if code != ExitUsage {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+-	if !strings.Contains(stdout, `"pages"`) {
+-		t.Fatalf("stdout=%s", stdout)
++	if called {
++		t.Fatal("expected no project inference request")
++	}
++	if !strings.Contains(stderr, "missing_project") {
++		t.Fatalf("stdout=%s stderr=%s", stdout, stderr)
+ 	}
+ }
+ 
+ func TestCommentAddValidatesBody(t *testing.T) {
+-	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--api-key", "key", "comment", "add", "--annotation", "1"}, "")
++	stdout, stderr, code := runCLI(t, []string{"--base-url", "http://example.test", "--token", "key", "comment", "add", "--annotation", "1"}, "")
+ 	if code != ExitUsage {
+ 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+ 	}
+@@ -107,7 +108,7 @@ func TestServerStatusExitCodes(t *testing.T) {
+ 	}))
+ 	defer server.Close()
+ 
+-	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--api-key", "key", "project", "list"}, "")
++	_, stderr, code := runCLI(t, []string{"--base-url", server.URL, "--token", "key", "project", "list"}, "")
+ 	if code != ExitRateLimited {
+ 		t.Fatalf("code=%d stderr=%s", code, stderr)
+ 	}
+diff --git a/internal/cli/screenshot.go b/internal/cli/screenshot.go
+index 591931c..989712f 100644
+--- a/internal/cli/screenshot.go
++++ b/internal/cli/screenshot.go
+@@ -19,11 +19,7 @@ func (a *app) screenshotCommand() *cobra.Command {
+ 		Short: "List screenshots",
+ 		Args:  rejectArgs,
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+-			client, resolved, err := a.client()
+-			if err != nil {
+-				return err
+-			}
+-			project, err := a.projectID(cmd.Context(), client, resolved)
++			client, project, err := a.clientForProject(cmd.Context())
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -52,7 +48,7 @@ func (a *app) screenshotCommand() *cobra.Command {
+ 			if title == "" {
+ 				return missingFlag("title")
+ 			}
+-			client, _, err := a.client()
++			client, project, err := a.clientForProject(cmd.Context())
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -71,7 +67,7 @@ func (a *app) screenshotCommand() *cobra.Command {
+ 				contentType = mime.TypeByExtension(filepath.Ext(filePath))
+ 			}
+ 
+-			raw, err := client.CreateScreenshot(cmd.Context(), title, pageValue, filename, contentType, reader)
++			raw, err := client.CreateScreenshot(cmd.Context(), project, title, pageValue, filename, contentType, reader)
+ 			if err != nil {
+ 				return err
+ 			}
+diff --git a/internal/config/config.go b/internal/config/config.go
+index 6eae0e7..b1cc2b8 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -4,6 +4,7 @@ import (
+ 	"errors"
+ 	"os"
+ 	"path/filepath"
++	"time"
+ 
+ 	"github.com/BurntSushi/toml"
+ )
+@@ -11,13 +12,23 @@ import (
+ const DefaultConfigPath = "~/.config/screenote/config.toml"
+ 
+ type Values struct {
+-	APIKey  string `toml:"api_key" json:"api_key,omitempty"`
+-	BaseURL string `toml:"base_url" json:"base_url,omitempty"`
+-	Project string `toml:"project" json:"project,omitempty"`
++	Token   string            `toml:"token" json:"token,omitempty"`
++	BaseURL string            `toml:"base_url" json:"base_url,omitempty"`
++	Project string            `toml:"project" json:"project,omitempty"`
++	Login   *LoginCredentials `toml:"login,omitempty" json:"-"`
++}
++
++type LoginCredentials struct {
++	AccessToken  string    `toml:"access_token"`
++	RefreshToken string    `toml:"refresh_token,omitempty"`
++	ExpiresAt    time.Time `toml:"expires_at,omitempty"`
++	ClientID     string    `toml:"client_id"`
++	BaseURL      string    `toml:"base_url"`
++	Issuer       string    `toml:"issuer,omitempty"`
+ }
+ 
+ type Sources struct {
+-	APIKey  string `json:"api_key,omitempty"`
++	Token   string `json:"token,omitempty"`
+ 	BaseURL string `json:"base_url,omitempty"`
+ 	Project string `json:"project,omitempty"`
+ }
+@@ -56,8 +67,8 @@ func Resolve(options Options) (Resolved, error) {
+ 	}
+ 
+ 	resolved := Resolved{Values: fileValues}
+-	if fileValues.APIKey != "" {
+-		resolved.Sources.APIKey = "config"
++	if fileValues.Token != "" {
++		resolved.Sources.Token = "config"
+ 	}
+ 	if fileValues.BaseURL != "" {
+ 		resolved.Sources.BaseURL = "config"
+@@ -74,10 +85,10 @@ func Resolve(options Options) (Resolved, error) {
+ 		*sourceTarget = source
+ 	}
+ 
+-	apply(env("SCREENOTE_API_KEY"), "env", &resolved.APIKey, &resolved.Sources.APIKey)
++	apply(env("SCREENOTE_TOKEN"), "env", &resolved.Token, &resolved.Sources.Token)
+ 	apply(env("SCREENOTE_BASE_URL"), "env", &resolved.BaseURL, &resolved.Sources.BaseURL)
+ 	apply(env("SCREENOTE_PROJECT"), "env", &resolved.Project, &resolved.Sources.Project)
+-	apply(options.Flags.APIKey, "flag", &resolved.APIKey, &resolved.Sources.APIKey)
++	apply(options.Flags.Token, "flag", &resolved.Token, &resolved.Sources.Token)
+ 	apply(options.Flags.BaseURL, "flag", &resolved.BaseURL, &resolved.Sources.BaseURL)
+ 	apply(options.Flags.Project, "flag", &resolved.Project, &resolved.Sources.Project)
+ 
+@@ -127,11 +138,19 @@ func Save(path string, values Values) error {
+ 		return err
+ 	}
+ 
+-	f, err := os.OpenFile(expanded, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
++	f, err := os.OpenFile(expanded, os.O_CREATE|os.O_WRONLY, 0o600)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	defer f.Close()
++	// OpenFile's permission is only applied on creation. Tighten an existing
++	// hand-authored config before writing OAuth access/refresh credentials.
++	if err := f.Chmod(0o600); err != nil {
++		return err
++	}
++	if err := f.Truncate(0); err != nil {
++		return err
++	}
+ 
+ 	return toml.NewEncoder(f).Encode(values)
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index 765d676..64dda64 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,21 +1,23 @@
+ package config
+ 
+ import (
++	"os"
+ 	"path/filepath"
++	"runtime"
+ 	"testing"
+ )
+ 
+ func TestResolvePrecedence(t *testing.T) {
+ 	path := filepath.Join(t.TempDir(), "config.toml")
+-	if err := Save(path, Values{APIKey: "file-key", BaseURL: "http://file", Project: "file-project"}); err != nil {
++	if err := Save(path, Values{Token: "file-token", BaseURL: "http://file", Project: "file-project"}); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+ 	resolved, err := Resolve(Options{
+ 		ConfigPath: path,
+-		Flags:      Values{APIKey: "flag-key"},
++		Flags:      Values{Token: "flag-token"},
+ 		Env: map[string]string{
+-			"SCREENOTE_API_KEY":  "env-key",
++			"SCREENOTE_TOKEN":    "env-token",
+ 			"SCREENOTE_BASE_URL": "http://env",
+ 		},
+ 	})
+@@ -23,8 +25,8 @@ func TestResolvePrecedence(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	if resolved.APIKey != "flag-key" || resolved.Sources.APIKey != "flag" {
+-		t.Fatalf("api key = %q from %q", resolved.APIKey, resolved.Sources.APIKey)
++	if resolved.Token != "flag-token" || resolved.Sources.Token != "flag" {
++		t.Fatalf("token = %q from %q", resolved.Token, resolved.Sources.Token)
+ 	}
+ 	if resolved.BaseURL != "http://env" || resolved.Sources.BaseURL != "env" {
+ 		t.Fatalf("base url = %q from %q", resolved.BaseURL, resolved.Sources.BaseURL)
+@@ -34,6 +36,50 @@ func TestResolvePrecedence(t *testing.T) {
+ 	}
+ }
+ 
++func TestResolveTokenSources(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "config.toml")
++	if err := Save(path, Values{Token: "file-token"}); err != nil {
++		t.Fatal(err)
++	}
++
++	envResolved, err := Resolve(Options{
++		ConfigPath: path,
++		Env:        map[string]string{"SCREENOTE_TOKEN": "env-token"},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if envResolved.Token != "env-token" || envResolved.Sources.Token != "env" {
++		t.Fatalf("token = %q from %q", envResolved.Token, envResolved.Sources.Token)
++	}
++
++	fileResolved, err := Resolve(Options{ConfigPath: path})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if fileResolved.Token != "file-token" || fileResolved.Sources.Token != "config" {
++		t.Fatalf("token = %q from %q", fileResolved.Token, fileResolved.Sources.Token)
++	}
++}
++
++func TestResolveIgnoresLegacyAPIKeySources(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "config.toml")
++	if err := os.WriteFile(path, []byte("api_key = \"legacy\"\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	resolved, err := Resolve(Options{
++		ConfigPath: path,
++		Env:        map[string]string{"SCREENOTE_API_KEY": "legacy-env"},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if resolved.Token != "" || resolved.Sources.Token != "" {
++		t.Fatalf("legacy API key source resolved token: %#v", resolved)
++	}
++}
++
+ func TestLoadMissingConfig(t *testing.T) {
+ 	values, err := Load(filepath.Join(t.TempDir(), "missing.toml"))
+ 	if err != nil {
+@@ -43,3 +89,26 @@ func TestLoadMissingConfig(t *testing.T) {
+ 		t.Fatalf("values = %#v", values)
+ 	}
+ }
++
++func TestSaveTightensExistingConfigPermissions(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("POSIX permission bits are not available on Windows")
++	}
++	path := filepath.Join(t.TempDir(), "config.toml")
++	if err := os.WriteFile(path, []byte("base_url = \"https://old.example\"\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(path, 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if err := Save(path, Values{BaseURL: "https://screenote.test", Login: &LoginCredentials{AccessToken: "access-1"}}); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := info.Mode().Perm(); got != 0o600 {
++		t.Fatalf("permissions=%#o want 0600", got)
++	}
++}
+diff --git a/internal/screenote/client.go b/internal/screenote/client.go
+index 1433f4d..092f72d 100644
+--- a/internal/screenote/client.go
++++ b/internal/screenote/client.go
+@@ -13,14 +13,17 @@ import (
+ 	"path"
+ 	"strconv"
+ 	"strings"
++	"time"
+ )
+ 
+ type Client struct {
+-	baseURL    *url.URL
+-	apiKey     string
+-	httpClient *http.Client
++	baseURL     *url.URL
++	bearerToken string
++	httpClient  *http.Client
+ }
+ 
++const defaultHTTPTimeout = 30 * time.Second
++
+ type Error struct {
+ 	StatusCode int
+ 	Code       string
+@@ -34,7 +37,7 @@ func (e *Error) Error() string {
+ 	return http.StatusText(e.StatusCode)
+ }
+ 
+-func NewClient(baseURL, apiKey string, httpClient *http.Client) (*Client, error) {
++func NewClient(baseURL, bearerToken string, httpClient *http.Client) (*Client, error) {
+ 	if baseURL == "" {
+ 		return nil, errors.New("base url is required")
+ 	}
+@@ -45,10 +48,15 @@ func NewClient(baseURL, apiKey string, httpClient *http.Client) (*Client, error)
+ 	if parsed.Scheme == "" || parsed.Host == "" {
+ 		return nil, errors.New("base url must include scheme and host")
+ 	}
++	httpClient = httpClientOrDefault(httpClient)
++	return &Client{baseURL: parsed, bearerToken: bearerToken, httpClient: httpClient}, nil
++}
++
++func httpClientOrDefault(httpClient *http.Client) *http.Client {
+ 	if httpClient == nil {
+-		httpClient = http.DefaultClient
++		return &http.Client{Timeout: defaultHTTPTimeout}
+ 	}
+-	return &Client{baseURL: parsed, apiKey: apiKey, httpClient: httpClient}, nil
++	return httpClient
+ }
+ 
+ func (c *Client) Projects(ctx context.Context) (json.RawMessage, ProjectsResponse, error) {
+@@ -67,7 +75,7 @@ func (c *Client) Screenshots(ctx context.Context, project string, query url.Valu
+ 	return raw, out, err
+ }
+ 
+-func (c *Client) CreateScreenshot(ctx context.Context, title, pageValue, filename, contentType string, r io.Reader) (json.RawMessage, error) {
++func (c *Client) CreateScreenshot(ctx context.Context, project, title, pageValue, filename, contentType string, r io.Reader) (json.RawMessage, error) {
+ 	if contentType == "" {
+ 		contentType = "application/octet-stream"
+ 	}
+@@ -99,6 +107,11 @@ func (c *Client) CreateScreenshot(ctx context.Context, title, pageValue, filenam
+ 				return
+ 			}
+ 		}
++		if project != "" {
++			if err = writer.WriteField("project_id", project); err != nil {
++				return
++			}
++		}
+ 
+ 		header := make(textproto.MIMEHeader)
+ 		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename="%s"`, escapeQuotes(path.Base(filename))))
+@@ -111,21 +124,35 @@ func (c *Client) CreateScreenshot(ctx context.Context, title, pageValue, filenam
+ 		_, err = io.Copy(part, r)
+ 	}()
+ 
++	// Close the reader when we return so the producer goroutine unblocks (and
++	// releases the open upload file) even if doJSON never starts draining it.
++	defer pr.Close()
+ 	return c.doJSON(ctx, http.MethodPost, "/api/v1/screenshots", nil, headers, nil, pr)
+ }
+ 
+-func (c *Client) Annotations(ctx context.Context, screenshot string, query url.Values) (json.RawMessage, AnnotationsResponse, error) {
++func (c *Client) Annotations(ctx context.Context, screenshot, project string, query url.Values) (json.RawMessage, AnnotationsResponse, error) {
+ 	var out AnnotationsResponse
++	if project != "" {
++		query = cloneQuery(query)
++		query.Set("project_id", project)
++	}
+ 	raw, err := c.doJSON(ctx, http.MethodGet, "/api/v1/screenshots/"+url.PathEscape(screenshot)+"/annotations", query, nil, &out, nil)
+ 	return raw, out, err
+ }
+ 
+-func (c *Client) Annotation(ctx context.Context, id string) (json.RawMessage, error) {
+-	return c.doJSON(ctx, http.MethodGet, "/api/v1/annotations/"+url.PathEscape(id), nil, nil, nil, nil)
++func (c *Client) Annotation(ctx context.Context, id, project string) (json.RawMessage, error) {
++	query := url.Values{}
++	if project != "" {
++		query.Set("project_id", project)
++	}
++	return c.doJSON(ctx, http.MethodGet, "/api/v1/annotations/"+url.PathEscape(id), query, nil, nil, nil)
+ }
+ 
+-func (c *Client) AddComment(ctx context.Context, annotation, body string) (json.RawMessage, error) {
++func (c *Client) AddComment(ctx context.Context, annotation, project, body string) (json.RawMessage, error) {
+ 	form := url.Values{"body": []string{body}}
++	if project != "" {
++		form.Set("project_id", project)
++	}
+ 	headers := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+ 	return c.doJSON(ctx, http.MethodPost, "/api/v1/annotations/"+url.PathEscape(annotation)+"/comments", nil, headers, nil, strings.NewReader(form.Encode()))
+ }
+@@ -159,8 +186,8 @@ func (c *Client) doJSON(ctx context.Context, method, rawPath string, query url.V
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if c.apiKey != "" {
+-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
++	if c.bearerToken != "" {
++		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+ 	}
+ 	req.Header.Set("Accept", "application/json")
+ 	for key, value := range headers {
+@@ -188,6 +215,14 @@ func (c *Client) doJSON(ctx context.Context, method, rawPath string, query url.V
+ 	return raw, nil
+ }
+ 
++func cloneQuery(values url.Values) url.Values {
++	out := url.Values{}
++	for key, vals := range values {
++		out[key] = append([]string(nil), vals...)
++	}
++	return out
++}
++
+ func parseError(status int, raw []byte) error {
+ 	var payload struct {
+ 		Error   string `json:"error"`
+diff --git a/internal/screenote/client_test.go b/internal/screenote/client_test.go
+index 13ee371..fed1555 100644
+--- a/internal/screenote/client_test.go
++++ b/internal/screenote/client_test.go
+@@ -12,14 +12,14 @@ import (
+ 
+ func TestClientSendsAuthAndParsesErrors(t *testing.T) {
+ 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		if r.Header.Get("Authorization") != "Bearer test-key" {
++		if r.Header.Get("Authorization") != "Bearer test-token" {
+ 			t.Fatalf("Authorization = %q", r.Header.Get("Authorization"))
+ 		}
+ 		http.Error(w, `{"error":"nope","code":"unauthorized"}`, http.StatusUnauthorized)
+ 	}))
+ 	defer server.Close()
+ 
+-	client, err := NewClient(server.URL, "test-key", server.Client())
++	client, err := NewClient(server.URL, "test-token", server.Client())
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -47,6 +47,9 @@ func TestClientCreateScreenshotMultipart(t *testing.T) {
+ 		if got := r.FormValue("title"); got != "Home" {
+ 			t.Fatalf("title = %q", got)
+ 		}
++		if got := r.FormValue("project_id"); got != "7" {
++			t.Fatalf("project_id = %q", got)
++		}
+ 		file, header, err := r.FormFile("image")
+ 		if err != nil {
+ 			t.Fatal(err)
+@@ -60,11 +63,11 @@ func TestClientCreateScreenshotMultipart(t *testing.T) {
+ 	}))
+ 	defer server.Close()
+ 
+-	client, err := NewClient(server.URL, "test-key", server.Client())
++	client, err := NewClient(server.URL, "test-token", server.Client())
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	raw, err := client.CreateScreenshot(context.Background(), "Home", "", "stdin.png", "image/png", strings.NewReader("png-data"))
++	raw, err := client.CreateScreenshot(context.Background(), "7", "Home", "", "stdin.png", "image/png", strings.NewReader("png-data"))
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -72,3 +75,34 @@ func TestClientCreateScreenshotMultipart(t *testing.T) {
+ 		t.Fatalf("raw = %s", raw)
+ 	}
+ }
++
++func TestClientEmptyTokenOmitsAuthorization(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if got := r.Header.Get("Authorization"); got != "" {
++			t.Fatalf("Authorization = %q", got)
++		}
++		_, _ = w.Write([]byte(`{"projects":[]}`))
++	}))
++	defer server.Close()
++
++	client, err := NewClient(server.URL, "", server.Client())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := client.Projects(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestNewClientUsesBoundedDefaultHTTPClient(t *testing.T) {
++	client, err := NewClient("https://screenote.test", "token", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if client.httpClient.Timeout != defaultHTTPTimeout {
++		t.Fatalf("timeout=%s want %s", client.httpClient.Timeout, defaultHTTPTimeout)
++	}
++	if oauthClient := httpClientOrDefault(nil); oauthClient.Timeout != defaultHTTPTimeout {
++		t.Fatalf("OAuth timeout=%s want %s", oauthClient.Timeout, defaultHTTPTimeout)
++	}
++}
+diff --git a/internal/screenote/oauth.go b/internal/screenote/oauth.go
+new file mode 100644
+index 0000000..7a46b2e
+--- /dev/null
++++ b/internal/screenote/oauth.go
+@@ -0,0 +1,204 @@
++package screenote
++
++import (
++	"bytes"
++	"context"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"strings"
++	"time"
++)
++
++type OAuthMetadata struct {
++	Issuer                string   `json:"issuer"`
++	AuthorizationEndpoint string   `json:"authorization_endpoint"`
++	TokenEndpoint         string   `json:"token_endpoint"`
++	RegistrationEndpoint  string   `json:"registration_endpoint"`
++	ScopesSupported       []string `json:"scopes_supported"`
++	CodeChallengeMethods  []string `json:"code_challenge_methods_supported"`
++	GrantTypesSupported   []string `json:"grant_types_supported"`
++}
++
++type OAuthRegistration struct {
++	ClientID string `json:"client_id"`
++}
++
++type TokenResponse struct {
++	AccessToken  string `json:"access_token"`
++	RefreshToken string `json:"refresh_token"`
++	TokenType    string `json:"token_type"`
++	ExpiresIn    int    `json:"expires_in"`
++	Scope        string `json:"scope"`
++}
++
++func DiscoverOAuth(ctx context.Context, baseURL string, httpClient *http.Client) (OAuthMetadata, error) {
++	var metadata OAuthMetadata
++	u, err := metadataURL(baseURL)
++	if err != nil {
++		return metadata, err
++	}
++	httpClient = httpClientOrDefault(httpClient)
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
++	if err != nil {
++		return metadata, err
++	}
++	req.Header.Set("Accept", "application/json")
++	resp, err := httpClient.Do(req)
++	if err != nil {
++		return metadata, err
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode < 200 || resp.StatusCode > 299 {
++		raw, _ := io.ReadAll(resp.Body)
++		return metadata, parseError(resp.StatusCode, raw)
++	}
++	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
++		return metadata, err
++	}
++	if metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" || metadata.RegistrationEndpoint == "" {
++		return metadata, errors.New("OAuth metadata is missing required endpoints")
++	}
++	return metadata, nil
++}
++
++func RegisterOAuthClient(ctx context.Context, metadata OAuthMetadata, redirectURI string, httpClient *http.Client) (OAuthRegistration, error) {
++	var registration OAuthRegistration
++	body := map[string]any{
++		"client_name":   "Screenote CLI",
++		"redirect_uris": []string{redirectURI},
++	}
++	raw, err := json.Marshal(body)
++	if err != nil {
++		return registration, err
++	}
++	httpClient = httpClientOrDefault(httpClient)
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, metadata.RegistrationEndpoint, bytes.NewReader(raw))
++	if err != nil {
++		return registration, err
++	}
++	req.Header.Set("Accept", "application/json")
++	req.Header.Set("Content-Type", "application/json")
++	resp, err := httpClient.Do(req)
++	if err != nil {
++		return registration, err
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode < 200 || resp.StatusCode > 299 {
++		raw, _ := io.ReadAll(resp.Body)
++		return registration, parseError(resp.StatusCode, raw)
++	}
++	if err := json.NewDecoder(resp.Body).Decode(&registration); err != nil {
++		return registration, err
++	}
++	if registration.ClientID == "" {
++		return registration, errors.New("OAuth registration did not return a client_id")
++	}
++	return registration, nil
++}
++
++func AuthorizationURL(metadata OAuthMetadata, clientID, redirectURI, verifier, state, scope string) (string, error) {
++	u, err := url.Parse(metadata.AuthorizationEndpoint)
++	if err != nil {
++		return "", err
++	}
++	values := u.Query()
++	values.Set("response_type", "code")
++	values.Set("client_id", clientID)
++	values.Set("redirect_uri", redirectURI)
++	values.Set("scope", scope)
++	values.Set("state", state)
++	values.Set("code_challenge", PKCEChallenge(verifier))
++	values.Set("code_challenge_method", "S256")
++	u.RawQuery = values.Encode()
++	return u.String(), nil
++}
++
++func ExchangeCode(ctx context.Context, metadata OAuthMetadata, clientID, redirectURI, code, verifier string, httpClient *http.Client) (TokenResponse, error) {
++	form := url.Values{
++		"grant_type":    []string{"authorization_code"},
++		"client_id":     []string{clientID},
++		"redirect_uri":  []string{redirectURI},
++		"code":          []string{code},
++		"code_verifier": []string{verifier},
++	}
++	return tokenRequest(ctx, metadata.TokenEndpoint, form, httpClient)
++}
++
++func RefreshAccessToken(ctx context.Context, metadata OAuthMetadata, clientID, refreshToken string, httpClient *http.Client) (TokenResponse, error) {
++	form := url.Values{
++		"grant_type":    []string{"refresh_token"},
++		"client_id":     []string{clientID},
++		"refresh_token": []string{refreshToken},
++	}
++	return tokenRequest(ctx, metadata.TokenEndpoint, form, httpClient)
++}
++
++func RandomToken(bytesLen int) (string, error) {
++	data := make([]byte, bytesLen)
++	if _, err := rand.Read(data); err != nil {
++		return "", err
++	}
++	return base64.RawURLEncoding.EncodeToString(data), nil
++}
++
++func PKCEChallenge(verifier string) string {
++	sum := sha256.Sum256([]byte(verifier))
++	return base64.RawURLEncoding.EncodeToString(sum[:])
++}
++
++func ExpiresAt(response TokenResponse, now time.Time) time.Time {
++	if response.ExpiresIn <= 0 {
++		return time.Time{}
++	}
++	return now.Add(time.Duration(response.ExpiresIn) * time.Second)
++}
++
++func metadataURL(baseURL string) (string, error) {
++	parsed, err := url.Parse(baseURL)
++	if err != nil {
++		return "", err
++	}
++	if parsed.Scheme == "" || parsed.Host == "" {
++		return "", errors.New("base url must include scheme and host")
++	}
++	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/.well-known/oauth-authorization-server"
++	parsed.RawQuery = ""
++	return parsed.String(), nil
++}
++
++func tokenRequest(ctx context.Context, endpoint string, form url.Values, httpClient *http.Client) (TokenResponse, error) {
++	var token TokenResponse
++	httpClient = httpClientOrDefault(httpClient)
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
++	if err != nil {
++		return token, err
++	}
++	req.Header.Set("Accept", "application/json")
++	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	resp, err := httpClient.Do(req)
++	if err != nil {
++		return token, err
++	}
++	defer resp.Body.Close()
++	raw, err := io.ReadAll(resp.Body)
++	if err != nil {
++		return token, err
++	}
++	if resp.StatusCode < 200 || resp.StatusCode > 299 {
++		return token, parseError(resp.StatusCode, raw)
++	}
++	if err := json.Unmarshal(raw, &token); err != nil {
++		return token, err
++	}
++	if token.AccessToken == "" {
++		return token, fmt.Errorf("token endpoint did not return an access_token")
++	}
++	return token, nil
++}
+diff --git a/internal/screenote/oauth_test.go b/internal/screenote/oauth_test.go
+new file mode 100644
+index 0000000..c95bcb8
+--- /dev/null
++++ b/internal/screenote/oauth_test.go
+@@ -0,0 +1,62 @@
++package screenote
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"testing"
++)
++
++func TestAuthorizationURLUsesPKCEStateAndScopes(t *testing.T) {
++	rawURL, err := AuthorizationURL(OAuthMetadata{AuthorizationEndpoint: "https://screenote.test/oauth/authorize"}, "client-1", "http://127.0.0.1:1234/callback", "verifier", "state-1", "mcp_read mcp_write")
++	if err != nil {
++		t.Fatal(err)
++	}
++	parsed, err := url.Parse(rawURL)
++	if err != nil {
++		t.Fatal(err)
++	}
++	query := parsed.Query()
++	if query.Get("client_id") != "client-1" || query.Get("redirect_uri") != "http://127.0.0.1:1234/callback" || query.Get("state") != "state-1" {
++		t.Fatalf("query=%s", parsed.RawQuery)
++	}
++	if query.Get("scope") != "mcp_read mcp_write" || query.Get("code_challenge_method") != "S256" {
++		t.Fatalf("query=%s", parsed.RawQuery)
++	}
++	sum := sha256.Sum256([]byte("verifier"))
++	if query.Get("code_challenge") != base64.RawURLEncoding.EncodeToString(sum[:]) {
++		t.Fatalf("code_challenge=%q", query.Get("code_challenge"))
++	}
++}
++
++func TestOAuthRefreshPostsForm(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodPost || r.URL.Path != "/oauth/token" {
++			t.Fatalf("%s %s", r.Method, r.URL.Path)
++		}
++		if err := r.ParseForm(); err != nil {
++			t.Fatal(err)
++		}
++		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("client_id") != "client-1" || r.Form.Get("refresh_token") != "refresh-1" {
++			t.Fatalf("form=%v", r.Form)
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{
++			"access_token":  "access-2",
++			"refresh_token": "refresh-2",
++			"expires_in":    3600,
++		})
++	}))
++	defer server.Close()
++
++	response, err := RefreshAccessToken(context.Background(), OAuthMetadata{TokenEndpoint: server.URL + "/oauth/token"}, "client-1", "refresh-1", server.Client())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if response.AccessToken != "access-2" || response.RefreshToken != "refresh-2" {
++		t.Fatalf("response=%#v", response)
++	}
++}
+diff --git a/test/controllers/api/v1/annotation_comments_controller_test.rb b/test/controllers/api/v1/annotation_comments_controller_test.rb
+index 1e2e48e..ef8748a 100644
+--- a/test/controllers/api/v1/annotation_comments_controller_test.rb
++++ b/test/controllers/api/v1/annotation_comments_controller_test.rb
+@@ -46,11 +46,72 @@ class AnnotationCommentsControllerTest < ActionDispatch::IntegrationTest
+         assert_equal "not_found", response.parsed_body["code"]
+       end
+ 
++      test "oauth write token creates user-authored comment with explicit project" do
++        annotation = annotations(:point_annotation)
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        assert_difference "AnnotationComment.count", 1 do
++          post api_v1_annotation_comments_path(annotation),
++            params: { body: "OAuth comment", project_id: projects(:alice_project).id },
++            headers: auth_header(token.token)
++        end
++
++        assert_response :created
++        assert_equal users(:alice), AnnotationComment.last.user
++        assert_nil AnnotationComment.last.api_key
++      end
++
++      test "oauth read token cannot create comments" do
++        annotation = annotations(:point_annotation)
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        assert_no_difference "AnnotationComment.count" do
++          post api_v1_annotation_comments_path(annotation),
++            params: { body: "Read only", project_id: projects(:alice_project).id },
++            headers: auth_header(token.token)
++        end
++
++        assert_response :forbidden
++        assert_equal "insufficient_scope", response.parsed_body["code"]
++      end
++
++      test "oauth write token cannot comment in a non-member project" do
++        annotation = annotations(:point_annotation)
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        assert_no_difference "AnnotationComment.count" do
++          post api_v1_annotation_comments_path(annotation),
++            params: { body: "Trespass", project_id: projects(:bob_project).id },
++            headers: auth_header(token.token)
++        end
++
++        assert_response :forbidden
++        assert_equal "forbidden", response.parsed_body["code"]
++      end
++
++      test "oauth comment requires explicit project" do
++        annotation = annotations(:point_annotation)
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        assert_no_difference "AnnotationComment.count" do
++          post api_v1_annotation_comments_path(annotation),
++            params: { body: "Missing project" },
++            headers: auth_header(token.token)
++        end
++
++        assert_response :unprocessable_entity
++        assert_equal "missing_project", response.parsed_body["code"]
++      end
++
+       private
+ 
+       def auth_header(token)
+         { "Authorization" => "Bearer #{token}" }
+       end
++
++      def oauth_token(user:, scopes:)
++        create_oauth_token(application: create_oauth_application, user: user, scopes: scopes)
++      end
+     end
+   end
+ end
+diff --git a/test/controllers/api/v1/annotations_controller_test.rb b/test/controllers/api/v1/annotations_controller_test.rb
+index 6273198..80767b6 100644
+--- a/test/controllers/api/v1/annotations_controller_test.rb
++++ b/test/controllers/api/v1/annotations_controller_test.rb
+@@ -46,6 +46,10 @@ class AnnotationsControllerTest < ActionDispatch::IntegrationTest
+       end
+ 
+       test "does not list annotations for another project screenshot" do
++        # The screenshot must actually own annotations, otherwise an empty result
++        # proves nothing about cross-project scoping.
++        assert screenshots(:bob_screenshot).annotations.any?
++
+         get api_v1_screenshot_annotations_path(screenshots(:bob_screenshot)),
+           headers: auth_header(ALICE_TOKEN)
+ 
+@@ -79,11 +83,63 @@ class AnnotationsControllerTest < ActionDispatch::IntegrationTest
+         assert_response :unauthorized
+       end
+ 
++      test "oauth read token lists annotations with explicit project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_screenshot_annotations_path(@screenshot, project_id: @project.id),
++          headers: auth_header(token.token)
++
++        assert_response :success
++        assert response.parsed_body["annotations"].is_a?(Array)
++      end
++
++      test "oauth annotation list requires explicit project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_screenshot_annotations_path(@screenshot), headers: auth_header(token.token)
++
++        assert_response :unprocessable_entity
++        assert_equal "missing_project", response.parsed_body["code"]
++      end
++
++      test "oauth read token gets annotation details with explicit project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_annotation_path(annotations(:resolved_annotation), project_id: @project.id),
++          headers: auth_header(token.token)
++
++        assert_response :success
++        assert_equal annotations(:resolved_annotation).id, response.parsed_body["id"]
++      end
++
++      test "oauth token cannot get annotation outside member project by known id" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_annotation_path(annotations(:bob_annotation), project_id: @project.id),
++          headers: auth_header(token.token)
++
++        assert_response :not_found
++      end
++
++      test "oauth write-only token cannot read annotations" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        get api_v1_annotation_path(annotations(:resolved_annotation), project_id: @project.id),
++          headers: auth_header(token.token)
++
++        assert_response :forbidden
++        assert_equal "insufficient_scope", response.parsed_body["code"]
++      end
++
+       private
+ 
+       def auth_header(token)
+         { "Authorization" => "Bearer #{token}" }
+       end
++
++      def oauth_token(user:, scopes:)
++        create_oauth_token(application: create_oauth_application, user: user, scopes: scopes)
++      end
+     end
+   end
+ end
+diff --git a/test/controllers/api/v1/pages_controller_test.rb b/test/controllers/api/v1/pages_controller_test.rb
+index 8c578f2..499b7f2 100644
+--- a/test/controllers/api/v1/pages_controller_test.rb
++++ b/test/controllers/api/v1/pages_controller_test.rb
+@@ -26,11 +26,33 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
+         assert_equal "forbidden", response.parsed_body["code"]
+       end
+ 
++      test "oauth read token lists pages for member project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_project_pages_path(projects(:alice_project)), headers: auth_header(token.token)
++
++        assert_response :success
++        assert response.parsed_body["pages"].any? { |page| page["id"] == pages(:alice_page).id }
++      end
++
++      test "oauth write-only token cannot list pages" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        get api_v1_project_pages_path(projects(:alice_project)), headers: auth_header(token.token)
++
++        assert_response :forbidden
++        assert_equal "insufficient_scope", response.parsed_body["code"]
++      end
++
+       private
+ 
+       def auth_header(token)
+         { "Authorization" => "Bearer #{token}" }
+       end
++
++      def oauth_token(user:, scopes:)
++        create_oauth_token(application: create_oauth_application, user: user, scopes: scopes)
++      end
+     end
+   end
+ end
+diff --git a/test/controllers/api/v1/projects_controller_test.rb b/test/controllers/api/v1/projects_controller_test.rb
+index b53cd9d..9e013d1 100644
+--- a/test/controllers/api/v1/projects_controller_test.rb
++++ b/test/controllers/api/v1/projects_controller_test.rb
+@@ -21,15 +21,61 @@ class ProjectsControllerTest < ActionDispatch::IntegrationTest
+         get api_v1_projects_path
+ 
+         assert_response :unauthorized
+-        assert_equal "Invalid or missing API key", response.parsed_body["error"]
++        assert_equal "Invalid or missing bearer token", response.parsed_body["error"]
+         assert_equal "unauthorized", response.parsed_body["code"]
+       end
+ 
++      test "oauth read token lists all user projects with membership roles" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_projects_path, headers: auth_header(token.token)
++
++        assert_response :success
++        body = response.parsed_body
++        assert_equal [ projects(:alice_project).id, projects(:alice_second_project).id ].sort,
++          body["projects"].map { |project| project["id"] }.sort
++
++        expected_roles = users(:alice).project_memberships.index_by(&:project_id).transform_values(&:role)
++        actual_roles = body["projects"].to_h { |project| [ project["id"], project["role"] ] }
++        assert_equal expected_roles, actual_roles
++      end
++
++      test "oauth write-only token cannot list projects" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        get api_v1_projects_path, headers: auth_header(token.token)
++
++        assert_response :forbidden
++        assert_equal "insufficient_scope", response.parsed_body["code"]
++      end
++
++      test "unknown non-api-key bearer token is unauthorized" do
++        get api_v1_projects_path, headers: auth_header("garbage-oauth-token-not-sk-prefixed")
++
++        assert_response :unauthorized
++        assert_equal "unauthorized", response.parsed_body["code"]
++      end
++
++      test "revoked and expired oauth tokens are unauthorized" do
++        revoked = oauth_token(user: users(:alice), revoked_at: 1.minute.ago)
++        expired = oauth_token(user: users(:alice), expires_in: -1.minute)
++
++        get api_v1_projects_path, headers: auth_header(revoked.token)
++        assert_response :unauthorized
++
++        get api_v1_projects_path, headers: auth_header(expired.token)
++        assert_response :unauthorized
++      end
++
+       private
+ 
+       def auth_header(token)
+         { "Authorization" => "Bearer #{token}" }
+       end
++
++      def oauth_token(user:, scopes: "mcp_read", expires_in: 1.year, revoked_at: nil)
++        create_oauth_token(application: create_oauth_application, user: user, scopes: scopes, expires_in: expires_in, revoked_at: revoked_at)
++      end
+     end
+   end
+ end
+diff --git a/test/controllers/api/v1/screenshots_controller_test.rb b/test/controllers/api/v1/screenshots_controller_test.rb
+index aa17387..cc787de 100644
+--- a/test/controllers/api/v1/screenshots_controller_test.rb
++++ b/test/controllers/api/v1/screenshots_controller_test.rb
+@@ -81,7 +81,7 @@ class ScreenshotsControllerTest < ActionDispatch::IntegrationTest
+           params: { image: @image, title: "Test" }
+ 
+         assert_response :unauthorized
+-        assert_equal "Invalid or missing API key", response.parsed_body["error"]
++        assert_equal "Invalid or missing bearer token", response.parsed_body["error"]
+         assert_equal "unauthorized", response.parsed_body["code"]
+       end
+ 
+@@ -161,11 +161,96 @@ class ScreenshotsControllerTest < ActionDispatch::IntegrationTest
+         assert @api_key.reload.last_used_at > old_last_used, "last_used_at should be updated"
+       end
+ 
++      test "oauth read token can list screenshots for a member project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_project_screenshots_path(@project), headers: auth_header(token.token)
++
++        assert_response :success
++        assert_includes response.parsed_body["screenshots"].map { |screenshot| screenshot["id"] }, screenshots(:alice_screenshot).id
++      end
++
++      test "oauth read token cannot create screenshots" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        assert_no_difference "Screenshot.count" do
++          post api_v1_screenshots_path,
++            params: { image: @image, title: "No write", project_id: @project.id },
++            headers: auth_header(token.token)
++        end
++
++        assert_response :forbidden
++        assert_equal "insufficient_scope", response.parsed_body["code"]
++      end
++
++      test "oauth write token creates screenshots for member project with explicit project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        assert_difference "Screenshot.count", 1 do
++          post api_v1_screenshots_path,
++            params: { image: @image, title: "OAuth Upload", project_id: @project.id },
++            headers: auth_header(token.token)
++        end
++
++        assert_response :created
++        assert_equal @project.id, Screenshot.find(response.parsed_body["screenshot_id"]).project.id
++      end
++
++      test "oauth project scoped create requires explicit project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        assert_no_difference "Screenshot.count" do
++          post api_v1_screenshots_path,
++            params: { image: @image, title: "Missing project" },
++            headers: auth_header(token.token)
++        end
++
++        assert_response :unprocessable_entity
++        assert_equal "missing_project", response.parsed_body["code"]
++      end
++
++      test "oauth token cannot access non-member project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_project_screenshots_path(projects(:bob_project)), headers: auth_header(token.token)
++
++        assert_response :forbidden
++        assert_equal "forbidden", response.parsed_body["code"]
++      end
++
++      test "oauth write token cannot create screenshots in a non-member project" do
++        token = oauth_token(user: users(:alice), scopes: "mcp_write")
++
++        assert_no_difference "Screenshot.count" do
++          post api_v1_screenshots_path,
++            params: { image: @image, title: "Trespass", project_id: projects(:bob_project).id },
++            headers: auth_header(token.token)
++        end
++
++        assert_response :forbidden
++        assert_equal "forbidden", response.parsed_body["code"]
++      end
++
++      test "oauth requests do not touch api key last_used_at" do
++        @api_key.update_column(:last_used_at, 1.hour.ago)
++        old_last_used = @api_key.last_used_at
++        token = oauth_token(user: users(:alice), scopes: "mcp_read")
++
++        get api_v1_project_screenshots_path(@project), headers: auth_header(token.token)
++
++        assert_response :success
++        assert_equal old_last_used.to_i, @api_key.reload.last_used_at.to_i
++      end
++
+       private
+ 
+       def auth_header(token)
+         { "Authorization" => "Bearer #{token}" }
+       end
++
++      def oauth_token(user:, scopes: "mcp_read", expires_in: 1.year, revoked_at: nil)
++        create_oauth_token(application: create_oauth_application, user: user, scopes: scopes, expires_in: expires_in, revoked_at: revoked_at)
++      end
+     end
+   end
+ end
+diff --git a/test/services/api/bearer_authenticator_test.rb b/test/services/api/bearer_authenticator_test.rb
+new file mode 100644
+index 0000000..69af0d5
+--- /dev/null
++++ b/test/services/api/bearer_authenticator_test.rb
+@@ -0,0 +1,79 @@
++# frozen_string_literal: true
++
++require "test_helper"
++
++module Api
++  class BearerAuthenticatorTest < ActiveSupport::TestCase
++    ALICE_TOKEN = "sk_proj_test_alice_key_000000000000000000000000"
++    REVOKED_KEY_TOKEN = "sk_proj_test_alice_revoked_00000000000000000000"
++
++    test "returns nil for a blank token" do
++      assert_nil Api::BearerAuthenticator.call(nil)
++      assert_nil Api::BearerAuthenticator.call("")
++    end
++
++    test "authenticates an active api key and never consults oauth" do
++      result = Api::BearerAuthenticator.call(ALICE_TOKEN)
++
++      assert result.api_key?
++      assert_not result.oauth?
++      assert_equal api_keys(:alice_key), result.api_key
++      assert_nil result.oauth_token
++      assert_nil result.user
++    end
++
++    test "touches last_used_at on api key authentication" do
++      api_keys(:alice_key).update_column(:last_used_at, 1.hour.ago)
++      previous = api_keys(:alice_key).last_used_at
++
++      Api::BearerAuthenticator.call(ALICE_TOKEN)
++
++      assert api_keys(:alice_key).reload.last_used_at > previous
++    end
++
++    test "returns nil for a revoked api key" do
++      assert_nil Api::BearerAuthenticator.call(REVOKED_KEY_TOKEN)
++    end
++
++    test "authenticates a valid oauth access token" do
++      token = create_oauth_token(application: create_oauth_application, user: users(:alice), scopes: "mcp_read")
++
++      result = Api::BearerAuthenticator.call(token.token)
++
++      assert result.oauth?
++      assert_not result.api_key?
++      assert_equal token, result.oauth_token
++      assert_equal users(:alice), result.user
++    end
++
++    test "returns nil for a revoked oauth token" do
++      token = create_oauth_token(application: create_oauth_application, user: users(:alice), revoked_at: 1.minute.ago)
++
++      assert_nil Api::BearerAuthenticator.call(token.token)
++    end
++
++    test "returns nil for an expired oauth token" do
++      token = create_oauth_token(application: create_oauth_application, user: users(:alice), expires_in: -1.minute)
++
++      assert_nil Api::BearerAuthenticator.call(token.token)
++    end
++
++    test "returns nil for an unknown token" do
++      assert_nil Api::BearerAuthenticator.call("not-a-real-token")
++    end
++
++    test "returns nil when the oauth token resource owner no longer exists" do
++      token = create_oauth_token(application: create_oauth_application, user: users(:alice))
++
++      # A DB-level cascade keeps tokens from truly outliving their user, so
++      # override the lookup to exercise the defensive orphaned-resource_owner_id
++      # branch (find_by returning nil for a live token).
++      User.define_singleton_method(:find_by) { |*| nil }
++      begin
++        assert_nil Api::BearerAuthenticator.call(token.token)
++      ensure
++        User.singleton_class.send(:remove_method, :find_by)
++      end
++    end
++  end
++end
+diff --git a/wiki/api-cli.md b/wiki/api-cli.md
+index c2e1277..1ba8c54 100644
+--- a/wiki/api-cli.md
++++ b/wiki/api-cli.md
+@@ -3,19 +3,19 @@ title: API CLI
+ type: architecture
+ source: README.md, cmd/screenote, internal/cli, internal/screenote, app/controllers/api/v1
+ created: 2026-07-08
+-updated: 2026-07-08
++updated: 2026-07-09
+ tags: [cli, api, rest, agents]
+ ---
+ 
+ # API CLI
+ 
+-TLDR: `cmd/screenote` is an installable Go CLI for shell and CI automation. It talks to REST `api/v1`, emits JSON to stdout by default, emits stable JSON errors to stderr, and uses project API keys.
++TLDR: `cmd/screenote` is an installable Go CLI for shell and CI automation. It talks to REST `api/v1`, emits JSON to stdout by default, emits stable JSON errors to stderr, and uses OAuth bearer tokens.
+ 
+ Source: `README.md`, `cmd/screenote`, `internal/cli`, `internal/screenote`, `app/controllers/api/v1`
+ 
+ ## Role
+ 
+-MCP remains the richer agent protocol with OAuth/API-key transport and tool semantics. The CLI is the portable shell contract for non-MCP agents and CI jobs. See [[mcp-tools]] and [[routes]].
++MCP remains the richer agent protocol with OAuth/API-key transport and tool semantics. The CLI is the portable shell contract for non-MCP agents and CI jobs. CLI-facing auth is OAuth-first; server-side API keys remain available for REST/MCP compatibility. See [[mcp-tools]] and [[routes]].
+ 
+ ## Install
+ 
+@@ -33,26 +33,47 @@ GOFLAGS=-mod=mod go test ./...
+ 
+ Precedence:
+ 
+-1. Flags: `--api-key`, `--base-url`, `--project`
+-2. Environment: `SCREENOTE_API_KEY`, `SCREENOTE_BASE_URL`, `SCREENOTE_PROJECT`
++1. Flags: `--token`, `--base-url`, `--project`
++2. Environment: `SCREENOTE_TOKEN`, `SCREENOTE_BASE_URL`, `SCREENOTE_PROJECT`
+ 3. Config: `~/.config/screenote/config.toml`
++4. Stored OAuth credentials from `screenote login`
+ 
+-`screenote config` prints resolved config as JSON. `screenote config set` writes values noninteractively. Commands never prompt unless a future command explicitly implements `--interactive`.
++`screenote config` prints resolved config as JSON, reports `token_set` plus the token source, and never prints either explicit tokens or stored login secrets. `screenote config set` writes values noninteractively. Config writes enforce owner-only permissions even for a pre-existing hand-authored file. Ordinary commands never prompt or open a browser; only explicit `screenote login` starts browser-based OAuth.
+ 
+ The base URL should be set explicitly. Current docs use localhost, staging/self-hosted URLs, or the canonical production host `https://screenote.ai` from `config/deploy.yml`.
+ 
++CI and agents should use a deterministic bearer token:
++
++```sh
++screenote config set --base-url https://screenote.ai --token "$SCREENOTE_TOKEN" --project 7
++```
++
++Developers can use the OAuth authorization-code flow with PKCE and loopback redirect:
++
++```sh
++screenote --base-url https://screenote.ai login
++screenote logout
++```
++
++Login stores the authorized base URL alongside its single credential set, so a `--base-url` or environment override becomes the configured server for later commands. When browser launch is unavailable, stderr receives a JSON `browser_open_failed` message with `authorization_url` for manual continuation. Default REST and OAuth HTTP clients use a 30-second timeout; command cancellation still propagates through OAuth discovery, registration, exchange, and refresh.
++
+ ## Commands
+ 
+ ```sh
+ screenote project list
+-screenote page list [--project ID]
+-screenote screenshot list [--project ID] [--page ID] [--status pending|ready|failed] [--limit N] [--offset N]
+-screenote screenshot create --title TITLE [--page ID_OR_NAME] [--file PATH|-]
+-screenote annotation list [--project ID] [--screenshot ID] [--status open|resolved] [--viewport desktop|tablet|mobile]
+-screenote annotation get --annotation ID
+-screenote comment add --annotation ID --body TEXT
++screenote config
++screenote login
++screenote logout
++screenote page list --project ID
++screenote screenshot list --project ID [--page ID] [--status pending|ready|failed] [--limit N] [--offset N]
++screenote screenshot create --project ID --title TITLE [--page ID_OR_NAME] [--file PATH|-]
++screenote annotation list --project ID [--screenshot ID] [--status open|resolved] [--viewport desktop|tablet|mobile]
++screenote annotation get --project ID --annotation ID
++screenote comment add --project ID --annotation ID --body TEXT
+ ```
+ 
++User-global commands are `project list`, `config`, `login`, and `logout`. Project-scoped commands require project selection through `--project`, `SCREENOTE_PROJECT`, or config `project`; missing project is a JSON stderr usage/config error with code `missing_project` and exit code 2.
++
+ `annotation list` without `--screenshot` lists annotations across all screenshots in the resolved project. The CLI pages through screenshots and per-screenshot annotations, skips screenshots that become inaccessible during aggregation, reports the aggregate total, and applies `--limit`/`--offset` to the aggregate result.
+ 
+ `screenshot create` reads stdin when `--file` is omitted or set to `-`. When uploading a file, the content type is derived from the file extension; for example, `.png` maps to `image/png`. Stdin uploads fall back to `application/octet-stream` and are re-identified server-side from the bytes.
+@@ -67,7 +88,7 @@ Successful commands write JSON to stdout. Errors write this shape to stderr:
+ {"code":"missing_base_url","error":"base URL is required; set --base-url, SCREENOTE_BASE_URL, or config base_url"}
+ ```
+ 
+-Cobra flag parse errors use the stable `invalid_flag` usage error. Invalid base URLs use `invalid_base_url`.
++Cobra flag parse errors use the stable `invalid_flag` usage error. Invalid base URLs use `invalid_base_url`. Missing bearer credentials use `missing_token`. Invalid or expired tokens return exit code 3.
+ 
+ Exit codes:
+ 
+@@ -82,4 +103,4 @@ Exit codes:
+ 
+ ## Deferred
+ 
+-`annotation resolve`, `annotation reopen`, OAuth browser login, daemon/watch mode, member management, and required multi-viewport upload are future work rather than v1 ship criteria.
++`annotation resolve`, `annotation reopen`, daemon/watch mode, member management, and required multi-viewport upload are future work rather than v1 ship criteria.
+diff --git a/wiki/controllers/api-controllers.md b/wiki/controllers/api-controllers.md
+index 59f150c..055b4e3 100644
+--- a/wiki/controllers/api-controllers.md
++++ b/wiki/controllers/api-controllers.md
+@@ -9,7 +9,7 @@ tags: [controller, api, rest, bearer-auth]
+ 
+ # API Controllers
+ 
+-TLDR: REST API for agent/programmatic access. Bearer token authentication via ApiKey. Two namespaces: `Api` (upload endpoint) and `Api::V1` (versioned CRUD).
++TLDR: REST API for agent/programmatic access. REST v1 accepts project API keys and Doorkeeper OAuth bearer tokens; the upload endpoint remains signed-token based.
+ 
+ Source: `app/controllers/api/`
+ 
+@@ -20,7 +20,7 @@ Source: `app/controllers/api/base_controller.rb`
+ Base class for authenticated API endpoints. Inherits from `ActionController::API` (no view rendering, no CSRF).
+ 
+ **before_actions:**
+-- `authenticate_api_key!` -- Extracts bearer token from `Authorization` header, finds active ApiKey, returns 401 if invalid
++- `authenticate_bearer!` -- Extracts bearer token from `Authorization`, validates an active `ApiKey` or a live Doorkeeper access token, returns 401 JSON `unauthorized` if invalid
+ 
+ **Rescue handlers:**
+ - `ActiveRecord::RecordInvalid` -> 422 with error messages
+@@ -28,7 +28,8 @@ Base class for authenticated API endpoints. Inherits from `ActionController::API
+ 
+ **Provides:**
+ - `current_api_key` -- The authenticated ApiKey
+-- `current_project` -- The project associated with the API key
++- `current_oauth_token` / `current_user` -- OAuth request identity
++- `current_project` -- The API-key project or selected OAuth member project
+ - Stable JSON error rendering with `error` and machine-readable `code`
+ - `require_current_project!` guard for API-key scoped nested routes
+ - Shared pagination coercion for `limit` and `offset` params
+@@ -41,7 +42,7 @@ Source: `app/controllers/api/v1/projects_controller.rb`
+ 
+ **Actions:** index
+ 
+-Returns the project bound to the API key. API-key auth is project-authoritative, so the response is a one-project list with role `api_key`.
++API-key auth returns the project bound to the API key with role `api_key`. OAuth with `mcp_read` returns all projects visible through the authenticated user's memberships with membership roles.
+ 
+ ---
+ 
+@@ -51,7 +52,7 @@ Source: `app/controllers/api/v1/pages_controller.rb`
+ 
+ **Actions:** index
+ 
+-Lists pages for the API key's project with version counts and page URLs. `:project_id` must match the key's project.
++Lists pages with version counts and page URLs. API-key requests require `:project_id` to match the key's project. OAuth requests require `mcp_read` and membership in the selected `:project_id`.
+ 
+ ---
+ 
+@@ -73,6 +74,7 @@ Source: `app/controllers/api/v1/screenshots_controller.rb`
+ - Uses `Screenshot.create_with_image!`, which creates the parent screenshot and a desktop [[models/screenshot-image]]
+ - List supports `page_id`, `status`, `limit`, and `offset`
+ - Create returns `screenshot_id`, `page_id`, `status`, `annotate_url`, and primary image metadata
++- OAuth list requires `mcp_read`; OAuth create requires `mcp_write` and explicit `project_id`
+ 
+ ---
+ 
+@@ -92,6 +94,7 @@ Source: `app/controllers/api/v1/annotations_controller.rb`
+ - Scopes to current project via join through screenshots
+ - Supports `?status=open|resolved`, `?viewport=desktop|tablet|mobile`, `?limit=`, and `?offset=` filters
+ - Returns serialized annotations via `Annotation#as_api_json`
++- OAuth requests require `mcp_read` and explicit `project_id`
+ 
+ ---
+ 
+@@ -103,7 +106,9 @@ Source: `app/controllers/api/v1/annotation_comments_controller.rb`
+ 
+ | Action | Method | Path | Notes |
+ |--------|--------|------|-------|
+-| create | POST | `/api/v1/annotations/:annotation_id/comments` | Creates an API-key-authored annotation comment |
++| create | POST | `/api/v1/annotations/:annotation_id/comments` | Creates an API-key-authored or OAuth-user-authored annotation comment |
++
++- OAuth requests require `mcp_write` and explicit `project_id`
+ 
+ ---
+ 
+@@ -130,7 +135,9 @@ Source: `app/controllers/api/screenshot_uploads_controller.rb`
+ 
+ | Endpoint | Auth Method |
+ |----------|------------|
+-| `Api::V1::*` | Bearer token (ApiKey) via `Authorization: <redacted-credential>` |
++| `Api::V1::*` | Bearer token via project API key or Doorkeeper OAuth access token |
+ | `Api::ScreenshotUploadsController` | One-time upload token via query param `?token=...` |
+ 
++OAuth REST scopes reuse MCP scopes: read endpoints require `mcp_read`, and write endpoints require `mcp_write`. OAuth project-scoped endpoints require explicit project context and membership validation; object IDs alone are not enough.
++
+ See also: [[routes]], [[models/api-key]], [[models/screenshot]], [[models/screenshot-image]], [[controllers/web-controllers]]
+diff --git a/wiki/log.md b/wiki/log.md
+index 22a419d..dd4b1a7 100644
+--- a/wiki/log.md
++++ b/wiki/log.md
+@@ -185,3 +185,15 @@ Append-only log of all wiki operations.
+ **Scheduler:** `llm-wiki-screenote-a932fe24.timer` is enabled and active under `systemctl --user`; next run is scheduled for 2026-05-15 18:03:41 BST.
+ **Maintenance scripts:** `.llm-wiki/refresh-wiki.sh` and `.llm-wiki/post-commit-refresh.sh` use bounded Codex and qmd timeouts and tell headless Codex not to run `qmd update` or `qmd embed` itself.
+ **Source:** `systemctl --user list-timers`, `qmd update`, `qmd embed`, and collection-scoped `qmd search`.
++
++## [2026-07-08] OAuth-first CLI and REST OAuth auth
++
++**Action:** Updated API/CLI docs for OAuth-first CLI authentication and REST v1 dual bearer authentication.
++**Pages updated:** wiki/api-cli.md, wiki/controllers/api-controllers.md, wiki/routes.md, wiki/log.md
++**Source:** `internal/cli`, `internal/screenote`, `app/controllers/api`, `app/services/api/bearer_authenticator.rb`, controller tests
++
++## [2026-07-09] OAuth CLI review hardening
++
++**Action:** Hardened the OAuth CLI review findings: bounded every default HTTP path, kept saved login credentials aligned with the configured server, preserved JSON-only output when browser launch fails, masked bearer tokens from `screenote config`, and enforced owner-only permissions on existing config files.
++**Pages updated:** wiki/api-cli.md, wiki/log.md
++**Source:** `internal/cli`, `internal/config`, `internal/screenote`, Go regression tests
+diff --git a/wiki/routes.md b/wiki/routes.md
+index 58c77bf..9dd1fa3 100644
+--- a/wiki/routes.md
++++ b/wiki/routes.md
+@@ -119,19 +119,19 @@ All require authentication unless noted.
+ 
+ ## REST API Routes
+ 
+-### API v1 (Bearer token auth via ApiKey)
++### API v1 (Bearer token auth via API key or OAuth)
+ 
+ | Method | Path | Action | Auth |
+ |--------|------|--------|------|
+-| GET | `/api/v1/projects` | List the project bound to the API key | API Key |
+-| GET | `/api/v1/projects/:project_id/pages` | List pages with version counts | API Key |
+-| GET | `/api/v1/projects/:project_id/screenshots` | List screenshots with `page_id`, `status`, `limit`, and `offset` filters | API Key |
+-| POST | `/api/v1/screenshots` | Direct multipart screenshot upload | API Key |
+-| GET | `/api/v1/screenshots/:screenshot_id/annotations` | List annotations with `status`, `viewport`, `limit`, and `offset` filters | API Key |
+-| GET | `/api/v1/annotations/:id` | Get annotation details, comments, and best-effort crop data | API Key |
+-| POST | `/api/v1/annotations/:annotation_id/comments` | Add an API-key-authored annotation comment | API Key |
+-
+-API-key auth is project-scoped. If `:project_id` does not match the key's project, the v1 API returns a stable JSON error with `code: "forbidden"` rather than crossing project boundaries.
++| GET | `/api/v1/projects` | List API-key project or OAuth user's member projects | API key or OAuth `mcp_read` |
++| GET | `/api/v1/projects/:project_id/pages` | List pages with version counts | API key or OAuth `mcp_read` |
++| GET | `/api/v1/projects/:project_id/screenshots` | List screenshots with `page_id`, `status`, `limit`, and `offset` filters | API key or OAuth `mcp_read` |
++| POST | `/api/v1/screenshots` | Direct multipart screenshot upload | API key or OAuth `mcp_write` |
++| GET | `/api/v1/screenshots/:screenshot_id/annotations` | List annotations with `status`, `viewport`, `limit`, and `offset` filters | API key or OAuth `mcp_read` |
++| GET | `/api/v1/annotations/:id` | Get annotation details, comments, and best-effort crop data | API key or OAuth `mcp_read` |
++| POST | `/api/v1/annotations/:annotation_id/comments` | Add an API-key-authored or OAuth-user-authored annotation comment | API key or OAuth `mcp_write` |
++
++API-key auth is project-scoped. If `:project_id` does not match the key's project, the v1 API returns a stable JSON error with `code: "forbidden"` rather than crossing project boundaries. OAuth project-scoped calls require explicit `project_id` where the route does not already carry it, and the authenticated user must be a project member.
+ 
+ ### Upload API (Token-based, no persistent auth)
+ 

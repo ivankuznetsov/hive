@@ -1,0 +1,135 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "honeycomb",
+  "repository": "ivankuznetsov/honeycomb",
+  "id": 1849,
+  "slug": "security-lint-ci-for-package-260709-dcee",
+  "title": "Package security lint and CI",
+  "role": "supporting",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-07-17T01:14:29.801632Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": null,
+  "age_seconds": 1424811,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/honeycomb-1849/idea.md",
+      "bytes": 2149,
+      "sha256": "d2b7925c31be5c0634c5b38890c763907a093424c2d3906d4d80f2d90e37ffdb",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/honeycomb-1849/brainstorm.md",
+      "bytes": 7404,
+      "sha256": "2af3303b1a0de66efc15df5b78c2551110cb33ff6b305b3862f9e8698245eb27",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/honeycomb-1849/plan.md",
+      "bytes": 48695,
+      "sha256": "d2d483fbe5fc62107d513ff6f6cf3998d2fad1e224f53bdc14a63889ae4c3a70",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/honeycomb-1849/task.md",
+      "bytes": 2095,
+      "sha256": "87ddeb6673c121d61726a221bc7b089b1210f97dfd18fa74c8fefe6027df9386",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/honeycomb-1849/pr.md",
+      "bytes": 2419,
+      "sha256": "98e85d4e7fff28be499875d0dfeb252981322432eb6cbd8bbdd97cb91c7d4b97",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "artifact.md",
+      "path": "documents/honeycomb-1849/artifact.md",
+      "bytes": 4696,
+      "sha256": "17e3eb92f5375e4ac9cb05ab23f67bb29b6d6fa96d9402bd120c842e0c5fdf46",
+      "role": "artifact",
+      "format": "markdown"
+    },
+    {
+      "name": "summary.md",
+      "path": "documents/honeycomb-1849/summary.md",
+      "bytes": 1423,
+      "sha256": "8ca5fc3625a80ae70363294831b3bbeaaf09e2c791ba87c149cee72eae3d84ad",
+      "role": "outcome",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/honeycomb-1849/reviews/escalations-01.md",
+      "bytes": 109,
+      "sha256": "594bd4eec4f5fef8cc4bd5b5e4f933163ebc28951dc26cd5a862828130b6573f",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/honeycomb-1849/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/honeycomb",
+    "url": "https://github.com/ivankuznetsov/honeycomb/pull/2",
+    "number": 2,
+    "state": "MERGED",
+    "merged_at": "2026-07-17T01:08:26Z",
+    "merge_oid": "f524dbf6aebcbd2bb8dd6fe3217d9ecc0d20a9f5",
+    "head_oid": "3a48f21390f37712d6d1f2c527e28d46e4b9307e",
+    "base_branch": "main",
+    "branch": "security-lint-ci-for-package-260709-dcee",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "available",
+    "path": "changes/honeycomb-1849.patch",
+    "bytes": 392973,
+    "sha256": "daca8abe1c5b3049b5bf85bde9a6105ddec9b96bcaf10e14c2ef9e012aaa451e",
+    "truncated": false,
+    "redacted": true,
+    "provenance": {
+      "repository": "ivankuznetsov/honeycomb",
+      "url": "https://github.com/ivankuznetsov/honeycomb/pull/2",
+      "number": 2,
+      "state": "MERGED",
+      "merged_at": "2026-07-17T01:08:26Z",
+      "merge_oid": "f524dbf6aebcbd2bb8dd6fe3217d9ecc0d20a9f5",
+      "head_oid": "3a48f21390f37712d6d1f2c527e28d46e4b9307e",
+      "base_branch": "main",
+      "branch": "security-lint-ci-for-package-260709-dcee",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

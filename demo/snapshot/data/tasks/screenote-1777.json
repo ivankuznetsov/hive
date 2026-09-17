@@ -1,0 +1,191 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "screenote",
+  "repository": "ivankuznetsov/screenote",
+  "id": 1777,
+  "slug": "add-a-go-cli-for-260708-edec",
+  "title": "Go CLI and REST contract",
+  "role": "supporting",
+  "workflow": "coding",
+  "stage": "9-done",
+  "archived": true,
+  "action": "archived",
+  "action_label": "Archived",
+  "reason": null,
+  "unanswered_questions": 0,
+  "headline": {
+    "explanation": "This task is complete and read-only.",
+    "label": "Completed",
+    "state": "completed"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-07-09T17:00:14.576612Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": null,
+  "age_seconds": 1530319,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/screenote-1777/idea.md",
+      "bytes": 2303,
+      "sha256": "8de890bc5888eb938bafbd6aa95d60f6e583de90587d9e94176ef48219a9ae57",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/screenote-1777/brainstorm.md",
+      "bytes": 7450,
+      "sha256": "f8d51ff71fd1c11cfa8c19d4dfc3435a538f1c8183a9edda25eefa3accac9005",
+      "role": "brainstorm",
+      "format": "markdown"
+    },
+    {
+      "name": "plan.md",
+      "path": "documents/screenote-1777/plan.md",
+      "bytes": 17628,
+      "sha256": "95b12e1a5b0fe94b3bdf06dd69a5562382f1c03f01731936c36365f8246728ae",
+      "role": "plan",
+      "format": "markdown"
+    },
+    {
+      "name": "task.md",
+      "path": "documents/screenote-1777/task.md",
+      "bytes": 1536,
+      "sha256": "41e1ab7c26aed759fe9909bb1208ebc47775043d7e5bd1eec40f5d5ae33a7715",
+      "role": "primary",
+      "format": "markdown"
+    },
+    {
+      "name": "pr.md",
+      "path": "documents/screenote-1777/pr.md",
+      "bytes": 1573,
+      "sha256": "0faac69eada6cf322b3450fc4e17fdb6131cef4d38c6539da64092039d7bf3d1",
+      "role": "publication",
+      "format": "markdown"
+    },
+    {
+      "name": "artifact.md",
+      "path": "documents/screenote-1777/artifact.md",
+      "bytes": 2790,
+      "sha256": "fc22c324e78518c65aa36c65585a22ec0b618e6e57e14e7e30c6defae26527c7",
+      "role": "artifact",
+      "format": "markdown"
+    },
+    {
+      "name": "summary.md",
+      "path": "documents/screenote-1777/summary.md",
+      "bytes": 1722,
+      "sha256": "14e4215313e2ada96df45f82ba7c24d0a944eaf2bea69db057d36e524f3f4291",
+      "role": "outcome",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/claude-ce-code-review-01.md",
+      "path": "documents/screenote-1777/reviews/claude-ce-code-review-01.md",
+      "bytes": 3376,
+      "sha256": "421b760af5f9545e1ac61fd4f92c40804c9a88c2c06b2aaf540bf591d54a5f61",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/claude-ce-code-review-02.md",
+      "path": "documents/screenote-1777/reviews/claude-ce-code-review-02.md",
+      "bytes": 4270,
+      "sha256": "5506fa638637d5f75c4886d424e83d6dec32c50ead952b5a4c8dc13da731f838",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-01.md",
+      "path": "documents/screenote-1777/reviews/codex-ce-code-review-01.md",
+      "bytes": 1664,
+      "sha256": "8e6b2e3e7b1d4fd55bd84433769489a1d1bd99b2515bc58c04e62598bc78ee2b",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/codex-ce-code-review-02.md",
+      "path": "documents/screenote-1777/reviews/codex-ce-code-review-02.md",
+      "bytes": 1550,
+      "sha256": "377d75f8bc65a40c717c0560763ca72f8ed8d8931b9b2063219be72d89bf76d5",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/pr-review-toolkit-01.md",
+      "path": "documents/screenote-1777/reviews/pr-review-toolkit-01.md",
+      "bytes": 5733,
+      "sha256": "89ae230833d0fbd18312926add37718300ca5349f9975c327d3bdbb681afc131",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/pr-review-toolkit-02.md",
+      "path": "documents/screenote-1777/reviews/pr-review-toolkit-02.md",
+      "bytes": 4627,
+      "sha256": "ab0635fe5d946731ae0522bee4e45e241e733ed837c63f915ab53d5a81e41c27",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-01.md",
+      "path": "documents/screenote-1777/reviews/escalations-01.md",
+      "bytes": 1250,
+      "sha256": "63a137a3047cba0b05cdfa0735cf2c6128093c9f245b0f0f1d44eb0c9e965f36",
+      "role": "review",
+      "format": "markdown"
+    },
+    {
+      "name": "reviews/escalations-02.md",
+      "path": "documents/screenote-1777/reviews/escalations-02.md",
+      "bytes": 2352,
+      "sha256": "230c516b97eb9ddd139e9f70c386296eda8fdbc108b0d45c4bec31adc9c1b124",
+      "role": "review",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": "documents/screenote-1777/task.md",
+  "publication": {
+    "repository": "ivankuznetsov/screenote",
+    "url": "https://github.com/ivankuznetsov/screenote/pull/36",
+    "number": 36,
+    "state": "MERGED",
+    "merged_at": "2026-07-09T16:56:33Z",
+    "merge_oid": "52f41078b2765694dec4a2efa55ad2b2fd41afbd",
+    "head_oid": "fbc56e2bcf5598e9805be4063a5ce17aa43d71f9",
+    "base_branch": "main",
+    "branch": "add-a-go-cli-for-260708-edec",
+    "authority": "remote_merge"
+  },
+  "change": {
+    "state": "available",
+    "path": "changes/screenote-1777.patch",
+    "bytes": 163303,
+    "sha256": "eafb00645c6eebd485a4d00c5a9ab82a5952b4368dead5ef631df5dbe7cf2f02",
+    "truncated": false,
+    "redacted": true,
+    "provenance": {
+      "repository": "ivankuznetsov/screenote",
+      "url": "https://github.com/ivankuznetsov/screenote/pull/36",
+      "number": 36,
+      "state": "MERGED",
+      "merged_at": "2026-07-09T16:56:33Z",
+      "merge_oid": "52f41078b2765694dec4a2efa55ad2b2fd41afbd",
+      "head_oid": "fbc56e2bcf5598e9805be4063a5ce17aa43d71f9",
+      "base_branch": "main",
+      "branch": "add-a-go-cli-for-260708-edec",
+      "authority": "remote_merge"
+    }
+  },
+  "questions": [],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

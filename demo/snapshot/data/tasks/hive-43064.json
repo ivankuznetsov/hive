@@ -1,0 +1,130 @@
+{
+  "schema": "hive-demo-task",
+  "schema_version": 1,
+  "project": "hive",
+  "repository": "ivankuznetsov/hive",
+  "id": 43064,
+  "slug": "build-a-patrol-native-self-260829-cc36",
+  "title": "Patrol-native skill improvement",
+  "role": "active",
+  "workflow": "coding",
+  "stage": "2-brainstorm",
+  "archived": false,
+  "action": "needs_input",
+  "action_label": null,
+  "reason": "waiting for unanswered brainstorm questions",
+  "unanswered_questions": 5,
+  "headline": {
+    "explanation": "Canonical workflow status is current.",
+    "label": "Answer questions",
+    "state": "needs_input"
+  },
+  "status": {
+    "freshness": "fresh",
+    "observed_at": "2026-09-09T16:20:17.270754Z",
+    "state": "current"
+  },
+  "captured_at": "2026-09-17T10:12:38.939Z",
+  "observed_at": "2026-09-17T10:12:38.939Z",
+  "age_seconds": 669142,
+  "documents": [
+    {
+      "name": "idea.md",
+      "path": "documents/hive-43064/idea.md",
+      "bytes": 8170,
+      "sha256": "1309556ed17569a6cbb33c5a43a4ca10fa849a61adcf6c508895bb35c10b28c2",
+      "role": "idea",
+      "format": "markdown"
+    },
+    {
+      "name": "brainstorm.md",
+      "path": "documents/hive-43064/brainstorm.md",
+      "bytes": 3801,
+      "sha256": "7c5ca453260b7ae745db373b4ae0055976423fed6e6dc74d9d141a844275b9a7",
+      "role": "brainstorm",
+      "format": "markdown"
+    }
+  ],
+  "primary_document": null,
+  "publication": null,
+  "change": null,
+  "questions": [
+    {
+      "n": 1,
+      "ordinal": 1,
+      "round": 1,
+      "question": "What is the smallest first release that would deliver real value: a full observe-through-activation loop, or a shadow-mode loop that stops after an evaluated activation proposal?",
+      "answer": "Keep the full observe-through-activation capability required by the task seed, including evaluated activation proposals, explicit human approval, smoke verification and rollback. Shadow mode may be an implementation milestone, but it is not a substitute for the stated acceptance criteria. This task does not authorize activating a candidate or publishing a release.",
+      "answered": true
+    },
+    {
+      "n": 2,
+      "ordinal": 2,
+      "round": 1,
+      "question": "Who is the primary human operator, and which authorities must remain separate among signal/thesis disposition, held-out evaluation ownership, activation approval, and rollback?",
+      "answer": "The primary operator is the owner of this local Hive installation. Reuse existing Patrol disposition ownership. Keep the proposer and execution worker separate from the held-out evaluator, with no access to hidden cases, rubrics or per-case results. Activation requires explicit human approval; the controller may perform the approved transition and the specified smoke-failure rollback. Do not invent separate human teams or a new approval service.",
+      "answered": true
+    },
+    {
+      "n": 3,
+      "ordinal": 3,
+      "round": 1,
+      "question": "Which repo-local artifacts may be evolution targets in the first release, and which instruction surfaces must explicitly remain out of scope even when Patrol finds relevant evidence?",
+      "answer": null,
+      "answered": false
+    },
+    {
+      "n": 4,
+      "ordinal": 4,
+      "round": 1,
+      "question": "What exact classes of Hive artifacts may supply learning signals, and what minimum redaction or derived-field boundary must apply before their content becomes durable evidence or llm-wiki knowledge?",
+      "answer": "Use only bounded, explicitly allowlisted Hive task artifacts relevant to the learning signal, with retained source identity and provenance. Exclude secrets, private conversations, raw unrelated transcripts, untracked or ignored files, and evaluator holdouts, exactly as the seed requires. Persist redacted derived evidence sufficient to reproduce the finding, not wholesale transcripts; uncertainty and contradictions remain explicit. Reuse the existing evidence admission and redaction mechanisms.",
+      "answered": true
+    },
+    {
+      "n": 5,
+      "ordinal": 5,
+      "round": 1,
+      "question": "When the same evidence plausibly indicates both a code defect and an instruction or workflow defect, what ownership and precedence rule should the target taxonomy apply, and may one signal produce more than one durable disposition?",
+      "answer": "Keep one active task in one workflow queue at a time. A confirmed code or architecture defect must be fixed at that layer, not hidden with a prompt workaround. Escalation transfers ownership to the linked successor and removes the source from its active Patrol queue; retain the relationship as evidence rather than running duplicate repairs. Instruction-only issues and knowledge-only updates use their own stated lanes. Do not create two active dispositions for the same repair.",
+      "answered": true
+    },
+    {
+      "n": 6,
+      "ordinal": 6,
+      "round": 1,
+      "question": "What minimum recurrence, independence, and evidence-quality bar should distinguish a skill-evolution thesis from a one-off finding or knowledge-only update?",
+      "answer": null,
+      "answered": false
+    },
+    {
+      "n": 7,
+      "ordinal": 7,
+      "round": 1,
+      "question": "What exact evaluation outcome should make a candidate approvable, including the required improvement over the active and fixed baselines, treatment of inconclusive results, and correctness or safety vetoes?",
+      "answer": null,
+      "answered": false
+    },
+    {
+      "n": 8,
+      "ordinal": 8,
+      "round": 1,
+      "question": "If a cycle loses its lease, exhausts the shared daily ceiling, or discovers that its pinned active version or default-branch basis has moved, which state should be resumable and which conditions should force a fresh immutable cycle?",
+      "answer": null,
+      "answered": false
+    },
+    {
+      "n": 9,
+      "ordinal": 9,
+      "round": 1,
+      "question": "Over what observation window, and by which measurable outcomes, should operators judge the first release successful beyond merely completing candidate evaluations?",
+      "answer": null,
+      "answered": false
+    }
+  ],
+  "source": {
+    "kind": "native-task-workspace",
+    "schema": "hive-task-workspace",
+    "schema_version": 2
+  }
+}

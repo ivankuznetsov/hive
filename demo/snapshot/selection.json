@@ -1,0 +1,382 @@
+{
+  "schema": "hive-demo-selection",
+  "schema_version": 1,
+  "captured_from": {
+    "ui_sha": "9b92b6572f53a002c0761c0f91f9aebd836f043a",
+    "hive_version": "0.7.4",
+    "source": "Read-only native projections captured from the operator installation; the public demo never connects to live Hive state."
+  },
+  "projects": [
+    {
+      "name": "screenote",
+      "repository": "ivankuznetsov/screenote",
+      "url": "https://github.com/ivankuznetsov/screenote",
+      "license": "NOASSERTION",
+      "visibility": "public"
+    },
+    {
+      "name": "hive",
+      "repository": "ivankuznetsov/hive",
+      "url": "https://github.com/ivankuznetsov/hive",
+      "license": "MIT",
+      "visibility": "public"
+    },
+    {
+      "name": "honeycomb",
+      "repository": "ivankuznetsov/honeycomb",
+      "url": "https://github.com/ivankuznetsov/honeycomb",
+      "license": null,
+      "visibility": "public"
+    },
+    {
+      "name": "agent-plugins",
+      "repository": "ivankuznetsov/agent-plugins",
+      "url": "https://github.com/ivankuznetsov/agent-plugins",
+      "license": null,
+      "visibility": "public"
+    },
+    {
+      "name": "prdigest",
+      "repository": "ivankuznetsov/prdigest",
+      "url": "https://github.com/ivankuznetsov/prdigest",
+      "license": null,
+      "visibility": "public"
+    }
+  ],
+  "tasks": [
+    {
+      "project": "screenote",
+      "id": 42619,
+      "role": "lead",
+      "title": "Image attachments in comments and replies",
+      "outcome": {
+        "repository": "ivankuznetsov/screenote",
+        "number": 67,
+        "url": "https://github.com/ivankuznetsov/screenote/pull/67",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "reviews/grok-ce-code-review-01.md",
+        "reviews/grok-ce-code-review-02.md",
+        "reviews/grok-ce-code-review-adversarial-01.md",
+        "reviews/grok-ce-code-review-adversarial-02.md",
+        "reviews/claude-opus-5-ce-code-review-03.md",
+        "reviews/claude-opus-5-ce-code-review-adversarial-03.md",
+        "reviews/codex-ce-code-review-04.md",
+        "reviews/codex-native-review-04.md",
+        "reviews/escalations-01.md",
+        "reviews/escalations-02.md",
+        "reviews/escalations-03.md",
+        "reviews/escalations-04.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "hive",
+      "id": 42430,
+      "role": "lead",
+      "title": "Operator task workspace",
+      "outcome": {
+        "repository": "ivankuznetsov/hive",
+        "number": 1015,
+        "url": "https://github.com/ivankuznetsov/hive/pull/1015",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "summary.md",
+        "reviews/codex-ce-code-review-01.md",
+        "reviews/codex-ce-code-review-02.md",
+        "reviews/errors-01.md",
+        "reviews/errors-02.md",
+        "reviews/escalations-01.md",
+        "reviews/escalations-02.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "hive",
+      "id": 23117,
+      "role": "lead",
+      "title": "Natural-language workflow creator",
+      "outcome": {
+        "repository": "ivankuznetsov/hive",
+        "number": 854,
+        "url": "https://github.com/ivankuznetsov/hive/pull/854",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "summary.md",
+        "reviews/codex-ce-code-review-01.md",
+        "reviews/codex-ce-code-review-02.md",
+        "reviews/grok-ce-code-review-01.md",
+        "reviews/grok-ce-code-review-02.md",
+        "reviews/escalations-01.md",
+        "reviews/escalations-02.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "screenote",
+      "id": 1777,
+      "role": "supporting",
+      "title": "Go CLI and REST contract",
+      "outcome": {
+        "repository": "ivankuznetsov/screenote",
+        "number": 36,
+        "url": "https://github.com/ivankuznetsov/screenote/pull/36",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "summary.md",
+        "reviews/claude-ce-code-review-01.md",
+        "reviews/claude-ce-code-review-02.md",
+        "reviews/codex-ce-code-review-01.md",
+        "reviews/codex-ce-code-review-02.md",
+        "reviews/pr-review-toolkit-01.md",
+        "reviews/pr-review-toolkit-02.md",
+        "reviews/escalations-01.md",
+        "reviews/escalations-02.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "screenote",
+      "id": 1778,
+      "role": "supporting",
+      "title": "OAuth-first CLI authentication",
+      "outcome": {
+        "repository": "ivankuznetsov/screenote",
+        "number": 37,
+        "url": "https://github.com/ivankuznetsov/screenote/pull/37",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "summary.md",
+        "reviews/claude-ce-code-review-01.md",
+        "reviews/claude-ce-code-review-02.md",
+        "reviews/codex-ce-code-review-01.md",
+        "reviews/codex-ce-code-review-02.md",
+        "reviews/pr-review-toolkit-01.md",
+        "reviews/pr-review-toolkit-02.md",
+        "reviews/escalations-01.md",
+        "reviews/escalations-02.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "hive",
+      "id": 24065,
+      "role": "supporting",
+      "title": "Installable Patrol modules",
+      "outcome": {
+        "repository": "ivankuznetsov/hive",
+        "number": 886,
+        "url": "https://github.com/ivankuznetsov/hive/pull/886",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "reviews/codex-ce-code-review-01.md",
+        "reviews/codex-ce-code-review-02.md",
+        "reviews/grok-ce-code-review-01.md",
+        "reviews/grok-ce-code-review-02.md",
+        "reviews/escalations-01.md",
+        "reviews/escalations-02.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "honeycomb",
+      "id": 1848,
+      "role": "supporting",
+      "title": "Package manifest and registry contract",
+      "outcome": {
+        "repository": "ivankuznetsov/honeycomb",
+        "number": 1,
+        "url": "https://github.com/ivankuznetsov/honeycomb/pull/1",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "summary.md",
+        "reviews/escalations-01.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "honeycomb",
+      "id": 1849,
+      "role": "supporting",
+      "title": "Package security lint and CI",
+      "outcome": {
+        "repository": "ivankuznetsov/honeycomb",
+        "number": 2,
+        "url": "https://github.com/ivankuznetsov/honeycomb/pull/2",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "summary.md",
+        "reviews/escalations-01.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "agent-plugins",
+      "id": 1930,
+      "role": "supporting",
+      "title": "Portable plugins on four agent hosts",
+      "outcome": {
+        "repository": "ivankuznetsov/agent-plugins",
+        "number": 21,
+        "url": "https://github.com/ivankuznetsov/agent-plugins/pull/21",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "summary.md",
+        "reviews/escalations-01.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "prdigest",
+      "id": 9434,
+      "role": "supporting",
+      "title": "Daily merged-PR digests",
+      "outcome": {
+        "repository": "ivankuznetsov/prdigest",
+        "number": 1,
+        "url": "https://github.com/ivankuznetsov/prdigest/pull/1",
+        "state": "MERGED",
+        "authority": "remote_merge"
+      },
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md",
+        "pr.md",
+        "artifact.md",
+        "summary.md",
+        "reviews/codex-ce-code-review-01.md",
+        "reviews/codex-ce-code-review-02.md",
+        "reviews/escalations-01.md",
+        "reviews/escalations-02.md"
+      ],
+      "change": { "include": true, "max_bytes": 524288 }
+    },
+    {
+      "project": "hive",
+      "id": 43064,
+      "role": "active",
+      "title": "Patrol-native skill improvement",
+      "documents": [
+        "idea.md",
+        "brainstorm.md"
+      ]
+    },
+    {
+      "project": "hive",
+      "id": 42445,
+      "role": "active",
+      "title": "Token usage analytics",
+      "documents": [
+        "idea.md",
+        "brainstorm.md",
+        "plan.md",
+        "task.md"
+      ]
+    }
+  ],
+  "workflows": {
+    "project": "hive",
+    "exclude": ["root-cause-repair"]
+  },
+  "modules": {
+    "project": "hive",
+    "exclude": ["root-cause-repair"]
+  },
+  "patrol": {
+    "project": "hive",
+    "architecture_job": "pr-1015-8181522c6a7dcff1",
+    "ordinary_findings": [
+      "architecture-templates-builtins-20260910T000556Z-ed068e3c-1",
+      "architecture-templates-builtins-part-7-20260914T000031Z-9cbfb4f6-1"
+    ],
+    "selected_theses": 3
+  },
+  "digest": {
+    "date": "2026-09-15",
+    "project": "hive",
+    "label": "Selected public-project view"
+  },
+  "omissions": [
+    {
+      "reason": "Review bookkeeping sentinels, suppression ledgers, and machine status chatter are excluded from reader evidence.",
+      "count": 41
+    },
+    {
+      "reason": "Internal outcome-evidence generations and execution logs remain private; public merge evidence is captured separately.",
+      "count": 1
+    }
+  ]
+}

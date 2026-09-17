@@ -5626,7 +5626,7 @@ index 0000000..fdc5e70
 +  "${CONTAINER_ENGINE}" run --detach --name "${CONTAINER_NAME}" \
 +    --publish "127.0.0.1::9000" \
 +    --env "MINIO_ROOT_USER=${ACCESS_KEY_ID}" \
-+    --env "MINIO_ROOT_PASSWORD=${SECRET_ACCESS_KEY}" \
++    --env "<redacted-credential> \
 +    "${OBJECT_STORE_IMAGE}" server /data >/dev/null
 +  started_container=true
 +

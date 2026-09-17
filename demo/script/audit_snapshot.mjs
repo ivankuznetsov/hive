@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readdir, readFile } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { auditOptionsFor, auditText, sha256, validateDataset, validateSelection, validateTaskFile } from './lib/snapshot.mjs';
 
@@ -31,7 +31,9 @@ async function main() {
   const findings = [];
   const contents = new Map();
   const read = async (path) => {
-    if (!contents.has(path)) contents.set(path, await readFile(join(root, path), 'utf8'));
+    const absolute = resolve(root, path);
+    if (!absolute.startsWith(`${resolve(root)}${sep}`)) throw new Error(`snapshot path escapes the root: ${path}`);
+    if (!contents.has(path)) contents.set(path, await readFile(absolute, 'utf8'));
     return contents.get(path);
   };
 

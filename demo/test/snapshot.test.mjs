@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   auditOptionsFor, auditText, redactText, sha256, validateDataset, validateSelection, validateTaskFile
@@ -108,6 +108,22 @@ test('the checked-in snapshot matches its own provenance manifest', async () => 
     assert.equal(sha256(text), record.sha256, `${path} hash`);
     assert.equal(Buffer.byteLength(text), record.bytes, `${path} size`);
   }
+});
+
+test('the manifest lists every checked-in snapshot file', async () => {
+  const manifest = await readJson('manifest.json');
+  const walk = async (directory) => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const files = [];
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) files.push(...await walk(path));
+      else files.push(relative(SNAPSHOT, path));
+    }
+    return files;
+  };
+  const walked = (await walk(SNAPSHOT)).filter((path) => !['manifest.json', 'selection.json'].includes(path));
+  assert.deepEqual(Object.keys(manifest.files).sort(), walked.sort());
 });
 
 test('the checked-in snapshot carries ten verified stories and two active examples', async () => {

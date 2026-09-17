@@ -8220,7 +8220,7 @@ index 0000000..1614776
 +      "AIza" + "A1_" * 10,
 +      "eyJ" + "A" * 10 + "." + "B" * 10 + "." + "C" * 10,
 +      "<private-key-material-removed>",
-+      "api_key='A1b2C3d4E5f6G7h8I9j0K1l2'"
++      "<redacted-credential>"
 +    ]
 +    text = secrets.join("\n")
 +    findings = HoneycombSecurityLint::SecretPiiScanner.new.scan([source(text)])
@@ -8245,7 +8245,7 @@ index 0000000..1614776
 +  end
 +
 +  def test_ordinary_numbers_and_low_entropy_placeholders_do_not_block
-+    text = "issue 123456789012 and api_key='aaaaaaaaaaaaaaaaaaaa'\n"
++    text = "issue 123456789012 and <redacted-credential>\n"
 +    findings = HoneycombSecurityLint::SecretPiiScanner.new.scan([source(text)])
 +
 +    refute findings.any? { |finding| finding["disposition"] == "hard" }

@@ -60,12 +60,6 @@ module HiveDemo
       project ? "/done/#{project}" : "/done"
     end
 
-    def status_states
-      @status_states ||= snapshot.projects.flat_map(&:active_tasks)
-                                 .map { |task| TaskDisplay.new(task, fresh: true).state }
-                                 .tally
-    end
-
     private
 
     def path_for_status(view:, project:, state:)

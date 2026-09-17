@@ -24,9 +24,9 @@
     "observed_at": "2026-07-09T17:00:14.576612Z",
     "state": "current"
   },
-  "captured_at": "2026-09-17T09:53:52.482Z",
+  "captured_at": "2026-09-17T10:12:38.939Z",
   "observed_at": null,
-  "age_seconds": 1529193,
+  "age_seconds": 1530319,
   "documents": [
     {
       "name": "idea.md",
@@ -165,8 +165,8 @@
   "change": {
     "state": "available",
     "path": "changes/screenote-1777.patch",
-    "bytes": 163302,
-    "sha256": "c0aa9a9d627d515de9835e9eeef24f04584d4b58d94d4307a98b9c35e6db0959",
+    "bytes": 163303,
+    "sha256": "eafb00645c6eebd485a4d00c5a9ab82a5952b4368dead5ef631df5dbe7cf2f02",
     "truncated": false,
     "redacted": true,
     "provenance": {

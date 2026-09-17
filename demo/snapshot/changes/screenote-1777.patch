@@ -3205,7 +3205,7 @@ index d126823..06689e0 100644
 +    project_id = project_path.split("/").last
 +    collaborator = User.create!(
 +      email: email,
-+      password: "password",
++      <redacted-credential>,
 +      confirmed_at: Time.current
 +    )
 +    Project.find(project_id).project_memberships.create!(user: collaborator, role: :member)

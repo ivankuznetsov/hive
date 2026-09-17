@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile, cp, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -32,6 +32,7 @@ const configTag = `<script id="demo-config" type="application/json">${config}</s
 
 for (const route of manifest.routes) {
   const target = join(dist, route.page);
+  if (!target.startsWith(`${dist}${sep}`)) throw new Error(`Route ${route.path} escapes the build directory.`);
   const page = await readFile(target, 'utf8');
   if (!page.includes('<!-- DEMO_CONFIG -->')) throw new Error(`Page ${route.page} is missing the config slot.`);
   await writeFile(target, page.replace('<!-- DEMO_CONFIG -->', configTag));

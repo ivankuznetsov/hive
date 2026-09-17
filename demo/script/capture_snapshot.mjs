@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DATASET_SCHEMA, DATASET_VERSION, SELECTION_SCHEMA, SELECTION_VERSION, auditOptionsFor, auditText,
@@ -145,7 +145,10 @@ function activeReason(row) {
 }
 
 async function captureDocument(folder, source, redactions, out, projectDir) {
-  const absolute = join(folder, source);
+  const absolute = resolve(folder, source);
+  if (!absolute.startsWith(`${resolve(folder)}${sep}`) || source.startsWith('/')) {
+    throw new Error(`selected artifact escapes its task folder: ${source}`);
+  }
   if (!existsSync(absolute)) throw new Error(`selected artifact is missing: ${absolute}`);
   const original = await readFile(absolute, 'utf8');
   const { text, applied } = redactText(original, redactions);
@@ -460,6 +463,9 @@ async function captureRepos(selection, options, out, manifest) {
   const repos = [];
   for (const project of selection.projects) {
     const api = json('gh', ['api', `repos/${project.repository}`], { cwd: ROOT });
+    if (api.private !== false || api.visibility === 'private' || project.visibility !== 'public') {
+      throw new Error(`${project.repository} is not a public repository`);
+    }
     const capturedHead = run('git', ['-C', join(options.projectsRoot, project.name), 'rev-parse', 'HEAD'], { allowFailure: true });
     repos.push({
       name: project.name,

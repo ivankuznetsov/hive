@@ -4,6 +4,7 @@
   "title": "hive workflow install output v2",
   "oneOf": [
     {"$ref": "#/$defs/SuccessPayload"},
+    {"$ref": "#/$defs/GitSuccessPayload"},
     {"$ref": "#/$defs/ErrorPayload"}
   ],
   "$defs": {
@@ -44,6 +45,87 @@
         "mappings": {"type": "array", "items": {"$ref": "#/$defs/Mapping"}, "minItems": 1},
         "optional_inputs": {"type": "array", "items": {"$ref": "#/$defs/OptionalInput"}},
         "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "GitSuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "status",
+        "origin",
+        "name",
+        "repository",
+        "ref",
+        "source_commit",
+        "files",
+        "descriptor_path"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-workflow-install"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "const": true
+        },
+        "status": {
+          "enum": [
+            "dry_run",
+            "installed"
+          ]
+        },
+        "origin": {
+          "const": "authored"
+        },
+        "name": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "source_commit": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sha256",
+              "size",
+              "mode"
+            ],
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "mode": {
+                "enum": [
+                  "100644",
+                  "100755"
+                ]
+              }
+            }
+          }
+        },
+        "descriptor_path": {
+          "type": "string"
+        }
       }
     },
     "ErrorPayload": {

@@ -489,6 +489,7 @@ module Hive
         validate ID  Read and validate the normalized workflow graph without writes.
         commit ID    Commit a validated owner-authored graph under Hive's state lock.
         install honeycomb/NAME[@VERSION]  Verify and install a reviewed package.
+        install ID --from REPOSITORY      Import an owner-selected authored workflow from Git.
         list                              Inspect built-in, authored, and managed workflows.
         update NAME                       Diff and advance a managed package.
         remove NAME                       Disable a managed package for new tasks.
@@ -515,6 +516,8 @@ module Hive
                      desc: "for `publish`: semantic package version"
     option :expected_release_digest, type: :string,
                                          desc: "for `publish`: require the exact confirmed dry-run release digest"
+    option :from, type: :string, desc: "for `install ID`: import an authored workflow from a private or public Git repository"
+    option :ref, type: :string, desc: "for `install --from`: Git ref to resolve and record (default HEAD)"
     def workflow(subcommand = nil, id = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
@@ -529,7 +532,8 @@ module Hive
         mapping_overrides: options[:mapping],
         input_bindings: options[:input_binding],
         version: options[:version],
-        expected_release_digest: options[:expected_release_digest]
+        expected_release_digest: options[:expected_release_digest],
+        from: options[:from], ref: options[:ref]
       ).call
     end
 

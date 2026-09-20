@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.5
-canonical-digest: 4a2556e5e074e27487627b6c257d509ea1ffd7abbacf26869ac0fb138ae0fa09
+canonical-digest: 44d83d406a5cd6b682b05f8e7839b1fb34846367ae2df962c9f68fa5eeef6840
 hive-version: 0.7.4
 -->
 
@@ -82,6 +82,8 @@ module receipt, sign a migration report, cut over mutator ownership, or request
 rollback without the operator's explicit direction.
 
 ## Load the relevant reference
+
+- Read [workflow-installation.md](references/workflow-installation.md) when installing from a private or direct Git repository; check installed CLI support, repository access, and runtime prerequisites before reporting readiness.
 
 - Read [daily-digest.md](references/daily-digest.md) when asked for recent merged changes; use `hive digest --json`, inspect its `local_date`, and read the saved `document`. Use an explicit date for today or yesterday.
 - Read [workflow-creator.md](references/workflow-creator.md) when ordinary language asks to create a new project-local workflow. This focused route is the `hive-workflow-creator` capability inside the single canonical `/hive` skill; it is not a second skill or package.

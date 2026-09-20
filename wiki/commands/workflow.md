@@ -41,6 +41,11 @@ accepts only the current visit-specific identifier returned by `hive run`.
 
 ## Private and direct Git sources
 
+This feature is unreleased. Check the installed `hive workflow --help` for
+`--from` and `--ref` before giving these commands to a user. The agent procedure
+is `skills/hive/references/workflow-installation.md`; the public guide lives at
+`/docs/private-workflows/` in hive-site.
+
 `hive workflow install ID --from REPOSITORY [--ref REF]` imports an owner-selected
 workflow as an editable project-authored workflow. SSH, HTTPS with Git's
 configured credential helper, and absolute local Git repositories are supported.

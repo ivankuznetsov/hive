@@ -1,5 +1,9 @@
 # Workflow actions
 
+For private or direct Git repository installation, read
+[workflow-installation.md](workflow-installation.md). That route imports an
+authored workflow and has different setup requirements from managed Honeycomb.
+
 ## Prefer the scheduler for enrolled work
 
 Check operational status before dispatch. When a project is daemon-enabled, the daemon owns ordinary automatic progression and task action descriptors are suppressed. Watch or report the current gate instead of racing it with a duplicate direct command.

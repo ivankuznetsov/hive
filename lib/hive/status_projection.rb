@@ -36,7 +36,7 @@ module Hive
       "Plan review retry scheduled",
       "Plan review needs an operator decision",
       "Plan review cleared with degraded coverage",
-      "Plan reviewer configuration required",
+      "Plan review needs repair",
       "Plan review blocks execution",
       "Ready to develop",
       "Implementation rework required",

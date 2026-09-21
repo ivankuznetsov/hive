@@ -91,6 +91,7 @@ class TaskTest < ActiveSupport::TestCase
   test "prefers the action label when presenting task status" do
     project = Project.new("name" => "alpha")
 
+    assert_equal "Done", Task.new(project:, attributes: { "action" => "archived", "action_label" => "Archived" }).status_label
     assert_equal "Working", Task.new(project:, attributes: { "action_label" => "Working", "marker" => "waiting" }).status_label
     assert_equal "waiting", Task.new(project:, attributes: { "marker" => "waiting" }).status_label
     assert_equal "idle", Task.new(project:, attributes: {}).status_label

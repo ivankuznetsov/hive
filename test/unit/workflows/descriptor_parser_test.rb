@@ -20,8 +20,8 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       base.merge("archive_visibility_retention_days" => "never"), path: "/tmp/retention.yml"
     )
 
-    assert_equal 3, omitted.archive_visibility_retention_days
-    assert_equal omitted.archive_visibility_retention_days, explicit.archive_visibility_retention_days
+    assert_equal :never, omitted.archive_visibility_retention_days
+    assert_equal 3, explicit.archive_visibility_retention_days
     assert_equal 7, seven.archive_visibility_retention_days
     assert_equal :never, never.archive_visibility_retention_days
   end

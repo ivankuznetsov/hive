@@ -129,6 +129,8 @@ class Task
   end
 
   def status_label
+    return "Done" if self["action"] == "archived"
+
     self["action_label"].presence || self["marker"].presence || "idle"
   end
 

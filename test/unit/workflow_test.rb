@@ -12,7 +12,7 @@ class WorkflowTest < Minitest::Test
     )
 
     assert_equal 3, Hive::Workflow::DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS
-    assert_equal 3, defaulted.archive_visibility_retention_days
+    assert_equal :never, defaulted.archive_visibility_retention_days
     assert_equal :never, never.archive_visibility_retention_days
   end
 

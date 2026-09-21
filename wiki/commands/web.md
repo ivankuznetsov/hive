@@ -260,7 +260,10 @@ Honeycomb projections.
   when it does not. `Grid` retains the compact per-project task rows and gains
   the same fluid content area. Both ordinary views consume status's
   workflow-aware archive projection:
-  expired archived rows are absent, and a positive project count renders
+  document workflows keep completed deliverables visible by default. Completed
+  tasks in a terminal producer such as `deliver` appear in a separate Done column;
+  unfinished delivery stays in its real stage. No task folders move for this grouping.
+  Rows expired by an explicit retention policy are absent, and a positive project count renders
   `… and 1 older archived task (hive archive to view)` or
   `… and N older archived tasks (hive archive to view)` as a direct link to the
   project-scoped archive. A TUI-left-pane-parity project rail filters either view through

@@ -15,7 +15,7 @@
             <h2><%= band.project.name %></h2>
             <span class="kanban-workflow"><%= band.workflow_id %> workflow</span>
           </div>
-          <span class="muted"><%= pluralize(band.task_count, "active task") %></span>
+          <span class="muted"><%= pluralize(band.task_count, "task") %></span>
         </header>
 
         <% if band.hidden_archived_task_count.positive? %>

@@ -10,6 +10,7 @@ module Hive
 
     DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS = 3
     NEVER_ARCHIVE_VISIBILITY_RETENTION = :never
+    DEFAULT_ARCHIVE_VISIBILITY_RETENTION = Object.new.freeze
 
     # Unspecified-default kinds derive no runner; see Stage#execution_strategy.
     GENERIC_KIND_STRATEGIES = { agent: :agent, council: :council, controller: :controller }.freeze
@@ -94,16 +95,20 @@ module Hive
     end
 
     def initialize(id:, stages:,
-                   archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS,
+                   archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION,
                    result: nil, controller: nil)
-      retention = normalize_archive_visibility_retention(
-        archive_visibility_retention_days, workflow_id: id
-      )
       # Shallow freeze: the element Stages stay shared with the caller, which is
       # safe only because Stage is itself frozen. This dup does NOT deep-copy.
       frozen_stages = stages.dup.freeze
       normalized_result = frozen_stages.empty? ? result : normalize_result(
         result, frozen_stages, workflow_id: id
+      )
+      if archive_visibility_retention_days.equal?(DEFAULT_ARCHIVE_VISIBILITY_RETENTION)
+        archive_visibility_retention_days = normalized_result&.kind == :document ?
+          NEVER_ARCHIVE_VISIBILITY_RETENTION : DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS
+      end
+      retention = normalize_archive_visibility_retention(
+        archive_visibility_retention_days, workflow_id: id
       )
       super(
         id: id, stages: frozen_stages,

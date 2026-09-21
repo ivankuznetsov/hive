@@ -13,7 +13,6 @@ module Hive
 
       DESCRIPTOR = Hive::Workflow.new(
         id: :content,
-        archive_visibility_retention_days: 3,
         result: Hive::Workflow::Result.new(
           kind: :document,
           primary_artifact: "article.md",

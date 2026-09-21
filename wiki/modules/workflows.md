@@ -13,8 +13,8 @@ tags: [module, workflow, result, verbs, selection, human-stage, outcomes, termin
 
 - `Hive::Workflow` — frozen `Data` value object with `id`, ordered `stages`,
   and normalized `archive_visibility_retention_days` (`Integer` or `:never`).
-  `DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS` is the single legacy default
-  (`3`). Read-only lookup helpers:
+  `DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS` is the default for change results
+  (`3`); document results default to `:never`. Read-only lookup helpers:
   - `#stage_named(name)` — soft lookup, returns the `Stage` or nil.
   - `#state_file_for(name)` — hard lookup, raises `KeyError` on an unknown name.
   - `#stage_names` / `#stage_dirs` — frozen lists of the descriptor's stage names / `index-name` dirs.
@@ -48,7 +48,7 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 
 - `id` is required, must match the filename stem, and must match `/\A[a-z0-9][a-z0-9-]*\z/`.
 - `archive_visibility_retention_days` accepts a positive integer or exact
-  lowercase `never`. Key omission normalizes to `3`; key presence is checked
+  lowercase `never`. Key omission keeps document results visible indefinitely and uses `3` for change results; key presence is checked
   separately so explicit `null` fails. Floats, booleans, strings (including
   numeric strings), zero, negatives, and alternate sentinel casing fail with
   workflow id, field name, received value, and accepted forms in the error.
@@ -82,9 +82,10 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 Archive visibility resolves the same descriptor order on every refresh:
 explicit task `workflow:` pin, project `default_workflow`, then `coding`.
 Applying a managed workflow configuration preserves the source descriptor's
-retention value. Hive's built-in `coding`, `content`, and `bench` descriptors
-and both local scaffolds explicitly declare `3`; legacy and externally managed
-descriptors may omit it and receive the same value.
+retention value. Hive's built-in `coding` and `bench` descriptors explicitly
+declare `3`. Built-in `content` and managed document workflows without an explicit
+limit keep completed deliverables visible in ordinary views indefinitely. Explicit
+positive limits still apply to document workflows.
 
 ## Workflow result contract
 

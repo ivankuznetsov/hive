@@ -94,6 +94,31 @@ class ArchiveFilterTest < Minitest::Test
     assert_empty projection.ordinary_rows
   end
 
+  def test_old_articles_remain_visible_without_an_explicit_retention_limit
+    now = Time.utc(2026, 9, 21)
+    content = Hive::Workflows::Registry.fetch(:content)
+    writing = Hive::Workflow.new(
+      id: :writing,
+      stages: [ Hive::Workflow::Stage.new(
+        name: "deliver", index: 1, state_file: "delivery.md",
+        kind: :agent, deliverable: "article.md"
+      ) ]
+    )
+    rows = [ content, writing ].map do |workflow|
+      { action_key: "archived", task: FakeTask.new(
+        folder: "/#{workflow.id}/article", workflow: workflow,
+        completed_at: now - (30 * 86_400)
+      ) }
+    end
+
+    projection = Hive::ArchiveFilter.project(rows, now: now)
+
+    assert_equal rows, projection.ordinary_rows
+    assert_empty projection.hidden_rows
+    assert_nil projection.next_retention_boundary
+    assert_equal rows, projection.archive_rows
+  end
+
   private
 
   def workflow_with_retention(retention)

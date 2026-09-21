@@ -293,7 +293,7 @@ module Hive
 
       def parse_archive_visibility_retention(descriptor, id:)
         field = "archive_visibility_retention_days"
-        return Hive::Workflow::DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS unless descriptor.key?(field)
+        return Hive::Workflow::DEFAULT_ARCHIVE_VISIBILITY_RETENTION unless descriptor.key?(field)
 
         value = descriptor[field]
         return value if value.is_a?(Integer) && value.positive?

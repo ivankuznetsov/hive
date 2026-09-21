@@ -148,6 +148,11 @@ target. The pinned controller initializes its native runtime database before
 provider launches, then registers `/work` through `Config.register_project` so
 the YAML enrollment and native attempt project identity agree. Repeated setup
 preserves that identity. Resumes retain the database; fresh generations archive it.
+The sealed controller Git shim hands controller-created protected receipts back
+to the benchmark UID before invoking Git, avoiding a root-owned activity receipt
+blocking the state commit. Runner image builds package the pinned Betterleaks
+binary before installing the Hive gem; source archives alone do not contain the
+release asset.
 OpenCode usage is exported at controller exit as cumulative, read-only,
 model-attributed token receipts outside the candidate workspace. The latest
 receipt replaces earlier OpenCode snapshots and is added to other harnesses'

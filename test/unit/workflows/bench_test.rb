@@ -299,6 +299,7 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes dockerfile, "chmod -R go-rwx /opt/hb/control-bundle"
     assert_includes dockerfile, "rm -rf /usr/local/bundle/gems/hive-cli-*"
     assert_includes dockerfile, "gem build agent-cli-runtime.gemspec"
+    assert_includes dockerfile, "ruby packaging/betterleaks.rb"
     assert_includes dockerfile, "gem install ./agent-cli-runtime-*.gem --no-document"
     assert_includes dockerfile, "AgentCliRuntime.respond_to?(:extract_provider_error)"
     assert_includes dockerfile, "defined?(AgentCliRuntime::OpenCode::Permissions)"
@@ -308,6 +309,7 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes stages, "HB_ERROR hive_runtime_visible_to_candidate"
     assert_includes stages, "CONTROLLER_BIN=/opt/hb/controller-bin"
     assert_includes controller_git, "--reuid=1000"
+    assert_includes controller_git, "chown -R 1000:1000 /work"
     assert_includes controller_git, 'args[position]="$HB_CONTROLLER_ORIGIN"'
     assert_includes stages, 'cat >"$CONTROLLER_BIN/gh"'
     [ pi_launcher, opencode_launcher ].each do |launcher|

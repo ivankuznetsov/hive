@@ -82,6 +82,8 @@ RUN apt-get update \
 COPY hive-src.tar /tmp/hive-src.tar
 RUN mkdir -p /tmp/hive-build \
   && tar xf /tmp/hive-src.tar -C /tmp/hive-build \
+  && cd /tmp/hive-build \
+  && ruby packaging/betterleaks.rb \
   && cd /tmp/hive-build/components/agent-cli-runtime \
   && gem build agent-cli-runtime.gemspec \
   && gem install ./agent-cli-runtime-*.gem --no-document \

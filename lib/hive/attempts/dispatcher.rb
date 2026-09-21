@@ -165,6 +165,11 @@ module Hive
                 subject: nil, admission_view: nil, routing_policy:, retry_release: false,
                 replay_semantic_terminal: false, failed_route_id: nil)
         created = nil
+        # Incomplete legacy task creation can leave meta.yml without an ID.
+        # Keep the record's strict identity contract, but do not let one such
+        # task take down the shared scheduler or allocate a fabricated identity.
+        return deferred_result("missing_task_identity") if task && generation.task_id.to_s.empty?
+
         claim_capability = nil
         route_decision = nil
         view = admission_view

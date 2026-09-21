@@ -4003,6 +4003,7 @@ module Hive
             case result.reason
             when "transient_retry", "transition_retry" then :attempt_transient_retry
             when "patrol_retry_delay" then :attempt_patrol_retry_deferred
+            when "missing_task_identity" then :attempt_identity_deferred
             else :attempt_capacity_deferred
             end
           when :no_route then :attempt_route_unavailable

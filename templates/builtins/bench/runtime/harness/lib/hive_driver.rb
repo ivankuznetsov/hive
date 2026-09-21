@@ -37,6 +37,7 @@ module HiveBench
     RESUME_EXECUTE_SH = File.expand_path("hive_resume_execute.sh", __dir__)
     OPENCODE_BENCH_RUNTIME = File.expand_path("opencode_bench_runtime.rb", __dir__)
     OPENCODE_BENCH_LAUNCHER = File.expand_path("opencode_bench_launcher.sh", __dir__)
+    OPENCODE_AUTH = File.expand_path("~/.local/share/opencode/auth.json")
     PI_BENCH_LAUNCHER = File.expand_path("pi_bench_launcher.sh", __dir__)
     PI_TOOL_STREAM = File.expand_path("pi_tool_stream.ts", __dir__)
     PI_OPENROUTER_MODELS = File.expand_path("../profiles/pi_openrouter_models.json", __dir__)
@@ -582,7 +583,7 @@ module HiveBench
         raise "sealed benchmark runtime requires an exact 40-character Hive build SHA"
       end
 
-      unsupported = agent_ids(candidate) - %w[pi opencode]
+      unsupported = agent_ids(candidate) - %w[pi opencode grok]
       unless unsupported.empty?
         raise "sealed benchmark runtime does not yet support candidate agent(s): #{unsupported.join(", ")}"
       end
@@ -721,6 +722,17 @@ module HiveBench
         # atomically rotate auth.json under one cross-container lock domain.
         mounts += ["--tmpfs", "#{HOME}/.grok:exec,mode=1777",
                    "-v", "#{prepare_grok_auth_dir}:#{GROK_AUTH_CONTAINER_DIR}:rw"]
+      end
+      if uses?(candidate, "opencode")
+        # OpenCode Go and other native OpenCode subscriptions authenticate via
+        # the operator's XDG auth store, not OPENCODE_API_KEY. Keep the store
+        # read-only and the parent disposable so parallel cells cannot share
+        # sessions or mutate host configuration.
+        raise "OpenCode auth missing or not a file: #{OPENCODE_AUTH}" unless File.file?(OPENCODE_AUTH)
+
+        mounts += ["--tmpfs", "#{HOME}/.local:exec,mode=1777",
+                   "--tmpfs", "#{HOME}/.local/share:exec,mode=1777",
+                   "-v", "#{OPENCODE_AUTH}:#{HOME}/.local/share/opencode/auth.json:ro"]
       end
       mounts
     end

@@ -109,6 +109,7 @@ ruby -ryaml -rjson -e '
   require File.join(runtime, "harness/lib/campaign_contract")
   data = YAML.safe_load_file("campaign.yml")
   HiveBench::CampaignContract.validate_generation!(data, repo_root: repo)
+  HiveBench::CampaignContract.prepare_generation_network!(data)
   HiveBench::CampaignContract.verify_generation_network!(data)
 ' "$REPO_ROOT" "$BENCH_ROOT" >.generate-validate.out 2>.generate-validate.err || {
   write_waiting "$(cat .generate-validate.err .generate-validate.out)"
@@ -171,6 +172,7 @@ ruby -ryaml -rshellwords -rjson -e '
   judge_args = HiveBench::CampaignContract.judge_arguments(
     data.fetch("judges"), openrouter_model_flag: "--openrouter-judge-model"
   )
+  profiles = HiveBench::CampaignContract.candidates(data).to_h { |profile| [profile.id, profile] }
   data.fetch("tasks").each do |task|
     data.fetch("candidates").each do |candidate|
       next if exclusions.include?([task.to_s, candidate.to_s])
@@ -181,6 +183,7 @@ ruby -ryaml -rshellwords -rjson -e '
       args = [
         "ruby", File.join(runtime, "harness/hive_run.rb"),
         "--source", source,
+        "--campaign", File.expand_path("campaign.yml"),
         "--candidate", candidate.to_s,
         "--task", task.to_s,
         "--out", out,
@@ -199,7 +202,7 @@ ruby -ryaml -rshellwords -rjson -e '
         env << "HB_GEN_NETWORK=#{isolation.fetch("docker_network")}"
         env << "HB_GEN_HTTPS_PROXY=#{isolation.fetch("https_proxy")}"
       end
-      profile = HiveBench::Candidates.by_id(candidate.to_s)
+      profile = profiles.fetch(candidate.to_s)
       if profile
         codex_models = []
         codex_models << profile.codex_model if profile.respond_to?(:codex_model)
@@ -237,7 +240,7 @@ if [ "$NEEDS_OPENROUTER" = "true" ] && [ -f "$HOME/.openrouter_key" ]; then
 fi
 
 if [ "$NEEDS_OPENROUTER" = "true" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
-  write_waiting "OPENROUTER_API_KEY is required by an enabled OpenRouter route or Pi/OpenCode-backed candidate."
+  write_waiting "OPENROUTER_API_KEY is required by an enabled OpenRouter route."
   exit 0
 fi
 

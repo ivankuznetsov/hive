@@ -14,7 +14,8 @@ set -uo pipefail
 
 SLUG="$1"
 BASE="$2"
-export HOME=/home/asterio
+# HOME is the disposable container path supplied by the driver.
+: "${HOME:?benchmark container home is required}"
 if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
   HIVE_RUNTIME_BIN=/opt/hb/control-bundle/bin
   CONTROLLER_BIN=/opt/hb/controller-bin
@@ -57,6 +58,48 @@ echo "HB_NOTE hive_runtime version=$ACTUAL_HIVE_VERSION"
 cd /work || exit 3
 
 stage() { echo "HB_STAGE $1 rc=$2"; }
+
+# Each cell owns persistent controller storage mounted outside /work. Candidate
+# launchers can chown their workspace without touching runtime database custody.
+# Explicit setup is required by current Hive; normal stage commands only read
+# and validate an existing database. Load this API from the pinned runtime.
+initialize_controller_runtime() {
+  if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
+    if [ "${HIVE_HOME:-}" != "/opt/hb/hive-home" ] || [ -L "$HIVE_HOME" ]; then
+      echo "HB_ERROR hive_runtime_home_unsafe" >&2
+      return 1
+    fi
+    chown -R 0:0 "$HIVE_HOME" && chmod 0700 "$HIVE_HOME" || return 1
+  fi
+  ruby -rhive/runtime_control_plane/installation -e '
+    Hive::RuntimeControlPlane::Installation.setup
+  ' || {
+    echo "HB_ERROR hive_runtime_setup_failed" >&2
+    return 1
+  }
+  echo "HB_NOTE hive_runtime_storage ready"
+}
+
+initialize_controller_runtime || exit 4
+
+if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
+  chown 0:0 /opt/hb/usage-export && chmod 0755 /opt/hb/usage-export || exit 4
+fi
+
+# This separate mount is controller-owned and never handed to the candidate.
+# EXIT covers successful stages and failures; exports are cumulative snapshots
+# of the native usage store, including completed sessions before a failed stage.
+export_controller_usage() {
+  local stage_rc=$?
+  if ! ruby -I/opt/hb -r/opt/hb/token_report -e '
+    HiveBench::TokenReport.export_opencode_usage("/opt/hb/usage-export", task_slug: ARGV.fetch(0))
+  ' "$SLUG"; then
+    echo "HB_ERROR usage_export_unavailable" >&2
+    [ "$stage_rc" -ne 0 ] || stage_rc=4
+  fi
+  exit "$stage_rc"
+}
+trap export_controller_usage EXIT
 
 preflight_opencode_ce_skills() {
   local package=/opt/compound-engineering
@@ -140,7 +183,9 @@ install_pi_openrouter_auth() {
 if [ -f /opt/hb/pi-tool-stream.ts ]; then
   mkdir -p "$HOME/.pi/agent"
   if [ -f /opt/hb/pi-openrouter-models.json ]; then
-    install_pi_openrouter_auth || exit 4
+    if [ "${HB_PI_CUSTOM_CATALOG:-0}" != "1" ]; then
+      install_pi_openrouter_auth || exit 4
+    fi
     ln -sfn /opt/hb/pi-openrouter-models.json "$HOME/.pi/agent/models.json"
     echo "HB_NOTE pi_openrouter_models enabled"
   else
@@ -182,13 +227,15 @@ if [ -d /opt/hb/codex-plugins-cache ]; then
   [ -e "$HOME/.codex/plugins/cache" ] || ln -s /opt/hb/codex-plugins-cache "$HOME/.codex/plugins/cache"
   echo "HB_NOTE codex_skills linked: $(find /opt/hb/codex-plugins-cache -mindepth 1 -maxdepth 1 -printf '%f ')"
 fi
-if [ -d /opt/hb/pi-ce-skills ]; then
+PI_CE_SKILLS=/opt/hb/pi-ce-skills
+[ -d "$PI_CE_SKILLS" ] || PI_CE_SKILLS=/opt/compound-engineering/skills
+if [ -d "$PI_CE_SKILLS" ]; then
   mkdir -p "$HOME/.pi/agent/skills"
-  for s in /opt/hb/pi-ce-skills/*/; do
+  for s in "$PI_CE_SKILLS"/*/; do
     n="$(basename "$s")"
     [ -e "$HOME/.pi/agent/skills/$n" ] || ln -s "${s%/}" "$HOME/.pi/agent/skills/$n"
   done
-  echo "HB_NOTE pi_skills linked: $(find /opt/hb/pi-ce-skills -mindepth 1 -maxdepth 1 -printf '.' | wc -c) skills"
+  echo "HB_NOTE pi_skills linked: $(find "$PI_CE_SKILLS" -mindepth 1 -maxdepth 1 -printf '.' | wc -c) skills"
 fi
 
 # Capture the task worktree's diff vs base into $1: committed + uncommitted +

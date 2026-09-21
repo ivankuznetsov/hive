@@ -10,9 +10,43 @@ corpus_version: v3
 tasks:
   - fix-claude-tmux-ready-detector-260629-50cc
 
-# Candidate ids from harness/profiles/candidates.rb.
+# Historical ids from harness/profiles/candidates.rb, or campaign-owned ids
+# declared in candidate_profiles below. Never redefine a historical id.
 candidates:
   - all-opus-4.8
+
+# New models need no edits to the harness registry. These routes become native
+# Hive stage/model configuration. Single-model profiles disable plan review
+# unless explicitly enabled; ordinary code review still runs.
+# candidate_profiles:
+#   deepseek-single:
+#     model_version: deepseek-v4.1-flash
+#     credential_env: [OPENCODE_API_KEY] # names only; export values before Hive starts
+#     stages:
+#       plan: {agent: opencode, model: opencode-go/deepseek-v4.1-flash}
+#       execute: {agent: opencode, model: opencode-go/deepseek-v4.1-flash}
+#       review: {agent: opencode, model: opencode-go/deepseek-v4.1-flash}
+#     plan_review: {enabled: false}
+#
+# Mixed profiles may give each stage its own agent/model/effort. To enable plan
+# review, supply plan_review.enabled: true and all three native routes under
+# plan_review.routes: primary, adversarial, verification. Each needs agent,
+# model and family (plus optional effort/route); no production default model
+# may silently enter a benchmark. Optional reviewers uses native Hive reviewer
+# specifications and overrides the default code reviewer on stages.review.
+#
+# Pi custom providers may additionally declare pi_catalog using Pi's native
+# models.json format. Provider apiKey must be a $ENV reference listed in
+# credential_env; never commit a token or a secret-manager command.
+# pi_catalog:
+#   providers:
+#     zai-coding:
+#       baseUrl: https://api.z.ai/api/coding/paas/v4
+#       api: openai-completions
+#       apiKey: $ZAI_API_KEY
+#       models: [{id: glm-5.3-flash, reasoning: true}]
+# Supply the provider's verified context/token limits and thinkingLevelMap in
+# the registered catalog when using non-default reasoning levels.
 
 # Candidate-id -> effort. Today effort pins live in candidate profiles; this is
 # a review contract rather than a hive_run.rb flag.
@@ -31,6 +65,11 @@ isolation:
   require_provider_egress: true
   docker_network: hive-bench-provider-only
   https_proxy: http://hive-bench-egress-proxy:3128
+  # Optional native-stage setup: creates only campaign-labeled resources and
+  # refuses to replace shared resources. Choose unique names per campaign.
+  # managed_network: true
+  # proxy_image: sha256:<64-hex image ID from docker image inspect>
+  # provider_hosts: [api.z.ai, opencode.ai] # selected candidate APIs only
 
 # Judge samples. Use at least 3 for published results.
 seeds: 3

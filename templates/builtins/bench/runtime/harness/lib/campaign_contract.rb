@@ -47,10 +47,7 @@ module HiveBench
         abort("timeouts.hive_seconds must be a positive integer when set")
       end
 
-      load_candidates
-      known = HiveBench::Candidates.all.map(&:id)
-      unknown = data["candidates"].map(&:to_s) - known
-      abort("unknown candidate id(s): #{unknown.join(", ")}") unless unknown.empty?
+      candidates(data)
       unknown_tasks = data["tasks"].map(&:to_s).reject do |slug|
         File.file?(File.join(repo_root, "corpus", slug, "manifest.yml"))
       end
@@ -161,11 +158,15 @@ module HiveBench
     def campaign_requires_openrouter?(data)
       return true if judges_require_openrouter?(data.fetch("judges"))
 
+      require_relative "hive_config"
+      candidates(data).any? { |candidate| HiveConfig.openrouter?(candidate) }
+    end
+
+    def candidates(data)
       load_candidates
-      data.fetch("candidates").any? do |id|
-        candidate = HiveBench::Candidates.by_id(id.to_s)
-        candidate && (candidate.pi_models || candidate.opencode_models)
-      end
+      HiveBench::Candidates.for_campaign(data)
+    rescue ArgumentError => e
+      abort(e.message)
     end
 
     def judge_name(backend, config)
@@ -195,6 +196,13 @@ module HiveBench
       abort("isolation.docker_network must contain only proxy #{proxy_host}; found #{peers.sort.inspect}")
     end
 
+    def prepare_generation_network!(data)
+      require_relative "generation_network"
+      GenerationNetwork.prepare!(data)
+    rescue ArgumentError => e
+      abort(e.message)
+    end
+
     def validate_codex!(config)
       effort = config["reasoning_effort"]
       unless effort.is_a?(String) && !effort.include?("\n") && !effort.strip.empty?
@@ -215,6 +223,9 @@ module HiveBench
 
     def validate_isolation!(isolation)
       abort("isolation must be a mapping") unless isolation.is_a?(Hash)
+      if isolation.key?("managed_network") && ![true, false].include?(isolation["managed_network"])
+        abort("isolation.managed_network must be true or false")
+      end
       if isolation.key?("sealed_agent_runtime") &&
          ![ true, false ].include?(isolation["sealed_agent_runtime"])
         abort("isolation.sealed_agent_runtime must be true or false")

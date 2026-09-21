@@ -4,7 +4,7 @@
 # The runner drives actual hive stages, so the image bakes a PINNED snapshot of
 # the hive tool: a clean `git archive HEAD` of the hive repo, copied into the
 # build context and `gem install`ed (see Dockerfile.runner). HIVE_SRC points at
-# the hive checkout to pin (default ~/Dev/hive).
+# the hive checkout to pin (required, no workstation-specific default).
 #
 #   HIVE_SRC=~/Dev/hive harness/build_runner.sh
 #
@@ -13,7 +13,7 @@
 # either tag independently with IMAGE_TAG / OPENCODE_IMAGE_TAG.
 set -euo pipefail
 
-HIVE_SRC="${HIVE_SRC:-$HOME/Dev/hive}"
+: "${HIVE_SRC:?Set HIVE_SRC to the exact Hive checkout used by this campaign}"
 cd "$(dirname "$0")/.."
 
 [ -e "$HIVE_SRC/.git" ] || { echo "HIVE_SRC=$HIVE_SRC is not a git checkout" >&2; exit 1; }

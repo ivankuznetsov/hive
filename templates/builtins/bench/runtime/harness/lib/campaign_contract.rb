@@ -38,6 +38,7 @@ module HiveBench
         abort("require_successful_execution must be true or false")
       end
       validate_isolation!(data.fetch("isolation", {}))
+      generation_environment(data, repo_root: repo_root)
       validate_matrix!(data)
 
       timeouts = data["timeouts"]
@@ -92,6 +93,51 @@ module HiveBench
       return if missing.empty?
 
       abort("source does not contain the campaign marker runtime: #{missing.join(", ")}")
+    end
+
+    # Source remains the historical target checkout. Only an explicit runtime
+    # pin also selects its Hive executable; unpinned campaigns use active Hive.
+    def generation_environment(data, repo_root:, image_inspector: nil)
+      env = {}
+      if data.key?("runtime_commit")
+        sha = data["runtime_commit"]
+        abort("runtime_commit must be an exact 40-character commit SHA") unless
+          sha.is_a?(String) && sha.match?(/\A[0-9a-f]{40}\z/)
+        root = source(data, repo_root: repo_root)
+        out, _err, status = Open3.capture3("git", "-C", root, "rev-parse", "--verify", "HEAD^{commit}")
+        abort("runtime_commit does not match source HEAD") unless status.success? && out.strip == sha
+        bin = File.join(root, "bin", "hive")
+        unless File.file?(bin) && File.executable?(bin) && File.file?(File.join(root, "lib", "hive.rb"))
+          abort("runtime_commit source does not contain a complete Hive runtime")
+        end
+        env["HB_HIVE_BIN"] = bin
+      end
+      if data.key?("runner_image")
+        image = data["runner_image"]
+        unless image.is_a?(String) && image.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._:\/@-]*\z/)
+          abort("runner_image must be a non-empty Docker image reference")
+        end
+        if data.key?("runner_image_digest")
+          digest = data["runner_image_digest"]
+          unless digest.is_a?(String) && digest.match?(/\Asha256:[0-9a-f]{64}\z/)
+            abort("runner_image_digest must be an exact sha256 Docker image ID")
+          end
+          actual = if image_inspector
+            image_inspector.call(image)
+          else
+            out, err, status = Open3.capture3("docker", "image", "inspect", "--format", "{{.Id}}", image)
+            abort("cannot inspect registered runner_image: #{err.strip}") unless status.success?
+            out.strip
+          end
+          abort("runner_image_digest does not match registered runner_image") unless actual == digest
+          image = digest # launch immutable bytes, not a tag that can change later
+        end
+        env["HB_RUNNER_IMAGE"] = image
+        env["HB_OPENCODE_RUNNER_IMAGE"] = image
+      elsif data.key?("runner_image_digest")
+        abort("runner_image_digest requires runner_image")
+      end
+      env
     end
 
     def enabled_judges(judges)

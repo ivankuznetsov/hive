@@ -71,8 +71,11 @@ initialize_controller_runtime() {
     fi
     chown -R 0:0 "$HIVE_HOME" && chmod 0700 "$HIVE_HOME" || return 1
   fi
-  ruby -rhive/runtime_control_plane/installation -e '
+  ruby -rhive/runtime_control_plane/installation -rhive/config -e '
     Hive::RuntimeControlPlane::Installation.setup
+    # YAML alone does not enroll the project in the native attempt database.
+    # Use the normal idempotent registration API after storage exists.
+    Hive::Config.register_project(name: "work", path: Dir.pwd, repository_identity: nil)
   ' || {
     echo "HB_ERROR hive_runtime_setup_failed" >&2
     return 1

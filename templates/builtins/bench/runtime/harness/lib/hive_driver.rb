@@ -851,7 +851,18 @@ module HiveBench
       timeout_fallback = promote_execute_patch_after_timeout(work, stdout)
       diff_path = File.join(work, "candidate.patch")
       diff = File.file?(diff_path) ? File.read(diff_path) : ""
-      tel = telemetry(work).merge("wall_clock_sec" => wall)
+      status, reason = classify(stdout, work, diff)
+      begin
+        tel = telemetry(work).merge("wall_clock_sec" => wall)
+      rescue TokenReport::UsageUnavailable => error
+        # Missing accounting must still reject paid/executed cells, but must
+        # not hide the startup failure that prevented a session from starting.
+        # Only copy typed stage markers, never arbitrary potentially-secret stderr.
+        stages = stdout.to_s.lines.grep(/^HB_STAGE [a-z-]+ rc=\d+$/).map(&:strip).join(", ")
+        raise TokenReport::UsageUnavailable,
+              "#{status}: #{reason || 'generation completed'}; #{stages}; #{error.message}; " \
+              "stage stderr: #{File.join(work, '.hb', 'stage.err')}"
+      end
       if recovered
         tel["recovered_artifact"] = true
         tel["artifact_provenance"] = recovered
@@ -874,7 +885,6 @@ module HiveBench
         tel["answer_key_access_suspect"] = hit
         warn "hive-bench: ANSWER-KEY ACCESS SUSPECT — #{entry["task_id"]}: #{hit}"
       end
-      status, reason = classify(stdout, work, diff)
       # Failed runs can leave a zero-byte capture that `generate` would mistake
       # for a paid artifact sentinel. Preserve real diffs and terminal empties.
       FileUtils.rm_f(diff_path) if diff.empty? && !%w[generated empty_diff].include?(status)

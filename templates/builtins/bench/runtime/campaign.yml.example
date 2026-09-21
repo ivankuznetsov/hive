@@ -6,6 +6,15 @@ campaign_id: v3-example
 source: /home/user/Dev/hive
 corpus_version: v3
 
+# Optional controller pins. source is normally only the historical target repo;
+# runtime_commit additionally selects source/bin/hive after verifying source HEAD.
+# Without it, the controller uses the active Hive installation as before.
+# runtime_commit: <exact 40-character source HEAD>
+# runner_image: hive-bench-runner:my-pinned-build
+# Optional local Docker image ID; verified against runner_image, then used for
+# launch to prevent mutable-tag drift. Applies to every harness, including OpenCode.
+# runner_image_digest: sha256:<64-hex image ID from docker image inspect>
+
 # Corpus slugs. Each must exist at corpus/<slug>/manifest.yml.
 tasks:
   - fix-claude-tmux-ready-detector-260629-50cc

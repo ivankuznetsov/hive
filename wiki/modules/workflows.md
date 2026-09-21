@@ -102,6 +102,15 @@ the installed stage scripts own parallel matrix generation and judging. Do not
 maintain a second scheduler or run a modified checkout's harness behind a task's
 recorded workflow.
 
+Campaigns may pin `runner_image` for every harness, including OpenCode, instead
+of the inferred image defaults. Optional `runner_image_digest` is the local
+Docker image ID: generation checks the named image against that ID and launches
+the immutable ID. Optional `runtime_commit` must match `source` HEAD exactly and
+requires a complete `source/bin/hive` runtime; only then does generation override
+the inherited active Hive executable. Without this field, `source` remains only
+the historical target checkout, preserving existing campaigns. The sealed-image
+build-SHA and visibility checks still apply; neither pin bypasses isolation.
+
 The committed `campaign.yml` may declare `candidate_profiles` keyed by new IDs.
 Each profile specifies `model_version` and `stages.plan`, `stages.execute`, and
 `stages.review` with native `agent`, `model`, and optional `effort` fields.
@@ -136,7 +145,9 @@ Existing manually provisioned networks remain supported when this opt-in is off.
 
 Each cell keeps private controller storage beside, not inside, the candidate
 target. The pinned controller initializes its native runtime database before
-provider launches. Resumes retain the database; fresh generations archive it.
+provider launches, then registers `/work` through `Config.register_project` so
+the YAML enrollment and native attempt project identity agree. Repeated setup
+preserves that identity. Resumes retain the database; fresh generations archive it.
 OpenCode usage is exported at controller exit as cumulative, read-only,
 model-attributed token receipts outside the candidate workspace. The latest
 receipt replaces earlier OpenCode snapshots and is added to other harnesses'

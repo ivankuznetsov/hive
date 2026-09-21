@@ -86,6 +86,30 @@ class BenchControllerStorageTest < Minitest::Test
     end
   end
 
+  def test_bootstrap_registers_seeded_project_in_native_attempt_database
+    with_tmp_dir do |root|
+      home = File.join(root, "controller-home")
+      work = File.join(root, "work")
+      FileUtils.mkdir_p(home, mode: 0o700)
+      FileUtils.mkdir_p(File.join(work, ".hive-state"))
+      File.write(File.join(home, "config.yml"), YAML.dump("registered_projects" => [
+        { "name" => "work", "path" => work, "hive_state_path" => File.join(work, ".hive-state") }
+      ]))
+      out, err, status = bootstrap(home, work: work)
+      assert status.success?, out + err
+      require "sqlite3"
+      db = SQLite3::Database.new(Hive::Paths.runtime_control_plane_path(home))
+      first = db.execute("SELECT project_id, registration_id, name, state_root_path, active FROM projects WHERE name = 'work'")
+      assert_equal 1, first.length, "YAML enrollment must be synchronized before attempt admission"
+      assert_equal [ "work", File.join(work, ".hive-state"), 1 ], first.first.last(3)
+      out, err, status = bootstrap(home, work: work)
+      assert status.success?, out + err
+      assert_equal first, db.execute("SELECT project_id, registration_id, name, state_root_path, active FROM projects WHERE name = 'work'")
+    ensure
+      db&.close
+    end
+  end
+
   private
 
   def run_bootstrap(home)
@@ -93,14 +117,14 @@ class BenchControllerStorageTest < Minitest::Test
     assert status.success?, out + err
   end
 
-  def bootstrap(home)
+  def bootstrap(home, work: home)
     source = File.read(File.join(HARNESS, "lib", "hive_stages.sh"))
     function = source[/^initialize_controller_runtime\(\) \{\n.*?^\}/m]
     refute_nil function, "runner never bootstraps native runtime storage"
     Open3.capture3(
       { "HIVE_HOME" => home, "HB_SEALED_AGENT_RUNTIME" => "0",
         "RUBYLIB" => [ File.expand_path("../../../lib", __dir__), ENV["RUBYLIB"] ].compact.join(File::PATH_SEPARATOR) },
-      "bash", "-c", "#{function}\ninitialize_controller_runtime"
+      "bash", "-c", "#{function}\ninitialize_controller_runtime", chdir: work
     )
   end
 end

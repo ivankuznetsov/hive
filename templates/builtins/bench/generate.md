@@ -169,6 +169,7 @@ ruby -ryaml -rshellwords -rjson -e '
   end
   hive_timeout = data.fetch("timeouts", {})["hive_seconds"]
   source = HiveBench::CampaignContract.source(data, repo_root: repo)
+  pinned_env = HiveBench::CampaignContract.generation_environment(data, repo_root: repo)
   judge_args = HiveBench::CampaignContract.judge_arguments(
     data.fetch("judges"), openrouter_model_flag: "--openrouter-judge-model"
   )
@@ -203,7 +204,7 @@ ruby -ryaml -rshellwords -rjson -e '
         env << "HB_GEN_HTTPS_PROXY=#{isolation.fetch("https_proxy")}"
       end
       profile = profiles.fetch(candidate.to_s)
-      if profile
+      if profile && !pinned_env.key?("HB_RUNNER_IMAGE")
         codex_models = []
         codex_models << profile.codex_model if profile.respond_to?(:codex_model)
         codex_models.concat((profile.codex_models || {}).values) if profile.respond_to?(:codex_models)
@@ -215,6 +216,7 @@ ruby -ryaml -rshellwords -rjson -e '
           env << "HB_RUNNER_IMAGE=hive-bench-runner:grok"
         end
       end
+      env.concat(pinned_env.map { |key, value| "#{key}=#{value}" })
       puts Shellwords.join(env + args)
     end
   end

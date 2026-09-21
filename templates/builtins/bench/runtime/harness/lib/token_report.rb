@@ -3,7 +3,6 @@
 require "json"
 require "sqlite3"
 require "securerandom"
-require "lib/pricing"
 
 module HiveBench
   # Per-MODEL token accounting for one cell, from the agent stream logs. Every
@@ -231,6 +230,9 @@ module HiveBench
     # plus "_total". An unpriceable model keeps its tokens with cost nil, and
     # makes the cell total nil too — a partial total would read as complete.
     def price(per_model)
+      # The sealed controller mounts this exporter without pricing's model
+      # catalog. Exporting native token buckets must not depend on that catalog.
+      require "lib/pricing"
       out = per_model.to_h do |model, t|
         cost = Pricing.estimate_usd(model_strings: [model], input: t["input"], output: t["output"],
                                     cached: t["cache_read"], cache_creation: t["cache_write"])

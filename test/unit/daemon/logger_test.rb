@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "hive/daemon/logger"
+require "hive/daemon/dispatcher"
 
 # Pin the daemon's structured-log contract: one JSON line per event,
 # closed event enum, size rotation, stderr fallback when the log file
@@ -79,6 +80,22 @@ class HiveDaemonLoggerTest < Minitest::Test
       assert_equal Hive::Daemon::Logger::EVENTS.size, lines.size
       kinds = lines.map { |l| JSON.parse(l)["event"] }.sort
       assert_equal Hive::Daemon::Logger::EVENTS.map(&:to_s).sort, kinds
+    end
+  end
+
+  def test_missing_task_identity_admission_uses_a_registered_event
+    with_log do |logger, path|
+      dispatcher = Hive::Daemon::Dispatcher.allocate
+      dispatcher.instance_variable_set(:@logger, logger)
+      result = Hive::Attempts::DispatchResult.new(
+        status: :deferred, reason: "missing_task_identity", attempt: nil, receipt: nil, attach_descriptor: nil
+      )
+
+      dispatcher.send(:log_attempt_admission, result)
+
+      event = JSON.parse(File.read(path))
+      assert_equal "attempt_identity_deferred", event.fetch("event")
+      assert_equal "missing_task_identity", event.fetch("reason")
     end
   end
 

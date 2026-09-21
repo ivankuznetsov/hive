@@ -26,6 +26,8 @@ left a missing or empty stable task ID. It does not create an attempt, consume
 capacity, fabricate an ID, or rewrite task history. The daemon records
 `attempt_identity_deferred` and continues dispatching other tasks; repairing the
 incomplete task remains a separate operation. Module-hook subjects are unchanged.
+The identity-deferral event is registered in the logger's closed enum and tested
+through the dispatcher with the real logger, so logging cannot undo safe admission.
 
 `Hive::Attempts::API` is the public admission facade. The CLI, bot, web, daemon,
 and module-hook paths use the same dispatcher. A successful admission starts a

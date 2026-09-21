@@ -735,6 +735,7 @@ module HiveBench
 
         mounts += ["--tmpfs", "#{HOME}/.local:exec,mode=1777",
                    "--tmpfs", "#{HOME}/.local/share:exec,mode=1777",
+                   "--tmpfs", "#{HOME}/.local/share/opencode:exec,mode=1777",
                    "-v", "#{OPENCODE_AUTH}:#{HOME}/.local/share/opencode/auth.json:ro"]
       end
       mounts

@@ -369,18 +369,13 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
-  def test_exact_writer_rejects_invalid_ordinals_and_missing_raw_question_positions
+  def test_exact_writer_rejects_invalid_ordinals
     with_brainstorm(sample) do |path|
       assert_equal :question_not_found,
                    Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
                      brainstorm_path: path, ordinal: Object.new, answer_text: "never written"
                    )
     end
-
-    lines = [ "## Round 1\n", "### Q1. Only question?\n" ]
-    assert_nil Hive::Bot::BrainstormAnswerWriter.send(
-      :question_line_index_for_ordinal, lines, 2
-    )
   end
 
   # Boundary coverage (#269): the slot-creation scan must STOP at a
@@ -464,24 +459,69 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
-  # Defensive: if parsed says Q{n} is unanswered but the raw lines no
-  # longer contain that Q (e.g. brainstorm.md was rewritten between
-  # `parse_text` and `lines = content.lines` — impossible under the
-  # same `with_task_lock`, but the code guards it anyway), the
-  # writer must return nil → caller surfaces :answer_slot_missing
-  # rather than misattributing to a different line. Exercises the
-  # defensive return at the end of target_question_line_index.
-  def test_target_question_line_index_returns_nil_when_parsed_diverges_from_lines
-    fake_parsed = [
-      Hive::Bot::BrainstormParser::Question.new(round: 1, n: 1, text: "synthetic", answer: nil)
-    ]
-    # Lines contain NO `### Q1.` header at all — simulates a parse-vs-lines
-    # divergence that would otherwise let the writer misattribute.
-    lines = [ "## Round 1\n", "\n", "(no Q1 line on disk)\n" ]
+  # Mutation calls anchor on the parser's location fields (`question_line_index`,
+  # `block_end_index`, `answer_line_index`) instead of re-deriving line indices
+  # from raw lines, so a parse-vs-lines divergence is structurally impossible
+  # (one line array, one index space). The old defensive re-scan
+  # (`target_question_line_index` returning nil on divergence) was replaced by
+  # anchoring directly on `Question` location fields; this test pins the parser
+  # output the writer relies on.
+  def test_writer_anchors_on_parser_location_fields
+    text = "## Round 1\n\n### Q1. First?\n\n### A1.\n\n### Q2. Second?\n\n### A2.\n"
 
-    result = Hive::Bot::BrainstormAnswerWriter.send(:target_question_line_index, lines, fake_parsed, 1)
-    assert_nil result,
-               "defensive nil must fire when parsed and raw lines disagree about Q{n}"
+    parsed = Hive::Bot::BrainstormParser.parse_text(text)
+    target = parsed.find { |question| question.n == 2 && question.answer.nil? }
+
+    refute_nil target
+    assert_equal 6, target.question_line_index,
+                 "the writer fills/creates the slot at the parser-identified Q header line"
+    assert_equal 9, target.block_end_index,
+                 "the writer inserts before the parser-identified block end (EOF, after the A2 body)"
+    assert_equal 8, target.answer_line_index,
+                 "the writer fills the empty A-body between the A header and the block end"
+  end
+
+  def test_append_writes_answer_into_lone_cr_file
+    # BrainstormAnswerWriter.append! used to dead-end in
+    # :answer_slot_missing on a lone-\r document: parse_text normalized
+    # lone \r into line breaks while `content.lines` did not, so the
+    # writer-side raw-line re-scan could never locate the target Q line.
+    # The writer now does line surgery on the parser's own
+    # document_lines array, so the two views cannot diverge. (The exact
+    # ordinal writer always normalized first; that behavior is pinned by
+    # test_exact_writer_maps_ordinals_in_lone_cr_files.)
+    content = "## Round 1\r### Q1. First?\r### A1.\r### Q2. Second?\r### A2.\r<!-- WAITING -->\r"
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "first"
+      )
+
+      assert_equal :written, result
+      parsed = Hive::BrainstormParser.parse(path)
+      assert_equal "first", parsed[0].answer
+      assert_nil parsed[1].answer
+    end
+  end
+
+  def test_append_preserves_crlf_line_endings
+    content = "## Round 1\r\n\r\n### Q1. First?\r\n\r\n### A1.\r\n\r\n### Q2. Second?\r\n\r\n### A2.\r\n"
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path,
+        question_n: 1,
+        answer_text: "first"
+      )
+
+      assert_equal :written, result
+      raw = File.read(path)
+      # Byte-identical to the pre-refactor writer: the blank line between the
+      # empty A body and the Q2 boundary was (and still is) part of the empty
+      # slot envelope and is replaced by the answer.
+      assert_equal "## Round 1\r\n\r\n### Q1. First?\r\n\r\n### A1. #{Hive::BrainstormParser::ANSWER_ENCODING_V1}\r\nfirst\r\n### Q2. Second?\r\n\r\n### A2.\r\n", raw
+      assert_equal "first", Hive::BrainstormParser.parse(path)[0].answer
+    end
   end
 
   # F2 from PR #239 ce-code-review: when try_append returns :enoent

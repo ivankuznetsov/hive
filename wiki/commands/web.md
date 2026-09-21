@@ -1315,3 +1315,7 @@ registered project. A bounded process-local cache retains each result for one
 minute; stage-directory changes invalidate it immediately. The project-scoped
 Done and Archive pages reuse this cache instead of scanning every project first.
 The all-project Archive remains the lossless fleet-wide history view.
+
+Completed terminal deliveries (for example writing workflow `7-deliver`) appear
+in a Done column on the project board. Pending delivery remains in Deliver;
+this grouping does not move task folders or alter workflow execution.

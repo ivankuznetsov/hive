@@ -1,6 +1,22 @@
 require "test_helper"
 
 class BoardTest < ActiveSupport::TestCase
+  test "completed deliverables appear in Done while unfinished delivery stays in its stage" do
+    workflow = Hive::Workflow.new(id: :writing, stages: [
+      Hive::Workflow::Stage.new(name: "deliver", index: 1, kind: :agent,
+                               state_file: "delivery.md", deliverable: "article.md")
+    ])
+    completed = { "stage" => "1-deliver", "action" => "archived", "slug" => "finished" }
+    pending = { "stage" => "1-deliver", "action" => "ready_to_run", "slug" => "unfinished" }
+
+    columns = Board.allocate.send(:columns_for, workflow, [ completed, pending ])
+
+    assert_equal [ "Deliver", "Done" ], columns.map(&:label)
+    assert_equal [ pending ], columns.first.tasks
+    assert_equal [ completed ], columns.last.tasks
+    assert_equal "1-deliver", completed["stage"]
+  end
+
   test "groups tasks into project workflow bands and descriptor ordered columns" do
     project_name = create_hive_project!("kanban-model-app")
     project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)

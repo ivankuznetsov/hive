@@ -63,6 +63,17 @@ class Board
     tasks_by_stage = tasks.group_by { |task| task["stage"].presence || "unknown" }
     configured_dirs = configured_stages.map(&:dir)
 
+    # Producing a terminal deliverable and completing it are different states.
+    # Keep pending delivery in its real stage; Done is only a presentation group.
+    terminal = configured_stages.last
+    completed = []
+    if terminal && terminal.name != "done"
+      completed, pending = tasks_by_stage.fetch(terminal.dir, []).partition do |task|
+        task["action"] == "archived"
+      end
+      tasks_by_stage[terminal.dir] = pending
+    end
+
     columns = configured_stages.map do |stage|
       Column.new(stage: stage.dir, label: Hive::StageLabel.format(stage.name), tasks: tasks_by_stage.fetch(stage.dir, []),
                  terminal: stage == configured_stages.last)
@@ -70,6 +81,7 @@ class Board
     (tasks_by_stage.keys - configured_dirs).sort_by { |stage| stage_sort_key(stage) }.each do |stage|
       columns << Column.new(stage:, label: Hive::StageLabel.format(stage), tasks: tasks_by_stage.fetch(stage), terminal: false)
     end
+    columns << Column.new(stage: "completed", label: "Done", tasks: completed, terminal: true) if completed.any?
     columns.presence || [ Column.new(stage: "unavailable", label: "Workflow unavailable", tasks:, terminal: false) ]
   end
 

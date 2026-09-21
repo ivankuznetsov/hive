@@ -524,3 +524,7 @@ resolved by reassessment are removed, while unrelated missing evidence remains.
 Reassessment at the final allowed revision round cannot clear newly reclassified
 routine work: accepted residuals at that boundary terminate with
 `revision_round_limit` before any obsolete source blocker is removed.
+
+### Repair label
+
+Blocked reviewer capability and execution failures share the label `Plan review needs repair`. The label does not assert that configuration is missing: disposable-worktree creation can fail even when the reviewer capability is present. The structured review blocker and route diagnostic retain the specific cause; the action key, retry policy, and execution gate are unchanged.

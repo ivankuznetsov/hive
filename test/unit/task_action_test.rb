@@ -2238,6 +2238,30 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive plan-review-run demo-260426-aaaa", unsupported.command
   end
 
+  def test_plan_review_worktree_failure_does_not_claim_configuration_is_missing
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    [ "restore decision triage reviewer and request review",
+      "waive named coverage or restore required reviewer capability" ].each do |required_action|
+      action = Hive::TaskAction.for(
+        task, marker(:waiting),
+        plan_review: {
+          "state" => "blocked", "required_action" => required_action,
+          "routes" => [
+            {
+              "role" => "decision_triage", "capability_result" => "present",
+              "outcome" => "terminal_failure",
+              "diagnostic" => "could not create a disposable Git worktree: No space left on device"
+            }
+          ]
+        }
+      )
+
+      assert_equal "Plan review needs repair", action.label
+      assert_equal "plan_review_unsupported", action.key
+      assert_nil action.command
+    end
+  end
+
   def test_plan_review_unattempted_unsupported_route_remains_operator_owned
     task = fake_task(stage_name: "plan", stage_index: 3)
 

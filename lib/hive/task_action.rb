@@ -90,7 +90,7 @@ module Hive
       },
       plan_review_unsupported: {
         key: Hive::Schemas::TaskActionKind::PLAN_REVIEW_UNSUPPORTED,
-        label: "Plan reviewer configuration required",
+        label: "Plan review needs repair",
         command: nil
       },
       plan_review_blocked: {

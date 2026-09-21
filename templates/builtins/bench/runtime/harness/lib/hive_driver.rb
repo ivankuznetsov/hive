@@ -59,6 +59,7 @@ module HiveBench
     )
     GROK_AUTH = File.join(GROK_AUTH_DIR, "auth.json")
     GROK_AUTH_CONTAINER_DIR = "#{HOME}/.grok-auth".freeze
+    GROK_AUTH_SOURCE_CONTAINER_DIR = "#{HOME}/.grok-auth-source".freeze
     HIVE_HOME = "/opt/hb/hive-home".freeze
     GENERATION_IDENTITY = "generation-identity.json"
     RESUMABLE_EXECUTE_FAILURE = %r{\Astream\ disconnected\ before\ completion:\ (?:
@@ -717,11 +718,13 @@ module HiveBench
                    "-e", "HIVE_PI_BIN=/opt/hb/pi-bench-launcher"]
       end
       if uses?(candidate, "grok")
-        # Keep sessions/config/leader state ephemeral per cell. Only the
-        # separately authenticated benchmark credential is shared, so Grok can
-        # atomically rotate auth.json under one cross-container lock domain.
+        # Keep the host login immutable. Grok refreshes its adjacent lock and
+        # may rewrite auth.json; both must land in this cell's disposable
+        # tmpfs, never in the shared host credential directory.
         mounts += ["--tmpfs", "#{HOME}/.grok:exec,mode=1777",
-                   "-v", "#{prepare_grok_auth_dir}:#{GROK_AUTH_CONTAINER_DIR}:rw"]
+                   "--tmpfs", "#{GROK_AUTH_CONTAINER_DIR}:exec,mode=1777",
+                   "--tmpfs", "#{GROK_AUTH_SOURCE_CONTAINER_DIR}:exec,mode=1777",
+                   "-v", "#{File.join(prepare_grok_auth_dir, "auth.json")}:#{GROK_AUTH_SOURCE_CONTAINER_DIR}/auth.json:ro"]
       end
       if uses?(candidate, "opencode")
         # OpenCode Go and other native OpenCode subscriptions authenticate via
@@ -746,7 +749,6 @@ module HiveBench
 
       File.chmod(0o700, GROK_AUTH_DIR)
       validate_grok_auth!
-      validate_grok_auth_lock!
       GROK_AUTH_DIR
     end
 
@@ -811,7 +813,8 @@ module HiveBench
         args += ["-e", name]
       end
       if uses?(candidate, "grok")
-        args += ["-e", "GROK_AUTH_PATH=#{GROK_AUTH_CONTAINER_DIR}/auth.json"]
+        args += ["-e", "GROK_AUTH_PATH=#{GROK_AUTH_CONTAINER_DIR}/auth.json",
+                 "-e", "GROK_AUTH_SOURCE_PATH=#{GROK_AUTH_SOURCE_CONTAINER_DIR}/auth.json"]
       end
       args
     end

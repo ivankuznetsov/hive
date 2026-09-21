@@ -202,10 +202,22 @@ fi
 
 # BEGIN grok-auth-preflight
 # Hive 0.3.6 checks only ~/.grok/auth.json before launching the agent and does
-# not honor GROK_AUTH_PATH. The home is a per-cell tmpfs, so expose a symlink
-# for Hive's read-only preflight while Grok keeps using the canonical shared
-# path (and its adjacent refresh lock) through GROK_AUTH_PATH.
+# not honor GROK_AUTH_PATH. The home is a per-cell tmpfs, so copy the immutable
+# host login into a disposable per-cell path, then expose a symlink for Hive's
+# read-only preflight. Refreshes and adjacent locks stay inside that tmpfs.
 if [ -n "${GROK_AUTH_PATH:-}" ]; then
+  if [ -n "${GROK_AUTH_SOURCE_PATH:-}" ]; then
+    if [ ! -f "$GROK_AUTH_SOURCE_PATH" ]; then
+      echo "HB_ERROR grok_auth_preflight missing source credential: $GROK_AUTH_SOURCE_PATH" >&2
+      exit 4
+    fi
+    mkdir -p "$(dirname "$GROK_AUTH_PATH")" || exit 4
+    cp "$GROK_AUTH_SOURCE_PATH" "$GROK_AUTH_PATH" || {
+      echo "HB_ERROR grok_auth_preflight cannot copy credential into cell tmpfs" >&2
+      exit 4
+    }
+    chmod 600 "$GROK_AUTH_PATH"
+  fi
   if [ ! -f "$GROK_AUTH_PATH" ]; then
     echo "HB_ERROR grok_auth_preflight missing credential: $GROK_AUTH_PATH" >&2
     exit 4

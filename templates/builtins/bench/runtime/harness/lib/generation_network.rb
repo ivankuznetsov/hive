@@ -128,6 +128,7 @@ module HiveBench
       out, err, status = @command.call("docker", kind, "inspect", name)
       unless success?(status)
         return nil if err.match?(/No such (?:network|container|object):/i)
+        return nil if kind == "network" && err.strip == "Error response from daemon: network #{name} not found"
 
         raise ArgumentError, "cannot inspect benchmark #{kind}: #{err.strip}"
       end

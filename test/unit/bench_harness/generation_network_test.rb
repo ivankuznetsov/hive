@@ -28,6 +28,8 @@ class BenchGenerationNetworkTest < Minitest::Test
         value = @resources[[ kind, name ]]
         return [ JSON.generate([ value ]), "", true ] if value
 
+        return [ "", "Error response from daemon: network #{name} not found", false ] if kind == "network"
+
         return [ "", "Error: No such #{kind}: #{name}", false ]
       end
       [ "created", "", true ]

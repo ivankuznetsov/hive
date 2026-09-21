@@ -3,6 +3,28 @@ require "application_system_test_case"
 class KanbanBoardTest < ApplicationSystemTestCase
   teardown { StatusBroadcaster.stop! }
 
+  test "old completed articles remain readable from Done on the board" do
+    project = create_hive_project!("kanban-finished-articles")
+    slug = create_task!(project, "Read the finished article")
+    source = stage_dir(project, "1-inbox").join(slug)
+    done = stage_dir(project, "6-done").join(slug)
+    FileUtils.mkdir_p(done.dirname)
+    FileUtils.mv(source, done)
+    done.join("article.md").write("<!-- COMPLETE -->\n# Read the finished article\n\nThe finished article body.\n")
+    Hive::TaskMeta.rewrite(done.to_s, workflow: "content",
+                          completed_at: Time.now.utc - (30 * Hive::ArchiveFilter::SECONDS_PER_DAY))
+
+    sign_in!
+
+    within ".kanban-band[data-workflow='content'] .kanban-column[data-stage='6-done']" do
+      assert_text "Done"
+      assert_selector ".kanban-card[data-task-slug='#{slug}']"
+      click_link "Read the finished article"
+    end
+    assert_current_path task_path(project, slug)
+    assert_text "The finished article body."
+  end
+
   test "operator follows an ordinary hidden summary into the complete archive and task detail" do
     project = create_hive_project!("kanban-archive-app")
     slug = create_task!(project, "Keep the complete archive reachable")

@@ -1,6 +1,16 @@
 require "test_helper"
 
 class ApplicationHelperTest < ActionView::TestCase
+  test "digest helpers preserve task source and parse persisted timestamps" do
+    destination = { project: "demo", slug: "waiting-task", source: "archive" }
+
+    assert_equal "/tasks/demo/waiting-task?source=archive#task-questions",
+                 digest_task_path(destination, anchor: "task-questions")
+    assert_includes digest_time_tag("2026-08-30T12:30:00Z"),
+                    'datetime="2026-08-30T12:30:00Z"'
+    assert_includes digest_time_tag("not-a-time"), "Time unavailable"
+  end
+
   test "primary markdown receives deterministic collision-safe anchors and an outline at four h2 sections" do
     source = <<~MD
       # Guide

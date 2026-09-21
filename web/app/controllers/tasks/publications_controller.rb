@@ -1,3 +1,5 @@
+require "hive/task_workspace/publication_activity"
+
 class Tasks::PublicationsController < Tasks::BaseController
   def show
     render_publication(cache: publication_cache_for_current_credential)
@@ -15,7 +17,7 @@ class Tasks::PublicationsController < Tasks::BaseController
     identity = initial.dig("refresh", "identity")
     if identity
       limits = Hive::TaskWorkspace::Limits.new
-      cache.refresh(identity) do
+      refreshed = cache.refresh(identity) do
         GithubApi.new(token).pull_request(
           repository: identity.fetch("repository"),
           number: identity.fetch("number"),
@@ -24,6 +26,9 @@ class Tasks::PublicationsController < Tasks::BaseController
           checks_limit: limits.fetch(:github_checks)
         )
       end
+      Hive::TaskWorkspace::PublicationActivity.new(task: @native_task).record(
+        before: initial["remote"], after: refreshed
+      )
     else
       @refresh_notice = "Publication identity is incomplete or conflicting; remote state was not queried."
     end

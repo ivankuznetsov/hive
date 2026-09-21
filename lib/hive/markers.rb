@@ -105,6 +105,22 @@ module Hive
       new_marker
     end
 
+    # Install a controller-owned body only while the artifact has no useful
+    # non-marker bytes. This gives a stage a durable starting checkpoint
+    # without racing the agent's AGENT_WORKING write or replacing feedback
+    # left by a previous attempt. Non-regular entries are treated the same as
+    # Markers.set: never follow them; atomically replace the directory entry.
+    def seed_body_if_empty(state_file_path, seed)
+      ensure_dir(state_file_path)
+      with_markers_lock(state_file_path) do
+        body = read_regular_body(state_file_path) || "".b
+        return false unless without_markers(body).strip.empty?
+
+        write_atomic(state_file_path, seed.to_s)
+        true
+      end
+    end
+
     # One-off recovery migration compare-and-swap. The caller supplies the
     # exact id-less marker it observed; after taking the same sidecar lock used
     # by every marker writer, we re-read and upgrade only if that exact marker

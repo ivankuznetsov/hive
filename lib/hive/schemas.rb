@@ -11,7 +11,6 @@ module Hive
       "hive-running-status" => 2,
       "hive-operational-status" => 4,
       "hive-runtime-maintenance" => 1,
-      "hive-circuits" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
       "hive-init" => 2,
@@ -23,9 +22,7 @@ module Hive
       "hive-web-status" => 1,
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,
-      # Controller-owned, generation-bound outcome-evidence ledger. Legacy
-      # visual capture remains readable through its own v1/v2 contracts but
-      # cannot satisfy these universal coding-task requirements.
+      # Controller-owned, generation-bound outcome-evidence ledger.
       "hive-outcome-evidence-requirement" => 1,
       "hive-outcome-evidence-candidate" => 1,
       "hive-outcome-evidence-attempt" => 1,
@@ -99,6 +96,14 @@ module Hive
       # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
       # outage emit the in-command error envelope.
       "hive-answer-digest" => 1,
+      # Host-global immutable daily activity base. Amendments and public read
+      # envelopes have separate contracts so base bytes never drift with a
+      # renderer.
+      "hive-digest-record" => 1,
+      "hive-digest" => 1,
+      "hive-digest-refresh" => 1,
+      "hive-digest-prune" => 1,
+      "hive-digest-send" => 1,
       # Exact-slot brainstorm inventory/write boundary used by canonical-skill
       # conversations. Bindings are revalidated under a creation-disabled task
       # lock; the command never advances a workflow stage.
@@ -127,6 +132,19 @@ module Hive
       "hive-context-receipt" => 1
     }.freeze
 
+    # The v8 producers name their projection semantics. The field remains
+    # optional for compatibility with earlier v8 success documents.
+    # Keeping this compatibility marker in the daemon's code-fingerprint file
+    # also forces an already-running daemon to re-exec before it observes the
+    # active-only cutover from a freshly installed CLI.
+    module StatusProjectionKind
+      ORDINARY = "ordinary".freeze
+      ACTIVE = "active".freeze
+      ARCHIVE = "archive".freeze
+      PARTIAL = "partial".freeze
+      ALL = [ ORDINARY, ACTIVE, ARCHIVE, PARTIAL ].freeze
+    end
+
     # Closed enum of Diagnostic.generated_by values accepted by the
     # published status schemas. This is deliberately narrower than
     # AgentProfiles.registered_names because custom profiles are a
@@ -136,9 +154,8 @@ module Hive
     # Absolute path to the published JSON Schema files. Use
     # `Hive::Schemas.schema_path(name)` for the current version of a
     # schema; external consumers validate emitted documents with any
-    # draft-2020-12 validator. Pass an explicit `version:` to load an
-    # older revision (e.g. for back-compat tests against pinned
-    # consumers).
+    # draft-2020-12 validator. Only current contracts are shipped.
+    # Explicit versions identify paths, including absent historical revisions.
     def self.schema_dir
       File.expand_path("../../schemas", __dir__)
     end
@@ -255,6 +272,7 @@ module Hive
       PATROL_FIX_REJECTED = "patrol_fix_rejected".freeze
       PATROL_FIX_BLOCKED  = "patrol_fix_blocked".freeze
       PATROL_FIX_ESCALATED = "patrol_fix_escalated".freeze
+      PATROL_FIX_PUBLICATION_BLOCKED = "patrol_fix_publication_blocked".freeze
       ERROR               = "error".freeze
       ADMISSION_ERROR     = "admission_error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze

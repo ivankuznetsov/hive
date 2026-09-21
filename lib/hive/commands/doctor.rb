@@ -41,7 +41,7 @@ module Hive
       end
 
       def call
-        legacy_rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime +
+        legacy_rows = check_tmux + check_llm_wiki_qmd + check_project_config +
                       check_web_environment_aliases + check_runtime_control_plane
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
@@ -65,15 +65,11 @@ module Hive
 
       def check_runtime_control_plane
         require "hive/runtime_control_plane"
-        require "hive/runtime_control_plane/cutover"
+        require "hive/runtime_control_plane/installation"
         path = Hive::Paths.runtime_control_plane_path
-        cutover = File.join(Hive::Paths.state_home, ".runtime-cutover", "current")
-        return [] unless File.exist?(path) || File.exist?(cutover)
+        return [] unless File.exist?(path)
 
-        status = Hive::RuntimeControlPlane::Cutover.inspect_status(
-          state_home: Hive::Paths.state_home,
-          database: Hive::RuntimeControlPlane::Database.new(path: path)
-        )
+        status = Hive::RuntimeControlPlane::Installation.status(state_home: Hive::Paths.state_home)
         diagnosis = status.fetch("database")
         healthy = status.fetch("phase") == "active" && diagnosis.fetch("status") == "ok"
         [ {
@@ -83,7 +79,7 @@ module Hive
           message: healthy ? "runtime control plane is healthy" :
             "runtime control plane is #{status.fetch('phase')} (#{diagnosis.fetch('status')})",
           remediation: healthy ? nil :
-            "run hive runtime status, then hive runtime resume when its forward action is approved"
+            "run hive runtime status; use hive setup for a new installation"
         } ]
       rescue Hive::RuntimeControlPlane::Error => error
         [ {
@@ -250,35 +246,14 @@ module Hive
         parts.join("\n").lines.map(&:strip).find { |line| !line.empty? }.to_s
       end
 
-      def check_legacy_brainstorm_runtime
-        rows = []
-        if config_yml_unreadable?
-          rows << warning_row(
-            stage: "2-brainstorm", # coding-scoped: doctor probes coding brainstorm config
-            label: ".hive-state/config.yml",
-            agent: "config",
-            configured_skill: "config.yml",
-            skill: ".hive-state/config.yml",
-            message: "could not parse .hive-state/config.yml (#{@config_yml_error}); " \
-                     "any brainstorm.runtime → claude.mode migration warning is suppressed " \
-                     "until the file parses cleanly"
-          )
-          return rows
-        end
+      def check_project_config
+        return [] unless config_yml_unreadable?
 
-        return rows unless legacy_brainstorm_runtime_present?
-
-        rows << warning_row(
-          stage: "2-brainstorm", # coding-scoped: doctor probes coding brainstorm config
-          label: "2-brainstorm/brainstorm.runtime",
-          agent: "claude",
-          configured_skill: "brainstorm.runtime",
-          skill: "claude.mode",
-          message: "brainstorm.runtime is superseded by claude.mode (project-global); " \
-                   "migrate by adding the following YAML and removing the brainstorm.runtime key:\n" \
-                   "  claude:\n    mode: tmux"
-        )
-        rows
+        [ warning_row(
+          stage: "config", label: ".hive-state/config.yml", agent: "config",
+          configured_skill: "config.yml", skill: ".hive-state/config.yml",
+          message: "could not parse .hive-state/config.yml (#{@config_yml_error})"
+        ) ]
       end
 
       def check_web_environment_aliases
@@ -298,26 +273,6 @@ module Hive
         end
       end
 
-      def legacy_brainstorm_runtime_present?
-        return true if Hive::Config.explicit_brainstorm_runtime?(@config)
-
-        return false unless @project_root
-
-        path = File.join(@project_root, ".hive-state", "config.yml")
-        return false unless File.exist?(path)
-
-        raw = YAML.safe_load(File.read(path)) || {}
-        Hive::Config.nested_key?(raw, "brainstorm", "runtime")
-      rescue Psych::SyntaxError, Errno::ENOENT
-        false
-      end
-
-      # Detect a config.yml that cannot be loaded (corrupt YAML, perms,
-      # etc.) and remember the underlying error message so the operator
-      # sees a row explaining why doctor cannot evaluate the migration
-      # warning. Without this, a corrupt config.yml silently hid the
-      # legacy_brainstorm_runtime warning AND any other config-derived
-      # check that depends on the file.
       def config_yml_unreadable?
         return @config_yml_unreadable unless @config_yml_unreadable.nil?
 

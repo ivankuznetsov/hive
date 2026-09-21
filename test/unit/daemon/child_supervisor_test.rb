@@ -3,6 +3,7 @@ require "open3"
 require "rbconfig"
 require "tmpdir"
 require "hive/daemon/child_supervisor"
+require "hive/gh"
 
 # Pin the supervisor's spawn / reap / terminate semantics. Uses
 # test/fixtures/fake-hive-run.rb as the binary so exit-code branches
@@ -91,6 +92,62 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal [], sup.reap_all
   end
 
+  def test_reap_all_leaves_background_gh_exit_for_its_capture_owner
+    with_paused_gh_capture do |sup|
+      pid = sup.spawn(
+        command_string: %q(hive run owned --exit-code 75 --stdout-text '{"ok":false}'),
+        project: "p1", slug: "owned", stage: "patrol"
+      )
+      completed = wait_for_completion(sup)
+
+      assert_equal [ pid ], completed.map(&:pid)
+      assert_equal 75, completed.first.exit_code
+      assert_equal({ "ok" => false }, completed.first.json_envelope)
+      assert_empty sup.reap_all
+    end
+  end
+
+  def test_shutdown_leaves_background_gh_exit_for_its_capture_owner
+    with_paused_gh_capture do |sup|
+      pid = sup.spawn(
+        command_string: "hive run owned --sleep 30",
+        project: "p1", slug: "owned", stage: "patrol"
+      )
+      completed = sup.terminate_all(grace_sec: 1)
+
+      assert_equal [ pid ], completed.map(&:pid)
+      refute_equal 0, completed.first.exit_code
+      assert sup.shutdown_proof.fetch(:drained)
+    end
+  end
+
+  def test_reap_all_keeps_missing_status_fenced_and_checks_other_owned_pids
+    sup = make(dry_run: true)
+    missing_pid = sup.spawn(command_string: "hive run missing", project: "p1", slug: "missing", stage: "patrol")
+    ready_pid = sup.spawn(command_string: "hive run ready", project: "p1", slug: "ready", stage: "patrol")
+    dry_pid = sup.spawn(command_string: "hive run dry", project: "p1", slug: "dry", stage: "patrol")
+    running = sup.instance_variable_get(:@running)
+    running[123] = running.delete(missing_pid).merge(dry_run: false)
+    running[124] = running.delete(ready_pid).merge(dry_run: false)
+    calls = []
+
+    with_replaced_singleton_method(Process, :wait2, lambda { |pid, flags|
+      calls << [ pid, flags ]
+      raise "unexpected wait target #{pid}" unless [ 123, 124 ].include?(pid)
+      raise Errno::ECHILD if pid == 123
+
+      [ pid, Struct.new(:exitstatus).new(75) ]
+    }) do
+      completed = sup.reap_all
+      assert_equal [ 124 ], completed.map(&:pid)
+      assert_equal 75, completed.first.exit_code
+    end
+
+    assert_equal [ [ 123, Process::WNOHANG ], [ 124, Process::WNOHANG ] ], calls
+    assert_equal [ dry_pid, 123 ], sup.in_flight_pids
+    assert_equal [ dry_pid ], sup.reap_dry_run.map(&:pid)
+  end
+
   def test_in_flight_filters_by_exact_project_and_stage
     supervisor = make(dry_run: true)
     supervisor.spawn(
@@ -109,7 +166,10 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
         command_string: %(hive run slug-a --exit-code 0 --stdout-text this-is-not-json),
         project: "p1", slug: "slug-a", stage: "6-review"
       )
-      completed = wait_for_completion(sup, max_attempts: 50)
+      # The coverage gate instruments and flushes every child process. Give
+      # this real-process case the same ten-second bound as the slower custody
+      # cases so host contention cannot be mistaken for a missing completion.
+      completed = wait_for_completion(sup, max_attempts: 200)
       assert_equal 1, completed.size
       assert_nil completed.first.json_envelope,
                  "supervisor must tolerate non-JSON stdout without crashing"
@@ -563,6 +623,26 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal 100, sup.timeout_for_verb(""), "empty verb falls back to default"
   end
 
+  def test_digest_stage_timeout_wins_over_the_shared_digest_verb
+    sup = Hive::Daemon::ChildSupervisor.new(
+      hive_bin: FAKE_HIVE, dry_run: true, default_timeout_sec: 0,
+      verb_timeouts: { "digest" => 3_600 },
+      stage_timeouts: {
+        "daily_digest_refresh" => 900,
+        "daily_digest_close" => 3_600,
+        "daily_digest_delivery" => 300
+      }
+    )
+
+    pid = sup.spawn(
+      command_string: "hive digest send --date 2026-08-30 --json",
+      project: "daily_digest_delivery", slug: "2026-08-30",
+      stage: "daily_digest_delivery"
+    )
+
+    assert_equal 300, sup.instance_variable_get(:@running).fetch(pid).fetch(:timeout_sec)
+  end
+
   def test_enforce_timeouts_terms_then_kills_over_deadline_child
     sup = Hive::Daemon::ChildSupervisor.new(
       hive_bin: FAKE_HIVE, default_timeout_sec: 60, kill_grace_sec: 30
@@ -622,9 +702,14 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
 
   def test_update_timeouts_only_affects_future_spawns
     sup = Hive::Daemon::ChildSupervisor.new(hive_bin: FAKE_HIVE, default_timeout_sec: 60)
-    sup.update_timeouts(default_timeout_sec: 5, verb_timeouts: { "develop" => 9 }, kill_grace_sec: 1)
+    sup.update_timeouts(
+      default_timeout_sec: 5, verb_timeouts: { "develop" => 9 },
+      stage_timeouts: { "daily_digest_delivery" => 3 }, kill_grace_sec: 1
+    )
     assert_equal 9, sup.timeout_for_verb("develop")
     assert_equal 5, sup.timeout_for_verb("review")
+    assert_equal 3, sup.timeout_for_stage("daily_digest_delivery", verb: "digest")
+    assert_equal 9, sup.timeout_for_stage("6-review", verb: "develop")
   end
 
   def test_pgid_for_returns_nil_when_group_gone
@@ -770,6 +855,73 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
   end
 
   private
+
+  # Pause the real Gh wait loop after its first unsuccessful poll, then let
+  # its child exit. ps observes the zombie without consuming its exit status.
+  # The supervisor must leave that status available throughout normal/shutdown
+  # reaping, even while it has its own children to collect.
+  def with_paused_gh_capture
+    with_tmp_dir do |dir|
+      sup = make(log_dir: dir)
+      release_path = File.join(dir, "release-discovery")
+      paused = Queue.new
+      resume = Queue.new
+      discovery_pid = nil
+      first_poll = true
+      gh = Object.new.extend(Hive::Gh)
+      gh.define_singleton_method(:wait_with_deadline) do |pid, *args, **kwargs|
+        discovery_pid = pid
+        super(pid, *args, **kwargs)
+      end
+      gh.define_singleton_method(:sleep) do |interval|
+        if first_poll
+          first_poll = false
+          paused << true
+          raise "discovery barrier timed out" unless resume.pop(timeout: 10)
+        else
+          Kernel.sleep(interval)
+        end
+      end
+      worker = Thread.new do
+        Thread.current.report_on_exception = false
+        gh.send(:capture3, RbConfig.ruby, "-e",
+                'sleep 0.01 until File.exist?(ARGV.fetch(0)); print "discovery"',
+                release_path, timeout_sec: 15)
+      rescue StandardError => error
+        error
+      end
+
+      assert paused.pop(timeout: 5), "discovery never reached its wait barrier"
+      File.write(release_path, "go")
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+      loop do
+        state, = Open3.capture2("ps", "-o", "stat=", "-p", discovery_pid.to_s)
+        break if state.strip.start_with?("Z")
+        flunk "discovery child did not exit" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+        sleep 0.01
+      end
+
+      yield sup
+      resume << true
+      assert worker.join(5), "discovery capture did not finish"
+      result = worker.value
+      assert_kind_of Array, result, "discovery capture failed: #{result.inspect}"
+      stdout, stderr, status = result
+      assert_equal "discovery", stdout
+      assert_empty stderr
+      assert_equal 0, status.exitstatus
+    ensure
+      File.write(release_path, "go") if release_path
+      resume << true if resume
+      unless worker&.join(5)
+        Process.kill("KILL", discovery_pid) if discovery_pid
+        worker&.kill&.join
+        Process.waitpid(discovery_pid) if discovery_pid
+      end
+      sup&.terminate_all(grace_sec: 0)
+    end
+  end
 
   def wait_for_completion(sup, expected: 1, max_attempts: 50)
     completed = []

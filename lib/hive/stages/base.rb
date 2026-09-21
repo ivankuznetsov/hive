@@ -952,10 +952,11 @@ module Hive
                       permission_arguments: nil,
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
+                      cleanup_runtime_policy: true,
                       routing_resolution: nil, routing_arguments: nil,
                       additional_read_roots: [], additional_write_roots: [],
                       edit_patterns: [], bash_patterns: [],
-                      permission_policy: nil,
+                      permission_policy: nil, completion_probe: nil,
                       implementation_stage: nil,
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
@@ -1112,6 +1113,7 @@ module Hive
               bash_patterns: bash_patterns,
               permission_policy: permission_policy,
               isolate_environment: isolate_environment,
+              completion_probe: completion_probe,
               terminate_on_parent_signal: terminate_on_parent_signal
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
@@ -1156,7 +1158,7 @@ module Hive
           end
         end
       ensure
-        runtime_policy&.cleanup!
+        runtime_policy&.cleanup! if cleanup_runtime_policy
       end
 
       def admitted_routing_arguments(context, profile)

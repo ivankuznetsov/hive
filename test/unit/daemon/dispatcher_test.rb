@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/attempts/reconciler"
 require "hive/attempts/finalization_maintenance"
 require "fileutils"
+require "thread"
 require "tmpdir"
 require "hive/markers"
 require "hive/task_meta"
@@ -9,6 +10,7 @@ require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
+require "hive/daemon/scheduled_architecture_scheduler"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
 # these tests is the routing decisions: which Policy outcome maps to
@@ -172,9 +174,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @shutdown_exits
     end
 
-    def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
+    def update_timeouts(default_timeout_sec:, verb_timeouts:, stage_timeouts:, kill_grace_sec:)
       @timeouts = { default_timeout_sec: default_timeout_sec,
-                    verb_timeouts: verb_timeouts, kill_grace_sec: kill_grace_sec }
+                    verb_timeouts: verb_timeouts, stage_timeouts: stage_timeouts,
+                    kill_grace_sec: kill_grace_sec }
     end
 
     # #252: the dispatcher now calls this unconditionally each tick (the
@@ -347,6 +350,30 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class BlockingPatrolArbiter < FakePatrolArbiter
+    attr_reader :calls, :started
+
+    def initialize(items)
+      super
+      @calls = 0
+      @started = Queue.new
+      @release = Queue.new
+    end
+
+    def candidates(now:)
+      @calls += 1
+      return [] unless @calls == 1
+
+      @started << now
+      @release.pop
+      items
+    end
+
+    def release
+      @release << true
+    end
+  end
+
   class FakeAnswerDigestScheduler
     attr_accessor :next_dispatches
     attr_reader :completed
@@ -362,13 +389,13 @@ class HiveDaemonDispatcherTest < Minitest::Test
       out
     end
 
-    def complete(date:, exit_code:, envelope:, now:)
+    def complete(date:, exit_code:, envelope:, now:, stage: nil)
       completion = { date: date, exit_code: exit_code, now: now }
       completion[:envelope] = envelope if envelope
       @completed << completion
     end
 
-    def cancel(date:)
+    def cancel(date:, stage: nil)
       @cancelled ||= []
       @cancelled << date
     end
@@ -379,6 +406,16 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @reconfigured ||= []
       @reconfigured << { enabled: enabled, hour: hour }
     end
+  end
+
+  class FakeDailyDigestCloseScheduler < FakeAnswerDigestScheduler
+    def reconfigure(enabled:, interval_sec:)
+      @reconfigured ||= []
+      @reconfigured << { enabled: enabled, interval_sec: interval_sec }
+    end
+  end
+
+  class FakeDailyDigestDeliveryScheduler < FakeAnswerDigestScheduler
   end
 
   class FakeRecoveryCoordinator
@@ -552,6 +589,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       dispatch_state: nil, status_result: nil,
                       dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                       with_answer_digest_scheduler: false,
+                      with_daily_digest_close_scheduler: false,
+                      with_daily_digest_delivery_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
                       patrol_fix_admission_scheduler: nil,
@@ -560,7 +599,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil,
-                      dispatch_repository: nil)
+                      dispatch_repository: nil, patrol_discovery_async: false)
     dispatch_request_state_home ||= Dir.mktmpdir("hive-dispatch-test")
     config = {
       "daemon" => {
@@ -592,6 +631,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
     merge_watcher = with_merge_watcher ? FakeMergeWatcher.new : nil
     patrol_scheduler = with_patrol_scheduler ? FakePatrolScheduler.new : nil
     answer_digest_scheduler = with_answer_digest_scheduler ? FakeAnswerDigestScheduler.new : nil
+    daily_digest_close_scheduler = if with_daily_digest_close_scheduler
+      FakeDailyDigestCloseScheduler.new
+    end
+    daily_digest_delivery_scheduler = if with_daily_digest_delivery_scheduler
+      FakeDailyDigestDeliveryScheduler.new
+    end
 
     dispatcher = Hive::Daemon::Dispatcher.new(
       config: config,
@@ -606,6 +651,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
       patrol_arbiter: patrol_arbiter,
       answer_digest_scheduler: answer_digest_scheduler,
+      daily_digest_close_scheduler: daily_digest_close_scheduler,
+      daily_digest_delivery_scheduler: daily_digest_delivery_scheduler,
       dry_run: dry_run,
       dispatch_request_state_home: dispatch_request_state_home,
       dispatch_result_state_home: dispatch_result_state_home,
@@ -617,7 +664,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       recovery_coordinator: recovery_coordinator,
       plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback,
-      clock: clock
+      clock: clock,
+      patrol_discovery_async: patrol_discovery_async
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # Bypass the Hive::Config.find_project / Config.load lookup chain
@@ -625,8 +673,138 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.define_singleton_method(:project_enabled?) { |_| project_enabled }
     [
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
-      answer_digest_scheduler
+      answer_digest_scheduler, daily_digest_close_scheduler, daily_digest_delivery_scheduler
     ]
+  end
+
+  def test_async_patrol_discovery_keeps_authoritative_ticks_responsive
+    candidate = {
+      project: "p1", patrol_kind: :ordinary, slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = BlockingPatrolArbiter.new([ candidate ])
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor = make_dispatcher(
+      rows: [], with_patrol_scheduler: true, patrol_arbiter: arbiter,
+      operational_snapshot: snapshot, patrol_discovery_async: true
+    )
+
+    tick_thread = Thread.new { dispatcher.tick(now: T0) }
+    assert_equal T0, arbiter.started.pop
+    begin
+      assert tick_thread.join(0.5),
+             "authoritative tick must not wait for a slow Patrol registry scan"
+      fresh_payload = {
+        "schema" => "hive-status", "schema_version" => 7,
+        "generated_at" => (T0 + 30).iso8601
+      }
+      dispatcher.instance_variable_get(:@status_consumer).next_result =
+        Hive::Daemon::StatusConsumer::Result.new(
+          ok: true, rows: [], status_payload: fresh_payload
+        )
+      dispatcher.tick(now: T0 + 30)
+      assert_equal 1, arbiter.calls,
+                   "a later scheduler tick must not start an overlapping discovery scan"
+      completions = snapshot.calls.select { |method, _attributes| method == :complete }
+      assert_equal 2, completions.length,
+                   "scheduler authority must refresh while Patrol discovery is still running"
+      assert_equal fresh_payload, completions.last.fetch(1).fetch(:status_payload),
+                   "the repeated publication must carry the newly fetched task source"
+    ensure
+      arbiter.release
+      tick_thread.join(1)
+    end
+    assert_equal :complete, snapshot.calls.last.first
+    assert_empty supervisor.spawned
+
+    discovery = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert discovery.join(1), "released Patrol discovery should finish"
+    dispatcher.tick(now: T0 + 60)
+    next_discovery = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert next_discovery.join(1), "the next Patrol scan should start after harvest"
+
+    assert_equal 2, arbiter.calls,
+                 "a completed batch is harvested before the next scan starts"
+    assert_equal [ "hive patrol p1 --json" ], supervisor.spawned.map { |item| item.fetch(:command) }
+  ensure
+    arbiter&.release if tick_thread&.alive?
+    tick_thread&.join(1)
+    dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.join(1)
+  end
+
+  def test_async_patrol_discovery_reports_one_stall_and_recovers
+    clock_now = T0
+    arbiter = BlockingPatrolArbiter.new([])
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], patrol_arbiter: arbiter, patrol_discovery_async: true,
+      clock: -> { clock_now }
+    )
+
+    dispatcher.tick(now: T0)
+    assert_equal T0, arbiter.started.pop
+    clock_now = T0 + 90
+    dispatcher.tick(now: clock_now)
+    clock_now = T0 + 120
+    dispatcher.tick(now: clock_now)
+
+    stalls = logger.events.select do |name, attributes|
+      name == :fatal && attributes[:message].include?("patrol discovery is stalled")
+    end
+    assert_equal 1, stalls.length
+    assert_equal 90.0, stalls.fetch(0).last.fetch(:elapsed_sec)
+
+    arbiter.release
+    discovery = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert discovery.join(1)
+    clock_now = T0 + 121
+    dispatcher.tick(now: clock_now)
+    replacement = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert replacement.join(1)
+    assert_equal 2, arbiter.calls
+  ensure
+    arbiter&.release if dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.alive?
+    dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.join(1)
+  end
+
+  def test_async_patrol_discovery_surfaces_worker_errors_on_harvest_and_restarts
+    arbiter = FakePatrolArbiter.new([])
+    arbiter.candidate_error = IOError.new("registry unavailable")
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [], patrol_arbiter: arbiter, patrol_discovery_async: true
+    )
+
+    dispatcher.tick(now: T0)
+    first = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert first.join(1)
+    arbiter.candidate_error = nil
+    dispatcher.tick(now: T0 + 30)
+    replacement = dispatcher.instance_variable_get(:@patrol_discovery_thread)
+    assert replacement.join(1)
+
+    error = logger.events.find do |name, attributes|
+      name == :fatal && attributes[:message].include?("registry unavailable")
+    end
+    refute_nil error
+    assert_empty supervisor.spawned
+  ensure
+    dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.join(1)
+  end
+
+  def test_async_mode_without_an_arbiter_keeps_legacy_reservation_on_the_caller
+    dispatcher, _supervisor, _controller, _logger, _watcher, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true, patrol_discovery_async: true
+    )
+    tick_threads = []
+    patrol.define_singleton_method(:tick) do |now:|
+      tick_threads << Thread.current.object_id
+      []
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ Thread.current.object_id ], tick_threads
+    assert_nil dispatcher.instance_variable_get(:@patrol_discovery_thread)
   end
 
   def test_patrol_fix_admission_scheduler_has_an_independent_dispatcher_tick
@@ -796,7 +974,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       request_id: "recovery-1", created_at: T0, project: "p1", slug: "s1",
       argv: %w[hive run s1 --stage 4-execute --project p1 --json],
       requestor: "web", chat_id: nil, update_id: nil, trigger: "recovery",
-      task_generation: "c" * 64, predecessor_attempt_id: nil,
+      task_generation: "c" * 64,
       inherited_outputs: [], task_id: 1, expected_stage: "4-execute",
       expected_marker_name: "error", expected_marker_id: "m1",
       recovery: recovery, schema_version: 4
@@ -1110,6 +1288,78 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
 
+  def test_periodic_architecture_scan_dispatches_and_reaps_through_real_schedulers
+    with_tmp_dir do |root|
+      entry = { "name" => "p1", "path" => root, "project_id" => "p1-id",
+                "hive_state_path" => File.join(root, ".hive-state") }
+      cfg = Hive::Config.merge_defaults(
+        "daemon" => { "enabled" => true }, "refactor_patrol" => { "enabled" => true }
+      )
+      scheduled = Hive::Daemon::ScheduledArchitectureScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { cfg }
+      )
+      architecture = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(*) { cfg }, scheduled_scheduler: scheduled
+      )
+      arbiter = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil, architecture_scheduler: architecture,
+        state_path: File.join(root, "arbiter.json")
+      )
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+      )
+      remaining = 1
+      budget = Object.new
+      budget.define_singleton_method(:remaining_launches) { remaining }
+      with_replaced_singleton_method(Hive::Patrol::LaunchBudget, :new, ->(*) { budget }) do
+        dispatcher.tick(now: T0)
+        assert_equal 1, supervisor.spawned.size
+        child = supervisor.spawned.first
+        assert_includes child.fetch(:command), "refactor-patrol-scheduled"
+        token = child.fetch(:dispatch_token)
+        assert_equal :scheduled, token.fetch(:phase)
+        dispatcher.tick(now: T0 + 1)
+        assert_equal 1, supervisor.spawned.size, "live slice must not launch twice"
+        supervisor.next_exits = [ ChildExit.new(
+          pid: child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: child.fetch(:command), started_at: T0,
+          finished_at: T0 + 2, json_envelope: { "ok" => true }, dispatch_token: token
+        ) ]
+        dispatcher.tick(now: T0 + 2)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        assert_equal 1, supervisor.spawned.size, "completion must preserve cadence"
+        dispatcher.tick(now: T0 + 3600)
+        assert_equal 2, supervisor.spawned.size, "completed sweep must permit the next periodic dispatch"
+        second_child = supervisor.spawned.last
+        second_token = second_child.fetch(:dispatch_token)
+        assert_equal :scheduled, second_token.fetch(:phase)
+        refute_equal token.fetch(:job_id), second_token.fetch(:job_id)
+        supervisor.next_exits = [ ChildExit.new(
+          pid: second_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: second_child.fetch(:command), started_at: T0 + 3600,
+          finished_at: T0 + 3602, json_envelope: { "ok" => true }, dispatch_token: second_token
+        ) ]
+        dispatcher.tick(now: T0 + 3602)
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        dispatcher.tick(now: T0 + 7200)
+        third_child = supervisor.spawned.last
+        assert_equal 3, supervisor.spawned.size
+        supervisor.next_exits = [ ChildExit.new(
+          pid: third_child.fetch(:pid), exit_code: 0, project: "p1", slug: "refactor-patrol-scheduled",
+          stage: "refactor-patrol", command: third_child.fetch(:command), started_at: T0 + 7200,
+          finished_at: T0 + 7202, json_envelope: { "ok" => true, "reason" => "no_available_slice" },
+          dispatch_token: third_child.fetch(:dispatch_token)
+        ) ]
+        dispatcher.tick(now: T0 + 7202)
+        assert logger.events.any? { |name, attrs| name == :architecture_patrol_skipped && attrs[:reason] == "no_available_slice" }
+        assert_equal 2, logger.events.count { |name, attrs| name == :architecture_patrol_closed && attrs[:lane] == "scheduled" }
+        remaining = 0
+        dispatcher.tick(now: T0 + 10800)
+        assert_equal 3, supervisor.spawned.size, "exhausted discovery allowance must block another launch"
+      end
+    end
+  end
+
   def test_architecture_patrol_spawn_attaches_fence_then_commits_arbiter_and_routes_completion
     architecture = FakeRefactorPatrolScheduler.new
     candidate = {
@@ -1243,6 +1493,25 @@ class HiveDaemonDispatcherTest < Minitest::Test
     event = logger.events.find { |name, attrs| name == :blocked && attrs[:action] == "refactor_patrol_intake" }
     assert event
     assert_equal "pagination failed", event.last.fetch(:reason)
+  end
+
+  def test_event_drain_failure_is_reported_without_stopping_ticks_or_hiding_discovery_errors
+    architecture = FakeRefactorPatrolScheduler.new
+    architecture.define_singleton_method(:drain_events) { raise IOError, "event drain failed" }
+    arbiter = FakePatrolArbiter.new([])
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [], refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+    first = logger.events.select { |name, _| name == :fatal }.last
+    assert_includes first.last.fetch(:message), "event drain failed"
+    arbiter.candidate_error = IOError.new("original discovery failure")
+    dispatcher.tick(now: T0 + 30)
+    second = logger.events.select { |name, _| name == :fatal }.last
+    assert_includes second.last.fetch(:message), "original discovery failure"
+    assert_equal 2, logger.events.count { |name, _| name == :tick_end }
+    assert_empty supervisor.spawned
   end
 
   def test_scheduler_block_events_are_forwarded_without_internal_status_field
@@ -1596,6 +1865,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_scheduler_snapshot_completes_before_project_patrol_candidate_scan
+    snapshot = FakeOperationalSnapshot.new
+    snapshot_calls_at_patrol = nil
+    arbiter = FakePatrolArbiter.new([])
+    arbiter.define_singleton_method(:candidates) do |now:|
+      snapshot_calls_at_patrol = snapshot.calls.map(&:first)
+      []
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], operational_snapshot: snapshot, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal %i[begin_tick complete], snapshot_calls_at_patrol,
+                 "slow Patrol discovery must not own scheduler snapshot freshness"
+  end
+
   def test_durable_dispatch_publishes_the_actual_admission_outcome
     attempt = Struct.new(:attempt_id, :task_generation, :state)
                     .new("attempt-1", "generation-1", "running")
@@ -1605,11 +1892,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       [ :terminal_replay, nil, :attempt_terminal_replay, "hive" ],
       [ :deferred, "capacity", :attempt_capacity, "scheduler" ],
       [ :deferred, "capacity_saturated", :attempt_capacity, "scheduler" ],
-      [ :deferred, "failure_cohort_cooldown", :attempt_failure_cohort, "scheduler" ],
+      [ :deferred, "patrol_retry_delay", :attempt_patrol_retry, "scheduler" ],
       [ :deferred, "transient_retry", :attempt_transient_retry, "scheduler" ],
       [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
-      [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ],
-      [ :deferred, "invalid_predecessor", :invalid_predecessor, "hive" ]
+      [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ]
     ]
     results = admissions.map do |status, reason, _outcome, _owner|
       Hive::Attempts::DispatchResult.new(
@@ -1780,6 +2066,40 @@ class HiveDaemonDispatcherTest < Minitest::Test
       name == :operational_snapshot_publish_failed && attrs.fetch(:phase) == "attempt_storage"
     end
     refute_nil failure
+  end
+
+  def test_maintenance_failure_is_published_in_the_current_operational_snapshot
+    capacity = Hive::Attempts::CapacitySnapshot.new(
+      global_count: 0, per_project: {}, per_task: {}, daily_counts: {},
+      reserved_attempt_ids: []
+    )
+    reconciliation = Hive::Attempts::ReconciliationSnapshot.new(
+      capacity: capacity, attempts: [], lost_attempts: [],
+      newly_lost_attempts: [], terminal_attempts: [], admission_view: nil
+    )
+    failed = false
+    reconciler = Object.new
+    reconciler.define_singleton_method(:reconcile) { |now:| reconciliation }
+    reconciler.define_singleton_method(:sweep_finalization_maintenance) do |now:|
+      failed = true
+      raise Hive::Attempts::RepositoryError, "cleanup failed"
+    end
+    reconciler.define_singleton_method(:operational_storage_status) do |_snapshot|
+      if failed
+        { "status" => "degraded", "degraded_reason" => "maintenance_failed" }
+      else
+        { "status" => "healthy" }
+      end
+    end
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_reconciler: reconciler, operational_snapshot: snapshot
+    )
+
+    dispatcher.tick(now: T0)
+
+    updates = snapshot.calls.select { |name, _| name == :update_attempt_storage }
+    assert_equal "maintenance_failed", updates.last.last.fetch("degraded_reason")
   end
 
   def test_legacy_layout_row_publishes_operator_disposition_without_dispatch
@@ -2735,7 +3055,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     ctrl.record_dispatch(
       pid: 999, project: "answer_digest", slug: "2026-06-13", stage: "answer_digest",
       command: "hive answer-digest --date 2026-06-13 --json", started_at: T0 - 5,
-      state_file_mtime: nil, kind: :digest
+      state_file_mtime: nil, kind: :answer_digest
     )
     answer_digest.next_dispatches = [
       {
@@ -2986,6 +3306,149 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal({ enabled: true, hour: 11 }, answer_digest.reconfigured&.last)
   end
 
+  def test_daily_digest_schedulers_dispatch_independently_from_answer_digest
+    dispatcher, supervisor, controller, _logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_answer_digest_scheduler: true,
+        with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+    controller.record_dispatch(
+      pid: 999, project: "answer_digest", slug: "2026-08-30", stage: "answer_digest",
+      command: "hive answer-digest --date 2026-08-30 --json", started_at: T0 - 5,
+      state_file_mtime: nil, kind: :answer_digest
+    )
+    close_scheduler.next_dispatches = [
+      {
+        project: "daily_digest_refresh", slug: "2026-08-30", stage: "daily_digest_refresh",
+        command: "hive digest refresh --json", state_file_mtime: nil,
+        state_file_path: nil, hive_state_path: nil
+      },
+      {
+        project: "daily_digest_close", slug: "2026-08-30", stage: "daily_digest_close",
+        command: "hive digest refresh --json", state_file_mtime: nil,
+        state_file_path: nil, hive_state_path: nil
+      }
+    ]
+    delivery_scheduler.next_dispatches = [ {
+      project: "daily_digest_delivery", slug: "2026-08-29", stage: "daily_digest_delivery",
+      command: "hive digest send --date 2026-08-29 --json", state_file_mtime: nil,
+      state_file_path: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal %w[daily_digest_refresh daily_digest_close daily_digest_delivery],
+                 supervisor.spawned.map { |entry| entry.fetch(:stage) }
+    assert_equal :daily_digest_refresh_in_flight,
+                 controller.can_dispatch_digest?(identity: :daily_digest_refresh, now: T0)
+    assert_equal :daily_digest_delivery_in_flight,
+                 controller.can_dispatch_digest?(identity: :daily_digest_delivery, now: T0)
+    assert_equal :daily_digest_close_in_flight,
+                 controller.can_dispatch_digest?(identity: :daily_digest_close, now: T0)
+    assert_equal :answer_digest_in_flight,
+                 controller.can_dispatch_digest?(identity: :answer_digest, now: T0)
+  end
+
+  def test_daily_digest_child_exits_complete_only_the_matching_scheduler
+    dispatcher, supervisor, _controller, _logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+    supervisor.next_exits = [
+      ChildExit.new(
+        pid: 123, exit_code: 0, project: "daily_digest", slug: "2026-08-30",
+        stage: "daily_digest_close", command: "hive digest refresh --json",
+        state_file_path: nil, started_at: T0 - 5, finished_at: T0,
+        json_envelope: { "record_id" => "r1" }
+      ),
+      ChildExit.new(
+        pid: 124, exit_code: 0, project: "daily_digest_delivery", slug: "2026-08-29",
+        stage: "daily_digest_delivery", command: "hive digest send --date 2026-08-29 --json",
+        state_file_path: nil, started_at: T0 - 4, finished_at: T0,
+        json_envelope: { "outcome" => "sent" }
+      )
+    ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ {
+      date: "2026-08-30", exit_code: 0, now: T0,
+      envelope: { "record_id" => "r1" }
+    } ], close_scheduler.completed
+    assert_equal [ {
+      date: "2026-08-29", exit_code: 0, now: T0,
+      envelope: { "outcome" => "sent" }
+    } ], delivery_scheduler.completed
+  end
+
+  def test_reload_config_reconfigures_daily_digest_schedulers
+    dispatcher, _supervisor, _controller, _logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+    daily = Hive::Config::DEFAULTS.fetch("daily_digest").merge(
+      "enabled" => true,
+      "materialization_interval_sec" => 45,
+      "telegram" => { "enabled" => true, "hour" => 17 }
+    )
+
+    with_replaced_singleton_method(Hive::DailyDigest::Migration, :prepare!, -> { daily }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_equal({ enabled: true, interval_sec: 45 }, close_scheduler.reconfigured&.last)
+    assert_equal({ enabled: true, hour: 17 }, delivery_scheduler.reconfigured&.last)
+  end
+
+  def test_reload_invalid_daily_digest_disables_only_daily_schedulers
+    dispatcher, _supervisor, _controller, logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+
+    with_replaced_singleton_method(Hive::DailyDigest::Migration, :prepare!, lambda {
+      raise Hive::ConfigError, "daily digest frontier is not initialized"
+    }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_equal({ enabled: false, interval_sec: 300 }, close_scheduler.reconfigured&.last)
+    assert_equal({ enabled: false, hour: 9 }, delivery_scheduler.reconfigured&.last)
+    assert logger.events.any? { |name, attrs|
+      name == :daily_digest_configuration_disabled &&
+        attrs[:message].include?("not initialized")
+    }
+    assert logger.events.any? { |name, _attrs| name == :config_reloaded },
+           "an invalid digest block must not prevent unrelated config reload"
+  end
+
+  def test_reload_digest_initialization_failure_disables_only_daily_schedulers
+    dispatcher, _supervisor, _controller, logger, _watcher, _patrol, _answer,
+      close_scheduler, delivery_scheduler = make_dispatcher(
+        rows: [], with_daily_digest_close_scheduler: true,
+        with_daily_digest_delivery_scheduler: true
+      )
+
+    with_replaced_singleton_method(Hive::DailyDigest::Migration, :prepare!, lambda {
+      raise Hive::DailyDigest::Migration::InitializationError, "daily digest frontier is not initialized"
+    }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_equal({ enabled: false, interval_sec: 300 }, close_scheduler.reconfigured&.last)
+    assert_equal({ enabled: false, hour: 9 }, delivery_scheduler.reconfigured&.last)
+    assert logger.events.any? { |name, attrs|
+      name == :daily_digest_configuration_disabled &&
+        attrs[:message].include?("not initialized")
+    }
+    assert logger.events.any? { |name, _attrs| name == :config_reloaded },
+           "an invalid digest block must not prevent unrelated config reload"
+  end
+
   def test_dispatches_later_pipeline_stages_first
     # Rows supplied in pipeline order; the dispatcher must flip them so the
     # task closest to done (8-finalize) claims a slot before earlier-stage
@@ -3005,20 +3468,76 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def test_dispatch_priority_order_is_later_stage_first_and_stable
     rows = [
-      row(slug: "a", stage: "2-brainstorm"),
-      row(slug: "b", stage: "7-artifacts"),
-      row(slug: "c", stage: "6-review"),
-      row(slug: "d", stage: "7-artifacts"),
-      row(slug: "e", stage: "9-done")
+      row(slug: "a", stage: "2-brainstorm", action: "ready_to_run"),
+      row(slug: "b", stage: "7-artifacts", action: "ready_to_run"),
+      row(slug: "c", stage: "6-review", action: "ready_to_run"),
+      row(slug: "d", stage: "7-artifacts", action: "ready_to_run"),
+      row(slug: "e", stage: "9-done", action: "ready_to_run"),
+      row(slug: "accepted", stage: "2-brainstorm", workflow: "patrol-fix", action: "ready_to_advance")
     ]
     dispatcher, = make_dispatcher
 
     ordered = dispatcher.send(:dispatch_priority_order, rows, now: T0)
 
-    assert_equal %w[9-done 7-artifacts 7-artifacts 6-review 2-brainstorm],
-                 ordered.map(&:stage), "later stages first"
+    assert_equal %w[e b d c accepted a], ordered.map(&:slug),
+                 "stage rank remains primary and terminal work wins within a stage"
     assert_equal %w[b d], ordered.select { |r| r.stage == "7-artifacts" }.map(&:slug),
-                 "stable within a stage — original status order preserved"
+                 "stable within the same stage and action class"
+  end
+
+  def test_terminal_advance_claims_a_scarce_slot_before_new_work_in_the_same_stage
+    rows = [
+      row(
+        slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_run", command: "hive run new-finding --project p1"
+      ),
+      row(
+        slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_advance",
+        command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+      )
+    ]
+    dispatcher, supervisor, controller, = make_dispatcher(rows: rows)
+    controller.update_limits(
+      max_concurrent_runs: 1, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] },
+                 "terminal work must drain before another agent starts in the shared stage"
+  end
+
+  def test_terminal_priority_precedes_a_queued_fresh_request
+    Dir.mktmpdir("hive-dispatch-priority") do |state_home|
+      accepted = row(
+        slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+        action: "ready_to_advance",
+        command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+      )
+      dispatcher, supervisor, controller, logger, = make_dispatcher(
+        rows: [ accepted ], dispatch_request_state_home: state_home
+      )
+      controller.update_limits(
+        max_concurrent_runs: 1, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+      )
+      write_request_file(state_home, slug: "new-finding", request_id: "FRESH")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+        assert_equal [ "FRESH" ], Q.pending(state_home: state_home).map(&:request_id)
+        assert logger.events.any? { |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "FRESH" &&
+            attrs[:reason] == "global_cap"
+        }
+      ensure
+        restore_find_project!
+      end
+    end
   end
 
   def test_dispatch_priority_ages_waiting_rows_past_fresh_later_stage_work
@@ -4649,6 +5168,36 @@ def test_shutdown_acknowledgement_records_closed_admission_and_child_inventory
   assert_equal [ 88 ], payload.fetch(:child_inventory).map { |entry| entry.fetch(:pid) }
 end
 
+def test_shutdown_acknowledgement_is_not_drained_while_patrol_discovery_is_alive
+  snapshot = FakeOperationalSnapshot.new
+  arbiter = BlockingPatrolArbiter.new([])
+  dispatcher, supervisor, _controller, logger = make_dispatcher(
+    rows: [], patrol_arbiter: arbiter, patrol_discovery_async: true,
+    operational_snapshot: snapshot
+  )
+  original_tick = dispatcher.method(:tick)
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_seconds| nil }
+  dispatcher.define_singleton_method(:tick) do |now:|
+    original_tick.call(now: now)
+    request_shutdown!
+  end
+
+  dispatcher.run_forever
+
+  method, payload = snapshot.calls.last
+  assert_equal :shutdown, method
+  assert_equal true, payload.fetch(:admission_closed)
+  assert_equal false, payload.fetch(:drained)
+  assert_empty supervisor.spawned
+  assert logger.events.any? { |name, attributes|
+    name == :fatal && attributes[:message].include?("did not stop before daemon shutdown")
+  }
+ensure
+  arbiter&.release
+  dispatcher&.instance_variable_get(:@patrol_discovery_thread)&.join(1)
+end
+
 def test_run_forever_routes_shutdown_child_exit_through_architecture_completion
   architecture = FakeRefactorPatrolScheduler.new
   architecture.completion_status = :retry
@@ -5098,6 +5647,22 @@ def test_incremental_row_removal_resets_an_empty_probe_cursor
   assert_equal 0, dispatcher.instance_variable_get(:@tracked_state_file_cursor)
 end
 
+def test_incremental_status_replacement_keeps_a_terminal_advance_row_prioritized
+  dispatcher, = make_dispatcher(rows: [])
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance"
+  )
+  fresh = row(slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix")
+
+  dispatcher.send(
+    :replace_incremental_status_rows, [ [ "p1", "accepted-finding" ] ], [ accepted ]
+  )
+
+  assert_equal [ "accepted-finding", "new-finding" ],
+               dispatcher.send(:incremental_dispatch_rows, [ fresh ]).map(&:slug)
+end
+
 def test_changed_task_ticks_do_not_delay_the_periodic_full_repair_scan
   status_row = row(action: nil, command: nil)
   dispatcher, = make_dispatcher(rows: [ status_row ], clock: -> { T0 })
@@ -5190,6 +5755,140 @@ def test_changed_task_ticks_leave_global_schedulers_to_the_full_scan
   assert dispatcher.tick_changed(task_keys: [ [ "p1", "s1" ] ], now: T0)
 end
 
+def test_changed_task_tick_considers_cached_terminal_advances_before_fresh_work
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance",
+    command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+  )
+  fresh = row(
+    slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_run", command: "hive run new-finding --project p1"
+  )
+  dispatcher, supervisor, controller = make_dispatcher(rows: [ accepted ])
+  controller.update_limits(
+    max_concurrent_runs: 1, max_concurrent_per_project: 1,
+    max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+  )
+  with_replaced_singleton_method(controller, :can_dispatch?, ->(**) { :cooldown }) do
+    dispatcher.tick(now: T0)
+  end
+  assert_empty supervisor.spawned
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ fresh ]
+  )
+
+  assert dispatcher.tick_changed(
+    task_keys: [ [ "p1", "new-finding" ] ], now: T0 + 1
+  )
+
+  assert_equal [ "accepted-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+  assert_equal 1, status.fetch_count, "incremental priority must not trigger another full status scan"
+  assert_equal 1, status.fetch_task_count
+end
+
+def test_changed_task_tick_does_not_replay_cached_coding_advance
+  coding_advance = row(
+    slug: "ready-for-pr", stage: "5-open-pr", workflow: "coding",
+    action: "ready_to_open_pr",
+    command: "hive open-pr ready-for-pr --from 5-open-pr"
+  )
+  fresh = row(
+    slug: "new-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_run", command: "hive run new-finding --project p1"
+  )
+  dispatcher, supervisor = make_dispatcher(rows: [ coding_advance ])
+  dispatcher.send(:refresh_status_index, [ coding_advance ])
+  dispatcher.send(:cache_terminal_advances, [ coding_advance ])
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+    ok: true, rows: [ fresh ]
+  )
+
+  assert dispatcher.tick_changed(
+    task_keys: [ [ "p1", "new-finding" ] ], now: T0 + 1
+  )
+
+  assert_equal [ "new-finding" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
+def test_changed_task_tick_does_not_replay_cached_non_patrol_generic_advance
+  generic = row(
+    slug: "content-ready", stage: "1-inbox", workflow: "content",
+    action: "ready_to_advance", command: "hive approve content-ready --from 1-inbox"
+  )
+  fresh = row(slug: "fresh", action: "ready_to_run")
+  dispatcher, supervisor = make_dispatcher(rows: [ generic ])
+  dispatcher.send(:refresh_status_index, [ generic ])
+  dispatcher.send(:cache_terminal_advances, [ generic ])
+  dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+    Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+
+  dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+  assert_equal [ "fresh" ], supervisor.spawned.map { |entry| entry[:slug] }
+end
+
+def test_durable_advance_ownership_consumes_the_cached_row_before_an_unrelated_tick
+  %i[accepted existing_live terminal_replay].each do |initial_status|
+    accepted = row(
+      slug: "accepted", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve accepted --project p1 --from 1-inbox --force"
+    )
+    fresh = row(slug: "fresh", action: "ready_to_run")
+    requests = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **|
+      requests << request.slug
+      Hive::Attempts::DispatchResult.new(
+        status: requests.length == 1 ? initial_status : :accepted,
+        attempt: nil, receipt: nil, attach_descriptor: nil, reason: nil
+      )
+    end
+    dispatcher, = make_dispatcher(rows: [ accepted ], attempt_dispatcher: attempt_dispatcher)
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    dispatcher.tick(now: T0)
+
+    # Durable workers never enter the local child supervisor. With no active
+    # capacity remaining, the old approval must not be admitted a second time.
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+    dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+    assert_equal [ "accepted", "fresh" ], requests, initial_status.to_s
+  end
+end
+
+def test_cached_advance_yields_to_a_pending_same_task_request_after_cooldown
+  with_tmp_dir do |state_home|
+    accepted = row(
+      slug: "accepted", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve accepted --project p1 --from 1-inbox --force"
+    )
+    fresh = row(slug: "fresh", action: "ready_to_run")
+    dispatcher, supervisor, controller = make_dispatcher(
+      rows: [ accepted ], dispatch_request_state_home: state_home
+    )
+    write_request_file(state_home, slug: "accepted", request_id: "EXPLICIT")
+    stub_find_project!(dispatcher, "p1")
+    begin
+      with_replaced_singleton_method(controller, :can_dispatch?, ->(**) { :cooldown }) do
+        dispatcher.tick(now: T0)
+      end
+      assert_empty supervisor.spawned
+      dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+        Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+
+      dispatcher.tick_changed(task_keys: [ [ "p1", "fresh" ] ], now: T0 + 1)
+
+      assert_equal [ "fresh" ], supervisor.spawned.map { |entry| entry[:slug] }
+      refute_nil Q.fetch("EXPLICIT", state_home: state_home)
+    ensure
+      restore_find_project!
+    end
+  end
+end
+
 def test_failed_changed_task_status_keeps_cached_external_capacity
   running = row(
     slug: "external", action: "agent_running", command: nil,
@@ -5258,15 +5957,28 @@ def test_live_heartbeat_tick_does_not_reconcile_attempt_history
     slug: "external", action: "agent_running", command: nil,
     claude_pid_alive: true
   )
+  accepted = row(
+    slug: "accepted-finding", stage: "1-inbox", workflow: "patrol-fix",
+    action: "ready_to_advance",
+    command: "hive approve accepted-finding --project p1 --from 1-inbox --force"
+  )
   reconciler = Object.new
   reconciler.define_singleton_method(:reconcile) do |now:|
     raise "heartbeat tick scanned attempt history"
   end
-  dispatcher, = make_dispatcher(rows: [ running ], attempt_reconciler: reconciler)
+  dispatcher, supervisor = make_dispatcher(
+    rows: [ running ], attempt_reconciler: reconciler
+  )
+  dispatcher.send(:refresh_status_index, [ running, accepted ])
+  dispatcher.send(:cache_terminal_advances, [ running, accepted ])
+  dispatcher.instance_variable_get(:@status_consumer).next_task_result =
+    Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ running ])
 
   assert dispatcher.tick_changed(
     task_keys: [ [ "p1", "external" ] ], now: T0 + 1
   )
+  assert_empty supervisor.spawned,
+               "heartbeat-only ticks must not dispatch cached advance rows"
 end
 
 def test_changed_task_tick_stops_when_attempt_reconciliation_fails
@@ -6091,10 +6803,18 @@ end
   end
 
   def test_terminal_attempt_receipt_completes_claimed_delivery_without_wait2
+    assert_terminal_attempt_completes_delivery(chat_id: 42)
+  end
+
+  def test_terminal_attempt_is_promoted_in_same_tick_when_request_is_deleted
+    assert_terminal_attempt_completes_delivery(chat_id: nil)
+  end
+
+  def assert_terminal_attempt_completes_delivery(chat_id:)
     Dir.mktmpdir("hive-attempt-delivery") do |state_home|
       request_id = Q.write_request!(
         project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
-        chat_id: 42, request_id: "request-1", task_id: "42",
+        chat_id: chat_id, request_id: "request-1", task_id: "42",
         task_generation: "generation-1", expected_stage: "4-execute",
         state_home: state_home, now: T0
       )
@@ -6107,7 +6827,7 @@ end
       )
       launching = store.create_launching(
         source_fingerprint: "test",
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "p1", task_slug: "demo-task",
         intended_stage: "4-execute", task_generation: "generation-1",
         progress_token: "progress", provider: "codex",
@@ -6155,11 +6875,17 @@ end
       assert_empty supervisor.spawned
       assert_empty Q.claimed(state_home: state_home)
       notice = Q.pending_results(state_home: state_home).first
-      assert_equal "attempt-1", notice.attempt_id
-      assert_equal "terminal", notice.attempt_state
-      assert_equal "succeeded", notice.receipt["outcome"]
+      if chat_id
+        assert_equal "attempt-1", notice.attempt_id
+        assert_equal "terminal", notice.attempt_state
+        assert_equal "succeeded", notice.receipt["outcome"]
+      else
+        assert_nil notice
+        assert_nil Q.repository(state_home).fetch(request_id)
+      end
       assert_nil store.fetch_hot("attempt-1")
       assert_equal "terminal", store.fetch("attempt-1").state
+      assert_equal request_id, store.fetch("attempt-1")["request_id"]
     end
   end
 
@@ -6180,7 +6906,7 @@ end
       )
       launching = store.create_launching(
         source_fingerprint: "test",
-        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "attempt-1", request_id: "request-1",
         task_id: "42", project: "p1", task_slug: "demo-task",
         intended_stage: "4-execute", task_generation: "generation-1",
         progress_token: "progress", provider: "codex",
@@ -6221,7 +6947,7 @@ end
       pending = store.publication(terminal.attempt_id)
       assert_equal true, pending.dig("consumers", "accounting")
       assert_equal true, pending.dig("consumers", "journal")
-      assert_equal false, pending.dig("consumers", "request_delivery")
+      assert_equal false, pending.dig("consumers", "dispatch")
     end
   end
 
@@ -6267,9 +6993,9 @@ end
       dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0)
 
       assert_equal [
-        [ :acknowledge, "terminal-1", :request_delivery ],
+        [ :acknowledge, "terminal-1", :dispatch ],
         [ :promote, "terminal-1" ],
-        [ :acknowledge, "lost-1", :request_delivery ],
+        [ :acknowledge, "lost-1", :dispatch ],
         [ :promote, "lost-1" ]
       ], calls
     end
@@ -7203,7 +7929,7 @@ end
     assert_equal 2, failures.size
   end
 
-  def test_legacy_manual_lost_delivery_remains_claimed_for_successor_recovery
+  def test_pending_lost_delivery_remains_claimed_for_recovery
     Dir.mktmpdir("hive-attempt-manual-delivery") do |state_home|
       request_id = Q.write_request!(
         project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
@@ -7218,7 +7944,7 @@ end
       outcomes.define_singleton_method(:fetch) do |_attempt_id|
         {
           "attempt_id" => "lost-1", "task_generation" => "generation-1",
-          "status" => "manual"
+          "phase" => "pending", "request_id" => nil
         }
       end
       dispatcher, _supervisor, _controller, logger = make_dispatcher(
@@ -7230,7 +7956,6 @@ end
       dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0 + 1)
 
       assert_equal 1, Q.claimed(state_home: state_home).size
-      assert_empty Q.pending_results(state_home: state_home)
       refute logger.events.any? { |name, _attrs| name == :dispatch_request_completed }
     end
   end
@@ -7243,7 +7968,7 @@ end
       [ :existing_live, nil ],
       [ :terminal_replay, nil ],
       [ :deferred, "capacity" ],
-      [ :deferred, "failure_cohort_cooldown" ]
+      [ :deferred, "patrol_retry_delay" ]
     ]
     calls = []
     attempt_dispatcher = Object.new
@@ -7273,7 +7998,7 @@ end
     assert_equal 1, dispatcher.instance_variable_get(:@dispatched_today)
     assert_equal %i[
       attempt_accepted attempt_duplicate attempt_terminal_replay
-      attempt_capacity_deferred attempt_failure_cohort_deferred
+      attempt_capacity_deferred attempt_patrol_retry_deferred
     ],
                  logger.events.map(&:first).grep(/attempt_/)
     dispatched = logger.events.select { |name, _attrs| name == :dispatched }
@@ -7513,6 +8238,37 @@ end
     end
   end
 
+  def test_reap_result_survives_crash_before_request_completion
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      repository = Q.repository(state_home)
+      dispatcher, sup, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home, dispatch_repository: repository
+      )
+      write_request_file(state_home, slug: "s1", request_id: "CRASH1")
+      exited = ChildExit.new(
+        pid: 556, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+        command: "hive review s1", state_file_path: nil,
+        started_at: T0, finished_at: T0, json_envelope: nil, request_id: "CRASH1"
+      )
+      sup.define_singleton_method(:reap_all) { |now:| [ exited ] }
+
+      with_replaced_singleton_method(
+        repository, :remove, ->(*, **) { raise "crash before request completion" }
+      ) do
+        assert_raises(RuntimeError) { dispatcher.send(:reap_completed, now: T0 + 1) }
+      end
+
+      restarted = Hive::RuntimeControlPlane::DispatchRepository.new(
+        database: repository.database
+      )
+      assert_equal [ "CRASH1" ], restarted.pending_results.map(&:request_id)
+      assert restarted.remove("CRASH1")
+      assert_equal [ "CRASH1" ], restarted.pending_results.map(&:request_id)
+      assert_equal "completed", restarted.fetch("CRASH1").state
+    end
+  end
+
   def test_reap_promotes_sequence_only_after_success
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(
@@ -7582,7 +8338,7 @@ end
       assert_equal 1, Q.pending_results(state_home: state_home).size,
                    "a failed sequence step must still notify the originating chat"
       assert_equal "completed", Q.fetch("SEQF", state_home: state_home).state,
-                   "the failed request stays as the outbox foreign-key anchor"
+                   "the failed request retains its own pending result"
     end
   end
 
@@ -7712,7 +8468,7 @@ end
       end
 
       assert_equal "completed", Q.fetch("SEQRAISE", state_home: state_home).state,
-                   "the failed request stays as the outbox foreign-key anchor"
+                   "the failed request retains its own pending result"
 
       notices = Q.pending_results(state_home: state_home)
       assert_equal 1, notices.size,
@@ -7759,8 +8515,7 @@ end
     assert_equal 790, dispatcher.send(:claim_expiry_sec)
   end
 
-  # #6: the daemon prunes stale dispatch-result notices each tick.
-  def test_prune_dispatch_results_removes_stale
+  def test_prune_dispatch_results_keeps_pending_and_removes_expired_delivered_request
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, = make_dispatcher(rows: [], dispatch_request_state_home: state_home)
       write_request_file(state_home, slug: "old", request_id: "r")
@@ -7769,7 +8524,12 @@ end
         command: "hive review old", state_home: state_home, now: T0 - 7200
       )
       dispatcher.send(:prune_dispatch_results, now: T0)
-      assert_empty Q.pending_results(state_home: state_home)
+      assert_equal [ "r" ], Q.pending_results(state_home: state_home).map(&:request_id)
+
+      assert Q.remove("r", state_home: state_home)
+      assert Q.acknowledge_result("r", state_home: state_home, now: T0)
+      dispatcher.send(:prune_dispatch_results, now: T0)
+      assert_nil Q.fetch("r", state_home: state_home)
     end
   end
 
@@ -9566,7 +10326,7 @@ end
     assert_equal [ false, nil, false, true ], observed
   end
 
-  def test_lost_successor_rebinds_claim_and_acknowledges_original_attempt
+  def test_completed_lost_recovery_rebinds_claim_by_request_identity
     request = Q::Request.new(
       request_id: "lost-delivery", created_at: T0, project: "p1", slug: "task",
       argv: %w[hive run task], requestor: "daemon"
@@ -9584,19 +10344,27 @@ end
     repository.define_singleton_method(:update_claim) do |request_id, **attributes|
       updates << [ request_id, attributes ]
     end
-    attempt = Struct.new(:attempt_id).new("lost-1")
+    attempt_type = Struct.new(:attempt_id, :task_generation)
+    lost = attempt_type.new("lost-1", "generation-1")
+    replacement = attempt_type.new("replacement-1", "generation-2")
     acknowledgements = []
     reconciler = Object.new
-    reconciler.define_singleton_method(:fetch) { |_attempt_id| attempt }
+    attempt_store = Object.new
+    attempt_store.define_singleton_method(:attempt_id_for_request) do |request_id:|
+      request_id == "recovery-request-1" ? replacement.attempt_id : nil
+    end
+    reconciler.define_singleton_method(:store) { attempt_store }
+    reconciler.define_singleton_method(:fetch) do |attempt_id|
+      attempt_id == lost.attempt_id ? lost : replacement
+    end
     reconciler.define_singleton_method(:acknowledge_finalization) do |seen, consumer|
       acknowledgements << [ seen.attempt_id, consumer ]
     end
     outcomes = Object.new
     outcomes.define_singleton_method(:fetch) do |_attempt_id|
       {
-        "status" => "successor_dispatched",
-        "successor_attempt_id" => "successor-1",
-        "task_generation" => "generation-2"
+        "phase" => "complete", "request_id" => "recovery-request-1",
+        "task_generation" => "generation-1"
       }
     end
     dispatcher, = make_dispatcher(
@@ -9607,9 +10375,9 @@ end
     dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0)
 
     assert_equal "lost-delivery", updates.fetch(0).fetch(0)
-    assert_equal "successor-1", updates.fetch(0).fetch(1).fetch(:attempt_id)
+    assert_equal "replacement-1", updates.fetch(0).fetch(1).fetch(:attempt_id)
     assert_equal "generation-2", updates.fetch(0).fetch(1).fetch(:task_generation)
-    assert_equal [ [ "lost-1", :request_delivery ] ], acknowledgements
+    assert_equal [ [ "lost-1", :dispatch ] ], acknowledgements
   end
 
   def test_shutdown_snapshot_failure_is_advisory

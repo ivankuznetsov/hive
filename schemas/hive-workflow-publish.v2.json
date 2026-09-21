@@ -117,6 +117,7 @@
     },
     "ErrorPayload": {
       "oneOf": [
+        {"$ref": "#/$defs/UsageErrorPayload"},
         {"$ref": "#/$defs/ValidationErrorPayload"},
         {"$ref": "#/$defs/ConfigurationErrorPayload"},
         {"$ref": "#/$defs/OfflineErrorPayload"},
@@ -124,6 +125,21 @@
         {"$ref": "#/$defs/RemoteAmbiguousErrorPayload"},
         {"$ref": "#/$defs/InternalErrorPayload"}
       ]
+    },
+    "UsageErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Pre-dispatch argument rejection, before publication starts.",
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-workflow-publish"},
+        "schema_version": {"const": 2},
+        "ok": {"const": false},
+        "error_class": {"const": "UsageError"},
+        "error_kind": {"const": "usage"},
+        "exit_code": {"const": 64},
+        "message": {"type": "string"}
+      }
     },
     "ErrorBase": {
       "type": "object",

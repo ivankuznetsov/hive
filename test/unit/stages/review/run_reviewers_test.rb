@@ -2070,6 +2070,22 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_retired_lockfile_findings_resume_without_waiving_other_findings
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir).with(pass: 4)
+      lockfile = "- [ ] dependency_lockfile_change: Gemfile.lock:?: Gemfile.lock\n"
+      write_guardrail_file(dir, pass: 4, body: lockfile * 2)
+      assert Hive::Stages::Review.fix_guardrail_approved?(ctx, expected_matches: 2)
+      refute Hive::Stages::Review.fix_guardrail_approved?(ctx, expected_matches: 3)
+      cfg = { "review" => { "fix" => { "guardrail" => { "patterns_override" => {
+        "dependency_lockfile_change" => { "regex" => "Gemfile.lock", "targets" => "file_path" }
+      } } } } }
+      refute Hive::Stages::Review.fix_guardrail_approved?(ctx, expected_matches: 2, cfg: cfg)
+      write_guardrail_file(dir, pass: 4, body: lockfile + "- [ ] dotenv_edit: .env\n")
+      refute Hive::Stages::Review.fix_guardrail_approved?(ctx, expected_matches: 2)
+    end
+  end
+
   def test_exact_guardrail_waiver_emits_a_visible_fingerprint_event
     Dir.mktmpdir("hive-review-waiver-event") do |dir|
       task = Struct.new(:folder, :slug).new(dir, "review-task")

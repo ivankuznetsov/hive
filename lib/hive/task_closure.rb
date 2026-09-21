@@ -274,7 +274,8 @@ module Hive
       errors = []
       blockers = []
       normalized_input = normalize_input(input, errors)
-      task_repository = resolve_task_repository(task, project, errors)
+      cancelled = normalized_input["reason"] == "cancelled"
+      task_repository = resolve_task_repository(task, project, errors, local: cancelled)
       successor = resolve_successor(normalized_input, task, errors)
       evidence = verify_evidence(normalized_input, task_repository, errors)
       authority = closure_authority(normalized_input, task_repository, evidence, errors)
@@ -283,7 +284,7 @@ module Hive
                             item["same_repository"] == true
       end
       blockers.concat(
-        task_blockers(task, project, delivered_heads: delivered_heads)
+        task_blockers(task, project, delivered_heads: delivered_heads, preserve_worktree: cancelled)
       )
 
       task_observation = observation(task, project)
@@ -458,7 +459,7 @@ module Hive
       value = input.respond_to?(:to_h) ? input.to_h : {}
       value = value.transform_keys(&:to_s)
       reason = valid_utf8_string(value["reason"], field: "reason", errors: errors)
-      errors << field_error("reason", "unsupported", "must be already_delivered or superseded") unless
+      errors << field_error("reason", "unsupported", "must be #{REASONS.join(', ')}") unless
         REASONS.include?(reason)
 
       references = value["evidence"] || value["evidence_refs"] || []
@@ -495,6 +496,12 @@ module Hive
         errors << field_error("attestation", "required", "superseded closure requires an operator statement") if
           attestation.empty?
       end
+      if reason == "cancelled"
+        errors << field_error("attestation", "required", "cancellation requires an operator reason") if attestation.empty?
+        unless references.empty? && successor.empty?
+          errors << field_error("reason", "incompatible_fields", "cancellation does not accept delivery evidence or a successor")
+        end
+      end
       if reason == "already_delivered" && (!successor.empty? || !attestation.empty?)
         errors << field_error(
           "reason", "incompatible_fields",
@@ -502,7 +509,7 @@ module Hive
         )
       end
       errors << field_error("evidence", "required", "at least one immutable delivery item is required") if
-        references.empty?
+        references.empty? && reason != "cancelled"
 
       {
         "reason" => reason,
@@ -529,12 +536,13 @@ module Hive
       ""
     end
 
-    def resolve_task_repository(task, project, errors)
+    def resolve_task_repository(task, project, errors, local: false)
       registration = registered_project(project)
       unless same_path?(registration.fetch("path"), task.project_root)
         errors << field_error("task", "registration_mismatch", "task is outside the registered project checkout")
         return nil
       end
+      return { "path" => File.realpath(task.project_root) } if local
 
       config = Hive::Config.load(task.project_root)
       live = @gh.repository_identity(task.project_root, cfg: config)
@@ -595,6 +603,7 @@ module Hive
     end
 
     def verify_evidence(input, task_repository, errors)
+      return [] if input["reason"] == "cancelled"
       return [] unless task_repository
 
       default_branches = {}
@@ -788,6 +797,7 @@ module Hive
 
     def closure_authority(input, task_repository, evidence, errors)
       return nil unless task_repository
+      return "operator_attestation" if input["reason"] == "cancelled"
       if evidence.empty?
         errors << field_error("evidence", "unverified", "at least one verified immutable delivery item is required")
         return nil
@@ -812,7 +822,7 @@ module Hive
         "operator_attestation" : "remote_merge"
     end
 
-    def task_blockers(task, project, ignore_task_lock: false, delivered_heads: [])
+    def task_blockers(task, project, ignore_task_lock: false, delivered_heads: [], preserve_worktree: false)
       blockers = []
       if !ignore_task_lock && live_task_lock?(task)
         blockers << blocker("live_attempt", "a live task owner must finish before closure")
@@ -823,7 +833,7 @@ module Hive
           "durable attempt #{attempt.attempt_id} is #{attempt.state}"
         )
       end
-      blockers.concat(worktree_blockers(task, delivered_heads: delivered_heads))
+      blockers.concat(worktree_blockers(task, delivered_heads: delivered_heads)) unless preserve_worktree
       blockers.uniq
     rescue Hive::Error, SystemCallError, IOError => e
       [ blocker("ownership_unverifiable", e.message) ]
@@ -1034,13 +1044,20 @@ module Hive
              observation.fetch("marker_generation").to_s.match?(/\A[0-9a-f]{64}\z/)
         raise InvalidReceipt, "closure receipt observation is malformed"
       end
-      repository = validate_receipt_repository!(receipt.fetch("task_repository"))
-      validate_receipt_registration!(
-        repository, task: task, project: expected_project
-      )
+      cancelled = receipt["reason"] == "cancelled"
+      if cancelled
+        repository_errors = []
+        repository = resolve_task_repository(task, expected_project, repository_errors, local: true)
+        unless repository_errors.empty? && repository == receipt.fetch("task_repository")
+          raise InvalidReceipt, "cancelled task no longer matches its registered checkout"
+        end
+      else
+        repository = validate_receipt_repository!(receipt.fetch("task_repository"))
+        validate_receipt_registration!(repository, task: task, project: expected_project)
+      end
       evidence = receipt.fetch("evidence")
       raise InvalidReceipt, "closure receipt has invalid evidence" unless
-        evidence.is_a?(Array) && evidence.length.between?(1, MAX_EVIDENCE)
+        evidence.is_a?(Array) && (cancelled ? evidence.empty? : evidence.length.between?(1, MAX_EVIDENCE))
       evidence.each { |item| validate_receipt_evidence!(item, repository) }
       unless self.class.secure_compare(
         receipt.fetch("evidence_digest"), self.class.digest(evidence)
@@ -1154,6 +1171,15 @@ module Hive
       authority = receipt.fetch("authority")
       successor = receipt["successor"]
       attestation = receipt["attestation"]
+      if reason == "cancelled"
+        unless authority == "operator_attestation" && successor.nil? &&
+               CHANNELS.include?(confirmation.fetch("channel")) &&
+               attestation.is_a?(String) && attestation.valid_encoding? &&
+               !attestation.strip.empty? && attestation.bytesize <= MAX_ATTESTATION_BYTES
+          raise InvalidReceipt, "cancelled closure semantics are inconsistent"
+        end
+        return true
+      end
       if reason == "already_delivered"
         unless authority == "remote_merge" && successor.nil? && attestation.nil? &&
                receipt.fetch("evidence").all? { |item| item["same_repository"] == true }
@@ -1211,7 +1237,8 @@ module Hive
                               item["same_repository"] == true
         end
         blockers = task_blockers(
-          task, project, delivered_heads: delivered_heads
+          task, project, delivered_heads: delivered_heads,
+          preserve_worktree: receipt["reason"] == "cancelled"
         )
         raise VerificationFailed, blockers.map { |entry| entry["message"] }.join("; ") unless blockers.empty?
       end
@@ -1249,6 +1276,7 @@ module Hive
         current_stage: "#{task.stage_index}-#{task.stage_name}",
         target_stage: target_stage,
         project: project,
+        terminal_outcome: receipt["reason"] == "cancelled" ? "cancelled" : nil,
         transition_guard: lambda do |locked_task|
           Hive::Conditions::TransitionGuard.validate_closure!(
             locked_task,
@@ -1266,7 +1294,9 @@ module Hive
       self.class.validate_active_cas!(task, receipt, attempt_store: @attempt_store)
 
       repository_errors = []
-      live_repository = resolve_task_repository(task, project, repository_errors)
+      live_repository = resolve_task_repository(
+        task, project, repository_errors, local: receipt["reason"] == "cancelled"
+      )
       unless repository_errors.empty? &&
              live_repository == receipt.fetch("task_repository")
         detail = repository_errors.map { |entry| entry.fetch("message") }.join("; ")
@@ -1300,7 +1330,8 @@ module Hive
       blockers = task_blockers(
         task, project,
         ignore_task_lock: true,
-        delivered_heads: delivered_heads
+        delivered_heads: delivered_heads,
+        preserve_worktree: receipt["reason"] == "cancelled"
       )
       unless blockers.empty?
         raise VerificationFailed,

@@ -10,8 +10,6 @@ class ReleaseCandidateRunnerTest < Minitest::Test
         [ :keyreq, :repo_root ],
         [ :key, :runs_root ],
         [ :key, :gate_executor ],
-        [ :key, :upgrade_executor ],
-        [ :key, :sandbox ],
         [ :key, :remote_client ]
       ],
       HiveReleaseCandidate::Runner.instance_method(:initialize).parameters

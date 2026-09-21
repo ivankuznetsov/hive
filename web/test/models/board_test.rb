@@ -43,26 +43,6 @@ class BoardTest < ActiveSupport::TestCase
     assert_equal [ "content-task" ], content.columns.find { |column| column.stage == "2-research" }.tasks.map(&:slug)
   end
 
-  test "attaches a project hidden count to exactly one workflow band" do
-    project_name = create_hive_project!("kanban-hidden-archive-app")
-    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
-    project = Project.new(
-      "name" => project_name,
-      "path" => project_path,
-      "hive_state_path" => File.join(project_path, ".hive-state"),
-      "hidden_archived_task_count" => 3,
-      "tasks" => [
-        { "slug" => "coding-task", "stage" => "3-plan", "workflow" => "coding" },
-        { "slug" => "content-task", "stage" => "2-research", "workflow" => "content" }
-      ]
-    )
-
-    bands = Board.new([ project ]).bands
-
-    assert_equal [ 3, 0 ], bands.map(&:hidden_archived_task_count)
-    assert_equal 3, bands.sum(&:hidden_archived_task_count)
-  end
-
   test "keeps unknown stages visible after the configured workflow columns" do
     project_name = create_hive_project!("kanban-unknown-stage-app")
     project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
@@ -79,6 +59,7 @@ class BoardTest < ActiveSupport::TestCase
 
     assert_equal "99-future", band.columns.last.stage
     assert_equal [ "future-task" ], band.columns.last.tasks.map(&:slug)
+    refute band.columns.last.folded_by_default?
   end
 
   test "renders an empty project through its configured default workflow" do
@@ -183,6 +164,9 @@ class BoardTest < ActiveSupport::TestCase
     assert_nil empty_band.error
     assert_equal [ "custom-task" ], task_band.columns.fetch(1).tasks.map(&:slug)
     assert_nil task_band.error
+    refute task_band.columns.fetch(1).folded_by_default?
+    assert task_band.columns.last.terminal
+    assert task_band.columns.last.folded_by_default?
   ensure
     Hive::Workflows::Project.reset!
   end

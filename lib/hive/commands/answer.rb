@@ -286,7 +286,7 @@ module Hive
       end
 
       def answer_fingerprint(answer)
-        Digest::SHA256.hexdigest(canonical_answer(answer))
+        ::Digest::SHA256.hexdigest(canonical_answer(answer))
       end
 
       def resolve_bound_slot(binding, questions, answer_text)
@@ -472,7 +472,7 @@ module Hive
         metadata = Hive::TaskMeta.read(task.folder)
         stat = File.stat(task.folder)
         input_epoch = Hive::Attempts::Generation.current_task_input_epoch(task)
-        incarnation = Digest::SHA256.hexdigest(
+        incarnation = ::Digest::SHA256.hexdigest(
           [
             "hive-brainstorm-answer-incarnation-v1",
             task.id, task.slug, metadata[:input_fingerprint],
@@ -690,3 +690,10 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary: Thor
+# rejections that never reach the handler still ride this command's JSON
+# envelope (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("answer", { schema: "hive-answer", error_kind: "usage" })

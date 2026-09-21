@@ -7,7 +7,7 @@ require "hive/commands/status"
 # `Status#collect_rows` walks only canonical stages, so a task left in a
 # legacy stage directory (e.g. `6-pr/` from the pre-PR-first layout)
 # becomes unreachable from every operator surface until the operator
-# happens to run `hive migrate`.
+# converts it using the migration guide.
 #
 # These tests assert that Status surfaces the legacy directories in both
 # JSON and text output so the operator gets a visible nudge instead of a
@@ -37,12 +37,10 @@ class StatusLegacyLayoutTest < Minitest::Test
         assert_equal legacy.map { |e| e["stage_dir"] }.sort,
                      legacy.map { |e| e["stage_dir"] },
                      "legacy_stage_dirs must be sorted alphabetically by stage_dir"
-        # Machine-readable parity of the text "run `hive migrate`"
-        # recovery hint. Agents reading the JSON envelope must get a
-        # ready-to-execute command string whenever legacy_stage_dirs is
-        # non-empty; see issue #94.
-        assert_equal "hive migrate", project["legacy_migrate_command"],
-                     "legacy_migrate_command must surface the recovery command when " \
+        # Agents reading JSON receive the same conversion guide as
+        # operators reading the text output.
+        assert_equal "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", project["legacy_state_guide"],
+                     "legacy_state_guide must surface the conversion guide when " \
                      "legacy_stage_dirs is non-empty"
       end
     end
@@ -56,7 +54,7 @@ class StatusLegacyLayoutTest < Minitest::Test
 
         out, _err = capture_io { Hive::Commands::Status.new(operational: true).call }
         assert_includes out, "6-pr", "warning must name the legacy directory"
-        assert_includes out, "hive migrate", "warning must point at the fix command"
+        assert_includes out, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", "warning must point at the fix command"
         assert_match(/1 task hidden in legacy stage dirs/, out,
                      "singular form of the warning must be used for one hidden task")
       end
@@ -86,13 +84,13 @@ class StatusLegacyLayoutTest < Minitest::Test
         project = payload.fetch("projects").first
         assert_equal [], project["legacy_stage_dirs"],
                      "clean projects must emit legacy_stage_dirs as an empty array"
-        # The diagnostic-field-always-present convention: `legacy_migrate_command`
+        # The diagnostic-field-always-present convention: `legacy_state_guide`
         # must be `null` (not absent) when the project is clean, so agent
         # consumers can branch on the field without a `key?` probe. Issue #94.
-        assert project.key?("legacy_migrate_command"),
-               "legacy_migrate_command key must always be present"
-        assert_nil project["legacy_migrate_command"],
-                   "clean projects must emit legacy_migrate_command as nil"
+        assert project.key?("legacy_state_guide"),
+               "legacy_state_guide key must always be present"
+        assert_nil project["legacy_state_guide"],
+                   "clean projects must emit legacy_state_guide as nil"
       end
     end
   end
@@ -119,7 +117,7 @@ class StatusLegacyLayoutTest < Minitest::Test
   # directories with non-slug names (a `.logs` dot-folder, an
   # underscore-named scratch dir) must not inflate the number,
   # otherwise the operator sees a count that doesn't match what
-  # `hive migrate` would actually move. (Note: bare `logs` happens to
+  # an agent would actually convert. (Note: bare `logs` happens to
   # match the slug regex — the test uses `.logs` and `scratch_dir` so
   # the gate it pins is `Hive::Stages.task_slug?`, not "any name with
   # letters in it".)

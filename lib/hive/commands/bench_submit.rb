@@ -6,6 +6,7 @@ require "pathname"
 require "hive"
 require "hive/config"
 require "hive/git_ops"
+require "hive/secret_scanner"
 
 module Hive
   module Commands
@@ -15,10 +16,8 @@ module Hive
     # duplicated) plus a local secret preflight so a contributor never opens a PR
     # that the hive-bench validator would reject for leaked credentials.
     #
-    # The preflight delegates to hive-bench's canonical SecretScan — the exact
-    # module the validator's gate uses — rather than a local pattern copy, so the
-    # local check can never silently drift weaker than the gate that will judge
-    # the PR. There is one pattern set, and it lives in hive-bench.
+    # Betterleaks owns the local credential preflight. The external benchmark
+    # validator may enforce additional submission policies independently.
     #
     # Locates the hive-bench checkout via HIVE_BENCH_PATH (or ~/Dev/hive-bench).
     # The extractor invocation and the PR open are seams for testing.
@@ -181,29 +180,14 @@ module Hive
         relative
       end
 
-      # Run hive-bench's own SecretScan (one source of truth) in a child ruby —
-      # array-form, no shell — over the spec paths. Each finding comes back as
-      # "<label> in <file>:<line>". Refuses if the canonical scanner is absent,
-      # rather than fall back to a weaker check that could pass a real secret.
-      RUNNER = <<~'RUBY'
-        require "secret_scan"
-        HiveBench::SecretScan.scan_files(ARGV).each { |f| puts "#{f.label}:#{f.line}" }
-      RUBY
-
       def local_secret_scan(paths)
-        return [] if paths.empty?
-
-        scanner = File.join(@bench_path, "validator", "secret_scan.rb")
-        unless File.file?(scanner)
-          raise UsageError, "hive-bench secret scanner not found at #{scanner} — " \
-                            "can't guarantee parity with the validator; update your hive-bench checkout"
+        paths.flat_map do |path|
+          Hive::SecretScanner.scan(File.binread(path), path: path).map do |hit|
+            "#{hit.fetch(:name)} in #{File.basename(path)}:#{hit.fetch(:line)}"
+          end
         end
-
-        cmd = [ "ruby", "-I", File.join(@bench_path, "validator"), "-e", RUNNER, "--", *paths ]
-        out, err, status = Open3.capture3(*cmd)
-        raise UsageError, "secret scan failed: #{err.strip}" unless status.success?
-
-        out.each_line.map(&:strip).reject(&:empty?)
+      rescue Hive::SecretScanner::Unavailable, SystemCallError
+        raise UsageError, "secret scan failed; submission blocked"
       end
 
       def report(entry_dir, submission)

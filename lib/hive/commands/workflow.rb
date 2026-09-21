@@ -23,6 +23,19 @@ module Hive
       SCHEMA = "hive-workflow-new".freeze
       SUBCOMMANDS = %w[new validate commit install list update remove publish].freeze
 
+      # Pre-dispatch usage errors for `hive workflow validate` own the
+      # diagnostics arm: an arity rejection is still a validate document, so
+      # agent callers get the same schema they would from an in-command
+      # validation failure.
+      def self.usage_error_payload(error, schema:, argv: [], id: nil)
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error, error_kind: "usage",
+          extras: id ? { "valid" => false, "id" => id } : {}
+        )
+        payload["diagnostics"] = [ { "message" => error.message } ] if schema == "hive-workflow-validate"
+        payload
+      end
+
       class UsageError < Hive::Error
         attr_reader :value, :expected, :suggested_id
 
@@ -613,4 +626,32 @@ module Hive
       end
     end
   end
+end
+
+# The pre-dispatch JSON usage contract for this command boundary follows the
+# workflow subcommand; `validate` additionally owns its diagnostics arm so
+# arity rejections still produce a validate document (see
+# Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("workflow") do |argv, command_index:, option_argv:|
+  sub = Hive::CliUsageContracts.subcommand(argv, command_index)
+  schema = case sub
+  when "install" then "hive-workflow-install"
+  when "list" then "hive-workflow-list"
+  when "remove" then "hive-workflow-remove"
+  when "update" then "hive-workflow-update"
+  when "publish" then "hive-workflow-publish"
+  when "validate" then "hive-workflow-validate"
+  else "hive-workflow-new"
+  end
+  next unless Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+
+  next { schema: schema, error_kind: "usage", extras: {} } unless sub == "validate"
+
+  id = Hive::CliUsageContracts.positionals(argv, command_index).fetch(1, "")
+  {
+    schema: schema, error_kind: "usage", extras: { "valid" => false, "id" => id },
+    payload: ->(error, argv: []) { Hive::Commands::Workflow.usage_error_payload(error, schema: schema, argv: argv, id: id) }
+  }
 end

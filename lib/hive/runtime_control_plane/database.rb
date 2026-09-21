@@ -9,10 +9,10 @@ require "hive/atomic_file"
 
 module Hive
   module RuntimeControlPlane
-    EXPECTED_SCHEMA_SHA256 = "34e12e7c8303f7b6f21c00cd0019fe96aaf80bc4679db90034b2a0b931ae1355".freeze
+    EXPECTED_SCHEMA_SHA256 = "f237684b17dfd8f7ded175a5e3c7a1b0445c4a7bee109fca4f2f51e498ead0a7".freeze
 
     class Database
-      MIGRATE_ACTION = "stop Hive and run hive migrate --all".freeze
+      MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze
       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
       MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
       attr_reader :path, :owner_pid
@@ -43,9 +43,12 @@ module Hive
           ensure_process_owner!
           validate_migration_set!
           verify_runtime_capabilities!
-          diagnosis = diagnostics_uncoordinated if File.exist?(path)
-          raise_for_diagnosis!(diagnosis) if diagnosis &&
-            %i[unrelated_database corrupt newer_schema].include?(diagnosis.status)
+          diagnosis = diagnostics_uncoordinated
+          if diagnosis.status != :missing
+            raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
+            open_uncoordinated!
+            next
+          end
           FileUtils.mkdir_p(File.dirname(path))
           prepare_storage!
           connect!
@@ -62,8 +65,7 @@ module Hive
         disconnect
         raise IntegrityError.new("runtime control-plane migration failed: #{error.message}",
                                  code: :migration_failed,
-                                 action: "correct storage and resume the incomplete cutover; " \
-                                         "active recovery requires an external backup",
+                                 action: BACKUP_ACTION,
                                  details: { error_class: error.class.name })
       end
 
@@ -221,7 +223,7 @@ module Hive
 
       def unavailable!(code, message, error: nil)
         action = "install a supported sqlite3 gem build"
-        action += " and rerun hive migrate --all" unless message.start_with?("SQLite version is unreadable")
+        action += " and rerun hive setup" unless message.start_with?("SQLite version is unreadable")
         raise Unavailable.new(message, code: code, action: action,
                               details: error ? { error_class: error.class.name } : {})
       end
@@ -244,13 +246,13 @@ module Hive
       def raise_migration_set!(detail)
         raise MigrationRequired.new("runtime control-plane migration set is invalid: #{detail}",
                                     code: :migration_set_invalid,
-                                    action: "reinstall Hive, then rerun hive migrate --all")
+                                    action: "reinstall Hive, then rerun hive setup")
       end
 
       def ensure_installation_identity!
         return unless @connection[:installations].empty?
         identity = @uuid_generator.call
-        @connection[:installations].insert(installation_id: identity, lineage_id: identity,
+        @connection[:installations].insert(installation_id: identity,
                                            activation_epoch: 0,
                                            created_at: Codec.dump_time(@clock.call))
       end
@@ -262,11 +264,11 @@ module Hive
         true
       end
 
-      def exact_schema?(database)
+      def exact_schema?(database, expected: EXPECTED_SCHEMA_SHA256)
         rows = database[:sqlite_master].where(type: %w[table index])
           .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
           .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
-        Digest::SHA256.hexdigest(Codec.dump_json(rows)) == EXPECTED_SCHEMA_SHA256
+        Digest::SHA256.hexdigest(Codec.dump_json(rows)) == expected
       rescue Sequel::Error
         false
       end
@@ -343,7 +345,7 @@ module Hive
         when :partial_schema
           "runtime control-plane schema is incomplete; #{MIGRATE_ACTION}"
         else
-          "runtime control-plane schema #{version || 'missing'} requires hive migrate --all"
+          "runtime control-plane schema #{version || 'missing'} is unsupported; #{MIGRATE_ACTION}"
         end
         diagnosis(status, application_id: application_id, schema_version: version,
                   integrity: integrity,
@@ -358,8 +360,8 @@ module Hive
 
       def raise_for_diagnosis!(diagnosis)
         raise diagnosis.error if diagnosis&.error
-        raise MigrationRequired.new("runtime control-plane database is missing; run hive migrate --all",
-                                    code: :missing_database, action: "run hive migrate --all")
+        raise MigrationRequired.new("runtime control-plane database is missing; run hive setup",
+                                    code: :missing_database, action: "run hive setup")
       end
     end
   end

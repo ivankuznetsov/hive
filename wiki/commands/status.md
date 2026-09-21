@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-09-01
+updated: 2026-09-09
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal]
 ---
 
@@ -22,7 +22,7 @@ terminal history. The former public full-fleet status surface is removed.
 | `hive status` | Bounded human daemon/liveness snapshot. |
 | `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
 | `hive status --operational` | Concise human active-work and blocker view. |
-| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
+| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable stateless routing decision; superseded v1-v3 are removed. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |
@@ -41,6 +41,32 @@ managed-workflow breadcrumbs become one `status_warning` per tick instead of
 leaking to process stderr. Outside that scoped build the same warnings retain
 their ordinary stderr behavior. A failed scan retains warnings emitted before
 its final exception.
+
+## Usage and examples: act
+
+`hive act ACTION_ID TARGET --observation TOKEN --json` executes one fresh
+routine action issued by operational status. For example, use
+`hive act workflow.retry demo:task --observation TOKEN --json` only with the
+exact `action_id`, target, and opaque token from the current status document; a
+stale or invented action is refused.
+
+## Output exceptions, serialization, and exit codes
+
+Status uses `hive-running-status.v2`, `hive-status-diagnose.v2`, or
+`hive-operational-status.v4` according to the selected mode; act uses
+`hive-act.v2`. Invalid arguments and stale/refused actions emit the selected
+typed error surface. Status suppresses a `JSON::GeneratorError` while encoding
+an error so the original typed error controls the exit, while act propagates
+the generator exception and emits no fallback JSON. Success exits `0`; usage
+errors exit `64`, temporary/stale observations exit `75`, and configuration
+errors exit `78`.
+
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive status` | Options: `--json`, `--operational`, `--diagnose`, and the mode-specific filters documented below. | Reads bounded liveness, operational, diagnostic, or archive projections without mutating tasks. | The selected JSON schema is `hive-running-status.v2`, `hive-status-diagnose.v2`, or `hive-operational-status.v4`. | Invalid arguments and projection failures use the selected typed error surface. | Error-envelope `JSON::GeneratorError` is suppressed so the original typed status error controls the exit. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
+| `hive act` | Options: required `--observation` and optional `--json`. | Revalidates and executes one current routine action; stale or invented actions are refused. | JSON uses schema `hive-act.v2`. | Invalid arguments and stale/refused actions use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
 
 ## Bounded running-task contract
 
@@ -77,6 +103,10 @@ response: they are counted under `source.malformed_locks` or
 not be proven. Malformed, absent, unreadable, or oversized metadata does not
 hide a live task; the row falls back to its bounded folder identity and reports
 `metadata_status`.
+
+The compact producer loads the task-lease repository directly before deriving
+its lock payload limit, so isolated `hive status --json` loads do not depend on
+another command having initialized that repository first.
 
 Every returned task has `status: "running"`, `action: "agent_running"`, and
 `liveness.running: true`; `liveness.source` says which process observation
@@ -181,6 +211,17 @@ Confirmation-free operational actions repeat this routine read under the task
 lock. If history changes or becomes invalid between status and `hive act`, the
 observation token is rejected without mutation.
 
+Dead process metadata is stale liveness only while the task's current action
+or marker still claims that a runner owns the step. A markerless controller
+task whose durable receipts already project `ready_to_run` or
+`ready_to_advance` reports `not_running` and keeps that workflow state even if
+an earlier attempt left dead process metadata in the runtime task lease. For
+daemon-enrolled projects the next transition remains scheduler-owned, and ordinary
+task-lock acquisition reclaims the dead holder with a higher fence without an
+operator repair step. A genuinely current
+`agent_running`, `AGENT_WORKING`, or `REVIEW_WORKING` claim with a dead runner
+continues to report `needs_repair`.
+
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and
 `dependency_wait` as its primary reason; it cannot fall through to `idle`.
@@ -277,6 +318,11 @@ terminal recovery receipt. The one-off recovery-contract migration moved every
 in-repository producer, consumer, fixture, and operating skill to v2; v1 is no
 longer published or supported.
 
+A Patrol Fix publication secret park reports `waiting_on_you`, owned by the
+operator, with a sanitized `secret_detected` reason. It offers no executable
+recovery action, including when the daemon is enabled. Ordinary retry cannot
+release the same blocked generation.
+
 Recovery recommendations bind to the exact current `marker_id`. A task carrying
 an old id-less recoverable marker reports `recovery_migration_required` and
 remains operator-owned until `hive migrate <project>` performs the one-off
@@ -288,6 +334,19 @@ and rejects stale tokens or recommendations that are no longer routine. It is
 not a general command executor and cannot represent destructive, release, or
 administrative actions.
 
+`hive-act.v2` errors include the requested `action_id` and `target`; a missing
+pre-dispatch positional is represented by an empty string. Command-level act
+error serialization uses the strict policy: if `JSON.generate` raises
+`JSON::GeneratorError`, that generator exception is raised rather than
+suppressed, and no fallback JSON document is emitted.
+
+Status pre-dispatch errors retain the requested surface. Bare JSON errors use
+`hive-running-status.v2`, `--diagnose` uses `hive-status-diagnose.v2`, and
+`--operational` uses `hive-operational-status.v4`, each with
+`error_kind: "error"`. Status itself suppresses a
+`JSON::GeneratorError` while serializing an error envelope so the original
+typed status error continues to control the exit boundary.
+
 For markerless descriptor tasks, `observation_mtime` and the locked recheck use
 the stable task `meta.yml` mtime when present rather than the task-directory
 mtime. Task lock creation changes the directory mtime, so using it would make a
@@ -298,18 +357,21 @@ cover workflow stage actions plus generic `run` and `approve` branches from
 status-issued tokens.
 
 Status captures every registered project's workflow/config generation before
-scanning any project's rows, captures one UTC `now`, and then publishes either
-the ordinary or dedicated archive projection. Dependency admission uses those
-same captured generations and is built from the complete
-graph before presentation filtering, so an expired completed dependency still
-satisfies its dependants. When concise operational status builds that graph, it
-also derives each project's `daemon.enabled` context from the captured
-generation instead of parsing the project config a second time. Callers that
-provide an existing status payload retain the context-only config read and do
-not trigger a new workflow-generation scan. Daemon, bot, TUI, and web consume
-the ordinary projection. The TUI separately caches a fresh archive-mode
-payload for its dedicated archive pane and dependency context; it never
-reconstructs ordinary visibility from row timestamps.
+scanning rows and uses one UTC `now`. Active projections build dependency
+admission from the already action-classified rows and their exact referenced prerequisites, so an
+expired completed dependency still satisfies its dependants. Ordinary and
+archive projections retain the complete dependency graph. Operational status
+uses the captured generation for each project's `daemon.enabled` context;
+callers supplying an existing payload keep the context-only config read.
+The producer prepares each project once and reuses selected folders for
+admission. A project that cannot prepare rows falls back to a disk admission
+scan without repeating healthy projects. Synthetic invalid rows retain
+archive membership from their captured workflow generation.
+
+Daemon, TUI, and Web consume active rows. The bot's CLI transport still consumes
+ordinary rows. The TUI separately loads a lossless archive payload on request;
+archive history is not merged back into the active feed or used to derive its
+dependency context.
 
 The JSON envelope isolates project-local failures. Missing roots report
 `error: missing_project_path`, missing state roots report
@@ -438,15 +500,18 @@ durable per-project cursor under Hive's state home rotates past persistent
 failures across one-shot CLI processes, and the path-only backfill commit
 preserves unrelated staged operator changes.
 
-Operational status, daemon snapshots, TUI, web, and Hivebox omit expired
-archived rows. Every
-successful ordinary project JSON object carries the non-negative
-`hidden_archived_task_count` (including `0`); task objects do not expose
-`completed_at`, retention, hidden details, or hidden reasons. Operational
-status and daemon snapshots aggregate the same key without copying hidden
-rows. Human CLI and TUI surfaces render
-`… and 1 older archived task (hive archive to view)` or
-`… and N older archived tasks (hive archive to view)`.
+Operational status, in-process daemon snapshots, TUI, Web, and watch use the
+active projection. TUI and Web load archive history only when requested,
+through a separate archive producer. Named task reads remain exact, including
+retention-hidden terminal tasks. Non-inert terminal stages remain eligible for
+active scanning; canonical archive membership excludes completed rows even
+when a dependency annotation changes their action label.
+
+The internal CLI graph (`hive status --internal-task-graph --json`), still
+used by the bot, retains ordinary retention-filtered rows pending a separate
+notification recovery contract. Its successful project objects carry
+`hidden_archived_task_count`; task objects do not expose retention details.
+This exception preserves the bot's existing terminal-row notification source.
 
 `hive archive` with no target reuses Status in archive mode
 (`Hive::Commands::Status.new(archive: true)`). It lists every workflow-aware
@@ -658,3 +723,14 @@ task/commit locks and committed before the clock can hide a row.
 
 - [[cli]] · [[commands/run]] · [[commands/approve]] · [[commands/watch]]
 - [[modules/markers]] · [[modules/task]] · [[modules/task_action]] · [[modules/task_dependencies]] · [[modules/config]] · [[modules/plan_review]]
+
+## Historical terminal recovery
+
+The operational projection retains terminal recovery receipts for diagnostics,
+but `attempt_terminal_replay` does not override the current task state, blocker
+owner, or reason. For example, a Patrol fix now parked in review keeps its
+`Escalated (parked)` reason instead of becoming idle with reason `terminal`
+because an earlier recovery succeeded. Active recovery dispositions still
+participate in scheduling classification.
+
+Active and ordinary status share one envelope builder. Active-row preparation avoids duplicate action classification independently of numeric prerequisite resolution, which retains the registered-slug folder lookup and unregistered-task fallback.

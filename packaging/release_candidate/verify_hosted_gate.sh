@@ -22,7 +22,7 @@ case "$receipt_slug" in
     )
     ;;
   release-e2e)
-    trusted_paths=(bin/hive-e2e test/e2e)
+    trusted_paths=(bin/hive-e2e test/e2e packaging/betterleaks.rb lib/hive/betterleaks.rb)
     ;;
   package)
     trusted_paths=(packaging/release_candidate packaging/managed_web_archive.rb)
@@ -31,6 +31,7 @@ case "$receipt_slug" in
     trusted_paths=(
       packaging/live_agent_skills/install_candidate_gem.sh
       packaging/verify-managed-web-setup.sh
+      packaging/fixtures/systemctl
     )
     ;;
   native-*)

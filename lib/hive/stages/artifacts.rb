@@ -5,7 +5,6 @@ require "securerandom"
 require "hive/claude_launcher"
 require "hive/agent_limit"
 require "hive/artifact_firewall"
-require "hive/artifacts/capture_policy"
 require "hive/artifacts/capture_toolkit"
 require "hive/artifacts/outcome_evidence/contract"
 require "hive/artifacts/outcome_evidence/identity"
@@ -13,9 +12,7 @@ require "hive/artifacts/outcome_evidence/rework"
 require "hive/artifacts/outcome_evidence/store"
 require "hive/atomic_file"
 require "hive/markers"
-require "hive/screenote/credential_store"
-require "hive/screenote/mcp_config"
-require "hive/screenote/oauth_client"
+require "hive/terminal_outcome"
 require "hive/stages/base"
 
 module Hive
@@ -25,8 +22,10 @@ module Hive
 
       EVIDENCE_ROLES = %w[inference producer reviewer].freeze
       MAX_INFERENCE_ATTEMPTS = 2
+      MAX_PRODUCER_ATTEMPTS = 2
       MAX_REVIEWER_ATTEMPTS = 2
       class RoleOutputError < Hive::Artifacts::OutcomeEvidence::StoreError; end
+      class IntegrityError < Hive::Artifacts::OutcomeEvidence::StoreError; end
       class RoleAgentError < StandardError
         attr_reader :role, :profile, :result
 
@@ -43,6 +42,29 @@ module Hive
       }.freeze
 
       def run!(task, cfg)
+        marker = Hive::Markers.current(task.state_file)
+        return { commit: nil, status: :complete } if
+          marker.name == :complete && marker.attrs["evidence_status"] == "unavailable"
+
+        result = collect!(task, cfg)
+        return result unless result[:status] == :error
+
+        marker = Hive::Markers.current(task.state_file)
+        return result if %w[outcome_evidence_integrity_invalid outcome_evidence_reworks_exhausted].include?(marker.attrs["reason"]) ||
+                         Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs)
+
+        Hive::Markers.set(
+          task.state_file, :complete,
+          marker.attrs.merge(
+            "reason" => "evidence_best_effort", "evidence_status" => "unavailable",
+            "warning_reason" => marker.attrs["reason"]
+          )
+        )
+        warn "hive: evidence collection unavailable; continuing without accepted evidence (#{marker.attrs['reason']})"
+        { commit: "artifacts_best_effort", status: :complete }
+      end
+
+      def collect!(task, cfg)
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
         run_outcome_evidence!(task, cfg || {})
       rescue RoleAgentError => e
@@ -53,7 +75,9 @@ module Hive
              Hive::Artifacts::ManagedWebServer::ServerError,
              Hive::AgentError, Hive::ConfigError, KeyError => e
         Hive::Markers.set(
-          task.state_file, :error, reason: "outcome_evidence_invalid",
+          task.state_file, :error,
+          reason: e.is_a?(IntegrityError) || e.is_a?(Hive::Artifacts::OutcomeEvidence::ResolutionError) ||
+            e.is_a?(Hive::ArtifactFirewall::Error) ? "outcome_evidence_integrity_invalid" : "outcome_evidence_invalid",
           diagnostic: e.message.to_s.byteslice(0, 200).to_s.scrub
         )
         { commit: "error", status: :error }
@@ -228,6 +252,11 @@ module Hive
                 producer_profile: producer_profile
               )
             rescue Hive::ConfigError => e
+              begin
+                capture_toolkit.close if capture_toolkit.respond_to?(:close)
+              ensure
+                remove_producer_work!(task, writable_root)
+              end
               pointer = store.publish_blocked!(
                 generation: generation, reason: "capability_blocked",
                 failed_targets: revision.any? ? revision.map { |item| item.fetch("target_id") } :
@@ -240,30 +269,32 @@ module Hive
             end
             producer = nil
             replacements = begin
-              producer_prompt = render_role_prompt(
-                "artifacts_producer_prompt.md.erb", task,
-                requirement_json: JSON.pretty_generate(requirement),
-                prior_evidence_json: JSON.pretty_generate(prior ? prior.fetch("evidence") : []),
-                revision_json: JSON.pretty_generate(revision),
-                capture_tools_json: JSON.pretty_generate(capture_tools),
+              producer, retained = run_producer!(
+                task: task, cfg: cfg, identity: identity,
+                prompt_values: {
+                  requirement_json: JSON.pretty_generate(requirement),
+                  prior_evidence_json: JSON.pretty_generate(
+                    prior ? prior.fetch("evidence") : []
+                  ),
+                  revision_json: JSON.pretty_generate(revision),
+                  capture_tools_json: JSON.pretty_generate(capture_tools),
+                  writable_root: writable_root,
+                  writable_relative_root: writable_relative_root
+                },
                 writable_root: writable_root,
-                writable_relative_root: writable_relative_root
-              )
-              producer = run_role!(
-                role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
-                identity: identity, writable_root: writable_root,
                 launch_environment: capture_toolkit.launch_environment,
                 producer_add_dirs: capture_toolkit.producer_add_dirs,
                 producer_permission_arguments: capture_toolkit.producer_permission_arguments,
                 producer_runtime_policy: capture_toolkit.producer_runtime_policy
-              )
-              candidate = Array(producer.fetch(:output).fetch("evidence"))
-              capture_toolkit.verify_captures!(candidate)
-              ensure_producer_paths!(task, writable_root, candidate)
-              store.retain_candidate!(
-                generation: generation, attempt_id: attempt_id, evidence: candidate,
-                producer: producer.fetch(:actor)
-              )
+              ) do |candidate, actor|
+                capture_toolkit.verify_captures!(candidate)
+                ensure_producer_paths!(task, writable_root, candidate)
+                store.retain_candidate!(
+                  generation: generation, attempt_id: attempt_id,
+                  evidence: candidate, producer: actor
+                )
+              end
+              retained
             ensure
               begin
                 capture_toolkit.close if capture_toolkit.respond_to?(:close)
@@ -311,6 +342,57 @@ module Hive
             return rework_from_review!(
               task, store, requirement, history, attempt, rework_tracker
             )
+          end
+        end
+      end
+
+      # Capture may succeed while the producer's final descriptor contains a
+      # mechanical field owned by the controller, malformed JSON structure, or
+      # another correctable admission error. Inference and review already get
+      # one bounded fresh-context repair; without the same channel here, Hive
+      # discards useful private captures and turns a format typo into a whole
+      # daemon retry. The admission block remains the authority and must pass
+      # before anything reaches the independent reviewer.
+      def run_producer!(task:, cfg:, identity:, prompt_values:, writable_root:,
+                        launch_environment:, producer_add_dirs:,
+                        producer_permission_arguments:, producer_runtime_policy:)
+        repair = nil
+        MAX_PRODUCER_ATTEMPTS.times do |index|
+          producer_prompt = render_role_prompt(
+            "artifacts_producer_prompt.md.erb", task,
+            **prompt_values, repair_json: JSON.pretty_generate(repair || {})
+          )
+          producer = nil
+          begin
+            producer = run_role!(
+              role: "producer", task: task, cfg: cfg, prompt: producer_prompt,
+              identity: identity, writable_root: writable_root,
+              launch_environment: launch_environment,
+              producer_add_dirs: producer_add_dirs,
+              producer_permission_arguments: producer_permission_arguments,
+              producer_runtime_policy: producer_runtime_policy
+            )
+            output = producer.fetch(:output)
+            unless output.keys == [ "evidence" ]
+              raise RoleOutputError, "producer output must contain only evidence"
+            end
+            candidate = Array(output.fetch("evidence"))
+            return [ producer, yield(candidate, producer.fetch(:actor)) ]
+          rescue RoleOutputError, Hive::Artifacts::OutcomeEvidence::StoreError, KeyError => e
+            # Store errors raised before run_role! returns describe a failed
+            # or unsafe launch, not a repairable descriptor. Once the role
+            # returned, however, store validation is exactly what this bounded
+            # repair turn exists to correct.
+            raise if e.is_a?(Hive::Artifacts::OutcomeEvidence::StoreError) &&
+              !e.is_a?(RoleOutputError) && !producer
+            raise if index + 1 >= MAX_PRODUCER_ATTEMPTS
+
+            repair = {
+              "validation_error" => e.message.to_s.byteslice(0, 1024).to_s.scrub,
+              "previous_output" => producer&.fetch(:output, nil),
+              "instruction" =>
+                "Reuse successful controller-issued captures when possible and return corrected JSON immediately."
+            }
           end
         end
       end
@@ -457,12 +539,17 @@ module Hive
             isolate_environment: true,
             launch_environment: launch_environment,
             agent_custody: agent_custody,
+            # CaptureToolkit owns the Pi evidence policy for the whole
+            # producer attempt. A bounded JSON-repair turn must reuse its
+            # still-live runtime home and capture mailbox; Base otherwise
+            # cleans a runtime policy after one spawn.
+            cleanup_runtime_policy: producer_runtime_policy.nil?,
             **security
           )
         rescue Hive::AgentError => e
           report = agent_custody.report
           if report && !report.valid?
-            raise Hive::Artifacts::OutcomeEvidence::StoreError,
+            raise IntegrityError,
                   "#{role} modified protected task state: #{report.diagnostic}"
           end
 
@@ -473,11 +560,11 @@ module Hive
         end
         report = agent_custody.report
         if !report && result.is_a?(Hash) && result[:status] == :ok
-          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+          raise IntegrityError,
                 "#{role} agent custody was not invoked"
         end
         if report && !report.valid?
-          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+          raise IntegrityError,
                 "#{role} modified protected task state: #{report.diagnostic}"
         end
         unless result && result[:status] == :ok
@@ -491,7 +578,7 @@ module Hive
           task: task, project: File.basename(task.project_root)
         ).resolve
         unless resolved == identity
-          raise Hive::Artifacts::OutcomeEvidence::StoreError,
+          raise IntegrityError,
                 "#{role} changed the frozen implementation source"
         end
 
@@ -768,10 +855,14 @@ module Hive
         fenced = text.match(
           /\A(?<preamble>.*?)```json[ \t]*\r?\n(?<json>.*?)\r?\n```[ \t]*(?:\r?\n)?\z/m
         )
-        raise original_error unless fenced && !fenced[:preamble].include?("```")
+        trailing = text.match(
+          /\A(?<preamble>.*?)(?:\r?\n){2,}[ \t]*(?<json>\{.*\})[ \t]*(?:\r?\n)?\z/m
+        )
+        candidate = fenced || trailing
+        raise original_error unless candidate && !candidate[:preamble].include?("```")
 
         JSON.parse(
-          fenced[:json], object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
+          candidate[:json], object_class: Hive::Artifacts::OutcomeEvidence::Document::StrictHash,
           allow_duplicate_key: false
         )
       end
@@ -864,210 +955,6 @@ module Hive
           attempt_count: pointer.fetch("attempt_count"),
           failed_targets: pointer.fetch("failed_targets").join(",")
         )
-      end
-
-      def run_legacy_capture!(task, cfg)
-        capture_policy = Hive::Artifacts::CapturePolicy.for_task(
-          task,
-          project: File.basename(task.project_root)
-        )
-        capture_requirement = capture_policy.ensure!
-        marker = Hive::Markers.current(task.state_file)
-        if marker.name == :complete
-          return { commit: nil, status: :complete } if capture_policy.capture_satisfied?
-
-          return required_capture_error(task, capture_requirement)
-        end
-
-        profile = Hive::Stages::Base.stage_profile(cfg, "artifacts")
-        # External upload is deliberately outside the stage. Do not read or
-        # inject the operator's Screenote credential during autonomous capture.
-        screenote = build_unavailable_context(
-          "External upload requires a separate operator-confirmed action after local inspection.",
-          cfg
-        )
-        prompt = render_prompt(
-          task,
-          screenote: screenote,
-          capture_requirement: capture_requirement
-        )
-        spawn_artifacts_agent(task, cfg, prompt, profile, screenote: screenote)
-        marker = Hive::Markers.current(task.state_file)
-        if marker.name == :complete && !capture_policy.capture_satisfied?
-          return required_capture_error(task, capture_requirement)
-        end
-        { commit: action_for(marker.name), status: marker.name }
-      end
-
-      def required_capture_error(task, requirement)
-        Hive::Markers.set(
-          task.state_file,
-          :error,
-          reason: "required_capture_missing",
-          capture_requirement: requirement.fetch("result"),
-          remediation: "run supervised local capture and retain media/capture-manifest.json"
-        )
-        { commit: "error", status: :error }
-      end
-
-      # `screenote:` is required (no `screenote_context(cfg)` default): the
-      # default ran a real CredentialStore.new.load against the dev machine for
-      # any caller that omitted it, coupling tests to ambient disk state. The
-      # sole production caller (run!) always passes it.
-      def spawn_artifacts_agent(task, cfg, prompt, profile, screenote:)
-        cwd = File.directory?(task.worktree_path.to_s) ? task.worktree_path : task.folder
-        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
-          cfg, "artifacts", task, profile,
-          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
-        )
-        kwargs = {
-          prompt: prompt,
-          add_dirs: scope.fetch(:add_dirs),
-          cwd: cwd,
-          max_budget_usd: cfg.dig("budget_usd", "artifacts") || Hive::Config::DEFAULTS.dig("budget_usd", "artifacts"),
-          timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
-          log_label: "artifacts",
-          profile: profile,
-          **Hive::Stages::Base.model_launch_arguments(
-            cfg, "artifacts", profile,
-            current: Hive::Stages::Base.model_routing_current(cfg["artifacts"])
-          ),
-          **Hive::Stages::Base.tool_scope_kwargs(scope),
-          status_mode: :state_file_marker
-        }
-        mcp_config_path = nil
-        if Hive::AgentSupport.supports?(profile, :Interactive)
-          allowed_tools = Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
-          if screenote[:connected]
-            begin
-              mcp_config_path = Hive::Screenote::McpConfig.new(credential: screenote.fetch(:credential)).write!
-              allowed_tools = Hive::Screenote::McpConfig.allowed_tools_csv(allowed_tools)
-            rescue SystemCallError, Hive::ConfigError => e
-              # An unwritable/full cache_home (SystemCallError) OR a credential
-              # that lost a required key between screenote_context's check and
-              # McpConfig#payload (Hive::ConfigError) must degrade to a no-MCP
-              # run (the agent keeps local media), not hard-fail the stage (A8).
-              warn "[hive] could not write Screenote MCP config; running artifacts " \
-                   "without Screenote upload: #{e.message}"
-              mcp_config_path = nil
-            end
-          end
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task,
-            cfg,
-            **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("7-artifacts", task), # coding-scoped: coding artifacts stage tmux session
-            allowed_tools: allowed_tools,
-            mcp_config_path: mcp_config_path,
-            strict_mcp_config: !mcp_config_path.nil?
-          )
-        else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
-        end
-      ensure
-        if mcp_config_path
-          begin
-            FileUtils.rm_f(mcp_config_path)
-          rescue SystemCallError => e
-            # The ephemeral 0600 config embeds the bearer; if cleanup fails
-            # (e.g. EACCES) it lingers on disk. Surface it so an operator can
-            # remove it, rather than swallowing the failure silently.
-            warn "[hive] could not remove ephemeral Screenote MCP config #{mcp_config_path}: #{e.message}"
-          end
-        end
-      end
-
-      def render_prompt(task, screenote: nil, capture_requirement: nil)
-        screenote ||= build_unavailable_context("Screenote is not connected; run `hive connect screenote`.", {})
-        capture_requirement ||= {
-          "result" => "not_applicable",
-          "rationale" => "No precomputed capture requirement was supplied.",
-          "task_generation" => "unknown"
-        }
-        Hive::Stages::Base.render(
-          "artifacts_prompt.md.erb",
-          Hive::Stages::Base::TemplateBindings.new(
-            project_name: File.basename(task.project_root),
-            task_folder: task.folder,
-            worktree_path: task.worktree_path,
-            artifact_file: task.state_file,
-            capture_requirement: capture_requirement.fetch("result"),
-            capture_rationale: capture_requirement.fetch("rationale"),
-            capture_generation: capture_requirement.fetch("task_generation"),
-            screenote_connected: screenote[:connected],
-            screenote_project_id: screenote[:project_id],
-            screenote_base_url: screenote[:base_url],
-            screenote_skip_reason: screenote[:reason],
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag
-          )
-        )
-      end
-
-      def screenote_context(cfg, credential_store: Hive::Screenote::CredentialStore.new, now: Time.now)
-        credential = credential_store.load
-        return warn_and_build_unavailable("Screenote is not connected; run `hive connect screenote`.", cfg) unless credential
-
-        if credential_store.expired?(credential, now: now)
-          return warn_and_build_unavailable("Screenote OAuth token expired; run `hive connect screenote`.", cfg)
-        end
-
-        project_id = cfg.dig("screenote", "project_id").to_s.strip
-        project_id = credential["project_id"].to_s.strip if project_id.empty?
-        if project_id.empty?
-          return warn_and_build_unavailable("Screenote has no default project; run `hive connect screenote`.", cfg)
-        end
-
-        if credential["access_token"].to_s.strip.empty? || credential["mcp_resource"].to_s.strip.empty?
-          return warn_and_build_unavailable("Screenote credential is incomplete; run `hive connect screenote`.", cfg)
-        end
-
-        {
-          connected: true,
-          credential: credential,
-          project_id: project_id,
-          base_url: connected_base_url(credential, cfg),
-          reason: nil
-        }
-      rescue Hive::ConfigError => e
-        warn_and_build_unavailable("Screenote credential is invalid: #{e.message}", cfg)
-      rescue SystemCallError => e
-        # A8 fail-soft: a read failure on the credential file (EACCES /
-        # EISDIR / a TOCTOU ENOENT) must skip Screenote, not hard-fail the
-        # 7-artifacts stage. CredentialStore#load only rescues JSON errors,
-        # so an OS-level File.read failure escapes here as SystemCallError.
-        warn_and_build_unavailable("Screenote credential could not be read: #{e.message}", cfg)
-      end
-
-      # Visible fail-soft: warn at run time so an operator watching the run
-      # sees WHY no upload happened (the cause was otherwise buried only in
-      # the prompt/manifest), then return the unavailable context. Used by
-      # screenote_context's skip paths; `build_unavailable_context` stays the
-      # silent builder for render_prompt's default binding (which deliberately
-      # skips the warn).
-      def warn_and_build_unavailable(reason, cfg)
-        warn "[hive] Screenote upload disabled for artifacts: #{reason}"
-        build_unavailable_context(reason, cfg)
-      end
-
-      def build_unavailable_context(reason, cfg)
-        {
-          connected: false,
-          credential: nil,
-          project_id: nil,
-          base_url: config_base_url(cfg),
-          reason: reason
-        }
-      end
-
-      # The configured Screenote base URL, falling back to the OAuth
-      # client's default. The `|| DEFAULT_BASE_URL` fallback is load-bearing
-      # for `render_prompt`'s empty-cfg default-arg path.
-      def config_base_url(cfg)
-        cfg.dig("screenote", "base_url") || Hive::Screenote::OAuthClient::DEFAULT_BASE_URL
-      end
-
-      def connected_base_url(credential, cfg)
-        credential["base_url"].to_s.empty? ? config_base_url(cfg) : credential["base_url"]
       end
 
       def action_for(marker_name)

@@ -6,6 +6,7 @@ require "hive/workflows"
 require "hive/task_closure"
 require "hive/task_projection"
 require "hive/terminal_outcome"
+require "hive/patrol_fix/publication_block_receipt"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -22,6 +23,7 @@ module Hive
       completion_ready unknown idle
     ].freeze
     RUNNING_ACTIONS = %w[agent_running].freeze
+    RUNNING_MARKERS = %w[agent_working review_working].freeze
     REPAIR_ACTIONS = %w[error recover_execute recover_review admission_error].freeze
     COMPLETION_ACTIONS = %w[ready_to_archive review_parked].freeze
     HUMAN_ACTIONS = %w[needs_input].freeze
@@ -201,7 +203,7 @@ module Hive
         issues << issue(
           code: "legacy_stage_dirs", source: "task_graph", project: project["name"],
           message: "#{total} task#{total == 1 ? '' : 's'} hidden in legacy stage dirs: #{dirs}",
-          remediation: project["legacy_migrate_command"] || "hive migrate"
+          remediation: project["legacy_state_guide"] || "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
         )
       end
       active.each do |project, row|
@@ -390,9 +392,13 @@ module Hive
           scheduler_disposition.fetch("reason", "scheduler disposition is unavailable"),
           "scheduler"
         )
-        reasons.unshift(scheduler_reason) if material_scheduler_disposition?(scheduler_disposition)
+        controller_failure = scheduler_disposition["decision"] == "markerless_stalled" &&
+          typed_attempt_diagnostic(row)
+        if material_scheduler_disposition?(scheduler_disposition)
+          controller_failure ? reasons.push(scheduler_reason) : reasons.unshift(scheduler_reason)
+        end
         scheduler_state, scheduler_owner = classify_scheduler_disposition(scheduler_disposition)
-        unless running?(row) || scheduler_state.nil?
+        unless running?(row) || scheduler_state.nil? || controller_failure
           state = scheduler_state
           owner = scheduler_owner
         end
@@ -416,12 +422,7 @@ module Hive
           "marker" => row.fetch("marker"),
           "allowed_outcomes" => Array(row["outcomes"])
         },
-        "liveness" => {
-          "status" => liveness_status(row),
-          "pid" => row["task_lock_pid"] || row["claude_pid"],
-          "attempt_id" => row["attempt_id"],
-          "task_generation" => row["task_generation"]
-        },
+        "liveness" => liveness_payload(row),
         "state" => state,
         "blocker_owner" => owner,
         "reason" => reasons.first.fetch("message"),
@@ -582,7 +583,7 @@ module Hive
     end
 
     def material_scheduler_disposition?(disposition)
-      !%w[not_evaluated skip project_disabled].include?(disposition["decision"])
+      !%w[not_evaluated skip project_disabled attempt_terminal_replay].include?(disposition["decision"])
     end
 
     def classify_scheduler_disposition(disposition)
@@ -597,8 +598,6 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]
-      when "attempt_terminal_replay"
-        [ "idle", "none" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
       when "semantic_terminal_error"
@@ -619,6 +618,9 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
+      if row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
+        return [ "waiting_on_you", "operator" ]
+      end
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
       if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
         owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
@@ -670,8 +672,8 @@ module Hive
       return malformed_routing_payload(row, project_name) unless routing_value_safe?(raw)
 
       keys = %w[
-        candidates circuit_generations decided_at decision_id exclusions next_action_owner
-        policy policy_digest probe_requirements reason selected_route status task_generation
+        candidates decided_at decision_id exclusions next_action_owner policy policy_digest
+        reason selected_route status task_generation
       ]
       return malformed_routing_payload(row, project_name) unless raw.keys.sort == keys.sort
       core = %w[
@@ -692,9 +694,7 @@ module Hive
         "policy" => raw["policy"],
         "selected_route" => raw["selected_route"],
         "candidates" => Array(raw["candidates"]),
-        "exclusions" => Array(raw["exclusions"]),
-        "circuit_generations" => Array(raw["circuit_generations"]),
-        "probe_requirements" => Array(raw["probe_requirements"])
+        "exclusions" => Array(raw["exclusions"])
       }
     rescue KeyError
       malformed_routing_payload(row, project_name)
@@ -753,7 +753,7 @@ module Hive
             "next_eligible_at" => nil,
             "owner" => "operator",
             "reason" => "recovery_migration_required",
-            "remediation" => "run `hive migrate` in the task project and retry from fresh status",
+            "remediation" => "read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent, then retry from fresh status",
             "retry_count" => nil,
             "provider_hint" => provider_hint(row),
             "terminal_outcome" => nil,
@@ -892,6 +892,9 @@ module Hive
     end
 
     def stale_liveness?(row)
+      return false unless RUNNING_ACTIONS.include?(row["action"]) ||
+                          RUNNING_MARKERS.include?(row["marker"])
+
       (row["claude_pid"] && row["claude_pid_alive"] == false) ||
         (row["task_lock_pid"] && row["live_task_lock"] == false)
     end
@@ -944,6 +947,12 @@ module Hive
           "task has a verified live runner"
         end
         reasons << reason("live_runner", message, "liveness")
+      elsif row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
+        reasons << reason(
+          Hive::PatrolFix::PublicationBlockReceipt::CODE,
+          Hive::PatrolFix::PublicationBlockReceipt::SUMMARY,
+          "patrol_fix"
+        )
       elsif row["plan_review"].is_a?(Hash) && row["action"].to_s.start_with?("plan_review")
         review = row.fetch("plan_review")
         message = review["required_action"] || review["blocker_reason"] || row["action_label"]
@@ -1043,6 +1052,17 @@ module Hive
       return "stale" if stale_liveness?(row)
 
       "not_running"
+    end
+
+    def liveness_payload(row)
+      status = liveness_status(row)
+      owned = status != "not_running"
+      {
+        "status" => status,
+        "pid" => owned ? row["task_lock_pid"] || row["claude_pid"] : nil,
+        "attempt_id" => owned ? row["attempt_id"] : nil,
+        "task_generation" => owned ? row["task_generation"] : nil
+      }
     end
 
     def archive_payload(archived)

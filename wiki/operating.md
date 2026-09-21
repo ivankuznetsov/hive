@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-08-25
+updated: 2026-08-30
 tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood]
 ---
 
@@ -474,7 +474,8 @@ the service after project setup, but the init prompt only controls whether that
 project is enrolled for dispatch. The recipes below are the manual fallback for
 environments where setup could not write or enable a unit (read-only
 home, restricted user, custom layout) or for migrating an existing install onto
-a newer template.
+a newer template. [[modules/user_service]] is the authority for shared
+contention, replay, backup, manager-availability, and recovery behavior.
 
 ### Linux (systemd-user)
 
@@ -495,7 +496,14 @@ If you log out and want the daemon to keep running:
 sudo loginctl enable-linger $USER
 ```
 
-The unit declares `Type=simple` and runs `hive daemon start` in the
+All shipped systemd-user templates target `default.target` and deliberately
+omit `network.target` and `network-online.target`: those are system-manager
+targets, not a user-manager or remote-health contract. Bot and babysitter keep
+transient connectivity failures inside their application retry loops; web and
+daemon remain locally available while individual remote operations report
+their own failures. An active unit proves only local process readiness.
+
+The daemon unit declares `Type=simple` and runs `hive daemon start` in the
 foreground — systemd is the supervisor. `Restart=on-failure` brings
 the daemon back after a crash; the daemon's own SIGTERM handler does
 the graceful drain (`daemon.shutdown_grace_sec`, default 600 s). The shipped
@@ -627,7 +635,7 @@ Linux sample unit:
 ```bash
 mkdir -p ~/.config/systemd/user
 cp examples/systemd/hive-bot.service ~/.config/systemd/user/
-$EDITOR ~/.config/systemd/user/hive-bot.service   # set token / paths
+$EDITOR ~/.config/systemd/user/hive-bot.service   # confirm ExecStart=
 systemctl --user daemon-reload
 systemctl --user enable --now hive-bot
 journalctl --user -u hive-bot -f
@@ -638,7 +646,7 @@ macOS sample plist:
 ```bash
 mkdir -p ~/Library/LaunchAgents
 cp examples/launchd/hive-bot.plist ~/Library/LaunchAgents/
-$EDITOR ~/Library/LaunchAgents/hive-bot.plist     # set token / paths
+$EDITOR ~/Library/LaunchAgents/hive-bot.plist     # confirm absolute paths
 launchctl load ~/Library/LaunchAgents/hive-bot.plist
 ```
 

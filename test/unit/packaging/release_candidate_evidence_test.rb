@@ -31,8 +31,7 @@ class ReleaseCandidateEvidenceTest < Minitest::Test
       )
 
       assert_equal first_bytes, File.binread(first_path)
-      assert_equal first.fetch("attempt_id"),
-                   second.fetch("predecessor_attempt_id")
+      refute_includes second, "predecessor_attempt_id"
       effective = second.fetch("effective_gate_set").to_h do |entry|
         [ entry.fetch("name"), entry ]
       end

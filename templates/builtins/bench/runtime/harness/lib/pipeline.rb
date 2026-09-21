@@ -38,6 +38,13 @@ module HiveBench
 
       plan, plan_tel, plan_result = plan_phase(entry, planner, source, base, out_dir)
       return parked(entry, pair_id, planner, "planner hit a provider limit") if limit?(plan_result)
+      # Validate the planner spawn itself: a timeout-kill or non-zero exit can
+      # still leave a non-empty plan file behind (partial work), and emptiness
+      # alone is not success. Only a clean planner exit may reach the executor.
+      if (plan_status = plan_result[:status]) != :ok
+        return cell(entry, pair_id, executor, "plan_failed", nil, plan_tel,
+                    plan_status == :timeout ? "planner timed out" : "planner exited non-zero")
+      end
       if plan.strip.empty?
         return cell(entry, pair_id, executor, "plan_failed", nil, plan_tel,
                     "planner wrote no #{IsolationExec::PLAN_OUTPUT_FILE}")

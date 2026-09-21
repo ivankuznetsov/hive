@@ -5,40 +5,79 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
   include HiveTestHelper
 
   EXPECTED_TABLES = %i[
-    attempt_accounting
-    attempt_failure_cohorts
-    attempt_failure_events
-    attempt_lost_outcomes
-    attempt_maintenance
-    attempt_relationships
-    attempt_routing_decisions
     attempts
-    capacity_reservations
     daemon_runtime
-    dispatch_outbox
     dispatch_requests
     installations
-    patrol_allowances
     payload_references
-    pr_merge_project_state
-    pr_merge_reconciliations
     projects
-    provider_audit
-    provider_circuits
-    routing_policies
     schema_info
-    task_counters
     task_leases
     task_subjects
-    terminal_pending_publications terminal_publication_obligations
     token_usage
+  ].freeze
+
+  EXPECTED_ATTEMPT_COLUMNS = %i[
+    accepted_at accepted_date admission_runtime_digest
+    admission_workflow attempt_id created_at details_json ended_at
+    heartbeat_at lease_version
+    lost_recovery_cleanup lost_recovery_phase lost_recovery_request_id
+    lost_recovery_revision lost_recovery_updated_at outcome ownership_generation
+    project_id project_name provider_account_id publication_accounting_acknowledged
+    publication_dispatch_acknowledged publication_journal_acknowledged publication_promoted
+    refunded request_id retain_until retry_charge source_fingerprint
+    started_at state subject_json subject_key subject_kind task_generation task_id
+    task_slug terminal_publication_created_at terminal_receipt_digest
+    terminal_receipt_json terminal_task_source_fingerprint
+  ].freeze
+
+  EXPECTED_DISPATCH_COLUMNS = %i[
+    claim_attempt_id claim_owner claim_pid claim_process_identity claimed_at
+    created_at due_at idempotency_key intended_stage payload_json priority
+    project_id recovery_request request_id result_available_at result_delivered_at
+    result_digest result_json result_state retain_until revision source_fingerprint
+    state subject_key subject_kind task_generation task_id task_slug updated_at
+  ].freeze
+
+  RETIRED_ATTEMPT_COLUMNS = %i[
+    checkpoint_json owner_identity_json routing_json record_json record_digest
   ].freeze
 
   def test_migration_creates_the_complete_domain_schema
     with_database do |database|
-      tables = database.read { |connection| connection.tables.sort }
+      tables, attempt_columns, dispatch_columns = database.read do |connection|
+        [
+          connection.tables.sort,
+          connection.schema(:attempts).map(&:first).sort,
+          connection.schema(:dispatch_requests).map(&:first).sort
+        ]
+      end
 
       assert_equal EXPECTED_TABLES, tables
+      assert_equal EXPECTED_ATTEMPT_COLUMNS, attempt_columns
+      assert_equal EXPECTED_DISPATCH_COLUMNS, dispatch_columns
+      assert_empty RETIRED_ATTEMPT_COLUMNS & attempt_columns
+      refute_includes dispatch_columns, :routing_policy_digest
+    end
+  end
+
+  def test_every_retained_foreign_key_has_a_full_leading_index
+    with_database do |database|
+      missing = database.read do |connection|
+        EXPECTED_TABLES.flat_map do |table|
+          next [] if table == :schema_info
+
+          indexes = full_index_columns(connection, table)
+          connection.foreign_key_list(table).filter_map do |foreign_key|
+            columns = foreign_key.fetch(:columns).map(&:to_s)
+            next if indexes.any? { |index| index.first(columns.length) == columns }
+
+            "#{table}(#{columns.join(',')})"
+          end
+        end
+      end
+
+      assert_empty missing, "foreign-key child paths without leading indexes: #{missing.join(', ')}"
     end
   end
 
@@ -75,16 +114,7 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     with_database do |database|
       ids = seed_project_and_task(database)
       database.transaction do |connection|
-        base = {
-          project_id: ids.fetch(:project_id), task_id: ids.fetch(:task_id),
-          subject_kind: "task_stage", subject_key: "4-execute",
-          task_generation: "task:v1", ownership_generation: "owner:v1",
-          state: "running", lease_version: 0, routing_json: "{}",
-          source_fingerprint: "sha256:source", record_json: "{}",
-          record_digest: "a" * 64, subject_json: "{}", project_name: "hive",
-          task_slug: "sqlite", accepted_date: "2026-08-29", created_at: timestamp,
-          accepted_at: timestamp
-        }
+        base = attempt_row(ids)
         connection[:attempts].insert(base.merge(attempt_id: uuid("4")))
         assert_raises(Sequel::UniqueConstraintViolation) do
           connection[:attempts].insert(base.merge(attempt_id: uuid("5")))
@@ -92,32 +122,13 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
       end
 
       foreign_keys = database.read do |connection|
-        %i[
-          attempt_routing_decisions attempt_failure_cohorts attempt_failure_events
-        ].to_h { |table| [ table, connection.foreign_key_list(table).first ] }
-      end
-      assert_equal :set_null,
-                   foreign_keys.dig(:attempt_routing_decisions, :on_delete)
-      assert_equal :set_null,
-                   foreign_keys.dig(:attempt_failure_cohorts, :on_delete)
-      assert_equal :cascade,
-                   foreign_keys.dig(:attempt_failure_events, :on_delete)
-
-      database.transaction do |connection|
-        circuit = {
-          circuit_id: uuid("6"), scope_kind: "provider_account", provider_account_id: "acct",
-          model: "", automatic_state: "closed", manual_block: 0,
-          generation: 0, journal_epoch: 0, probe_attempt_id: uuid("4"),
-          probe_json: "{}",
-          updated_at: timestamp
+        {
+          attempt: connection.foreign_key_list(:attempts).find do |foreign_key|
+            foreign_key.fetch(:columns) == [ :request_id ]
+          end
         }
-        connection[:provider_circuits].insert(circuit)
-        connection[:provider_circuits].insert(
-          circuit.merge(circuit_id: uuid("8"), scope_kind: "model", model: "model-a")
-        )
-        assert_equal 2,
-                     connection[:provider_circuits].where(probe_attempt_id: uuid("4")).count
       end
+      assert_nil foreign_keys[:attempt], "queue cleanup must not mutate attempt provenance"
 
       database.transaction do |connection|
         request = {
@@ -132,6 +143,117 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
         assert_raises(Sequel::UniqueConstraintViolation) do
           connection[:dispatch_requests].insert(request.merge(request_id: uuid("a")))
         end
+      end
+    end
+  end
+
+  def test_retained_enums_accept_emitted_values_and_reject_retired_values
+    with_database do |database|
+      ids = seed_project_and_task(database)
+      request = dispatch_row(ids)
+      database.transaction do |connection|
+        connection[:dispatch_requests].insert(request)
+        %w[claimed admitted awaiting_delivery completed cancelled].each do |state|
+          connection[:dispatch_requests].where(request_id: request.fetch(:request_id)).update(state: state)
+        end
+      end
+
+      database.read do |connection|
+        assert_equal %i[installation_id observation_json], connection[:daemon_runtime].columns
+        refute_includes connection[:installations].columns, :lineage_id
+        refute_includes connection[:projects].columns, :repository_identity_json
+        assert_equal %i[task_id holder_id holder_process_identity holder_pid payload_json lease_version],
+                     connection[:task_leases].columns
+      end
+
+      database.transaction do |connection|
+        connection[:payload_references].insert(
+          payload_id: uuid("3"), task_id: ids.fetch(:task_id), kind: "attempt_log",
+          relative_path: "open/task.log", state: "open", created_at: timestamp
+        )
+        connection[:payload_references].insert(
+          payload_id: uuid("4"), task_id: ids.fetch(:task_id), kind: "attempt_log",
+          relative_path: "sealed/task.log", sha256: "a" * 64, bytes: 12,
+          state: "sealed", created_at: timestamp
+        )
+        connection[:payload_references].insert(
+          payload_id: uuid("5"), task_id: ids.fetch(:task_id), kind: "attempt_log",
+          relative_path: "sealed/expired.log", sha256: "b" * 64, bytes: 13,
+          state: "releasable", created_at: timestamp, retain_until: timestamp
+        )
+        assert_raises(Sequel::CheckConstraintViolation) do
+          connection[:payload_references].insert(
+            payload_id: uuid("6"), task_id: ids.fetch(:task_id), kind: "attempt_log",
+            relative_path: "sealed/pinned.log", sha256: "c" * 64, bytes: 14,
+            state: "pinned", created_at: timestamp
+          )
+        end
+      end
+    end
+  end
+
+  def test_attempt_result_and_publication_checks_reject_invalid_combinations
+    with_database do |database|
+      ids = seed_project_and_task(database)
+
+      assert_raises(Sequel::CheckConstraintViolation) do
+        database.transaction do |connection|
+          connection[:attempts].insert(
+            attempt_row(ids).merge(
+              attempt_id: uuid("4"), state: "terminal", outcome: "succeeded",
+              ended_at: timestamp, terminal_receipt_json: "{}"
+            )
+          )
+        end
+      end
+
+      assert_raises(Sequel::CheckConstraintViolation) do
+        database.transaction do |connection|
+          connection[:attempts].insert(
+            attempt_row(ids).merge(
+              attempt_id: uuid("5"), state: "lost", ended_at: timestamp,
+              terminal_receipt_json: "{}", terminal_receipt_digest: "a" * 64,
+              terminal_publication_created_at: timestamp,
+              lost_recovery_phase: "complete", lost_recovery_revision: 1,
+              lost_recovery_updated_at: timestamp
+            )
+          )
+        end
+      end
+
+      assert_raises(Sequel::CheckConstraintViolation) do
+        database.transaction do |connection|
+          connection[:dispatch_requests].insert(
+            dispatch_row(ids).merge(
+              request_id: uuid("6"), result_state: "pending", result_json: "{}",
+              result_digest: "a" * 64, result_available_at: timestamp,
+              result_delivered_at: timestamp, retain_until: timestamp
+            )
+          )
+        end
+      end
+
+      database.transaction do |connection|
+        connection[:attempts].insert(
+          attempt_row(ids).merge(
+            attempt_id: uuid("8"), subject_key: "terminal-proof", state: "terminal",
+            outcome: "succeeded", ended_at: timestamp, terminal_receipt_json: "{}",
+            terminal_receipt_digest: "c" * 64,
+            terminal_task_source_fingerprint: "sha256:source",
+            terminal_publication_created_at: timestamp,
+            publication_journal_acknowledged: 1,
+            publication_accounting_acknowledged: 1,
+            publication_dispatch_acknowledged: 1,
+            publication_promoted: 1
+          )
+        )
+        connection[:dispatch_requests].insert(
+          dispatch_row(ids).merge(
+            request_id: uuid("a"), subject_key: "result-proof", result_state: "pending",
+            result_json: "{}", result_digest: "d" * 64,
+            result_available_at: timestamp, retain_until: timestamp
+          )
+        )
       end
     end
   end
@@ -196,6 +318,38 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
   end
 
   private
+
+  def full_index_columns(connection, table)
+    connection.fetch("PRAGMA index_list(#{connection.literal(table.to_s)})").filter_map do |row|
+      next if row.fetch(:partial) == 1
+
+      connection.fetch("PRAGMA index_info(#{connection.literal(row.fetch(:name))})").all
+        .sort_by { |entry| entry.fetch(:seqno) }.map { |entry| entry.fetch(:name) }
+    end
+  end
+
+  def attempt_row(ids)
+    {
+      project_id: ids.fetch(:project_id), task_id: ids.fetch(:task_id),
+      subject_kind: "task_stage", subject_key: "4-execute", subject_json: "{}",
+      task_generation: "task:v1", ownership_generation: "owner:v1",
+      state: "running", lease_version: 0, source_fingerprint: "sha256:source",
+      details_json: "{}", project_name: "hive",
+      task_slug: "sqlite", accepted_date: "2026-08-29", created_at: timestamp,
+      accepted_at: timestamp, retry_charge: 0, refunded: 0
+    }
+  end
+
+  def dispatch_row(ids)
+    {
+      request_id: uuid("9"), project_id: ids.fetch(:project_id),
+      task_id: ids.fetch(:task_id), subject_kind: "task_stage",
+      subject_key: "4-execute", task_slug: "sqlite", task_generation: "task:v1",
+      intended_stage: "4-execute", state: "queued", priority: 0,
+      source_fingerprint: "sha256:request-source", payload_json: "{}",
+      created_at: timestamp, updated_at: timestamp
+    }
+  end
 
   def with_database
     with_tmp_dir do |root|

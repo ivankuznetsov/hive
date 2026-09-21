@@ -209,6 +209,49 @@ module Hive
       raise InvalidRequest, e.message
     end
 
+    # External readers such as Betterleaks inherit the same no-helper Git
+    # policy as closed reads, without reaching into ManagedGit themselves.
+    def read_environment
+      env = { "GIT_CONFIG_GLOBAL" => File::NULL, "GIT_CONFIG_NOSYSTEM" => "1",
+              "GIT_CONFIG_COUNT" => Hive::ManagedGit::CONFIG.length.to_s }
+      Hive::ManagedGit::CONFIG.each_with_index do |entry, index|
+        key, value = entry.split("=", 2)
+        env["GIT_CONFIG_KEY_#{index}"] = key
+        env["GIT_CONFIG_VALUE_#{index}"] = value
+      end
+      env
+    end
+
+    # The creation OID is provenance, not the current PR diff base. Prefer
+    # the remote-tracking target and use a local target for offline repositories.
+    def change_base(repository_path, branch:, head_oid:)
+      target = read(repository_path, :branch_oid, branch: branch, remote: true)
+      target = read(repository_path, :branch_oid, branch: branch) unless target.success?
+      raise CommandFailed, "PR base branch is unavailable" unless target.success?
+
+      base = read(repository_path, :merge_base, base_oid: target.stdout.strip, head_oid: head_oid)
+      raise CommandFailed, "PR merge-base is unavailable" unless base.success?
+
+      base.stdout.strip
+    end
+
+    def diff_digest(path, base_oid:, head_oid:)
+      repository = repository_path(path)
+      validate_repository_config!(repository)
+      arguments = read_arguments(:diff, { base_oid: base_oid, head_oid: head_oid })
+      digest = Digest::SHA256.new
+      Hive::ManagedGit.popen3(repository, *arguments) do |input, output, error, process|
+        input.close
+        drain = Thread.new { IO.copy_stream(error, File::NULL) }
+        while (chunk = output.read(16 * 1024))
+          digest << chunk
+        end
+        drain.value
+        raise CommandFailed, "publication diff is unavailable" unless process.value.success?
+      end
+      digest.hexdigest
+    end
+
     def observe_remote_branch(repository_path:, branch:, remote: "origin",
                               allow_local_transport: false)
       name = branch_name(branch)
@@ -459,6 +502,20 @@ module Hive
       when :head_oid
         expect_parameters!(parameters)
         [ "rev-parse", "--verify", "HEAD^{commit}" ]
+      when :git_dir
+        expect_parameters!(parameters)
+        [ "rev-parse", "--absolute-git-dir" ]
+      when :branch_oid
+        branch = Hive::GitRef.validate_branch_name(parameters.delete(:branch))
+        remote = parameters.delete(:remote) == true
+        expect_parameters!(parameters)
+        ref = remote ? "refs/remotes/origin/#{branch}" : "refs/heads/#{branch}"
+        [ "rev-parse", "--verify", "#{ref}^{commit}" ]
+      when :merge_base
+        base = exact_oid(parameters.delete(:base_oid), label: "base OID")
+        head = exact_oid(parameters.delete(:head_oid), label: "head OID")
+        expect_parameters!(parameters)
+        [ "merge-base", base, head ]
       when :commit_oid
         oid = exact_oid(parameters.delete(:oid), label: "commit OID")
         expect_parameters!(parameters)

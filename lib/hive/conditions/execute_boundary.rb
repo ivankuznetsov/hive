@@ -3,6 +3,7 @@ require "hive/attempts/repository"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/migration"
 require "hive/conditions/reconcilers/execute"
+require "hive/conditions/recovery_action"
 require "hive/conditions/shadow_audit"
 require "hive/markers"
 require "hive/paths"
@@ -146,7 +147,7 @@ module Hive
           return [ :execute_complete, attrs, "execute_complete", :execute_complete ]
         end
 
-        diagnostic = gate.diagnostics.first || {}
+        diagnostic = RecoveryAction.primary_diagnostic(gate) || {}
         reason = diagnostic["reason"].to_s
         reason = diagnostic["state"] == "unverifiable" ? "condition_unverifiable" :
           "condition_pending" if reason.empty?

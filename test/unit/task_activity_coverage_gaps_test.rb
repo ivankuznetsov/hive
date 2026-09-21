@@ -252,32 +252,6 @@ class TaskActivityCoverageGapsTest < Minitest::Test
                     Hive::TaskActivity::Operation.begin!(activity: activity, receipt: receipt)
       end
 
-      retry_operation = Object.new
-      retry_operation.define_singleton_method(:receipt) { { "state" => "aborted" } }
-      retry_operation.define_singleton_method(:same_intent?) { |_| true }
-      with_replaced_singleton_method(File, :exist?, ->(*) { true }) do
-        with_replaced_singleton_method(
-          Hive::TaskActivity::Operation, :open!, ->(**) { retry_operation }
-        ) do
-          assert_raises(Hive::TaskActivity::Conflict) do
-            Hive::TaskActivity::Operation.begin_retry!(activity: activity, receipt: receipt)
-          end
-        end
-      end
-
-      conflicting_retry = Object.new
-      conflicting_retry.define_singleton_method(:receipt) { { "state" => "complete" } }
-      conflicting_retry.define_singleton_method(:same_intent?) { |_| false }
-      with_replaced_singleton_method(File, :exist?, ->(*) { true }) do
-        with_replaced_singleton_method(
-          Hive::TaskActivity::Operation, :open!, ->(**) { conflicting_retry }
-        ) do
-          assert_raises(Hive::TaskActivity::Conflict) do
-            Hive::TaskActivity::Operation.begin_retry!(activity: activity, receipt: receipt)
-          end
-        end
-      end
-
       assert_raises(Hive::TaskActivity::InvalidActivity) do
         Hive::TaskActivity::Operation.open!(activity: activity, filename: "bad")
       end

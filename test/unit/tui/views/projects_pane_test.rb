@@ -160,14 +160,14 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
           "name" => "legacy",
           "tasks" => [],
           "legacy_stage_dirs" => [ "7-done" ],
-          "legacy_migrate_command" => "hive migrate"
+          "legacy_state_guide" => "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
         }
       ]
     )
     model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, pane_focus: :left)
     out = Hive::Tui::Views::ProjectsPane.render(model, width: 60)
 
-    assert_includes out, "⚠ legacy (legacy dirs — run hive migrate)"
+    assert_includes out, "⚠ legacy (legacy dirs — run hive status)"
   end
 
   def test_unhealthy_project_with_unknown_error_uses_raw_error_label

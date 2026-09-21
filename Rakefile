@@ -1,9 +1,11 @@
 require "rake/testtask"
 require "fileutils"
+require "etc"
 require "securerandom"
 require_relative "test/support/coverage"
 require_relative "test/support/tmp_cleanup"
 require_relative "test/support/changed_coverage"
+require_relative "test/support/test_partition"
 
 # These expensive outer proofs are intentionally separate from the normal local
 # suite. CI runs them as named merge gates.
@@ -18,35 +20,21 @@ HIVE_CI_GATE_TEST_OPTIONS = {
   "test:babysitter_dry_run_security_matrix" =>
     "--include=test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands"
 }.freeze
+HIVE_SYSTEMD_USER_GATE_TESTS = %w[
+  test/unit/examples_systemd_user_templates_test.rb
+  test/unit/bot/supervisor_test.rb
+  test/unit/bot/telegram_test.rb
+  test/unit/babysitter/project_tick_test.rb
+  test/integration/systemd_user_service_offline_test.rb
+].freeze
 HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
 ].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
 HIVE_COVERAGE_SHARD_COUNT = 6
-HIVE_COVERAGE_SHARDS = begin
-  partition_by_bytes = lambda do |files, count|
-    shards = Array.new(count) { [] }
-    shard_bytes = Array.new(count, 0)
+HIVE_COVERAGE_SHARDS = HiveTestPartition.partition(
+  HIVE_DEFAULT_TEST_FILES, count: HIVE_COVERAGE_SHARD_COUNT, root: __dir__
+).each(&:freeze).freeze
 
-    files.sort_by { |path| [ -File.size(path), path ] }.each do |path|
-      shard = shard_bytes.each_index.min_by { |index| [ shard_bytes[index], index ] }
-      shards.fetch(shard) << path
-      shard_bytes[shard] += File.size(path)
-    end
-
-    shards
-  end
-
-  # Hosted runs identified the third source-balanced partition as the original
-  # long pole, then exposed the fourth as the remaining long pole. Split those
-  # measured hot partitions while preserving the two faster partitions and
-  # adding only two runners instead of reshuffling or doubling the whole matrix.
-  base_shards = partition_by_bytes.call(HIVE_DEFAULT_TEST_FILES, 4)
-  hot_shards = partition_by_bytes.call(base_shards.fetch(2), 2)
-  tail_shards = partition_by_bytes.call(base_shards.fetch(3), 2)
-  shards = [ base_shards[0], base_shards[1], *hot_shards, *tail_shards ]
-  shards.each(&:freeze)
-  shards.freeze
-end
 HIVE_HOSTILE_TEST_FILES = FileList[
   "test/unit/packaging/workflow_creator_values_test.rb"
 ].to_a.freeze
@@ -61,6 +49,17 @@ Rake::TestTask.new do |t|
   t.warning = false
 end
 
+# Direct root-Hive manifest without the standalone component prerequisite. This
+# is evidence only for the narrowly documented baseline comparison; ordinary
+# local and CI callers continue to use `rake test`.
+Rake::TestTask.new("test:hive") do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = HIVE_DEFAULT_TEST_FILES
+  t.warning = false
+  t.description = "Run the default Hive test-file manifest without component prerequisites"
+end
+
 Rake::TestTask.new("test:agent_cli_runtime") do |t|
   t.libs << "components/agent-cli-runtime/test"
   t.libs << "components/agent-cli-runtime/lib"
@@ -70,6 +69,20 @@ Rake::TestTask.new("test:agent_cli_runtime") do |t|
 end
 
 Rake::Task[:test].enhance([ "test:agent_cli_runtime" ])
+
+namespace :test do
+  desc "Run the complete local suite in bounded, isolated processes (HIVE_TEST_WORKERS=2)"
+  task :parallel do
+    require_relative "script/test_parallel"
+    success = HiveTestParallel.run(
+      files: HIVE_DEFAULT_TEST_FILES,
+      component_files: Dir["components/agent-cli-runtime/test/**/*_test.rb"].sort,
+      root: File.expand_path(__dir__)
+    )
+    abort "parallel test suite failed" unless success
+  end
+end
+
 
 task "test:enable_hostile" do
   ENV["HIVE_HOSTILE_TESTS"] = "1"
@@ -224,7 +237,7 @@ namespace :coverage do
 
     sources = HiveChangedCoverage.changed_sources(base: base)
     if sources.empty?
-      puts "coverage:changed: no changed lib sources versus #{base}; nothing to run"
+      puts "coverage:changed: no changed lib sources versus #{base}; use bin/test --changed for other changes"
       next
     end
 
@@ -237,7 +250,7 @@ namespace :coverage do
 
     root = File.expand_path(__dir__)
     run_id = "changed-#{Process.pid}-#{SecureRandom.hex(4)}"
-    env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+    env_keys = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID HIVE_COVERAGE_COLLECT_ONLY HIVE_COVERAGE_LOAD_ALL RUBYOPT]
     old_env = env_keys.to_h { |key| [ key, ENV[key] ] }
 
     begin
@@ -245,6 +258,8 @@ namespace :coverage do
       ENV["HIVE_COVERAGE"] = "1"
       ENV["HIVE_COVERAGE_ROOT"] = root
       ENV["HIVE_COVERAGE_RUN_ID"] = run_id
+      ENV["HIVE_COVERAGE_COLLECT_ONLY"] = "1"
+      ENV["HIVE_COVERAGE_LOAD_ALL"] = "0"
       ENV["RUBYOPT"] = [ "-I#{File.join(root, 'test')} -rhive_coverage_boot", ENV["RUBYOPT"] ].compact.join(" ")
 
       # Reuse the focused runner so multiple mapped files are all loaded and
@@ -260,8 +275,10 @@ namespace :coverage do
       abort "coverage:changed: focused tests failed" unless success
 
       HiveTestCoverage.configure!(root: root)
-      HiveTestCoverage.report!
-      report = HiveTestCoverage.read_report(File.join(root, "coverage", "coverage.json"))
+      report = HiveTestCoverage.build_report(HiveTestCoverage.merged_results, sources: sources)
+      report_path = File.join(root, "coverage", "#{run_id}.json")
+      File.write(report_path, JSON.pretty_generate(report))
+      puts "coverage:changed: report #{report_path}"
       failures = HiveChangedCoverage.enforce(report, sources: sources)
       abort "coverage:changed failed:\n  - #{failures.join("\n  - ")}" unless failures.empty?
       puts "coverage:changed: exact line coverage holds for all #{sources.length} changed source(s)"
@@ -272,7 +289,7 @@ namespace :coverage do
   end
 end
 
-# Smoke suite — opt-in, runs against real agent CLIs and tmp homes/repos.
+# Smoke suite — opt-in, runs against real agent CLIs and tmp Hive homes/repos.
 # Some Claude cases cost roughly $0.25 per invocation. Excluded from the
 # default suite so CI without authenticated agent binaries does not run it.
 #
@@ -280,13 +297,10 @@ end
 #
 # Per project CLAUDE.md (Ivan's rule "use real APIs, make real requests"):
 # this is the test bed where claude actually gets called.
-task "test:allow_real_user_environment" do
-  ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] = "1"
-end
-
-Rake::TestTask.new(smoke: "test:allow_real_user_environment") do |t|
+Rake::TestTask.new(:smoke) do |t|
   t.libs << "test"
   t.libs << "lib"
+  t.ruby_opts << "-r#{File.expand_path('test/support/allow_real_user_environment', __dir__)}"
   t.test_files = FileList["test/smoke/**/*_test.rb"]
   t.warning = false
   t.description = "Run authenticated live-agent smoke tests (real subprocesses; may incur API cost)"
@@ -309,6 +323,19 @@ end
 
 task "test:require_nonempty_ci_gate" do
   ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
+end
+
+task "test:enable_systemd_user_gate" => "test:require_nonempty_ci_gate" do
+  ENV["HIVE_REQUIRE_SYSTEMD_USER_GATE"] = "1"
+  ENV["HIVE_SYSTEMD_USER_HOME"] = Etc.getpwuid(Process.uid).dir
+end
+
+Rake::TestTask.new("test:systemd_user_service" => "test:enable_systemd_user_gate") do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = HIVE_SYSTEMD_USER_GATE_TESTS
+  t.warning = false
+  t.description = "Run required systemd user-template and offline reconnect proofs"
 end
 
 HIVE_CI_GATE_TESTS.each do |qualified_name, test_file|

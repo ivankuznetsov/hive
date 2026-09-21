@@ -135,11 +135,11 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal "artifacts", policy.stage
   end
 
-  def test_successor_uses_the_same_per_project_configuration
+  def test_recovery_uses_the_same_per_project_configuration
     task = FakeTask.new(slug: "task", project_root: "/projects/demo")
     downstream = Object.new
     call = nil
-    downstream.define_singleton_method(:dispatch_successor) do |**attributes|
+    downstream.define_singleton_method(:dispatch_recovery) do |**attributes|
       call = attributes
       :accepted
     end
@@ -154,12 +154,12 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     )
 
     assert_equal :accepted,
-                 adapter.dispatch_successor(
-                   task: task, predecessor: :lost, argv: %w[hive develop task],
+                 adapter.dispatch_recovery(
+                   task: task, source_attempt: :lost, argv: %w[hive develop task],
                    admission_view: :tick
                  )
     assert_equal task, call.fetch(:task)
-    assert_equal :lost, call.fetch(:predecessor)
+    assert_equal :lost, call.fetch(:source_attempt)
     assert_equal :tick, call.fetch(:admission_view)
   end
 
@@ -191,7 +191,7 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
       :launcher
     end
     downstream = Object.new
-    downstream.define_singleton_method(:dispatch_successor) { |**_attributes| :accepted }
+    downstream.define_singleton_method(:dispatch_recovery) { |**_attributes| :accepted }
     dispatcher_class = Class.new
     dispatcher_class.define_singleton_method(:new) do |**options|
       dispatcher_options << options
@@ -205,8 +205,8 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
 
     2.times do
       assert_equal :accepted,
-                   adapter.dispatch_successor(
-                     task: task, predecessor: :lost, argv: %w[hive develop task]
+                   adapter.dispatch_recovery(
+                     task: task, source_attempt: :lost, argv: %w[hive develop task]
                    )
     end
 

@@ -85,6 +85,35 @@ class HiveTestCoverageTest < Minitest::Test
     end
   end
 
+  def test_focused_report_keeps_unloaded_selected_sources_without_scanning_unrelated_files
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      selected = File.join(dir, "lib", "selected.rb")
+      unrelated = File.join(dir, "lib", "unrelated.rb")
+      File.write(selected, "SELECTED = 1\n")
+      File.write(unrelated, "UNRELATED = 2\n")
+
+      with_coverage_config(root: dir) do
+        report = HiveTestCoverage.build_report({}, sources: [ "lib/selected.rb" ])
+        assert_equal [ "lib/selected.rb" ], report.fetch(:files).map { |file| file.fetch(:file) }
+        assert_equal [ "lib/selected.rb" ], report.fetch(:unloaded_files)
+        refute report.fetch(:ok)
+        assert_equal 2, HiveTestCoverage.build_report({}).fetch(:files).length,
+                     "a focused report must not change the global CI source catalog"
+      end
+    end
+  end
+
+  def test_focused_report_refuses_missing_or_outside_sources
+    with_tmp_dir do |dir|
+      with_coverage_config(root: dir) do
+        [ "lib/missing.rb", "../outside.rb" ].each do |source|
+          assert_raises(ArgumentError) { HiveTestCoverage.build_report({}, sources: [ source ]) }
+        end
+      end
+    end
+  end
+
   def test_unreadable_result_files_fail_the_gate
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "lib"))

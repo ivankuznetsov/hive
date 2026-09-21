@@ -24,23 +24,57 @@ require "English"
 require_relative "support/tmp_cleanup"
 
 HIVE_TEST_SUITE_TMP_DIRS = []
+HIVE_TEST_PARENT_GEM_PATH = Gem.path.join(File::PATH_SEPARATOR).freeze
 
 # Never let a normal test subprocess inherit the operator's Hive state, home,
 # XDG roots, agent configuration, GitHub configuration, or global Git config.
 # Set only HOME and remove the optional overrides so production defaults keep
 # following HOME when an individual test replaces it. Authenticated smoke tests
-# opt out explicitly because they exercise the operator's real agent login.
-unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
-  HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
-  HIVE_TEST_SUITE_TMP_DIRS << HIVE_TEST_USER_ROOT
+# retain the operator HOME for agent login, but still isolate Hive-owned state.
+requested_test_files = Array(Thread.current[:hive_test_requested_files])
+Thread.current[:hive_test_requested_files] = nil
+allow_real_user_env = ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
+if allow_real_user_env
+  requested_test_files.concat(ARGV.grep(/\.rb\z/))
+  test_root = File.expand_path(__dir__)
+  test_prefix = "#{test_root}#{File::SEPARATOR}"
+  program_path = File.expand_path($PROGRAM_NAME)
+  requested_test_files << program_path if program_path.start_with?(test_prefix) && program_path.end_with?(".rb")
+  requested_test_files = [ $PROGRAM_NAME ] if requested_test_files.empty?
+  smoke_root = File.expand_path("smoke", __dir__)
+  smoke_prefix = "#{smoke_root}#{File::SEPARATOR}"
+  unless requested_test_files.all? { |path| File.expand_path(path).start_with?(smoke_prefix) }
+    abort "HIVE_TEST_ALLOW_REAL_USER_ENV=1 is only supported for test/smoke files"
+  end
+end
+
+HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
+HIVE_TEST_SUITE_TMP_DIRS << HIVE_TEST_USER_ROOT
+if allow_real_user_env
+  test_hive_home = File.join(HIVE_TEST_USER_ROOT, "hive-home")
+  FileUtils.mkdir_p(test_hive_home)
+  ENV["HIVE_HOME"] = test_hive_home
+  ENV["XDG_DATA_HOME"] = File.join(HIVE_TEST_USER_ROOT, "data")
+  ENV["XDG_BIN_HOME"] = File.join(HIVE_TEST_USER_ROOT, "bin")
+  ENV.delete("HIVE_PREFIX")
+else
   test_home = File.join(HIVE_TEST_USER_ROOT, "home")
   FileUtils.mkdir_p(test_home)
+  # Bundler is activated before tests isolate HOME. Ruby subprocess fixtures
+  # inherit that activation, so preserve the parent's already-resolved locked
+  # gem path instead of making them rediscover gems beneath the throwaway HOME.
+  ENV["GEM_PATH"] = HIVE_TEST_PARENT_GEM_PATH if ENV["BUNDLE_GEMFILE"]
   ENV["HOME"] = test_home
   %w[
     HIVE_HOME
     HIVE_RUNTIME_CHANNEL
     HIVE_RUNTIME_BUILD_SHA
     HIVE_RUNTIME_DEPLOYMENT_ID
+    HIVE_CLAUDE_BIN
+    HIVE_CODEX_BIN
+    HIVE_PI_BIN
+    HIVE_GROK_BIN
+    HIVE_OPENCODE_BIN
     XDG_CONFIG_HOME
     XDG_DATA_HOME
     XDG_STATE_HOME
@@ -114,7 +148,11 @@ end
 
 if ENV["HIVE_COVERAGE"]
   HiveTestCoverage.install_reporter!
-  HiveTestCoverage.load_all_sources! unless ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"
+  if ENV["HIVE_COVERAGE_LOAD_ALL"] == "0"
+    HiveTestCoverage.reload_preloaded_entrypoint!
+  else
+    HiveTestCoverage.load_all_sources!
+  end
 end
 
 module HiveTestStdinIsolation
@@ -286,29 +324,8 @@ module HiveTestHelper
   end
 
   def activate_test_control_plane(state_home)
-    require "hive/runtime_control_plane/cutover_manifest"
-    epoch = 20260829120000
-    database = Hive::RuntimeControlPlane::Database.new(
-      path: Hive::Paths.runtime_control_plane_path(state_home)
-    ).migrate!
-    identity = database.read { |db| db[:installations].first }
-    database.transaction do |db|
-      db[:installations].update(
-        activation_epoch: epoch, activated_at: "2026-08-29T12:00:00.000000Z"
-      )
-    end
-    database.disconnect
-    root = File.join(state_home, ".runtime-cutover", "current")
-    FileUtils.mkdir_p(root)
-    document = Hive::RuntimeControlPlane::CutoverManifest.build(
-      phase: "active", installation_id: identity.fetch(:installation_id),
-      lineage_id: identity.fetch(:lineage_id), source_release: "0.7.1",
-      target_release: Hive::VERSION, exclusions: [], task_authority: [],
-      evidence: { "activation_epoch" => epoch }
-    )
-    Hive::RuntimeControlPlane::CutoverManifest.new(
-      path: File.join(root, "active.json")
-    ).publish(document)
+    require "hive/runtime_control_plane/installation"
+    Hive::RuntimeControlPlane::Installation.setup(state_home: state_home)
   end
 
   def register_runtime_project(database:, name:, path:,
@@ -378,6 +395,7 @@ module HiveTestHelper
     project_root, state_home: nil, state_root_path: File.join(project_root, ".hive-state")
   )
     require "digest"
+    require "hive/runtime_control_plane/task_lease_repository"
     require "hive/task_counter"
     state_home ||= (@hive_test_runtime_state_home ||= tracked_tmp_dir("hive-test-runtime"))
     project_name = "test-#{Digest::SHA256.hexdigest(project_root)[0, 16]}"
@@ -707,6 +725,7 @@ module HiveTestHelper
       keys = %w[HOME HIVE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_BIN_HOME]
       old = keys.to_h { |key| [ key, ENV.fetch(key, nil) ] }
       ENV["HOME"] = File.join(dir, "home")
+      FileUtils.mkdir_p(ENV.fetch("HOME"))
       ENV.delete("HIVE_HOME")
       ENV["XDG_CONFIG_HOME"] = File.join(dir, "config")
       ENV["XDG_DATA_HOME"] = File.join(dir, "data")

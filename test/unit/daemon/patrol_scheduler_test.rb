@@ -152,6 +152,49 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_reservation_rechecks_patrol_enablement
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [ entry ] },
+        config_loader: ->(_path) { cfg },
+        git: FakeGit.new,
+        database: runtime_database(entry)
+      )
+      candidate = sched.candidates(now: T0).fetch(0)
+      cfg = enabled_cfg("patrol" => { "enabled" => false })
+
+      assert_nil sched.reserve(candidate, now: T0)
+      refute sched.pending?(entry.fetch("name"))
+    end
+  end
+
+  def test_reservation_rejects_a_replaced_registration
+    with_tmp_dir do |dir|
+      original = project_entry(File.join(dir, "original"))
+      replacement = project_entry(File.join(dir, "replacement")).merge(
+        "project_id" => "replacement-id"
+      )
+      FileUtils.mkdir_p(original.fetch("path"))
+      FileUtils.mkdir_p(replacement.fetch("path"))
+      registrations = [ original ]
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { registrations },
+        config_loader: ->(_path) { enabled_cfg },
+        git: FakeGit.new,
+        database: runtime_database(original)
+      )
+      candidate = sched.candidates(now: T0).fetch(0)
+      [ replacement, original.reject { |key, _| key == "path" }, original.merge("path" => nil) ].each do |current|
+        registrations = [ current ]
+
+        assert_nil sched.reserve(candidate, now: T0)
+        refute sched.pending?(original.fetch("name"))
+      end
+    end
+  end
+
   def test_timer_mode_honors_interval
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => {
@@ -198,6 +241,20 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       assert_equal 1, sched.candidates(now: T0).size
       assert_equal 1, sched.candidates(now: T0 + 1).size
+    end
+  end
+
+  def test_reservation_rejects_a_candidate_that_entered_failure_backoff_during_discovery
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      sched = scheduler(entry, enabled_cfg)
+      stale_candidate = sched.candidates(now: T0).fetch(0)
+      reserved = sched.reserve(stale_candidate, now: T0)
+      sched.complete(project: "p1", exit_code: 1, now: T0)
+
+      assert_nil sched.reserve(reserved.merge(entry: entry), now: T0 + 1),
+                 "a discovery hint must not bypass a newer completion backoff"
+      refute sched.pending?("p1")
     end
   end
 
@@ -351,7 +408,33 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     Hive::UsageDb.database = old_database
   end
 
-  def test_provider_retry_hold_survives_scheduler_restart_without_parking_architecture
+  def test_reservation_rechecks_capacity_consumed_after_discovery
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg
+      database = runtime_database(entry)
+      write_state(dir, "last_scanned_sha" => "old")
+      sched = scheduler(entry, cfg)
+      candidate = sched.candidates(now: T0).fetch(0)
+      budget = Hive::Patrol::LaunchBudget.new(
+        dir, cfg: cfg, project_id: entry.fetch("project_id"),
+        project_name: entry.fetch("name"), engine: :ordinary, database: database
+      )
+      4.times do |index|
+        assert budget.acquire(
+          profile: "codex", stage: "patrol-review", started_at: T0,
+          reservation_id: "intervening-launch-#{index}"
+        )
+      end
+
+      assert_nil sched.reserve(candidate, now: T0)
+      refute sched.pending?("p1")
+      assert_equal T0 + 43_200,
+                   sched.instance_variable_get(:@next_check_at).fetch("p1")
+    end
+  end
+
+  def test_provider_retry_backoff_is_process_local_and_not_retained_after_restart
     old_database = Hive::UsageDb.database
     with_tmp_dir do |dir|
       entry = project_entry(dir)
@@ -373,7 +456,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       )
 
       restarted = scheduler(entry, cfg)
-      assert_empty restarted.tick(now: T0 + 20)
+      assert_equal 1, restarted.tick(now: T0 + 20).size
       architecture = Hive::Patrol::LaunchBudget.new(
         dir, cfg: cfg, project_id: entry.fetch("project_id"),
         project_name: entry.fetch("name"), engine: :architecture,
@@ -381,7 +464,6 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
         clock: -> { T0 + 20 }
       )
       assert_equal 4, architecture.remaining_launches
-      assert_equal 1, restarted.tick(now: retry_at).size
     end
   ensure
     Hive::UsageDb.database = old_database
@@ -491,12 +573,13 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_event_drain_reservation_failure_and_malformed_provider_retry_are_bounded
+  def test_event_drain_reservation_failure_and_provider_retry_are_bounded_in_process
     with_tmp_dir do |dir|
       entry = project_entry(dir)
       sched = Hive::Daemon::PatrolScheduler.new(
-        registry: -> { [] }, config_loader: ->(*) { enabled_cfg },
-        state_store_factory: ->(*) { raise "store unavailable" }
+        registry: -> { [ entry ] }, config_loader: ->(*) { enabled_cfg },
+        state_store_factory: ->(*) { raise "store unavailable" },
+        database: runtime_database(entry)
       )
       sched.instance_variable_get(:@events) << { status: :blocked }
       assert_equal [ { status: :blocked } ], sched.drain_events
@@ -506,10 +589,6 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_raises(RuntimeError) { sched.reserve(candidate, now: T0) }
       refute sched.pending?("p1")
 
-      parks = []
-      budget = Object.new
-      budget.define_singleton_method(:park!) { |**values| parks << values }
-      sched.define_singleton_method(:allowance_budget) { |*args, **kwargs| budget }
       sched.instance_variable_set(:@pending, "p1" => { entry: entry, started_at: T0 })
       sched.complete(
         project: "p1", exit_code: 1, now: T0,
@@ -517,7 +596,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
           "reason" => "provider_quota", "retry_after_sec" => "invalid"
         } } } ] }
       )
-      assert_equal T0 + 60, parks.fetch(0).fetch(:retry_at)
+      assert_equal T0 + 60,
+                   sched.instance_variable_get(:@failures).dig("p1", :next_eligible_at)
       assert_nil sched.send(:parse_retry_time, "not-a-time")
     end
   end

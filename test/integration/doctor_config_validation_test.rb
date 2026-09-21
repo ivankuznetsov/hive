@@ -8,12 +8,11 @@ class DoctorConfigValidationIntegrationTest < Minitest::Test
   HIVE_BIN = File.expand_path("../../bin/hive", __dir__)
   HIVE_LIB = File.expand_path("../../lib", __dir__)
 
-  def test_doctor_rejects_invalid_promoted_reviewers_without_running_probes
+  def test_doctor_rejects_obsolete_root_reviewers_without_running_probes
     with_doctor_project("reviewers" => nil) do |out, err, status, probe_marker, config_path|
       assert_equal Hive::ExitCodes::CONFIG, status.exitstatus
       assert_empty out
-      assert_includes err, "review.reviewers"
-      assert_includes err, "is nil"
+      assert_includes err, "Unknown top-level key `reviewers`."
       assert_includes err, config_path
       refute File.exist?(probe_marker), "doctor probes must not run after shared config validation fails"
       refute_includes out, "hive doctor"

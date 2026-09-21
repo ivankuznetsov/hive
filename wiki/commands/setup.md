@@ -58,12 +58,10 @@ Without `--no-bootstrap`, setup provisions in this order:
    `Hive::Web::AppBundle.ensure!`.
 4. Initialize or enroll the current project unless `--no-init` is passed. If
    the project is already initialized, setup enables it for daemon dispatch.
-5. Explicitly activate a verified empty SQLite runtime control plane through
-   the same manifest/candidate protocol as fleet cutover, but only when the
-   installation is genuinely fresh. An existing healthy database is observed;
-   legacy state directs to `hive migrate --all`, while a corrupt, partial, or
-   wrong-identity database fails the phase. No ordinary runtime open creates or
-   migrates the database.
+5. Explicitly initialize the current SQLite runtime through `Installation.setup`.
+   Setup publishes a complete private database once; an existing healthy database
+   is validated and retained. Unsupported, corrupt or wrong-identity storage is
+   refused. There are no cutover manifests or automatic historical imports.
 6. Run `hive daemon install` semantics through
    `Hive::Commands::Daemon::ServiceInstaller` with autostart, forced template
    refresh, and the same `Hive::InvokedBinary.path` used to invoke setup. The
@@ -164,6 +162,10 @@ schema rather than a separate pre-dispatch contract. These pre-dispatch errors
 also carry `mode`, effective `url`, migration `warnings`, and the observed
 service lifecycle so automation does not lose semantic context on failures.
 
+The final setup document is encoded directly. A serialization failure is not
+replaced with prose or a fallback JSON document; it propagates rather than
+reporting a successful setup without its contract.
+
 ## Web Bundle
 
 The managed web app lives under `Hive::Paths.web_app_home` and is version-stamped with `.hive-web-version`. `Hive::Web::AppBundle.ensure!` refreshes when the bundle is missing, when the stamp differs from `Hive::VERSION`, or when the compiled asset manifest is missing/broken; this keeps a CLI upgrade from continuing to serve an old or assetless Rails app. `HIVE_WEB_APP_DIR` is the canonical operator-managed override. The deprecated `HIVEBOX_WEB_APP_DIR` alias still works through the next major release and emits migration guidance.
@@ -186,6 +188,18 @@ The mutating web-install readiness window uses 40 samples at 250 ms intervals,
 so a cold packaged Rails boot can take roughly ten seconds without producing a
 false `active_not_ready` install failure. This longer window does not make
 `hive web status` block; status retains its single immediate health sample.
+
+## Examples
+
+Use `hive setup --yes --json` for an unattended managed setup, or
+`hive setup --no-bootstrap --json` for a read-only diagnostic pass.
+
+## Output exceptions and exit codes
+
+`hive-setup.v1` records phase failures inside one document; pre-dispatch usage
+errors retain that schema. Success exits `0`, incomplete or failed setup exits
+`1`, invalid arguments or missing non-interactive consent exit `64`, and an
+invalid global/project configuration exits `78`.
 
 ## Backlinks
 

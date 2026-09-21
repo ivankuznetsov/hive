@@ -9,8 +9,7 @@ tags: [architecture, daemon, bot, tui, update, decision]
 
 **TLDR**: The daemon checks for releases and publishes an update nudge; it does
 not install unattended. When an operator runs `hive update`, however, the
-channel update and all registered migrations are automatic and visibly
-reported. See [[commands/update]] and [[commands/migrate]].
+channel update and current-runtime validation are visibly reported. See [[commands/update]] and [[commands/migrate]].
 
 ## Pieces
 
@@ -26,9 +25,9 @@ reported. See [[commands/update]] and [[commands/migrate]].
 
 ## Channels
 
-- **install.sh (bash)** — the daemon nudges `hive update`; that command re-runs the installer and then migrates all registered projects. Unattended daemon installation remains deferred to U7.
-- **brew** — the daemon nudges `hive update`; the command runs brew followed by automatic migration.
-- **aur** — the daemon nudges `hive update`; the command picks `yay` or `paru` at runtime and then runs automatic migration.
+- **install.sh (bash)** — the daemon nudges `hive update`; that command re-runs the installer and then validates current runtime storage. Unattended daemon installation remains deferred to U7.
+- **brew** — the daemon nudges `hive update`; the command runs brew followed by runtime validation.
+- **aur** — the daemon nudges `hive update`; the command picks `yay` or `paru` at runtime and then runs runtime validation.
 - **dev** — git clone; skipped entirely.
 
 ## Deferred (U7)
@@ -36,7 +35,7 @@ reported. See [[commands/update]] and [[commands/migrate]].
 Bash auto-update from the daemon: drain in-flight work, run `hive update`, and
 re-exec into the new version (idle = active-agent snapshot empty AND
 `controller.in_flight_count == 0`). The foreground updater now waits for its
-installer and migration subprocesses, but unattended daemon ownership and
+installer and validation subprocesses, but unattended daemon ownership and
 restart proof still need a live systemd-user spike. Non-daemon users are also
 not nudged in this scope.
 

@@ -46,7 +46,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       assert_equal :ok, result.fetch(:status)
       assert_equal 2, attempts.size
       assert_equal 1, attempts.last["retry_charge"]
-      assert_equal first.attempt_id, attempts.last["predecessor_attempt_id"]
+      refute_includes attempts.last.to_h, "predecessor_attempt_id"
       assert_equal first.subject, attempts.last.subject
     end
   end

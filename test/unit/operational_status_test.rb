@@ -70,6 +70,26 @@ class OperationalStatusTest < Minitest::Test
     assert_equal diagnostic, projected.dig("evidence", "diagnostic")
   end
 
+  def test_publication_secret_park_remains_operator_owned_without_action_when_daemon_enabled
+    row = task(
+      action: "patrol_fix_publication_blocked", slug: "publication-block",
+      stage: "5-publish", marker: "none"
+    ).merge(
+      "workflow" => "patrol-fix",
+      "action_label" => "Publication blocked by secret policy",
+      "suggested_command" => nil
+    )
+    projected = project(
+      status_payload(row),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "waiting_on_you", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal "secret_detected", projected.dig("reasons", 0, "code")
+    assert_nil projected["action"]
+  end
+
   def test_operational_snapshot_identifies_the_active_dogfood_build
     sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
     result = Hive::OperationalStatus.new(
@@ -86,6 +106,26 @@ class OperationalStatusTest < Minitest::Test
     assert_equal sha, result.dig("runtime", "build_sha")
     assert_equal "#{Hive::VERSION}+dogfood.0864de726",
                  result.dig("runtime", "display_version")
+  end
+
+  def test_controller_failure_is_not_hidden_by_markerless_scheduler_brake
+    %w[secret_policy_publish_blocked fix_worktree_dirty worktree_head_custody_mismatch].each do |code|
+      row = task(action: "ready_to_run", slug: "controller", marker: "none").merge(
+        "workflow" => "patrol-fix",
+        "diagnostic" => { "source" => "artifact", "code" => code,
+                          "owner" => "operator", "detail" => "Exact controller failure" }
+      )
+      snapshot = scheduler_snapshot_for(row, decision: "markerless_stalled", reason: "No progress")
+      projected = project(
+        status_payload(row), scheduler_snapshot: snapshot,
+        project_context: { "demo" => { "daemon_enabled" => true } }
+      ).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state")
+      assert_equal "operator", projected.fetch("blocker_owner")
+      assert_equal code, projected.dig("reasons", 0, "code")
+      assert_equal "markerless_stalled", projected.dig("reasons", 1, "code")
+    end
   end
 
   def test_closure_projection_advertises_operator_confirmation_and_retains_archived_receipt
@@ -197,6 +237,48 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "hive", projected.fetch("blocker_owner")
     assert_equal "stale", projected.dig("liveness", "status")
     assert_equal "stale_runner", projected.dig("reasons", 0, "code")
+  end
+
+  def test_dead_runner_marker_stays_repair_after_the_action_projects_error
+    %w[agent_working review_working].each do |marker|
+      row = task(action: "error", slug: marker, marker: marker).merge(
+        "claude_pid" => 99_999,
+        "claude_pid_alive" => false
+      )
+
+      projected = project(status_payload(row)).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state"), marker
+      assert_equal "stale", projected.dig("liveness", "status"), marker
+      assert_equal "stale_runner", projected.dig("reasons", 0, "code"), marker
+    end
+  end
+
+  def test_patrol_fix_receipt_progress_outweighs_a_dead_predecessor_lock
+    row = task(
+      action: "ready_to_advance", slug: "receipt-ready",
+      stage: "2-fix", marker: "none"
+    ).merge(
+      "workflow" => "patrol-fix",
+      "claude_pid" => 99_999,
+      "claude_pid_alive" => false,
+      "attempt_id" => "completed-attempt",
+      "task_generation" => "generation-1"
+    )
+
+    projected = project(
+      status_payload(row),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "idle", projected.fetch("state")
+    assert_equal "scheduler", projected.fetch("blocker_owner")
+    assert_equal "not_running", projected.dig("liveness", "status")
+    assert_nil projected.dig("liveness", "pid")
+    assert_nil projected.dig("liveness", "attempt_id")
+    assert_nil projected.dig("liveness", "task_generation")
+    assert_equal "ready_for_dispatch", projected.dig("reasons", 0, "code")
+    assert_nil projected.fetch("action"), "the enrolled daemon owns the next transition"
   end
 
   def test_invalid_task_is_unknown_while_admission_error_needs_repair
@@ -466,12 +548,12 @@ class OperationalStatusTest < Minitest::Test
       { "stage_dir" => "5-implement", "task_count" => 2 },
       { "stage_dir" => "6-review", "task_count" => 1 }
     ]
-    payload.dig("projects", 0)["legacy_migrate_command"] = "hive migrate demo"
+    payload.dig("projects", 0)["legacy_state_guide"] = "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
 
     issue = project(payload).fetch("issues").find { |entry| entry.fetch("code") == "legacy_stage_dirs" }
 
     assert_equal "3 tasks hidden in legacy stage dirs: 5-implement (2), 6-review (1)", issue.fetch("message")
-    assert_equal "hive migrate demo", issue.fetch("remediation")
+    assert_equal "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", issue.fetch("remediation")
 
     payload.dig("projects", 0)["legacy_stage_dirs"] = [
       { "stage_dir" => "5-implement", "task_count" => 1 }
@@ -970,6 +1052,30 @@ class OperationalStatusTest < Minitest::Test
     end
   end
 
+  def test_terminal_recovery_history_preserves_current_workflow_state_and_reason
+    rows = [ "Escalated (parked)", "Rejected (parked)" ].map.with_index do |label, index|
+      task(action: "needs_input", slug: "writero-parked-#{index}", stage: "4-review", marker: "none").merge(
+        "workflow" => "patrol-fix", "action_label" => label, "suggested_command" => nil
+      )
+    end
+    rows << task(action: "needs_input", slug: "question", stage: "2-brainstorm",
+                 marker: "waiting", unanswered_questions: 2)
+    rows.each do |row|
+      expected = project(status_payload(row)).fetch("tasks").first
+      snapshot = scheduler_snapshot_for(row, decision: "attempt_terminal_replay", reason: "terminal")
+      snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+        "status" => "terminal", "phase" => "terminal", "request_id" => "old-request",
+        "attempt_id" => "old-attempt", "terminal_outcome" => "succeeded"
+      }
+      actual = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } },
+                       scheduler_snapshot: snapshot).fetch("tasks").first
+      %w[state blocker_owner reason].each { |key| assert_equal expected[key], actual[key], "#{row['slug']}: #{key}" }
+      assert_equal expected.fetch("reasons").first.fetch("code"), actual.fetch("reasons").first.fetch("code")
+      assert_equal "terminal", actual.dig("recovery", "status")
+      assert_equal "succeeded", actual.dig("recovery", "terminal_outcome")
+    end
+  end
+
   def test_recovery_projection_derives_running_terminal_and_provider_hint_without_a_receipt
     row = task(
       action: "error", slug: "derived-recovery", stage: "4-execute",
@@ -1065,7 +1171,7 @@ class OperationalStatusTest < Minitest::Test
 
     assert_equal "blocked", projected.dig("recovery", "status")
     assert_equal "recovery_migration_required", projected.dig("recovery", "reason")
-    assert_includes projected.dig("recovery", "remediation"), "hive migrate"
+    assert_includes projected.dig("recovery", "remediation"), "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
   end
 
   def test_lean_recovery_projection_only_joins_recovery_candidates
@@ -1464,6 +1570,13 @@ class OperationalStatusTest < Minitest::Test
                  classify_row(row, daemon_enabled: true)
   end
 
+  def test_execution_repair_stays_operator_owned_with_daemon_enabled
+    row = task(action: "recover_execute", slug: "execute-repair", stage: "4-execute")
+
+    assert_equal [ "needs_repair", "operator" ], classify_row(row)
+    assert_equal [ "needs_repair", "operator" ], classify_row(row, daemon_enabled: true)
+  end
+
   def test_plan_review_repair_actions_report_the_review_blocker_owner
     Hive::OperationalStatus::PLAN_REVIEW_REPAIR_ACTIONS.each do |action|
       row = task(action:, slug: "repair", stage: "3-plan",
@@ -1578,11 +1691,9 @@ class OperationalStatusTest < Minitest::Test
         "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
         "adapter" => "codex", "model" => "model-a", "effort" => "high",
         "eligible" => true, "exclusions" => [],
-        "capacity" => { "observed" => 1, "max" => 2 }, "circuits" => []
+        "capacity" => { "observed" => 1, "max" => 2 }
       } ],
-      "exclusions" => [],
-      "circuit_generations" => [],
-      "probe_requirements" => []
+      "exclusions" => []
     }
   end
 
@@ -1592,7 +1703,7 @@ class OperationalStatusTest < Minitest::Test
     else
       [ {
         "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state",
-        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_migrate_command" => nil,
+        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_state_guide" => nil,
         "hidden_archived_task_count" => hidden_count
       } ]
     end

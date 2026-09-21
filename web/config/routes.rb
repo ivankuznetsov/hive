@@ -20,11 +20,15 @@ Rails.application.routes.draw do
   get "board" => "status#index", defaults: { view: "board" }, as: :board
   get "grid" => "status#index", defaults: { view: "grid" }, as: :grid
   get "archive" => "status#archive", as: :archive
+  get "digests/:date" => "digests#show", as: :digest,
+      constraints: { date: /today|\d{4}-\d{2}-\d{2}/ }
   get "patrol" => "patrol#index", as: :patrol
   resource :status_view_preference, only: :create
   resource :daemon_repair, only: :create, path: "daemon/repair"
 
   post "ideas" => "ideas#create", as: :ideas
+
+  get "honeycombs" => "workflows#index", as: :honeycombs
 
   get  "workflows" => "workflows#index", as: :workflows
   post "workflows" => "workflows#create", as: :create_workflow

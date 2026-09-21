@@ -1,5 +1,3 @@
-require "fileutils"
-
 module Hive
   module Paths
     module_function
@@ -40,6 +38,16 @@ module Hive
       File.join(workflow_publish_root, "objects")
     end
 
+    # Host-global daily activity projection. The version lives in the path so
+    # future readers never have to infer a record schema from mutable config.
+    def daily_digest_root
+      File.join(state_home, "daily-digest", "documents", "v1")
+    end
+
+    def daily_digest_delivery_root
+      File.join(daily_digest_root, "deliveries")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),
@@ -58,22 +66,6 @@ module Hive
     # wipe state and accumulated work.
     def hive_home_collapsed?
       !hive_home_override.nil?
-    end
-
-    def ensure_migrated!
-      return if hive_home_override
-      return if File.exist?(File.join(config_home, "config.yml"))
-
-      legacy = legacy_registry_path
-      return unless legacy
-
-      FileUtils.mkdir_p(config_home)
-      FileUtils.mv(legacy, File.join(config_home, "config.yml"))
-      File.write(
-        File.join(config_home, ".migrated-from"),
-        "#{legacy}\n"
-      )
-      remove_empty_legacy_dir(File.dirname(legacy))
     end
 
     def base_home(env_key, fallback)
@@ -99,23 +91,6 @@ module Hive
       return nil if value.nil? || value.empty?
 
       File.expand_path(value)
-    end
-
-    def remove_empty_legacy_dir(path)
-      Dir.rmdir(path)
-    rescue SystemCallError => e
-      warn "hive: could not remove empty legacy dir #{path}: #{e.message}"
-      nil
-    end
-
-    # Legacy registry candidates probed by `ensure_migrated!`. Order
-    # matters: the older `~/Dev/hive/config.yml` is migrated only when
-    # there is no `~/.hive-state/registry.yml`.
-    def legacy_registry_path
-      [
-        File.expand_path("~/.hive-state/registry.yml"),
-        File.expand_path("~/Dev/hive/config.yml")
-      ].find { |p| File.exist?(p) }
     end
   end
 end

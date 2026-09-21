@@ -194,6 +194,10 @@ might already be healthy: Hive deliberately does not launch native discovery
 to find out. Stdout contains exactly one JSON document; prompts/progress never
 contaminate it.
 
+Success and configuration-error documents are encoded directly. A
+`JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
+it propagates.
+
 ## Extension contract
 
 To add a built-in default:

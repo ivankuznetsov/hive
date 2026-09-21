@@ -326,7 +326,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         status_payload: payload, now: T0 + 1
       )
       database_for(path).transaction do |db|
-        dataset = db[:daemon_runtime].where(daemon_kind: "operational")
+        dataset = db[:daemon_runtime]
         document = Hive::RuntimeControlPlane::Codec.load_json(dataset.get(:observation_json))
         document.fetch("status_projection")["tick_sequence"] += 1
         dataset.update(observation_json: Hive::RuntimeControlPlane::Codec.dump_json(document))
@@ -411,9 +411,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       database.transaction do |db|
         installation_id = db[:installations].get(:installation_id)
         db[:daemon_runtime].insert(
-          installation_id: installation_id, daemon_kind: "operational",
-          generation: 1, state: "running", observation_json: "{",
-          observed_at: T0.iso8601(6)
+          installation_id: installation_id, observation_json: "{"
         )
       end
       assert_raises(Hive::RuntimeControlPlane::IntegrityError) { repository.snapshot }
@@ -779,7 +777,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_provider_hold_without_stage_or_reason_still_matches_the_current_task
+  def test_provider_reset_hint_does_not_replace_the_hourly_retry_assessment
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader = build(path)
@@ -792,15 +790,22 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       )
 
       assembler.begin_tick(now: T0)
+      assembler.observe(
+        held, decision: "retry_cooldown", owner: "scheduler",
+        reason: "automatic retry is scheduled", retry_at: (T0 + 60).iso8601,
+        retry_due: false, retry_safe: true
+      )
       assembler.complete(
         rows: [ held ], controller: {}, queue: {},
         recoveries: {}, now: T0 + 1
       )
 
       task = reader.read(now: T0 + 2).fetch("tasks").first
-      assert_equal "provider_hold", task.dig("disposition", "decision")
-      assert_equal "provider", task.dig("disposition", "owner")
-      assert_includes task.dig("disposition", "reason"), "codex quota hold"
+      assert_equal "retry_cooldown", task.dig("disposition", "decision")
+      assert_equal "scheduler", task.dig("disposition", "owner")
+      assert_equal (T0 + 60).iso8601, task.dig("disposition", "retry_at")
+      assert_equal (T0 + 3_600).iso8601,
+                   reader.read(now: T0 + 2).dig("provider_holds", 0, "retry_after")
     end
   end
 

@@ -150,7 +150,7 @@ class ArtifactsCapturePolicyTest < Minitest::Test
     )
   end
 
-  def test_retained_v1_capture_manifest_remains_satisfactory_after_v2_migration
+  def test_superseded_v1_capture_manifest_is_rejected
     with_task do |task|
       policy = Hive::Artifacts::CapturePolicy.new(
         task: task, project: "demo", changed_paths: [ "web/app.css" ],
@@ -190,7 +190,7 @@ class ArtifactsCapturePolicyTest < Minitest::Test
       }
       File.write(File.join(media, "capture-manifest.json"), JSON.generate(manifest))
 
-      assert policy.capture_satisfied?
+      refute policy.capture_satisfied?
     end
   end
 

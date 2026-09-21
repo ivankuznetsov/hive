@@ -11,6 +11,7 @@ class ArtifactsTerminalRecorderTest < Minitest::Test
 
       result = Hive::Artifacts::TerminalRecorder.new(
         argv: [ RbConfig.ruby, "-e", '$stdout.write("hello\\n")' ],
+        display_argv: [ "bin/check", "--fast" ],
         cwd: root, cast_path: cast, review_path: review,
         environment: { "PATH" => ENV.fetch("PATH", "") }
       ).record!
@@ -20,6 +21,7 @@ class ArtifactsTerminalRecorderTest < Minitest::Test
       assert_equal 2, records.first.fetch("version")
       assert records.drop(1).any? { |event| event[1] == "o" && event[2].include?("hello") }
       assert_includes File.read(review), "hello"
+      assert_includes File.read(review), "$ bin/check --fast"
       assert_includes File.read(review), "exit 0"
       assert_equal Digest::SHA256.file(cast).hexdigest,
                    result.dig("representations", 0, "sha256")

@@ -42,6 +42,7 @@ module Hive
                      dry_run: false,
                      default_timeout_sec: 0,
                      verb_timeouts: {},
+                     stage_timeouts: {},
                      kill_grace_sec: DEFAULT_KILL_GRACE_SEC)
         @hive_bin = hive_bin
         @dry_run = dry_run
@@ -61,6 +62,9 @@ module Hive
         @verb_timeouts = (verb_timeouts || {}).each_with_object({}) do |(verb, secs), acc|
           acc[verb.to_s] = secs.to_i
         end
+        @stage_timeouts = (stage_timeouts || {}).each_with_object({}) do |(stage, secs), acc|
+          acc[stage.to_s] = secs.to_i
+        end
         @kill_grace_sec = kill_grace_sec.to_i
         # pid → { project, slug, stage, command, started_at, log_path, pgid,
         #         timeout_sec, terminating_at, killed }
@@ -75,14 +79,22 @@ module Hive
         @verb_timeouts.fetch(verb.to_s, @default_timeout_sec)
       end
 
+      def timeout_for_stage(stage, verb: nil)
+        @stage_timeouts.fetch(stage.to_s) { timeout_for_verb(verb) }
+      end
+
       # Re-read the timeout knobs after a SIGHUP config reload. Only
       # affects children spawned AFTER the reload — in-flight children
       # keep the timeout frozen on their running entry at spawn time, so
       # a reload never retroactively kills (or reprieves) a live run.
-      def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
+      def update_timeouts(default_timeout_sec:, verb_timeouts:, stage_timeouts:,
+                          kill_grace_sec:)
         @default_timeout_sec = default_timeout_sec.to_i
         @verb_timeouts = (verb_timeouts || {}).each_with_object({}) do |(verb, secs), acc|
           acc[verb.to_s] = secs.to_i
+        end
+        @stage_timeouts = (stage_timeouts || {}).each_with_object({}) do |(stage, secs), acc|
+          acc[stage.to_s] = secs.to_i
         end
         @kill_grace_sec = kill_grace_sec.to_i
       end
@@ -113,7 +125,7 @@ module Hive
         # can swap in a fixture path via HIVE_BIN.
         argv[0] = @hive_bin
 
-        timeout_sec = timeout_for_verb(argv_verb(argv))
+        timeout_sec = timeout_for_stage(stage, verb: argv_verb(argv))
 
         if effective_dry_run
           @running[next_dry_pid] = {
@@ -187,24 +199,24 @@ module Hive
         actions
       end
 
-      # Reap every child that has exited since the last call. Returns an
+      # Reap every tracked child that has exited since the last call. Returns an
       # Array<ChildExit> for the dispatcher to feed into the
       # concurrency controller. Empty array when nothing has completed.
       def reap_all(now: Time.now)
         completed = @forced_completions.shift(@forced_completions.length)
-        loop do
-          # Process.wait with WNOHANG returns nil when nothing is ready.
-          pid, status = Process.wait2(-1, Process::WNOHANG)
-          break if pid.nil?
-        rescue Errno::ECHILD
-          break
-        else
-          entry = @running.delete(pid)
-          # Could be a child we don't track (sub-spawn from a hive run),
-          # but since we use pgroup: true, kids of our children should
-          # be in their own process groups already. Be defensive anyway.
-          next if entry.nil?
+        @running.each do |pid, entry|
+          next if entry[:dry_run]
 
+          # Background discovery owns its own Gh subprocess waits. A process-
+          # wide wait would steal their statuses, including during shutdown.
+          waited_pid, status = Process.wait2(pid, Process::WNOHANG)
+          next if waited_pid.nil?
+        rescue Errno::ECHILD
+          # A missing status is not a successful completion. Keep this entry
+          # fenced, but still collect other children whose statuses we own.
+          next
+        else
+          @running.delete(pid)
           completed << child_exit(pid, status, entry, now)
         end
         completed

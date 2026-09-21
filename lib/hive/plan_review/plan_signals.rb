@@ -2,7 +2,7 @@ require "digest"
 require "pathname"
 require "yaml"
 require "hive/plan_review"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module PlanReview
@@ -200,7 +200,7 @@ module Hive
             "evidence" => path ? "path:#{path}" : bounded_excerpt(evidence_text, match.begin(0))
           }.freeze
         end
-        if Hive::SecretPatterns.match?(evidence_text) &&
+        if Hive::SecretScanner.match?(evidence_text) &&
            reasons.none? { |reason| reason.fetch("category") == "auth_secrets_permissions" }
           reasons.unshift(
             {

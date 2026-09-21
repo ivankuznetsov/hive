@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-09-09
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Authored task and workflow documents remain files, while the activated SQLite runtime control plane owns attempt lifecycle, admission/accounting relationships, capacity, and routing-policy snapshots.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable independent attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Authored task and workflow documents remain files, while the activated SQLite runtime control plane owns machine-local attempt lifecycle, live capacity, request/result delivery, leases, payload references, PR reconciliation, and token history. Provider order stays in current configuration.
 
 ## Layer cake
 
@@ -38,8 +38,8 @@ protocol: a generation-scoped lease claimed by a detached supervisor wrapper
 that starts the ordinary Hive command as its worker. CLI calls admit locally
 and attach; bot/web requests are durable SQL deliveries consumed by the
 daemon when present; daemon auto-advance and coordinator-owned recovery call
-the same dispatcher; attempt-loss healing is a separate ledger successor
-admission. A daemon is optional after acceptance. Every surface attaches to
+the same dispatcher; attempt-loss healing creates one deterministic recovery
+request and an independent replacement attempt. A daemon is optional after acceptance. Every surface attaches to
 or observes the durable attempt instead of owning agent lifetime.
 
 ```text
@@ -55,7 +55,7 @@ daemon auto-advance / recovery ────┘          │
                                       provider agent group
 ```
 
-Attempt custody, wrapper ownership, successor healing, and lease durability
+Attempt custody, wrapper ownership, lost recovery, and lease durability
 are owned by [[modules/attempts]]; delivery scheduling, reconciliation
 policy, and non-task ancillary children are owned by [[modules/daemon]].
 
@@ -76,9 +76,44 @@ attempt cannot unlink bytes while another attempt publishes the same digest.
 Project and task source files remain authoritative. Registration YAML is
 project discovery authority and synchronizes stable project lineage into SQL;
 deregistering and re-registering the same project reuses that inactive lineage.
-The irreversible fleet cutover imports only validated token-usage history,
-rebuilds project/task identity from files, and discards other legacy runtime
-state after proving services, attempts, and leases are quiescent.
+Fresh setup publishes a current SQLite database with its installation identity.
+Existing current databases are validated in place; runtime startup neither
+requires a cutover manifest nor imports historical state. Unsupported storage
+requires the explicit offline procedure in
+`docs/guides/current-format-migration.md`.
+
+## Host-global daily activity projection
+
+The daily digest is a global projection beside, not inside, the per-project
+workflow state machines. Authoritative task creation receipts, task journals,
+publication evidence, status transitions, and ordered registry membership feed
+one materiality classifier and collector. The store persists one IANA-zone
+interval per effective day under the global state home.
+
+```text
+project-local task/PR owners ─┐
+ordered registry history ────┼→ DailyDigest::Collector → Coordinator → Store
+source health / gaps ─────────┘                                  │
+                                                                 ▼
+                                                   DailyDigest::Reader
+                                                  ├─ CLI text / JSON
+                                                  ├─ authenticated Rails
+                                                  ├─ Telegram renderer
+                                                  └─ canonical agent skill
+```
+
+Only daemon or explicit refresh paths own collection and materialization. An
+open base can be atomically replaced; the first materialization after its
+persisted boundary freezes it. Late facts, corrections, and recovered source
+gaps are immutable idempotent amendments. CLI, Web, Telegram rendering, and
+agents share a pure persisted-record reader, so no output surface becomes a
+workflow authority or reconstructs history from current status.
+
+GitHub is a fail-soft observation source when Hive-owned PR facts are
+insufficient. PRDigest is neither called nor authoritative. Refresh/close and
+opt-in Telegram delivery have separate scheduler/capacity identities and
+ledgers, so an unavailable notification channel cannot block publication. See
+[[modules/daily-digest]], [[commands/digest]], and ADR-052 in [[decisions]].
 
 ## Scheduled architecture-patrol boundary
 
@@ -404,19 +439,59 @@ property, so restoring a page after a source-less route cannot revive it.
 Later confirmations on that connection are bounded to one
 reconciliation GET instead of a refresh loop, while navigation cannot revive
 an old URL's latch. A real socket disconnect releases the connection-local
-latch so a later missed update can recover. Rejected lazy Action
-Cable consumer promises are removed from turbo-rails' cache before a bounded
-retry. A synchronous create failure also removes any partially registered
-subscription and replaces its failed consumer; detaching the source cancels
-the retry. A pre-confirmation detach waits for the current transport's
-confirmation, rejection, or disconnect before releasing the handle, preserving
-server subscribe/unsubscribe order across reconnects. A five-second fallback
-closes an otherwise-unowned transport that produces none of those callbacks,
-giving the server a connection-cleanup edge before local release. The channel
-also fences Action Cable's deferred adapter subscribe both before registration
-and at its completion; if teardown wins either race, no handler remains. A
-raising deferred adapter releases the broadcaster lease and reconnects the
-transport, so it cannot strand an active, unconfirmed channel. On task pages
+latch so a later missed update can recover. One `StatusStreamOwner` owns the
+current identity-bearing application attempt, retry timer, pending-release
+timer and disposition, catch-up attempt, and explicit lifecycle state. Each
+application setup or retry creates a dedicated consumer with
+`cable.createConsumer()`; an Action Cable transport reconnect remains on that
+consumer, subscription, and attempt, while setup, registration, rejection, or
+non-reconnecting transport failure fully retires the attempt, enters
+`retry_wait`, and starts a fresh attempt after the existing five-second bound.
+The owner never reads or mutates turbo-rails' shared consumer cache and never
+uses its subscription registry to decide whether cleanup is safe.
+
+The dedicated connection's `open` and `reopen` entry points, every callback,
+both timers, and asynchronous setup continuations are fenced by owner and
+attempt identity. Retiring an attempt first makes those entry points inert, so
+already-queued visibility-monitor work cannot open another socket or mutate a
+successor. A pre-confirmation detach leaves the disconnected owner as the sole
+bounded custodian until confirmation, rejection, or disconnect establishes the
+subscription's disposition. Confirmation still releases only after server
+registration; if none of those callbacks arrives within five seconds, timeout
+cleanup closes the dedicated transport before locally unsubscribing or
+forgetting the handle. This preserves server subscribe/unsubscribe order
+without a shared-registry scan. The element records that bounded custodian on
+plain DOM detach as well as attribute supersession, so a later detach/attach
+cycle force-retires the older predecessor before allocating beyond the two-
+transport overlap bound. The channel also fences Action Cable's deferred
+adapter subscribe both before registration and at its completion; if teardown
+wins either race, no handler remains. A raising deferred adapter releases the
+broadcaster lease and reconnects the same transport, so it cannot strand an
+active, unconfirmed channel.
+
+Owner disconnect is an ordered best-effort transaction. It detaches private
+slots first, cancels the retry timer, attempts every applicable cleanup, and
+commits terminal `disconnected` even if an operation throws. Unsubscribe runs
+before transport cleanup for confirmed subscriptions. Consumer disconnect is
+the primary shutdown; reconnect-disabled connection close and captured-socket
+close are attempted only while that socket remains `OPEN` or `CONNECTING`, and
+the connection monitor is stopped even after earlier failures. The internal
+boundary rethrows the exact first thrown value after finalization, while custom-
+element disconnect, async-failure, and attribute-supersession paths warn only
+after their DOM and successor obligations finish. Repeated disconnect is a
+no-op, and supersession installs or retains a retrying successor even when old
+cleanup fails. Dedicated ownership intentionally allocates one Cable transport
+per simultaneously live status source; an unconfirmed retiring predecessor can
+briefly overlap one successor until the bounded pending release settles, and a
+detached source returns to zero transports after any bounded pending release.
+Although the source is `data-turbo-permanent`, a cross-URL Turbo move invokes
+its disconnect/connect callbacks. Dedicated ownership therefore replaces the
+transport on every such navigation instead of reusing turbo-rails' cached
+consumer: the next `connected` state and catch-up wait for a fresh WebSocket
+and Action Cable subscription handshake. Repeated supersession force-retires
+the older pending predecessor before allocating another successor, so this
+navigation and retry cost never expands the two-transport overlap bound.
+On task pages
 the status-refresh owner
 wraps the mutation forms as well as the stream source, so every task action
 crosses the same native submission guard before a filesystem broadcast can
@@ -450,6 +525,12 @@ source/name input, owns the clone target, bounds and cleans up `gh repo clone`,
 and normalizes origins before handing the checkout to `Project#setup!`.
 `ReposController` only selects between new admission and existing-project
 setup, then renders or redirects.
+
+Hive web groups workflow and module management under one **Honeycombs**
+primary navigation entry. `/honeycombs` opens Workflows; shared Workflows and
+Modules links retain the selected project and stay visible on preview pages.
+The introduction explains that both workflows and modules can be installed.
+Existing workflow and module URLs and lifecycle actions remain available.
 
 Workflow list rows are typed `Workflow` models rather than anonymous adapter
 hashes. The model owns the shared `Hive::Web::WorkflowLifecycle` boundary for
@@ -526,4 +607,4 @@ precedence, budgets, and negative guarantees are owned by
 - [[cli]] — command surface.
 - [[dependencies]] — gem choices.
 - [[decisions]] — architectural decisions (ADR style).
-- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daemon]] · [[modules/gh]] · [[modules/bot]] · [[commands/refactor-patrol]]
+- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/daemon]] · [[modules/gh]] · [[modules/bot]] · [[commands/digest]] · [[commands/refactor-patrol]]

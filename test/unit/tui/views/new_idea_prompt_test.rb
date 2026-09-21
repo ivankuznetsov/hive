@@ -46,14 +46,14 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
                     "scope=0 must not silently label or submit to the first project"
   end
 
-  def test_label_uses_explicit_project_when_scope_n
+  def test_label_uses_identity_pinned_when_numeric_scope_was_consumed
     model = Hive::Tui::Model.initial.with(
       mode: :new_idea, snapshot: make_snapshot(%w[hive myapp]),
-      scope: 2
+      scope: 2, new_idea_project_name: "myapp"
     )
     out = Hive::Tui::Views::NewIdeaPrompt.render(model)
     assert_includes out, "myapp"
-    refute_includes out, "choose project", "explicit scope must NOT look unresolved"
+    refute_includes out, "choose project", "the pinned identity must be shown"
   end
 
   def test_label_handles_nil_snapshot
@@ -70,39 +70,6 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     assert_includes out, "(no projects)"
   end
 
-  def test_resolve_project_name_returns_nil_when_no_projects
-    model = Hive::Tui::Model.initial.with(snapshot: nil)
-    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
-  end
-
-  def test_resolve_project_name_returns_nil_when_scope_zero_without_choice
-    model = Hive::Tui::Model.initial.with(
-      snapshot: make_snapshot(%w[alpha beta]), scope: 0
-    )
-    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
-  end
-
-  def test_resolve_project_name_returns_chosen_project_under_scope_zero
-    model = Hive::Tui::Model.initial.with(
-      snapshot: make_snapshot(%w[alpha beta]), scope: 0, new_idea_project_name: "beta"
-    )
-    assert_equal "beta", Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
-  end
-
-  def test_resolve_project_name_returns_nth_project_when_scope_n
-    model = Hive::Tui::Model.initial.with(
-      snapshot: make_snapshot(%w[alpha beta gamma]), scope: 2
-    )
-    assert_equal "beta", Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
-  end
-
-  def test_resolve_project_name_returns_nil_when_scope_out_of_range
-    model = Hive::Tui::Model.initial.with(
-      snapshot: make_snapshot(%w[alpha]), scope: 99
-    )
-    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
-  end
-
   # ---- project_label decoration logic ----
   # The render path covers these transitively, but a direct test pins
   # the unresolved ★ All marker, the explicit-scope path, and the empty-
@@ -117,12 +84,23 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
                  "scope=0 must ask for a concrete target instead of falling back"
   end
 
-  def test_project_label_returns_plain_name_when_scope_n
+  def test_project_label_returns_plain_pinned_name_without_reusing_scope
+    model = Hive::Tui::Model.initial.with(
+      snapshot: make_snapshot(%w[hive myapp]),
+      scope: 2,
+      new_idea_project_name: "myapp"
+    )
+    assert_equal "myapp", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
+                 "the prompt must format the authority's exact-name resolution"
+  end
+
+  def test_project_label_does_not_reinterpret_numeric_scope_without_a_pin
     model = Hive::Tui::Model.initial.with(
       snapshot: make_snapshot(%w[hive myapp]), scope: 2
     )
-    assert_equal "myapp", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
-                 "explicit scope must NOT look unresolved"
+
+    assert_equal "(choose project)", Hive::Tui::Views::NewIdeaPrompt.project_label(model),
+      "numeric scope is entry-only and cannot become prompt resolution policy"
   end
 
   def test_project_label_handles_no_projects_gracefully
@@ -373,9 +351,9 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
     assert_operator out.lines.count, :<=, Hive::Tui::Views::NewIdeaPrompt::MAX_VISIBLE_ROWS
   end
 
-  # ---- Unhealthy-project resolution ----
+  # ---- Authority-backed unavailable labels ----
 
-  def test_resolve_project_name_refuses_unhealthy_chosen_project
+  def test_project_label_refuses_unhealthy_pinned_project
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-04",
       "projects" => [
@@ -384,32 +362,33 @@ class HiveTuiViewsNewIdeaPromptTest < Minitest::Test
       ]
     )
     model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0, new_idea_project_name: "broken")
-    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model),
-               "chosen project must be revalidated against the latest snapshot before dispatch"
+    assert_equal "(choose project)", Hive::Tui::Views::NewIdeaPrompt.project_label(model)
   end
 
-  def test_resolve_project_name_returns_nil_when_explicit_scope_is_unhealthy
+  def test_project_label_refuses_ambiguous_pinned_project
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-04",
       "projects" => [
-        { "name" => "alpha", "tasks" => [] },
-        { "name" => "broken", "error" => "missing_project_path", "tasks" => [] }
+        { "name" => "duplicate", "tasks" => [] },
+        { "name" => "duplicate", "error" => "missing_project_path", "tasks" => [] }
       ]
     )
-    model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 2)
-    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model),
-               "explicit scope onto an unhealthy project must NOT dispatch"
+    model = Hive::Tui::Model.initial.with(
+      snapshot: snap,
+      scope: 0,
+      new_idea_project_name: "duplicate"
+    )
+
+    assert_equal "(choose project)", Hive::Tui::Views::NewIdeaPrompt.project_label(model)
   end
 
-  def test_resolve_project_name_returns_nil_when_all_projects_unhealthy
+  def test_project_label_reports_no_projects_from_authority
     snap = Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-04",
-      "projects" => [
-        { "name" => "broken1", "error" => "missing_project_path", "tasks" => [] },
-        { "name" => "broken2", "error" => "not_initialised", "tasks" => [] }
-      ]
+      "projects" => []
     )
     model = Hive::Tui::Model.initial.with(snapshot: snap, scope: 0)
-    assert_nil Hive::Tui::Views::NewIdeaPrompt.resolve_project_name(model)
+
+    assert_equal "(no projects)", Hive::Tui::Views::NewIdeaPrompt.project_label(model)
   end
 end

@@ -1,6 +1,34 @@
 module Hive::AgentSupport::Claude::Stream
   MAX_DIAGNOSTIC_BYTES = 200
 
+  # Track the main conversation independently of billing for delegated work.
+  class ModelIdentity
+    attr_reader :model
+
+    def observe(event)
+      return unless event.is_a?(Hash) && event["parent_tool_use_id"].nil?
+
+      observed = case event["type"]
+      when "system"
+        event["model"] if event["subtype"] == "init" && @model.nil?
+      when "assistant"
+        event.dig("message", "model")
+      when "stream_event"
+        event.dig("event", "message", "model") if event.dig("event", "type") == "message_start"
+      when "result"
+        event["model"] || (@model.nil? && single_model(event))
+      end
+      @model = observed if observed.is_a?(String) && !observed.empty?
+    end
+
+    private
+
+    def single_model(event)
+      models = event["modelUsage"]
+      models.keys.first if models.is_a?(Hash) && models.size == 1
+    end
+  end
+
   class TokenMeter < Hive::AgentSupport::StreamMeter
     def initialize(*)
       super

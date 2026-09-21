@@ -96,14 +96,13 @@ module Hive
         #
         # A clean-pathed project that nevertheless carries
         # `legacy_stage_dirs` (task folders under a renamed stage)
-        # gets the same `⚠` prefix and a short "legacy dirs — run
-        # hive migrate" hint, so the operator notices the migration
-        # nudge in the same scan they use for missing/needs-init.
+        # gets the same `⚠` prefix and a short status hint for the conversion guide
+        # in the same scan used for missing/needs-init.
         def project_label(project)
           if project.error.nil?
             return project.name.to_s if Array(project.legacy_stage_dirs).empty?
 
-            return "⚠ #{project.name} (legacy dirs — run hive migrate)"
+            return "⚠ #{project.name} (legacy dirs — run hive status)"
           end
 
           short = case project.error

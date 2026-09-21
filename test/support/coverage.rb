@@ -468,9 +468,20 @@ module HiveTestCoverage
     end
   end
 
-  def build_report(result, result_errors: @result_errors || [])
+  def build_report(result, result_errors: @result_errors || [], sources: nil)
     coverage_by_path = result.transform_keys { |path| File.expand_path(path) }
-    files = source_files.map do |path|
+    paths = if sources
+      sources.map do |source|
+        path = File.expand_path(source, @root)
+        unless path.start_with?("#{@lib_dir}/") && path.end_with?(".rb") && File.file?(path)
+          raise ArgumentError, "invalid focused coverage source: #{source}"
+        end
+        path
+      end.uniq.sort
+    else
+      source_files
+    end
+    files = paths.map do |path|
       file_report(path, coverage_by_path[File.expand_path(path)])
     end
 

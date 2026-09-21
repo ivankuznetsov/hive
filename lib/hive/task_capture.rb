@@ -8,6 +8,8 @@ require "hive/task_counter"
 require "hive/task_meta"
 require "hive/workflows"
 require "hive/workflow_package/managed_store"
+require "hive/config"
+require "hive/daily_digest/task_creation_receipt"
 
 module Hive
   # Lower-level deterministic task capture shared by CLI task creation and
@@ -38,7 +40,8 @@ module Hive
                    idempotency_key:, input_fingerprint:, attachments: [],
                    depends_on: nil, base_branch: nil, initial_marker: nil,
                    git_ops: nil, task_id_provider: nil, before_lookup: nil,
-                   before_candidate: nil, candidate_writer: nil)
+                   before_candidate: nil, candidate_writer: nil, project: nil,
+                   clock: -> { Time.now.utc })
       @project_root = File.expand_path(project_root)
       @hive_state = File.expand_path(hive_state)
       @workflow_info = workflow_info
@@ -56,6 +59,8 @@ module Hive
       @before_lookup = before_lookup
       @before_candidate = before_candidate
       @candidate_writer = candidate_writer
+      @project = project
+      @clock = clock
     end
 
     def call
@@ -185,7 +190,15 @@ module Hive
       copy_attachments!(task_dir)
       @candidate_writer&.call(task_dir)
       validate_stable_authored_workflow!
-      write_task_meta!(task_dir, stable_selection: stable_selection)
+      metadata = write_task_meta!(task_dir, stable_selection: stable_selection)
+      Hive::DailyDigest::TaskCreationReceipt.write!(
+        task_folder: task_dir,
+        project: project_identity!,
+        task: { "id" => metadata[:id], "slug" => @slug },
+        workflow: @workflow.id.to_s,
+        stage: @workflow.stages.first.dir,
+        created_at: @clock.call
+      )
     rescue StandardError, Interrupt
       FileUtils.rm_rf(task_dir) if created
       raise
@@ -282,6 +295,18 @@ module Hive
       FileUtils.rm_rf(task_dir)
       relative = task_dir.delete_prefix("#{@hive_state}/")
       @git_ops.run_git!("-C", @hive_state, "reset", "-q", "HEAD", "--", relative)
+    end
+
+    def project_identity!
+      project = @project || Hive::Config.registered_projects.find do |entry|
+        File.expand_path(entry.fetch("path")) == @project_root
+      end
+      unless project
+        raise Hive::ConfigError,
+              "task creation requires a current registered-project identity"
+      end
+
+      project
     end
   end
 end

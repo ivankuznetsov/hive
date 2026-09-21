@@ -26,7 +26,7 @@ module Hive
 
       def stage_dirs = workflows.values.flat_map(&:stage_dirs).uniq.freeze
       def active_stage_dirs
-        workflows.values.flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }.uniq.freeze
+        workflows.values.flat_map(&:active_stage_dirs).uniq.freeze
       end
       def terminal_stage_dirs = workflows.values.map { |workflow| workflow.stages.last.dir }.uniq.freeze
     end
@@ -285,7 +285,7 @@ module Hive
       unless selected
         raise Hive::ConfigError,
               "managed workflow #{meta[:workflow].inspect} is not selected; " \
-              "install it and run hive migrate before executing task #{slug}"
+              "install it and read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md before executing task #{slug}"
       end
       current = [
         selected.fetch("source_commit"),
@@ -297,7 +297,7 @@ module Hive
 
       raise Hive::ConfigError,
             "managed workflow task #{slug} requires migration to the selected " \
-            "#{meta[:workflow].inspect} generation; run hive migrate"
+            "#{meta[:workflow].inspect} generation; read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     end
 
     def project_default_workflow
@@ -398,7 +398,7 @@ module Hive
 
       raise InvalidTaskPath,
             "unknown stage name: #{stage_dir} for workflow #{workflow.id.inspect}; " \
-              "run `hive migrate` if this task uses pre-open-pr stage names"
+              "read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md if this task uses pre-open-pr stage names"
     end
 
     def membership_workflows

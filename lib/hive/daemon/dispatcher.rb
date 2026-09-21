@@ -21,6 +21,10 @@ require "hive/runtime_control_plane/dispatch_repository"
 
 require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
+require "hive/daemon/daily_digest_close_scheduler"
+require "hive/daily_digest/migration"
+require "hive/daemon/daily_digest_delivery_scheduler"
+require "hive/daily_digest/hold_observer"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/patrol_fix_admission_scheduler"
@@ -57,6 +61,7 @@ module Hive
       OperationalQueueState = Data.define(:pending, :claimed, :malformed, :error)
       FastProbe = Data.define(:task_keys, :full_tick)
       DISPATCH_AGING_STEP_SEC = 30 * 60
+      PatrolDiscoveryResult = Data.define(:candidates, :error)
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
       STATE_FILE_PROBE_BATCH_SIZE = 64
       STALE_RECOVERY_BLOCK_REASONS = %w[
@@ -77,22 +82,29 @@ module Hive
       # @param logger [Hive::Daemon::Logger]
       # @param merge_watcher [PrMergeWatcher, nil]
       # @param patrol_scheduler [PatrolScheduler, nil]
+      # @param patrol_discovery_async [Boolean] discover Patrol candidates on
+      #   one background thread while keeping reservation and spawn on the
+      #   dispatcher thread
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
                      patrol_scheduler: nil, refactor_patrol_scheduler: nil,
                      patrol_fix_admission_scheduler: nil,
-                     patrol_arbiter: nil, answer_digest_scheduler: nil, dry_run: false,
+                     patrol_arbiter: nil, answer_digest_scheduler: nil,
+                     daily_digest_close_scheduler: nil,
+                     daily_digest_delivery_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      dispatch_repository: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      operational_snapshot: nil, recovery_coordinator: nil,
+                     digest_hold_observer: Hive::DailyDigest::HoldObserver.new,
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
                      runtime_ready_callback: nil,
-                     clock: nil)
+                     clock: nil,
+                     patrol_discovery_async: false)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -104,7 +116,14 @@ module Hive
         @refactor_patrol_scheduler = refactor_patrol_scheduler
         @patrol_fix_admission_scheduler = patrol_fix_admission_scheduler
         @patrol_arbiter = patrol_arbiter
+        @patrol_discovery_async = patrol_discovery_async == true
+        @patrol_discovery_thread = nil
+        @patrol_discovery_started_at = nil
+        @patrol_discovery_stall_reported = false
         @answer_digest_scheduler = answer_digest_scheduler
+        @daily_digest_close_scheduler = daily_digest_close_scheduler
+        @daily_digest_delivery_scheduler = daily_digest_delivery_scheduler
+        @digest_hold_observer = digest_hold_observer
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
         @attempt_reconciler = attempt_reconciler
@@ -136,6 +155,7 @@ module Hive
 
         @daemon_cfg = config["daemon"] || {}
         @update_cfg = config["update"] || Hive::Config::DEFAULTS["update"]
+        @daily_digest_cfg = config["daily_digest"] || Hive::Config::DEFAULTS["daily_digest"]
         @update_check_enabled = @update_cfg.fetch("check", true)
         # NOTE: `update.auto` is intentionally NOT read here yet — bash
         # auto-update (U7) is the only consumer and is deferred, so every
@@ -183,6 +203,7 @@ module Hive
         @tracked_state_file_order_members = Set.new
         @tracked_state_file_cursor = 0
         @known_rows_by_key = {}
+        @advance_rows_by_key = {}
         @dispatched_today = 0
         reset_active_agent_snapshot
         # Per-tick enable cache. Populated lazily within one tick so
@@ -204,9 +225,9 @@ module Hive
         # see the next warning the next time it goes red, but we don't
         # actively re-emit on every tick. Issue #95.
         @legacy_layout_logged = {}
-        # Test-injectable state homes for dispatch requests and the completion
-        # outbox. Production uses `Hive::Paths.state_home`; unit tests inject a
-        # sandbox while sharing one SQL control plane.
+        # Test-injectable state homes for dispatch requests and their results.
+        # Production uses `Hive::Paths.state_home`; unit tests inject a sandbox
+        # while sharing one SQL control plane.
         # `[project, slug] → last-logged error signature` for the
         # brainstorm-gate parse-error log dedup (see
         # `brainstorm_answer_state`).
@@ -276,8 +297,13 @@ module Hive
           )
           reconcile_lost_attempt_deliveries(now: now)
           if @attempt_reconciler&.respond_to?(:sweep_finalization_maintenance)
-            result = @attempt_reconciler.sweep_finalization_maintenance(now: now)
-            refresh_attempt_storage_snapshot if result&.fetch(:ran, false)
+            begin
+              result = @attempt_reconciler.sweep_finalization_maintenance(now: now)
+              refresh_attempt_storage_snapshot if result&.fetch(:ran, false)
+            rescue StandardError
+              refresh_attempt_storage_snapshot
+              raise
+            end
           end
         rescue StandardError => e
           @logger.event(:fatal,
@@ -312,6 +338,12 @@ module Hive
         # + catch-up-cap `write_state`), and an unguarded SystemCallError
         # (ENOSPC/EROFS/EACCES) would otherwise crash the whole tick and
         # trip the unit's restart-loop cap.
+        run_digest_scheduler_tick(
+          @daily_digest_close_scheduler, "daily_digest_close_scheduler.tick", now: now
+        )
+        run_digest_scheduler_tick(
+          @daily_digest_delivery_scheduler, "daily_digest_delivery_scheduler.tick", now: now
+        )
         run_digest_scheduler_tick(@answer_digest_scheduler, "answer_digest_scheduler.tick", now: now)
 
         # 2. Fetch status
@@ -395,6 +427,7 @@ module Hive
         # consume every newly opened slot before an old direct row is ever
         # considered. Single-writer invariant: only the daemon spawns
         # `hive run`-class verbs.
+        cache_terminal_advances(result.rows)
         queue_dispatch = process_dispatch_requests(
           now: now, rows: result.rows, projects: result.projects
         )
@@ -405,50 +438,6 @@ module Hive
         # the patrol-scan controller path; its injected predicate consults
         # normal workflow capacity instead.
         run_patrol_fix_admission_scheduler_tick(now: now)
-
-        # 3c. Project-level patrol scans are not task rows, so they do
-        # not go through Policy. They still pass through the same
-        # daemon.enabled, legacy-layout, dry-run, and concurrency gates
-        # before any subprocess is spawned.
-        patrol_candidates = if @patrol_arbiter
-          begin
-            @patrol_arbiter.candidates(now: now)
-          rescue Hive::Daemon::PatrolArbiter::StateError => e
-            @logger.event(
-              :architecture_patrol_blocked,
-              reason: "arbiter_state_error", error: "#{e.class}: #{e.message}"
-            )
-            []
-          end
-        else
-          @patrol_scheduler&.tick(now: now)
-        end
-        patrol_events = @patrol_scheduler&.drain_events
-        Array(patrol_events).each do |event|
-          @logger.event(
-            :patrol_recovery_blocked,
-            **event.reject { |key, _value| key == :status }
-          )
-        end
-        architecture_events = @refactor_patrol_scheduler&.drain_events
-        Array(architecture_events).each do |event|
-          @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
-        end
-        Array(patrol_candidates).each do |patrol_dispatch|
-          unless admission_open?
-            unless @patrol_arbiter
-              close_patrol_admission(
-                project: patrol_dispatch[:project],
-                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
-                reserved: patrol_dispatch,
-                now: now
-              )
-            end
-            next
-          end
-
-          dispatch_patrol_with_gates(patrol_dispatch, now: now)
-        end
 
         # 4. Per-row dispatch, later pipeline stages first for fresh rows
         # (see dispatch_priority_order), with aging so old earlier-stage
@@ -489,6 +478,12 @@ module Hive
           now: now
         )
 
+        # Publish task reconciliation before polling the one-slot Patrol
+        # discovery worker. Git/config inspection can be slow or blocked on one
+        # repository; only candidate enumeration leaves the dispatcher thread.
+        # Reservation, gates, and spawn remain serialized here on a later tick.
+        poll_patrol_scheduler(now: now)
+
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
       ensure
@@ -528,7 +523,8 @@ module Hive
         # Reuse the last full attempt snapshot for them. Any row that could
         # heal or dispatch refreshes attempt ownership first, preserving the
         # capacity gate without scanning attempt history on every heartbeat.
-        if result.rows.any? { |row| !active_agent_row?(row) } && !reconcile_attempts(now: now)
+        dispatchable_change = result.rows.any? { |row| !active_agent_row?(row) }
+        if dispatchable_change && !reconcile_attempts(now: now)
           @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                    action: "incremental_attempt_reconciliation_failed")
           return false
@@ -550,8 +546,9 @@ module Hive
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
+        dispatch_rows = dispatchable_change ? incremental_dispatch_rows(result.rows) : result.rows
         @priority_capacity_fences = dispatch_rows_in_priority_order(
-          result.rows, now: now, capacity_fences: @priority_capacity_fences
+          dispatch_rows, now: now, capacity_fences: @priority_capacity_fences
         )
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  action: "incremental",
@@ -617,6 +614,7 @@ module Hive
           interruptible_sleep(@fast_poll_sec)
         end
 
+        patrol_discovery_drained = join_patrol_discovery
         @logger.event(:dispatcher_stopping, in_flight: @controller.in_flight_count,
                                             grace_sec: @shutdown_grace_sec,
                                             reexec_requested: @reexec_requested)
@@ -624,7 +622,10 @@ module Hive
         record_completed(Array(shutdown_entries), now: Time.now)
         # One final reap to catch any last completions
         reap_completed(now: Time.now)
-        publish_shutdown_acknowledgement(now: Time.now)
+        publish_shutdown_acknowledgement(
+          now: Time.now,
+          patrol_discovery_drained: patrol_discovery_drained
+        )
         @logger.close
       end
 
@@ -647,13 +648,13 @@ module Hive
         raise if @runtime_ready_callback
       end
 
-      def publish_shutdown_acknowledgement(now:)
+      def publish_shutdown_acknowledgement(now:, patrol_discovery_drained: true)
         return unless @operational_snapshot
 
         proof = @supervisor.respond_to?(:shutdown_proof) ? @supervisor.shutdown_proof : nil
         @operational_snapshot.shutdown(
           admission_closed: true,
-          drained: proof && proof.fetch(:drained, false),
+          drained: proof && proof.fetch(:drained, false) && patrol_discovery_drained,
           child_inventory: proof ? proof.fetch(:child_inventory, []) : [],
           now: now
         )
@@ -918,6 +919,8 @@ module Hive
             event = case result && result[:status]
             when :closed
               :architecture_patrol_closed
+            when :skipped
+              :architecture_patrol_skipped
             when :classified, :action_pending
               :architecture_patrol_progress
             else
@@ -985,7 +988,8 @@ module Hive
           date: entry.slug,
           exit_code: entry.exit_code,
           envelope: entry.json_envelope,
-          now: now
+          now: now,
+          stage: entry.stage
         )
         @digest_scheduler_fatal_signatures.delete(label)
       rescue StandardError => e
@@ -1003,7 +1007,7 @@ module Hive
 
         scheduler.tick(now: now)&.each do |digest_dispatch|
           unless admission_open?
-            scheduler.cancel(date: digest_dispatch[:slug])
+            scheduler.cancel(date: digest_dispatch[:slug], stage: digest_dispatch[:stage])
             next
           end
 
@@ -1037,6 +1041,154 @@ module Hive
           message: "Patrol Fix admission scheduler raised: #{error.class}: #{error.message}",
           keeping_previous: true
         )
+      end
+
+      def run_patrol_scheduler_tick(now:)
+        consume_patrol_discovery(discover_patrol_candidates(now: now), now: now)
+      end
+
+      def poll_patrol_scheduler(now:)
+        # The arbiter's candidate API leaves reservation on this thread. The
+        # legacy scheduler-only API returns already-reserved rows, so it must
+        # remain synchronous even if an embedding caller enables async mode.
+        return run_patrol_scheduler_tick(now: now) unless
+          @patrol_discovery_async && @patrol_arbiter
+        thread = @patrol_discovery_thread
+        if thread&.alive?
+          report_patrol_discovery_stall
+          return
+        elsif thread
+          result = thread.value
+          @patrol_discovery_thread = nil
+          @patrol_discovery_started_at = nil
+          @patrol_discovery_stall_reported = false
+          consume_patrol_discovery(result, now: now)
+        end
+        if admission_open? && !@patrol_discovery_thread
+          start_patrol_discovery(now: now)
+        end
+      end
+
+      def start_patrol_discovery(now:)
+        @patrol_discovery_started_at = full_tick_clock_time
+        @patrol_discovery_stall_reported = false
+        @patrol_discovery_thread = Thread.new(now) do |observed_at|
+          Thread.current.name = "hive-patrol-discovery" if Thread.current.respond_to?(:name=)
+          discover_patrol_candidates(now: observed_at)
+        end
+        @patrol_discovery_thread.report_on_exception = false
+      end
+
+      def discover_patrol_candidates(now:)
+        candidates = []
+        error = nil
+        begin
+          candidates = if @patrol_arbiter
+            @patrol_arbiter.candidates(now: now)
+          else
+            @patrol_scheduler&.tick(now: now)
+          end
+        rescue StandardError => discovery_error
+          error = discovery_error
+        end
+        PatrolDiscoveryResult.new(
+          candidates: Array(candidates),
+          error: error
+        )
+      end
+
+      def drain_patrol_discovery_events(scheduler, prior_error)
+        return [ [], prior_error ] unless scheduler
+
+        [ Array(scheduler.drain_events), prior_error ]
+      rescue StandardError => error
+        [ [], prior_error || error ]
+      end
+
+      def consume_patrol_discovery(result, now:)
+        patrol_events, error = drain_patrol_discovery_events(
+          @patrol_scheduler, result.error
+        )
+        architecture_events, error = drain_patrol_discovery_events(
+          @refactor_patrol_scheduler, error
+        )
+        if error.is_a?(Hive::Daemon::PatrolArbiter::StateError)
+          @logger.event(
+            :architecture_patrol_blocked,
+            reason: "arbiter_state_error",
+            error: "#{error.class}: #{error.message}"
+          )
+        elsif error
+          @logger.event(
+            :fatal,
+            message: "patrol discovery raised: #{error.class}: #{error.message}",
+            keeping_previous: true
+          )
+        end
+        patrol_events.each do |event|
+          @logger.event(
+            :patrol_recovery_blocked,
+            **event.reject { |key, _value| key == :status }
+          )
+        end
+        architecture_events.each do |event|
+          @logger.event(
+            :architecture_patrol_blocked,
+            **event.reject { |key, _value| key == :status }
+          )
+        end
+        result.candidates.each do |patrol_dispatch|
+          unless admission_open?
+            unless @patrol_arbiter
+              close_patrol_admission(
+                project: patrol_dispatch[:project],
+                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
+                reserved: patrol_dispatch,
+                now: now
+              )
+            end
+            next
+          end
+
+          dispatch_patrol_with_gates(patrol_dispatch, now: now)
+        end
+      end
+
+      def join_patrol_discovery
+        thread = @patrol_discovery_thread
+        return true unless thread
+        return true if thread.join(0.5)
+
+        @logger.event(
+          :fatal,
+          message: "patrol discovery did not stop before daemon shutdown",
+          elapsed_sec: patrol_discovery_elapsed.round(3),
+          keeping_previous: true
+        )
+        false
+      end
+
+      def report_patrol_discovery_stall
+        return if @patrol_discovery_stall_reported
+
+        threshold = [ @poll_interval_sec.to_f * 3, 1.0 ].max
+        elapsed = patrol_discovery_elapsed
+        return if elapsed < threshold
+
+        @patrol_discovery_stall_reported = true
+        @logger.event(
+          :fatal,
+          message: "patrol discovery is stalled; scheduler snapshots remain live",
+          elapsed_sec: elapsed.round(3),
+          threshold_sec: threshold,
+          keeping_previous: true
+        )
+      end
+
+      def patrol_discovery_elapsed
+        return 0.0 unless @patrol_discovery_started_at
+
+        [ full_tick_clock_time - @patrol_discovery_started_at, 0.0 ].max
       end
 
       def dispatch_patrol_fix_semantic(result, now:)
@@ -1237,6 +1389,12 @@ module Hive
         keys = task_keys.map { |project, slug| [ project.to_s, slug.to_s ] }.uniq
         keys.each { |key| @known_rows_by_key.delete(key) }
         rows.each { |row| @known_rows_by_key[task_key(row)] = row }
+        keys.each { |key| @advance_rows_by_key.delete(key) }
+        rows.each do |row|
+          next unless terminal_advance?(row)
+
+          @advance_rows_by_key[task_key(row)] = row
+        end
 
         keys.each { |key| @tracked_state_files.delete(key) }
         rows.each do |row|
@@ -1825,11 +1983,10 @@ module Hive
         when :deferred
           case result.reason
           when "capacity", "capacity_saturated" then :attempt_capacity
-          when "failure_cohort_cooldown" then :attempt_failure_cohort
-          when "transient_retry" then :attempt_transient_retry
+          when "patrol_retry_delay" then :attempt_patrol_retry
+          when "transient_retry", "transition_retry" then :attempt_transient_retry
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
-          when "invalid_predecessor" then :invalid_predecessor
           else :attempt_deferred
           end
         else
@@ -1854,16 +2011,14 @@ module Hive
           [ "hive", "the automatic advance failed without producing task progress" ]
         when :attempt_capacity
           [ "scheduler", "durable attempt capacity is exhausted" ]
-        when :attempt_failure_cohort
-          [ "scheduler", "this typed Patrol failure cohort is durably paced" ]
+        when :attempt_patrol_retry
+          [ "scheduler", "this Patrol task is waiting for its retry delay" ]
         when :attempt_transient_retry
           [ "scheduler", "transient contention is waiting for its retry backoff" ]
         when :attempt_lost
           [ "hive", "a prior durable attempt is lost and requires recovery" ]
         when :launch_handoff_failed
           [ "hive", "durable worker launch handoff failed" ]
-        when :invalid_predecessor
-          [ "hive", "durable successor admission found an invalid predecessor" ]
         when :attempt_deferred
           [ "hive", "durable attempt admission was deferred" ]
         when :global_cap
@@ -1904,6 +2059,9 @@ module Hive
       end
 
       def observe_operational_disposition(row, decision:, owner:, reason:, **details)
+        @digest_hold_observer&.record(
+          row, decision: decision, owner: owner, reason: reason, **details
+        )
         return unless @operational_snapshot
 
         @operational_snapshot.observe(
@@ -2052,7 +2210,7 @@ module Hive
         []
       end
 
-      # Order fresh rows so tasks closer to the end of the pipeline dispatch
+      # Order rows so tasks closer to the end of the pipeline dispatch
       # first: a 7-artifacts row before a 6-review row, an 8-finalize before
       # both. Each half-hour waited adds one stage of priority, preventing
       # old earlier-stage work from starving behind a continuous stream of
@@ -2062,6 +2220,35 @@ module Hive
         rows.each_with_index
             .sort_by { |row, idx| [ -dispatch_priority(row, now: now), idx ] }
             .map(&:first)
+      end
+
+      # Coding's ready_to_* actions initiate their next stage and may require
+      # an agent run. Only the generic Patrol Fix approval is a terminal
+      # controller transition that must outrank fresh work in the same stage.
+      # Treating every Policy.advance? action as terminal makes a fast tick
+      # replay a cached coding transition after an unrelated state change.
+      def terminal_advance?(row)
+        row.workflow == "patrol-fix" && row.action == "ready_to_advance"
+      end
+
+      def cache_terminal_advances(rows)
+        @advance_rows_by_key = rows.filter_map do |row|
+          [ task_key(row), row ] if terminal_advance?(row)
+        end.to_h
+      end
+
+      # A bounded status refresh may contain only a newly-ready run row while
+      # an unchanged accepted Patrol Fix row remains in the last full-scan cache. Merge
+      # those cached terminal contenders with the changed non-terminal rows so
+      # the same ordering applies without reading another task file or
+      # rebuilding the complete status graph.
+      def incremental_dispatch_rows(changed_rows)
+        return changed_rows if @advance_rows_by_key.empty?
+
+        pending_keys = dispatch_repository.pending(state_home: dispatch_request_state_home)
+          .map { |request| [ request.project.to_s, request.slug.to_s ] }.to_set
+        cached = @advance_rows_by_key.values.reject { |row| pending_keys.include?(task_key(row)) }
+        cached + changed_rows.reject { |row| terminal_advance?(row) }
       end
 
       # Preserve priority across the full status frame and any changed-task
@@ -2090,6 +2277,9 @@ module Hive
           project_key = row.project.to_s
           capacity_fence = global_fence || project_fences[project_key]
           outcome = handle_row(row, now: now, capacity_fence: capacity_fence)
+          if %i[dispatched in_flight attempt_terminal_replay].include?(outcome)
+            @advance_rows_by_key.delete(task_key(row))
+          end
           case outcome
           when :global_cap, :attempt_capacity
             global_fence ||= outcome
@@ -2123,7 +2313,8 @@ module Hive
       end
 
       def dispatch_priority(row, now:)
-        stage_rank(row.stage) + dispatch_age_steps(row, now: now)
+        stage_rank(row.stage) + dispatch_age_steps(row, now: now) +
+          (terminal_advance?(row) ? 0.5 : 0)
       end
 
       def dispatch_age_steps(row, now:)
@@ -2356,7 +2547,7 @@ module Hive
         action = global_digest_action(stage)
         scheduler = global_digest_scheduler(stage)
         unless admission_open?
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return :shutdown
         end
 
@@ -2364,22 +2555,25 @@ module Hive
         # holds a task slot or pushes the daemon past max_concurrent_runs,
         # and (b) can't double-dispatch the same date while a prior digest
         # child is still tracked — e.g. a restart that lost the scheduler's
-        # in-memory pending marker. Tagged `kind: :digest`, off the task
-        # caps. A gated dispatch releases the scheduler's pending marker so
-        # the next eligible tick re-evaluates it.
-        gate = digest_dispatch_gate(project: project, date: date, now: now)
+        # in-memory pending marker. Each scheduler has a distinct controller
+        # identity and runs off the task caps, so a wedged delivery cannot
+        # suppress refresh/close or the pending-answer digest. A gated
+        # dispatch releases the matching scheduler's pending marker so the
+        # next eligible tick re-evaluates it.
+        gate = digest_dispatch_gate(project: project, date: date, stage: stage, now: now)
         unless gate == :ok
           @logger.event(:blocked, project: project, slug: date,
                                   stage: stage,
                                   action: action, reason: gate.to_s)
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return
         end
         unless admission_open?
-          scheduler&.cancel(date: date)
+          scheduler&.cancel(date: date, stage: stage)
           return :shutdown
         end
 
+        capacity_identity = digest_capacity_identity(stage)
         result = dispatch_command(
           digest_dispatch[:command],
           project: project,
@@ -2389,9 +2583,9 @@ module Hive
           state_file_path: digest_dispatch[:state_file_path],
           now: now,
           trigger: action,
-          kind: :digest
+          kind: capacity_identity
         )
-        scheduler&.cancel(date: date) if result == :shutdown
+        scheduler&.cancel(date: date, stage: stage) if result == :shutdown
         result
       rescue StandardError => e
         # If dispatch_command already spawned + recorded the child before
@@ -2399,17 +2593,18 @@ module Hive
         # `complete` here too would record a SECOND failure for one logical
         # dispatch, double-incrementing the backoff count. Only complete when
         # no child is in flight for this date (spawn failed before recording).
-        if date && !@controller.running_task?(project: project, slug: date)
-          scheduler&.complete(date: date, exit_code: 1, envelope: nil, now: now)
+        identity = stage && digest_capacity_identity(stage)
+        if date && (!identity || @controller.can_dispatch_digest?(identity: identity, now: now) == :ok)
+          scheduler&.complete(
+            date: date, exit_code: 1, envelope: nil, now: now, stage: stage
+          )
         end
         @logger.event(:fatal, message: "#{action} dispatch error: #{e.class}: #{e.message}",
                               project: digest_dispatch[:project], slug: date)
       end
 
-      def digest_dispatch_gate(project:, date:, now:)
-        return :in_flight if @controller.running_task?(project: project, slug: date)
-
-        @controller.can_dispatch_digest?(now: now)
+      def digest_dispatch_gate(project:, date:, stage:, now:)
+        @controller.can_dispatch_digest?(identity: digest_capacity_identity(stage), now: now)
       end
 
       # Global-digest pseudo-stages mapped to their action label. Both
@@ -2418,7 +2613,10 @@ module Hive
       # maps a stage to the per-instance scheduler ivar, which can't live in a
       # frozen constant.
       GLOBAL_DIGEST_ACTIONS = {
-        Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE => "answer_digest"
+        Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE => "answer_digest",
+        Hive::Daemon::DailyDigestCloseScheduler::REFRESH_STAGE => "daily_digest_refresh",
+        Hive::Daemon::DailyDigestCloseScheduler::STAGE => "daily_digest_close",
+        Hive::Daemon::DailyDigestDeliveryScheduler::STAGE => "daily_digest_delivery"
       }.freeze
 
       def global_digest_stage?(stage)
@@ -2438,7 +2636,16 @@ module Hive
         case stage
         when Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
           @answer_digest_scheduler
+        when Hive::Daemon::DailyDigestCloseScheduler::REFRESH_STAGE,
+             Hive::Daemon::DailyDigestCloseScheduler::STAGE
+          @daily_digest_close_scheduler
+        when Hive::Daemon::DailyDigestDeliveryScheduler::STAGE
+          @daily_digest_delivery_scheduler
         end
+      end
+
+      def digest_capacity_identity(stage)
+        GLOBAL_DIGEST_ACTIONS.fetch(stage).to_sym
       end
 
       def global_digest_action(stage)
@@ -3349,7 +3556,7 @@ module Hive
               )
             end
             dispatch_repository.complete_delivery(request.request_id, now: now)
-            acknowledge_attempt_finalization(attempt_id, :request_delivery)
+            acknowledge_attempt_finalization(attempt_id, :dispatch)
             next
           end
 
@@ -3413,12 +3620,12 @@ module Hive
             exit_code: receipt["exit_status"],
             outcome: receipt["outcome"]
           )
-          acknowledge_attempt_finalization(attempt, :request_delivery)
+          acknowledge_attempt_finalization(attempt, :dispatch)
         end
 
         terminal_attempts.each do |attempt|
           unless claimed_attempt_ids.key?(attempt.attempt_id)
-            acknowledge_attempt_finalization(attempt, :request_delivery)
+            acknowledge_attempt_finalization(attempt, :dispatch)
           end
         end
         terminal_attempts.each do |attempt|
@@ -3444,27 +3651,34 @@ module Hive
           outcome = @lost_outcome_store.fetch(attempt_id)
           next unless outcome
 
-          case outcome["status"]
-          when "successor_dispatched"
-            successor_id = outcome["successor_attempt_id"].to_s
-            next if successor_id.empty? || successor_id == attempt_id
+          case outcome["phase"]
+          when "complete"
+            request_id = outcome["request_id"].to_s
+            next if request_id.empty? || !@attempt_reconciler&.respond_to?(:store)
+
+            replacement_id = @attempt_reconciler.store.attempt_id_for_request(
+              request_id: request_id
+            ).to_s
+            next if replacement_id.empty? || replacement_id == attempt_id
+            replacement = @attempt_reconciler.fetch(replacement_id)
+            next unless replacement
 
             dispatch_repository.update_claim(
               delivery.request.request_id,
               pid: delivery.claim["pid"],
               process_start_time: delivery.claim["process_start_time"],
-              attempt_id: successor_id,
-              task_generation: outcome["task_generation"],
+              attempt_id: replacement.attempt_id,
+              task_generation: replacement.task_generation,
               state_home: dispatch_request_state_home,
               now: now
             )
-            acknowledge_attempt_finalization(attempt_id, :request_delivery)
+            acknowledge_attempt_finalization(attempt_id, :dispatch)
           end
         end
 
         Array(@attempt_snapshot&.lost_attempts).each do |attempt|
           unless claimed_attempt_ids.key?(attempt.attempt_id)
-            acknowledge_attempt_finalization(attempt, :request_delivery)
+            acknowledge_attempt_finalization(attempt, :dispatch)
           end
         end
         Array(@attempt_snapshot&.lost_attempts).each do |attempt|
@@ -3540,11 +3754,9 @@ module Hive
         timeout + grace + (@poll_interval_sec.to_i * 2) + 600
       end
 
-      # ADV-1 (#6): drop stale dispatch-result notices each tick so a
-      # down/wedged bot can't let the dir grow without bound. The bot
-      # itself also skips+removes stale notices on drain; this is the
-      # daemon-side backstop for when no bot is consuming at all. Never
-      # crashes a tick.
+      # Prune only expired, delivered, completed request rows. Pending results
+      # survive indefinitely until the bot acknowledges a successful send.
+      # Never crashes a tick.
       def prune_dispatch_results(now:)
         dispatch_repository.prune_results(
           state_home: dispatch_result_state_home, now: now
@@ -3573,7 +3785,7 @@ module Hive
         )
       end
 
-      # ADV-1: write a completion-notice file the bot will drain + relay to
+      # ADV-1: write a completion result the bot will drain + relay to
       # the originating Telegram chat. No-op when the completed run did
       # not carry a chat_id (auto-advance runs, or metadata already gone)
       # — there's no one to reply to. Best-effort: a write failure must
@@ -3728,7 +3940,6 @@ module Hive
           update_id: nil,
           trigger: trigger,
           task_generation: nil,
-          predecessor_attempt_id: nil,
           inherited_outputs: [],
           schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION
         )
@@ -3790,8 +4001,8 @@ module Hive
           when :terminal_replay then :attempt_terminal_replay
           when :deferred
             case result.reason
-            when "transient_retry" then :attempt_transient_retry
-            when "failure_cohort_cooldown" then :attempt_failure_cohort_deferred
+            when "transient_retry", "transition_retry" then :attempt_transient_retry
+            when "patrol_retry_delay" then :attempt_patrol_retry_deferred
             else :attempt_capacity_deferred
             end
           when :no_route then :attempt_route_unavailable
@@ -3818,7 +4029,7 @@ module Hive
        # its `legacy_stage_dirs` array is non-empty (i.e. tasks were left
        # in a pre-rename stage directory). Advancing a row on top of a
        # half-migrated layout would silently lose work, so we skip the
-       # whole project until the operator runs `hive migrate`. Logging is
+       # whole project until the operator runs an offline agent conversion. Logging is
        # gated by `@legacy_layout_logged` so a half-migrated project
        # doesn't spam daemon.log every tick — first-sight only.
        # Issue #95.
@@ -3972,6 +4183,15 @@ module Hive
         daemon_cfg = Hive::Config.load_global_daemon
         update_cfg = Hive::Config.load_global_update
         answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        daily_digest_cfg = begin
+          Hive::DailyDigest::Migration.prepare!
+        rescue Hive::ConfigError, Hive::DailyDigest::Migration::InitializationError => error
+          @logger.event(
+            :daily_digest_configuration_disabled,
+            error_class: error.class.name, message: error.message
+          )
+          Hive::Config::DEFAULTS.fetch("daily_digest").merge("enabled" => false)
+        end
         stale_agent_healer = StaleAgentHealer.new(
           controller: @controller,
           logger: @logger,
@@ -3991,10 +4211,12 @@ module Hive
         @daemon_cfg = daemon_cfg
         @update_cfg = update_cfg
         @answer_digest_cfg = answer_digest_cfg
+        @daily_digest_cfg = daily_digest_cfg
         @config = {
           "daemon" => @daemon_cfg,
           "update" => @update_cfg,
-          "answer_digest" => @answer_digest_cfg
+          "answer_digest" => @answer_digest_cfg,
+          "daily_digest" => @daily_digest_cfg
         }
         @update_check_enabled = @update_cfg.fetch("check", true)
         @controller.update_limits(
@@ -4017,6 +4239,18 @@ module Hive
             "hour", Hive::Daemon::AnswerDigestScheduler::DEFAULT_HOUR
           )
         )
+        @daily_digest_close_scheduler&.reconfigure(
+          enabled: @daily_digest_cfg.fetch("enabled", false),
+          interval_sec: @daily_digest_cfg.fetch("materialization_interval_sec", 300)
+        )
+        telegram_cfg = @daily_digest_cfg.fetch("telegram", {})
+        @daily_digest_delivery_scheduler&.reconfigure(
+          enabled: @daily_digest_cfg.fetch("enabled", false) &&
+            telegram_cfg.fetch("enabled", false),
+          hour: telegram_cfg.fetch(
+            "hour", Hive::Daemon::DailyDigestDeliveryScheduler::DEFAULT_HOUR
+          )
+        )
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
@@ -4032,6 +4266,7 @@ module Hive
             "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
           ),
           verb_timeouts: @daemon_cfg.fetch("child_verb_timeouts", {}),
+          stage_timeouts: @daemon_cfg.fetch("child_stage_timeouts", {}),
           kill_grace_sec: @daemon_cfg.fetch(
             "child_kill_grace_sec", ChildSupervisor::DEFAULT_KILL_GRACE_SEC
           )

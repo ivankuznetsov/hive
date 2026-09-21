@@ -30,6 +30,7 @@ class StagesBaseUsageTest < Minitest::Test
     folder = File.join(root, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
     prepare_test_task_lease_repository(folder)
+    ensure_test_task_identity(folder)
     Hive::Task.new(folder)
   end
 
@@ -132,7 +133,7 @@ class StagesBaseUsageTest < Minitest::Test
       )
       store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1",
-        predecessor_attempt_id: nil, task_id: task.id,
+        task_id: task.id.to_s,
         project: registered_project, task_slug: task.slug,
         intended_stage: "2-brainstorm", task_generation: "owner-3",
         ownership_generation: "owner-3", task_input_epoch: 3,

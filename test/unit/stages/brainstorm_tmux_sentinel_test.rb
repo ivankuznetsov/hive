@@ -65,7 +65,7 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   def test_runtime_for_non_claude_agent_is_headless_before_tmux_preflight
     cfg = {
       "claude" => { "mode" => "tmux" },
-      "brainstorm" => { "runtime" => "tmux_interactive", "agent" => "codex" }
+      "brainstorm" => { "agent" => "codex" }
     }
 
     assert_equal :headless, Hive::Stages::Brainstorm.runtime_for(cfg)

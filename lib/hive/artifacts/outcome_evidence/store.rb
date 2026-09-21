@@ -9,7 +9,6 @@ require "hive/attempts/repository"
 require "hive/artifacts/outcome_evidence/document"
 require "hive/artifacts/outcome_evidence/contract"
 require "hive/artifacts/outcome_evidence/identity"
-require "hive/artifacts/outcome_evidence/legacy_capture_reader"
 require "hive/artifacts/outcome_evidence/proof"
 require "hive/artifacts/outcome_evidence/recovery"
 
@@ -22,7 +21,6 @@ module Hive
       class Store
         ROOT = "outcome-evidence".freeze
         MAX_DOCUMENT_BYTES = 256 * 1024
-        MAX_DIFF_BYTES = 16 * 1024 * 1024
         SAFE_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
         DIGEST = Proof::DIGEST
         BLOCK_REASONS = %w[
@@ -421,12 +419,12 @@ module Hive
           canonical = canonical_identity(identity)
           generation, = current_generation(canonical)
           result = Hive::AgentGitGate.read(
-            source_root, :diff, max_stdout_bytes: MAX_DIFF_BYTES,
+            source_root, :diff,
             base_oid: canonical.fetch("implementation_base"),
             head_oid: canonical.fetch("implementation_head")
           )
           unless result.success?
-            raise StoreError, "exact implementation diff is unavailable or oversized"
+            raise StoreError, "exact implementation diff is unavailable"
           end
 
           path = File.join(generation_root(generation), "implementation.diff")
@@ -434,7 +432,7 @@ module Hive
           {
             "path" => Pathname.new(path).relative_path_from(Pathname.new(@task.folder)).to_s,
             "sha256" => secure_file_digest!(
-              path, "exact implementation diff", max_bytes: MAX_DIFF_BYTES
+              path, "exact implementation diff", max_bytes: nil
             ),
             "bytes" => File.size(path),
             "implementation_base" => canonical.fetch("implementation_base"),
@@ -455,7 +453,7 @@ module Hive
           {
             "path" => Pathname.new(path).relative_path_from(Pathname.new(@task.folder)).to_s,
             "sha256" => secure_file_digest!(
-              path, "exact implementation diff", max_bytes: MAX_DIFF_BYTES
+              path, "exact implementation diff", max_bytes: nil
             ),
             "bytes" => stat.size,
             "implementation_base" => canonical.fetch("implementation_base"),
@@ -490,10 +488,6 @@ module Hive
             requirement_path(generation), schema: SCHEMAS.fetch(:requirement),
             label: "outcome-evidence requirement"
           )
-        end
-
-        def legacy_capture
-          LegacyCaptureReader.new(@task.folder).read
         end
 
         def package
@@ -923,9 +917,6 @@ module Hive
         end
 
         def write_once_bytes(path, source, generation:)
-          if source.bytesize > MAX_DIFF_BYTES
-            raise StoreError, "exact implementation diff exceeds #{MAX_DIFF_BYTES} bytes"
-          end
           ensure_generation_directories!(generation)
           begin
             File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o600) do |file|
@@ -935,15 +926,23 @@ module Hive
             end
             Hive::AtomicFile.fsync_directory(File.dirname(path))
           rescue Errno::EEXIST
-            existing = begin
+            matches = begin
               File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+                raise StoreError, "exact implementation diff must be a regular file" unless file.stat.file?
                 file.binmode
-                file.read
+                next false unless file.stat.size == source.bytesize
+
+                offset = 0
+                while (chunk = file.read(16 * 1024))
+                  break unless chunk == source.byteslice(offset, chunk.bytesize).b
+                  offset += chunk.bytesize
+                end
+                chunk.nil? && offset == source.bytesize
               end
             rescue Errno::ELOOP
               raise StoreError, "exact implementation diff must be a regular file"
             end
-            raise StoreError, "exact implementation diff is append-only and already differs" unless existing == source
+            raise StoreError, "exact implementation diff is append-only and already differs" unless matches
           end
         end
 
@@ -1060,7 +1059,7 @@ module Hive
             total = 0
             while (chunk = file.read(16 * 1024))
               total += chunk.bytesize
-              raise StoreError, "outcome-evidence document exceeds #{max_bytes} bytes" if total > max_bytes
+              raise StoreError, "outcome-evidence document exceeds #{max_bytes} bytes" if max_bytes && total > max_bytes
               digest << chunk
             end
             digest.hexdigest

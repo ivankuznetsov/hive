@@ -67,7 +67,7 @@ module Hive
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
                      observation_guard: nil, post_rearm_mutation: nil, commit_lock: true,
-                     clock: DEFAULT_CLOCK)
+                     clock: DEFAULT_CLOCK, dependency_admission: true)
         @target = target
         @to = to
         @from = from
@@ -82,6 +82,7 @@ module Hive
         @post_rearm_mutation = post_rearm_mutation
         @commit_lock = commit_lock
         @clock = clock
+        @dependency_admission = dependency_admission
       end
 
       def call
@@ -141,7 +142,7 @@ module Hive
         new_folder, commit_action = perform_move_and_commit(
           task,
           next_stage_dir,
-          enforce_admission: direction == "forward"
+          enforce_admission: direction == "forward" && @dependency_admission
         )
         complete_approval_operation(operation, new_folder, next_stage_dir, direction)
         patrol_transition&.complete!(next_stage_dir) if direction == "forward"
@@ -272,6 +273,13 @@ module Hive
 
       def resolve_destination(task)
         return resolve_explicit_to(task, @to) if @to
+        if task.workflow.controller?
+          projection = Hive::PatrolFix::Projection.new(
+            task_folder: task.folder, stage: "#{task.stage_index}-#{task.stage_name}"
+          ).to_h
+          return task.workflow.stages.last.dir if
+            Hive::PatrolFix::Projection::TERMINAL_OUTCOMES.include?(projection.dig("outcome", "kind"))
+        end
 
         task.workflow.next_stage_after(task.stage_name)&.dir ||
           raise(Hive::FinalStageReached.new(
@@ -792,3 +800,10 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary: Thor
+# rejections that never reach the handler still ride this command's JSON
+# envelope (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("approve", { schema: "hive-approve", error_kind: "invalid_task_path" })

@@ -9,7 +9,7 @@ require "time"
 require "yaml"
 require "hive"
 require "hive/attempts/generation"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/web/capture_runtime"
 require "hive/worktree"
 
@@ -210,8 +210,8 @@ module Hive
         return false unless manifest.is_a?(Hash)
 
         version = Integer(manifest["schema_version"], exception: false)
-        return false unless [ 1, 2 ].include?(version)
-        return false unless capture_manifest_schemer(version).valid?(manifest)
+        return false unless version == Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-artifact-capture")
+        return false unless capture_manifest_schemer.valid?(manifest)
         return false unless manifest["status"] == "captured"
         return false unless manifest["task"].to_s == @task.slug.to_s
         return false unless manifest["source_sha"].to_s == receipt["implementation_head"].to_s
@@ -220,30 +220,17 @@ module Hive
           "port" => "released", "processes" => "clean", "runtime" => "cleaned"
         }
         return false unless valid_capture_times?(manifest)
-        return false if Hive::SecretPatterns.match?(JSON.generate(manifest))
-        evidence_valid = if version == 1
-          valid_v1_capture_evidence?(manifest)
-        else
-          valid_v2_capture_evidence?(manifest)
-        end
-        return false unless evidence_valid
+        return false if Hive::SecretScanner.match?(JSON.generate(manifest))
+        return false unless valid_v2_capture_evidence?(manifest)
 
         artifacts = Array(manifest["artifacts"])
         artifacts.any? && artifacts.all? { |artifact| valid_capture_artifact?(artifact) }
       end
 
-      def capture_manifest_schemer(version)
-        @capture_manifest_schemers ||= {}
-        @capture_manifest_schemers[version] ||= JSONSchemer.schema(
-          Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture", version: version))
+      def capture_manifest_schemer
+        @capture_manifest_schemer ||= JSONSchemer.schema(
+          Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture"))
         )
-      end
-
-      def valid_v1_capture_evidence?(manifest)
-        manifest["environment_keys"] == Hive::Web::CaptureRuntime::DISCLOSED_ENV_KEYS.sort &&
-          !Array(manifest["command"]).empty? &&
-          !Array(manifest["fixture_ids"]).empty? &&
-          !Array(manifest["accessibility_assertions"]).empty?
       end
 
       def valid_v2_capture_evidence?(manifest)

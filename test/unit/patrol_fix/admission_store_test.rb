@@ -426,7 +426,7 @@ class PatrolFixAdmissionStoreTest < Minitest::Test
       error = assert_raises(Hive::PatrolFix::AdmissionStore::CorruptRecord) do
         store.pending(now: NOW)
       end
-      assert_includes error.message, "hive migrate"
+      assert_includes error.message, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
 
       first = store.rebuild_pending_index!
       second = store.rebuild_pending_index!

@@ -6,16 +6,14 @@ module Hive
   module ProviderRouting
     class Decision
       STATUSES = %i[legacy selected capacity_saturated no_route].freeze
-      OWNERS = %w[attempt scheduler retry_authority operator].freeze
+      OWNERS = %w[attempt scheduler retry_authority].freeze
 
-      Exclusion = Data.define(:route_id, :reason, :detail, :scope, :observation) do
-        def initialize(route_id:, reason:, detail: nil, scope: nil, observation: nil)
+      Exclusion = Data.define(:route_id, :reason, :detail) do
+        def initialize(route_id:, reason:, detail: nil)
           super(
             route_id: ProviderRouting.frozen_string(route_id),
             reason: ProviderRouting.frozen_string(reason),
-            detail: detail && ProviderRouting.frozen_string(detail),
-            scope: ProviderRouting.deep_freeze(ProviderRouting.deep_copy(scope)),
-            observation: ProviderRouting.deep_freeze(ProviderRouting.deep_copy(observation))
+            detail: detail && ProviderRouting.frozen_string(detail)
           )
           freeze
         end
@@ -24,9 +22,7 @@ module Hive
           {
             "route_id" => route_id,
             "reason" => reason,
-            "detail" => detail,
-            "scope" => scope,
-            "observation" => observation
+            "detail" => detail
           }.freeze
         end
 
@@ -38,12 +34,11 @@ module Hive
 
       attr_reader :status, :request, :route, :considered, :exclusions, :reason,
                   :policy_digest, :decision_id, :decided_at, :next_action_owner,
-                  :candidates, :probe_requirements, :circuit_generations
+                  :candidates
 
       class << self
         def selected(request:, route:, considered:, exclusions: [], candidates: [],
-                     decision_id: nil, decided_at: nil, probe_requirements: [],
-                     circuit_generations: [])
+                     decision_id: nil, decided_at: nil)
           new(
             status: :selected,
             request: request,
@@ -54,16 +49,14 @@ module Hive
             decision_id: decision_id,
             decided_at: decided_at,
             next_action_owner: "attempt",
-            candidates: candidates,
-            probe_requirements: probe_requirements,
-            circuit_generations: circuit_generations
+            candidates: candidates
           )
         end
 
         def no_route(request:, considered:, exclusions:, reason: "no_eligible_provider_route",
                      candidates: [], decision_id: nil, decided_at: nil,
                      next_action_owner: nil)
-          owner = next_action_owner || (reason == "health_state_unavailable" ? "operator" : "retry_authority")
+          owner = next_action_owner || "retry_authority"
           new(
             status: :no_route,
             request: request,
@@ -74,9 +67,7 @@ module Hive
             decision_id: decision_id,
             decided_at: decided_at,
             next_action_owner: owner,
-            candidates: candidates,
-            probe_requirements: [],
-            circuit_generations: []
+            candidates: candidates
           )
         end
 
@@ -92,9 +83,7 @@ module Hive
             decision_id: decision_id,
             decided_at: decided_at,
             next_action_owner: "scheduler",
-            candidates: candidates,
-            probe_requirements: [],
-            circuit_generations: []
+            candidates: candidates
           )
         end
 
@@ -107,16 +96,14 @@ module Hive
             exclusions: [],
             reason: "legacy_bypass",
             next_action_owner: "attempt",
-            candidates: [],
-            probe_requirements: [],
-            circuit_generations: []
+            candidates: []
           )
         end
       end
 
       def initialize(status:, request:, route:, considered:, exclusions:, reason:,
                      decision_id: nil, decided_at: nil, next_action_owner:,
-                     candidates:, probe_requirements:, circuit_generations:)
+                     candidates:)
         unless request.is_a?(Request)
           raise ArgumentError, "provider-routing decision request must be a ProviderRouting::Request"
         end
@@ -140,10 +127,6 @@ module Hive
         @decided_at = normalize_time(decided_at || Time.at(0).utc)
         @next_action_owner = owner.freeze
         @candidates = Array(candidates).dup.freeze
-        @probe_requirements = Array(probe_requirements).dup.freeze
-        @circuit_generations = ProviderRouting.deep_freeze(
-          ProviderRouting.deep_copy(circuit_generations)
-        )
         freeze
       end
 
@@ -155,15 +138,6 @@ module Hive
       def adapter = route&.adapter
       def model = route&.model
       def effort = route&.effort
-
-      def to_record_h
-        {
-          "decision_id" => decision_id,
-          "policy_digest" => policy_digest,
-          "decided_at" => decided_at,
-          "exclusions" => exclusions.uniq(&:route_id).map(&:to_record_h)
-        }.freeze
-      end
 
       def to_h
         {
@@ -180,12 +154,8 @@ module Hive
             "requirements" => request.policy.requirements.to_h
           },
           "selected_route" => route&.id,
-          "candidates" => candidates.map do |candidate|
-            candidate.respond_to?(:to_h) ? candidate.to_h(now: Time.iso8601(decided_at)) : candidate
-          end,
-          "exclusions" => exclusions.map(&:to_h),
-          "circuit_generations" => circuit_generations,
-          "probe_requirements" => probe_requirements.map(&:to_h)
+          "candidates" => candidates.map { |candidate| candidate.respond_to?(:to_h) ? candidate.to_h : candidate },
+          "exclusions" => exclusions.map(&:to_h)
         }.freeze
       end
 

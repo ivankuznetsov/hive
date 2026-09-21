@@ -3,6 +3,7 @@ require "hive/patrol_fix"
 require "hive/patrol_fix/source_snapshot"
 require "hive/patrol_fix/task_manifest"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module Daemon
@@ -70,7 +71,7 @@ module Hive
         folder = File.dirname(path)
         reject_unsafe_folder!(folder)
         manifest_snapshot = Hive::PatrolFix::TaskManifest.new(task_folder: folder).read_snapshot
-        if Hive::SecretPatterns.match?(manifest_snapshot.canonical_bytes)
+        if Hive::SecretScanner.match?(manifest_snapshot.canonical_bytes)
           invalid!("owned Patrol Fix manifest contains secret-like material")
         end
         manifest = manifest_snapshot.document

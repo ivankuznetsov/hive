@@ -1,4 +1,5 @@
 import { Controller } from "@hotwired/stimulus"
+import { Turbo } from "@hotwired/turbo-rails"
 
 // Turbo preserves the composer node across history visits. Keep that useful
 // draft preservation, but realign its project after Back/Forward restores a
@@ -12,6 +13,12 @@ window.addEventListener("popstate", () => {
 // enhancement carries an explicit project choice into the permanent composer
 // before Turbo visits the link; unfinished text and staged files stay put.
 export default class extends Controller {
+  chooseFromSelect(event) {
+    const select = event.currentTarget
+    if (select.value) selectComposerProject(select.value)
+    Turbo.visit(select.selectedOptions[0].dataset.url)
+  }
+
   choose(event) {
     if (event.defaultPrevented || event.button !== 0 ||
         event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return

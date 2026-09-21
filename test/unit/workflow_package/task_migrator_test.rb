@@ -70,7 +70,7 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       error = assert_raises(Hive::ConfigError) { migrator(dir, store).call }
 
       assert_includes error.message, "semantic stage \"review\""
-      assert_includes error.message, "hive migrate"
+      assert_includes error.message, "retry the workflow install or update"
       assert_equal before, File.binread(File.join(folder, "meta.yml"))
       assert File.directory?(folder)
       assert_empty store.cleaned

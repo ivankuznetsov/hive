@@ -138,7 +138,7 @@ class HiveStagesReviewPreFixCleanExitTest < Minitest::Test
     assert_equal paths, stored
   end
 
-  def test_oversized_visual_baseline_becomes_recoverable_without_staging_source_residue
+  def test_large_baseline_with_a_secret_becomes_recoverable_without_staging_source_residue
     @task = fake_task
     worktree = Dir.mktmpdir("hive-review-worktree")
     run!("git", "-C", worktree, "init", "-b", "main", "--quiet")
@@ -152,7 +152,7 @@ class HiveStagesReviewPreFixCleanExitTest < Minitest::Test
     FileUtils.mkdir_p(File.join(worktree, "lib"))
     File.binwrite(
       File.join(worktree, "test", "visual", "task.png"),
-      "x" * (Hive::Stages::AutoCommit::AUTO_COMMIT_BLOB_SCAN_MAX_BYTES + 1)
+      "ordinary content\n" * 300_000 + "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     )
     File.write(File.join(worktree, "lib", "repair.rb"), "meaningful change\n")
 
@@ -192,7 +192,7 @@ class HiveStagesReviewPreFixCleanExitTest < Minitest::Test
     FileUtils.mkdir_p(File.join(worktree, "test", "visual"))
     File.binwrite(
       File.join(worktree, "test", "visual", "task.png"),
-      "x" * (Hive::Stages::AutoCommit::AUTO_COMMIT_BLOB_SCAN_MAX_BYTES + 1)
+      "ordinary content\n" * 300_000 + "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     )
     task = Hive::Task.new(folder)
     File.write(task.state_file, "---\nslug: #{slug}\n---\n")

@@ -2,6 +2,7 @@ require_relative "fix_test"
 require "digest"
 require "hive/commands/approve"
 require "hive/stages/patrol_fix/publish"
+require "hive/stages/patrol_fix/validate"
 
 class PatrolFixPublishStageTest < Minitest::Test
   include HiveTestHelper
@@ -128,6 +129,79 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_clean_change_before_publication_revalidates_and_replays_the_move
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      custody = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task.folder, project_root: task.project_root, slug: task.slug,
+        worktree_root: worktree_root
+      )
+      worktree = custody.read.fetch("worktree")
+      File.write(File.join(worktree, "repair.rb"), "puts :repair\n")
+      PatrolFixStageFixture.git(worktree, "add", "repair.rb")
+      PatrolFixStageFixture.git(worktree, "commit", "-m", "Repair before publication")
+      transition = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root, commit: ->(**) { })
+      github = FakeGithub.new
+      with_replaced_singleton_method(Hive::PatrolFix::Transition, :new, ->(*) { transition }) do
+        result = Hive::Stages::PatrolFix::Publish.run!(
+          task, config, worktree_root: worktree_root, git_gateway: LocalGit.new, github_gateway: github
+        )
+        moved = Hive::Task.new(result.fetch(:moved_task_folder))
+        assert_equal "validate", moved.stage_name
+        assert_equal 0, github.creates
+        assert_equal result, Hive::Stages::PatrolFix::Publish.run!(task, config)
+        assert_equal result, Hive::Stages::PatrolFix::Validate.run!(task, config)
+        rows = Hive::PatrolFix::ReceiptStore.new(task_folder: moved.folder).read_all
+        assert_equal 2, rows.last.dig("task", "generation")
+        assert_equal "fix", rows.last.fetch("kind")
+      end
+    end
+  end
+
+  def test_revalidation_rejects_a_commit_racing_the_transition
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      transition = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root, commit: ->(**) { })
+      custody = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task.folder, project_root: task.project_root, slug: task.slug,
+        worktree_root: worktree_root
+      )
+      worktree = custody.read.fetch("worktree")
+      refresh = transition.method(:refresh_fix_receipt!)
+      transition.define_singleton_method(:refresh_fix_receipt!) do |folder, intent|
+        File.write(File.join(worktree, "racing.rb"), "puts :racing\n")
+        PatrolFixStageFixture.git(worktree, "add", "racing.rb")
+        PatrolFixStageFixture.git(worktree, "commit", "-m", "Race revalidation")
+        refresh.call(folder, intent)
+      end
+
+      error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) { transition.revalidate! }
+      assert_equal "worktree changed during revalidation transition", error.message
+      destination = File.join(task.hive_state_path, "stages", "3-validate", task.slug)
+      rows = Hive::PatrolFix::ReceiptStore.new(task_folder: destination).read_all
+      refute rows.any? { |row| row["kind"] == "fix" && row.dig("task", "generation") == 2 }
+    end
+  end
+
+  def test_revalidation_rejects_changed_custody_and_missing_source_receipt
+    with_publish_task do |task, worktree_root, _manifest, _review, _remote|
+      transition = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root, commit: ->(**) { })
+      custody = Hive::PatrolFix::WorktreeReceipt.new(
+        task_folder: task.folder, project_root: task.project_root, slug: task.slug,
+        worktree_root: worktree_root
+      )
+      captured = custody.capture!(generation: 1, evidence_digest: "a" * 64)
+      custody.define_singleton_method(:capture!) { |**| captured.merge("branch" => "foreign") }
+      with_replaced_singleton_method(Hive::PatrolFix::WorktreeReceipt, :new, ->(**) { custody }) do
+        error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) { transition.revalidate! }
+        assert_includes error.message, "custody changed"
+      end
+      rewrite_receipts(task) { |rows| rows.reject { |row| row["kind"] == "fix" } }
+      error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+        transition.send(:refresh_fix_receipt!, task.folder, { "carried_receipts" => [ "missing" ] })
+      end
+      assert_includes error.message, "source fix is missing"
+    end
+  end
+
   def test_changed_head_immediately_before_push_blocks_without_remote_effect
     with_publish_task do |task, worktree_root, _manifest, _review, _remote|
       delegate = LocalGit.new
@@ -214,20 +288,77 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_publication_omits_example_url_credentials_without_changing_review_receipts
+    rationale = "Checked HTTP://user:pw@example.com/a and https://user:pw@example.com/b. " \
+                "Keep https://example.com?email=user@example.org and https://example.com#user@example.org."
+    with_publish_task(review_rationale: rationale) do |task, worktree_root, _manifest, _review, _remote|
+      before = File.binread(File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME))
+      request = Hive::Stages::PatrolFix::Publish.publication_request(
+        task, config, git_gateway: LocalGit.new, worktree_root: worktree_root
+      )
+
+      assert_includes request.body, "HTTP://example.com/a"
+      assert_includes request.body, "https://example.com/b"
+      refute_includes request.body, "user:pw@"
+      assert_includes request.body, "https://example.com?email=user@example.org"
+      assert_includes request.body, "https://example.com#user@example.org"
+      assert_equal before, File.binread(File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME))
+      refute Hive::SecretScanner.match?(request.published_body)
+    end
+  end
+
   def test_secret_in_review_body_blocks_before_push_without_leaking_diagnostic
-    with_publish_task(review_rationale: "token ghp_#{'a' * 36}") do |task, worktree_root, _manifest, _review, _remote|
+    with_publish_task(review_rationale: "token ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}") do |task, worktree_root, _manifest, _review, _remote|
       git = LocalGit.new
-      error = assert_raises(Hive::GithubPublication::Blocked) do
-        Hive::Stages::PatrolFix::Publish.run!(
-          task, config, git_gateway: git, github_gateway: FakeGithub.new,
+      github = FakeGithub.new
+      result = Hive::Stages::PatrolFix::Publish.run!(
+        task, config, git_gateway: git, github_gateway: github,
+        worktree_root: worktree_root, cleanup: ->(*) { true }
+      )
+
+      assert_equal :parked, result.fetch(:status)
+      block = result.fetch(:receipt)
+      assert_equal "publication_block", block.fetch("kind")
+      assert_equal "secret_detected", block.dig("payload", "code")
+      assert_equal "operator", block.dig("payload", "owner")
+      assert_equal [ "body" ], block.dig("payload", "blocked_fields")
+      refute block.fetch("payload").key?("rework_stage")
+      refute_includes JSON.generate(block), "ghp_"
+      assert_equal 0, git.pushes
+      assert_equal 0, github.creates
+      refute publication_receipt(task)
+      projection = Hive::PatrolFix::Projection.new(
+        task_folder: task.folder, stage: "5-publish"
+      ).to_h
+      assert_equal "publication_blocked", projection.dig("outcome", "kind")
+      assert_equal "operator", projection.fetch("blocker_owner")
+      assert_equal "parked", projection.dig("action", "kind")
+
+      replay = Hive::Stages::PatrolFix::Publish.run!(
+        task, config, git_gateway: Object.new, github_gateway: Object.new,
+        worktree_root: worktree_root, cleanup: ->(*) { flunk "park replay must not clean up" }
+      )
+      assert_equal block, replay.fetch(:receipt)
+    end
+  end
+
+  def test_source_and_diff_secrets_park_without_a_recovery_route
+    token = "ghp_aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
+    [
+      [ { source_evidence: "evidence #{token}" }, [ "body" ] ],
+      [ { fixed_contents: "puts '#{token}'\n" }, [ "diff" ] ]
+    ].each do |options, expected_fields|
+      with_publish_task(**options) do |task, worktree_root, _manifest, _review, _remote|
+        result = Hive::Stages::PatrolFix::Publish.run!(
+          task, config, git_gateway: LocalGit.new, github_gateway: FakeGithub.new,
           worktree_root: worktree_root, cleanup: ->(*) { true }
         )
-      end
 
-      assert_equal "secret_detected", error.code
-      refute_includes error.message, "ghp_"
-      assert_equal 0, git.pushes
-      refute publication_receipt(task)
+        assert_equal :parked, result.fetch(:status)
+        refute result.fetch(:receipt).fetch("payload").key?("rework_stage")
+        assert_equal expected_fields, result.dig(:receipt, "payload", "blocked_fields")
+        refute_includes JSON.generate(result.fetch(:receipt)), token
+      end
     end
   end
 
@@ -254,7 +385,7 @@ class PatrolFixPublishStageTest < Minitest::Test
     with_publish_task do |task, worktree_root, _manifest, _review, _remote|
       cleanup_calls = 0
       with_replaced_singleton_method(
-        Hive::Stages::PatrolFix::Publish, :current_publication, ->(*) { nil }
+        Hive::Stages::PatrolFix::Publish, :current_publish_result, ->(*) { nil }
       ) do
         error = assert_raises(Hive::GithubPublication::Blocked) do
           Hive::Stages::PatrolFix::Publish.run!(
@@ -508,6 +639,23 @@ class PatrolFixPublishStageTest < Minitest::Test
     end
   end
 
+  def test_secret_removed_from_final_diff_still_parks_without_remote_effects
+    token = "ghp_aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
+    with_publish_task(intermediate_contents: "puts '#{token}'\n") do |task, worktree_root, _manifest, _review, _remote|
+      git = LocalGit.new
+      github = FakeGithub.new
+      result = Hive::Stages::PatrolFix::Publish.run!(
+        task, config, git_gateway: git, github_gateway: github,
+        worktree_root: worktree_root, cleanup: ->(*) { true }
+      )
+      assert_equal :parked, result.fetch(:status)
+      assert_equal [ "diff" ], result.dig(:receipt, "payload", "blocked_fields")
+      assert_equal 0, git.pushes
+      assert_equal 0, github.creates
+      refute_includes JSON.generate(result.fetch(:receipt)), token
+    end
+  end
+
   private
 
   def rewrite_receipts(task)
@@ -516,8 +664,11 @@ class PatrolFixPublishStageTest < Minitest::Test
     File.write(path, yield(rows).map { |row| JSON.generate(row) }.join("\n") + "\n")
   end
 
-  def with_publish_task(review_rationale: "Independent review approved the exact patch.")
-    PatrolFixStageFixture.with_task(stage: "5-publish") do |task, root, manifest|
+  def with_publish_task(review_rationale: "Independent review approved the exact patch.",
+                        source_evidence: "bug", fixed_contents: "puts :fixed\n", intermediate_contents: nil)
+    PatrolFixStageFixture.with_task(
+      stage: "5-publish", source_evidence: source_evidence
+    ) do |task, root, manifest|
       remote = File.join(root, "remote.git")
       capture("git", "init", "--bare", remote)
       PatrolFixStageFixture.git(task.project_root, "remote", "add", "origin", remote)
@@ -533,7 +684,12 @@ class PatrolFixPublishStageTest < Minitest::Test
         generation: 1, evidence_digest: "a" * 64,
         base_revision: manifest.fetch("target_revision")
       )
-      File.write(File.join(owner.fetch("worktree"), "app.rb"), "puts :fixed\n")
+      if intermediate_contents
+        File.write(File.join(owner.fetch("worktree"), "app.rb"), intermediate_contents)
+        PatrolFixStageFixture.git(owner.fetch("worktree"), "add", "app.rb")
+        PatrolFixStageFixture.git(owner.fetch("worktree"), "commit", "-m", "Intermediate change")
+      end
+      File.write(File.join(owner.fetch("worktree"), "app.rb"), fixed_contents)
       PatrolFixStageFixture.git(owner.fetch("worktree"), "add", "app.rb")
       PatrolFixStageFixture.git(owner.fetch("worktree"), "commit", "-m", "fix")
       fix_payload = custody.capture!(generation: 1, evidence_digest: "a" * 64)

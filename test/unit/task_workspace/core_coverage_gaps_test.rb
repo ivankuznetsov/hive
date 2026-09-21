@@ -90,19 +90,16 @@ class TaskWorkspaceCoreCoverageGapsTest < Minitest::Test
     ).call
     assert_equal "missing", empty.fetch("state")
 
-    missing_predecessor = Hive::TaskWorkspace::Attempts.new(
-      projection: { "identity" => { "attempt_id" => "a" }, "journal" => { "attempts" => [] } },
-      attempt_store: Store.new({ "a" => attempt("a", predecessor: "gone") }), activities: []
-    ).call
-    assert_includes missing_predecessor.fetch("diagnostics").map { |row| row["reason"] },
-                    "predecessor_missing"
-
     bytes = Hive::TaskWorkspace::Attempts.new(
-      projection: { "identity" => { "attempt_id" => "a" }, "journal" => { "attempts" => [] } },
+      projection: {
+        "identity" => { "attempt_id" => "a" },
+        "journal" => { "attempts" => [ { "attempt_id" => "b" } ] }
+      },
       attempt_store: Store.new({
-        "a" => attempt("a", predecessor: "b"),
+        "a" => attempt("a"),
         "b" => attempt("b").merge("padding" => "x" * 500)
-      }), activities: [], limits: Hive::TaskWorkspace::Limits.new(attempt_bytes: 450)
+      }), activities: [ { "attempt_id" => "b" } ],
+      limits: Hive::TaskWorkspace::Limits.new(attempt_bytes: 450)
     ).call
     assert_includes bytes.fetch("diagnostics").map { |row| row["reason"] }, "attempt_bytes_exhausted"
 
@@ -327,9 +324,9 @@ class TaskWorkspaceCoreCoverageGapsTest < Minitest::Test
 
   private
 
-  def attempt(id, predecessor: nil)
+  def attempt(id)
     {
-      "attempt_id" => id, "predecessor_attempt_id" => predecessor,
+      "attempt_id" => id,
       "intended_stage" => "4-execute", "task_input_epoch" => 3,
       "routing" => {}, "state" => "running", "accepted_at" => NOW
     }

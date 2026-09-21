@@ -3,6 +3,7 @@ require "time"
 require "hive/output_reference"
 require "hive/patrol_fix"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/stringify_keys"
 
 module Hive
@@ -95,7 +96,7 @@ module Hive
           "custody_status" => bounded_token(source["custody_status"] || "unknown", "custody status"),
           "detail" => detail,
           "redaction_status" => redaction_status,
-          "secret_policy_version" => Hive::SecretPatterns::POLICY_VERSION,
+          "secret_policy_version" => Hive::SecretPatterns::REDACTION_VERSION,
           "transport_status" => transport_status,
           "log_reference" => log_reference && Hive::StringifyKeys.call(log_reference),
           "recorded_at" => normalize_time(recorded_at)
@@ -166,7 +167,7 @@ module Hive
           raise InvalidDiagnostic, "attempt diagnostic detail is invalid"
         end
         unless REDACTION_VALUES.include?(value["redaction_status"]) &&
-               value["secret_policy_version"] == Hive::SecretPatterns::POLICY_VERSION
+               value["secret_policy_version"] == Hive::SecretPatterns::REDACTION_VERSION
           raise InvalidDiagnostic, "attempt diagnostic secret policy is invalid"
         end
         if require_log_reference
@@ -177,7 +178,7 @@ module Hive
         Time.iso8601(value.fetch("recorded_at"))
         encoded = JSON.generate(value)
         raise InvalidDiagnostic, "attempt diagnostic exceeds #{MAX_BYTES} bytes" if encoded.bytesize > MAX_BYTES
-        if Hive::SecretPatterns.match?(encoded)
+        if Hive::SecretScanner.match?(encoded)
           raise InvalidDiagnostic, "attempt diagnostic contains secret-pattern text"
         end
         true

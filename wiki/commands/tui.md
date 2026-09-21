@@ -3,11 +3,27 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-08-13
+updated: 2026-08-28
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr]
 ---
 
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · PR · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
+
+## Usage and options
+
+Run `hive tui` in an interactive TTY. It has no command-specific options;
+`--json` is explicitly rejected because the dashboard is human-only.
+
+## Examples
+
+`hive tui` opens the fleet dashboard; press `?` after launch for the complete
+per-mode keybinding reference.
+
+## Output, schema, and serialization
+
+Successful TUI operation is human-readable terminal output with no JSON schema,
+so success serialization and a serialization fallback are not applicable. The
+schema-less `--json` refusal is emitted only by the wrapper error boundary.
 
 ## Backend
 
@@ -45,7 +61,7 @@ The dashboard intentionally has no persistent metadata header. Scope and filter 
 | Input editor | `Enter` on a `needs_input` row | editor exit; completed brainstorm answers auto-continue; plan rows auto-advance to `develop` (or auto-revise if user added feedback) |
 | Filter prompt | `/` | `Esc` (cancels typed buffer; any committed filter is preserved) / `Enter` (commits) |
 | New idea project picker | `n` from `★ All projects` scope | `Esc` / `q` (cancels) / `Enter` (selects and advances to title prompt) |
-| New idea prompt | `n` (single-project scope), or after picker selection (all-projects scope) | `Esc` (cancels) / `Enter` (submits `hive new <project> "<title>"`) |
+| New idea prompt | `n` when the numeric scope resolves once to one admissible project, or after an explicit picker selection | `Esc` (cancels) / `Enter` (revalidates the pinned name, then submits `hive new <project> "<title>"`) |
 | Info panel | `i` on a selected right-pane task | `q` / `Esc` / `i` |
 | Archive pane | `z` | `q` / `Esc` |
 | Help overlay | `?` | `q` / `Esc` / `?` |
@@ -71,7 +87,7 @@ The dashboard intentionally has no persistent metadata header. Scope and filter 
 | `i` | open the focused row's in-TUI info panel — no editor handoff, no marker change, no workflow dispatch. |
 | `s` | steer the focused task manually: open the configured `execute.agent` in the feature worktree with every existing stage folder for that slug passed as agent context, mark the row `MANUAL_STEERING`, and archive the slug under `archived-manual/` when the agent exits |
 | `z` | open the Archive pane, listing every workflow-aware archived task across projects with no retention cutoff |
-| `n` | open the new-idea flow; if scope is `★ All projects`, first show a project picker, then submit with `hive new <project> "<title>"` against the chosen concrete project |
+| `n` | open the new-idea flow; `★ All projects` opens the project picker, while a numeric scope is consumed once as an entry hint and opens the composer only when it resolves to one admissible project |
 | `/` | open filter prompt |
 | `1`–`9` | scope the right pane to the Nth registered project (mirrors selection in the left pane) |
 | `0` | scope back to `★ All projects` |
@@ -86,7 +102,15 @@ The help overlay is height-bounded and scrollable. It word-wraps binding descrip
 
 ## New Idea Prompt Editing
 
-The `n` prompt is a cursor-aware single-line title editor. When the dashboard scope is `★ All projects`, `n` first opens a concrete project picker (`j`/`k` or arrows to move, `Enter` to choose, `Esc` to cancel) so task capture never silently lands in the first registered project; if the first status snapshot has not arrived yet, the picker stays open in a loading state until projects are available. After a project is chosen, printable typing inserts at the title cursor; `←` / `→` move within the title; `Home` / `End` and `Ctrl+A` / `Ctrl+E` jump to the start/end; `Backspace` deletes before the cursor; `Delete` deletes under the cursor. Paste is accepted as either ordinary terminal text chunks or bracketed paste; CR/LF/TAB in pasted payloads are normalized to spaces because `hive new` takes a single title. The prompt keeps a conservative 4 KiB title buffer cap and flashes `title too long` instead of accepting oversized clipboard dumps.
+`Hive::Tui::Snapshot` is the sole new-idea project authority. Each immutable snapshot freezes an ordered admission list containing only captured-healthy projects with unique exact names, plus typed causes and recovery classes for an empty list. Scoped and filtered render projections retain that registry-wide admission instead of recomputing it from their visible subset. Duplicate names are excluded before health is considered; when duplicates are the reason nothing is selectable, the picker identifies the bounded duplicate names and directs the operator to disambiguate the registry or use `hive forget` instead of claiming that no healthy projects exist. Loading, no registered projects, registered-but-unhealthy projects, and malformed registry entries with a blank project identity also retain distinct feedback. Presentation consumes Snapshot's recovery class and never branches on raw project-error strings.
+
+Dashboard scope is only an entry hint. `★ All projects` opens the picker. A numeric scope is resolved exactly once against the snapshot order present when `n` is pressed: one uniquely admissible result pins its exact name and opens the composer, while a missing snapshot, invalid position, unhealthy row, or ambiguous name opens the picker with no pin. The numeric position is never consulted again. Refreshes reconcile an existing picker highlight by exact identity; reorder keeps that identity highlighted, while removal, error, or ambiguity clears the highlight. Once invalidated, later refreshes do not silently aim at row zero: `j`/`k` (or arrows) must establish a highlight and `Enter` must explicitly select it. The ordinary initial loading/empty-to-valid transition may still highlight the first admissible row because no prior intent was invalidated.
+
+Immediately before either plain-title dispatch or rich image submission, `BubbleModel` resolves the pinned exact name through the latest snapshot already installed on the model. `disappeared`, `unhealthy`, `ambiguous`, `selection_required`, and the defensive `no_projects` result all fail closed with state-specific feedback and zero dispatch; `invalid_scope` is an entry-only result because submit preflight accepts only an exact pinned name. If removal leaves the snapshot empty, a previously pinned name remains `disappeared` and the recovery copy says that no projects remain instead of suggesting an impossible alternate choice. A blocked attempt clears only stale target intent, returns to the picker with no highlight, and preserves the title cursor, composition, attachments, and staged image bytes. Its typed reason remains visible beside a `draft kept` affordance until the operator explicitly selects a project. After a later snapshot and an explicit valid selection, retry uses the selected name and the existing success path still dispatches once and resets the composer.
+
+This preflight prevents stale snapshot positions from substituting another project; it is not atomic with the subsequent live registry lookup performed by the existing name-based command path. Registry mutation after preflight remains a residual race and requires a future command-boundary identity redesign.
+
+The `n` prompt is a cursor-aware single-line title editor. When project selection is required, the concrete picker uses `j`/`k` or arrows to move, `Enter` to choose, and `Esc` to cancel; if the first status snapshot has not arrived yet, it stays open in a loading state until projects are available. After a project is chosen, printable typing inserts at the title cursor; `←` / `→` move within the title; `Home` / `End` and `Ctrl+A` / `Ctrl+E` jump to the start/end; `Backspace` deletes before the cursor; `Delete` deletes under the cursor. Paste is accepted as either ordinary terminal text chunks or bracketed paste; CR/LF/TAB in pasted payloads are normalized to spaces because `hive new` takes a single title. The prompt keeps a conservative 4 KiB title buffer cap and flashes `title too long` instead of accepting oversized clipboard dumps.
 
 ### Image paste
 
@@ -128,39 +152,38 @@ snapshot so the first useful frame shows registered projects/tasks instead of a
 long-lived loading grid. This is necessary because bubbletea-ruby's raw input
 poll can starve Ruby background threads during startup; relying on the first
 background poll alone produced multi-second loading screens even when
-`hive status` itself was fast. At cold boot, the source obtains one ordinary
-status payload and one explicit, unfiltered archive payload using the same
-refresh time and admission context. Steady idle ticks do not rebuild either
-payload. When process liveness must be rechecked, Status scans only the captured
-workflow generations' nonterminal stage directories and StateSource merges the
-immutable still-visible archive subset from its last authoritative projection.
-Policy changes, terminal-directory signals, and retention boundaries run one
-full ordinary projection immediately; the complete archive cache then catches
-up off-thread. Its 30-second backstop repairs a missed directory signal. The
-ordinary producer remains the sole owner of archive membership and retention,
-so neither StateSource nor the TUI infers archive state from stage names or
-public timestamps.
+`hive status` itself was fast. Cold boot and routine polls build only the active
+projection: all nonterminal workflow stages plus any non-inert terminal stage
+that can still require work. Inert terminal directories are not
+walked, so completed Patrol history cannot make the routine TUI cost grow
+without bound.
+
+The Archive pane is a separate, lossless projection. Pressing `z` requests one
+background archive scan; repeated requests while that scan is running are
+coalesced. Active refreshes continue independently if the archive scan is slow
+or fails. Publication of the active and archive halves is serialized so an
+archive result that lands during an active build is preserved rather than
+overwritten. If one project degrades inside an otherwise successful archive
+payload, its last known rows remain visible with an `archive unavailable`
+warning; only a healthy empty project clears its rows. There is no periodic
+archive cache refresh, ordinary-retention merge, or hidden-archive count in the
+hot path.
 
 The cached fingerprint watches the global project registry
 (`Hive::Config.global_config_path`), project configuration, workflow descriptor
-contents, active-task metadata (including workflow pins), all relevant terminal
-directories, each active row's state file and `.lock`, and the project's
-`.hive-state/stages` directory and children. Content signatures detect
+contents, active-task metadata (including workflow pins), stage directories,
+and each active row's state file and `.lock`. Content signatures detect
 descriptor creation, deletion, rename, and same-size replacement even when
-mtime is preserved. Policy/default/pin changes therefore publish a complete new
-ordinary projection and hidden count on the next refresh; no last-good policy
-is reused for a malformed currently selected workflow. Hive-owned archived
-metadata writes touch the containing terminal stage directory, so a hidden task
-repinned to `never` or a longer policy still reappears on the next poll without
-hashing every archived `meta.yml`; the archive backstop covers out-of-band
-edits. Archived state files and locks remain excluded. The fingerprint evicts
-signatures for paths that moved or disappeared. `Status` also supplies the
-earliest upcoming retention boundary, which bypasses the idle gate on the first
-poll after expiry even when no file changed. A separate three-second liveness
-fallback reparses only active stages, so `live_task_lock` and
-`claude_pid_alive` self-heal without making refresh cost proportional to archive
-size. Cache publication is generation-fenced: an older background archive scan
-cannot overwrite a newer synchronous policy or terminal projection.
+mtime is preserved. Policy/default/pin changes therefore publish a new active
+projection on the next refresh; no last-good policy is reused for a malformed
+currently selected workflow. Archived state files and locks remain excluded.
+The fingerprint evicts signatures for paths that moved or disappeared. A
+separate three-second liveness fallback reparses only active stages, so
+`live_task_lock` and `claude_pid_alive` self-heal without making refresh cost
+proportional to archive size.
+`stop` keeps a still-running scan generation fenced. A subsequent `start`
+serializes its new poller behind that stale worker, ensuring restart creates a
+current lifecycle without allowing two pollers to mutate the fingerprint cache.
 Because status is the sole task-row producer, stage-move races are
 normalised upstream: `Status#collect_rows` skips task folders that vanish
 mid-read, re-raises `ENOENT` when the folder still exists, and prunes
@@ -179,19 +202,17 @@ JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `SnapshotArrived` message only when `state_source.current` differs from
 the last dispatched snapshot. Identical snapshots do not redraw.
 
-`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `pr_url`, `mtime`, and `folder_mtime` from status JSON. The project snapshot separately carries `hidden_archived_task_count`; no retention or completion fields are added to task rows. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `pr_url`, `mtime`, and `folder_mtime` from status JSON. Active projects and archive projects are stored separately; the routine project projection carries no hidden-archive aggregate. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
 
 The task grid has a fixed PR column between id and display name. Rows with no parseable pull-request URL render `—`; rows whose `pr_url` ends in `/pull/<number>` render `#<number>` via [[modules/pr]]. When stdout is a TTY, the number is wrapped in an OSC 8 hyperlink by `Hive::Tui::Views::Hyperlink`; invalid or non-http URLs fall back to the plain label. The PR column does not drop under narrow-width layout branches, so very small terminals first hide stage and status before sacrificing the PR signal.
 
 The grid view derives its visible snapshot only through project scope and the
-slug/name/id filter; archive retention has already been applied by status.
+slug/name/id filter; routine status has already omitted archive members.
 Cursor movement and `BubbleModel#current_row` use that same projection, so
-keystrokes cannot dispatch against a hidden row. When a project has hidden
-rows, the ordinary Tasks pane renders `… and 1 older archived task (hive
-archive to view)` or `… and N older archived tasks (hive archive to view)`.
-`z` opens the Archive pane over the separately cached, unfiltered archive
-payload, which retains every row whose pinned workflow/action classifies it as
-archived regardless of policy or age.
+keystrokes cannot dispatch against a hidden row. `z` opens the Archive pane and
+starts its separate unfiltered fetch when needed. That payload retains every
+row whose pinned workflow/action classifies it as archived regardless of policy
+or age.
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous complete snapshot stays visible through a transient JSON / IO error, while a malformed or unknown workflow selected by a current task remains an explicit error row rather than silently inheriting stale visibility.
 
@@ -282,6 +303,10 @@ Every `error` row follows one path: grid Enter opens red-status detail, and Ente
 - **`--json`:** rejected at the command boundary with EX_USAGE (64); the TUI is human-only by design. The reject path emits a structured error envelope on stdout (`{"ok":false, "error_class":"InvalidTaskPath", "error_kind":"invalid_task_path", "exit_code":64, "message":...}`) so JSON consumers see typed error data without a `SCHEMA_VERSIONS` bump (the envelope intentionally omits `schema` because `hive tui` has no registered `hive-*` schema, and `error_kind` matches the value other `InvalidTaskPath` emit sites already use).
 - **Non-tty boundary:** running `hive tui` with `$stdout` not a tty (e.g., a piped CI invocation) raises `Hive::InvalidTaskPath` and exits 64 (EX_USAGE) — same code as `--json` rejection, so wrappers branch on a single "this is a misuse, not a software fault" surface.
 
+The interactive command has no success JSON schema, so success serialization
+and a serialization fallback are not applicable. The schema-less `--json`
+refusal is produced only by the wrapper's pre-dispatch error boundary.
+
 ## Test surface
 
 - `test/integration/tui_command_test.rb` — Thor help-text registration, `--json` rejection, non-tty boundary check.
@@ -296,3 +321,8 @@ No render-layer snapshot tests beyond layout pinning; mainstream Ruby tooling do
 
 - [[cli]] · [[commands/status]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]]
 - [[modules/task_action]] · [[modules/workflows]] · [[modules/findings]]
+
+The new-idea resolution result carries only state, exact name, and diagnostic
+detail. Numeric entry accepts only scope; name revalidation is a separate
+method. A cleared picker highlight shows the first six choices without selecting
+one until the operator explicitly moves and confirms.

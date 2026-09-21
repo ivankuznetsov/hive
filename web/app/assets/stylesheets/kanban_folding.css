@@ -1,0 +1,13 @@
+.kanban-column-header h3 { width: 100%; }
+.kanban-column-toggle { display: flex; align-items: center; gap: 10px; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.kanban-column-toggle:hover { background: transparent; color: var(--accent); }
+.kanban-column-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.kanban-column-label { flex: 1; }
+.kanban-fold-icon { font-size: 1.3rem; line-height: 1; }
+.kanban-cards[hidden] { display: none; }
+.kanban-column.is-folded { flex: 0 0 52px; min-width: 52px; padding: 12px 8px; }
+.kanban-column.is-folded .kanban-column-header { margin: 0; }
+.kanban-column.is-folded .kanban-column-toggle { flex-direction: column; min-height: 145px; gap: 16px; }
+.kanban-column.is-folded .kanban-count { order: -1; }
+.kanban-column.is-folded .kanban-column-label { writing-mode: vertical-rl; white-space: nowrap; flex: 0; }
+.kanban-column.is-folded .kanban-fold-icon { transform: rotate(180deg); }

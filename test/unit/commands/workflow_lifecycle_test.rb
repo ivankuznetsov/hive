@@ -183,14 +183,12 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       )
       assert_equal "demo-work-v2", reconfirmed.mappings.fetch(0).fetch("mapping_contract")
 
-      error = assert_raises(Hive::ConfigError) do
-        Hive::Commands::Workflow::ConfigurationResolver.new(
-          validated: validated, resolution: resolution,
-          cfg: { "agents" => { "claude" => { "bin" => "/tmp/drifted-claude" } } },
-          previous: previous
-        )
-      end
-      assert_match(/profile drifted/, error.message)
+      refreshed = Hive::Commands::Workflow::ConfigurationResolver.new(
+        validated: validated, resolution: resolution,
+        cfg: { "agents" => { "claude" => { "bin" => "/tmp/drifted-claude" } } },
+        previous: previous
+      )
+      assert_equal "claude", refreshed.mappings.fetch(0).fetch("agent")
     end
   end
 

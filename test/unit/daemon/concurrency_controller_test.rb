@@ -627,6 +627,24 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
                  "at most one digest child may be in flight at a time"
   end
 
+  def test_daily_digest_capacity_identities_are_independent
+    c = make
+    dispatch(c, 100, "daily-digest", "2026-06-13", kind: :daily_digest_delivery)
+
+    assert_equal :daily_digest_delivery_in_flight,
+                 c.can_dispatch_digest?(identity: :daily_digest_delivery, now: T0)
+    assert_equal :ok, c.can_dispatch_digest?(identity: :daily_digest_refresh, now: T0)
+    assert_equal :ok, c.can_dispatch_digest?(identity: :daily_digest_close, now: T0)
+    assert_equal :ok, c.can_dispatch_digest?(identity: :answer_digest, now: T0)
+    assert_equal :ok, c.can_dispatch?(project: "alpha", slug: "task", now: T0)
+
+    dispatch(c, 101, "answer-digest", "2026-06-13", kind: :answer_digest)
+    assert_equal :answer_digest_in_flight,
+                 c.can_dispatch_digest?(identity: :answer_digest, now: T0)
+    assert_equal 0, c.daily_count_for("daily-digest", T0)
+    assert_equal 0, c.daily_count_for("answer-digest", T0)
+  end
+
   def test_digest_kind_does_not_consume_a_task_slot
     c = make(global: 1, per_project: 1)
     # A running digest must not eat the single task slot, mirroring patrol scans.

@@ -1,39 +1,9 @@
-<% headline = workspace.fetch("headline") %>
-<% action = workspace.fetch("action") %>
-
-<section id="workspace-summary"
-         class="workspace-summary workspace-state-<%= workspace.dig("status", "state") %>"
-         aria-labelledby="workspace-summary-heading"
-         data-task-workspace-target="summary">
-  <div class="workspace-summary-decision">
-    <p class="workspace-eyebrow">Task status</p>
-    <h2 id="workspace-summary-heading"><%= headline.fetch("label") %></h2>
-    <p><%= headline.fetch("explanation") %></p>
+<% display = TaskDisplay.new(@task, fresh: workspace.dig("status", "freshness") == "fresh" && workspace.dig("status", "state") == "current", archived: workspace.dig("task", "archived")) %>
+<section id="workspace-summary" class="workspace-summary task-summary task-state-<%= display.state %>"
+         aria-labelledby="workspace-summary-heading" data-task-workspace-target="summary">
+  <div>
+    <p class="workspace-eyebrow">Current step · <%= @task["stage"].to_s.sub(/\A\d+-/, "").humanize %></p>
+    <h2 id="workspace-summary-heading"><%= display.label %></h2>
+    <% if display.detail.present? %><p><%= display.detail %></p><% end %>
   </div>
-
-  <dl class="workspace-summary-facts">
-    <div>
-      <dt>Canonical action</dt>
-      <dd><%= action["label"].presence || "No action required" %></dd>
-    </div>
-    <div>
-      <dt>Action availability</dt>
-      <dd><span class="workspace-state-label"><%= if action.fetch("enabled")
-        "Available"
-      elsif workspace.dig("task", "archived") || headline["state"] == "completed"
-        "Read only"
-      else
-        "Not available"
-      end %></span></dd>
-    </div>
-    <div>
-      <dt>Workflow result</dt>
-      <dd><%= workspace.dig("result", "kind").to_s.humanize %></dd>
-    </div>
-    <div>
-      <dt>State quality</dt>
-      <dd><span class="workspace-state-label"><%= workspace.dig("status", "state").humanize %></span></dd>
-    </div>
-    <% if action["reason"].present? %><div class="workspace-summary-action-reason"><dt>Why</dt><dd><%= action["reason"] %></dd></div><% end %>
-  </dl>
 </section>

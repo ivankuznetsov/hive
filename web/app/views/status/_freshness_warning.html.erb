@@ -6,7 +6,11 @@
        data-status-availability="<%= availability %>">
     <span class="status-dot status-dot-waiting" aria-hidden="true"></span>
     <span>
-      <% if availability == "degraded" %>
+      <% if availability == "cached" %>
+        <strong>Updating your workspace…</strong>
+        Showing saved status from
+        <time datetime="<%= last_success_at %>"><%= Time.iso8601(last_success_at).utc.strftime("%-d %b, %H:%M UTC") %></time>.
+      <% elsif availability == "degraded" %>
         <strong>Live status is temporarily unavailable.</strong>
         Showing the last successful refresh
         <%= last_success_at.present? ? "from #{last_success_at}" : "from an earlier scan" %>.
@@ -14,7 +18,8 @@
         <strong>Live status is unavailable.</strong>
         No current fleet snapshot has loaded yet.
       <% end %>
-      Hive will retry automatically. Actions that depend on current task state are disabled.
+      <% unless availability == "cached" %>Hive will retry automatically.<% end %>
+      <%= availability == "cached" ? "Actions resume after refresh." : "Actions that depend on current task state are disabled." %>
       <% if error.present? %>
         <span class="status-freshness-diagnostic"><%= error %></span>
       <% end %>

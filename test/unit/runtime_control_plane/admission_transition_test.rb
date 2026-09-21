@@ -1,6 +1,6 @@
 require "test_helper"
+require "hive/attempts/lost_outcome"
 require "hive/attempts/repository"
-require "hive/provider_health/repository"
 require "hive/provider_routing"
 require "hive/runtime_control_plane/dispatch_repository"
 
@@ -10,10 +10,57 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
   NOW = Time.utc(2026, 8, 29, 12)
   CLAIM_DIGEST = Hive::Attempts::Capability.digest("c" * 64)
 
-  def test_racing_admissions_atomically_claim_one_request_slot_and_probe
+  def test_concurrent_lost_healers_admit_at_most_one_independent_replacement
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
+      source = attempts.create_launching(
+        attempt_id: "lost-source", request_id: "source-request",
+        task_id: "task-1", project: "demo", task_slug: "task-1",
+        intended_stage: "4-execute", task_generation: "generation-1",
+        ownership_generation: "owner-1", task_input_epoch: 1,
+        progress_token: "source-1", provider: "codex",
+        worker_argv: %w[hive run task-1], claim_capability_digest: CLAIM_DIGEST,
+        starting_revision: "a" * 40, retry_charge: 0,
+        inherited_outputs: [], launch_timeout_sec: 30, now: NOW
+      )
+      lost = attempts.mark_lost(source, reason: "owner_gone", now: NOW + 1)
+      recovery = Hive::Attempts::LostOutcomeTransition.new(store: attempts)
+      request_id = recovery.recovery_request_id(lost)
+      path = attempts.database.path
+      payload_root = attempts.root
+      attempts.database.disconnect
+
+      results = race_lost_healers(
+        path: path, payload_root: payload_root, source_attempt_id: lost.attempt_id
+      )
+
+      attempts.database.open!
+      assert_equal 1, results.count { |status, _| status == :accepted }, results.inspect
+      assert_equal 1, results.count { |status, _| status == :rejected }, results.inspect
+      rows = attempts.database.read do |db|
+        {
+          source: db[:attempts].where(attempt_id: lost.attempt_id).first,
+          replacements: db[:attempts].exclude(attempt_id: lost.attempt_id).all,
+          recovery_requests: db[:dispatch_requests].where(request_id: request_id).all
+        }
+      end
+      assert_equal "complete", rows.fetch(:source).fetch(:lost_recovery_phase)
+      assert_equal request_id, rows.fetch(:source).fetch(:lost_recovery_request_id)
+      assert_equal 1, rows.fetch(:replacements).size
+      assert_equal request_id, rows.fetch(:replacements).first.fetch(:request_id)
+      assert_equal 1, rows.fetch(:recovery_requests).size
+      assert_equal "admitted", rows.fetch(:recovery_requests).first.fetch(:state)
+      payload = Hive::RuntimeControlPlane::Codec.load_json(
+        rows.fetch(:recovery_requests).first.fetch(:payload_json)
+      )
+      assert_equal "dispatched", payload.dig("recovery", "phase")
+      replacement = attempts.fetch(rows.fetch(:replacements).first.fetch(:attempt_id))
+      refute_includes replacement.to_h, "predecessor_attempt_id"
+    end
+  end
+
+  def test_racing_admissions_atomically_claim_one_provider_capacity_slot
     with_control_plane(task_ids: %w[task-1 task-2]) do |attempts, dispatch, health|
       policy = explicit_policy(max_concurrent: 1)
-      seed_half_open_circuits(attempts.database)
       %w[1 2].each do |suffix|
         dispatch.write_request!(
           project: "demo", slug: "task-#{suffix}",
@@ -32,22 +79,18 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       assert_equal 1, results.count { |status, *_| status == :rejected }
       winner_id = accepted.fetch(0).fetch(1)
       winner = attempts.fetch(winner_id)
-      assert_equal 2, winner["routing"].fetch("probe_bindings").length
+      refute_includes winner["routing"], "probe_bindings"
 
       rows = attempts.database.read do |db|
         {
           requests: db[:dispatch_requests].order(:request_id).select_map([ :request_id, :state ]),
-          attempts: db[:attempts].select_map(:attempt_id),
-          reservations: db[:capacity_reservations].where(state: "reserved").select_map(:attempt_id),
-          probes: db[:provider_circuits].exclude(probe_attempt_id: nil).select_map(:probe_attempt_id)
+          attempts: db[:attempts].select_map(:attempt_id)
         }
       end
       assert_equal 1, rows.fetch(:requests).count { |_id, state| state == "admitted" }
       assert_equal 1, rows.fetch(:requests).count { |_id, state| state == "queued" }
       assert_includes rows.fetch(:requests), [ winner["request_id"], "admitted" ]
       assert_equal [ winner.attempt_id ], rows.fetch(:attempts)
-      assert_equal [ winner.attempt_id ], rows.fetch(:reservations)
-      assert_equal [ winner.attempt_id ], rows.fetch(:probes).uniq
     end
   end
 
@@ -68,6 +111,36 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
 
       assert_raises(Hive::Attempts::StaleTaskSource) do
         create_routed_attempt(attempts, health, policy, route_decision, suffix: 1)
+      end
+      assert_equal "queued", dispatch.fetch("request-1").state
+      assert_equal 0, attempts.database.read { |db| db[:attempts].count }
+    end
+  end
+
+  def test_recovery_admission_requires_the_requests_current_generation
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, dispatch, _health|
+      dispatch.write_request!(
+        project: "demo", slug: "task-1", argv: %w[hive run task-1],
+        request_id: "request-1", task_id: "task-1",
+        task_generation: "generation-current", expected_stage: "4-execute",
+        recovery: {
+          "variant" => "marker", "phase" => "cleared",
+          "expected_marker_attrs" => { "task_generation" => "generation-failed" }
+        },
+        now: NOW
+      )
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        attempts.create_launching(
+          attempt_id: "attempt-1", request_id: "request-1",
+          task_id: "task-1", project: "demo", task_slug: "task-1",
+          intended_stage: "4-execute", task_generation: "generation-failed",
+          ownership_generation: "generation-failed", task_input_epoch: 1,
+          progress_token: "source-1", provider: "codex",
+          worker_argv: %w[hive run task-1], claim_capability_digest: CLAIM_DIGEST,
+          starting_revision: "a" * 40, retry_charge: 1,
+          inherited_outputs: [], launch_timeout_sec: 30, now: NOW
+        )
       end
       assert_equal "queued", dispatch.fetch("request-1").state
       assert_equal 0, attempts.database.read { |db| db[:attempts].count }
@@ -135,7 +208,7 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       }
       record = attempts.create_launching(
         attempt_id: "module-attempt", request_id: "module-request",
-        predecessor_attempt_id: nil, task_id: nil, project: "demo",
+        task_id: nil, project: "demo",
         task_slug: "module-demo-task-event-1", intended_stage: "module-hook",
         task_generation: "module-generation", ownership_generation: "module-owner",
         task_input_epoch: 1, progress_token: "event-1", provider: "module",
@@ -249,7 +322,7 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
       base = {
         attempt_id: "module-attempt", request_id: "module-request",
-        predecessor_attempt_id: nil, task_id: nil, project: "demo",
+        task_id: nil, project: "demo",
         task_slug: "module-demo-task-event-1", intended_stage: "module-hook",
         task_generation: "module-generation", ownership_generation: "module-owner",
         task_input_epoch: 1, progress_token: "event-1", provider: "module",
@@ -272,7 +345,7 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       assert_raises(Hive::Attempts::RepositoryError) do
         attempts.create_launching(
           attempt_id: "attempt-1", request_id: "request-1",
-          predecessor_attempt_id: nil, task_id: "task-1", project: "demo",
+          task_id: "task-1", project: "demo",
           task_slug: "task-1", intended_stage: "4-execute",
           task_generation: "generation-1", ownership_generation: "owner-1",
           task_input_epoch: 1, progress_token: "source-1", provider: "codex",
@@ -281,24 +354,6 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
           limits: { max_global: "bad" }, launch_timeout_sec: 30, now: NOW
         )
       end
-    end
-  end
-
-  def test_admission_rejects_a_stale_routing_decision_before_mutation
-    with_control_plane(task_ids: [ "task-1" ]) do |attempts, dispatch, health|
-      policy = explicit_policy(max_concurrent: 1)
-      stale_policy = explicit_policy(max_concurrent: 2)
-      route_decision = decision(stale_policy, health, "generation-1")
-      dispatch.write_request!(
-        project: "demo", slug: "task-1", argv: %w[hive run task-1],
-        request_id: "request-1", task_id: "task-1",
-        task_generation: "generation-1", expected_stage: "4-execute", now: NOW
-      )
-
-      assert_raises(Hive::Attempts::RepositoryError) do
-        create_routed_attempt(attempts, health, policy, route_decision, suffix: 1)
-      end
-      assert_equal 0, attempts.database.read { |db| db[:attempts].count }
     end
   end
 
@@ -335,9 +390,7 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       )
       incomplete = Hive::ProviderRouting::Decision.selected(
         request: ordinary.request, route: ordinary.route, considered: ordinary.considered,
-        candidates: [ candidate ], decided_at: NOW,
-        probe_requirements: ordinary.probe_requirements,
-        circuit_generations: ordinary.circuit_generations
+        candidates: [ candidate ], decided_at: NOW
       )
       dispatch.write_request!(
         project: "demo", slug: "task-1", argv: %w[hive run task-1],
@@ -353,7 +406,103 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
+  def test_admission_rejects_unselectable_routes_and_missing_sealed_inheritance
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, dispatch, health|
+      policy = explicit_policy(max_concurrent: 1)
+      saturated = Hive::ProviderRouting::Router.new.call(
+        request: Hive::ProviderRouting::Request.new(
+          policy: policy, task_generation: "generation-1",
+          capacity: { "account-a" => { "observed" => 1, "max" => 1 } }
+        ),
+        decision_id: "saturated", decided_at: NOW
+      )
+      assert_raises(Hive::Attempts::RepositoryError) do
+        create_routed_attempt(attempts, health, policy, saturated, suffix: 1)
+      end
+
+      dispatch.write_request!(
+        project: "demo", slug: "task-1", argv: %w[hive run task-1],
+        request_id: "request-1", task_id: "task-1",
+        task_generation: "generation-1", expected_stage: "4-execute", now: NOW
+      )
+      selected = decision(policy, health, "generation-1")
+      missing = {
+        "path" => "sealed/sha256/aa/#{'a' * 64}", "sha256" => "a" * 64, "size" => 1
+      }
+      assert_raises(Hive::Attempts::RepositoryError) do
+        create_routed_attempt(
+          attempts, health, policy, selected, suffix: 1,
+          inherited_outputs: [ missing ]
+        )
+      end
+    end
+  end
+
   private
+
+  def race_lost_healers(path:, payload_root:, source_attempt_id:)
+    ready_read, ready_write = IO.pipe
+    start_read, start_write = IO.pipe
+    result_pipes = 2.times.map { IO.pipe }
+    pids = 2.times.map do |index|
+      fork do
+        ready_read.close
+        start_write.close
+        result_pipes.each_with_index do |(reader, writer), pipe_index|
+          reader.close
+          writer.close unless pipe_index == index
+        end
+        database = Hive::RuntimeControlPlane::Database.new(path: path).open!
+        repository = Hive::Attempts::Repository.new(root: payload_root, database: database)
+        source = repository.fetch(source_attempt_id)
+        recovery = Hive::Attempts::LostOutcomeTransition.new(store: repository)
+        ready_write.write("r")
+        start_read.read(1)
+        recovery.ensure_for(source, now: NOW + 2)
+        ready = recovery.update(
+          source, phase: "ready", cleanup: "absent",
+          request_id: recovery.recovery_request_id(source), now: NOW + 2
+        )
+        replacement = repository.create_launching(
+          attempt_id: "replacement-#{index + 1}", request_id: ready.fetch("request_id"),
+          recovery_source_attempt_id: source.attempt_id,
+          task_id: source["task_id"], project: source["project"],
+          task_slug: source["task_slug"], intended_stage: source["intended_stage"],
+          task_generation: source.task_generation,
+          ownership_generation: "replacement-owner-#{index + 1}",
+          task_input_epoch: source.task_input_epoch, progress_token: source["progress_token"],
+          provider: source["provider"], routing: source["routing"],
+          worker_argv: source["worker_argv"], claim_capability_digest: CLAIM_DIGEST,
+          starting_revision: source["starting_revision"], retry_charge: 1,
+          inherited_outputs: source["current_outputs"], launch_timeout_sec: 30,
+          now: NOW + 3
+        )
+        Marshal.dump([ :accepted, replacement.attempt_id ], result_pipes.fetch(index).fetch(1))
+      rescue Hive::Attempts::RepositoryError, Hive::RuntimeControlPlane::Error => error
+        Marshal.dump([ :rejected, error.class.name ], result_pipes.fetch(index).fetch(1))
+      ensure
+        database&.disconnect
+        exit! 0
+      end
+    end
+    ready_write.close
+    start_read.close
+    result_pipes.each { |_reader, writer| writer.close }
+    ready_read.read(2)
+    start_write.write("gg")
+    start_write.close
+    pids.each { |pid| Process.wait(pid) }
+    result_pipes.map { |reader, _writer| Marshal.load(reader.read) }
+  ensure
+    ready_read&.close unless ready_read&.closed?
+    ready_write&.close unless ready_write&.closed?
+    start_read&.close unless start_read&.closed?
+    start_write&.close unless start_write&.closed?
+    Array(result_pipes).each do |reader, writer|
+      reader.close unless reader.closed?
+      writer.close unless writer.closed?
+    end
+  end
 
   def with_control_plane(task_ids:)
     with_tmp_dir do |root|
@@ -385,7 +534,7 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       yield(
         attempts,
         Hive::RuntimeControlPlane::DispatchRepository.new(database: database, clock: -> { NOW }),
-        Hive::ProviderHealth::Repository.new(database: database, clock: -> { NOW })
+        nil
       )
     ensure
       database&.disconnect
@@ -408,15 +557,14 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
         attempts = Hive::Attempts::Repository.new(
           root: File.join(File.dirname(path), "child-#{index}"), database: database
         )
-        health = Hive::ProviderHealth::Repository.new(database: database, clock: -> { NOW })
-        route_decision = decision(policy, health, "generation-#{index + 1}")
+        route_decision = decision(policy, nil, "generation-#{index + 1}")
         ready_write.write("r")
         start_read.read(1)
         result = create_routed_attempt(
-          attempts, health, policy, route_decision, suffix: index + 1
+          attempts, nil, policy, route_decision, suffix: index + 1
         )
         Marshal.dump([ :accepted, result.attempt_id ], result_pipes.fetch(index).fetch(1))
-      rescue Hive::Attempts::RepositoryError, Hive::ProviderHealth::StaleGeneration => error
+      rescue StandardError => error
         Marshal.dump([ :rejected, error.class.name ], result_pipes.fetch(index).fetch(1))
       ensure
         database&.disconnect
@@ -442,29 +590,27 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
-  def create_routed_attempt(attempts, health, policy, route_decision, suffix:)
+  def create_routed_attempt(attempts, _health, _policy, route_decision, suffix:,
+                            inherited_outputs: [])
     attempts.create_launching(
       attempt_id: "attempt-#{suffix}", request_id: "request-#{suffix}",
-      predecessor_attempt_id: nil, task_id: "task-#{suffix}", project: "demo",
+      task_id: "task-#{suffix}", project: "demo",
       task_slug: "task-#{suffix}", intended_stage: "4-execute",
       task_generation: "generation-#{suffix}", ownership_generation: "owner-#{suffix}",
       task_input_epoch: 1, progress_token: "source-#{suffix}", provider: "codex",
       worker_argv: [ "hive", "run", "task-#{suffix}" ],
       claim_capability_digest: CLAIM_DIGEST, starting_revision: "a" * 40,
-      retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW,
+      retry_charge: 0, inherited_outputs: inherited_outputs,
+      launch_timeout_sec: 30, now: NOW,
       limits: { max_global: 10, max_per_project: 10, max_daily: 10 },
-      routing_policy: policy, route_decision: route_decision, health_repository: health
+      route_decision: route_decision
     )
   end
 
-  def decision(policy, health, generation)
-    evaluations = health.evaluate_routes(
-      routes: [ { account_id: "account-a", model_id: "model-a" } ], now: NOW
-    )
+  def decision(policy, _health, generation)
     Hive::ProviderRouting::Router.new.call(
       request: Hive::ProviderRouting::Request.new(
         policy: policy, task_generation: generation,
-        health: { "account-a/model-a" => evaluations.fetch(0) },
         capacity: { "account-a" => { "observed" => 0, "max" => 1 } }
       ),
       decision_id: "decision-#{generation}", decided_at: NOW
@@ -492,24 +638,5 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
         }
       }
     )
-  end
-
-  def seed_half_open_circuits(database)
-    scopes = [
-      Hive::ProviderHealth::Scope.provider_account(account_id: "account-a"),
-      Hive::ProviderHealth::Scope.model(account_id: "account-a", model_id: "model-a")
-    ]
-    database.transaction do |db|
-      scopes.each do |scope|
-        db[:provider_circuits].insert(
-          circuit_id: scope.key, scope_kind: scope.kind,
-          provider_account_id: scope.account_id, model: scope.model_id.to_s,
-          automatic_state: "open", manual_block: 0, generation: 1, journal_epoch: 0,
-          eligible_at: (NOW - 1).iso8601(6),
-          evidence_json: Hive::RuntimeControlPlane::Codec.dump_json("failure" => "quota"),
-          updated_at: NOW.iso8601(6)
-        )
-      end
-    end
   end
 end

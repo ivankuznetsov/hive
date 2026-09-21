@@ -3,8 +3,8 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-30
-tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood]
+updated: 2026-09-10
+tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
@@ -26,7 +26,9 @@ reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
 Telegram validators from the gem. Red task recovery submits the fresh status
 observation through the neutral `Hive::Recovery::API` to the same
 `RecoveryCoordinator` used by Telegram, TUI, CLI/action, recorder, and daemon
-healing.
+healing. The selected-day Digest view is a thin authenticated adapter over the
+same pure persisted `Hive::DailyDigest::Reader` used by the CLI; GET never
+collects activity or calls GitHub/PRDigest.
 
 The stage-action map has one typed exception: a fresh
 `outcome_evidence_rework` row at `7-artifacts` is not translated into the
@@ -84,7 +86,8 @@ repeat native web preparation at container startup.
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
 service using the invoked user-facing binary path. Its thin Hive installer owns
 web environment rendering and output policy while `Hive::UserService` owns
-file drift, plan revalidation, atomic replacement, and manager application.
+file drift, exclusive mutation, replay, and verified manager application; see
+[[modules/user_service]] for the shared transition and recovery contract.
 `--force` also forces an authenticated, rollback-safe managed-bundle
 reprovision before replacing the
 service, even when the installed bundle has a current version stamp and healthy
@@ -93,7 +96,8 @@ without a Hive version bump; ordinary foreground/start bootstrap remains a
 no-op for a healthy current bundle. If the service was already running, a
 successful refresh restarts it exactly once even when the unit file itself is
 unchanged. A service-unit upgrade that already restarted it is not restarted a
-second time.
+second time. The refresh restart is part of the recorded install intent, so the
+command does not release and reacquire service ownership between those effects.
 
 The default managed source is the signed release bundle, so a forced refresh can
 require network access and `cosign`; verification or preparation failure occurs
@@ -105,9 +109,12 @@ when combined with `--force`.
 
 `hive web start --detach` starts that service and reloads
 systemd-user first on Linux so a unit written while systemd-user was unavailable
-becomes visible. Foreground
-`hive web start` is equivalent to `hive web`. `status --json` emits
-`hive-web-status.v1`; `install --json` emits `hive-web-install.v1`. Both carry
+becomes visible. Managed start and stop failures retain the shared UserService
+contention or recovery guidance in the raised CLI error, so callers can tell
+whether to retry shortly or preserve and inspect pending evidence. Foreground
+`hive web start` is equivalent to `hive web`. `hive web status --json`
+emits `hive-web-status.v1`; `hive web install --json` emits
+`hive-web-install.v1`. Both carry
 `mode: "managed_service"`, deduplicated environment migration warnings, and
 separate installed, enabled, running, manager availability, URL, and readiness
 state on success and pre-dispatch/runtime errors. Readiness probes the local
@@ -131,6 +138,65 @@ this status-specific runtime field. Bootstrap and service-install exceptions fro
 `install --json` likewise emit
 exactly one versioned install error envelope, distinguished by
 `bootstrap_failed` and `service_install_failed`.
+
+The local Rails service starts without a network-readiness dependency. Remote
+GitHub, clone, and provider operations report their own failures to the caller;
+local readiness and an active unit do not claim that those dependencies are
+healthy.
+
+Pre-dispatch argv failures distinguish `web status` from `web install` and use
+the matching versioned envelope with `error_kind: "invalid_task_path"`.
+
+## Output exceptions, serialization, and exit codes
+
+Foreground `hive web` is human-readable. Machine lifecycle modes emit
+`hive-web-status.v1` or `hive-web-install.v1`, including their matching typed
+error arms. Those documents are encoded directly: a JSON serialization failure
+propagates and no prose or fallback JSON document is emitted. Success exits `0`;
+an unready service or ordinary bootstrap/service failure exits `1`, invalid
+arguments exit `64`, and invalid web configuration exits `78`.
+
+## Daily activity digest
+
+The authenticated read-only route is:
+
+```text
+GET /digests/:date                 # :date is today or YYYY-MM-DD
+GET /digests/:date?project=NAME    # filtered view, same global identity
+```
+
+`DailyDigest.find` delegates to `Hive::DailyDigest::Reader`. It does not use
+`StatusBroadcaster`, scan registered projects for activity, materialize a
+record, or make a live GitHub/PRDigest request. Consequently every GET leaves
+bases, amendments, frontiers, and `last_materialized_at` unchanged.
+
+The page leads with persisted date/zone and distinct lifecycle, completeness,
+and content badges. Navigation follows the record's `previous_date` and
+`next_date` sequence links, including across time-zone cutovers; `today`
+resolves the persisted interval containing now. Filter choices come from the
+selected historical record rather than the current registry. A project filter
+hides only other projects' facts and retains applicable global/source gaps.
+
+The content hierarchy is attention first, then grouped project changes and
+clearly labeled late amendments/resolved gaps. Complete-empty, partial,
+stale, missing, pre-coverage, and pruned states use separate accessible copy.
+Missing feature-era pages name `hive digest refresh --date ...`; pre-coverage
+pages state that V1 does not reconstruct history, and pruned pages preserve the
+tombstone outcome.
+
+Waiting attention is reduced in the Rails model to the privacy allowlist before
+ERB receives it: identity, stage/state, waiting age, and a resolved task
+destination. No question, answer, prompt, excerpt, or opaque binding can reach
+the template. A task link targets `#task-questions` only when the stored project
+still matches the current registration identity and the active/archive task
+route resolves at read time. Removed or replaced projects remain filterable and
+are labeled historical without a dead action link. PR links pass the shared
+strict HTTP(S) validator.
+
+The view uses semantic article/section/navigation landmarks, labeled date and
+project controls, text as well as color for state, visible focus, and the
+existing responsive touch-target/navigation containment. The primary Digest
+link targets `/digests/today`.
 
 ## Environment compatibility
 
@@ -194,9 +260,11 @@ sharing the URL.
 A locally authenticated operator sees the
 complete primary navigation under the `hive` product identity and is labelled
 `Local`; GitHub-dependent repository browsing stays behind an explicit
-**Connect GitHub** action. At the 390px mobile breakpoint, all seven primary
-capabilities remain visible in a bounded four-column grid below the account
-action, without starting inside a horizontal scroll overflow. Navigation state is grouped by the first segment of
+**Connect GitHub** action. At phone widths (720px and below), a labelled 44px hamburger button
+opens the seven primary links and account actions in a vertical menu. The menu
+starts collapsed, supports Escape with focus returned to the button, and closes
+on navigation and before Turbo caches the page. Desktop navigation stays inline.
+Navigation state is grouped by the first segment of
 Rails `controller_path`, so namespaced task, workflow, and Telegram resource
 controllers retain their parent section's active link when they render a
 complete page. Completing the optional GitHub connection from verified
@@ -255,15 +323,17 @@ Honeycomb projections.
   through the existing task controllers. The application shell and primary
   navigation use the full viewport width with fluid edge gutters; the project
   rail grows to a bounded desktop width while the status content receives all
-  remaining space. Kanban tracks grow beyond their comfortable minimum when a
-  large screen has room, and each band scrolls horizontally inside the page
-  when it does not. `Grid` retains the compact per-project task rows and gains
+  remaining space. Open Kanban columns keep a fixed 270px desktop width; unused space
+  stays empty instead of stretching cards when neighboring columns fold.
+  Mobile columns use `min(78vw, 290px)`, and each band scrolls horizontally
+  inside the page when it does not fit. Each column heading is a keyboard-accessible fold toggle.
+  Empty columns and the workflow's final Done column start folded, with the
+  count and vertical stage label still visible. Explicit choices persist in
+  browser local storage per project/workflow/stage across reloads and live
+  morphs. An untouched empty column opens when a task arrives. `Grid` retains the compact per-project task rows and gains
   the same fluid content area. Both ordinary views consume status's
   workflow-aware archive projection:
-  document workflows keep completed deliverables visible by default. Completed
-  tasks in a terminal producer such as `deliver` appear in a separate Done column;
-  unfinished delivery stays in its real stage. No task folders move for this grouping.
-  Rows expired by an explicit retention policy are absent, and a positive project count renders
+  expired archived rows are absent, and a positive project count renders
   `… and 1 older archived task (hive archive to view)` or
   `… and N older archived tasks (hive archive to view)` as a direct link to the
   project-scoped archive. A TUI-left-pane-parity project rail filters either view through
@@ -335,22 +405,21 @@ Honeycomb projections.
   pages share one five-second polling cadence regardless of their count. The
   subscribing page already rendered the primed snapshot, so the broadcaster
   does not send a duplicate first refresh.
-  The ordinary feed uses `Hive::Tui::StateSource` as a shared bounded
-  projection cache, serialized behind `CachedStatusCommand` for concurrent
-  Puma callers. Cold construction performs one authoritative ordinary scan but
-  no second unfiltered archive scan. Steady liveness refreshes scan only active
-  workflow stages and merge cached visible terminal rows, so the five-second
-  cadence is proportional to active work rather than total archive size.
+  The ordinary feed uses `Hive::Tui::StateSource` as a shared active-projection
+  cache, serialized behind `CachedStatusCommand` for concurrent Puma callers.
+  Cold construction and refresh classify active-stage candidates once and
+  reuse selected folders for dependency admission. Archived rows are omitted
+  from the routine feed. A project that cannot prepare rows falls back to a
+  project-local admission scan; healthy projects retain their prepared rows.
   During the same daemon generation's brief `started` phase,
   `CachedStatusCommand` retains the prior completed scheduler observation only
   while that observation remains valid. This prevents cooldown/recovery rows
   from flipping to transiently unavailable and triggering two full-page Turbo
   refreshes per daemon tick; restart, expiry, stale, and invalid observations
   still surface immediately.
-  Terminal-directory changes, policy edits, and retention boundaries rebuild
-  the ordinary projection immediately; a five-minute backstop repairs missed
-  signals. `/archive` remains lossless by invoking the unfiltered Status
-  producer on demand and never replacing the ordinary feed's cache. Archive
+  Active task, workflow, policy, and runtime fingerprints invalidate the
+  projection; liveness refreshes cover process changes. `/archive` invokes the
+  lossless producer on demand without replacing the active publication. Archive
   task links resolve only the requested registered project and stage through
   the unfiltered producer, so their shell, log, media, diff, and action routes
   do not multiply lossless fleet scans.
@@ -362,9 +431,6 @@ Honeycomb projections.
   comparable key with the payload and reuses the existing semantic token when
   that key is unchanged, so volatile-only ticks do not repeat canonical JSON
   hashing.
-  `hidden_archived_task_count` remains in that comparison, making a
-  boundary- or policy-driven count change material even if every active row is
-  unchanged.
   The broadcaster first renders one Turbo Stream
   message containing the refresh plus the server-sorted composer selector,
   then sends that complete message once over solid_cable. The refresh GET
@@ -390,24 +456,42 @@ Honeycomb projections.
   filesystem broadcast from aborting the mutation. The app-owned Action Cable
   source stays permanent across morphs and performs the version comparison
   only from its confirmed subscription callback; there is no reconnect DOM
-  observer, timer, or fresh-navigation refresh. Async Cable setup is
-  generation-guarded: a handle whose DOM owner disconnects before confirmation
-  waits for the current transport's confirmation, rejection, or disconnect
-  before release, so an abandoned page cannot keep the server poller alive or
-  race unsubscribe ahead of subscribe—even during reconnect. If no callback
-  arrives within five seconds, Hive closes the otherwise-unowned Cable transport
-  to force server cleanup before dropping the local handle. The server checks
-  teardown before deferred adapter registration and again when registration
-  completes, immediately removing any handler that landed after the first
-  cleanup. A deferred adapter exception releases the shared lease and closes
-  the socket with reconnect enabled. If turbo-rails' lazy
-  consumer promise rejects, Hive clears the
-  poisoned cached promise before retrying at a bounded five-second cadence;
-  if subscription creation throws after Action Cable registration, Hive removes
-  the partial registration, disconnects that failed consumer, and creates a
-  fresh one. A server-side poller startup failure rejects the subscription, and
-  the rejected callback schedules the same bounded retry. Detaching the source
-  cancels the retry. The task-page owner encloses every
+  observer, timer, or fresh-navigation refresh. One internal owner contains the
+  current attempt, retry and pending-release timers, pending disposition, and
+  catch-up state. Each application setup or five-second retry creates a
+  dedicated consumer without touching turbo-rails' shared consumer. Action
+  Cable transport reconnect stays on that attempt; setup, registration,
+  rejection, and non-reconnecting disconnect failures retire it into
+  `retry_wait` so the next retry uses a fresh consumer.
+
+  The dedicated connection's `open`/`reopen` paths and every async continuation
+  are fenced by owner and attempt identity. A handle whose DOM owner disconnects
+  before confirmation waits for that attempt's confirmation, rejection, or
+  disconnect before release, so an abandoned page cannot race unsubscribe ahead
+  of subscribe—even during reconnect. If no callback arrives within five
+  seconds, Hive closes the dedicated transport before dropping the local
+  subscription handle. The server checks teardown before deferred adapter
+  registration and again when registration completes, immediately removing any
+  handler that landed after the first cleanup. A deferred adapter exception
+  releases the shared lease and reconnects the same transport.
+
+  Disconnect remains best-effort under failures: confirmed subscriptions
+  unsubscribe first, consumer disconnect is the primary transport close, and
+  reconnect-disabled connection/raw-socket fallbacks run only while the
+  captured socket remains `OPEN` or `CONNECTING`. The owner attempts all
+  applicable cleanup and ends `disconnected`; the internal boundary preserves
+  the first thrown value, while DOM and async entry paths warn only after
+  cleanup, Turbo, and successor work completes. Attribute supersession always
+  installs or leaves a fresh owner retrying. This ownership allocates one Cable
+  transport per live source, with at most one bounded retiring predecessor
+  overlapping its successor; two simultaneous sources intentionally use two
+  isolated transports. Cross-URL Turbo navigation still runs the permanent
+  source's disconnect/connect callbacks, so it replaces the dedicated
+  transport and pays a fresh WebSocket plus Action Cable subscription handshake
+  before `connected` and catch-up complete; it does not reuse turbo-rails'
+  cached consumer. A server-side poller startup failure rejects the
+  subscription and the rejected callback schedules the same bounded retry.
+  Detaching the source cancels the retry. The task-page owner encloses every
   mutation form, so those submissions cross the same refresh guard as Board
   actions. A
   failed Turbo broadcast also remains pending across last-subscriber shutdown
@@ -434,8 +518,9 @@ Honeycomb projections.
   permanent node during rendering. At mobile widths the composer toolbar
   becomes a two-row grid: the project selector owns the first row and the
   image/submit actions share the second, so long registered-project names
-  cannot widen the document beyond the viewport. The horizontal project rail
-  keeps edge padding while it scrolls. No polling JS, no SSE. The daemon strip uses
+  cannot widen the document beyond the viewport. At widths up to 760px, a labelled project dropdown and separate Add project
+  button replace the rail. The dropdown uses the same filtered URLs, keeps
+  other query parameters, and preserves the composer draft and project choice. No polling JS, no SSE. The daemon strip uses
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
@@ -766,6 +851,17 @@ rendered while a plan review applies, and task mutations independently invoke
 
 ## Tests
 
+`web/test/models/daily_digest_test.rb` and
+`web/test/integration/digests_test.rb` pin the thin-reader boundary, historical
+project identity/link resolution, privacy allowlist, complete/partial/stale/
+missing/pruned rendering, interval-sequence navigation, filtering, global-gap
+retention, and authenticated read-only behavior. The matching CLI fixture is
+used to compare identity, ordering, links, and counts.
+`web/test/system/digest_flow_test.rb` uses Playwright at desktop and mobile
+widths to prove attention-first hierarchy, accessible landmarks/labels,
+keyboard focus, filter/date navigation, native `#task-questions` handoff, and
+back navigation without losing selected-day context.
+
 `web/test/integration/` drives the real GithubAuth through the device-flow
 routes via the `http:` DI seam (no API stubbing), including ownerless
 first-login claim, persisted `web.github.owner`, request-time owner-change
@@ -947,6 +1043,26 @@ canonical linked-cell Hive logo in the public site's yellow (`#f0b429`) on a
 full, opaque black (`#0d1117`) square; the solid square prevents white launcher
 corners and preserves the mark when a platform applies its own icon mask.
 
+## Visual fixtures and account branding
+
+`web/test/support/ui_fixtures.rb` provides isolated empty and populated workspaces
+for browser tests. `bundle exec rails test test/visual/status_scenarios_capture.rb`
+(from `web/`) captures Board/Grid at desktop/mobile widths in light/dark themes,
+plus expanded mobile menus: 20 full-page images and a Screenote manifest under
+`web/tmp/ui-captures/<run>/`. Native tasks provide usable detail links. These
+captures are explicitly synthetic and include local working-tree changes;
+publication remains a separate command. The capture file intentionally omits the
+`_test.rb` suffix so Rails integration discovery does not require a browser.
+See `web/README.md` for the recipe.
+
+The header displays `Hive` (or `hivebox` in the container distribution) with a
+compact logo gap and aligns the mobile account row with the navigation links. It uses `/brand.svg`: the existing Hive geometry, transparent background,
+and terracotta colors matched to the light/dark web theme. Launcher/favicons keep
+the opaque yellow-on-black assets. Signed-in users see their public GitHub avatar
+next to their login, with an initial fallback when unavailable. Local operators
+keep the `Local` label and Connect GitHub action. Browser tests substitute a local
+avatar image and exercise the failure fallback without calling GitHub.
+
 ## Task-local reads and degraded status
 
 Ordinary task show, log, diff, media, and mutation routes resolve one registered
@@ -957,7 +1073,25 @@ remain addressable and mutations revalidate current task state without a stale
 fleet cache. One process-wide `StatusFeed` owns polling,
 single-flight refresh, actual scan count, and latest-good state. Status-page
 HTTP renders never perform a fleet scan: they use the latest published state,
-or render the explicit loading state on a cold process. The first accepted
+or restore the last successful snapshot from owner-private `HIVE_HOME/web-status.json`
+after a restart. The saved view retains task labels and filters, shows its last
+successful refresh time with “Updating your workspace…”, and disables
+state-dependent actions until a fresh scan succeeds. The first subscriber
+starts an immediate background refresh; HTTP reads never wait for it.
+The cache uses atomic replacement, a versioned envelope, a 16 MiB bound, and
+exact registered-project matching. Missing, malformed, incompatible, or
+registry-mismatched caches fall back to the neutral “Loading your workspace…”
+panel. Write failures preserve the previous file without degrading a live scan.
+No archive or dependency context is restored, and mutations retain their
+existing targeted current-state validation. The five-second refresh cadence
+and TUI liveness policy are unchanged; this improves time to first display,
+not full-scan cost.
+Loading is identified by the initial `loading` version token, so normal startup
+does not display an outage warning. At phone widths, the loading panel becomes
+a compact message above the idea composer so it is visible without scrolling.
+Freshness warnings sit inside the main
+content column, keeping the project rail and content in their intended grid
+slots during failures as well as loading. The first accepted
 Turbo/Cable subscription performs that cold scan on the broadcaster thread and
 publishes the real snapshot. A later failure retains the last good rows with an
 accessible warning and disables freshness-dependent mutation controls until a
@@ -983,6 +1117,24 @@ or Git fetch. Only authenticated, CSRF-protected publication POST refreshes may
 perform one fixed read for the validated registered repository/PR/head, under
 single-flight and minimum-interval limits. Cache and remote failures degrade
 that panel without hiding task controls, artifacts, diff, or log.
+
+## Hivebox publication recovery
+
+`hivebox-recover.yml` accepts an existing stable release tag and builds its
+source with the current Dockerfile. The SHA must match the source identifier
+in the release workflow-signed checksums. Each architecture must pass the native
+web/daemon smoke before its digest is promoted. Promotion checks that the
+requested release is still GitHub's latest release and shares the normal
+promotion concurrency lock. This does not replace the release tag or signed native
+artifacts.
+
+The entrypoint initializes fresh runtime storage using `Installation.setup`
+before launching the supervisor, and validates existing storage without conversion.
+
+The image installs `sudo` for agent-browser's Linux dependency installer.
+Chrome for Testing does not supply a Linux ARM64 payload, so ARM64 images skip
+browser prewarming. Web and agent workflows remain available there; built-in
+browser-based task capture is unavailable on Linux ARM64 in 0.7.3.
 
 ## Supervised worktree capture server
 
@@ -1100,3 +1252,70 @@ ffmpeg, ffprobe, and Tesseract. The separate Playwright dependency in
 
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].
+
+Live-status setup uses one error boundary for consumer creation, installation,
+and subscription registration. It routes failure by current attempt identity;
+retired attempts dispose their own resources and cannot affect the successor.
+
+## Task views focused on current work
+
+Board and Grid show a plain-language state separately from the current stage.
+`TaskDisplay` translates the existing task projection for display only; it does
+not change scheduling or action eligibility. Ready work is not labelled running,
+a completed intermediate stage is not labelled a completed task, and stale
+active rows do not claim current liveness. Rejected Patrol findings remain
+paused even when the versioned action key is normalized to `needs_input`.
+State links count and filter the selected project and survive ordinary GET and
+Turbo refreshes. Running work and decisions sort before ready, waiting, paused
+and completed tasks; the Running count remains visible at zero.
+
+Task pages lead with step/state and the selected workflow document. Existing
+workflow-declared primary result selection remains authoritative. Missing usage
+is omitted; recorded usage and failure diagnostics are disclosed on demand.
+Dependency panels require an actual relationship; code panels require a real
+worktree or PR. Closure receipt digests, duplicate action/quality fields and
+repeated slugs are omitted from ordinary content. Document outlines and review
+metadata, routes and audit documents are collapsed; review findings and actions
+remain available. Structured primary files are disclosed on demand instead of
+showing raw JSON as the page body. Task references and manual
+closure remain under Advanced. Bounded publication and mutation guards remain
+unchanged.
+
+The task log view extracts readable provider messages, results, errors and tool
+names, with category and text filters. It preserves bounded reads, safe escaping,
+receipt-bound failure logs, polling pauses while reading and filter selections
+across frame replacement. Unrecognized envelopes, reasoning and tool input/output
+payloads are not displayed as log messages.
+
+Task display completion follows explicit archive context or the canonical archived
+action. A workflow’s final directory can still contain an active agent stage.
+State filtering retains unavailable-project warnings; query values remain URL
+query data. Missing artifact or publication evidence is presented as unavailable,
+not as proof that work or publication never happened. Log filter results are
+announced through a polite status region and persist through frame reloads.
+
+## Completed workflow board
+
+The status toolbar's Done link opens `/archive?view=board`, preserving the
+selected project. It reads the archive on demand and renders the workflow's
+actual terminal columns, with completed cards expanded and mutations disabled.
+This includes older records without changing their completion timestamps or
+adding archive scans to active-feed polling. The Archive list remains available.
+
+### Completed tasks on project pages
+
+Selecting a project on the normal Board or Grid includes its archived tasks,
+including retained history older than the ordinary retention window. The Board
+expands populated completed columns by default; completed cards link to read-only
+archive task detail. State counts and filters include these rows. The all-project
+page and background active feed remain active-only.
+
+`ProjectArchive` reads the canonical archive projection for only the selected
+registered project. A bounded process-local cache retains each result for one
+minute; stage-directory changes invalidate it immediately. The project-scoped
+Done and Archive pages reuse this cache instead of scanning every project first.
+The all-project Archive remains the lossless fleet-wide history view.
+
+Completed terminal deliveries (for example writing workflow `7-deliver`) appear
+in a Done column on the project board. Pending delivery remains in Deliver;
+this grouping does not move task folders or alter workflow execution.

@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/terminal_outcome.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/task_workspace/builder.rb
 created: 2026-04-26
-updated: 2026-08-25
+updated: 2026-09-09
 tags: [module, workflow, result, verbs, selection, human-stage, outcomes, terminal-outcomes, registry, archive, retention]
 ---
 
@@ -11,10 +11,15 @@ tags: [module, workflow, result, verbs, selection, human-stage, outcomes, termin
 
 ## Descriptor and registry
 
+Local blank and research scaffolds omit `permissions`, inheriting the project's
+normal execution policy. Do not add tool allowlists merely because a workflow
+is a Honeycomb. Explicit owner-requested permission scopes remain supported and
+validated; installing tools and restricting their use are separate concerns.
+
 - `Hive::Workflow` — frozen `Data` value object with `id`, ordered `stages`,
   and normalized `archive_visibility_retention_days` (`Integer` or `:never`).
-  `DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS` is the default for change results
-  (`3`); document results default to `:never`. Read-only lookup helpers:
+  `DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS` is the single legacy default
+  (`3`). Read-only lookup helpers:
   - `#stage_named(name)` — soft lookup, returns the `Stage` or nil.
   - `#state_file_for(name)` — hard lookup, raises `KeyError` on an unknown name.
   - `#stage_names` / `#stage_dirs` — frozen lists of the descriptor's stage names / `index-name` dirs.
@@ -35,7 +40,7 @@ tags: [module, workflow, result, verbs, selection, human-stage, outcomes, termin
 - `Hive::Workflow::AdvanceVerb` — frozen value object for the verb that advances into a stage, with `force_source` and `interactive` flags defaulting false.
 - `Hive::Workflows::Coding::DESCRIPTOR` — the default built-in descriptor (`id: :coding`), matching the current nine-stage pipeline exactly. Its action semantics for coding `:agent`/`:inert` stages live in `Hive::Workflows::Coding::ACTION_DISPATCH`; execute/review/finalize route by their runtime primitive kinds.
 - `Hive::Workflows::Content::DESCRIPTOR` — built-in non-coding descriptor (`id: :content`) for `inbox -> research -> outline -> draft -> critique -> done`. `inbox` is inert and captures `idea.md`; every later stage is a generic `kind: :agent` stage with `status_mode: :state_file_marker`, slash-skill metadata, explicit budgets/timeouts, and `done` writing the terminal `article.md`. `Content::BUDGET_USD` is the single frozen source for the shipped per-run caps: research `3.0`, outline `1.5`, draft `3.0`, critique `2.0`, and done `2.0`.
-- `Hive::Workflows::Bench::DESCRIPTOR` — built-in hive-bench descriptor (`id: :bench`) for `inbox -> extract -> generate -> judge -> publish -> done`. The four generic agent stages use packaged instructions under `templates/builtins/bench/` and pin their lightweight shell-control work to Codex rather than consuming the Claude account being benchmarked. Extract/publish allow one hour; generate/judge allow seven days so a campaign is not killed by the generic one-hour fallback. Generate starts every unbought matrix cell before it waits, then reaps every child with cell-specific stderr, so independent candidates and tasks use their registered provider allowance concurrently without losing per-cell failure classification. Sealed cells run the Hive controller as root but install an exit trap that restores the bind-mounted target to the host UID/GID, so a later host-side retry can replace and seed the target without colliding with root-owned Git object directories. Generate distinguishes provider-only pending cells from real failures: the former use `Hive::Markers.set` to write `ERROR reason=limits_reached retry_after=...` with canonical recovery identity and attempt metadata, while missing, malformed, contradictory, or non-limit failed cells remain manual `WAITING`. A cell with a clean per-cell result and a preserved non-empty candidate patch is already paid even when its honest generation status is nonterminal; generate normally merges that record into the campaign root and advances it to judge backfill instead of deadlocking before the judge-owned `results.json` exists. Campaigns can opt into `require_successful_execution: true`; those campaigns rerun nonterminal cells instead of treating a preserved patch as bought, and both generate and judge require `generated` or `empty_diff` before any judging spend. Judge applies the same durable cooldown contract after fail-soft rejudge: when the only incomplete evidence is a missing or undersampled configured judge and every exact cell/judge gap has a matching structured quota failure, it writes retryable `ERROR reason=limits_reached` at EOF so the bounded marker scanner can always see it; structural, effort, unmatched, mixed, and non-quota judge failures remain manual `WAITING`. Judge adapters raise `HiveBench::ProviderLimitError` only from trusted failed-process evidence: stderr quota signals, Claude CLI's exact standalone stdout reset or usage-credits banners, or its structured failed-result envelope when `api_error_status` is 429 and the result itself is quota text; arbitrary candidate or judge prose about quotas remains untrusted. `HiveBench::JudgeSlate` is the shared source for the pre-deliberation and final result-slate validation, preventing those gates from drifting. A complete configured judge slate is required before `deliberate.rb` can spend or write transcripts. The judge stage also checks the pinned runtime's structured-failure capability before loading the new gate and gives an explicit `hive init . --workflow bench` refresh instruction for older snapshots. Judge completion then requires a numeric 0–10 round-two `final` from every configured deliberation judge; a fail-soft `final: null` remains visible in the transcript, keeps the stage `WAITING`, and is excluded from the retry skip-set so a later run can recover it. `Hive::Workflows::Bench.install_runtime!` snapshots the packaged campaign example, runner image, and harness into `.hive-state/bench-runtime` and commits it on `hive/state`, so `hive init . --workflow bench` needs neither a project-local descriptor nor a separate hive-bench checkout. The runtime is workflow data in the one registered project, not another Hive installation or scheduler. Maintained campaigns are separate `bench` tasks in that project. The packaged candidate registry includes serialized Sol/Terra/Grok comparisons plus Opus-5-plan and Fable-5-plan variants with Sol-high execution and an explicit Sol/Opus review panel. Every candidate declares provider-neutral `models:` routes; the shared Agent CLI Runtime compiles provider argv, and the benchmark keeps no Codex/Grok model wrappers. Generate selects the Codex-0.144+ `sol` image for any GPT-5.6 stage, and that image also carries Grok for mixed cells.
+- `Hive::Workflows::Bench::DESCRIPTOR` — built-in hive-bench descriptor (`id: :bench`) for `inbox -> extract -> generate -> judge -> publish -> done`. The four generic agent stages use packaged instructions under `templates/builtins/bench/` and pin their lightweight shell-control work to Codex rather than consuming the Claude account being benchmarked. Extract/publish allow one hour; generate/judge allow seven days so a campaign is not killed by the generic one-hour fallback. Generate starts every unbought matrix cell before it waits, then reaps every child with cell-specific stderr, so independent candidates and tasks use their registered provider allowance concurrently without losing per-cell failure classification. Sealed cells run the Hive controller as root but install an exit trap that restores the bind-mounted target to the host UID/GID, so a later host-side retry can replace and seed the target without colliding with root-owned Git object directories. Generate distinguishes provider-only pending cells from real failures: the former use `Hive::Markers.set` to write `ERROR reason=limits_reached retry_after=...` with canonical recovery identity and attempt metadata, while missing, malformed, contradictory, or non-limit failed cells remain manual `WAITING`. A cell with a clean per-cell result and a preserved non-empty candidate patch is already paid even when its honest generation status is nonterminal; generate normally merges that record into the campaign root and advances it to judge backfill instead of deadlocking before the judge-owned `results.json` exists. Campaigns can opt into `require_successful_execution: true`; those campaigns rerun nonterminal cells instead of treating a preserved patch as bought, and both generate and judge require `generated` or `empty_diff` before any judging spend. The packaged harness `HiveBench::Pipeline` validates the planner spawn before any executor spend: provider-limit signatures park the cell, and any other non-`:ok` planner exit (timeout kill or non-zero exit) returns a `plan_failed` cell with no diff even when a non-empty `HIVE_BENCH_PLAN.md` was left behind, so a truncated partial plan is never scored as a clean generation. Judge applies the same durable cooldown contract after fail-soft rejudge: when the only incomplete evidence is a missing or undersampled configured judge and every exact cell/judge gap has a matching structured quota failure, it writes retryable `ERROR reason=limits_reached` at EOF so the bounded marker scanner can always see it; structural, effort, unmatched, mixed, and non-quota judge failures remain manual `WAITING`. Judge adapters raise `HiveBench::ProviderLimitError` only from trusted failed-process evidence: stderr quota signals, Claude CLI's exact standalone stdout reset or usage-credits banners, or its structured failed-result envelope when `api_error_status` is 429 and the result itself is quota text; arbitrary candidate or judge prose about quotas remains untrusted. `HiveBench::JudgeSlate` is the shared source for the pre-deliberation and final result-slate validation, preventing those gates from drifting. A complete configured judge slate is required before `deliberate.rb` can spend or write transcripts. The judge stage also checks the pinned runtime's structured-failure capability before loading the new gate and gives an explicit `hive init . --workflow bench` refresh instruction for older snapshots. Judge completion then requires a numeric 0–10 round-two `final` from every configured deliberation judge; a fail-soft `final: null` remains visible in the transcript, keeps the stage `WAITING`, and is excluded from the retry skip-set so a later run can recover it. `Hive::Workflows::Bench.install_runtime!` snapshots the packaged campaign example, runner image, and harness into `.hive-state/bench-runtime` and commits it on `hive/state`, so `hive init . --workflow bench` needs neither a project-local descriptor nor a separate hive-bench checkout. The runtime is workflow data in the one registered project, not another Hive installation or scheduler. Maintained campaigns are separate `bench` tasks in that project. The packaged candidate registry includes serialized Sol/Terra/Grok comparisons plus Opus-5-plan and Fable-5-plan variants with Sol-high execution and an explicit Sol/Opus review panel. Every candidate declares provider-neutral `models:` routes; the shared Agent CLI Runtime compiles provider argv, and the benchmark keeps no Codex/Grok model wrappers. Generate selects the Codex-0.144+ `sol` image for any GPT-5.6 stage, and that image also carries Grok for mixed cells.
   Deliberation round failures also emit typed cell/judge quota evidence. Matching quota-only missing transcripts and `final: null` verdicts use the durable `limits_reached` cooldown only when every failure emitted for the retried cell is quota-typed; unmatched, mixed, malformed, effort, and non-quota failures remain manual. Incomplete transcripts stay outside the retry skip-set until every configured judge has a numeric final.
 - `Hive::Workflows::PatrolFix::DESCRIPTOR` — controller-owned descriptor (`id: :patrol-fix`) for `inbox -> fix -> validate -> review -> publish -> done`. Its active stages declare `kind: controller` and `controller: :patrol_fix`; the resolver uses that capability to select the first-party Patrol Fix runner without matching a workflow id or stage-name list. `done` remains inert. This keeps controller-specific task rebinding and status/action behavior attached to the descriptor while ordinary `agent`, `council`, and inert stages retain the generic runners.
 - `Hive::Workflows::Registry.fetch(:coding)` / `.default` — descriptor lookup. Unknown ids raise `Hive::Workflows::UnknownWorkflow`.
@@ -48,7 +53,7 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 
 - `id` is required, must match the filename stem, and must match `/\A[a-z0-9][a-z0-9-]*\z/`.
 - `archive_visibility_retention_days` accepts a positive integer or exact
-  lowercase `never`. Key omission keeps document results visible indefinitely and uses `3` for change results; key presence is checked
+  lowercase `never`. Key omission normalizes to `3`; key presence is checked
   separately so explicit `null` fails. Floats, booleans, strings (including
   numeric strings), zero, negatives, and alternate sentinel casing fail with
   workflow id, field name, received value, and accepted forms in the error.
@@ -82,10 +87,9 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 Archive visibility resolves the same descriptor order on every refresh:
 explicit task `workflow:` pin, project `default_workflow`, then `coding`.
 Applying a managed workflow configuration preserves the source descriptor's
-retention value. Hive's built-in `coding` and `bench` descriptors explicitly
-declare `3`. Built-in `content` and managed document workflows without an explicit
-limit keep completed deliverables visible in ordinary views indefinitely. Explicit
-positive limits still apply to document workflows.
+retention value. Hive's built-in `coding`, `content`, and `bench` descriptors
+and both local scaffolds explicitly declare `3`; legacy and externally managed
+descriptors may omit it and receive the same value.
 
 ## Workflow result contract
 
@@ -128,43 +132,19 @@ missing its declared deliverable, and emits only applicable evidence. Web and
 meaning without `coding`, `architecture`, or `writing` conditionals in the
 view.
 
-The one compatibility exception is an exact semantic match for the project-local
-`bench.yml` shipped before `bench` became built in. Hive temporarily keeps that
-legacy descriptor active so existing benchmark tasks remain visible and runnable,
-and emits a one-time `hive init PROJECT --workflow bench` migration hint. The
-explicit re-init archives the descriptor as
-`workflows/bench.legacy.yml.disabled`, copies its instruction directory to
-`workflows/bench.legacy` while retaining the original path for any sibling
-descriptors that share those instructions, installs the packaged bench runtime,
-and binds `default_workflow: bench` in the same lock-scoped commit. It then resets
-the in-process project overlay so subsequent resolution uses the built-in
-descriptor without a manual cache reset. Migration rejects symlinked workflow,
-descriptor, and instruction roots and verifies that each resolves beneath the
-hive-state worktree before copying. Instructions are copied into a private
-staging directory and atomically published so a raced archive-target symlink is
-refused without traversal. Descriptor parsing and archival are bound to one
-captured inode/content snapshot, while all workflow archive operations and
-rollback use a validated pinned directory handle; atomically replacing
-`bench.yml` or the `workflows/` parent therefore fails closed rather than
-reclassifying or traversing the replacement. The descriptor entry is atomically
-quarantined and revalidated before archive publication; a replacement that
-reappears at the public name is preserved while the verified legacy archive is
-retained for recovery. A post-staging hook then verifies both the pinned
-worktree name and staged index deletion immediately before commit. The migration also requires a clean hive-state index,
-preventing a scoped runtime commit from absorbing unrelated staged entries. If
-the commit fails or Ctrl-C interrupts before it is durable, Hive unstages the
-migration first, restores the config, descriptor, and previous runtime, and
-returns the original error. Interrupt bookkeeping is masked around each move and
-the commit result; once the commit lands, Hive preserves that coherent durable
-state rather than rolling back only the working tree. A runtime that cannot be
-removed during rollback is left in place while the previous runtime is retained
-at a reported backup path, avoiding destructive backup nesting.
-Any modified or independently authored descriptor named `bench` still fails the
-normal collision guard rather than being mistaken for the legacy workflow.
-The upgrade path was live-smoked on the existing hive-bench state checkout on
-2026-07-14: the built-in `bench`, sibling `bench-generate`, and explicitly pinned
-`coding` tasks all remained resolvable, with all nine pre-migration status rows
-still visible and the unrelated dirty-state fingerprint unchanged.
+Project descriptors cannot override the built-in `bench` workflow, including
+an unchanged historical `workflows/bench.yml`. Discovery records a collision;
+explicit selection of the colliding workflow fails. Hive does not archive or
+convert that descriptor during init. Use
+`docs/guides/current-format-migration.md` to retain selected historical tasks
+and move the conflicting descriptor aside in an offline conversion.
+
+`hive init PROJECT --workflow bench` installs the current packaged runtime and
+binds `default_workflow: bench`. Runtime installation requires a clean
+hive-state index and commits only its selected paths. If an error or interrupt
+occurs before the commit lands, it unstages those paths and restores the prior
+runtime; once committed, it preserves the installed state. Failed cleanup keeps
+the previous runtime at a reported backup path rather than overwriting it.
 
 The packaged runtime includes the single-family Ox Alpha routes used by the
 maintained comparison: Pi at explicit `high` and `max` reasoning, plus OpenCode
@@ -200,6 +180,27 @@ and reset its gem path. The driver omits all host Hive source/gem mounts and
 refuses model spend when the image label does not match the active immutable
 dogfood deployment. Runtime visibility joins base history and egress in the
 generation identity, so unsealed artifacts cannot satisfy a sealed campaign.
+The runner entrypoint (`templates/builtins/bench/runtime/hb-entrypoint.sh`,
+COPYed into the image) dispatches Docker's appended container argv: a single
+argument runs as a login-shell command string (the gen/gate harness protocol),
+while two or more arguments exec as a verbatim argv array — isolation.sh's
+`hb_isolated <mode> <work> <cmd...>` forwards `$@`, so multi-argument commands
+must not be truncated by a bare `bash -lc` entrypoint. The image installs the
+entrypoint into root-owned `/usr/local/bin` before `USER runner`; the
+unprivileged runner user cannot chmod the root-owned copy, so COPY/chmod after
+the user switch would break the build.
+The root controller uses root-owned binary/state directories. Its root-owned
+Git wrapper pins the offline origin, disables candidate hooks and executable
+helpers, and drops every repository Git command to uid 1000. Candidate files
+and Git config therefore cannot replace `hive`/`gh`, execute Git extension
+points as root, or redirect a review push. Pi's explicit `HIVE_PI_BIN` launcher
+is the single wrapper for non-version calls and always loads the GLM 5.2/5.3
+tool-stream extension before dropping privileges; the unreachable PATH wrapper
+is gone. The wrapper keeps its sealed origin available after ManagedGit scrubs
+the environment and refuses repository URL rewriting before a push. Offline
+origin initialization ignores candidate templates and global configuration,
+accepts the deliberately shallow base history, and registers the ordinary
+unsealed origin on both initial and resumed setup.
 When the control plane is invoked through the dogfood wrapper, the packaged
 driver resolves the exact immutable deployment named by
 `HIVE_RUNTIME_DEPLOYMENT_ID` and verifies its full commit against
@@ -209,7 +210,17 @@ an explicit `HB_HIVE_BIN` override still takes precedence and fails closed.
 Generate and judge quota markers likewise load `Hive::Markers` (and the judge
 cooldown helper) from the campaign's immutable `source/lib`, so a scrubbed
 stage-agent shell cannot silently fall back to an older installed hive-cli gem
-with a different marker API.
+with a different marker API. `HiveBench::CampaignContract` owns the validation
+and argv mapping those two stages share. It resolves a relative `source`
+against the benchmark project root before either stage changes directory,
+requires the marker runtime before generation, and compiles the same Codex
+provider route for initial generation and judge backfill. Judge validation is
+limited to the durable fields it consumes, so a paid historical campaign does
+not become invalid when the current corpus or candidate catalog changes.
+Generate's OpenRouter preflight covers selected Pi and OpenCode candidates, so
+a missing key parks the campaign before any cell starts. A strict campaign also
+inspects its internal Docker network once before launching the parallel matrix;
+only the named CONNECT proxy may already be attached at that boundary.
 
 
 `hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those initial files to `hive/state`. After editing, the natural-language creator validates and invokes `hive workflow commit ID`, which commits the populated descriptor/instruction directory under the shared state commit lock before it reports success or creates a task. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.
@@ -307,6 +318,11 @@ that exact remote OID as the worktree base. The local `HEAD` observed by Inbox
 is decision evidence only. There is no local-base fallback, while rework keeps
 the already-owned checkout and base. A same-generation retry also reuses that
 custody without refetching a moving remote branch.
+
+Publish secret-policy failures are distinct operator-owned parks. A sanitized,
+generation-scoped receipt prevents repeated publication attempts; status exposes
+no retry or rework action. Correcting the source and starting fresh work is an
+operator responsibility, separate from this publication gate.
 
 ## Durable human stages
 

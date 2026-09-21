@@ -231,7 +231,7 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
   def test_secret_retry_waits_until_the_local_pr_source_is_clean
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
-      File.write(state_file, "token: sk-abcdefghijklmnopqrstuvwxyz1234\n")
+      File.write(state_file, "token: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       blocked, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(
         row(
           folder: dir,

@@ -14,7 +14,7 @@
     "schema": { "const": "hive-task-closure" },
     "schema_version": { "const": 1 },
     "status": { "const": "confirmed" },
-    "reason": { "type": "string", "enum": ["already_delivered", "superseded"] },
+    "reason": { "type": "string", "enum": ["already_delivered", "superseded", "cancelled"] },
     "authority": { "type": "string", "enum": ["remote_merge", "operator_attestation"] },
     "task": {
       "type": "object",
@@ -39,19 +39,29 @@
       }
     },
     "task_repository": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["host", "repository", "identity", "default_branch"],
-      "properties": {
-        "host": { "type": "string" },
-        "repository": { "type": "string" },
-        "identity": { "type": "string" },
-        "default_branch": { "type": "string" }
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host", "repository", "identity", "default_branch"],
+          "properties": {
+            "host": {"type": "string"},
+            "repository": {"type": "string"},
+            "identity": {"type": "string"},
+            "default_branch": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {"path": {"type": "string", "minLength": 1}}
+        }
+      ]
     },
     "evidence": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "maxItems": 16,
       "items": { "$ref": "#/$defs/Evidence" }
     },
@@ -86,6 +96,27 @@
     "confirmed_at": { "type": "string", "format": "date-time" },
     "receipt_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"reason": {"const": "cancelled"}}},
+      "then": {
+        "properties": {
+          "evidence": {"maxItems": 0},
+          "task_repository": {"required": ["path"]},
+          "authority": {"const": "operator_attestation"},
+          "successor": {"type": "null"},
+          "attestation": {"type": "string", "minLength": 1},
+          "confirmed_by": {"properties": {"channel": {"enum": ["cli", "web", "bot"]}}}
+        }
+      },
+      "else": {
+        "properties": {
+          "evidence": {"minItems": 1},
+          "task_repository": {"required": ["host", "repository", "identity", "default_branch"]}
+        }
+      }
+    }
+  ],
   "$defs": {
     "Evidence": {
       "type": "object",

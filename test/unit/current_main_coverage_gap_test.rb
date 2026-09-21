@@ -160,13 +160,11 @@ class CurrentMainCoverageGapTest < Minitest::Test
       profile = FakeProfile.new(:codex)
 
       with_spawn_agent_capture(calls) do
-        Hive::Stages::Artifacts.spawn_artifacts_agent(task, { "budget_usd" => {}, "timeout_sec" => {} }, "collect", profile,
-                                                      screenote: { connected: false })
         Hive::Stages::Finalize.spawn_finalize_agent(task, { "budget_usd" => {}, "timeout_sec" => {} }, "final", profile, root)
       end
 
-      assert_equal 2, calls.length
-      assert_equal %w[artifacts finalize], calls.map { |_task, kwargs| kwargs[:log_label] }
+      assert_equal 1, calls.length
+      assert_equal %w[finalize], calls.map { |_task, kwargs| kwargs[:log_label] }
       assert_equal "error", Hive::Stages::Artifacts.action_for(:error)
       assert_equal "custom", Hive::Stages::Artifacts.action_for(:custom)
     end
@@ -1035,6 +1033,43 @@ class CurrentMainCoverageGapTest < Minitest::Test
     assert_equal [ "app/.env.local", "services/api/package-lock.json" ], violations.map(&:path)
     assert_includes violations[0].reason, "denied path pattern"
     assert_includes violations[1].reason, "denied path pattern"
+  end
+
+  def test_auto_commit_scope_defaults_allow_framework_config_and_database_source
+    cfg = { "review" => {} }
+
+    violations = Hive::Stages::Review.send(
+      :auto_commit_scope_violations,
+      cfg,
+      [
+        "config/ci.rb",
+        "config/environments/production.rb",
+        "config/initializers/encryption.rb",
+        "config/routes.rb",
+        "db/migrate/20260822000500_add_recipient_to_messages.rb",
+        "db/schema.rb"
+      ]
+    )
+
+    assert_empty violations
+  end
+
+  def test_auto_commit_scope_defaults_still_block_rails_credentials
+    cfg = { "review" => {} }
+
+    violations = Hive::Stages::Review.send(
+      :auto_commit_scope_violations,
+      cfg,
+      [
+        "config/master.key",
+        "config/credentials/production.yml.enc",
+        "config/routes.rb"
+      ]
+    )
+
+    assert_equal [ "config/master.key", "config/credentials/production.yml.enc" ],
+                 violations.map(&:path)
+    assert violations.all? { |violation| violation.reason.include?("denied path pattern") }
   end
 
   def test_staged_auto_commit_paths_include_both_sides_of_denied_rename

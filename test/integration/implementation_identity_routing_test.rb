@@ -287,7 +287,7 @@ class ImplementationIdentityRoutingTest < Minitest::Test
 
   def create_attempt(task, attempts, attempt_id:, stage:, generation:, provider:)
     attempts.create_launching(
-      attempt_id: attempt_id, request_id: "request-#{attempt_id}", predecessor_attempt_id: nil,
+      attempt_id: attempt_id, request_id: "request-#{attempt_id}",
       task_id: task.id.to_s, project: "demo", task_slug: task.slug, intended_stage: stage,
       task_generation: "owner-#{generation}", ownership_generation: "owner-#{generation}",
       task_input_epoch: generation, progress_token: "progress-#{attempt_id}", provider: provider,

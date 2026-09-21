@@ -94,6 +94,19 @@ class HiveBotTelegramTest < Minitest::Test
     ::Telegram::Bot::Exceptions::ResponseError.new(response: response)
   end
 
+  def test_send_document_uploads_exact_utf8_text_as_a_multipart_file
+    api = Object.new
+    uploads = []
+    api.define_singleton_method(:send_document) do |params|
+      file = params.fetch(:document)
+      uploads << [ params.fetch(:chat_id), file.original_filename, file.content_type, file.read ]
+      { "message_id" => 1 }
+    end
+    text = "Daily digest\n\nShipped 🚀\n" * 300
+    telegram(api).send_document(chat_id: 42, text: text, filename: "digest.txt")
+    assert_equal [ [ 42, "digest.txt", "text/plain; charset=utf-8", text ] ], uploads
+  end
+
   def test_poll_updates_parses_message_and_callback_records
     api = FakeApi.new(updates: fixture("get_updates.json"))
     updates = telegram(api).poll_updates(timeout: 25, since_update_id: 1000)

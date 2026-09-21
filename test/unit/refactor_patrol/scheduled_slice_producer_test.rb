@@ -234,6 +234,59 @@ class RefactorPatrolScheduledSliceProducerTest < Minitest::Test
     end
   end
 
+  def test_admission_retry_advances_cursor_without_reviewing_the_same_revision_again
+    with_tmp_dir do |dir|
+      admission = FlakyAdmissionAdapter.new
+      subject, = producer(
+        dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a b])), admission: admission
+      )
+      claim = subject.claim(now: NOW)
+      assert_raises(RuntimeError) do
+        subject.complete(claim_id: claim.fetch("id"), result: result(claim), now: NOW)
+      end
+      assert subject.release(claim_id: claim.fetch("id"), now: NOW + 1)
+
+      next_claim = subject.claim(now: NOW + 60)
+      assert_equal [ SHA1, "b", 0 ],
+                   next_claim.values_at("analysis_sha", "feature_id", "sweep_generation")
+      assert_equal [ "thesis-a" ], admission.published.map { |_aggregate, item| item.fetch("id") }
+      assert subject.complete(
+        claim_id: next_claim.fetch("id"), result: result(next_claim, route: "discuss"), now: NOW + 60
+      )
+      assert_equal 2, subject.each_result.to_a.size
+    end
+  end
+
+  def test_consumed_result_recovers_cursor_after_owner_dies_before_state_persistence
+    with_tmp_dir do |dir|
+      subject, admission = producer(dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a b])))
+      claim = subject.claim(now: NOW)
+      persist = subject.method(:persist)
+      subject.define_singleton_method(:persist) do |state|
+        raise "cursor persistence interrupted" if state["cursor"] == "a"
+        persist.call(state)
+      end
+      assert_raises(RuntimeError) do
+        subject.complete(claim_id: claim.fetch("id"), result: result(claim), now: NOW)
+      end
+      refute_nil subject.each_result.first.fetch("consumed_at")
+      # The original owner is still live: another claim must not steal or
+      # complete its position, even though its durable result already exists.
+      refute subject.claim(now: NOW + 1)
+
+      recovered, = producer(
+        dir, snapshots: Snapshots.new(snapshot(SHA1, %w[a b])), admission: admission, pid: 202
+      )
+      next_claim = recovered.claim(now: NOW + 60)
+      assert_equal [ SHA1, "b", 0 ],
+                   next_claim.values_at("analysis_sha", "feature_id", "sweep_generation")
+      assert_equal 1, admission.published.size, "consumed admission must not be published again"
+      assert recovered.complete(
+        claim_id: next_claim.fetch("id"), result: result(next_claim), now: NOW + 60
+      )
+    end
+  end
+
   def test_dead_owner_claim_is_recovered_against_fresh_main
     with_tmp_dir do |dir|
       live = { 101 => "start-101", 202 => "start-202" }

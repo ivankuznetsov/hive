@@ -264,43 +264,6 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
-  def test_successor_stays_current_when_its_clock_regresses_and_predecessor_arrives_late
-    with_tmp_dir do |dir|
-      task = build_task(dir)
-      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
-      predecessor = create_attempt(store, now: NOW)
-      lost = store.mark_lost(predecessor, reason: "launch_timeout", now: NOW + 1)
-      successor = create_attempt(
-        store, attempt_id: "attempt-2", request_id: "request-2",
-        predecessor_attempt_id: lost.attempt_id, now: NOW - 10
-      )
-      terminal = terminalize(store, successor, outcome: "succeeded", now: NOW - 10)
-      successor_status = Hive::Attempts::ReconciledAttempt.new(
-        attempt: terminal, classification: :terminal,
-        owner_status: :not_applicable, evidence: {}
-      )
-      predecessor_status = Hive::Attempts::ReconciledAttempt.new(
-        attempt: lost, classification: :lost,
-        owner_status: :not_claimed, evidence: {}
-      )
-      observer = Hive::Conditions::AttemptObserver.new(
-        store: store, task_locator: ->(_attempt) { task }
-      )
-
-      assert observer.call(successor_status, now: NOW + 2)
-      assert observer.call(predecessor_status, now: NOW + 3)
-
-      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
-      health = projection.current_condition("AgentHealthy")
-      assert_equal "attempt-2", health.fetch("attempt_id")
-      assert_equal "satisfied", health.fetch("state")
-      superseded = projection["conditions"].fetch("history").find do |fact|
-        fact["condition"] == "AgentHealthy" && fact["attempt_id"] == "attempt-1"
-      end
-      assert_equal "newer_incompatible_attempt", superseded.fetch("superseded_reason")
-    end
-  end
-
   def test_default_locator_skips_bad_candidates_and_finds_matching_task
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -383,11 +346,9 @@ class ConditionsAttemptObserverTest < Minitest::Test
     )
   end
 
-  def create_attempt(store, attempt_id: "attempt-1", request_id: "request-1",
-                     predecessor_attempt_id: nil, now: NOW)
+  def create_attempt(store, attempt_id: "attempt-1", request_id: "request-1", now: NOW)
     store.create_launching(
       attempt_id: attempt_id, request_id: request_id,
-      predecessor_attempt_id: predecessor_attempt_id,
       task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
       task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
       progress_token: "progress", provider: "codex",

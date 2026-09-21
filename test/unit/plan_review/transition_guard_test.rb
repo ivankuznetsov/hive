@@ -80,6 +80,39 @@ class PlanReviewTransitionGuardTest < Minitest::Test
     end
   end
 
+  def test_pending_candidate_keeps_original_fresh_without_authorizing_execution
+    with_task do |task, cfg|
+      plan_path = File.join(task.folder, "plan.md")
+      original = File.binread(plan_path)
+      candidate = "# pending candidate\n"
+      projection = publish_projection(
+        task, cfg, state: "awaiting_decision",
+        plan_digest: Digest::SHA256.hexdigest(original),
+        candidate_digest: Digest::SHA256.hexdigest(candidate)
+      )
+
+      # Original bytes remain canonical until clearance; candidate bytes may be
+      # present after a crash between promotion and terminal record publication.
+      [ original, candidate ].each do |bytes|
+        File.binwrite(plan_path, bytes)
+        assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+          task:, projection:, config: cfg
+        ).fetch("status")
+        assert_raises(Hive::PlanReview::TransitionBlocked) do
+          Hive::PlanReview::TransitionGuard.prepare!(
+            task:, destination: "4-execute", config: cfg,
+            orchestrator: ->(**) { projection }
+          )
+        end
+      end
+
+      File.binwrite(plan_path, "# unrelated edit\n")
+      assert_equal "stale", Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection:, config: cfg
+      ).fetch("status")
+    end
+  end
+
   def test_verified_candidate_digest_is_current_but_policy_drift_is_not
     with_task do |task, cfg|
       original = File.binread(File.join(task.folder, "plan.md"))

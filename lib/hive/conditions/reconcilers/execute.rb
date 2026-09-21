@@ -225,8 +225,7 @@ module Hive
               "source" => "execute_reconciler",
               "attempt_id" => @attempt.attempt_id,
               "lease_version" => @attempt.lease_version,
-              "attempt_accepted_at" => @attempt["accepted_at"],
-              "predecessor_attempt_id" => @attempt["predecessor_attempt_id"]
+              "attempt_accepted_at" => @attempt["accepted_at"]
             },
             payload: payload
           }

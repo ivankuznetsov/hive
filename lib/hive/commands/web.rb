@@ -48,6 +48,20 @@ module Hive
         )
       end
 
+      # Pre-dispatch usage errors for `hive web install|status` ride the same
+      # native web context the command's own failures carry, so an agent whose
+      # argv Thor rejected still learns why the web surface is unavailable.
+      def self.usage_error_payload(error, schema:, argv: [])
+        extras = if schema == "hive-web-status"
+          status_error_context(environment: ENV)
+        else
+          error_context(environment: ENV)
+        end
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error, error_kind: "invalid_task_path", extras: extras
+        )
+      end
+
       VALID_SUBCOMMANDS = %w[install start stop status capture capture-server].freeze
       INSTALL_READINESS_ATTEMPTS = 40
       INSTALL_READINESS_INTERVAL_SEC = 0.25
@@ -361,14 +375,12 @@ module Hive
           environment: @environment,
           config: config
         )
-        was_running = Hive::Web::ServiceStatus.lifecycle_state(installer)["service_running"]
-        outcome = installer.install!(autostart: true, force: @force)
-        restarted = outcome.restarted
-        if bundle_refreshed && was_running && outcome.success? && !restarted
-          installer.restart!
-          restarted = true
-        end
-        envelope = service_envelope(installer, outcome, config: config, restarted: restarted)
+        outcome = installer.install!(
+          autostart: true,
+          force: @force,
+          restart_if_running: bundle_refreshed
+        )
+        envelope = service_envelope(installer, outcome, config: config)
         if @json
           emit_install_json(envelope)
         else
@@ -385,30 +397,17 @@ module Hive
       end
 
       def start_service
-        run_service_action(launchctl: "load", systemctl: "start", verb: "start")
+        run_service_action(:start)
       end
 
       def stop_service
-        run_service_action(launchctl: "unload", systemctl: "stop", verb: "stop")
+        run_service_action(:stop)
       end
 
-      # start/stop differ only in the launchctl (load/unload) and systemctl
-      # (start/stop) verbs, so the platform branch lives here once.
-      def run_service_action(launchctl:, systemctl:, verb:)
+      def run_service_action(verb)
         require "hive/commands/web/service_installer"
         installer = Hive::Commands::Web::ServiceInstaller.new
-        argv =
-          if installer.envelope_platform == "macos"
-            [ "launchctl", launchctl, installer.target_path ]
-          else
-            # A unit written while systemd-user was unavailable stays invisible
-            # until a daemon-reload, so `start` would fail with "unit not found".
-            # Reload before starting so a freshly written unit is picked up.
-            system("systemctl", "--user", "daemon-reload") if verb == "start"
-            [ "systemctl", "--user", systemctl, installer.service_name ]
-          end
-        ok = system(*argv)
-        raise Hive::Error, "hive web: could not #{verb} managed service" unless ok
+        installer.public_send("#{verb}!")
       end
 
       def status_service
@@ -512,4 +511,20 @@ module Hive
       end
     end
   end
+end
+
+# The pre-dispatch JSON usage contract for this command boundary: only the
+# install/status surfaces pre-announce a JSON envelope, and their payloads
+# carry the native web context this boundary owns (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("web") do |argv, command_index:, option_argv:|
+  sub = Hive::CliUsageContracts.subcommand(argv, command_index, value_options: %w[--bind --port])
+  next unless %w[install status].include?(sub)
+
+  {
+    schema: "hive-web-#{sub}",
+    error_kind: "invalid_task_path",
+    payload: ->(error, argv: []) { Hive::Commands::Web.usage_error_payload(error, schema: "hive-web-#{sub}", argv: argv) }
+  }
 end

@@ -126,3 +126,26 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary follows the
+# module subcommand; everything unrecognized stays on the lifecycle envelope
+# (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("module") do |argv, command_index:, option_argv:|
+  sub = Hive::CliUsageContracts.subcommand(
+    argv, command_index,
+    value_options: %w[
+      --receipt --setting --hook --grant --mapping --input-binding
+      --event --schedule --occurred-at
+    ]
+  )
+  schema = case sub
+  when "list" then "hive-module-list"
+  when "inspect", "status" then "hive-module-status"
+  when "doctor" then "hive-module-doctor"
+  when "dry-run" then "hive-module-dry-run"
+  else "hive-module-lifecycle"
+  end
+  { schema: schema, error_kind: "usage" }
+end

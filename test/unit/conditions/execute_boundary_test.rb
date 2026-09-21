@@ -4,6 +4,7 @@ require "hive/conditions/transition_guard"
 require "hive/attempts/generation"
 require "hive/attempts/repository"
 require "hive/workflows/coding"
+require "hive/stages/execute"
 
 class ConditionsExecuteBoundaryTest < Minitest::Test
   include HiveTestHelper
@@ -103,20 +104,53 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
     )
   end
 
+  def test_entry_integrity_reason_survives_condition_authority_without_new_changes
+    %w[branch_mismatch head_not_descendant].each do |reason|
+      with_fixture do |task, store, _attempt, context, baseline|
+        File.write(File.join(task.folder, "worktree.yml"), {
+          "path" => task.worktree_path, "branch" => "master", "execute_base_head" => baseline
+        }.to_yaml)
+        if reason == "branch_mismatch"
+          run!("git", "-C", task.worktree_path, "switch", "-c", "wrong-branch")
+        else
+          run!("git", "-C", task.worktree_path, "commit", "--amend", "-m", "rewritten history")
+        end
+
+        with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+          with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, -> { store }) do
+            outcome = Hive::Stages::Execute.validate_execution_checkout(
+              task, config("conditions"), task.worktree_path, Hive::GitOps.new(task.worktree_path), baseline
+            )
+            assert_equal :execute_waiting, outcome[:status]
+          end
+        end
+
+        assert_equal reason, Hive::Markers.current(task.state_file).attrs["reason"]
+        projection = Hive::TaskProjection::Reader.new(task_folder: task.folder, task: task).read
+        gate = Hive::Conditions::GateEvaluator.new(
+          projection: projection, rule: task.workflow.stage_named("execute").condition_policy
+        ).evaluate
+        refute gate.eligible?
+        action = Hive::Conditions::RecoveryAction.build(task: task, gate: gate)
+        assert_equal reason, action["reason"]
+        assert_equal task.worktree_path, action["target"]
+      end
+    end
+  end
+
   def test_attempt_b_new_head_satisfies_gate_and_supersedes_attempt_a_wait
     with_fixture do |task, store, attempt_a, context_a, baseline|
       first = evaluate(task, store, attempt_a, context_a, baseline, mode: "conditions",
                        legacy_marker: :execute_waiting, waiting_reason: "no_worktree_changes")
       assert_equal :execute_waiting, first.marker_name
 
-      lost = store.mark_lost(attempt_a, reason: "owner_gone", now: Time.now.utc)
+      store.mark_lost(attempt_a, reason: "owner_gone", now: Time.now.utc)
       File.write(File.join(task.worktree_path, "change.txt"), "change\n")
       run!("git", "-C", task.worktree_path, "add", "change.txt")
       run!("git", "-C", task.worktree_path, "commit", "-m", "change", "--quiet")
       attempt_b = store.create_launching(
         **attempt_identity(task, baseline).merge(
-          attempt_id: "attempt-b", request_id: "request-b",
-          predecessor_attempt_id: lost.attempt_id
+          attempt_id: "attempt-b", request_id: "request-b"
         ),
         launch_timeout_sec: 30, now: Time.now.utc
       )
@@ -254,7 +288,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       )
       assert_equal :execute_complete, outcome.marker_name
       lost = store.mark_lost(attempt, reason: "wrapper_exited", now: Time.now.utc)
-      store.prepare_publication(attempt_id: lost.attempt_id, consumers: %w[journal])
+      store.prepare_publication(attempt_id: lost.attempt_id)
       projects = [ { "name" => "demo", "path" => task.project_root } ]
 
       with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
@@ -493,7 +527,7 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
       ownership_generation: "owner-1", task_input_epoch: 1
     )
     {
-      attempt_id: "attempt-a", request_id: "request-a", predecessor_attempt_id: nil,
+      attempt_id: "attempt-a", request_id: "request-a",
       task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
       task_generation: generation.ownership_generation,
       ownership_generation: generation.ownership_generation,

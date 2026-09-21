@@ -10,6 +10,7 @@ require "hive/gh"
 require "hive/markers"
 require "hive/patrol_fix/successor_materializer"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/worktree"
 
 module Hive
@@ -23,13 +24,6 @@ module Hive
       MAX_PR_TITLE_CHARS = 120
       MAX_PR_BODY_CHARS = 8_000
       MAX_SUMMARY_CHARS = 900
-      MAX_COMMITS = 64
-      MAX_OBJECTS = 2_048
-      MAX_OBJECT_BYTES = 2 * 1024 * 1024
-      MAX_DIFF_BYTES = 8 * 1024 * 1024
-      MAX_SCAN_BYTES = 24 * 1024 * 1024
-      MAX_OBJECT_LIST_BYTES = 256 * 1024
-      MAX_PATH_LIST_BYTES = 256 * 1024
       MAX_GIT_ERROR_BYTES = 16 * 1024
       RECOVERABLE_REASON = Hive::DraftPrReceipt::RECOVERABLE_REASON
       QUARANTINE_REASON = Hive::DraftPrReceipt::QUARANTINE_REASON
@@ -504,116 +498,21 @@ module Hive
       private_class_method :redact_sensitive_identifiers
 
       def scan_publication!(context, head_oid, report_source, projected)
-        digest = ::Digest::SHA256.new
-        scanned_bytes = 0
-        add_piece = lambda do |piece, source|
-          scanned_bytes += piece.bytesize
-          if scanned_bytes > MAX_SCAN_BYTES
-            raise QuarantineError, "publication scan exceeds #{MAX_SCAN_BYTES} bytes at #{source}"
-          end
-          digest << ::Digest::SHA256.digest(piece)
-        end
         scan_text!(report_source, source: "repair report")
-        add_piece.call(report_source, "repair report")
-        add_piece.call(projected.title, "PR title")
-        add_piece.call(projected.body, "PR body")
-        commits = git_read_binary!(
-          context.worktree_path, :commits,
-          base_oid: context.base_oid, head_oid: head_oid,
-          max_bytes: MAX_OBJECT_LIST_BYTES
-        )
-                  .lines.map(&:strip).reject(&:empty?)
-        raise IdentityError, "validated repair has no commits" if commits.empty?
-        if commits.length > MAX_COMMITS
-          raise QuarantineError, "repair history exceeds #{MAX_COMMITS} commits"
+        if Hive::SecretScanner.git_match?(context.worktree_path, base_oid: context.base_oid, head_oid: head_oid)
+          raise QuarantineError, "repair commits contain prohibited credential material"
         end
-        commits.each do |oid|
-          object_size = git_read!(
-            context.worktree_path, :object_size, oid: oid
-          ).to_i
-          reject_oversized_object!(object_size, "commit object")
-          commit = git_read_binary!(
-            context.worktree_path, :object_content, oid: oid,
-            max_bytes: MAX_OBJECT_BYTES
-          )
-          scan_blob!(commit, source: "commit object")
-          diff = git_read_binary!(
-            context.worktree_path, :commit_patch, oid: oid,
-            max_bytes: MAX_DIFF_BYTES
-          )
-          scan_blob!(diff, source: "commit diff")
-          add_piece.call(commit, "commit object")
-          add_piece.call(diff, "commit diff")
-        end
-
-        objects = git_read_binary!(
-          context.worktree_path, :object_list,
-          base_oid: context.base_oid, head_oid: head_oid,
-          max_bytes: MAX_OBJECT_LIST_BYTES
-        ).lines
-        raise QuarantineError, "repair history exceeds #{MAX_OBJECTS} objects" if objects.length > MAX_OBJECTS
-        objects.each do |line|
-          oid = line.split(" ", 2).first.to_s
-          type = git_read!(
-            context.worktree_path, :object_type, oid: oid
-          ).strip
-          next unless type == "blob"
-
-          object_size = git_read!(
-            context.worktree_path, :object_size, oid: oid
-          ).to_i
-          reject_oversized_object!(object_size, "reachable commit blob")
-          blob = git_read_binary!(
-            context.worktree_path, :object_content, oid: oid,
-            max_bytes: MAX_OBJECT_BYTES
-          )
-          scan_blob!(blob, source: "reachable commit blob")
-          add_piece.call(blob, "reachable commit blob")
-        end
-
-        final_paths = git_read_binary!(
-          context.worktree_path, :changed_paths,
-          base_oid: context.base_oid, head_oid: head_oid,
-          max_bytes: MAX_PATH_LIST_BYTES
-        ).split("\0").reject(&:empty?)
-        final_paths.each do |path|
-          object_size = git_read!(
-            context.worktree_path, :object_size, oid: head_oid, path: path
-          ).to_i
-          reject_oversized_object!(object_size, "final changed file")
-          content = git_read_binary!(
-            context.worktree_path, :object_content, oid: head_oid, path: path,
-            max_bytes: MAX_OBJECT_BYTES
-          )
-          scan_blob!(content, source: "final changed file")
-          add_piece.call(content, "final changed file")
-        end
-        digest.hexdigest
+        Digest::SHA256.hexdigest(JSON.generate([
+          Hive::SecretScanner::POLICY_VERSION, context.base_oid, head_oid,
+          report_source, projected.title, projected.body
+        ]))
+      rescue Hive::SecretScanner::Unavailable => e
+        raise QuarantineError, e.message
       end
       private_class_method :scan_publication!
 
-      def reject_oversized_object!(size, source)
-        if size.negative? || size > MAX_OBJECT_BYTES
-          raise QuarantineError, "#{source} exceeds #{MAX_OBJECT_BYTES} bytes"
-        end
-      end
-      private_class_method :reject_oversized_object!
-
-      def scan_blob!(content, source:)
-        bytes = content.to_s.b
-        if bytes.include?("\0") || !bytes.dup.force_encoding(Encoding::UTF_8).valid_encoding?
-          raise QuarantineError, "#{source} contains unsupported binary content"
-        end
-        if bytes.start_with?("version https://git-lfs.github.com/spec/v1") ||
-           bytes.include?("GIT binary patch") || bytes.include?("Binary files ")
-          raise QuarantineError, "#{source} contains unsupported binary or LFS content"
-        end
-        scan_text!(bytes.force_encoding(Encoding::UTF_8), source: source)
-      end
-      private_class_method :scan_blob!
-
       def scan_text!(text, source:)
-        if Hive::SecretPatterns.match?(text.to_s)
+        if Hive::SecretScanner.match?(text.to_s)
           raise QuarantineError, "#{source} contains prohibited credential material"
         end
       end
@@ -789,62 +688,6 @@ module Hive
         raise IdentityError, e.message
       end
       private_class_method :git_read!
-
-      def git_read_binary!(path, operation, max_bytes:, **parameters)
-        result = Hive::AgentGitGate.read(
-          path, operation, max_stdout_bytes: max_bytes, **parameters
-        )
-        if result.overflow
-          raise QuarantineError,
-                "hardened Git #{operation} output exceeds #{max_bytes} bytes"
-        end
-        return result.stdout if result.success?
-
-        detail = result.stderr.encode(
-          "UTF-8", invalid: :replace, undef: :replace, replace: "?"
-        ).strip
-        raise IdentityError,
-              "hardened Git #{operation} failed during publication scan: #{detail[0, 200]}"
-      rescue Hive::AgentGitGate::Error => e
-        raise IdentityError, e.message
-      end
-      private_class_method :git_read_binary!
-
-      # Private compatibility shims keep older focused tests and exception
-      # wording stable while still translating a closed set of historical argv
-      # shapes into the public gate vocabulary. Unknown shapes fail closed.
-      def git!(path, *args)
-        operation, parameters = legacy_git_read(args)
-        git_read!(path, operation, **parameters)
-      end
-      private_class_method :git!
-
-      def git_binary!(path, *args, max_bytes: nil)
-        operation, parameters = if args.length == 2 && args.first == "show"
-          oid, object_path = args.last.split(":", 2)
-          oid = git_read!(path, :head_oid).strip if oid == "HEAD"
-          [ :object_content, { oid: oid, path: object_path } ]
-        else
-          legacy_git_read(args)
-        end
-        git_read_binary!(
-          path, operation,
-          max_bytes: max_bytes || MAX_DIFF_BYTES,
-          **parameters
-        )
-      end
-      private_class_method :git_binary!
-
-      def legacy_git_read(args)
-        case args
-        when [ "status" ], [ "status", "--porcelain=v1", "--untracked-files=all" ]
-          [ :status, {} ]
-        else
-          raise IdentityError,
-                "unsupported legacy hardened Git operation #{args.first.inspect}"
-        end
-      end
-      private_class_method :legacy_git_read
     end
   end
 end

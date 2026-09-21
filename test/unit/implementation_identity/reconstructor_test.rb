@@ -73,7 +73,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       maintenance.prepare(terminal)
       maintenance.acknowledge(terminal, :journal)
       assert maintenance.publish_after_journal(terminal)
-      maintenance.acknowledge(terminal, :request_delivery)
+      maintenance.acknowledge(terminal, :dispatch)
       assert maintenance.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
 
@@ -407,7 +407,7 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       intended_stage: stage, task_generation: "owner-0", ownership_generation: "owner-0",
       task_input_epoch: input_epoch, progress_token: "progress-#{id}",
       provider: provider, starting_revision: nil,
-      request_id: "request-#{id}", predecessor_attempt_id: nil,
+      request_id: "request-#{id}",
       worker_argv: [ "hive", "run", "legacy-task" ],
       claim_capability_digest: Hive::Attempts::Capability.digest(claim_capability),
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: now

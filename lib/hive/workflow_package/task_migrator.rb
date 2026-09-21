@@ -117,7 +117,7 @@ module Hive
           unless meta[:workflow] && meta[:workflow_commit] && meta[:workflow_manifest_digest]
             raise Hive::ConfigError,
                   "managed task #{File.basename(folder)} has incomplete workflow provenance; " \
-                  "repair meta.yml and rerun hive migrate"
+                  "repair meta.yml and retry the workflow install or update"
           end
 
           selection = selections.fetch(meta[:workflow]) do
@@ -141,14 +141,14 @@ module Hive
           unless old_stage
             raise Hive::ConfigError,
                   "managed task #{File.basename(folder)} is at #{stage_dir.inspect}, which is not " \
-                  "present in its pinned workflow; repair the task folder and rerun hive migrate"
+                  "present in its pinned workflow; repair the task folder and retry the workflow install or update"
           end
           current_stage = current_workflow.stage_named(old_stage.name)
           unless current_stage
             raise Hive::ConfigError,
                   "managed workflow #{meta[:workflow].inspect} removed semantic stage " \
                   "#{old_stage.name.inspect} while task #{File.basename(folder)} still uses it; " \
-                  "restore that stage name or archive/reset the task, then rerun hive migrate"
+                  "restore that stage name or archive/reset the task, then retry the workflow install or update"
           end
 
           Operation.new(

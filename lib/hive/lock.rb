@@ -1,7 +1,6 @@
 require "fileutils"
 require "time"
-require "hive/attempts/context"
-require "hive/runtime_control_plane/task_lease_repository"
+require "hive/git_index_lock"
 
 module Hive
   module Lock
@@ -46,6 +45,8 @@ module Hive
     end
 
     def acquire_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
+      require "hive/attempts/context"
+
       payload = (payload || {}).merge(payload_keywords)
       data = base_payload
              .merge(payload.transform_keys(&:to_s))
@@ -121,6 +122,7 @@ module Hive
         end
         held[lock_key] = Process.pid
         begin
+          Hive::GitIndexLock.recover!(project_hive_state_path)
           return yield
         ensure
           held.delete(lock_key) if held[lock_key] == Process.pid
@@ -217,6 +219,7 @@ module Hive
     end
 
     def task_lease_repository
+      require "hive/runtime_control_plane/task_lease_repository"
       @task_lease_repository ||= RuntimeControlPlane::TaskLeaseRepository.new(
         process_start_time: method(:process_start_time),
         process_alive: method(:process_identity_alive?)

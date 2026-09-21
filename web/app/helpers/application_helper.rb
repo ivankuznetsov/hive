@@ -1,11 +1,12 @@
 require "digest"
+require "time"
 
 module ApplicationHelper
   NAV_SECTIONS = {
     status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
+    digests: ->(c) { c == "digests" },
     repos: ->(c) { c == "repos" },
-    workflows: ->(c) { c == "workflows" },
-    modules: ->(c) { c == "modules" },
+    honeycombs: ->(c) { %w[workflows modules].include?(c) },
     patrol: ->(c) { c == "patrol" },
     agents: ->(c) { c == "agents" },
     telegram: ->(c) { c == "telegram" }
@@ -14,6 +15,20 @@ module ApplicationHelper
   def nav_class(section)
     active = NAV_SECTIONS.fetch(section).call(controller_path.split("/", 2).first)
     class_names("nav-link", "nav-link-active": active)
+  end
+
+  def digest_task_path(destination, anchor: nil)
+    options = {}
+    options[:source] = destination.fetch(:source) if destination[:source]
+    options[:anchor] = anchor if anchor
+    task_path(destination.fetch(:project), destination.fetch(:slug), **options)
+  end
+
+  def digest_time_tag(value)
+    timestamp = value.is_a?(String) ? Time.iso8601(value) : value
+    time_tag(timestamp)
+  rescue ArgumentError, TypeError
+    tag.span("Time unavailable", class: "digest-meta")
   end
 
   # Turbo morphs by DOM identity. Use a digest of the full raw tuple so
@@ -43,18 +58,11 @@ module ApplicationHelper
 
   # Liveness dot derived from the task row of Status#json_payload: a live
   # agent pulses green, an error marker is red, an actionable gate is amber.
-  def status_dot(task)
-    kind =
-      if task["marker"] == "error" || task["action"].to_s.include?("error")
-        "error"
-      elsif task["claude_pid_alive"]
-        "running"
-      elsif task["action"].present?
-        "waiting"
-      else
-        "idle"
-      end
-    tag.span("", class: "status-dot status-dot-#{kind}", title: task["action_label"].presence || "idle")
+  def status_dot(task, fresh: true, archived: false)
+    display = TaskDisplay.new(task, fresh: fresh, archived: archived)
+    kind = { "running" => "running", "attention" => "error", "waiting" => "waiting",
+             "ready" => "waiting", "completed" => "idle", "unknown" => "idle", "paused" => "idle" }.fetch(display.state)
+    tag.span("", class: "status-dot status-dot-#{kind}", title: display.label)
   end
 
   MARKDOWN_TAGS = %w[
@@ -128,10 +136,5 @@ module ApplicationHelper
     return "#{s / 3600}h ago" if s < 86_400
 
     "#{s / 86_400}d ago"
-  end
-
-  def hidden_archive_summary(count)
-    noun = count == 1 ? "task" : "tasks"
-    "… and #{count} older archived #{noun} (hive archive to view)"
   end
 end

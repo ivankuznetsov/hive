@@ -93,6 +93,12 @@ class AgentSupportTest < Minitest::Test
     ], stdout.lines.map(&:strip)
   end
 
+  def test_codex_does_not_treat_current_models_as_recoverable_legacy_planners
+    require "hive/agent_support/codex"
+
+    refute Hive::AgentSupport::Codex.recoverable_planner_identity?("model" => "gpt-5.6")
+  end
+
   def test_grok_loads_only_after_selection_and_keeps_facets_lazy
     script = <<~RUBY
       require "hive/agent_profiles"

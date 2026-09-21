@@ -1,4 +1,5 @@
 require "hive/tui/styles"
+require "hive/tui/update"
 require "hive/tui/views/format"
 
 module Hive
@@ -14,16 +15,19 @@ module Hive
 
         def render(model, width: model.cols.to_i)
           rows = [ "Choose project for new idea:" ]
+          if (message = retained_resolution_message(model))
+            rows << Styles::FLASH.render(message)
+          end
           projects = nil
           if model.snapshot.nil?
             rows << Styles::HINT.render("Loading projects...")
           else
             projects = choices(model)
             if projects.empty?
-              rows << Styles::FLASH.render("No healthy projects available")
+              rows << Styles::FLASH.render(empty_message(model.snapshot.new_idea_admission))
             else
-              cursor = model.new_idea_project_cursor.to_i.clamp(0, projects.size - 1)
-              visible, first_idx = visible_projects(projects, cursor)
+              cursor = highlighted_cursor(model, projects)
+              visible, first_idx = visible_projects(projects, cursor || 0)
               visible.each_with_index do |project, idx|
                 absolute_idx = first_idx + idx
                 prefix = absolute_idx == cursor ? "> " : "  "
@@ -35,14 +39,56 @@ module Hive
           # Always anchor the operator with at least an Esc-cancel hint —
           # loading + no-healthy-projects states used to render with no
           # exit affordance, making the mode look frozen.
-          hint = projects && !projects.empty? ? "Enter choose  Esc cancel" : "Esc cancel"
+          hint = if projects && !projects.empty?
+            cursor.nil? ? "j first / k last  Esc cancel" : "Enter choose  Esc cancel"
+          else
+            "Esc cancel"
+          end
           rows << Styles::HINT.render(hint)
 
           rows.map { |line| truncate(line, width) }.join("\n")
         end
 
         def choices(model)
-          Array(model.snapshot&.projects).select { |project| project.error.nil? }
+          model.snapshot&.new_idea_admission&.projects || []
+        end
+
+        def highlighted_cursor(model, projects)
+          cursor = model.new_idea_project_cursor
+          return nil unless cursor.is_a?(Integer) && cursor.between?(0, projects.size - 1)
+
+          cursor
+        end
+
+        def empty_message(admission)
+          case admission.state
+          when :ambiguous
+            names = admission.ambiguous_names.map(&:inspect).join(", ")
+            "Duplicate project name #{names} — disambiguate registry or run `hive forget <name>`"
+          when :unhealthy
+            "No healthy projects available"
+          when :invalid_identity
+            "Project registry has entries without names — repair invalid registry entries"
+          when :no_projects
+            "No projects registered — run `hive init <path>`"
+          else
+            raise ArgumentError, "unknown new-idea admission state: #{admission.state.inspect}"
+          end
+        end
+
+        def retained_resolution_message(model)
+          resolution = model.new_idea_project_resolution
+          return unless resolution
+
+          message = Hive::Tui::Update.new_idea_resolution_flash(
+            resolution,
+            admission: model.snapshot&.new_idea_admission
+          )
+          return unless message
+
+          draft_kept = !model.new_idea_buffer.to_s.empty? ||
+            Array(model.new_idea_attachments).any?
+          draft_kept ? "#{message} — draft kept" : message
         end
 
         def visible_projects(projects, cursor)

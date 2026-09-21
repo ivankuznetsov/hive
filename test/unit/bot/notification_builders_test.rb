@@ -32,7 +32,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     )
   end
 
-  def legacy_stage_dirs(task_count: 3, command: "hive migrate")
+  def legacy_stage_dirs(task_count: 3, command: "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md")
     Hive::Bot::StatusWatcher::LegacyStageDirs.new(
       project: "hive",
       project_path: "/tmp/hive",
@@ -41,7 +41,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
         { "stage_dir" => "5-review", "task_count" => task_count - 1 },
         { "stage_dir" => "6-pr", "task_count" => 1 }
       ],
-      legacy_migrate_command: command
+      legacy_state_guide: command
     )
   end
 
@@ -67,7 +67,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   def test_legacy_stage_dirs_notification_renders_project_count_dirs_and_command
     notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs)
 
-    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/hive",
                  notification.text
     assert_nil notification.keyboard
   end
@@ -85,15 +85,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
   def test_legacy_stage_dirs_notification_renders_singular_and_command_fallback
     notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(task_count: 1, command: nil))
 
-    assert_equal "Project hive has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/hive`",
-                 notification.text
-    assert_nil notification.keyboard
-  end
-
-  def test_legacy_stage_dirs_notification_handles_malformed_command_payload
-    notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(command: "hive 'migrate"))
-
-    assert_equal "Project hive has 3 tasks hidden in legacy stage dirs (5-review, 6-pr) - run `hive migrate /tmp/hive`",
+    assert_equal "Project hive has 1 task hidden in legacy stage dirs (6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/hive",
                  notification.text
     assert_nil notification.keyboard
   end

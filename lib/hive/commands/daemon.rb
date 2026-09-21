@@ -16,7 +16,11 @@ require "hive/daemon/operational_snapshot"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
+require "hive/daemon/scheduled_architecture_scheduler"
 require "hive/daemon/answer_digest_scheduler"
+require "hive/daemon/daily_digest_close_scheduler"
+require "hive/daily_digest/migration"
+require "hive/daemon/daily_digest_delivery_scheduler"
 require "hive/daemon/logger"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/daemon/patrol_fix_admission_scheduler"
@@ -191,10 +195,18 @@ module Hive
         # call merge_defaults({}) which discarded the global config.
         daemon_cfg = Hive::Config.load_global_daemon
         answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        daily_digest_error = nil
+        daily_digest_cfg = begin
+          Hive::DailyDigest::Migration.prepare!
+        rescue Hive::ConfigError, Hive::DailyDigest::Migration::InitializationError => error
+          daily_digest_error = error
+          Hive::Config::DEFAULTS.fetch("daily_digest").merge("enabled" => false)
+        end
         config = {
           "daemon" => daemon_cfg,
           "update" => Hive::Config.load_global_update,
-          "answer_digest" => answer_digest_cfg
+          "answer_digest" => answer_digest_cfg,
+          "daily_digest" => daily_digest_cfg
         }
 
         # Build the logger BEFORE the controller so both the controller and
@@ -207,6 +219,13 @@ module Hive
           max_bytes: daemon_cfg.fetch("log_max_bytes"),
           max_files: daemon_cfg.fetch("log_max_files")
         )
+        if daily_digest_error
+          logger.event(
+            :daily_digest_configuration_disabled,
+            error_class: daily_digest_error.class.name,
+            message: daily_digest_error.message
+          )
+        end
         controller = Hive::Daemon::ConcurrencyController.new(
           max_concurrent_runs: daemon_cfg.fetch("max_concurrent_runs"),
           max_concurrent_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
@@ -223,6 +242,7 @@ module Hive
             "child_timeout_sec", Hive::Config::DEFAULTS.dig("daemon", "child_timeout_sec")
           ),
           verb_timeouts: daemon_cfg.fetch("child_verb_timeouts", {}),
+          stage_timeouts: daemon_cfg.fetch("child_stage_timeouts", {}),
           kill_grace_sec: daemon_cfg.fetch(
             "child_kill_grace_sec", Hive::Daemon::ChildSupervisor::DEFAULT_KILL_GRACE_SEC
           )
@@ -238,11 +258,11 @@ module Hive
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           merge_intake: refactor_patrol_merge_reconciler,
-          store: Hive::Daemon::PrMergeRepository.new(dry_run: @dry_run),
           dry_run: @dry_run
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
         refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+          scheduled_scheduler: Hive::Daemon::ScheduledArchitectureScheduler.new(dry_run: @dry_run),
           dry_run: @dry_run
         )
         patrol_fix_runtime = Hive::Daemon::PatrolFixRuntime.new
@@ -266,6 +286,20 @@ module Hive
           enabled: answer_digest_cfg.fetch("enabled", false),
           hour: answer_digest_cfg.fetch(
             "hour", Hive::Daemon::AnswerDigestScheduler::DEFAULT_HOUR
+          ),
+          logger: logger
+        )
+        daily_digest_close_scheduler = Hive::Daemon::DailyDigestCloseScheduler.new(
+          enabled: daily_digest_cfg.fetch("enabled", false),
+          interval_sec: daily_digest_cfg.fetch("materialization_interval_sec", 300),
+          logger: logger
+        )
+        daily_telegram_cfg = daily_digest_cfg.fetch("telegram", {})
+        daily_digest_delivery_scheduler = Hive::Daemon::DailyDigestDeliveryScheduler.new(
+          enabled: daily_digest_cfg.fetch("enabled", false) &&
+            daily_telegram_cfg.fetch("enabled", false),
+          hour: daily_telegram_cfg.fetch(
+            "hour", Hive::Daemon::DailyDigestDeliveryScheduler::DEFAULT_HOUR
           ),
           logger: logger
         )
@@ -316,6 +350,8 @@ module Hive
           patrol_fix_admission_scheduler: patrol_fix_admission_scheduler,
           patrol_arbiter: patrol_arbiter,
           answer_digest_scheduler: answer_digest_scheduler,
+          daily_digest_close_scheduler: daily_digest_close_scheduler,
+          daily_digest_delivery_scheduler: daily_digest_delivery_scheduler,
           dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new,
           attempt_dispatcher: attempts_api,
@@ -325,7 +361,8 @@ module Hive
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
           runtime_ready_callback: -> { activation_lock.release! },
-          clock: -> { Time.now.utc }
+          clock: -> { Time.now.utc },
+          patrol_discovery_async: true
         )
 
         reexec_requested = false

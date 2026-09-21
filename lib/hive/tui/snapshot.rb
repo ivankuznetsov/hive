@@ -13,26 +13,76 @@ module Hive
     # thread for one frame at a time. Frozen: `#filter_by_slug` and
     # `#scope_to_project_index` return new instances rather than mutating.
     class Snapshot
+      NEW_IDEA_ADMISSION_STATES = %i[
+        available ambiguous unhealthy invalid_identity no_projects
+      ].freeze
+      NEW_IDEA_RECOVERY_KINDS = %i[prune_missing repair_projects repair_registry].freeze
+      NEW_IDEA_RESOLUTION_STATES = %i[
+        available selection_required disappeared unhealthy ambiguous invalid_scope no_projects
+      ].freeze
+      NEW_IDEA_AMBIGUOUS_NAME_LIMIT = 3
+
+      # Ordered projects that the new-idea picker may admit, plus the cause
+      # needed to explain an empty collection without re-reading raw project
+      # errors in a consumer. Recovery is already classified here; duplicate
+      # exact names never enter `projects`, even when all rows are healthy.
+      NewIdeaAdmission = Data.define(:state, :projects, :ambiguous_names, :recovery) do
+        def initialize(state:, projects:, ambiguous_names: [].freeze,
+                       recovery: nil)
+          unless Hive::Tui::Snapshot::NEW_IDEA_ADMISSION_STATES.include?(state)
+            raise ArgumentError, "unknown new-idea admission state: #{state.inspect}"
+          end
+          if recovery && !Hive::Tui::Snapshot::NEW_IDEA_RECOVERY_KINDS.include?(recovery)
+            raise ArgumentError, "unknown new-idea recovery kind: #{recovery.inspect}"
+          end
+
+          super(
+            state: state,
+            projects: Array(projects).freeze,
+            ambiguous_names: Array(ambiguous_names).freeze,
+            recovery: recovery
+          )
+        end
+      end
+
+      # Closed result shared by numeric composer entry and later exact-name
+      # revalidation. `name` preserves the attempted stable identity;
+      # `detail` carries the raw
+      # captured error or invalid scope for state-specific feedback.
+      NewIdeaResolution = Data.define(:state, :name, :detail) do
+        def initialize(state:, name: nil, detail: nil)
+          unless Hive::Tui::Snapshot::NEW_IDEA_RESOLUTION_STATES.include?(state)
+            raise ArgumentError, "unknown new-idea resolution state: #{state.inspect}"
+          end
+
+          super(state: state, name: name, detail: detail)
+        end
+
+        def available?
+          state == :available
+        end
+      end
+
       # `error` is nil for healthy projects and the JSON's "error" string
       # ("missing_project_path" / "not_initialised") otherwise.
       # `legacy_stage_dirs` carries the JSON's `legacy_stage_dirs` array
       # verbatim ([] when the project is clean) so the renderer can flag
       # projects with task folders stuck under a renamed stage directory
-      # without re-walking the filesystem. `legacy_migrate_command`
-      # carries the JSON's `legacy_migrate_command` string verbatim
-      # ("hive migrate" when legacy_stage_dirs is non-empty; nil
+      # without re-walking the filesystem. `legacy_state_guide`
+      # carries the JSON's `legacy_state_guide` string verbatim
+      # ("https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md" when legacy_stage_dirs is non-empty; nil
       # otherwise) — agent-facing parity of the text recovery hint.
       ProjectView = Data.define(:name, :path, :hive_state_path, :error, :rows,
-                                :legacy_stage_dirs, :legacy_migrate_command,
+                                :legacy_stage_dirs, :legacy_state_guide,
                                 :hidden_archived_task_count) do
-        # `legacy_stage_dirs` defaults to `[]` and `legacy_migrate_command`
+        # `legacy_stage_dirs` defaults to `[]` and `legacy_state_guide`
         # to nil so existing test factories (predating the fields) can keep
         # building ProjectView with the original 5-keyword shape.
         # Production callers in this file always pass them explicitly.
-        def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil,
+        def initialize(legacy_stage_dirs: [].freeze, legacy_state_guide: nil,
                        hidden_archived_task_count: 0, **rest)
           super(legacy_stage_dirs: legacy_stage_dirs,
-                legacy_migrate_command: legacy_migrate_command,
+                legacy_state_guide: legacy_state_guide,
                 hidden_archived_task_count: hidden_archived_task_count, **rest)
         end
       end
@@ -174,12 +224,19 @@ module Hive
         end
       end
 
-      attr_reader :generated_at, :projects, :archive_projects
+      attr_reader :generated_at, :projects, :archive_projects, :new_idea_admission
 
-      def initialize(generated_at:, projects:, archive_projects: [].freeze)
+      def initialize(generated_at:, projects:, archive_projects: [].freeze,
+                     new_idea_admission: nil, new_idea_registry_projects: nil)
         @generated_at = generated_at
         @projects = projects.freeze
         @archive_projects = archive_projects.freeze
+        @new_idea_registry_projects = (new_idea_registry_projects || @projects).freeze
+        # Admission is registry-wide authority. Derived scope/filter snapshots
+        # carry this exact value and its source projects instead of recomputing
+        # policy over a visible subset, so every resolver answers from the same
+        # complete registry authority.
+        @new_idea_admission = new_idea_admission || build_new_idea_admission
         freeze
       end
 
@@ -225,7 +282,7 @@ module Hive
           error: payload["error"],
           rows: sorted.freeze,
           legacy_stage_dirs: Array(payload["legacy_stage_dirs"]).freeze,
-          legacy_migrate_command: payload["legacy_migrate_command"],
+          legacy_state_guide: payload["legacy_state_guide"],
           hidden_archived_task_count: normalized_hidden_count(
             payload["hidden_archived_task_count"]
           )
@@ -308,17 +365,46 @@ module Hive
         @archive_projects.flat_map(&:rows)
       end
 
-      def hidden_archived_task_count(scope: 0)
-        scoped =
-          if scope.zero?
-            @projects
-          elsif scope.between?(1, @projects.size)
-            [ @projects[scope - 1] ]
-          else
-            []
-          end
-        scoped.sum(&:hidden_archived_task_count)
+      # Resolve a dashboard numeric scope exactly once, against this
+      # snapshot's original registry order. Name-only revalidation belongs to
+      # `resolve_new_idea_project`.
+      def resolve_new_idea_entry(scope:)
+        return new_idea_resolution(:no_projects) if @new_idea_registry_projects.empty?
+        unless scope.is_a?(Integer) && scope.between?(1, @new_idea_registry_projects.size)
+          return new_idea_resolution(:invalid_scope, detail: scope)
+        end
+
+        project = @new_idea_registry_projects[scope - 1]
+        return new_idea_resolution(:invalid_scope, detail: scope) if project.name.to_s.empty?
+
+        resolve_new_idea_project(name: project.name)
       end
+
+      # Revalidate only the pinned exact name against this snapshot. This
+      # deliberately accepts no numeric position, so reorder/removal cannot
+      # reinterpret stale scope as a different target.
+      def resolve_new_idea_project(name:)
+        candidate = name.to_s
+        if @new_idea_registry_projects.empty? && candidate.empty?
+          return new_idea_resolution(:no_projects)
+        end
+        return new_idea_resolution(:selection_required) if candidate.empty?
+
+        matches = @new_idea_registry_projects.select { |project| project.name == candidate }
+        return new_idea_resolution(:disappeared, name: candidate) if matches.empty?
+        return new_idea_resolution(:ambiguous, name: candidate) if matches.size > 1
+
+        project = matches.first
+        if project.error
+          return new_idea_resolution(
+            :unhealthy,
+            name: candidate,
+            detail: project.error.to_s
+          )
+        end
+
+         new_idea_resolution(:available, name: candidate)
+       end
 
       # Case-insensitive substring filter on each row's slug, display name,
       # or id. Empty
@@ -344,14 +430,16 @@ module Hive
             error: project.error,
             rows: matched.freeze,
             legacy_stage_dirs: project.legacy_stage_dirs,
-            legacy_migrate_command: project.legacy_migrate_command,
+            legacy_state_guide: project.legacy_state_guide,
             hidden_archived_task_count: project.hidden_archived_task_count
           ).freeze
         end
         self.class.new(
           generated_at: @generated_at,
           projects: filtered,
-          archive_projects: @archive_projects
+          archive_projects: @archive_projects,
+          new_idea_admission: @new_idea_admission,
+          new_idea_registry_projects: @new_idea_registry_projects
         )
       end
 
@@ -363,13 +451,25 @@ module Hive
         return self if n.zero?
 
         if n.between?(1, @projects.size)
+          project = @projects[n - 1]
+          archive_project = @archive_projects.find do |candidate|
+            candidate.path == project.path
+          end
           self.class.new(
             generated_at: @generated_at,
-            projects: [ @projects[n - 1] ],
-            archive_projects: [ @archive_projects[n - 1] ].compact
+            projects: [ project ],
+            archive_projects: [ archive_project ].compact,
+            new_idea_admission: @new_idea_admission,
+            new_idea_registry_projects: @new_idea_registry_projects
           )
         else
-          self.class.new(generated_at: @generated_at, projects: [], archive_projects: [])
+          self.class.new(
+            generated_at: @generated_at,
+            projects: [],
+            archive_projects: [],
+            new_idea_admission: @new_idea_admission,
+            new_idea_registry_projects: @new_idea_registry_projects
+          )
         end
       end
 
@@ -377,7 +477,7 @@ module Hive
       # scope to the focused project, then apply the slug filter. Archive
       # retention has already been applied by Status; Snapshot never derives
       # visibility from row mtimes.
-      def visible_projection(scope:, filter:, now: nil)
+      def visible_projection(scope:, filter:)
         scope_to_project_index(scope)
           .filter_by_slug(filter)
       end
@@ -396,6 +496,63 @@ module Hive
         return nil unless row_idx.between?(0, project_rows.size - 1)
 
         project_rows[row_idx]
+      end
+
+      private
+
+      def build_new_idea_admission
+        groups = @new_idea_registry_projects.group_by(&:name)
+        ambiguous_groups = groups.select do |name, projects|
+          !name.to_s.empty? && projects.size > 1
+        end
+        invalid_identity = @new_idea_registry_projects.any? { |project| project.name.to_s.empty? }
+        projects = @new_idea_registry_projects.select do |project|
+          !project.name.to_s.empty? && groups.fetch(project.name).one? && project.error.nil?
+        end.freeze
+        ambiguous_names = ambiguous_groups.keys.filter_map do |name|
+          value = name.to_s
+          value.dup.freeze unless value.empty?
+        end.first(NEW_IDEA_AMBIGUOUS_NAME_LIMIT).freeze
+
+        state =
+          if projects.any?
+            :available
+          elsif @new_idea_registry_projects.empty?
+            :no_projects
+          elsif invalid_identity
+            :invalid_identity
+          elsif ambiguous_groups.any?
+            :ambiguous
+          else
+            :unhealthy
+          end
+        recovery =
+          case state
+          when :unhealthy
+            @new_idea_registry_projects.all? { |project| project.error.to_s == "missing_project_path" } ?
+              :prune_missing : :repair_projects
+          when :invalid_identity
+            :repair_registry
+          end
+
+        NewIdeaAdmission.new(
+          state: state,
+          projects: projects,
+          ambiguous_names: ambiguous_names,
+          recovery: recovery
+        )
+      end
+
+      def new_idea_resolution(state, name: nil, detail: nil)
+        NewIdeaResolution.new(
+          state: state,
+          name: frozen_new_idea_value(name),
+          detail: frozen_new_idea_value(detail)
+        )
+      end
+
+      def frozen_new_idea_value(value)
+        value.is_a?(String) ? value.dup.freeze : value
       end
     end
   end

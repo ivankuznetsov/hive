@@ -4,7 +4,7 @@ require "json"
 require "time"
 require "hive/errors"
 require "hive/patrol_fix/attempt_diagnostic"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module HiveTestSupport
   class PatrolDispatchReplay
@@ -28,7 +28,7 @@ module HiveTestSupport
 
       utf8 = bytes.dup.force_encoding(Encoding::UTF_8)
       raise InvalidFixture, "fixture must be valid UTF-8" unless utf8.valid_encoding?
-      raise InvalidFixture, "fixture is secret-bearing" if Hive::SecretPatterns.match?(utf8)
+      raise InvalidFixture, "fixture is secret-bearing" if Hive::SecretScanner.match?(utf8)
       if %r{(?:\A|["'\s])/(?:home|Users)/|[A-Za-z]:\\\\}.match?(utf8)
         raise InvalidFixture, "fixture contains a host-specific path"
       end

@@ -14,21 +14,14 @@ module Hive
       MAX_BYTES = 1024 * 1024
       OUTCOMES = Adapters::Base::OUTCOMES
       LENS_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/.freeze
-      SELECTED_LENSES_CONTRACT_VERSION = 2
-      LEGACY_SELECTED_LENSES_DIAGNOSTIC =
-        "plan review selected_lenses must contain lowercase names".freeze
-      RESIDUAL_EVIDENCE_CONTRACT_VERSION = 1
-      LEGACY_RESIDUAL_EVIDENCE_DIAGNOSTIC =
-        "invalid plan review residual evidence entry".freeze
-      INITIAL_REVIEW_RECOVERY_ROLES = %w[primary adversarial].freeze
       KEYS = %w[
         schema schema_version attempt_id plan_digest policy_fingerprint outcome findings coverage
-        selected_lenses residual_evidence diagnostic retry_at
+        selected_lenses residual_evidence diagnostic retry_at decision_assessments
       ].freeze
 
       Parsed = Data.define(
         :attempt_id, :plan_digest, :policy_fingerprint, :outcome, :findings,
-        :coverage, :selected_lenses, :residual_evidence, :diagnostic, :retry_at
+        :coverage, :selected_lenses, :residual_evidence, :diagnostic, :retry_at, :decision_assessments
       ) do
         def to_h
           {
@@ -42,6 +35,7 @@ module Hive
             "coverage" => coverage,
             "selected_lenses" => selected_lenses,
             "residual_evidence" => residual_evidence,
+            "decision_assessments" => decision_assessments,
             "diagnostic" => diagnostic,
             "retry_at" => retry_at
           }
@@ -76,6 +70,9 @@ module Hive
         coverage = validate_coverage!(data["coverage"])
         lenses = validate_names!(data["selected_lenses"], "selected_lenses")
         residual = validate_residual_evidence!(data["residual_evidence"])
+        unless data.fetch("decision_assessments", []).is_a?(Array)
+          raise InvalidRecord, "decision_assessments must be an Array"
+        end
         diagnostic = data["diagnostic"]
         unless diagnostic.nil? || diagnostic.is_a?(String)
           raise InvalidRecord, "plan review diagnostic must be a String or null"
@@ -92,6 +89,7 @@ module Hive
           coverage: coverage.freeze,
           selected_lenses: lenses.freeze,
           residual_evidence: residual.freeze,
+          decision_assessments: Hive::PlanReview.deep_freeze(data.fetch("decision_assessments", [])),
           diagnostic: diagnostic&.freeze,
           retry_at: retry_at&.freeze
         ).freeze
@@ -164,57 +162,6 @@ module Hive
         end
         value.uniq
       end
-
-      def recoverable_selected_lenses_routes(routes)
-        recoverable_parser_contract_routes(
-          routes,
-          diagnostic: LEGACY_SELECTED_LENSES_DIAGNOSTIC,
-          recovery_flag: "selected_lenses_contract_recovery",
-          version_field: "selected_lenses_contract_version",
-          version: SELECTED_LENSES_CONTRACT_VERSION
-        )
-      end
-
-      def recoverable_residual_evidence_routes(routes)
-        recoverable_parser_contract_routes(
-          routes,
-          diagnostic: LEGACY_RESIDUAL_EVIDENCE_DIAGNOSTIC,
-          recovery_flag: "residual_evidence_contract_recovery",
-          version_field: "residual_evidence_contract_version",
-          version: RESIDUAL_EVIDENCE_CONTRACT_VERSION
-        )
-      end
-
-      def recoverable_parser_contract_routes(routes, diagnostic:, recovery_flag:,
-                                              version_field:, version:)
-        recoverable = {}
-        recovered_roles = Set.new
-        Array(routes).reverse_each do |route|
-          role = route["role"]
-          next unless INITIAL_REVIEW_RECOVERY_ROLES.include?(role)
-
-          if current_parser_contract?(
-            route, recovery_flag:, version_field:, version:
-          )
-            recovered_roles.add(role)
-            recoverable.delete(role)
-          elsif !recovered_roles.include?(role) && !recoverable.key?(role) &&
-                route["outcome"] == "terminal_failure" &&
-                route["diagnostic"] == diagnostic &&
-                [ nil, "parser" ].include?(route["diagnostic_source"])
-            recoverable[role] = route
-          end
-        end
-        recoverable.values
-      end
-      private_class_method :recoverable_parser_contract_routes
-
-      def current_parser_contract?(route, recovery_flag:, version_field:, version:)
-        route[recovery_flag] == true && Integer(route[version_field]) >= version
-      rescue ArgumentError, TypeError
-        false
-      end
-      private_class_method :current_parser_contract?
 
       def validate_residual_evidence!(value)
         raise InvalidRecord, "residual_evidence must be an Array" unless value.is_a?(Array)

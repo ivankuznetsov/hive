@@ -3,26 +3,24 @@
   "$id": "urn:hive:schema:runtime-maintenance:v1",
   "title": "hive runtime maintenance output (v1)",
   "oneOf": [
-    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/StatusPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
   ],
   "$defs": {
-    "SuccessPayload": {
+    "StatusPayload": {
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "schema_version", "ok", "action", "result"],
       "properties": {
         "schema": { "const": "hive-runtime-maintenance" },
         "schema_version": { "const": 1 },
-        "ok": { "const": true },
-        "action": { "type": "string", "enum": ["status", "resume"] },
-        "result": {
-          "oneOf": [
-            { "$ref": "#/$defs/StatusResult" },
-            { "$ref": "#/$defs/ResumeResult" }
-          ]
-        }
-      }
+        "ok": { "type": "boolean" },
+        "action": { "type": "string", "enum": ["status"] },
+        "result": { "$ref": "#/$defs/StatusResult" }
+      },
+      "if": { "properties": { "result": { "properties": { "phase": { "const": "active" } } } } },
+      "then": { "properties": { "ok": { "const": true } } },
+      "else": { "properties": { "ok": { "const": false } } }
     },
     "ErrorPayload": {
       "type": "object",
@@ -50,21 +48,10 @@
       "additionalProperties": false,
       "required": ["phase", "installation_id", "next_action", "database"],
       "properties": {
-        "phase": { "type": "string", "enum": ["absent", "preparing", "ready", "intended", "active"] },
+        "phase": { "type": "string", "enum": ["absent", "active"] },
         "installation_id": { "type": ["string", "null"] },
         "next_action": { "type": ["string", "null"] },
         "database": { "$ref": "#/$defs/DatabaseDiagnosis" }
-      }
-    },
-    "ResumeResult": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["phase", "cutover_id", "database_path", "exclusions"],
-      "properties": {
-        "phase": { "const": "active" },
-        "cutover_id": { "type": "string" },
-        "database_path": { "type": "string" },
-        "exclusions": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
       }
     },
     "DatabaseDiagnosis": {

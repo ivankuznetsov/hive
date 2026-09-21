@@ -155,7 +155,7 @@ SERVICE_MANAGER_BIN="$PREFIX/service-manager-bin"
 mkdir -p "$SERVICE_MANAGER_BIN"
 case "$(uname -s)" in
   Linux)
-    printf '%s\n' '#!/bin/sh' 'exit 0' > "$SERVICE_MANAGER_BIN/systemctl"
+    cp "$REPO_ROOT/packaging/fixtures/systemctl" "$SERVICE_MANAGER_BIN/systemctl"
     chmod 0755 "$SERVICE_MANAGER_BIN/systemctl"
     SERVICE_MANAGER_COMMAND="systemctl"
     ;;

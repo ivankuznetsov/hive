@@ -17,7 +17,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
-    assert_equal 17, skill.reference_paths.size
+    assert_equal 18, skill.reference_paths.size
     assert skill.reference_paths.all? { |path| path.start_with?("references/") }
     refute_includes skill.rendered_canonical_files.values.join("\n"), "{{HIVE_VERSION}}"
     assert_includes skill.rendered_canonical_files.fetch("references/setup-and-platforms.md"),
@@ -129,6 +129,27 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
       refute_includes text, legacy
     end
     refute_match(/pgrep\s+-af|kill\s+-0|while\s+:/, text)
+  end
+
+  def test_daily_activity_questions_use_the_persisted_pure_digest_reader
+    files = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files
+    route = files.fetch("SKILL.md")
+    policy = files.fetch("references/daily-digest.md")
+
+    assert_includes route, "what happened today, yesterday"
+    assert_includes route, "hive digest --json"
+    assert_includes route, "Do not run the current operational-status loop first"
+    assert_includes policy, "hive digest --json"
+    assert_includes policy, "hive digest --date YYYY-MM-DD --json"
+    assert_includes policy, "previous_date"
+    assert_includes policy, "reader_status"
+    assert_includes policy, "Read `document`"
+    assert_includes policy, "not necessarily adjacent calendar days"
+    assert_includes policy, "complete recorded repository scope"
+    assert_includes policy, "Never send or"
+    assert_includes policy, "Reads never call an agent, GitHub, PRDigest, refresh, or Telegram"
+    assert_includes policy, "does not authorize a release, version choice,"
+    refute_includes policy, "--project PROJECT"
   end
 
   def test_policy_preserves_consent_safe_setup_and_host_boundaries

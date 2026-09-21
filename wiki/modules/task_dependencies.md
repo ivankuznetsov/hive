@@ -3,7 +3,7 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
 created: 2026-06-18
-updated: 2026-08-12
+updated: 2026-08-28
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -89,20 +89,26 @@ TERM-to-KILL cleanup; same-project-only snapshots spawn no Git lookups.
 Each admission invocation snapshots every enrolled project, its tasks, and
 its own workflow descriptors. Qualified `[project, slug]` identities and
 same-project numeric ids are indexed without using the global task resolver.
-The TUI's one-second active-only refresh is the bounded exception: it builds a
-new immutable context from current active tasks plus immutable terminal-task
-snapshots produced by the last full/archive status pass. Cached terminal
-snapshots preserve their exact workflow, dependency edge, validation error,
-and project repository identity. Active tasks shadow an archived snapshot with
-the same slug; otherwise O(1) slug/id indexes consult the archived context as a
-fallback, including for transitive chains. The periodic archive refresh
-replaces successful project snapshots while retaining the last lossless
-snapshot for a project whose archive read degraded transiently.
+Routine active projections build a new immutable context from current active
+task metadata, then recursively exact-load only missing dependency references
+from terminal history. Exact slug references read the one matching folder;
+same-project numeric references use the control plane's registered ID-to-slug
+mapping, scoped to the project's state root. They check that slug across stage
+folders and verify the current metadata ID, so an observed path that predates a
+stage move does not cause a miss and a replacement folder cannot satisfy the
+old identity. This reads no unrelated task metadata for registered IDs.
+Older or never-run tasks without a registered subject retain metadata discovery
+as a compatibility fallback; the lookup does not create or migrate a database. Loaded prerequisites preserve their workflow, dependency edge,
+validation error, and project repository identity, including transitive chains,
+without retaining or periodically refreshing a fleet archive cache. Bounded
+Watch projections use the same closure builder from an exact set of selected
+roots, so post-selection polling neither scans unrelated active tasks nor
+replaces valid dependency verdicts with the daemon fast-tick hold.
 Duplicate or ambiguous identities fail closed. Full-chain walking follows
 only explicit project edges, detects missing tasks, self-reference, corrupt
 upstream nodes, and cycles, and reports a cycle as an ordered qualified path
 including the repeated closing node. Cycle bookkeeping and immutable-context
-verdicts are indexed and memoized, so full status evaluates shared dependency
+verdicts are indexed and memoized, so one active projection evaluates shared dependency
 tails once instead of rewalking them for every row. Each task folder's
 device/inode identity is checked before and after strict reads; a concurrent
 stage move invalidates that snapshot instead of retaining the enumerated old

@@ -13,10 +13,6 @@ module HiveReleaseCandidate
       "Native candidate install (linux-x86_64)",
       "Native candidate install (linux-arm64)",
       "Native candidate install (macos-arm64)",
-      "Latest stable upgrade (linux-x86_64)",
-      "Latest stable upgrade (linux-arm64)",
-      "Latest stable upgrade (macos-arm64)",
-      "Legacy bench v0.4.1 upgrade (linux-x86_64)",
       "Baseline catalog freshness",
       "Candidate version newer"
     ].freeze

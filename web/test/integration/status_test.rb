@@ -2,6 +2,55 @@ require "test_helper"
 require "hive/daemon/status_report"
 
 class StatusTest < ActionDispatch::IntegrationTest
+  test "state filters preserve unavailable project warnings" do
+    sign_in!
+    with_status_snapshot("projects" => [ { "name" => "broken", "error" => "project_load_failed", "tasks" => [] } ]) do
+      %w[running unknown].each do |state|
+        get "/grid", params: { project: "broken", state: state }
+        assert_response :success
+        assert_select ".state-banner-error", text: /Project status unavailable/
+        assert_select ".empty-state", text: /No tasks in this state/, count: 0
+      end
+    end
+  end
+
+  test "state filter query values cannot become URL routing options" do
+    sign_in!
+    with_status_snapshot("projects" => []) do
+      get "/grid", params: { host: "untrusted.example", protocol: "https", script_name: "//untrusted.example" }
+      assert_response :success
+      assert_select ".task-state-filter" do |links|
+        links.each { |link| assert link["href"].start_with?("/grid?"), link["href"] }
+      end
+    end
+  end
+
+  test "state filters count the selected project and distinguish ready from running" do
+    sign_in!
+    projects = [
+      { "name" => "demo", "tasks" => [
+        { "slug" => "running", "stage" => "4-execute", "action" => "agent_running" },
+        { "slug" => "ready", "stage" => "4-execute", "action" => "ready_to_develop" },
+        { "slug" => "question", "stage" => "2-brainstorm", "action" => "needs_input" }
+      ] },
+      { "name" => "other", "tasks" => [ { "slug" => "other-running", "stage" => "4-execute", "action" => "agent_running" } ] }
+    ]
+    with_status_snapshot("projects" => projects) do
+      get "/grid", params: { project: "demo", state: "running" }
+      assert_response :success
+      assert_select ".task-state-filter.active", text: /Running\s+1/
+      assert_select ".task-row", count: 1
+      assert_select ".task-row a[href='/tasks/demo/running']"
+      assert_select ".task-state-filter[href*='project=demo']", minimum: 3
+      get "/grid", params: { project: "demo", state: "waiting" }
+      assert_select ".empty-state", text: /No tasks in this state/
+      get "/grid", params: { project: "demo" }
+      assert_select ".task-row a" do |links|
+        assert_equal %w[running question ready], links.map { |link| link["href"].split("/").last }
+      end
+    end
+  end
+
   test "a supervised daemon does not render service repair guidance" do
     sign_in!
     daemon_status = {
@@ -236,6 +285,75 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "cold board and grid show loading inside the main column without an outage warning" do
+    sign_in!
+    with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
+      with_status_snapshot(
+        Hive::Web::StatusFeed::UNAVAILABLE_PAYLOAD,
+        version: StatusBroadcaster::LOADING_VERSION, availability: "unavailable"
+      ) do
+        [ board_path, grid_path ].each do |path|
+          get path
+
+          assert_response :success
+          assert_select ".status-layout > .project-nav"
+          assert_select ".status-layout > .status-main .status-loading[role=status]",
+                        text: /Loading your workspace/
+          assert_select ".status-freshness-warning", 0
+          assert_select ".status-content-unavailable", 0
+          assert_select "#status-board, #status-grid", 0
+        end
+      end
+    end
+  end
+
+  test "saved board and grid render immediately while a real feed refresh is blocked" do
+    sign_in!
+    project_name = create_hive_project!("saved-status-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    payload = {
+      "projects" => [ { "name" => project_name, "path" => project_path,
+        "hive_state_path" => File.join(project_path, ".hive-state"),
+        "tasks" => [ { "slug" => "ready-card-260721-abcd", "display_name" => "Saved card",
+          "stage" => "3-plan", "workflow" => "coding", "marker" => "complete", "age_seconds" => 120 } ] } ]
+    }
+    saved_project = payload.fetch("projects").first
+    payload["projects"] = Hive::Config.registered_projects.map do |project|
+      project.fetch("name") == project_name ? saved_project : project.merge("tasks" => [])
+    end
+    store = Hive::Web::StatusSnapshotStore.new(path: File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "saved-status.json"))
+    store.write(payload, last_success_at: "2026-07-25T12:00:00Z")
+    started = Queue.new
+    release = Queue.new
+    producer = Object.new.extend(Hive::Web::StatusCommand)
+    producer.define_singleton_method(:json_payload) { |_| started << true; release.pop }
+    feed = Hive::Web::StatusFeed.new(status_command: producer, snapshot_store: store, interval: 60)
+    assert_equal "cached", feed.current_state&.availability
+    previous = StatusBroadcaster.feed
+    StatusBroadcaster.feed = feed
+    subscriber = Thread.new { feed.each_state { |_| } }
+    Timeout.timeout(2) { started.pop }
+    begin
+      [ board_path, grid_path ].each do |path|
+        Timeout.timeout(2) { get path }
+        assert_response :success
+        assert_select ".status-freshness-warning[data-status-availability=cached]", text: /Updating your workspace.*Showing saved status from/m
+        assert_select "time[datetime='2026-07-25T12:00:00Z']"
+        assert_select "a", text: "Saved card"
+        assert_select ".status-loading", 0
+        assert_select ".status-freshness-warning", { text: /unavailable/, count: 0 }
+        if path == board_path
+          assert_select ".kanban-card form button[disabled][aria-disabled=true]", text: "Approve"
+        end
+      end
+    end
+  ensure
+    subscriber&.kill
+    subscriber&.join
+    feed&.stop
+    StatusBroadcaster.feed = previous if previous
+  end
+
   test "first-load status failure renders unavailable rather than an empty fleet" do
     sign_in!
     with_daemon_status("running" => true, "service_installed" => true, "binary_drift" => "none") do
@@ -247,9 +365,9 @@ class StatusTest < ActionDispatch::IntegrationTest
         get board_path
 
         assert_response :success
-        assert_select ".status-freshness-warning[data-status-availability=unavailable][role=status]",
+        assert_select ".status-main > .status-freshness-warning[data-status-availability=unavailable][role=status]",
                       text: /No current fleet snapshot has loaded.*retry automatically/m
-        assert_select ".status-content-unavailable", text: /next successful refresh/
+        assert_select ".status-content-unavailable", text: /Tasks will appear when live status is available/
         assert_select "#status-board", 0
         assert_select ".empty-state", { text: /No projects yet/, count: 0 },
                       "an unavailable producer must not be presented as a healthy empty fleet"
@@ -257,7 +375,7 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "ordinary grid and board link exact hidden archive summaries" do
+  test "ordinary grid and board keep the archive explicitly reachable" do
     sign_in!
     project_name = create_hive_project!("archive-summary-status-app")
     project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
@@ -265,7 +383,6 @@ class StatusTest < ActionDispatch::IntegrationTest
       "name" => project_name,
       "path" => project_path,
       "hive_state_path" => File.join(project_path, ".hive-state"),
-      "hidden_archived_task_count" => 1,
       "tasks" => []
     }
 
@@ -274,16 +391,13 @@ class StatusTest < ActionDispatch::IntegrationTest
         get grid_path
 
         assert_response :success
-        assert_select ".archive-summary a[href='#{archive_path(project: project_name)}']",
-                      text: "… and 1 older archived task (hive archive to view)"
+        assert_select ".status-archive-link[href='#{archive_path}']", text: "Archive"
 
-        project["hidden_archived_task_count"] = 2
-        get board_path
+        get board_path(project: project_name)
 
         assert_response :success
-        assert_select ".archive-summary a[href='#{archive_path(project: project_name)}']",
-                      text: "… and 2 older archived tasks (hive archive to view)",
-                      count: 1
+        assert_select ".status-done-link[href='#{archive_path(project: project_name, view: "board")}']", text: "Done"
+        assert_select ".status-archive-link[href='#{archive_path(project: project_name)}']", text: "Archive"
       end
     end
   end
@@ -341,9 +455,9 @@ class StatusTest < ActionDispatch::IntegrationTest
           "tasks" => [
             {
               "slug" => slug,
-              "stage" => "9-done",
+              "stage" => "7-architecture",
               "workflow" => "coding",
-              "action" => "archived",
+              "action" => "error",
               "action_label" => "Archived",
               "age_seconds" => 10 * 86_400
             }
@@ -357,7 +471,7 @@ class StatusTest < ActionDispatch::IntegrationTest
 
       assert_response :success
       assert_select "#status-archive .project-section[data-project-name='#{project_name}']"
-      assert_select "[data-task-slug='#{slug}']"
+      assert_select "[data-task-slug='#{slug}'] .status-dot-idle[title='Archived']"
       assert_select "a[href='#{task_path(project_name, slug, source: "archive")}']"
       assert_select ".project-nav a.active[aria-current='page']", text: project_name
 
@@ -366,6 +480,75 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+
+  test "normal project board includes completed workflow tasks with archive links" do
+    sign_in!
+    name = create_hive_project!("completed-project-board")
+    path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", name)
+    workflows = File.join(path, ".hive-state", "workflows")
+    FileUtils.mkdir_p(workflows)
+    stages = (1..7).map { |index| { "name" => "step-#{index}", "kind" => "terminal", "state_file" => "architecture.md" } }
+    stages << { "name" => "done", "kind" => "terminal", "state_file" => "architecture.md" }
+    File.write(File.join(workflows, "architecture.yml"), { "id" => "architecture", "stages" => stages }.to_yaml)
+    Hive::Workflows::Project.reset!
+    project = { "name" => name, "path" => path,
+                "hive_state_path" => File.join(path, ".hive-state"), "tasks" => [] }
+    completed = project.merge("tasks" => [ { "slug" => "finished-architecture",
+      "stage" => "8-done", "workflow" => "architecture", "action" => "archived",
+      "title" => "Architecture record", "age_seconds" => 30 * 86_400 } ])
+    original = StatusBroadcaster.method(:archive_snapshot)
+    calls = []
+    StatusBroadcaster.define_singleton_method(:archive_snapshot) do |project: nil|
+      calls << project&.name
+      { "projects" => [ completed ] }
+    end
+    with_status_snapshot("projects" => [ project ]) do
+      get "/", params: { project: name }
+      assert_response :success
+      assert_select "[data-workflow='architecture'] [data-stage='8-done']:not(.is-folded) [data-task-slug='finished-architecture']"
+      assert_select "a[href='#{task_path(name, "finished-architecture", source: "archive")}']"
+      assert_select ".kanban-band-warning", count: 0
+      assert_select ".kanban-card form", count: 0
+      assert_select ".task-state-filter", text: /Completed\s+1/
+      assert_equal [ name ], calls
+      get "/", params: { project: name, state: "completed" }
+      assert_select "[data-task-slug='finished-architecture']"
+      calls.clear
+      get "/"
+      assert_empty calls, "fleet page must not scan the archive"
+      get archive_path(project: name, view: "board")
+      assert_response :success
+      assert_equal [ name ], calls, "project archive must scope the read before scanning"
+    end
+  ensure
+    StatusBroadcaster.define_singleton_method(:archive_snapshot, original) if original
+    Hive::Workflows::Project.reset!
+  end
+
+  test "Done board reads archived tasks and keeps completed cards visible and read-only" do
+    sign_in!
+    project_name = create_hive_project!("done-board-app")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    payload = { "projects" => [ {
+      "name" => project_name, "path" => project_path,
+      "hive_state_path" => File.join(project_path, ".hive-state"),
+      "tasks" => [ { "slug" => "finished-task", "stage" => "9-done",
+                    "workflow" => "coding", "action" => "archived", "age_seconds" => 30 * 86_400 } ]
+    } ] }
+    with_status_snapshot("projects" => []) do
+      with_archive_snapshot(payload) do
+        get archive_path(project: project_name, view: "board")
+        assert_response :success
+        assert_select "h1", text: "Done"
+        assert_select "[data-stage='9-done']:not(.is-folded) [data-task-slug='finished-task']"
+        assert_select "a[href='#{task_path(project_name, "finished-task", source: "archive")}']"
+        assert_select ".kanban-card form", count: 0
+        assert_select "hive-status-stream-source", count: 0
+        assert_select ".project-nav a.active", text: project_name
+        assert_select "a[href='#{board_path(project: project_name)}']", text: "Back to status"
+      end
+    end
+  end
 
   test "a stopped installed daemon shows the command that resumes it" do
     sign_in!
@@ -412,12 +595,12 @@ class StatusTest < ActionDispatch::IntegrationTest
     Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new) if original_report_new
   end
 
-  def with_status_snapshot(payload = nil, availability: nil, last_success_at: nil, error: nil, **payload_keywords)
+  def with_status_snapshot(payload = nil, version: 1, availability: nil, last_success_at: nil, error: nil, **payload_keywords)
     payload ||= payload_keywords
     original_snapshot = StatusBroadcaster.method(:snapshot_with_version)
     StatusBroadcaster.define_singleton_method(:snapshot_with_version) do
       StatusBroadcaster::PageSnapshot.new(
-        payload:, version: 1, availability:, last_success_at:, error:
+        payload:, version:, availability:, last_success_at:, error:
       )
     end
     yield
@@ -427,7 +610,7 @@ class StatusTest < ActionDispatch::IntegrationTest
 
   def with_archive_snapshot(payload)
     original_snapshot = StatusBroadcaster.method(:archive_snapshot)
-    StatusBroadcaster.define_singleton_method(:archive_snapshot) { payload }
+    StatusBroadcaster.define_singleton_method(:archive_snapshot) { |**| payload }
     yield
   ensure
     StatusBroadcaster.define_singleton_method(:archive_snapshot, original_snapshot) if original_snapshot

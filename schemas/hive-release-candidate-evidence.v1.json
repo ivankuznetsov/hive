@@ -43,7 +43,6 @@
         "schema_version",
         "candidate_sha",
         "attempt_id",
-        "predecessor_attempt_id",
         "selection",
         "identity",
         "trust_scope",
@@ -73,15 +72,6 @@
         "attempt_id": {
           "type": "string",
           "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$"
-        },
-        "predecessor_attempt_id": {
-          "anyOf": [
-            { "type": "null" },
-            {
-              "type": "string",
-              "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$"
-            }
-          ]
         },
         "selection": {
           "type": "object",

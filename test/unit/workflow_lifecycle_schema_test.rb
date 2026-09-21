@@ -54,6 +54,23 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
     end
   end
 
+  def test_lifecycle_schemas_accept_pre_dispatch_usage_errors
+    SCHEMAS.each do |name|
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: name, error: Hive::UsageError.new("invalid --json value"), error_kind: "usage"
+      )
+      assert schemer(name).valid?(payload), "#{name} must accept pre-dispatch usage errors"
+      refute schemer(name).valid?(payload.merge("error_kind" => "unknown"))
+      refute schemer(name).valid?(payload.merge("unexpected" => true))
+    end
+
+    payload = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-workflow-publish", error: Hive::UsageError.new("invalid --json value"), error_kind: "usage"
+    )
+    refute schemer("hive-workflow-publish").valid?(payload.merge("exit_code" => 70))
+    refute schemer("hive-workflow-publish").valid?(payload.merge("retryable" => true))
+  end
+
   def test_publish_schema_rejects_invalid_semver_and_accepts_structured_lint_evidence
     payload = Marshal.load(Marshal.dump(success_payloads.fetch("hive-workflow-publish")))
     payload["version"] = "01.0.0"

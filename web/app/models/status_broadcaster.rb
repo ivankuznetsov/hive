@@ -20,7 +20,7 @@ class StatusBroadcaster
 
   class << self
     def feed
-      @feed ||= Hive::Web::StatusFeed.new
+      @feed ||= Hive::Web::StatusFeed.new(snapshot_store: Hive::Web::StatusSnapshotStore.new)
     end
 
     # Injectable for tests; one feed per process in production.
@@ -99,8 +99,8 @@ class StatusBroadcaster
       }
     end
 
-    def archive_snapshot
-      feed.archive_snapshot
+    def archive_snapshot(project: nil)
+      project ? ProjectArchive.snapshot(project) : feed.archive_snapshot
     end
 
     def current_version?(candidate)

@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-08-29
+updated: 2026-09-02
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -13,14 +13,15 @@ documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
-agent-first `hive status --operational --json`, explicit `hive circuits`
-inspection/administration, bounded `hive watch`, closed `hive act`, native
+agent-first `hive status --operational --json`, bounded `hive watch`, closed `hive act`, native
 semantic `hive task` detail, the
 `hive doctor` / consent-safe setup split for one canonical Hive
 operating skill projected to OpenClaw, Claude, Codex, Pi, and OpenCode, and the single
 ClawHub `hive-cli` listing whose installed slash command is `/hive`.
-The Ruby command/API contract lives in [[cli]] and the
-per-command pages. OpenClaw does not add a second runtime and does not publish
+[[cli]] is the navigation-only command-to-owner index. Each linked command or
+module page is the sole authority for that command's syntax, behavior, schema,
+serialization policy, and exits; the surface summaries below are orientation,
+not competing contracts. OpenClaw does not add a second runtime and does not publish
 one ClawHub listing per Hive verb.
 
 ## Source Files
@@ -37,7 +38,6 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/setup_agents.rb`
 - `lib/hive/commands/watch.rb`
 - `lib/hive/commands/act.rb`
-- `lib/hive/commands/circuits.rb`
 - `lib/hive/operational_status.rb`
 - `lib/hive/operational_action.rb`
 - `skills/hive/`
@@ -70,12 +70,10 @@ lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer,
 the [[commands/pairing]] Telegram pairing approval surface,
-[[commands/refactor-patrol]] as the architecture refactor thesis scanner (only
-its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
-authorized actions), and
+[[commands/refactor-patrol]] as the language-neutral architecture-patrol
+discovery surface (it routes evidence-backed theses but takes no actions), and
 [[commands/doctor]] read-only managed health reporting,
 [[commands/setup-agents]] consent-safe native provisioning,
-[[commands/circuits]] as the generation-fenced provider-health surface,
 [[commands/task]] as the bounded read-only semantic result/usage/diagnostic
 surface for one exact task,
 `--json` envelopes where the command page says they exist.
@@ -101,9 +99,8 @@ exception: after `hive new PROJECT`, later `--help`, `-h`, or malformed
 `--` before the tail so Thor leaves the idea text alone. Wrapper-owned usage
 errors use the last recognized JSON boolean flag, so `--json --no-json` and
 `--json --json=false` choose human prose instead of an error envelope. When the
-final recognized JSON flag is truthy, pre-dispatch Thor usage errors listed in
-`JSON_USAGE_ERROR_CONTRACTS` emit command-shaped JSON before stderr, including
-unversioned `hive-setup` usage failures and Screenote connect/disconnect
+final recognized JSON flag is truthy, pre-dispatch Thor usage contracts declared in each command boundary emit
+command-shaped JSON before stderr, including versioned `hive-setup.v1` usage failures and Screenote connect/disconnect
 missing-`SERVICE` failures.
 
 After dispatch, commands whose published failures use the common
@@ -268,3 +265,11 @@ exit `78`; JSON mode distinguishes them as `missing_repro` and
 - [[commands/web]]
 - [[commands/setup]]
 - [[commands/screenote]]
+
+Command boundaries own static usage contracts, argv-dependent variants, extras,
+and custom payload builders through `Hive::CliUsageContracts`. The launcher
+resolves once after a usage rejection and reuses the exact contract for error
+classification and rendering. Missing contracts or failed resolution use human
+stderr, empty stdout, and generic usage exit 64. Only resolution failures add the
+bounded `[hive.cli] usage_contract_resolution_failed exception=CLASS` diagnostic;
+there is no second lookup during rendering.

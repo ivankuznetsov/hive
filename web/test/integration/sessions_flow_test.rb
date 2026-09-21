@@ -266,7 +266,7 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "title", text: "Hive web — sign in"
     assert_select "meta[name='application-name'][content='Hive web']", 1
-    assert_select "a.brand", text: "Hive web"
+    assert_select "a.brand", text: "Hive"
     assert_select "h1", text: "Hive web"
     assert_match "first GitHub sign-in becomes its owner", response.body
     refute_match(/hivebox/i, response.body)

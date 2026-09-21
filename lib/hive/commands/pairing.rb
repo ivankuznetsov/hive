@@ -332,3 +332,13 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary follows the
+# pairing subcommand (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("pairing") do |argv, command_index:, option_argv:|
+  sub = Hive::CliUsageContracts.subcommand(argv, command_index)
+  schema = sub == "approve" ? "hive-pairing-approve" : "hive-pairing-list"
+  { schema: schema, error_kind: "invalid_arguments" }
+end

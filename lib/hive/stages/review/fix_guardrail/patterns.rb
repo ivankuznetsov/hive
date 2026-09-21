@@ -1,4 +1,4 @@
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module Stages
@@ -13,7 +13,7 @@ module Hive
         #
         # Override per-project via review.fix.guardrail.patterns_override:
         #   patterns_override:
-        #     dependency_lockfile_change: false   # disable
+        #     ci_workflow_edit: false   # disable
         #     custom_no_pdb:                      # add custom
         #       regex: '\bimport pdb\b'
         #       severity: high
@@ -22,7 +22,7 @@ module Hive
           # Each pattern descriptor:
           #   :detector    — which scan engine owns this pattern:
           #                    :regex           — spec[:regex] matched against the target text
-          #                    :secret_patterns — dispatched to Hive::SecretPatterns.scan;
+          #                    :secret_patterns — dispatched to Hive::SecretScanner.scan;
           #                                       no spec[:regex] participates in matching
           #   :regex       — Regexp matched against either added lines (code) or file paths (file_path)
           #   :severity    — :high | :medium | :nit (used to group findings in fix-guardrail-NN.md)
@@ -46,7 +46,7 @@ module Hive
             secrets_pattern_match: {
               # Explicit non-regex strategy: scan dispatches on this
               # detector key and hands each added line to
-              # Hive::SecretPatterns.scan instead of spec[:regex].
+              # Hive::SecretScanner.scan instead of spec[:regex].
               detector: :secret_patterns,
               regex: nil,
               severity: :high,
@@ -82,16 +82,6 @@ module Hive
               severity: :high,
               targets: :file_path,
               description: ".env / secrets file edit: env/secret files often contain credentials and per-environment overrides; auto-fix shouldn't touch them."
-            },
-            dependency_lockfile_change: {
-              detector: :regex,
-              # `(?:\A|/)` so monorepo lockfiles match too —
-              # packages/y/package-lock.json, services/api/Gemfile.lock,
-              # apps/web/yarn.lock — not just repo-root.
-              regex: %r{(?:\A|/)(?:Gemfile\.lock|package-lock\.json|pnpm-lock\.ya?ml|yarn\.lock|Cargo\.lock|go\.sum|poetry\.lock|Pipfile\.lock|composer\.lock|uv\.lock)\z},
-              severity: :medium,
-              targets: :file_path,
-              description: "lockfile churn during a fix pass: verify the change is an intended bump, not an accidental downgrade or arbitrary version drift."
             },
             permission_change: {
               detector: :regex,

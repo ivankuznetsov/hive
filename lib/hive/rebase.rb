@@ -2,6 +2,7 @@ require "yaml"
 require "fileutils"
 require "hive/git_ops"
 require "hive/gh"
+require "hive/github_publication"
 require "hive/stages/base"
 
 module Hive
@@ -352,12 +353,27 @@ module Hive
     def publish_rebased_branch!(task, cfg, publish_lease, warnings)
       return unless publish_lease
 
-      result = Hive::Gh.push_branch(
-        task.worktree_path,
-        publish_lease.branch,
-        cfg: cfg,
-        expected_remote_oid: publish_lease.remote_oid
-      )
+      push = lambda do
+        Hive::Gh.push_branch(
+          task.worktree_path, publish_lease.branch, cfg: cfg,
+          expected_remote_oid: publish_lease.remote_oid
+        )
+      end
+      state_path = File.join(task.folder, "github-publication.json")
+      result = if File.exist?(state_path)
+        controller = Hive::GithubPublication::Controller.new(
+          state_path: state_path,
+          git_gateway: Hive::GithubPublication::GitGateway.new(cfg: cfg),
+          github_gateway: Hive::GithubPublication::GithubGateway.new(cfg: cfg)
+        )
+        controller.publish_rebase!(
+          worktree_path: task.worktree_path, branch: publish_lease.branch,
+          before_oid: publish_lease.remote_oid,
+          after_oid: Hive::GitOps.new(task.worktree_path).head_sha, &push
+        )
+      else
+        push.call
+      end
       return if result.success?
 
       detail = result.stderr.to_s.strip
@@ -366,9 +382,10 @@ module Hive
       message = "#{message}: #{detail[0, 200]}" unless detail.empty?
       warn "[hive] #{message}; remote history was left unchanged"
       warnings << message
-    rescue Hive::GhError, SystemCallError, IOError => e
+    rescue Hive::GhError, Hive::GitError, Hive::GithubPublication::Blocked, Hive::ManagedDirectory::UnsafeError,
+           SystemCallError, IOError => e
       message = "rebased branch not published: #{e.class}: #{e.message}"
-      warn "[hive] #{message}; remote history was left unchanged"
+      warn "[hive] #{message}; publication outcome requires reconciliation"
       warnings << message
     end
 

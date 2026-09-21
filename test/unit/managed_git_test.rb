@@ -80,6 +80,13 @@ class ManagedGitTest < Minitest::Test
                     "credential.https://github.com.helper=!/usr/bin/true auth git-credential"
   end
 
+  def test_default_gh_binary_is_used_when_no_override_is_present
+    command = Hive::ManagedGit.command("/tmp/repo", "status", env: {})
+
+    assert_includes command,
+                    "credential.https://github.com.helper=!gh auth git-credential"
+  end
+
   def test_gh_binary_override_must_be_an_absolute_executable
     error = assert_raises(ArgumentError) do
       Hive::ManagedGit.command(
@@ -130,6 +137,29 @@ class ManagedGitTest < Minitest::Test
   def test_capture_timeout_must_be_positive
     assert_raises(ArgumentError) do
       Hive::ManagedGit.capture3("/tmp/repo", "status", timeout_sec: 0)
+    end
+  end
+
+  def test_bounded_capture_preserves_overflow_when_process_already_exited
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "large.txt"), "x" * 65_536)
+      run!("git", "-C", repo, "add", "large.txt")
+      signals = []
+      missing = lambda do |signal, pid|
+        signals << [ signal, pid ]
+        raise Errno::ESRCH
+      end
+      with_replaced_singleton_method(Process, :kill, missing) do
+        out, _err, status, overflow = Hive::ManagedGit.capture3_bounded(
+          repo, "show", ":large.txt", max_stdout_bytes: 1024
+        )
+        assert_equal "x" * 1024, out
+        assert status.success?
+        assert overflow
+      end
+      assert_equal 1, signals.size
+      assert_equal "KILL", signals.first.first
+      assert_operator signals.first.last, :<, 0
     end
   end
 

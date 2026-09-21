@@ -128,12 +128,9 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_includes error, "service restarted"
   end
 
-  def test_install_stops_a_detached_babysitter_before_enabling_service
+  def test_install_passes_the_legacy_process_home_to_the_service_owner
     events = []
     installer = Object.new
-    installer.define_singleton_method(:service_lifecycle_state) do
-      { "service_manager_available" => true, "service_running" => false }
-    end
     installer.define_singleton_method(:install!) do |**_kwargs|
       events << :install
       Struct.new(:kind, :backup_path, :success?, :drifted?, :failed?).new(
@@ -142,43 +139,46 @@ class HiveCommandsBabysitTest < Minitest::Test
     end
     installer.define_singleton_method(:messages) { [] }
     installer.define_singleton_method(:target_path) { "/tmp/hive-babysitter.service" }
+    installer_args = nil
+    command = babysit("install")
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, lambda { |**kwargs|
+        installer_args = kwargs
+        installer
+      }) do
+        capture_io { command.call }
+      end
+    end
+
+    assert_equal @home, installer_args.fetch(:hive_home)
+    assert_equal "/usr/bin/hive", installer_args.fetch(:binary_path)
+    assert_equal [ :install ], events
+  end
+
+  def test_legacy_takeover_reuses_the_babysitter_stop_policy
     FileUtils.mkdir_p(@home)
     File.write(File.join(@home, ".babysitter.pid"), "pid")
-    stopper = Object.new
-    stopper.define_singleton_method(:call) { events << :stop }
+    takeover = Hive::Commands::Babysit::ServiceInstaller::LegacyTakeover.new(hive_home: @home)
     stop_args = nil
-    command = babysit("install")
+    home = @home
+    stopper = Object.new
+    stopper.define_singleton_method(:call) do
+      FileUtils.rm_f(File.join(home, ".babysitter.pid"))
+    end
 
     with_replaced_singleton_method(Hive::Commands::Babysit, :new, lambda { |subcommand, **kwargs|
       stop_args = [ subcommand, kwargs ]
       stopper
     }) do
-      with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/usr/bin/hive" }) do
-        with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, ->(**) { installer }) do
-          capture_io { command.call }
-        end
-      end
+      assert takeover.pending?
+      assert takeover.stop!
     end
 
     assert_equal "stop", stop_args.first
     assert_equal @home, stop_args.last.fetch(:hive_home)
     assert_equal true, stop_args.last.fetch(:quiet)
-    assert_equal %i[stop install], events
-  end
-
-  def test_service_takeover_leaves_a_manager_owned_babysitter_running
-    installer = Object.new
-    installer.define_singleton_method(:service_lifecycle_state) do
-      { "service_manager_available" => true, "service_running" => true }
-    end
-    FileUtils.mkdir_p(@home)
-    File.write(File.join(@home, ".babysitter.pid"), "pid")
-
-    with_replaced_singleton_method(Hive::Commands::Babysit, :new, lambda { |*|
-      raise "manager-owned service must not be stopped"
-    }) do
-      Hive::Commands::Babysit.prepare_service_takeover!(installer: installer, hive_home: @home)
-    end
+    refute takeover.pending?
   end
 
   def test_status_recommends_restart_when_runtime_predates_source

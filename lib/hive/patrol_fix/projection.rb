@@ -12,6 +12,7 @@ module Hive
       MAX_DIAGNOSTIC_BYTES = 512
       STAGE_DIRS = %w[1-inbox 2-fix 3-validate 4-review 5-publish 6-done].freeze # not-a-stage-ref: Patrol Fix workflow stages
       PARKED_ROUTES = %w[reject blocked escalate].freeze
+      TERMINAL_OUTCOMES = %w[rejected escalated].freeze
 
       attr_reader :task_folder, :stage
 
@@ -46,13 +47,23 @@ module Hive
         end
         fix = current.reverse.find { |receipt| receipt["kind"] == "fix" }
         publication = current.reverse.find { |receipt| receipt["kind"] == "publication" }
-        outcome = parked_outcome(decision)
+        publication_block = current.reverse.find do |receipt|
+          receipt["kind"] == "publication_block" && receipt["stage"] == "publish"
+        end
+        outcome = parked_outcome(decision) || publication_block_outcome(publication_block)
         done = stage == "6-done" # not-a-stage-ref: Patrol Fix workflow stage
         closure = done && publication.nil? && valid_evidence_closure?
-        missing_terminal_authority = done && publication.nil? && !closure
+        terminal_outcome = outcome && (outcome["kind"] == "rejected" ||
+          (outcome["kind"] == "escalated" && manifest.dig("relations", "successor")))
+        missing_terminal_authority = done && publication.nil? && !closure && !terminal_outcome
         state = missing_terminal_authority ? "invalid" : "current"
         diagnostic = if missing_terminal_authority
-          { "summary" => "Patrol-fix done requires an exact current pull-request receipt or valid evidence-closure receipt." }
+          { "summary" => "Patrol-fix done requires an exact current pull-request receipt, rejection, linked escalation, or valid evidence-closure receipt." }
+        elsif publication_block
+          {
+            "code" => publication_block.dig("payload", "code"),
+            "summary" => publication_block.dig("payload", "summary")
+          }
         elsif !closure
           publication_diagnostic
         end
@@ -74,7 +85,7 @@ module Hive
           "validation" => validation&.fetch("payload", nil),
           "review" => last_decision && last_decision["stage"] == "review" ? last_decision.fetch("payload") : nil,
           "publication" => publication&.fetch("payload", nil),
-          "timing" => timing_projection(receipts, current, decision),
+          "timing" => timing_projection(receipts, current, outcome),
           "archived" => done && state == "current",
           "diagnostic" => diagnostic,
           "action" => action_for(
@@ -95,7 +106,8 @@ module Hive
       def current_decision(receipts)
         relevant_stage = stage_name
         decisions = receipts.select do |receipt|
-          receipt["stage"] == relevant_stage && %w[decision reopen].include?(receipt["kind"])
+          (relevant_stage == "done" || receipt["stage"] == relevant_stage) &&
+            %w[decision reopen].include?(receipt["kind"])
         end
         decisions.reduce(nil) do |current, receipt|
           if receipt["kind"] == "decision"
@@ -121,6 +133,17 @@ module Hive
         }
       end
 
+      def publication_block_outcome(receipt)
+        return unless receipt
+
+        {
+          "kind" => "publication_blocked",
+          "receipt_id" => receipt.fetch("receipt_id"),
+          "rationale" => receipt.dig("payload", "summary"),
+          "blocker_owner" => receipt.dig("payload", "owner")
+        }
+      end
+
       def decision_projection(receipt)
         return nil unless receipt
 
@@ -131,21 +154,24 @@ module Hive
         }
       end
 
-      def timing_projection(receipts, current, current_decision)
+      def timing_projection(receipts, current, outcome)
         starts = receipts.map { |receipt| receipt.fetch("recorded_at") }
         parked_seconds = 0
         parked_since = nil
         parked = {}
         receipts.each do |receipt|
-          if receipt["kind"] == "decision" && PARKED_ROUTES.include?(receipt.dig("payload", "route"))
+          if (receipt["kind"] == "decision" &&
+              PARKED_ROUTES.include?(receipt.dig("payload", "route"))) ||
+             receipt["kind"] == "publication_block"
             parked[receipt.fetch("receipt_id")] = receipt.fetch("recorded_at")
           elsif receipt["kind"] == "reopen"
             opened = parked.delete(receipt.dig("payload", "outcome_receipt_id"))
             parked_seconds += elapsed_seconds(opened, receipt.fetch("recorded_at")) if opened
           end
         end
-        if current_decision && PARKED_ROUTES.include?(current_decision.dig("payload", "route"))
-          parked_since = current_decision.fetch("recorded_at")
+        if stage_name != "done" && outcome
+          active = current.find { |receipt| receipt["receipt_id"] == outcome["receipt_id"] }
+          parked_since = active&.fetch("recorded_at", nil)
         end
         {
           "started_at" => starts.min,
@@ -176,6 +202,7 @@ module Hive
       def action_for(state:, done:, outcome:, decision:, fix:, validation:, publication:)
         return action("invalid", runnable: false) if state == "invalid"
         return action("done", runnable: false) if done
+        return action("advance", runnable: true) if TERMINAL_OUTCOMES.include?(outcome&.fetch("kind"))
         return action("parked", runnable: false) if outcome
         ready = case stage
         when "1-inbox" then decision&.dig("payload", "route") == "fix" # not-a-stage-ref: Patrol Fix workflow stage

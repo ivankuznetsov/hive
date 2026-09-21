@@ -138,7 +138,12 @@ violations remain runtime failures and never become report decisions. Hive
 atomically replaces untrusted output with a private controller `ERROR` marker
 and a non-nil commit action; quota keeps `reason=limits_reached`, timeout keeps
 `reason=timeout`, and other failures use `reason=managed_agent_failed`, so a
-failed task does not remain markerless and daemon-runnable.
+failed task does not remain markerless and daemon-runnable. Quota classification
+on the worktree stage routes through the same shared spawn-failure classifier as
+the generic agent stage (`Hive::Stages::Agent.limit_error_envelope?`), so a
+provider-limit envelope in `limit_text` or `error_message` is recognized
+identically on both spawn surfaces and stamps the selected profile as `provider`
+plus a computed `retry_after` on the worktree marker.
 
 Before and after the spawn, `Hive::ProtectedFiles` snapshots metadata, pointer,
 handoff, PR/marker, journal, projection, `.git` pointer, and repository/global

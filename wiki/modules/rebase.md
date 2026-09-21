@@ -24,7 +24,7 @@ tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 
 - **`Hive::Rebase::MAX_CONFLICT_RESOLUTIONS = 5`** — hardcoded cap on conflict-resolution agent dispatches per `perform` invocation. Not configurable per the doc-review's S1 decision: projects with persistently high-conflict branches should investigate the underlying drift, not raise the cap.
 
-- **`Hive::RebaseConflict < Hive::GitError`** (lib/hive.rb) — raised by `GitOps#rebase_onto` / `#rebase_continue` when git halts with conflicts. Distinct from generic `GitError` so callers can rescue conflicts without swallowing unrelated git failures.
+- **`Hive::RebaseConflict < Hive::GitError`** (lib/hive/errors.rb) — raised by `GitOps#rebase_onto` / `#rebase_continue` when git halts with conflicts. Distinct from generic `GitError` so callers can rescue conflicts without swallowing unrelated git failures.
 
 ## Internals
 

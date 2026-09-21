@@ -170,6 +170,8 @@ module Hive
         worktree_git = Hive::GitOps.new(worktree_path)
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
+        checkout_failure = validate_execution_checkout(task, cfg, worktree_path, worktree_git, baseline_head)
+        return checkout_failure if checkout_failure
 
         agent_custody = Hive::ArtifactFirewall::AgentCustody.new(
           execute_custody_manifest(
@@ -737,6 +739,30 @@ module Hive
         }
       rescue Hive::GitError
         nil
+      end
+
+      # A stale pointer after an external history rewrite cannot be repaired by
+      # implementing the plan. Check before spending an agent turn; retain the
+      # post-spawn checks as the agent can still change branch or history.
+      def validate_execution_checkout(task, cfg, worktree_path, worktree_git, baseline_head)
+        state = inspect_worktree_state(task, worktree_git)
+        return worktree_git_failed(task, cfg, worktree_path, baseline_head) unless state
+
+        reason = if state.fetch(:branch) != expected_worktree_branch(task)
+          "branch_mismatch"
+        elsif !worktree_git.ancestor?(baseline_head, state.fetch(:head))
+          "head_not_descendant"
+        end
+        return unless reason
+
+        apply_execute_outcome(
+          task, cfg, worktree_path, baseline_head,
+          marker_name: :execute_waiting, attrs: { reason: reason },
+          commit: "execute_waiting_#{reason}", status: :execute_waiting,
+          waiting_reason: reason
+        )
+      rescue Hive::GitError
+        worktree_git_failed(task, cfg, worktree_path, baseline_head)
       end
 
       def worktree_git_failed(task, cfg, worktree_path, baseline_head = nil)

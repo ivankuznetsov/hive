@@ -322,3 +322,10 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary: Thor
+# rejections that never reach the handler still ride this command's JSON
+# envelope (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("bot", { schema: "hive-bot-status", error_kind: "extra_arguments" })

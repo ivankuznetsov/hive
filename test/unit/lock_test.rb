@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/lock"
+require "hive/runtime_control_plane/task_lease_repository"
 
 class LockTest < Minitest::Test
   include HiveTestHelper
@@ -43,6 +44,21 @@ class LockTest < Minitest::Test
     assert_nil Hive::Lock.read_task_lock(folder)
     row = @database.read { |db| db[:task_leases].where(task_id: "1").first }
     assert_nil row.fetch(:holder_id)
+  end
+
+  def test_registered_slug_lookup_is_scoped_to_the_state_root
+    folder = task_folder(19)
+    lookup = Hive::RuntimeControlPlane::TaskLeaseRepository
+    assert_equal "task-19", lookup.registered_slug(
+      task_id: 19, state_root: File.join(@root, ".hive-state"), database: @database
+    )
+    assert_nil lookup.registered_slug(
+      task_id: 19, state_root: File.join(@root, "other-state"), database: @database
+    )
+    assert_nil lookup.registered_slug(
+      task_id: 20, state_root: File.join(@root, ".hive-state"), database: @database
+    )
+    assert File.directory?(folder)
   end
 
   def test_live_holder_returns_typed_contention_with_identity
@@ -470,11 +486,8 @@ class LockTest < Minitest::Test
     @database.transaction do |db|
       db[:task_leases].insert(
         task_id: identity.fetch(:task_id), lease_version: 1,
-        holder_kind: nil, holder_id: nil, holder_pid: nil,
-        holder_process_identity: nil, payload_json: "{}",
-        generation: identity.fetch(:generation),
-        source_fingerprint: identity.fetch(:source_fingerprint),
-        acquired_at: nil, expires_at: nil, released_at: timestamp
+        holder_id: nil, holder_pid: nil,
+        holder_process_identity: nil, payload_json: "{}"
       )
     end
     data = {

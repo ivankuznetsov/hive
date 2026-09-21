@@ -111,7 +111,6 @@ returns every flat patch and supersession receipt.
 | `hive markers clear FOLDER --name NAME` | Clear a recovery marker through the allowlisted path. |
 | `hive rebase-status TARGET` | Inspect whether the next run would auto-rebase. |
 | `hive refactor-patrol PROJECT --list\|--show JOB_ID [--limit N]` | Inspect durable architecture-patrol jobs without mutation; list pages use `--cursor`, while show accepts explicit `--full` history. |
-| `hive migrate [PROJECT_PATH]` | Rewrite legacy project config, rename in-flight task folders from older stage layouts, and backfill legacy task metadata. |
 | `hive workflow new ID` | Scaffold a blank project workflow descriptor under `<hive_state_path>/workflows/`. |
 | `hive workflow validate ID [--json]` | Read-only load and validate a built-in or project workflow, including instructions and normalized transitions/outcomes. |
 | `hive workflow commit ID` | Validate and commit a populated owner-authored descriptor and instruction directory under Hive's state commit lock. |
@@ -198,3 +197,5 @@ Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts
 | 70 | Software, git, worktree, agent, or stage failure. |
 | 75 | Temporary failure, usually lock contention. |
 | 78 | Config error; for `setup-agents`, invalid manifest, effective config, or filter. |
+
+Historical state conversion is an offline agent task; see [the migration guide](guides/current-format-migration.md). `hive update` validates current runtime storage and `hive setup` initializes a fresh database.

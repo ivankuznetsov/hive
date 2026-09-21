@@ -30,14 +30,6 @@ module HiveReleaseCandidate
         description: "Verify the reviewed release-baseline and offline-closure identity."
       ),
       Gate.new(
-        name: "latest_stable_upgrade", gate_class: "blocking", local: true, default: true,
-        description: "Prove the reviewed latest-stable state and channel upgrade survivor."
-      ),
-      Gate.new(
-        name: "legacy_bench_v041_upgrade", gate_class: "blocking", local: true, default: true,
-        description: "Prove the v0.4.1 producer/v0.4.2 observer bench migration survivor."
-      ),
-      Gate.new(
         name: "candidate_version", gate_class: "blocking", local: true, default: false,
         description: "Require the candidate version to be newer before release handoff."
       ),

@@ -83,6 +83,21 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "Never publish externally"
   end
 
+  def test_projection_routes_changes_to_the_saved_document
+    reference = ROOT.join("hive", "references", "daily-digest.md")
+    assert reference.file?
+    text = reference.read
+    assert_includes text, "hive digest --json"
+    assert_includes text, "hive digest --date YYYY-MM-DD --json"
+    assert_includes text, "Inspect `local_date`"
+    assert_includes text, "Read `document` as the human-facing result"
+    assert_includes text, "missing document does"
+    assert_includes text, "not mean historical GitHub changes are unavailable"
+    assert_includes text, "Never send or"
+    assert_includes text, "Reads never call an agent, GitHub, PRDigest"
+    assert_includes text, "does not authorize a release, version choice"
+  end
+
   def test_projection_carries_the_guided_and_yolo_brainstorm_answering_contract
     root = ROOT.join("hive")
     reference = root.join("references", "brainstorm-answering.md")
@@ -115,7 +130,7 @@ class OpenClawSkillsTest < Minitest::Test
       assert_includes text, escaped.tr("\\", "")
     end
     assert_includes text, "hive act workflow.retry"
-    assert_includes text, "hive migrate PROJECT_PATH"
+    assert_includes text, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     assert_includes text, "RecoveryCoordinator"
     assert_includes normalized_text, "not a retry recipe"
     assert_includes text, "obtain explicit confirmation"

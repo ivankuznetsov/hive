@@ -1,6 +1,5 @@
 require_relative "../test_helper"
 require "hive/attempts/dispatcher"
-require "hive/provider_health/repository"
 require "hive/provider_routing"
 
 class ProviderRoutingAdmissionTest < Minitest::Test
@@ -28,40 +27,12 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     end
   end
 
-  class RacingHealth
-    def initialize(store, scope)
-      @store = store
-      @scope = scope
-      @raced = false
-    end
-
-    def reconcile! = @store.reconcile!
-
-    def evaluate_routes(**attributes)
-      evaluation = @store.evaluate_routes(**attributes)
-      unless @raced
-        @raced = true
-        @store.block(
-          scope: @scope,
-          expected_generation: 0,
-          actor: "uid:1000",
-          reason: "race before admission"
-        )
-      end
-      evaluation
-    end
-
-    def validate_route_in(...) = @store.validate_route_in(...)
-    def claim_probe_bindings_in(...) = @store.claim_probe_bindings_in(...)
-  end
-
   def setup
     @root = Dir.mktmpdir("provider-routing-admission")
     @project_root = File.join(@root, "demo")
     @state_root = File.join(@project_root, ".hive-state")
-    database = Hive::RuntimeControlPlane::Database.new(
-      path: File.join(@root, "runtime-control-plane.sqlite3")
-    ).migrate!
+    @database_path = File.join(@root, "runtime-control-plane.sqlite3")
+    database = Hive::RuntimeControlPlane::Database.new(path: @database_path).migrate!
     register_runtime_project(
       database: database, name: "demo", path: @project_root,
       state_root_path: @state_root
@@ -72,10 +43,6 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     @launcher = Launcher.new
     @ids = (1..20).map { |number| "attempt-#{number}" }.each
     @decision_ids = (1..20).map { |number| "decision-#{number}" }.each
-    @health = Hive::ProviderHealth::Repository.new(
-      database: @store.database,
-      clock: -> { NOW }
-    )
     @dispatcher = build_dispatcher
   end
 
@@ -84,13 +51,8 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     FileUtils.remove_entry(@root)
   end
 
-  def test_legacy_admission_never_constructs_or_reads_provider_health
-    dispatcher = build_dispatcher(
-      health_store: nil,
-      health_store_factory: -> { raise "legacy path touched health" }
-    )
-
-    result = dispatcher.dispatch(
+  def test_legacy_admission_does_not_construct_provider_state
+    result = @dispatcher.dispatch(
       **dispatch_attributes(task("legacy", 1)),
       routing_policy: Hive::ProviderRouting::Policy.legacy(stage: "execute")
     )
@@ -100,229 +62,113 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     assert_equal "codex", result.attempt["provider"]
   end
 
-  def test_selected_route_and_closed_generation_vector_are_committed_with_attempt
+  def test_selected_current_route_identity_is_committed_without_policy_health_or_decision_state
     result = dispatch(task("selected", 2), policy: policy)
 
     assert_equal :accepted, result.status
     assert result.decision.selected?
     assert_equal "account-a/model-a", result.decision.route.id
     assert_equal "codex", result.attempt["provider"]
+    assert_equal %w[mode route], result.attempt["routing"].keys.sort
     assert_equal "account-a", result.attempt["routing"].dig("route", "provider_account_id")
     assert_equal "binding-a", result.attempt["routing"].dig("route", "launch_binding_id")
     assert_equal "subscription", result.attempt["routing"].dig("route", "billing_route")
     assert_equal "agent_profile_contract",
                  result.attempt["routing"].dig("route", "billing_evidence_source")
-    assert_equal policy.digest, result.attempt["routing"].fetch("policy_digest")
-    assert_equal 2, result.attempt["routing"].fetch("circuit_generations").length
-    assert_empty result.attempt["routing"].fetch("probe_bindings")
-    assert_equal result.decision.to_h, @store.routing_decision(
-      task_generation: result.attempt.task_generation,
-      subject: result.attempt.subject
-    )
+    refute @store.database.read { |db| db.table_exists?(:routing_policies) }
+    refute @store.database.read { |db| db.table_exists?(:attempt_routing_decisions) }
+    refute @store.database.read { |db| db.table_exists?(:provider_circuits) }
   end
 
-  def test_admission_requests_one_health_batch_for_the_complete_route_pool
-    calls = []
-    original_batch = @health.method(:evaluate_routes)
-    @health.define_singleton_method(:evaluate_routes) do |**attributes|
-      calls << attributes.fetch(:routes)
-      original_batch.call(**attributes)
-    end
-    @health.define_singleton_method(:evaluate_route) do |**|
-      raise "dispatcher must use the batch health snapshot"
-    end
-
-    result = dispatch(task("batch-health", 16), policy: policy)
-
-    assert_equal :accepted, result.status
-    assert_equal 1, calls.length
-    assert_equal(
-      [
-        { account_id: "account-a", model_id: "model-a" },
-        { account_id: "account-b", model_id: "model-b" }
-      ],
-      calls.first
-    )
-  end
-
-  def test_manual_block_falls_back_in_configured_order
-    @health.block(
-      scope: provider_scope("account-a"),
-      expected_generation: 0,
-      actor: "uid:1000",
-      reason: "maintenance"
-    )
-
-    result = dispatch(task("fallback", 3), policy: policy)
-
-    assert_equal :accepted, result.status
-    assert_equal "account-b/model-b", result.decision.route.id
-    assert_equal "claude", result.attempt["provider"]
-    assert_equal [ "manual_block" ], result.decision.exclusions.map(&:reason)
-  end
-
-  def test_provider_capacity_is_ledger_derived_and_all_saturation_creates_nothing
-    first = dispatch(task("capacity-a", 4), policy: policy)
-    second = dispatch(task("capacity-b", 5), policy: policy)
-    before = @store.active_attempts.map(&:attempt_id).sort
-
-    saturated = dispatch(task("capacity-c", 6), policy: policy)
+  def test_provider_capacity_is_derived_from_live_attempts_in_configured_order
+    first = dispatch(task("capacity-a", 3), policy: policy)
+    second = dispatch(task("capacity-b", 4), policy: policy)
+    saturated = dispatch(task("capacity-c", 5), policy: policy)
 
     assert_equal "account-a", first.attempt["routing"].dig("route", "provider_account_id")
     assert_equal "account-b", second.attempt["routing"].dig("route", "provider_account_id")
     assert_equal :deferred, saturated.status
     assert_equal "capacity_saturated", saturated.reason
     assert saturated.decision.capacity_saturated?
-    assert_equal "scheduler", saturated.decision.next_action_owner
     assert_nil saturated.attempt
-    assert_equal before, @store.active_attempts.map(&:attempt_id).sort
     assert_equal 2, @launcher.launched.length
   end
 
-  def test_unambiguous_legacy_default_attempt_counts_against_explicit_account_only
-    legacy_task = task("legacy-default", 11)
-    legacy = @dispatcher.dispatch(
-      **dispatch_attributes(legacy_task),
-      routing_policy: Hive::ProviderRouting::Policy.legacy(stage: "execute")
-    )
+  def test_saturated_hard_pin_never_falls_through_to_another_provider
+    pinned = policy(pin: Hive::ProviderRouting::Pin.new(provider: "account-a"))
+    first = dispatch(task("pinned-a", 6), policy: pinned)
+    blocked = dispatch(task("pinned-b", 7), policy: pinned)
 
-    explicit = dispatch(task("after-legacy", 12), policy: legacy_aware_policy)
-
-    assert_equal :accepted, legacy.status
-    assert_equal "account-b/model-b", explicit.decision.route.id
-    assert_equal [ "provider_concurrency_saturated" ], explicit.decision.exclusions.map(&:reason)
-  end
-
-  def test_first_no_route_freezes_policy_before_config_changes
-    %w[account-a account-b].each do |account_id|
-      @health.block(
-        scope: provider_scope(account_id),
-        expected_generation: 0,
-        actor: "uid:1000",
-        reason: "maintenance"
-      )
-    end
-    routed_task = task("frozen", 7)
-    generation = "generation-frozen"
-    first = dispatch(routed_task, policy: policy, generation: generation)
-    changed = single_route_policy("account-b")
-    replay = dispatch(routed_task, policy: changed, generation: generation)
-
-    assert_equal :no_route, first.status
-    assert_equal "no_eligible_provider_route", first.reason
-    assert_nil first.attempt
-    assert_equal first.decision.policy_digest, replay.decision.policy_digest
-    assert_equal policy.digest, replay.decision.policy_digest
-    assert_equal %w[account-a/model-a account-b/model-b],
-                 replay.decision.candidates.map { |candidate| candidate.route.id }
-    assert_empty @launcher.launched
-  end
-
-  def test_preselection_health_failure_is_a_typed_no_route_decision
-    failing_health = Object.new
-    failing_health.define_singleton_method(:evaluate_routes) do |**|
-      raise Hive::ProviderHealth::Unavailable, "health_state_unavailable"
-    end
-    dispatcher = build_dispatcher(health_store: failing_health)
-
-    result = dispatcher.dispatch(
-      **dispatch_attributes(task("health-unavailable", 13)),
-      routing_policy: policy
-    )
-
-    assert_equal :no_route, result.status
-    assert_equal "health_state_unavailable", result.reason
-    assert_equal "operator", result.decision.next_action_owner
-    assert_equal [ "health_state_unavailable" ], result.decision.exclusions.map(&:reason).uniq
-    assert_nil result.attempt
-  end
-
-  def test_health_store_construction_failure_is_a_durable_typed_no_route_decision
-    factory_calls = 0
-    errors = [ Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError ]
-
-    results = errors.each_with_index.map do |error_class, index|
-      dispatcher = build_dispatcher(
-        health_store: nil,
-        health_store_factory: lambda do
-          factory_calls += 1
-          raise error_class, "unsafe health root"
-        end
-      )
-      dispatcher.dispatch(
-        **dispatch_attributes(task("health-construction-unavailable-#{index}", 14 + index)),
-        routing_policy: policy
-      )
-    end
-
-    assert_equal 2, factory_calls
-    results.each do |result|
-      assert_equal :no_route, result.status
-      assert_equal "health_state_unavailable", result.reason
-      assert_equal "operator", result.decision.next_action_owner
-      assert_equal [ "health_state_unavailable" ], result.decision.exclusions.map(&:reason).uniq
-      assert_nil result.attempt
-    end
-    assert_equal results.map { |result| result.decision.to_h }.sort_by { |decision| decision["decision_id"] },
-                 @store.routing_decisions.map { |entry| entry.fetch("decision") }
-                   .sort_by { |decision| decision["decision_id"] }
-  end
-
-  def test_one_admission_claims_both_half_open_scopes_and_concurrent_work_uses_b
-    open_scope(provider_scope("account-a"), failure_class: "account_quota")
-    open_scope(model_scope("account-a", "model-a"), failure_class: "model_capacity")
-
-    probe = dispatch(task("probe", 8), policy: policy)
-    fallback = dispatch(task("probe-follower", 9), policy: policy)
-
-    assert_equal "account-a/model-a", probe.decision.route.id
-    assert_equal 2, probe.attempt["routing"].fetch("probe_bindings").length
-    claim_generations = probe.attempt["routing"].fetch("probe_bindings").map do |binding|
-      binding.fetch("claim_generation")
-    end
-    assert_equal [ 2, 2 ], claim_generations
-    assert_equal "account-b/model-b", fallback.decision.route.id
-    assert_equal [ "half_open_probe_owned" ], fallback.decision.exclusions.map(&:reason).uniq
-    assert @health.inspect_scope(provider_scope("account-a")).circuit.probe_owned?
-    assert @health.inspect_scope(model_scope("account-a", "model-a")).circuit.probe_owned?
-  end
-
-  def test_generation_change_between_selection_and_commit_is_re_evaluated
-    racing = RacingHealth.new(@health, provider_scope("account-a"))
-    dispatcher = build_dispatcher(health_store: racing)
-
-    result = dispatcher.dispatch(
-      **dispatch_attributes(task("generation-race", 10)),
-      routing_policy: policy
-    )
-
-    assert_equal :accepted, result.status
-    assert_equal "account-b/model-b", result.decision.route.id
-    assert_equal 1, @store.active_attempts.length
+    assert_equal :accepted, first.status
+    assert_equal "account-a/model-a", first.decision.route.id
+    assert_equal :no_route, blocked.status
+    assert_equal "no_eligible_provider_route", blocked.reason
+    assert_equal %w[provider_concurrency_saturated hard_pin_mismatch],
+                 blocked.decision.exclusions.map(&:reason)
     assert_equal 1, @launcher.launched.length
+  end
+
+  def test_atomic_revalidation_prevents_concurrent_provider_over_admission
+    single = policy(routes: [ route("account-a", "model-a", "codex", "binding-a", 0) ])
+    tasks = [ task("race-a", 8), task("race-b", 9) ]
+    second_database = Hive::RuntimeControlPlane::Database.new(path: @database_path).open!
+    second_store = Hive::Attempts::Repository.new(
+      root: File.join(@root, "attempts"), database: second_database
+    )
+    dispatchers = [
+      build_dispatcher(
+        store: @store, launcher: Launcher.new,
+        id_generator: -> { "race-attempt-a" }
+      ),
+      build_dispatcher(
+        store: second_store, launcher: Launcher.new,
+        id_generator: -> { "race-attempt-b" }
+      )
+    ]
+    ready = Queue.new
+    release = Queue.new
+    threads = dispatchers.each_with_index.map do |dispatcher, index|
+      Thread.new do
+        ready << true
+        release.pop
+        dispatcher.dispatch(
+          **dispatch_attributes(tasks.fetch(index)), routing_policy: single
+        )
+      end
+    end
+    2.times { ready.pop }
+    2.times { release << true }
+    results = threads.map(&:value)
+    live = @store.database.read do |db|
+      db[:attempts].where(
+        provider_account_id: "account-a", state: %w[launching running]
+      ).count
+    end
+
+    assert_equal 1, results.count { |result| result.status == :accepted }
+    assert_equal 1, live
+  ensure
+    second_database&.disconnect
   end
 
   private
 
-  def build_dispatcher(health_store: @health, health_store_factory: nil)
+  def build_dispatcher(store: @store, launcher: @launcher,
+                       id_generator: -> { @ids.next })
     Hive::Attempts::Dispatcher.new(
-      store: @store,
-      launcher: @launcher,
+      store: store,
+      launcher: launcher,
       limits: { max_global: 20, max_per_project: 20, max_daily: 50 },
       clock: -> { NOW },
-      id_generator: -> { @ids.next },
-      decision_id_generator: -> { @decision_ids.next },
-      capability_generator: -> { CLAIM_CAPABILITY },
-      health_store: health_store,
-      health_store_factory: health_store_factory
+      id_generator: id_generator,
+      decision_id_generator: -> { SecureRandom.uuid },
+      capability_generator: -> { CLAIM_CAPABILITY }
     )
   end
 
-  def dispatch(routed_task, policy:, generation: nil)
+  def dispatch(routed_task, policy:)
     @dispatcher.dispatch(
-      **dispatch_attributes(routed_task),
-      generation: generation,
-      routing_policy: policy
+      **dispatch_attributes(routed_task), routing_policy: policy
     )
   end
 
@@ -353,42 +199,21 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     )
   end
 
-  def policy
-    @policy ||= Hive::ProviderRouting::Policy.explicit(
-      stage: "execute",
-      routes: [ route("account-a", "model-a", "codex", "binding-a", 0),
-                route("account-b", "model-b", "claude", "binding-b", 1) ],
-      requirements: Hive::ProviderRouting::Requirements.empty,
-      pin: nil,
-      account_policy: {
-        "account-a" => account("codex", "binding-a", "model-a"),
-        "account-b" => account("claude", "binding-b", "model-b")
-      }
-    )
-  end
-
-  def single_route_policy(account_id)
-    candidate = policy.routes.find { |route| route.account == account_id }
+  def policy(routes: nil, pin: nil)
+    routes ||= [
+      route("account-a", "model-a", "codex", "binding-a", 0),
+      route("account-b", "model-b", "claude", "binding-b", 1)
+    ]
+    account_policy = routes.map(&:account).uniq.to_h do |account_id|
+      candidate = routes.find { |route| route.account == account_id }
+      [ account_id, account(candidate.adapter, candidate.launch_binding, candidate.model) ]
+    end
     Hive::ProviderRouting::Policy.explicit(
       stage: "execute",
-      routes: [ candidate.with(order: 0) ],
+      routes: routes,
       requirements: Hive::ProviderRouting::Requirements.empty,
-      pin: nil,
-      account_policy: { account_id => policy.account_policy.fetch(account_id) }
-    )
-  end
-
-  def legacy_aware_policy
-    Hive::ProviderRouting::Policy.explicit(
-      stage: "execute",
-      routes: [ route("account-a", "model-a", "codex", "default", 0),
-                route("account-b", "model-b", "claude", "binding-b", 1) ],
-      requirements: Hive::ProviderRouting::Requirements.empty,
-      pin: nil,
-      account_policy: {
-        "account-a" => account("codex", "default", "model-a"),
-        "account-b" => account("claude", "binding-b", "model-b")
-      }
+      pin: pin,
+      account_policy: account_policy
     )
   end
 
@@ -415,84 +240,7 @@ class ProviderRoutingAdmissionTest < Minitest::Test
       "adapter" => adapter,
       "launch_binding" => binding,
       "models" => [ model ],
-      "max_concurrent" => 1,
-      "cooldown_sec" => Hive::ProviderRouting::DEFAULT_COOLDOWN_SEC
+      "max_concurrent" => 1
     }
-  end
-
-  def provider_scope(account_id)
-    Hive::ProviderHealth::Scope.provider_account(account_id: account_id)
-  end
-
-  def model_scope(account_id, model)
-    Hive::ProviderHealth::Scope.model(account_id: account_id, model_id: model)
-  end
-
-  def open_scope(scope, failure_class:)
-    route = Hive::ProviderHealth::RouteIdentity.new(
-      route_id: "account-a/model-a",
-      account_id: "account-a",
-      adapter: "codex",
-      launch_binding_id: "binding-a",
-      model_id: "model-a"
-    )
-    attempt = Hive::ProviderHealth::AttemptBinding.new(
-      attempt_id: "evidence-attempt-#{scope.kind}",
-      task_generation: "evidence-generation",
-      ownership_fence: "evidence-fence",
-      route: route
-    )
-    persist_terminal_health_attempt(attempt)
-    evidence = Hive::ProviderHealth::Evidence.new(
-      scope: scope,
-      failure_class: failure_class,
-      provenance: "provider_diagnostic",
-      route: route,
-      reset_hint_seconds: 0,
-      source_reference: {
-        "path" => "logs/evidence.frames", "size" => 0, "sha256" => "0" * 64
-      },
-      attempt_id: attempt.attempt_id
-    )
-    @health.apply_evidence(
-      evidence: evidence,
-      attempt: attempt,
-      terminal_receipt: {
-        "attempt_id" => attempt.attempt_id,
-        "receipt_version" => 1,
-        "terminal_lease_version" => 2
-      },
-      expected_generation: 0
-    )
-  end
-
-  def persist_terminal_health_attempt(attempt)
-    source = "source-#{attempt.attempt_id}"
-    evidence_task = task(attempt.attempt_id, attempt.attempt_id)
-    generation = Hive::Attempts::Generation.resolve(
-      task: evidence_task, project: "demo", intended_stage: "4-execute",
-      progress_token: source, task_generation: attempt.task_generation,
-      ownership_generation: attempt.ownership_fence, task_input_epoch: 1
-    )
-    @store.observe_task_source(task: evidence_task, generation: generation, observed_at: NOW)
-    @store.create_launching(
-      attempt_id: attempt.attempt_id, request_id: nil, predecessor_attempt_id: nil,
-      task_id: attempt.attempt_id, project: "demo", task_slug: attempt.attempt_id,
-      intended_stage: "4-execute", task_generation: attempt.task_generation,
-      ownership_generation: attempt.ownership_fence, task_input_epoch: 1,
-      progress_token: source, provider: "codex",
-      routing: { "mode" => "legacy" }, worker_argv: %w[hive run evidence],
-      claim_capability_digest: Hive::Attempts::Capability.digest("e" * 64),
-      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
-      launch_timeout_sec: 30, now: NOW
-    )
-    @store.database.transaction do |db|
-      db[:attempts].where(attempt_id: attempt.attempt_id).update(
-        state: "terminal", outcome: "failed", ended_at: NOW.iso8601(6)
-      )
-      db[:capacity_reservations].where(attempt_id: attempt.attempt_id).update(
-        state: "released", released_at: NOW.iso8601(6)
-      )
-    end
   end
 end

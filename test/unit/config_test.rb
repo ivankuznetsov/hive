@@ -181,16 +181,38 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_registry_assigns_and_preserves_project_and_registration_identity
+  def test_registry_preserves_project_identity_but_rotates_registration_on_path_replacement
     with_tmp_global_config do
       first = Hive::Config.register_project(name: "sample", path: "/tmp/first")
       second = Hive::Config.register_project(name: "sample", path: "/tmp/second")
 
       assert_match(Hive::Config::PROJECT_UUID, first.fetch("project_id"))
       assert_equal first.fetch("project_id"), second.fetch("project_id")
-      assert_equal first.fetch("registration_id"), second.fetch("registration_id")
-      assert_equal first.fetch("registered_at"), second.fetch("registered_at")
+      refute_equal first.fetch("registration_id"), second.fetch("registration_id")
+      refute_equal first.fetch("registered_at"), second.fetch("registered_at")
+
+      repeated = Hive::Config.register_project(name: "sample", path: "/tmp/second")
+      assert_equal second.fetch("registration_id"), repeated.fetch("registration_id")
+      assert_equal second.fetch("registered_at"), repeated.fetch("registered_at")
     end
+  end
+
+  def test_membership_history_rebuilds_a_missing_event_id_index
+    existing = {
+      "event_id" => "existing-event", "kind" => "registered",
+      "occurred_at" => "2026-08-30T09:00:00Z", "before" => {}, "after" => {}
+    }
+    data = { "project_membership_history" => [ existing ] }
+
+    appended = Hive::Config.send(
+      :append_membership_history!, data,
+      kind: "unregistered", occurred_at: "2026-08-30T10:00:00Z",
+      before: { "project_id" => "project-1" }, after: {}
+    )
+
+    assert_equal true, data.dig("project_membership_event_ids", "existing-event")
+    assert_equal true,
+                 data.dig("project_membership_event_ids", appended.fetch("event_id"))
   end
 
   def test_registry_projects_are_synchronized_into_the_active_control_plane
@@ -354,6 +376,25 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registry_backfill_repairs_missing_epoch_with_existing_project_identity
+    with_tmp_global_config do
+      project_id = SecureRandom.uuid
+      registered_at = "2026-01-01T00:00:00Z"
+      row = { "name" => "old", "path" => "/missing/old", "project_id" => project_id,
+              "registered_at" => registered_at }
+      File.write(Hive::Config.global_config_path, { "registered_projects" => [ row ] }.to_yaml)
+
+      assert Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 22))
+      persisted = YAML.safe_load_file(Hive::Config.global_config_path)
+      repaired = persisted.fetch("registered_projects").first
+      assert_equal project_id, repaired.fetch("project_id")
+      assert_equal "legacy:#{project_id}", repaired.fetch("registration_id")
+      assert_equal registered_at, repaired.fetch("registered_at")
+      refute persisted.key?("project_membership_history")
+      refute Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 23))
+    end
+  end
+
   def test_registry_backfill_adds_canonical_path_even_when_project_id_exists
     with_tmp_global_config do |home|
       project = Dir.mktmpdir("hive-registry-real-path")
@@ -446,7 +487,8 @@ class ConfigTest < Minitest::Test
       config_path = File.join(dir, ".hive-state", "config.yml")
       FileUtils.mkdir_p(File.dirname(config_path))
       File.write(config_path, <<~YAML)
-        reviewers: []
+        review:
+          reviewers: []
         models:
           plan:
             agent: codex
@@ -483,7 +525,8 @@ class ConfigTest < Minitest::Test
       config_path = File.join(dir, ".hive-state", "config.yml")
       FileUtils.mkdir_p(File.dirname(config_path))
       File.write(config_path, <<~YAML)
-        reviewers: []
+        review:
+          reviewers: []
         plan:
           agent: pi
         models:
@@ -682,84 +725,6 @@ class ConfigTest < Minitest::Test
 
       assert_match(/models\.review_ci\.effort/i, error.message)
       assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
-    end
-  end
-
-  def test_load_promotes_top_level_reviewers_for_upgrade_compatibility_and_warns_once
-    with_tmp_dir do |dir|
-      config_path = File.join(dir, ".hive-state", "config.yml")
-      FileUtils.mkdir_p(File.dirname(config_path))
-      reviewer = {
-        "name" => "legacy",
-        "kind" => "agent",
-        "agent" => "codex",
-        "skill" => "ce-code-review",
-        "output_basename" => "legacy",
-        "prompt_template" => "reviewer_codex_ce_code_review.md.erb"
-      }
-      File.write(config_path, { "reviewers" => [ reviewer ] }.to_yaml)
-
-      cfg = nil
-      _out, err = capture_io do
-        cfg = Hive::Config.load(dir)
-        Hive::Config.load(dir)
-      end
-
-      assert_equal [ reviewer ], cfg.dig("review", "reviewers")
-      refute cfg.key?("reviewers")
-      assert_equal 1, err.scan(/top-level `reviewers`/).length
-      assert_includes err, "run `hive migrate`"
-      assert_includes err, config_path
-    end
-  end
-
-  def test_load_rejects_conflicting_legacy_and_canonical_reviewers
-    with_tmp_dir do |dir|
-      config_path = File.join(dir, ".hive-state", "config.yml")
-      FileUtils.mkdir_p(File.dirname(config_path))
-      File.write(config_path, {
-        "review" => { "reviewers" => [] },
-        "reviewers" => []
-      }.to_yaml)
-
-      error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
-
-      assert_includes error.message, "both top-level `reviewers` and `review.reviewers`"
-      assert_includes error.message, "choose which value to keep"
-      assert_includes error.message, config_path
-    end
-  end
-
-  def test_load_rejects_legacy_reviewers_when_review_is_not_a_mapping
-    with_tmp_dir do |dir|
-      config_path = File.join(dir, ".hive-state", "config.yml")
-      FileUtils.mkdir_p(File.dirname(config_path))
-      File.write(config_path, {
-        "review" => "invalid",
-        "reviewers" => []
-      }.to_yaml)
-
-      error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
-
-      assert_includes error.message, "cannot be migrated because `review` is String"
-      assert_includes error.message, "make `review` a mapping"
-    end
-  end
-
-  def test_load_validates_reviewers_after_promoting_the_legacy_key
-    [ nil, {}, "", 7 ].each do |value|
-      with_tmp_dir do |dir|
-        config_path = File.join(dir, ".hive-state", "config.yml")
-        FileUtils.mkdir_p(File.dirname(config_path))
-        File.write(config_path, { "reviewers" => value }.to_yaml)
-
-        error = assert_raises(Hive::ConfigError) do
-          capture_io { Hive::Config.load(dir) }
-        end
-
-        assert_includes error.message, "review.reviewers"
-        assert_includes error.message, config_path
-      end
     end
   end
 
@@ -1974,7 +1939,7 @@ class ConfigTest < Minitest::Test
       assert_equal :tmux, Hive::Config.claude_mode(cfg), "claude.mode must default to tmux"
       assert_equal "bypassPermissions", Hive::Config.claude_permission_mode(cfg),
                    "claude.permission_mode must default to bypassPermissions"
-      assert_equal "headless", cfg.dig("brainstorm", "runtime"), "brainstorm runtime must default to headless"
+      assert_nil cfg.dig("brainstorm", "runtime")
     end
   end
 
@@ -2274,21 +2239,6 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_tracks_legacy_brainstorm_runtime_separately_from_global_claude_mode
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        brainstorm:
-          runtime: headless
-      YAML
-      cfg = Hive::Config.load(dir)
-      assert_equal :tmux, Hive::Config.claude_mode(cfg),
-                   "legacy brainstorm.runtime must not become the project-global claude.mode"
-      assert_equal false, Hive::Config.explicit_claude_mode?(cfg)
-      assert_equal true, Hive::Config.explicit_brainstorm_runtime?(cfg)
-    end
-  end
-
   def test_load_honors_per_project_stage_agent_overrides
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -2301,21 +2251,9 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal "codex", cfg.dig("brainstorm", "agent")
       assert_equal "pi",    cfg.dig("plan", "agent")
-      assert_equal "headless", cfg.dig("brainstorm", "runtime")
+      assert_nil cfg.dig("brainstorm", "runtime")
       assert_equal "claude", cfg.dig("execute", "agent"),
                    "execute agent must fall back to default when not overridden"
-    end
-  end
-
-  def test_load_honors_brainstorm_tmux_runtime_override
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        brainstorm:
-          runtime: tmux_interactive
-      YAML
-      cfg = Hive::Config.load(dir)
-      assert_equal "tmux_interactive", cfg.dig("brainstorm", "runtime")
     end
   end
 
@@ -2328,8 +2266,17 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/brainstorm\.runtime/, err.message)
-      assert_match(/headless/, err.message)
-      assert_match(/tmux_interactive/, err.message)
+      assert_match(/claude.mode/, err.message)
+    end
+  end
+
+  def test_load_rejects_obsolete_reviewers_and_brainstorm_runtime
+    [ { "reviewers" => [] }, { "brainstorm" => { "runtime" => "headless" } } ].each do |data|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), data.to_yaml)
+        assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      end
     end
   end
 
@@ -4425,8 +4372,16 @@ class ConfigTest < Minitest::Test
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
       # Answer-digest ships a non-zero default cap so a wedged child cannot
       # pin the single global digest slot forever.
-      assert_equal({ "answer-digest" => 3600 },
+      assert_equal({ "answer-digest" => 3600, "digest" => 3600 },
                    cfg.dig("daemon", "child_verb_timeouts"))
+      assert_equal(
+        {
+          "daily_digest_refresh" => 900,
+          "daily_digest_close" => 3600,
+          "daily_digest_delivery" => 300
+        },
+        cfg.dig("daemon", "child_stage_timeouts")
+      )
     end
   end
 
@@ -4456,6 +4411,7 @@ class ConfigTest < Minitest::Test
       assert_equal 5400,  cfg.dig("daemon", "child_verb_timeouts", "develop")
       # A user override deep-merges with the seeded default.
       assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "answer-digest")
+      assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "digest")
     end
   end
 
@@ -4481,6 +4437,34 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/daemon.child_verb_timeouts.*must be a Hash/, err.message)
+    end
+  end
+
+  def test_daily_digest_stage_timeouts_are_positive_and_closed_by_identity
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts:
+            daily_digest_refresh: 0
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daily_digest_refresh.*positive integer/, error.message)
+
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts: disabled
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/child_stage_timeouts.*must be a Hash/, error.message)
+
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          child_stage_timeouts:
+            daily_digest_close: forever
+      YAML
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/daily_digest_close.*integer >= 0/, error.message)
     end
   end
 
@@ -5704,6 +5688,78 @@ class ConfigTest < Minitest::Test
     )
     assert_equal 42, merged.value
     assert_equal "merged_default", merged.source
+  end
+
+  def test_daily_digest_validator_rejects_each_invalid_initialization_shape
+    path = "/tmp/config.yml"
+    base = {
+      "enabled" => false,
+      "materialization_interval_sec" => 300,
+      "freshness_budget_sec" => 900,
+      "telegram" => { "enabled" => false, "hour" => 9 }
+    }
+    invalid = [
+      "scalar",
+      base.merge("telegram" => []),
+      base.merge("telegram" => { "enabled" => false, "hour" => 24 }),
+      base.merge("initial_membership" => [ "bad" ]),
+      base.merge("time_zone" => ""),
+      base.merge("time_zone" => "Mars/Olympus"),
+      base.merge("coverage_started_at" => "not-a-time"),
+      base.merge("first_interval" => []),
+      base.merge("first_interval" => { "local_date" => "2026-08-30" })
+    ]
+
+    invalid.each do |daily|
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(:validate_daily_digest!, { "daily_digest" => daily }, path)
+      end
+    end
+
+    Hive::Config.send(:validate_daily_digest!, { "daily_digest" => base }, path)
+
+    enabled = base.merge("enabled" => true)
+    Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled }, path)
+    Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled.merge("time_zone" => "UTC") }, path)
+    assert_raises(Hive::ConfigError) do
+      Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled.merge("initial_membership" => []) }, path)
+    end
+
+    initialized = enabled.merge(
+      "time_zone" => "UTC",
+      "coverage_started_at" => "2026-08-30T00:00:00Z",
+      "initial_membership" => [],
+      "first_interval" => {
+        "local_date" => "2026-08-30", "time_zone" => "UTC",
+        "starts_at" => "2026-08-30T00:00:00Z", "ends_at" => "2026-08-31T00:00:00Z"
+      }
+    )
+    %w[time_zone coverage_started_at first_interval].each do |key|
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :validate_daily_digest!,
+          { "daily_digest" => initialized.merge(key => false) }, path
+        )
+      end
+    end
+  end
+
+  def test_daily_digest_membership_helpers_preserve_arrays_and_type_time_errors
+    nested = [ { project_id: "one", paths: [ "a", "b" ] } ]
+    assert_equal [ { "project_id" => "one", "paths" => [ "a", "b" ] } ],
+                 Hive::Config.send(:canonical_membership_value, nested)
+    assert_raises(Hive::ConfigError) do
+      Hive::Config.send(:normalize_membership_time, "not-a-time")
+    end
+
+    with_tmp_global_config do
+      history = [ { "event_id" => "event-1", "kind" => "registered" } ]
+      File.write(
+        Hive::Config.global_config_path,
+        { "project_membership_history" => history }.to_yaml
+      )
+      assert_equal history, Hive::Config.load_global_project_membership_history
+    end
   end
 
   private

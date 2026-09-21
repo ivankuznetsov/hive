@@ -16,15 +16,17 @@ class HiveStagesOpenPrTest < Minitest::Test
   end
 
   class FakeController
-    attr_reader :request, :phases
+    attr_reader :request, :phases, :existing_pr_url
+    attr_accessor :creation_base_oid
 
     def initialize(publication)
       @publication = publication
       @phases = []
     end
 
-    def publish!(request, revalidate:)
+    def publish!(request, revalidate:, existing_pr_url: nil)
       @request = request
+      @existing_pr_url = existing_pr_url
       %i[prepare before_push before_create final].each do |phase|
         @phases << phase
         raise "stale request" unless revalidate.call(phase)
@@ -107,16 +109,18 @@ class HiveStagesOpenPrTest < Minitest::Test
       assert_equal "open-pr-task", controller.request.branch
       assert_equal "master", controller.request.base_branch
       assert_equal "Add the feature", controller.request.title
-      assert_equal Digest::SHA256.hexdigest(controller.request.diff),
+      diff = Hive::AgentGitGate.read(_repo, :diff, base_oid: base_oid, head_oid: controller.request.head_oid).stdout
+      assert_equal Digest::SHA256.hexdigest(diff),
                    controller.request.diff_digest
-      assert_includes controller.request.diff, "feature.rb"
+      assert_includes diff, "feature.rb"
       assert_equal :complete, Hive::Markers.current(task.state_file).name
       assert_includes File.read(task.state_file), "publication_id: #{controller.request.publication_id}"
     end
   end
 
   def test_run_recovers_controller_owned_merged_publication
-    with_task do |task, _repo, _base_oid|
+    with_task do |task, repo, _base_oid|
+      run!("git", "-C", repo, "branch", "-f", "master", "HEAD")
       result = Hive::Stages::OpenPr.run!(
         task, cfg,
         git_gateway: FakeGitGateway.new,
@@ -135,6 +139,42 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_publication_excludes_upstream_changes_since_task_creation
+    with_task do |task, repo, original_base|
+      run!("git", "-C", repo, "checkout", "master", "--quiet")
+      File.write(File.join(repo, "upstream.txt"), "upstream changes\n" * 300_000)
+      run!("git", "-C", repo, "add", "upstream.txt")
+      run!("git", "-C", repo, "commit", "-m", "Advance upstream", "--quiet")
+      run!("git", "-C", repo, "checkout", task.slug, "--quiet")
+      run!("git", "-C", repo, "rebase", "master", "--quiet")
+      controller = FakeController.new(publication)
+
+      result = Hive::Stages::OpenPr.run!(task, cfg, git_gateway: FakeGitGateway.new, controller: controller)
+
+      assert_equal :complete, result.fetch(:status)
+      assert_equal original_base, controller.request.creation_base_oid
+      diff = Hive::AgentGitGate.read(repo, :diff, base_oid: controller.request.scan_base_oid, head_oid: controller.request.head_oid).stdout
+      refute_includes diff, "upstream.txt"
+      assert_includes diff, "feature.rb"
+    end
+  end
+
+  def test_publication_accepts_a_legitimate_patch_larger_than_four_megabytes
+    with_task do |task, repo, _base|
+      File.write(File.join(repo, "large.txt"), "ordinary content\n" * 300_000)
+      run!("git", "-C", repo, "add", "large.txt")
+      run!("git", "-C", repo, "commit", "-m", "Large change", "--quiet")
+      controller = FakeController.new(publication)
+
+      result = Hive::Stages::OpenPr.run!(task, cfg, git_gateway: FakeGitGateway.new, controller: controller)
+
+      assert_equal :complete, result.fetch(:status)
+      diff = Hive::AgentGitGate.read(repo, :diff, base_oid: controller.request.scan_base_oid, head_oid: controller.request.head_oid).stdout
+      assert_operator diff.bytesize, :>, 4 * 1024 * 1024
+      assert_equal Digest::SHA256.hexdigest(diff), controller.request.diff_digest
+    end
+  end
+
   def test_closed_publication_is_not_recreated
     with_task do |task, _repo, _base_oid|
       result = Hive::Stages::OpenPr.run!(
@@ -145,6 +185,27 @@ class HiveStagesOpenPrTest < Minitest::Test
 
       assert_equal({ commit: "open_pr_closed", status: :error }, result)
       assert_equal "open_pr_closed", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+    end
+  end
+
+  def test_legacy_pointer_without_a_creation_base_uses_the_verified_pr_base
+    with_task do |task, _repo, base_oid|
+      path = File.join(task.folder, "worktree.yml")
+      pointer = YAML.safe_load(File.read(path))
+      pointer.delete("base_oid")
+      File.write(path, pointer.to_yaml)
+      controller = FakeController.new(publication)
+
+      result = Hive::Stages::OpenPr.run!(task, cfg, git_gateway: FakeGitGateway.new, controller: controller)
+
+      assert_equal :complete, result.fetch(:status)
+      assert_equal base_oid, controller.request.creation_base_oid
+      refute YAML.safe_load(File.read(path)).key?("base_oid")
+
+      controller.creation_base_oid = base_oid
+      replay = Hive::Stages::OpenPr.run!(task, cfg, git_gateway: FakeGitGateway.new, controller: controller)
+      assert_equal :complete, replay.fetch(:status)
+      assert_equal base_oid, controller.request.creation_base_oid
     end
   end
 
@@ -246,6 +307,56 @@ class HiveStagesOpenPrTest < Minitest::Test
       assert_equal task.folder, captured.fetch(:cwd)
       assert_equal "open_pr", captured.fetch(:implementation_stage)
       assert captured.fetch(:defer_implementation_observation)
+      assert captured.fetch(:completion_probe).call
+    end
+  end
+
+  def test_opencode_authoring_scope_overrides_project_bash_with_exact_output_edit
+    with_task do |task, _repo, _base_oid|
+      output = File.join(task.folder, Hive::Stages::OpenPr::AUTHORING_FILE)
+      FileUtils.rm_f(output)
+      profile = Hive::AgentProfiles.lookup(:opencode)
+      project_cfg = {
+        "open_pr" => {
+          "permissions" => {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit", "Bash(*)" ]
+          }
+        }
+      }
+      captured = nil
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_agent,
+        lambda do |*_args, **kwargs|
+          captured = kwargs
+          { status: :error }
+        end
+      ) do
+        Hive::Stages::OpenPr.spawn_open_pr_agent(
+          task, project_cfg, "prompt", profile, task.folder,
+          launch_arguments: { identity_arguments: [] },
+          expected_output: output
+        )
+      end
+
+      assert_equal "workspace-write", captured.fetch(:permission_mode)
+      assert_equal [ output ], captured.fetch(:edit_patterns)
+      assert_empty captured.fetch(:bash_patterns)
+      assert_equal [ task.folder ], captured.fetch(:additional_write_roots)
+      assert_nil captured.fetch(:allowed_tools)
+      assert_nil captured.fetch(:disallowed_tools)
+      refute captured.fetch(:completion_probe).call
+    end
+  end
+
+  def test_completion_probe_waits_for_a_partially_written_authoring_file
+    with_task do |task, _repo, _base_oid|
+      output = File.join(task.folder, Hive::Stages::OpenPr::AUTHORING_FILE)
+      File.write(output, '{"title":')
+      refute Hive::Stages::OpenPr.complete_authoring_file?(output)
+      write_authoring(task)
+      assert Hive::Stages::OpenPr.complete_authoring_file?(output)
     end
   end
 

@@ -333,6 +333,35 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_daemon_task_payload_checks_dependencies_when_authoritative
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = "dependent-task-260823-abcd"
+      folder = write_status_task(
+        hive_state, "1-inbox", dependent, state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 2, slug: dependent, display_name: nil,
+        depends_on: "prerequisite-task-260823-abcd"
+      )
+      write_status_task(
+        hive_state, "9-done", "prerequisite-task-260823-abcd",
+        state_file: "done.md", marker: "COMPLETE"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{dependent}" ]
+      )
+
+      payload = command.daemon_task_payload(
+        [ status_project(project_root, hive_state) ], authoritative_dependencies: true
+      )
+
+      row = payload.dig("projects", 0, "tasks", 0)
+      assert_equal dependent, row.fetch("slug")
+      assert_equal false, row.fetch("blocked")
+    end
+  end
+
   def test_daemon_task_payload_fails_closed_when_dependency_projection_raises
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -589,7 +618,7 @@ class CommandsStatusTest < Minitest::Test
       refute_includes slugs, "manual-task"
       assert_equal [], payload.fetch("projects").first.fetch("legacy_stage_dirs"),
                    "archived-manual is an intentional status-private sibling, not a legacy stage"
-      assert_nil payload.fetch("projects").first.fetch("legacy_migrate_command")
+      assert_nil payload.fetch("projects").first.fetch("legacy_state_guide")
     end
   end
 
@@ -682,6 +711,11 @@ class CommandsStatusTest < Minitest::Test
 
       assert_empty project.fetch("tasks")
       assert_equal 1, project.fetch("hidden_archived_task_count")
+      exact = Hive::Commands::Status.new(daemon_tasks: [ "demo:#{File.basename(folder)}" ])
+        .daemon_task_payload([ status_project(project_root, hive_state) ], now: now,
+                             authoritative_dependencies: true)
+      assert_equal "partial", exact.fetch("projection")
+      assert_equal [ File.basename(folder) ], exact.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
     end
   end
 
@@ -813,6 +847,87 @@ class CommandsStatusTest < Minitest::Test
         assert_equal "dispatch", task.fetch("workflow")
         assert_equal [], project.fetch("legacy_stage_dirs")
       end
+    end
+  end
+
+  def test_active_payload_keeps_an_unfinished_generic_terminal_agent
+    descriptor = dispatch_workflow
+
+    with_registered_workflow(descriptor) do
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        active_slug = "active-terminal-agent-260828-abcd"
+        active = File.join(hive_state, "stages", "3-report", active_slug)
+        archived_slug = "complete-terminal-agent-260828-bcde"
+        archived = File.join(hive_state, "stages", "3-report", archived_slug)
+        FileUtils.mkdir_p(active)
+        FileUtils.mkdir_p(archived)
+        Hive::TaskMeta.write(
+          active, id: 77, slug: active_slug, display_name: nil,
+          workflow: descriptor.id.to_s
+        )
+        Hive::TaskMeta.write(
+          archived, id: 78, slug: archived_slug, display_name: nil,
+          workflow: descriptor.id.to_s
+        )
+        File.write(File.join(active, "report.md"), "<!-- WAITING -->\n")
+        File.write(File.join(archived, "report.md"), "report\n<!-- COMPLETE -->\n")
+
+        calls = Hash.new(0)
+        original_for = Hive::TaskAction.method(:for)
+        payload = with_replaced_singleton_method(
+          Hive::TaskAction, :for,
+          lambda do |task, *args, **kwargs|
+            calls[task.folder] += 1
+            original_for.call(task, *args, **kwargs)
+          end
+        ) do
+          Hive::Commands::Status.new.active_payload([
+            status_project(project_root, hive_state)
+          ])
+        end
+        tasks = payload.fetch("projects").first.fetch("tasks")
+
+        assert_equal [ active_slug ], tasks.map { |task| task.fetch("slug") },
+                     tasks.map { |task| task.slice("slug", "action", "marker", "attrs") }.inspect
+        assert_equal "needs_input", tasks.first.fetch("action")
+        assert_equal 1, calls.fetch(active), "the active terminal row must reuse its status classification"
+        assert_equal 1, calls.fetch(archived), "the archived terminal row must not be classified by a pre-scan"
+      end
+    end
+  end
+
+  def test_active_payload_matches_the_legacy_active_envelope_for_errors
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "dependency-error-260829-abcd"
+      folder = write_status_task(
+        hive_state, "4-execute", slug,
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 1, slug: slug, display_name: nil, depends_on: "missing-prerequisite"
+      )
+      missing_root = File.join(project_root, "missing")
+      projects = [
+        { "name" => "missing", "path" => missing_root,
+          "hive_state_path" => File.join(missing_root, ".hive-state") },
+        { "name" => "healthy", "path" => project_root, "hive_state_path" => hive_state }
+      ]
+      now = Time.utc(2026, 8, 29, 12, 0, 0)
+
+      legacy = active = nil
+      capture_io do
+        legacy = Hive::Commands::Status.new.json_payload(
+          projects, exclude_archived: true, now: now
+        )
+        active = Hive::Commands::Status.new.active_payload(projects, now: now)
+      end
+
+      assert_equal legacy, active
+      assert_equal "missing_project_path", active.dig("projects", 0, "error")
+      assert_equal "dependency_task_missing",
+                   active.dig("projects", 1, "tasks", 0, "admission_error", "reason_code")
     end
   end
 
@@ -984,7 +1099,7 @@ class CommandsStatusTest < Minitest::Test
       }, actions_by_slug)
       assert_equal [ { "stage_dir" => "5-review", "task_count" => 1 } ],
                    project.fetch("legacy_stage_dirs")
-      assert_equal "hive migrate", project.fetch("legacy_migrate_command")
+      assert_equal "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", project.fetch("legacy_state_guide")
     end
   end
 
@@ -996,12 +1111,50 @@ class CommandsStatusTest < Minitest::Test
       "position" => { "stage" => "4-execute", "marker" => "none" },
       "blocker_owner" => "operator",
       "reason" => "provider health is unavailable",
-      "routing" => { "selected_route" => nil, "reason" => "health_state_unavailable" }
+      "routing" => { "selected_route" => nil, "reason" => "no_eligible_provider_route" }
     }
 
     line = Hive::Commands::Status.new.send(:operational_row_line, row)
 
-    assert_includes line, "routing health_state_unavailable"
+    assert_includes line, "routing no_eligible_provider_route"
+  end
+
+  def test_active_payload_exact_loads_only_referenced_terminal_dependencies
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "9-done", "base-task-260909-aaaa",
+                               state_file: "task.md", marker: "COMPLETE")
+      unrelated = write_status_task(hive_state, "9-done", "unrelated-task-260909-bbbb",
+                                    state_file: "task.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260909-cccc",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(unrelated, id: 2, slug: File.basename(unrelated), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 3, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: File.basename(base))
+      reads = []
+      original = Hive::TaskMeta.method(:read_for_admission)
+      reader = lambda do |folder|
+        reads << folder
+        original.call(folder)
+      end
+      payload = with_replaced_singleton_method(Hive::TaskMeta, :read_for_admission, reader) do
+        Hive::Commands::Status.new.active_payload([ status_project(project_root, hive_state) ])
+      end
+      rows = payload.fetch("projects").first.fetch("tasks")
+      assert_equal "active", payload.fetch("projection")
+      assert_equal [ File.basename(dependent) ], rows.map { |row| row.fetch("slug") }
+      refute rows.first.fetch("blocked")
+      assert_includes reads, base
+      refute_includes reads, unrelated
+
+      projects = [ status_project(project_root, hive_state) ]
+      frame = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        Hive::Commands::Status.new.internal_task_graph_payload
+      end
+      assert_equal "active", frame.fetch("projection")
+      assert_equal [ File.basename(dependent) ], frame.dig("projects", 0, "tasks").map { |row| row.fetch("slug") }
+    end
   end
 
   def test_json_payload_unblocks_dependency_at_gate_stage
@@ -1386,20 +1539,18 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_json_status_keeps_legacy_root_reviewers_operational_during_migration_window
+  def test_json_status_rejects_obsolete_root_reviewers
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       FileUtils.mkdir_p(File.join(hive_state, "stages"))
       File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
       project = { "name" => "legacy", "path" => project_root, "hive_state_path" => hive_state }
 
-      payload = nil
-      _out, err = capture_io do
-        payload = Hive::Commands::Status.new.json_payload([ project ])
+      error = assert_raises(Hive::UnsupportedProjectConfigError) do
+        capture_io { Hive::Commands::Status.new.json_payload([ project ]) }
       end
-
-      assert_equal [ "legacy" ], payload.fetch("projects").map { |entry| entry.fetch("name") }
-      assert_includes err, "run `hive migrate`"
+      assert_includes error.message, "Unknown top-level key `reviewers`."
+      assert_equal "reviewers: []\n", File.read(File.join(hive_state, "config.yml"))
     end
   end
 
@@ -1451,6 +1602,85 @@ class CommandsStatusTest < Minitest::Test
       assert_equal [], exploded.fetch("tasks"), "the exploding project degrades to no tasks"
       assert_equal "project_load_failed", exploded.fetch("error")
       refute_empty healthy.fetch("tasks"), "the healthy project is unaffected"
+      assert_match(/payload failed/, err)
+    end
+  end
+
+  def test_active_preparation_failure_uses_project_local_admission_fallback
+    raising = Class.new(Hive::Commands::Status) do
+      def prepare_project(project, **)
+        raise "preparation failed" if project["name"] == "broken"
+
+        super
+      end
+    end
+
+    with_tmp_dir do |root|
+      projects = %w[broken healthy].map do |name|
+        path = File.join(root, name)
+        FileUtils.mkdir_p(path)
+        { "name" => name, "path" => path, "hive_state_path" => File.join(path, ".hive-state"),
+          "repository_identity" => "github.com/acme/#{name}" }
+      end
+      prerequisite = write_status_task(
+        projects.first.fetch("hive_state_path"), "4-execute", "base-task-260909-aaaa",
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+      dependent = write_status_task(
+        projects.last.fetch("hive_state_path"), "4-execute", "dependent-task-260909-bbbb",
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+      reference = "broken:#{File.basename(prerequisite)}"
+      Hive::TaskMeta.write(prerequisite, id: 1, slug: File.basename(prerequisite), display_name: nil)
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: reference)
+      payload = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(
+          Hive::RepositoryIdentity, :current,
+          ->(path) { "github.com/acme/#{File.basename(path)}" }
+        ) { payload = raising.new.active_payload(projects) }
+      end
+      broken, healthy = payload.fetch("projects")
+      assert_equal "project_load_failed", broken.fetch("error")
+      assert_empty broken.fetch("tasks")
+      row = healthy.fetch("tasks").first
+      assert_equal File.basename(dependent), row.fetch("slug")
+      assert_nil row.fetch("admission_error"), "fallback must resolve the existing prerequisite"
+      assert_equal true, row.fetch("blocked")
+      assert_equal "4-execute", row.fetch("dependency_stage")
+      assert_match(/preparation failed/, err)
+    end
+  end
+
+  def test_active_payload_degrades_a_project_that_fails_during_completion
+    raising = Class.new(Hive::Commands::Status) do
+      def complete_project_payload(prepared, **)
+        raise "boom in #{prepared.project['name']}" if prepared.project["name"] == "explodes"
+
+        super
+      end
+    end
+
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(
+        hive_state, "4-execute", "healthy-active-260829-abcd",
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+
+      payload = nil
+      _out, err = capture_io do
+        payload = raising.new.active_payload([
+          { "name" => "explodes", "path" => project_root, "hive_state_path" => hive_state },
+          { "name" => "healthy", "path" => project_root, "hive_state_path" => hive_state }
+        ])
+      end
+
+      exploded, healthy = payload.fetch("projects")
+      assert_equal "project_load_failed", exploded.fetch("error")
+      assert_empty exploded.fetch("tasks")
+      assert_equal [ "healthy-active-260829-abcd" ], healthy.fetch("tasks").map { |task| task.fetch("slug") }
       assert_match(/payload failed/, err)
     end
   end
@@ -2595,6 +2825,12 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_archive_mode_active_payload_keeps_the_archive_projection_label
+    payload = Hive::Commands::Status.new(archive: true).active_payload([])
+
+    assert_equal "archive", payload.fetch("projection")
+  end
+
   def test_mixed_workflow_retention_projects_one_ordinary_set_and_lossless_archive
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -2622,8 +2858,10 @@ class CommandsStatusTest < Minitest::Test
       )
       project = status_project(project_root, hive_state)
 
-      ordinary = Hive::Commands::Status.new.json_payload([ project ], now: now)
+      command = Hive::Commands::Status.new
+      ordinary = command.json_payload([ project ], now: now)
         .fetch("projects").first
+      assert_equal now, command.next_retention_boundary
       archived = Hive::Commands::Status.new(archive: true).json_payload([ project ], now: now)
         .fetch("projects").first
 
@@ -2640,6 +2878,14 @@ class CommandsStatusTest < Minitest::Test
         visible-forever-260610-abcd visible-seven-260610-abcd
       ], archived.fetch("tasks").map { |task| task.fetch("slug") }.sort
       refute archived.key?("hidden_archived_task_count")
+
+      indexed = Hive::Commands::Status.new.json_payload(
+        [ project ], now: now, include_archive_index: true
+      ).fetch("projects").first
+      assert_equal archived.fetch("tasks").map { |task| task.fetch("slug") }.sort,
+                   indexed.fetch("__archive_folders").map { |folder| File.basename(folder) }.sort
+      assert_predicate indexed.fetch("__archive_folders"), :frozen?
+      refute ordinary.key?("__archive_folders")
     ensure
       Hive::Workflows::Project.reset!
     end
@@ -3197,7 +3443,7 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_includes output,
-                    "SNAPSHOT COMPLETE — 0 active · 0 archived · task graph cached 32s ago"
+                    "SNAPSHOT COMPLETE — 0 active · archive on demand · task graph cached 32s ago"
   end
 
   def test_operational_project_context_fails_closed_when_config_is_unreadable
@@ -3282,7 +3528,7 @@ class CommandsStatusTest < Minitest::Test
     command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
       snapshot.fetch("status_cache")
     end
-    command.define_singleton_method(:json_payload) do |*|
+    command.define_singleton_method(:active_payload) do |*|
       raise "concise status must not rescan task folders when the daemon cache is current"
     end
 
@@ -3363,7 +3609,7 @@ class CommandsStatusTest < Minitest::Test
     }
     command = Hive::Commands::Status.new(operational: true)
     scans = 0
-    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+    command.define_singleton_method(:active_payload) do |*_args, **_kwargs|
       scans += 1
       fresh_payload
     end
@@ -3394,7 +3640,7 @@ class CommandsStatusTest < Minitest::Test
     fresh_payload = cached_payload.merge("generated_at" => now.iso8601(6))
     command = Hive::Commands::Status.new(operational: true)
     scans = 0
-    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+    command.define_singleton_method(:active_payload) do |*_args, **_kwargs|
       scans += 1
       fresh_payload
     end
@@ -3429,7 +3675,7 @@ class CommandsStatusTest < Minitest::Test
       snapshot.fetch("status_cache")
     end
     scans = 0
-    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+    command.define_singleton_method(:active_payload) do |*_args, **_kwargs|
       scans += 1
       fresh_payload
     end
@@ -3467,7 +3713,7 @@ class CommandsStatusTest < Minitest::Test
     command.define_singleton_method(:status_cache_record) do |_snapshot, now:|
       snapshot.fetch("status_cache")
     end
-    command.define_singleton_method(:json_payload) do |*|
+    command.define_singleton_method(:active_payload) do |*|
       raise "a valid prior graph must remain cheap during the next full scan"
     end
 
@@ -3509,7 +3755,7 @@ class CommandsStatusTest < Minitest::Test
       snapshot.fetch("status_cache")
     end
     scans = 0
-    command.define_singleton_method(:json_payload) do |*_args, **_kwargs|
+    command.define_singleton_method(:active_payload) do |*_args, **_kwargs|
       scans += 1
       fresh_payload
     end
@@ -3685,10 +3931,10 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_nil cmd.send(:workflow_generation_for, {}, {})
-    expected_active = Hive::Workflows::Registry.all
-      .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
-      .uniq
-    assert_equal expected_active, cmd.send(:workflow_active_stage_dirs, nil)
+    active_dirs = cmd.send(:workflow_active_stage_dirs, nil)
+    assert_equal Hive::Workflows.all_active_stage_dirs, active_dirs
+    assert_includes active_dirs, "6-done", "content terminal still has work"
+    refute_includes active_dirs, "9-done", "coding terminal is inert"
   end
 
   def test_status_generation_capture_records_unexpected_project_failures
@@ -3768,7 +4014,7 @@ class CommandsStatusTest < Minitest::Test
     end
 
     assert_includes output, "3 tasks hidden in legacy stage dirs: 5-review (2), 6-pr (1)"
-    assert_includes output, "hive migrate"
+    assert_includes output, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
   end
 
   private

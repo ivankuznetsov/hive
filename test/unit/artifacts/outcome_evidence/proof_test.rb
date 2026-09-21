@@ -103,7 +103,7 @@ class OutcomeEvidenceProofTest < Minitest::Test
       )
       assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { admit(root, bad_cast) }
 
-      File.write(File.join(root, "secret.txt"), "token: ghp_abcdefghijklmnopqrstuvwxyz0123456789\n")
+      File.write(File.join(root, "secret.txt"), "token: ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}\n")
       secret = proof(
         "terminal", files.merge("secret.txt" => true),
         original: [ "session.cast", "application/x-asciinema+json" ],
@@ -502,7 +502,7 @@ class OutcomeEvidenceProofTest < Minitest::Test
       end
       assert_match(/unsafe media type/, error.message)
 
-      secret = "api_key=abcdefghijklmnopqrstuvwxyz0123456789"
+      secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
       which = Hive::InvokedBinary.method(:which)
       replacement = ->(name) { name == "tesseract" ? "/bin/true" : which.call(name) }
       with_replaced_singleton_method(Hive::InvokedBinary, :which, replacement) do

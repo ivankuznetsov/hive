@@ -1,61 +1,8 @@
 require "test_helper"
 require "hive/secret_patterns"
 
-# Direct coverage for Hive::SecretPatterns. The shared regex set is
-# consumed by both PR-body scanning and the post-fix diff guardrail —
-# false negatives there mean a credential ships to a public PR or a
-# fix-agent commit, so each pattern must have at least one assertion
-# proving it fires on a realistic input.
+# Log redaction only. Detection is tested against Betterleaks.
 class SecretPatternsTest < Minitest::Test
-  def assert_match_name(text, expected_name)
-    matches = Hive::SecretPatterns.scan(text)
-    assert(matches.any? { |m| m[:name] == expected_name },
-           "expected #{expected_name} match in #{text.inspect}; got #{matches.inspect}")
-  end
-
-  def refute_match_any(text)
-    matches = Hive::SecretPatterns.scan(text)
-    assert_empty matches, "expected no matches in #{text.inspect}; got #{matches.inspect}"
-  end
-
-  def test_aws_access_key_long_term_prefix_is_detected
-    assert_match_name("ACCESS = AKIAIOSFODNN7EXAMPLE", :aws_access_key)
-  end
-
-  def test_aws_access_key_session_token_prefix_is_detected
-    # ASIA = STS temporary credentials. Pre-fix the regex only matched
-    # AKIA, missing every session-token leak (extremely common in CI
-    # environments using assume-role).
-    assert_match_name("export AWS_KEY=ASIA1234567890123456", :aws_access_key)
-  end
-
-  def test_generic_api_key_quoted_is_detected
-    assert_match_name(%(api_key = "abcdefghijklmnopqrstuvwxyz"), :generic_api_key)
-  end
-
-  def test_generic_api_key_unquoted_shell_assignment_is_detected
-    # YAML/.env/shell style without quotes is the most common form a
-    # fix-agent would write — the pre-fix regex required literal quotes
-    # and missed every unquoted assignment.
-    assert_match_name("API_KEY=abcdefghijklmnopqrstuvwxyz", :generic_api_key)
-  end
-
-  def test_generic_api_key_before_json_delimiter_is_detected
-    assert_match_name(
-      '{"api_key":"abcdefghijklmnopqrstuvwxyz"}',
-      :generic_api_key
-    )
-  end
-
-  def test_short_api_key_value_does_not_match
-    refute_match_any("api_key = 'short'")
-  end
-
-  def test_pem_private_key_is_detected
-    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----"
-    assert_match_name(pem, :pem_private_key)
-  end
-
   def test_pem_private_key_block_body_is_redacted_not_just_header
     # Pre-fix the regex matched only the BEGIN delimiter, leaving the
     # base64 body and END line in redacted output. A leak path because
@@ -86,9 +33,6 @@ class SecretPatternsTest < Minitest::Test
       MIIEowIBAAKCAQEAvbPHGfakebodyzxcvbnmasdfghjklqwertyuiopASDF1234==
       QWERTYZXCVBNMqwertyuiopasdfghjklzxcvbnm1234567890abcdefABCDEFGH==
     PEM
-    matches = Hive::SecretPatterns.scan(truncated)
-    assert(matches.any? { |m| m[:name] == :pem_private_key_header },
-           "expected pem_private_key_header match; got #{matches.inspect}")
 
     redacted = Hive::SecretPatterns.redact(truncated)
     refute_includes redacted, "MIIEow",
@@ -128,9 +72,6 @@ class SecretPatternsTest < Minitest::Test
     # body. Still redact — the header signal alone is meaningful and
     # there may be a byte or two of key material on the same line.
     head_only = "log line\n-----BEGIN OPENSSH PRIVATE KEY-----\n"
-    matches = Hive::SecretPatterns.scan(head_only)
-    assert(matches.any? { |m| m[:name] == :pem_private_key_header },
-           "BEGIN line alone must trigger pem_private_key_header")
     redacted = Hive::SecretPatterns.redact(head_only)
     refute_includes redacted, "BEGIN OPENSSH PRIVATE KEY"
   end
@@ -150,186 +91,8 @@ class SecretPatternsTest < Minitest::Test
     refute_includes redacted, "[REDACTED:pem_private_key_header]"
   end
 
-  def test_password_assignment_unquoted_is_detected
-    assert_match_name("PASSWORD=hunter2spelledbackwards", :password_assignment)
-  end
-
-  def test_password_assignment_yaml_style_is_detected
-    assert_match_name("password: s3cretpassphrase42", :password_assignment)
-  end
-
-  def test_password_assignment_shell_variable_indirection_is_not_a_secret
-    refute_match_any("MINIO_ROOT_PASSWORD=${SECRET_ACCESS_KEY}")
-    refute_match_any('DATABASE_PASSWORD="$DATABASE_PASSWORD"')
-    assert_match_name("DATABASE_PASSWORD=${DATABASE_PASSWORD}-literal", :password_assignment)
-    assert_match_name('DATABASE_PASSWORD="$DATABASE_PASSWORD-suffix"', :password_assignment)
-  end
-
-  def test_password_before_json_delimiter_is_detected
-    assert_match_name(
-      '{"password":"s3cretpassphrase42"}',
-      :password_assignment
-    )
-  end
-
-  def test_short_password_value_does_not_match
-    refute_match_any("password=abc")
-  end
-
-  def test_password_prose_does_not_match_an_assignment
-    refute_match_any("Rate limits apply to password resets, confirmations, and sign-ins.")
-  end
-
-  def test_test_password_literal_remains_a_detected_assignment
-    assert_match_name('operator.password = "password"', :password_assignment)
-  end
-
-  def test_runtime_test_password_literals_remain_detected
-    [ "correct", "system-password" ].each do |value|
-      assert_match_name(%(password: "#{value}"), :password_assignment)
-    end
-  end
-
-  def test_diff_scan_allows_runtime_password_references_but_not_literals
-    runtime_diff = <<~DIFF
-      diff --git a/app/services/setup.rb b/app/services/setup.rb
-      --- a/app/services/setup.rb
-      +++ b/app/services/setup.rb
-      @@ -1 +1,4 @@
-      -operator.update!(name: name)
-      +operator.password = password
-      +def password=(raw_password)
-      +task reset_password: :environment do
-      +operator.update!(password: params[:password])
-    DIFF
-    literal_diff = runtime_diff.sub(
-      "+operator.password = password",
-      '+operator.password = "project-secret-42"'
-    )
-
-    refute Hive::SecretPatterns.match_diff?(runtime_diff)
-    assert Hive::SecretPatterns.match_diff?(literal_diff)
-  end
-
-  def test_diff_scan_does_not_exempt_shell_command_substitutions
-    command = <<~DIFF
-      diff --git a/.kamal/secrets b/.kamal/secrets
-      --- /dev/null
-      +++ b/.kamal/secrets
-      @@ -0,0 +1 @@
-      +# ROOT_PASSWORD=$(credential-tool read root_password ${PROJECT})
-    DIFF
-    literal_in_command = command.sub(
-      "root_password ${PROJECT}", "root_password s3cretpassphrase42"
-    )
-
-    assert Hive::SecretPatterns.match_diff?(command)
-    assert Hive::SecretPatterns.match_diff?(literal_in_command)
-  end
-
-  def test_diff_scan_ignores_removed_secrets_and_scans_added_paths
-    removed = <<~DIFF
-      diff --git a/config/old.env b/config/old.env
-      --- a/config/old.env
-      +++ /dev/null
-      @@ -1 +0,0 @@
-      -PASSWORD=s3cretpassphrase42
-    DIFF
-    secret_path = <<~DIFF
-      diff --git a/config/old.env b/config/ghp_abcdefghijklmnopqrstuvwxyz0123456789
-      --- a/config/old.env
-      +++ b/config/ghp_abcdefghijklmnopqrstuvwxyz0123456789
-      @@ -1 +1 @@
-      -old
-      +new
-    DIFF
-
-    refute Hive::SecretPatterns.match_diff?(removed)
-    assert Hive::SecretPatterns.match_diff?(secret_path)
-  end
-
-  def test_diff_scan_checks_target_paths_without_hunks
-    renamed = <<~DIFF
-      diff --git a/config/old b/config/ghp_abcdefghijklmnopqrstuvwxyz0123456789
-      similarity index 100%
-      rename from config/old
-      rename to config/ghp_abcdefghijklmnopqrstuvwxyz0123456789
-    DIFF
-
-    assert Hive::SecretPatterns.match_diff?(renamed)
-  end
-
-  def test_diff_scan_fails_closed_for_malformed_patch_lines
-    malformed_plain_path = <<~DIFF
-      diff --git a/config/old b/config/new
-      --- a/config/old
-      +++ config/new
-    DIFF
-    malformed_path = <<~DIFF
-      diff --git a/config/old b/config/new
-      --- a/config/old
-      +++ ghp_abcdefghijklmnopqrstuvwxyz0123456789
-    DIFF
-    malformed_hunk = <<~DIFF
-      diff --git a/config/old b/config/new
-      --- a/config/old
-      +++ b/config/new
-      @@ -1 +1 @@
-      PASSWORD=s3cretpassphrase42
-    DIFF
-
-    refute Hive::SecretPatterns.match_diff?(malformed_plain_path)
-    assert Hive::SecretPatterns.match_diff?(malformed_path)
-    assert Hive::SecretPatterns.match_diff?(malformed_hunk)
-  end
-
-  def test_high_signal_password_forms_remain_protected
-    samples = {
-      "ALTER USER app PASSWORD 's3cretpassphrase42';" => :password_sql,
-      "<password>s3cretpassphrase42</password>" => :password_xml,
-      "deploy --password s3cretpassphrase42" => :password_cli
-    }
-
-    samples.each do |value, pattern|
-      assert_match_name(value, pattern)
-    end
-  end
-
-  def test_authorization_bearer_token_is_detected
-    assert_match_name(
-      "Authorization: Bearer abc123XYZdef456ghi789jklMNO",
-      :bearer_token
-    )
-  end
-
-  def test_authorization_basic_credentials_are_detected
-    assert_match_name(
-      "authorization: Basic dXNlcjpzdXBlcnNlY3JldHBhc3M=",
-      :bearer_token
-    )
-  end
-
-  def test_session_cookie_header_is_detected
-    assert_match_name(
-      "Cookie: sessionid=abcdef0123456789xyz; Path=/",
-      :session_cookie
-    )
-  end
-
-  def test_set_cookie_session_is_detected
-    assert_match_name(
-      "Set-Cookie: SID=abcdef0123456789xyz; HttpOnly",
-      :session_cookie
-    )
-  end
-
-  def test_github_token_is_detected
-    assert_match_name("token = ghp_abcdefghijklmnopqrstuvwxyz0123456789", :github_token)
-  end
-
   def test_current_fine_grained_github_pat_is_detected_and_redacted
     token = "github_pat_#{'AbC123_' * 8}"
-    assert_match_name("token=#{token}", :github_fine_grained_pat)
     redacted = Hive::SecretPatterns.redact("token=#{token}")
     refute_includes redacted, token
     assert_includes redacted, "[REDACTED:github_fine_grained_pat]"
@@ -338,38 +101,10 @@ class SecretPatternsTest < Minitest::Test
   def test_hyphenated_openai_project_credential_is_detected_and_redacted
     credential = "sk-proj-#{'AbC123_' * 6}"
 
-    assert_match_name("credential=#{credential}", :openai_api_key)
     redacted = Hive::SecretPatterns.redact("credential=#{credential}")
     refute_includes redacted, credential
     assert_includes redacted, "[REDACTED:openai_api_key]"
   end
-
-  def test_scan_returns_empty_for_blank_input
-    assert_empty Hive::SecretPatterns.scan("")
-    assert_empty Hive::SecretPatterns.scan(nil)
-  end
-
-  def test_match_short_circuits_when_only_presence_is_needed
-    assert Hive::SecretPatterns.match?("token=github_pat_#{'A' * 40}")
-    refute Hive::SecretPatterns.match?("ordinary diagnostic text")
-    refute Hive::SecretPatterns.match?(nil)
-  end
-
-  # ── multi-pattern + truncation pinning ─────────────────────────────────
-
-  def test_multi_pattern_input_returns_matches_for_each_pattern
-    # An AWS access key AND an Anthropic API key in the same blob —
-    # both must surface; neither pattern's scan can short-circuit.
-    text = "AKIA1234567890123456 sk-ant-abcdefghijklmnopqrst"
-    matches = Hive::SecretPatterns.scan(text)
-    names = matches.map { |m| m[:name] }
-    assert_includes names, :aws_access_key,
-                    "AWS pattern must match in multi-pattern input"
-    assert_includes names, :anthropic_api_key,
-                    "Anthropic pattern must match in multi-pattern input"
-  end
-
-  # ── redact helper ──────────────────────────────────────────────────────
 
   def test_redact_replaces_match_with_named_placeholder
     text = "ACCESS = AKIAIOSFODNN7EXAMPLE"
@@ -407,19 +142,5 @@ class SecretPatternsTest < Minitest::Test
     assert_includes redacted, "日本語"
     assert_includes redacted, "[REDACTED:github_token]"
     refute_includes redacted, "???"
-  end
-
-  def test_long_secret_is_truncated_in_snippet_per_eighty_char_rule
-    # Long generic API key value (well over 80 chars) must be
-    # truncated in `snippet` so callers can include the snippet in
-    # error messages without leaking the full secret to logs.
-    long_value = "a" * 100
-    text = %(api_key = "#{long_value}")
-    matches = Hive::SecretPatterns.scan(text)
-    snippet = matches.find { |m| m[:name] == :generic_api_key }[:snippet]
-    assert_operator snippet.length, :<=, 81,
-                    "snippet truncated at 80 chars + ellipsis (= 81 max)"
-    assert snippet.end_with?("…"),
-           "truncated snippet ends with the ellipsis character"
   end
 end

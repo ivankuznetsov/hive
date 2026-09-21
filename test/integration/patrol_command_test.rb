@@ -136,7 +136,7 @@ class PatrolCommandTest < Minitest::Test
       end
 
       refute_equal Hive::ExitCodes::SUCCESS, first_status
-      assert_includes first_err, "hive migrate"
+      assert_includes first_err, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
       assert_equal [ "finding-1" ], patrol_store(repo).findings.map(&:id)
 
       store.patrol_fix_admission_adapter.store.rebuild_pending_index!

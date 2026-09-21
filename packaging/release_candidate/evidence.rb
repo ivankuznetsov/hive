@@ -78,7 +78,6 @@ module HiveReleaseCandidate
         "schema_version" => SCHEMA_VERSION,
         "candidate_sha" => paths.candidate_sha,
         "attempt_id" => attempt_id,
-        "predecessor_attempt_id" => predecessor && predecessor.fetch("attempt_id"),
         "selection" => {
           "mode" => selection_mode,
           "selected_gates" => selected_names,

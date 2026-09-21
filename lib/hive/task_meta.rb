@@ -234,7 +234,7 @@ module Hive
       rewrite(task_folder, id: id)
     end
 
-    # New coding tasks and pre-execute coding tasks touched by `hive migrate`
+    # New coding tasks and pre-execute coding tasks touched by an offline agent conversion
     # carry this bit. Its absence is the explicit pre-feature compatibility
     # shape used by execute-entry adoption; a malformed value is never treated
     # as a legacy exemption.

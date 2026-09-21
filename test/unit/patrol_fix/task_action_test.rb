@@ -8,6 +8,7 @@ require "hive/commands/status"
 require "hive/tui/snapshot"
 require "hive/bot/status_watcher"
 require "hive/patrol_fix/receipt_store"
+require "hive/patrol_fix/publication_block_receipt"
 require "hive/patrol_fix/task_manifest"
 require "hive/task"
 require "hive/task_action"
@@ -18,17 +19,16 @@ class PatrolFixTaskActionTest < Minitest::Test
   SLUG = "repair-login-260820-abcd"
   Marker = Hive::Markers::State
 
-  def test_rejected_and_blocked_outcomes_are_visible_non_runnable_and_never_dispatch
+  def test_rejection_advances_to_archive_while_blocked_remains_parked
     with_task("inbox") do |task, receipts|
       receipts.append!(decision_receipt(route: "reject", stage: "inbox"))
 
       action = Hive::TaskAction.for(task, marker)
 
-      assert_equal Hive::Schemas::TaskActionKind::PATROL_FIX_REJECTED, action.key
-      assert_equal "Rejected (parked)", action.label
-      assert_nil action.command
+      assert_equal Hive::Schemas::TaskActionKind::READY_TO_ADVANCE, action.key
+      assert_includes action.command, "hive approve"
       assert_equal "rejected", action.patrol_fix.dig("outcome", "kind")
-      assert_equal :skip, policy_decision(action)
+      assert_equal :dispatch, policy_decision(action)
     end
 
     with_task("review") do |task, receipts|
@@ -43,17 +43,17 @@ class PatrolFixTaskActionTest < Minitest::Test
     end
   end
 
-  def test_escalation_exposes_the_successor_without_archiving_the_origin
+  def test_escalation_dispatches_the_archive_transition
     with_task("inbox", successor: { "project" => "demo", "slug" => "coding-successor-260820-abcd" }) do |task, receipts|
       receipts.append!(decision_receipt(route: "escalate", stage: "inbox"))
 
       action = Hive::TaskAction.for(task, marker)
 
-      assert_equal Hive::Schemas::TaskActionKind::PATROL_FIX_ESCALATED, action.key
+      assert_equal Hive::Schemas::TaskActionKind::READY_TO_ADVANCE, action.key
       assert_equal({ "project" => "demo", "slug" => "coding-successor-260820-abcd" },
                    action.patrol_fix.fetch("successor"))
       refute action.patrol_fix.fetch("archived")
-      assert_equal :skip, policy_decision(action)
+      assert_equal :dispatch, policy_decision(action)
     end
   end
 
@@ -68,6 +68,41 @@ class PatrolFixTaskActionTest < Minitest::Test
       assert_equal Hive::Schemas::TaskActionKind::ARCHIVED, done.key
       assert done.patrol_fix.fetch("archived")
       assert_equal "github:acme/demo#42", done.patrol_fix.dig("publication", "id")
+    end
+  end
+
+  def test_publication_secret_block_is_visible_without_retry_or_rework_action
+    with_task("publish") do |task, receipts, root|
+      block = publication_block_receipt
+      receipts.append!(block)
+      action = Hive::TaskAction.for(task, marker)
+
+      assert_equal Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED,
+                   action.key
+      assert_equal "Publication blocked by secret policy", action.label
+      assert_nil action.command
+      assert_equal :skip, policy_decision(action)
+
+      descriptor = Hive::OperationalAction.descriptor_for_task(task, project: "demo")
+      assert_nil descriptor
+
+      project = {
+        "name" => "demo", "path" => root,
+        "hive_state_path" => File.join(root, ".hive-state")
+      }
+      status = Hive::Commands::Status.new(json: true)
+      payload = status.json_payload([ project ], now: Time.utc(2026, 8, 20, 12, 5))
+      row = payload.dig("projects", 0, "tasks", 0)
+      assert_equal "patrol_fix_publication_blocked", row.fetch("action")
+
+      operational = status.operational_payload(
+        [ project ], status_payload: payload, scheduler_snapshot: nil,
+        now: Time.utc(2026, 8, 20, 12, 5)
+      ).fetch("tasks").first
+      assert_equal "waiting_on_you", operational.fetch("state")
+      assert_equal "operator", operational.fetch("blocker_owner")
+      assert_equal "secret_detected", operational.dig("reasons", 0, "code")
+      assert_nil operational["action"]
     end
   end
 
@@ -97,9 +132,7 @@ class PatrolFixTaskActionTest < Minitest::Test
       tui_row = Hive::Tui::Snapshot.from_payload(payload).rows.first
       assert_equal "needs_input", tui_row.action_key
 
-      bot_row = Hive::Bot::StatusWatcher.new.send(
-        :extract_rows, payload, now: Time.utc(2026, 8, 20, 12, 5)
-      ).first
+      bot_row = Hive::Bot::StatusWatcher.new.send(:extract_rows, payload).first
       assert_equal "needs_input", bot_row.action
       assert_equal task.slug, bot_row.slug
     end
@@ -174,6 +207,17 @@ class PatrolFixTaskActionTest < Minitest::Test
         "state" => "open", "observed_at" => "2026-08-20T12:02:00Z"
       }
     }
+  end
+
+  def publication_block_receipt
+    Hive::PatrolFix::PublicationBlockReceipt.build(
+      task: { "slug" => SLUG, "generation" => 1 },
+      evidence_revision: { "generation" => 1, "digest" => "a" * 64 },
+      blocked_fields: [ "body" ],
+      review_receipt_id: "review-1", fix_receipt_id: "fix-1",
+      validation_receipt_id: "validation-1", head_revision: "2" * 40,
+      diff_digest: "3" * 64, recorded_at: Time.utc(2026, 8, 20, 12, 2)
+    )
   end
 
   def policy_decision(action)

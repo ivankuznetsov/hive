@@ -79,20 +79,6 @@ class HiveBotLoggerTest < Minitest::Test
                  "hive-bot-log.v3 event enum must mirror Logger::EVENTS exactly (no schema-side drift)"
   end
 
-  def test_v2_schema_remains_for_back_compat
-    schema_doc = JSON.parse(File.read(File.expand_path("../../../schemas/hive-bot-log.v2.json", __dir__)))
-    schema = JSONSchemer.schema(schema_doc)
-    historical_line = {
-      "ts" => "2026-06-01T12:00:00Z",
-      "schema" => "hive-bot-log",
-      "schema_version" => 2,
-      "event" => "poll_failure"
-    }
-
-    assert_equal 2, schema_doc.fetch("properties").fetch("schema_version").fetch("const")
-    refute_includes schema_doc.fetch("properties").fetch("event").fetch("enum"), "poll_unhealthy"
-    assert schema.valid?(historical_line), "historical v2 bot log line should remain valid"
-  end
 
   def test_default_levels_come_from_event_map
     with_log do |logger, path|

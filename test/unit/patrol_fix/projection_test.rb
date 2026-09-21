@@ -3,9 +3,10 @@ require "tmpdir"
 require "json_schemer"
 require "pathname"
 require "hive/patrol_fix/projection"
+require "hive/patrol_fix/publication_block_receipt"
 
 class PatrolFixProjectionTest < Minitest::Test
-  def test_rejected_inbox_is_parked_and_non_runnable
+  def test_rejected_inbox_is_ready_to_archive
     with_task do |dir, manifest, receipts|
       receipts.append!(decision_receipt(route: "reject", stage: "inbox"))
 
@@ -14,11 +15,40 @@ class PatrolFixProjectionTest < Minitest::Test
       assert_equal "current", projected.fetch("state")
       assert_equal "rejected", projected.dig("outcome", "kind")
       assert_equal "inbox_gate", projected.fetch("blocker_owner")
-      assert_equal "parked", projected.dig("action", "kind")
-      refute projected.dig("action", "runnable")
+      assert_equal "advance", projected.dig("action", "kind")
+      assert projected.dig("action", "runnable")
       assert JSONSchemer.schema(
         Pathname.new(Hive::Schemas.schema_path("hive-patrol-fix-projection"))
       ).valid?(projected)
+    end
+  end
+
+  def test_archived_rejection_retains_its_outcome_without_publication
+    %w[inbox review].each do |stage|
+      with_task do |dir, _manifest, receipts|
+        receipts.append!(decision_receipt(route: "reject", stage: stage))
+        projected = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "6-done").to_h
+        assert projected.fetch("archived")
+        assert_equal "rejected", projected.dig("outcome", "kind")
+        assert_nil projected.fetch("publication")
+        assert_nil projected.dig("timing", "parked_since")
+      end
+    end
+  end
+
+  def test_archived_escalation_requires_a_successor
+    [ nil, { "project" => "demo", "slug" => "coding-successor-260820-abcd" } ].each do |successor|
+      with_task(successor: successor) do |dir, _manifest, receipts|
+        receipts.append!(decision_receipt(route: "escalate", stage: "inbox"))
+        projected = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "6-done").to_h
+        assert_equal !successor.nil?, projected.fetch("archived")
+        assert_equal "escalated", projected.dig("outcome", "kind")
+        unless successor
+          assert_equal "invalid", projected.fetch("state")
+          refute projected.dig("action", "runnable")
+          assert_includes projected.dig("diagnostic", "summary"), "linked escalation"
+        end
+      end
     end
   end
 
@@ -147,6 +177,28 @@ class PatrolFixProjectionTest < Minitest::Test
     end
   end
 
+  def test_publication_secret_block_is_operator_parked_and_generation_scoped
+    with_task do |dir, manifest, receipts|
+      block = publication_block_receipt
+      receipts.append!(block)
+
+      projected = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "5-publish").to_h
+      assert_equal "publication_blocked", projected.dig("outcome", "kind")
+      assert_equal block.fetch("receipt_id"), projected.dig("outcome", "receipt_id")
+      assert_equal "operator", projected.fetch("blocker_owner")
+      assert_equal "secret_detected", projected.dig("diagnostic", "code")
+      assert_equal "parked", projected.dig("action", "kind")
+      assert_equal block.fetch("recorded_at"), projected.dig("timing", "parked_since")
+
+      changed = Marshal.load(Marshal.dump(manifest.read))
+      changed.fetch("task")["generation"] = 2
+      changed.fetch("evidence_revision").merge!("generation" => 2, "digest" => "b" * 64)
+      manifest.write!(changed)
+      reopened = Hive::PatrolFix::Projection.new(task_folder: dir, stage: "4-review").to_h
+      assert_nil reopened.fetch("outcome")
+    end
+  end
+
   def test_invalid_publication_diagnostics_fail_the_projection_closed
     with_task do |dir, _manifest, _receipts|
       path = File.join(dir, "patrol-fix-publication-diagnostic.json")
@@ -246,6 +298,18 @@ class PatrolFixProjectionTest < Minitest::Test
         "body_digest" => "5" * 64, "marker_digest" => "6" * 64,
         "hosted_state" => "open", "observed_at" => "2026-08-20T12:02:00Z"
       }
+    )
+  end
+
+
+  def publication_block_receipt
+    Hive::PatrolFix::PublicationBlockReceipt.build(
+      task: { "slug" => "repair-login-260820-abcd", "generation" => 1 },
+      evidence_revision: { "generation" => 1, "digest" => "a" * 64 },
+      blocked_fields: [ "body" ],
+      review_receipt_id: "review-1", fix_receipt_id: "fix-1",
+      validation_receipt_id: "validation-1", head_revision: "2" * 40,
+      diff_digest: "3" * 64, recorded_at: Time.utc(2026, 8, 20, 12, 2)
     )
   end
 end

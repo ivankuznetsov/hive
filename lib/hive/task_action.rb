@@ -13,8 +13,8 @@ require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
 require "hive/plan_review/projection"
-require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/planner_revision"
+require "hive/plan_review/decision_triage"
 require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
@@ -90,7 +90,7 @@ module Hive
       },
       plan_review_unsupported: {
         key: Hive::Schemas::TaskActionKind::PLAN_REVIEW_UNSUPPORTED,
-        label: "Plan reviewer configuration required",
+        label: "Plan review needs repair",
         command: nil
       },
       plan_review_blocked: {
@@ -101,6 +101,11 @@ module Hive
       execute_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
         label: "Needs your input",
+        command: "develop"
+      },
+      execute_repair: {
+        key: Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
+        label: "Needs execution repair",
         command: "develop"
       },
       execute_complete: {
@@ -243,6 +248,11 @@ module Hive
       patrol_fix_escalated: {
         key: Hive::Schemas::TaskActionKind::PATROL_FIX_ESCALATED,
         label: "Escalated (parked)",
+        command: nil
+      },
+      patrol_fix_publication_blocked: {
+        key: Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED,
+        label: "Publication blocked by secret policy",
         command: nil
       },
       agent_running: {
@@ -428,16 +438,18 @@ module Hive
 
     def patrol_fix_action
       return ACTIONS.fetch(:error) if patrol_fix["state"] == "invalid"
-      return ACTIONS.fetch(:done) if patrol_fix["archived"] == true
-
-      case patrol_fix.dig("outcome", "kind")
-      when "rejected" then ACTIONS.fetch(:patrol_fix_rejected)
-      when "blocked" then ACTIONS.fetch(:patrol_fix_blocked)
-      when "escalated" then ACTIONS.fetch(:patrol_fix_escalated)
-      else
-        return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
-        ACTIONS.fetch(:generic_ready_to_run)
+      outcome = patrol_fix.dig("outcome", "kind")
+      if patrol_fix["archived"] == true
+        return ACTIONS.fetch(:done).merge(label: outcome.capitalize) if
+          Hive::PatrolFix::Projection::TERMINAL_OUTCOMES.include?(outcome)
+        return ACTIONS.fetch(:done)
       end
+      return ACTIONS.fetch(:ready_to_advance) if patrol_fix.dig("action", "kind") == "advance"
+
+      return ACTIONS.fetch(:patrol_fix_publication_blocked) if outcome == "publication_blocked"
+      return ACTIONS.fetch(:patrol_fix_blocked) if outcome == "blocked"
+
+      ACTIONS.fetch(:generic_ready_to_run)
     end
 
     def universal_action
@@ -619,7 +631,10 @@ module Hive
 
     def execute_action
       if migration_selection.effective == "conditions"
-        return condition_gate.eligible? ? ACTIONS.fetch(:execute_complete) : ACTIONS.fetch(:execute_waiting)
+        return ACTIONS.fetch(:execute_complete) if condition_gate.eligible?
+
+        reason = Hive::Conditions::RecoveryAction.primary_diagnostic(condition_gate)&.fetch("reason", nil)
+        return execute_wait_action(reason)
       end
 
       case marker.name
@@ -630,7 +645,7 @@ module Hive
       when :execute_waiting
         return ACTIONS.fetch(:execute_stale) if legacy_execute_findings?
 
-        ACTIONS.fetch(:execute_waiting)
+        execute_wait_action(marker.attrs["reason"])
       when :none
         # Markerless (:none) = nothing ran at this stage yet → runnable, not an
         # input gate; a real pause carries an `:execute_waiting` marker (U6).
@@ -645,6 +660,11 @@ module Hive
         # Policy than presuming the stage is runnable.
         ACTIONS.fetch(:error)
       end
+    end
+
+    def execute_wait_action(reason)
+      action = Hive::ExecuteWaitingAction.technical_reason?(reason) ? :execute_repair : :execute_waiting
+      ACTIONS.fetch(action)
     end
 
     def execute_condition_rule
@@ -739,21 +759,9 @@ module Hive
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
       when "blocked"
-        if recoverable_planner_identity_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_transient_planner_revision?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif stale_planner_revision_contract?
+        if recoverable_decision_triage? || recoverable_transient_planner_revision?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_adversarial_identity_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_checkpoint_custody_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_selected_lenses_contract_review?
-          ACTIONS.fetch(:plan_reviewing)
-        elsif recoverable_residual_evidence_contract_review?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_transient_coverage_review?
           ACTIONS.fetch(:plan_reviewing)
@@ -968,24 +976,6 @@ module Hive
       false
     end
 
-    # A blocked planner-revision series is terminal only under the result
-    # contract that adjudicated it. When Hive upgrades that contract, the
-    # orchestrator owns one new bounded attempt series; classify this exact
-    # stale-controller case as runnable so the daemon can reach that recovery
-    # path without an operator manufacturing a linked plan generation.
-    def stale_planner_revision_contract?
-      route = Array(plan_review["routes"]).reverse.find do |entry|
-        entry["role"] == "planner_revision"
-      end
-      return false unless route
-      return false unless PLAN_REVIEW_TRANSIENT_OUTCOMES.include?(route["outcome"])
-
-      Integer(route["planner_revision_contract_version"] || 0) <
-        Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
-    rescue ArgumentError, TypeError
-      true
-    end
-
     # Older builds terminalized an exhausted transient planner-revision series.
     # The orchestrator now owns opening cooled attempt series until that route
     # recovers, so expose only the exact old planner-owned transient block as
@@ -1005,24 +995,34 @@ module Hive
       end
     end
 
-    def recoverable_planner_identity_review?
-      route = Array(plan_review["routes"]).reverse.find do |entry|
-        entry["role"] == "planner"
-      end
-      identity = route&.fetch("actual", nil) || route&.fetch("requested", nil)
-      Hive::PlanReview::PlannerIdentity.recoverable?(identity)
-    end
-
     # An awaiting-decision projection normally belongs to the operator. A
     # gated finding already covered by an active approval policy is different:
     # the orchestrator owns consuming that durable authority. Classify the row
     # as runnable so the daemon can recover records written by an older build
     # and so a crash between publishing the finding and consuming the policy
     # cannot strand the task.
+    def recoverable_decision_triage?
+      return false unless task.folder && File.directory?(task.folder)
+
+      record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      route = record["routes"].reverse.find { |entry| entry["role"] == "decision_triage" }
+      route && route["triage_version"] == Hive::PlanReview::DecisionTriage::VERSION &&
+        %w[success partial_coverage].include?(route["outcome"]) &&
+        !Hive::PlanReview::DecisionTriage.pending(record).empty?
+    rescue Hive::PlanReview::Error, Hive::ConfigError, SystemCallError, IOError
+      false
+    end
+
     def auto_plan_review_decision?
       return false unless task.folder && File.directory?(task.folder)
 
       record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      return true unless Hive::PlanReview::DecisionTriage.pending(record).empty?
+      return true if Array(record["findings"]).any? do |entry|
+        entry["classification"] == "safe_auto" && entry["lifecycle"] == "open" ||
+          %w[approved answered incorporated].include?(entry["lifecycle"])
+      end
+
       pending = record["findings"].map { |entry| Hive::PlanReview::Finding.new(entry) }
         .select(&:blocking?)
       return false if pending.empty?
@@ -1058,42 +1058,6 @@ module Hive
         end
         route && route["outcome"] == "unsupported"
       end
-    end
-
-    # A successful legacy Grok attempt can still carry the pre-alias-fix
-    # `reviewer_family_unknown` receipt. Re-enter only when current provider
-    # support can now attest the exact requested/served identity pair, and only
-    # until the orchestrator has recorded its versioned one-time retry.
-    def recoverable_adversarial_identity_review?
-      routes = Array(plan_review["routes"])
-      planner = routes.find { |entry| entry["role"] == "planner" }
-      planner_identity = planner&.fetch("actual", nil) || planner&.fetch("requested", nil)
-      !Hive::PlanReview::RouteResolver.recoverable_identity_route(
-        routes:, planner_identity:
-      ).nil?
-    end
-
-    # Builds that first protected the bounded projection checkpoint included
-    # Hive's own session write in reviewer custody. Surface only the adapter's
-    # exact runner-provenance false positive as runnable until the orchestrator
-    # records its versioned one-time reset.
-    def recoverable_checkpoint_custody_review?
-      Hive::PlanReview::CheckpointCustody.recoverable?(plan_review["routes"])
-    end
-
-    # The old selected-lens grammar rejected natural lowercase kebab-case
-    # names. Surface that exact versionless parser verdict as runnable until the
-    # orchestrator records its one-time contract recovery reset.
-    def recoverable_selected_lenses_contract_review?
-      !Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
-        plan_review["routes"]
-      ).empty?
-    end
-
-    def recoverable_residual_evidence_contract_review?
-      !Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
-        plan_review["routes"]
-      ).empty?
     end
 
     # A mandatory initial reviewer can exhaust its bounded in-process retry

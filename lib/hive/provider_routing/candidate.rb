@@ -4,9 +4,9 @@ require "hive/provider_routing/decision"
 module Hive
   module ProviderRouting
     Candidate = Data.define(
-      :route, :exclusions, :health, :observed_concurrency, :max_concurrency
+      :route, :exclusions, :observed_concurrency, :max_concurrency
     ) do
-      def initialize(route:, exclusions:, health: nil, observed_concurrency: nil,
+      def initialize(route:, exclusions:, observed_concurrency: nil,
                      max_concurrency: nil)
         normalized = Array(exclusions).map do |entry|
           entry.is_a?(Decision::Exclusion) ? entry : Decision::Exclusion.new(**entry)
@@ -14,7 +14,6 @@ module Hive
         super(
           route: route,
           exclusions: normalized.freeze,
-          health: health,
           observed_concurrency: observed_concurrency.nil? ? nil : Integer(observed_concurrency),
           max_concurrency: max_concurrency.nil? ? nil : Integer(max_concurrency)
         )
@@ -26,7 +25,7 @@ module Hive
         entry.reason == "provider_concurrency_saturated"
       end
 
-      def to_h(now: Time.now.utc)
+      def to_h
         {
           "route_id" => route.id,
           "provider_account_id" => route.account,
@@ -38,10 +37,7 @@ module Hive
           "capacity" => observed_concurrency.nil? ? nil : {
             "observed" => observed_concurrency,
             "max" => max_concurrency
-          },
-          "circuits" => Array(health&.inspections).map do |inspection|
-            Hive::ProviderHealth.circuit_observation(inspection, now: now)
-          end
+          }
         }.freeze
       end
     end

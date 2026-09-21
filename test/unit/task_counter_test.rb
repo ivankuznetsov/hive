@@ -71,5 +71,8 @@ class TaskCounterTest < Minitest::Test
     end
 
     assert_equal 42, Hive::TaskCounter.peek
+    assert_equal 42, Hive::TaskCounter.seed_at_least!(2)
+    assert_equal 42, Hive::TaskCounter.next!
+    assert_equal 43, @database.read { |db| db[:installations].get(:next_task_id) }
   end
 end

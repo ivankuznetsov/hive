@@ -220,9 +220,9 @@ class AgentRuntimeTest < Minitest::Test
       "--add-dir", "/workspace/extra",
       "--allowedTools", "Read", "--disallowedTools", "Write",
       "--max-budget-usd", "2",
-      *claude.output_format_flags, "do work"
+      *claude.output_format_flags
     ], claude_call.argv
-    assert_nil claude_call.stdin_data
+    assert_equal "do work", claude_call.stdin_data
 
     codex_call = compile(codex, add_dirs: [ "/workspace/extra" ], max_budget_usd: 2)
     assert_equal [
@@ -239,9 +239,9 @@ class AgentRuntimeTest < Minitest::Test
 
     grok_call = compile(grok, max_budget_usd: 2)
     assert_equal [
-      grok.bin, "-p", "do work", "--always-approve", *grok.output_format_flags
+      grok.bin, "--prompt-file=/dev/stdin", "--always-approve", *grok.output_format_flags
     ], grok_call.argv
-    assert_nil grok_call.stdin_data
+    assert_equal "do work", grok_call.stdin_data
   end
 
   def test_plain_text_consumer_can_omit_provider_output_flags

@@ -138,6 +138,12 @@ equivalent Unicode spellings match, while compatibility forms such as `①`/`1`,
 `x²`/`x2`, full-width text, and ligatures remain distinct so a compatibility-
 equivalent rewording fails closed.
 
+## Serialization fallback
+
+Both success and error arms are encoded directly as `hive-answer.v1`. If JSON
+serialization raises, Hive emits no prose or fallback JSON document; the
+serialization exception propagates through the command boundary.
+
 ## Lifecycle boundary
 
 Completing the final slot changes only `brainstorm.md`. The command does not

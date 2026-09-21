@@ -110,6 +110,79 @@ module Hive
       )
     end
 
+    # The discovery reservation is the usage row. The unique session identity
+    # makes retries idempotent while the immediate transaction keeps the daily
+    # count and insert under one SQLite writer boundary.
+    def reserve_patrol_discovery!(session_id:, agent:, project_slug:, stage:, started_at:, limit:,
+                                  database: nil)
+      session_id = required_text(session_id, "Patrol reservation id")
+      project_slug = required_text(project_slug, "Patrol project")
+      stage = required_text(stage, "Patrol discovery stage")
+      limit = Integer(limit)
+      raise ArgumentError, "Patrol discovery limit must not be negative" if limit.negative?
+
+      store = database || self.database
+      started_at = normalized_time(started_at)
+      store.transaction do |db|
+        usage = db[:token_usage]
+        lane = patrol_discovery_dataset(
+          usage, project_slug: project_slug, stage: stage, at: started_at
+        )
+        existing = usage.where(session_id: session_id).first
+        if existing
+          validate_patrol_reservation!(
+            existing, project_slug: project_slug, stage: stage
+          )
+          next {
+            reserved: true, existing: true,
+            used: lane.count
+          }
+        end
+
+        used = lane.count
+        next { reserved: false, existing: false, used: used } if used >= limit
+
+        usage.insert(
+          id: SecureRandom.uuid, session_id: session_id, agent: agent.to_s,
+          project_slug: project_slug, task_slug: stage, stage: "#{stage}-unmetered",
+          started_at: started_at.iso8601, ended_at: nil,
+          input: 0, output: 0, cached: 0, task_generation: 0,
+          source: "patrol_discovery_launch"
+        )
+        { reserved: true, existing: false, used: used + 1 }
+      end
+    rescue ArgumentError, TypeError, Hive::RuntimeControlPlane::IntegrityError
+      raise
+    rescue StandardError => error
+      raise Hive::RuntimeControlPlane::Unavailable.new(
+        "Patrol discovery reservation failed: #{error.message}",
+        code: :usage_persistence_failed,
+        action: "repair the runtime control plane before launching Patrol discovery",
+        details: { error_class: error.class.name }
+      )
+    end
+
+    def patrol_discovery_count(project_slug:, stage:, at:, database: nil)
+      project_slug = required_text(project_slug, "Patrol project")
+      stage = required_text(stage, "Patrol discovery stage")
+      store = database || self.database
+      store.read do |db|
+        patrol_discovery_dataset(
+          db[:token_usage], project_slug: project_slug,
+          stage: stage, at: normalized_time(at)
+        ).count
+      end
+    rescue ArgumentError, TypeError, Hive::RuntimeControlPlane::IntegrityError
+      raise
+    rescue StandardError => error
+      raise Hive::RuntimeControlPlane::Unavailable.new(
+        "Patrol discovery history is unavailable: #{error.message}",
+        code: :usage_read_failed,
+        action: "repair the runtime control plane before launching Patrol discovery",
+        details: { error_class: error.class.name }
+      )
+    end
+
     def exact_attempt(attempt_id:, task_generation: nil, project_slug: nil,
                       task_slug: nil, legacy_limit: 100, session_limit: 100,
                       deadline: nil,
@@ -276,6 +349,25 @@ module Hive
       dataset.where(Sequel.like(:stage, "patrol%") | Sequel.like(:stage, "refactor-patrol%"))
     end
 
+    def patrol_discovery_dataset(dataset, project_slug:, stage:, at:)
+      start_at = Time.utc(at.year, at.month, at.day)
+      dataset.where(
+        project_slug: project_slug, task_slug: stage,
+        source: "patrol_discovery_launch"
+      ).where { started_at >= start_at.iso8601 }
+        .where { started_at < (start_at + 86_400).iso8601 }
+    end
+
+    def validate_patrol_reservation!(row, project_slug:, stage:)
+      valid = row[:source] == "patrol_discovery_launch" &&
+        row[:project_slug] == project_slug && row[:task_slug] == stage
+      return if valid
+
+      raise Hive::RuntimeControlPlane::IntegrityError.new(
+        "Patrol reservation identity conflict", code: :usage_session_conflict
+      )
+    end
+
     def apply_aggregate!(target, row)
       CORE_METRICS.each do |metric|
         target[metric] = integer(row[metric])
@@ -383,6 +475,19 @@ module Hive
       Time.parse(value.to_s).utc.iso8601
     rescue ArgumentError
       value.to_s
+    end
+
+    def normalized_time(value)
+      return value.utc if value.respond_to?(:utc)
+
+      Time.parse(value.to_s).utc
+    end
+
+    def required_text(value, label)
+      text = value.to_s
+      raise ArgumentError, "#{label} is invalid" if text.empty?
+
+      text
     end
 
     def integer(value) = value.to_i

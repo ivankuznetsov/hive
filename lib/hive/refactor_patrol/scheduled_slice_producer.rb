@@ -68,7 +68,8 @@ module Hive
 
       def claim(now: Time.now.utc)
         @directory.prepare!
-        @directory.with_lock(LOCK_FILE) { replay_unconsumed_results(now) }
+        available = @directory.with_lock(LOCK_FILE) { replay_unconsumed_results(now) }
+        return nil unless available
 
         snapshot = @snapshotter.call(entry: @entry, cfg: @cfg)
         validate_snapshot!(snapshot)
@@ -138,12 +139,28 @@ module Hive
       end
 
       def replay_unconsumed_results(now)
-        result_records.each do |record|
+        state = load_state
+        return false if live_claim?(state["claim"])
+
+        records = result_records
+        records.each do |record|
           next if record["consumed_at"]
 
           publish_admission(record)
           mark_result_consumed(record, now)
         end
+        # Results precede admission and cursor persistence. Recover even when
+        # the owner died after marking a result consumed, or released its claim
+        # after admission failed. Sweep generation and feature order only grow.
+        latest = records.max_by { |record| [ record.fetch("sweep_generation"), record.fetch("feature_id") ] }
+        if latest && ([ latest.fetch("sweep_generation"), latest.fetch("feature_id") ] <=>
+                      [ state.fetch("sweep_generation"), state["cursor"].to_s ]).positive?
+          state["cursor"] = latest.fetch("feature_id")
+          state["sweep_generation"] = latest.fetch("sweep_generation")
+          state["updated_at"] = normalize_time(now).iso8601(6)
+          persist(state)
+        end
+        true
       end
 
       def mutate_claim(claim_id, now:)

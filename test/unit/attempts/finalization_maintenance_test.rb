@@ -1,6 +1,4 @@
 require "test_helper"
-require "open3"
-require "rbconfig"
 require "hive/attempts/finalization_maintenance"
 require "hive/attempts/reconciler"
 require "hive/task_action"
@@ -21,7 +19,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       refute subject.promote(terminal)
       assert store.fetch_hot(terminal.attempt_id)
 
-      subject.acknowledge(terminal, :request_delivery)
+      subject.acknowledge(terminal, :dispatch)
       subject.acknowledge(terminal, :accounting)
       assert subject.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
@@ -45,7 +43,10 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       prepare_all(subject, terminal)
 
       refute subject.promote(terminal)
-      assert store.fetch_hot(terminal.attempt_id)
+      assert store.fetch(terminal.attempt_id)
+      restarted = Hive::Attempts::Repository.new(root: store.root, migrate: true)
+      assert_equal terminal.attempt_id,
+                   restarted.active_attempts.find { |attempt| attempt.attempt_id == terminal.attempt_id }&.attempt_id
       writer.close
       assert subject.promote(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
@@ -66,7 +67,8 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       assert_operator early.fetch(:cold_examined), :<=,
                       Hive::Attempts::FinalizationMaintenance::COLD_SWEEP_LIMIT
 
-      expired = subject.sweep_logs(now: NOW + (3 * 86_400) + 4)
+      restarted = maintenance(store)
+      expired = restarted.sweep_logs(now: NOW + (3 * 86_400) + 4)
       assert_equal 1, expired.fetch(:deleted)
       assert_equal :expired, store.log_archive.resolve(terminal.attempt_id).availability
       assert_equal terminal.to_h, store.fetch(terminal.attempt_id).to_h
@@ -145,7 +147,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       2.times { assert subject.prepare(terminal) }
       assert subject.finalize(terminal, now: NOW + 4)
       accounting = store.database.read do |db|
-        db[:attempt_accounting].where(attempt_id: terminal.attempt_id).first
+        db[:attempts].where(attempt_id: terminal.attempt_id).first
       end
       assert_equal 1, accounting.fetch(:refunded)
     end
@@ -173,7 +175,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       refute subject.finalize(terminal, now: NOW + 4)
       assert_equal [ :journal ], order
       assert_equal({
-        "accounting" => false, "journal" => false, "request_delivery" => false
+        "accounting" => false, "journal" => false, "dispatch" => false
       }, store.publication(terminal.attempt_id).fetch("consumers"))
 
       assert subject.finalize(terminal, now: NOW + 5)
@@ -202,32 +204,33 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       pending = store.publication(terminal.attempt_id)
       assert_equal true, pending.dig("consumers", "journal")
       assert_equal true, pending.dig("consumers", "accounting")
-      assert_equal false, pending.dig("consumers", "request_delivery")
+      assert_equal false, pending.dig("consumers", "dispatch")
 
-      assert reconciler.acknowledge_finalization(terminal, :request_delivery)
+      assert reconciler.acknowledge_finalization(terminal, :dispatch)
       assert reconciler.promote_finalization(terminal)
       assert_nil store.fetch_hot(terminal.attempt_id)
     end
   end
 
-  def test_due_maintenance_records_success_and_respects_its_interval
+  def test_maintenance_timing_and_status_are_process_local
     with_repository do |store|
-      terminal = terminal_attempt(store)
       subject = maintenance(store)
-      prepare_all(subject, terminal)
 
-      first = subject.run_if_due(now: NOW + 60)
+      first = subject.sweep_if_due(now: NOW + 60)
       assert first.fetch(:ran)
-      refute maintenance(store).run_if_due(now: NOW + 61).fetch(:ran)
+      refute subject.sweep_if_due(now: NOW + 61).fetch(:ran)
+      restarted = maintenance(store)
+      assert restarted.sweep_if_due(now: NOW + 61).fetch(:ran)
       snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
       assert_equal "healthy", snapshot.fetch("status")
       assert_equal({
-        "promoted" => 1, "deleted" => 0, "cold_examined" => 0
+        "promoted" => 0, "deleted" => 0, "cold_examined" => 0,
+        "errors" => 0
       }, snapshot.dig("maintenance", "last_result"))
     end
   end
 
-  def test_cold_sweep_cursor_resumes_in_a_new_maintenance_instance
+  def test_cold_sweep_cursor_advances_only_within_the_current_process
     with_repository do |store|
       seen = []
       page = Data.define(:attempt_ids, :cursor)
@@ -241,82 +244,119 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       end
       store.define_singleton_method(:log_archive) { archive }
 
-      assert maintenance(store).sweep_if_due(now: NOW).fetch(:ran)
-      assert maintenance(store).sweep_if_due(
+      subject = maintenance(store)
+      assert subject.sweep_if_due(now: NOW).fetch(:ran)
+      assert subject.sweep_if_due(
         now: NOW + Hive::Attempts::FinalizationMaintenance::MAINTENANCE_INTERVAL_SEC
       ).fetch(:ran)
-      assert_equal [ nil, "attempt-1" ], seen.map { |cursor, _limit| cursor.fetch("after") }
+      assert maintenance(store).sweep_if_due(now: NOW).fetch(:ran)
+      assert_equal [ nil, "attempt-1", nil ], seen.map { |cursor, _limit| cursor.fetch("after") }
     end
   end
 
-  def test_maintenance_error_is_visible_to_a_new_instance
+  def test_cold_sweep_stops_at_its_time_budget_and_resumes_after_the_last_examined_row
+    record = Struct.new(:attempt_id) do
+      def final? = true
+      def [](key) = key == "ended_at" ? "2026-08-01T00:00:00Z" : nil
+    end
+    pages = []
+    page = Data.define(:attempt_ids, :cursor)
+    archive = Object.new
+    archive.define_singleton_method(:cold_attempt_ids_page) do |cursor:, **|
+      pages << cursor.fetch("after")
+      ids = cursor.fetch("after") == "attempt-1" ? %w[attempt-2 attempt-3] : %w[attempt-1 attempt-2 attempt-3]
+      page.new(attempt_ids: ids, cursor: { "after" => ids.last })
+    end
+    archive.define_singleton_method(:expire) { |*, **| :expired }
+    store = Object.new
+    store.define_singleton_method(:log_archive) { archive }
+    store.define_singleton_method(:publication) { |_| nil }
+    store.define_singleton_method(:fetch) { |id| record.new(id) }
+    clock_values = [ 0.0, 1.0, 6.0, 10.0, 11.0, 12.0 ]
+    subject = Hive::Attempts::FinalizationMaintenance.new(
+      store: store, task_archived: ->(_) { false },
+      monotonic_clock: -> { clock_values.shift }, maintenance_time_budget_sec: 5
+    )
+
+    first = subject.sweep_logs(now: NOW)
+    second = subject.sweep_logs(now: NOW)
+
+    assert_equal 1, first.fetch(:cold_examined)
+    assert_equal 2, second.fetch(:cold_examined)
+    assert_equal [ nil, "attempt-1" ], pages
+  end
+
+  def test_maintenance_error_is_visible_only_in_the_current_process
     with_repository do |store|
       archive = Object.new
       archive.define_singleton_method(:cold_attempt_ids_page) { |**| raise ArgumentError, "bad page" }
       store.define_singleton_method(:log_archive) { archive }
 
-      assert_raises(ArgumentError) { maintenance(store).sweep_if_due(now: NOW) }
-      snapshot = maintenance(store).storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+      subject = maintenance(store)
+      assert_raises(ArgumentError) { subject.sweep_if_due(now: NOW) }
+      snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
       assert_equal "degraded", snapshot.fetch("status")
       assert_equal "maintenance_failed", snapshot.fetch("degraded_reason")
       assert_equal "ArgumentError", snapshot.dig("last_error", "class")
       assert_equal NOW.iso8601(6), snapshot.dig("last_error", "observed_at")
+      assert_equal "unknown",
+                   maintenance(store).storage_snapshot(
+                     hot_count: 0, invalid_hot_count: 0
+                   ).fetch("status")
     end
   end
 
-  def test_due_claim_serializes_across_processes
-    with_repository do |store|
-      store.database.disconnect
-      script = <<~'RUBY'
-        require "time"
-        require "hive/attempts/finalization_maintenance"
-        database = Hive::RuntimeControlPlane::Database.new(path: ARGV.fetch(0)).open!
-        store = Hive::Attempts::Repository.new(database: database, root: ARGV.fetch(1))
-        STDIN.read(1)
-        result = Hive::Attempts::FinalizationMaintenance.new(store: store)
-          .sweep_if_due(now: Time.iso8601(ARGV.fetch(2)))
-        puts(result.fetch(:ran) ? "1" : "0")
-      RUBY
-      processes = 2.times.map do
-        Open3.popen3(
-          RbConfig.ruby, "-Ilib", "-rbundler/setup", "-e", script,
-          store.database.path, store.root, NOW.iso8601(6)
-        )
-      end
-      processes.each { |stdin, *_rest| stdin.write("x"); stdin.close }
-      outcomes = processes.map { |_stdin, stdout, _stderr, _wait| stdout.read.strip }.sort
-      errors = processes.map { |_stdin, _stdout, stderr, _wait| stderr.read }
-      statuses = processes.map { |_stdin, _stdout, _stderr, wait| wait.value }
-
-      assert_equal %w[0 1], outcomes
-      assert statuses.all?(&:success?), errors.join
+  def test_a_failing_oldest_cleanup_does_not_block_a_later_candidate
+    record = Struct.new(:attempt_id) do
+      def final? = true
+      def [](key) = key == "ended_at" ? "2026-08-01T00:00:00Z" : nil
     end
+    page = Data.define(:attempt_ids, :cursor).new(
+      attempt_ids: %w[bad good], cursor: { "after" => "good" }
+    )
+    archive = Object.new
+    archive.define_singleton_method(:cold_attempt_ids_page) { |**| page }
+    archive.define_singleton_method(:expire) { |id, **| id == "good" ? :expired : :missing }
+    store = Object.new
+    store.define_singleton_method(:log_archive) { archive }
+    store.define_singleton_method(:publication) { |_| nil }
+    store.define_singleton_method(:database) do
+      Struct.new(:diagnostics).new(Struct.new(:ok?, :error).new(true, nil))
+    end
+    store.define_singleton_method(:fetch) do |id|
+      raise Hive::Attempts::RepositoryError, "permanently bad" if id == "bad"
+
+      record.new(id)
+    end
+    subject = Hive::Attempts::FinalizationMaintenance.new(
+      store: store, task_archived: ->(_) { false }
+    )
+
+    result = subject.sweep_if_due(now: NOW)
+    assert_equal 1, result.fetch(:deleted)
+    assert_equal 1, result.fetch(:errors)
+    snapshot = subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+    assert_equal "maintenance_failed", snapshot.fetch("degraded_reason")
+    assert_equal "bad", snapshot.dig("last_error", "attempt_id")
   end
 
-  def test_runtime_wires_provider_health_and_dispatch_delivery_to_the_shared_database
+  def test_runtime_wires_dispatch_delivery_without_provider_health
     with_repository do |store|
       subject = Hive::Attempts::FinalizationMaintenance.runtime(store: store)
-      observer = subject.instance_variable_get(:@provider_health_observer_factory).call
       delivery = subject.instance_variable_get(:@delivery_pending)
 
-      assert_instance_of Hive::ProviderHealth::AttemptObserver, observer
+      refute subject.instance_variable_defined?(:@provider_health_observer_factory)
       refute delivery.call(Struct.new(:attempt_id).new("missing"))
     end
   end
 
-  def test_provider_health_and_delivery_fail_closed_on_collaborator_errors
-    record = Struct.new(:attempt_id) do
-      def explicit_routing? = true
-    end.new("attempt")
-    observer = Object.new
-    observer.define_singleton_method(:observe) { |_| raise Hive::ProviderHealth::Error, "bad" }
-    store = Object.new
+  def test_delivery_fails_closed_on_collaborator_errors
+    record = Struct.new(:attempt_id).new("attempt")
     subject = Hive::Attempts::FinalizationMaintenance.new(
-      store: store, provider_health_observer_factory: -> { observer },
+      store: Object.new,
       delivery_pending: ->(_) { raise Hive::Error, "bad" }
     )
 
-    refute subject.acknowledge_provider_health(record)
     assert subject.send(:delivery_pending?, record)
   end
 
@@ -331,10 +371,9 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       archive = Object.new
       archive.define_singleton_method(:archive) do |_attempt_id|
         changed = terminal.with("diagnostics" => terminal["diagnostics"].merge("changed" => true))
-        payload = Hive::RuntimeControlPlane::Codec.dump_json(changed.to_h)
         store.database.transaction do |db|
           db[:attempts].where(attempt_id: terminal.attempt_id).update(
-            record_json: payload, record_digest: Digest::SHA256.hexdigest(payload)
+            details_json: Hive::RuntimeControlPlane::Codec.dump_json(changed.to_h.slice(*Hive::Attempts::Record::DETAIL_KEYS))
           )
         end
         :archived
@@ -356,7 +395,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     end
 
     broken_store = Object.new
-    broken_store.define_singleton_method(:fetch_hot) do |_|
+    broken_store.define_singleton_method(:publication) do |_|
       raise Hive::Attempts::RepositoryError, "bad"
     end
     subject = Hive::Attempts::FinalizationMaintenance.new(store: broken_store)
@@ -367,50 +406,28 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     refute subject.send(:retention_expired?, record, now: NOW)
 
     pending_store = Object.new
-    pending_store.define_singleton_method(:fetch_hot) { |_| Object.new }
+    pending_store.define_singleton_method(:publication) { |_| Object.new }
     pending_store.define_singleton_method(:publication_complete?) { |_| false }
     pending = Hive::Attempts::FinalizationMaintenance.new(store: pending_store)
     assert pending.send(:recovery_pinned?, record)
   end
 
-  def test_successful_patrol_attempt_closes_its_failure_cohort
-    calls = []
-    store = Object.new
-    store.define_singleton_method(:record_failure_cohort_success) do |**attributes|
-      calls << attributes
-      true
-    end
-    reconciler = Hive::Attempts::FailureCohortReconciler.new(store: store)
-    record = Struct.new(:state, :outcome, :attempt_id) do
-      def [](key) = key == "intended_stage" ? "2-fix" : nil
-    end.new("terminal", "succeeded", "attempt-1")
-    admission = { "workflow" => "patrol_fix", "stage" => "2-fix", "utc_date" => "2026-08-10" }
-
-    assert reconciler.reconcile(record: record, admission: admission)
-    assert_equal [ { attempt_id: "attempt-1", date: "2026-08-10" } ], calls
-  end
-
-  def test_archived_task_lookup_and_loss_successor_checks_are_bounded
+  def test_archived_task_lookup_and_loss_resolution_checks_are_bounded
     record = Struct.new(:attempt_id, :task_generation, :subject) do
       def [](key)
         { "project" => "demo", "task_slug" => "task", "task_id" => "42" }[key]
       end
     end.new("lost", "generation", { "kind" => "task_stage" })
-    successor = Struct.new(:attempt_id, :task_generation, :subject) do
-      def [](key) = key == "predecessor_attempt_id" ? "lost" : nil
-    end.new("successor", "generation", record.subject)
     store = Object.new
-    store.define_singleton_method(:successor_attempt_id) { |**| "successor" }
-    store.define_singleton_method(:fetch) { |_| successor }
     subject = Hive::Attempts::FinalizationMaintenance.new(store: store)
     transition = Object.new
     transition.define_singleton_method(:fetch) do |_|
-      { "status" => "successor_dispatched", "cleanup" => "absent",
-        "successor_attempt_id" => "successor" }
+      { "phase" => "complete", "cleanup" => "absent",
+        "request_id" => "recovery-request" }
     end
 
     with_replaced_singleton_method(Hive::Attempts::LostOutcomeTransition, :new, ->(**) { transition }) do
-      assert_same successor, subject.send(:resolved_loss_successor, record)
+      assert subject.send(:resolved_loss?, record)
     end
     with_replaced_singleton_method(
       Hive::Attempts::LostOutcomeTransition, :new,
@@ -445,6 +462,22 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     assert_equal [ lost ], refunded
   end
 
+  def test_maintenance_error_recording_survives_a_broken_logger
+    with_repository do |store|
+      logger = Object.new
+      logger.define_singleton_method(:event) { |*| raise IOError, "logger failed" }
+      subject = maintenance(store, logger: logger)
+
+      assert_nil subject.send(
+        :record_maintenance_error, IOError.new("sweep failed"),
+        now: NOW, attempt_id: "attempt-1"
+      )
+      assert_equal "IOError",
+                   subject.storage_snapshot(hot_count: 0, invalid_hot_count: 0)
+                     .fetch("last_error").fetch("class")
+    end
+  end
+
   private
 
   def with_repository
@@ -470,7 +503,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     assert subject.prepare(record)
     assert subject.acknowledge(record, :journal)
     assert subject.acknowledge(record, :accounting)
-    assert subject.acknowledge(record, :request_delivery)
+    assert subject.acknowledge(record, :dispatch)
   end
 
   def terminal_attempt(store, exit_status: 0)
@@ -495,7 +528,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
 
   def running_attempt(store)
     launching = store.create_launching(
-      attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+      attempt_id: "attempt-1", request_id: "request-1",
       task_id: "42", project: "demo", task_slug: "task",
       intended_stage: "4-execute", task_generation: "generation-1",
       ownership_generation: "owner-1", task_input_epoch: 1,

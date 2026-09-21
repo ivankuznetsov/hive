@@ -35,7 +35,10 @@ root declares cohesive behavior and lazily exposes larger facets by constant:
   effort, and invocation rules. The generic runtime still materializes output
   schemas; `Hive::Reviewers::Runtime` owns its subprocess and findings writes,
   and the reviewer receives its generic stage host rather than loading
-  orchestration or process custody into the provider package.
+  orchestration or process custody into the provider package. Managed evidence
+  capture resolves Codex's native runtime through the runtime doctor's
+  provenance, so supported npm launchers and shell shims retain the same native
+  executable validation as direct installations.
 - Grok owns its terminal event protocol, auth precedence and environment,
   native model discovery, managed bubblewrap argv, skill/plugin inventory,
   runtime provenance checks, and setup operations.

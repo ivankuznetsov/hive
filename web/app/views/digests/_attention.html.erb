@@ -1,0 +1,44 @@
+<section class="digest-attention" aria-labelledby="digest-attention-heading">
+  <div class="digest-section-heading">
+    <div>
+      <p class="digest-kicker">Act first</p>
+      <h2 id="digest-attention-heading">Needs attention</h2>
+    </div>
+    <span class="digest-count"><%= digest.attention.length + digest.gaps.length %></span>
+  </div>
+
+  <% if digest.attention.empty? && digest.gaps.empty? %>
+    <div class="digest-empty"><p>No blocked, unanswered, failed, or degraded items at this boundary.</p></div>
+  <% else %>
+    <div class="digest-attention-grid">
+      <% digest.attention.each do |item| %>
+        <article class="digest-attention-card digest-attention-<%= item.fetch("kind") %>">
+          <div class="digest-card-heading">
+            <span class="digest-badge"><%= item.fetch("kind").humanize %></span>
+            <span class="digest-meta"><%= item["waiting_age_seconds"] ? relative_age(item["waiting_age_seconds"]) : "Waiting age unavailable" %></span>
+          </div>
+          <h3><%= [item["project"], item["task_slug"]].compact.join(":") %></h3>
+          <p><%= item["stage"] %> · <%= item["state"].to_s.humanize %></p>
+          <% if (destination = item["task_destination"]) %>
+            <%= link_to "Open answer flow",
+                  digest_task_path(destination, anchor: "task-questions"),
+                  class: "digest-action-link" %>
+          <% else %>
+            <p class="digest-historical">Historical project or task · no live action route</p>
+          <% end %>
+        </article>
+      <% end %>
+
+      <% digest.gaps.each do |gap| %>
+        <article class="digest-attention-card digest-gap" data-scope="<%= gap["scope"] %>">
+          <div class="digest-card-heading">
+            <span class="digest-badge digest-badge-partial">Source gap</span>
+            <% if gap["freshness_at"] %><span class="digest-meta">Fresh through <%= digest_time_tag(gap["freshness_at"]) %></span><% end %>
+          </div>
+          <h3><%= gap["source"].to_s.humanize %> · <%= gap["scope"].presence || "global" %></h3>
+          <p><%= gap["reason"] %></p>
+        </article>
+      <% end %>
+    </div>
+  <% end %>
+</section>

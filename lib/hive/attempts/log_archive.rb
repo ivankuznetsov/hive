@@ -180,7 +180,7 @@ module Hive
 
       def expirable_logs(db)
         db[:payload_references].where(kind: "attempt_log").where(
-          Sequel.lit("state IN ('sealed', 'pinned') OR (state = 'releasable' AND retain_until IS NOT NULL)")
+          Sequel.lit("state = 'sealed' OR (state = 'releasable' AND retain_until IS NOT NULL)")
         )
       end
 

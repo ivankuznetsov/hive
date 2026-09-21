@@ -21,6 +21,9 @@ class ConfigBotIntegrationTest < Minitest::Test
     assert_includes rendered, "idea_attachment_max_count"
     assert_includes rendered, "idea_draft_ttl_sec"
     assert_includes rendered, "last_seen_state_file"
+    %w[time_zone coverage_started_at initial_membership first_interval].each do |key|
+      assert_includes rendered, key
+    end
   end
 
   def test_bot_defaults_include_alert_lifecycle_settings

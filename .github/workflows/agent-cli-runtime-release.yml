@@ -46,9 +46,11 @@ jobs:
       - name: Require the installed OpenCode offline contract
         env:
           AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_REQUIRED: "1"
+          AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_ROUTE: opencode/deepseek-v4-flash-free
         run: |
           set -euo pipefail
           npm install --global opencode-ai@1.18.16
+          export AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_BIN="$(command -v opencode)"
           ruby -Icomponents/agent-cli-runtime/test \
             components/agent-cli-runtime/test/opencode_offline_smoke_test.rb
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

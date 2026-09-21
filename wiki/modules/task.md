@@ -100,13 +100,13 @@ For stages 4 and later:
 - `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; explicit migration cannot sanitize dependency evidence by replacing a damaged mapping.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns the installation-scoped
-`task_counters(namespace=tasks)` SQLite row:
+`installations.next_task_id` SQLite column:
 
 - `next!` returns the current value and increments it in one immediate
   transaction, so competing processes cannot duplicate an id.
 - `next_or_nil` returns nil only when the typed runtime-control-plane mutation
   is unavailable, for capture paths repairable by `hive migrate`.
-- `peek` returns the stored next value, defaulting to `1` before first use.
+- `peek` returns the stored next value, inferring a floor above numeric task subject IDs before first use.
 - `seed_at_least!(next_id)` advances the counter floor without moving it backwards.
 
 ## Tests

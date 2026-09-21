@@ -100,7 +100,7 @@ class HiveCommandsBotTest < Minitest::Test
     refute File.exist?(File.join(@home, "attempts")),
            "bot startup must not run attempt migration"
     refute File.exist?(File.join(@home, "recovery-migration-v6.json")),
-           "bot startup must leave migration to hive migrate"
+           "bot startup must leave existing state untouched"
   end
 
   def test_start_ignores_lock_close_failures

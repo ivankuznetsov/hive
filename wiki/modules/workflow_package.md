@@ -13,6 +13,14 @@ tags: [module, workflow-package, honeycomb, registry, permissions, disclosure, m
 
 ## Managed Honeycomb boundary
 
+Package installation and publication run full security scanning. Reads of an
+already installed generation (workflow loading, manifest inspection, integrity
+verification, and configuration reconstruction) do not launch Betterleaks or
+repeat package security lint. They still check the pinned manifest digest, file
+inventory and hashes, filesystem shape, descriptor, and runtime policy. Changed
+installed bytes fail integrity verification rather than being silently rescanned
+and accepted. This keeps package admission work out of routine status scans.
+
 An unchanged `honeycomb-manifest/v1` package normalizes to a one-workflow,
 hook-free `Hive::ModulePackage` with the same immutable identity, mappings,
 inputs, and disclosure. That compatibility relationship does not make this
@@ -70,9 +78,12 @@ weakening owner-authored descriptor compatibility:
   Immutable task reads apply their saved mapping without resolving the process's
   current agent profile, so status and retained history survive later profile
   renames, capability changes, and compatible upgrades. Runtime-context
-  preparation verifies current pin support and the fingerprint for the exact
-  executable slot about to launch; drift therefore remains fail-closed at the
-  side-effect boundary without invalidating unrelated or completed task records.
+  preparation verifies current pin support for the exact executable slot about
+  to launch. Saved profile fingerprints describe installation-time metadata;
+  they do not veto updated executables or compatible adapter changes. Updates
+  preserve the selected agent/model/effort without reconfirming a fingerprint.
+  Runner availability and explicit permission capabilities are still checked
+  by the launch boundary.
   Configuration-only activation against an
   unchanged package generation compares the selected source, manifest, and
   configuration digests before swapping the pointer. Cleanup is serialized
@@ -132,6 +143,14 @@ built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
 all three managed provenance fields.
 
 Honeycomb v2 permission summaries are disclosure data, not executable policy.
+Owner-trusted actors declare `permissions: yolo`. They run directly with the
+ordinary agent environment plus explicit package input bindings, without a
+Hive Bubblewrap wrapper, tool allowlists, private agent home, or JSON-to-file
+adapter. Agents write their stage outputs normally. Package provenance, task
+locks, recovery, and completion validation remain unchanged. Restricted actors
+still use their declared scoped policy; installing from Honeycomb alone is not
+a reason to restrict an explicitly trusted actor.
+
 Managed execution uses each stage/reviewer/reviser descriptor's exact
 `permissions:` block. Install reports explicit `yolo`, scoped shell, and
 unqualified scoped file-write actors without adding a second approval gate; a v2
@@ -219,7 +238,11 @@ The canonical builder emits only `packages/NAME/VERSION/` with generated
 instructions, and declared assets. The manifest owns normalized permissions,
 the complete registry-relative hash map, and `release_sha256`; the final
 manifest byte hash is `package_digest`. The current consumer validator and
-pinned Honeycomb lint contract run before remote access. The installed gem
+pinned Honeycomb lint contract run before remote access. Both import scanning
+and authoring lint delegate credential detection to bundled Betterleaks;
+authoring lint emits the stable `secret.detected` rule without maintaining a
+second credential regex catalog or entropy classifier. Permission, network,
+and personal-data lint remain separate checks. The installed gem
 ships the pinned Markdown corpus and upstream SafeYAML parity cases as runtime
 contract data, so packaged Hive does not depend on the source checkout's test
 tree. Bounded safe-file reads treat a zero-byte regular file as empty bytes;

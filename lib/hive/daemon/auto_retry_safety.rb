@@ -1,5 +1,5 @@
 require "hive/brainstorm_parser"
-require "hive/secret_patterns"
+require "hive/secret_scanner"
 require "hive/task"
 require "hive/worktree"
 
@@ -31,7 +31,7 @@ module Hive
           return [ false, "protected files from the tampered run were not restored" ]
         end
         if SECRET_REASONS.include?(reason)
-          hits = Hive::SecretPatterns.scan(File.binread(row.state_file.to_s))
+          hits = Hive::SecretScanner.scan(File.binread(row.state_file.to_s))
           return [ false, "credential pattern remains in the local PR source" ] if hits.any?
         end
 

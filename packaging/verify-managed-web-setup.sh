@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 HIVE_BIN=""
 WEB_ARCHIVE=""
 WEB_SHA256=""
@@ -66,7 +68,7 @@ mkdir -p "$SERVICE_MANAGER_BIN" "$SANDBOX/home" "$SANDBOX/hive-home" "$SANDBOX/w
 
 case "$(uname -s)" in
   Linux)
-    printf '%s\n' '#!/bin/sh' 'exit 0' > "$SERVICE_MANAGER_BIN/systemctl"
+    cp "$REPO_ROOT/packaging/fixtures/systemctl" "$SERVICE_MANAGER_BIN/systemctl"
     chmod 0755 "$SERVICE_MANAGER_BIN/systemctl"
     SERVICE_MANAGER_COMMAND="systemctl"
     ;;
@@ -135,11 +137,12 @@ ruby -rsocket -rjson -e '
     while (line = socket.gets)
       break if line == "\r\n"
     end
+    File.write(ARGV.fetch(1), "probed")
     body = JSON.generate("ok" => true)
     socket.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}")
     socket.close
   end
-' "$PORT_FILE" >"$SANDBOX/health.log" 2>&1 &
+' "$PORT_FILE" "$SANDBOX/health-probed" >"$SANDBOX/health.log" 2>&1 &
 HEALTH_PID=$!
 
 cleanup() {
@@ -163,6 +166,7 @@ cat > "$SANDBOX/hive-home/config.yml" <<YAML
 web:
   bind: 127.0.0.1
   port: ${HEALTH_PORT}
+  origin: http://127.0.0.1:${HEALTH_PORT}
 YAML
 
 SETUP_JSON="$SANDBOX/setup.json"
@@ -217,6 +221,12 @@ for phase in web_bundle daemon_service web_service web; do
     exit 1
   fi
 done
+
+[[ -s "$SANDBOX/health-probed" ]] || {
+  echo "verify-managed-web-setup: readiness did not probe the isolated health fixture" >&2
+  exit 1
+}
+jq -e --arg url "http://127.0.0.1:$HEALTH_PORT" '.url == $url' "$SETUP_JSON" >/dev/null
 
 PAYLOAD_OK="$(jq -r '.ok | tostring' "$SETUP_JSON")"
 if [[ "$PAYLOAD_OK" == "true" && "$SETUP_RC" -ne 0 ]] || \

@@ -53,7 +53,6 @@ module Hive
         update_nudge_no_command
         version_drift
         daemon_dispatch_baselines_corrupt
-        daemon_dispatch_baselines_lock_error
         daemon_dispatch_baselines_write_error
         daemon_dispatch_baselines_tmp_sweep_error
         daemon_dispatch_baselines_unexpected_error
@@ -81,12 +80,18 @@ module Hive
         attempt_duplicate
         attempt_terminal_replay
         attempt_transient_retry
-        attempt_failure_cohort_deferred
+        attempt_patrol_retry_deferred
         attempt_capacity_deferred
         attempt_route_unavailable
         attempt_legacy_backfilled
         answer_digest_failure_backoff
         answer_digest_state_unreadable
+        daily_digest_close_failure_backoff
+        daily_digest_close_state_unreadable
+        daily_digest_delivery_failure_backoff
+        daily_digest_delivery_state_unreadable
+        daily_digest_scheduler_failure_backoff
+        daily_digest_configuration_disabled
         architecture_patrol_opened
         architecture_patrol_progress
         architecture_patrol_closed

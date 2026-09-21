@@ -203,7 +203,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       result = adapter_for(runner).call(request)
 
-      assert_equal "terminal_failure", result.outcome
+      assert_equal "retryable_failure", result.outcome
       assert_equal request.reviewer, result.route_receipt.fetch("actual")
       assert_equal "different_model_family", result.route_receipt.fetch("independence_reason")
       assert_equal "parser", result.route_receipt.fetch("diagnostic_source")
@@ -270,7 +270,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       result = adapter.call(pi_request)
 
-      assert_equal "terminal_failure", result.outcome
+      assert_equal "retryable_failure", result.outcome
       assert_includes result.diagnostic, "not valid JSON"
     end
   end
@@ -357,7 +357,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
-  def test_output_is_read_with_the_parser_byte_bound
+  def test_oversized_output_is_retryable_with_the_parser_byte_bound
     with_request do |request, _plan_path|
       runner = lambda do |output_path:, **|
         File.binwrite(output_path, "x" * (Hive::PlanReview::ResultParser::MAX_BYTES + 1))
@@ -366,7 +366,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       result = adapter_for(runner).call(request)
 
-      assert_equal "terminal_failure", result.outcome
+      assert_equal "retryable_failure", result.outcome
       assert_includes result.diagnostic, "size limit"
     end
   end
@@ -523,6 +523,29 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
 
       assert_equal "unexpected-model", overridden.dig("actual_route", "model")
       refute overridden.fetch("actual_route").key?("family")
+    end
+  end
+
+  def test_production_runner_uses_main_agent_identity_instead_of_subagent_usage
+    [ "gpt-5.6-sol", nil ].each do |main_model|
+      with_runner do |runner, request, output_path|
+        payload = valid_result(request)
+        replacement = lambda do |_task, expected_output:, **|
+          File.write(expected_output, JSON.generate(payload))
+          { status: :ok, model: main_model, usage: { model: "helper-model" } }
+        end
+        observed = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+          runner.call(prompt: "review", cwd: request.output_directory, output_path:, request:)
+        end
+
+        if main_model
+          assert_equal main_model, observed.dig("actual_route", "model")
+          assert_equal request.reviewer["family"], observed.dig("actual_route", "family")
+        else
+          refute observed.fetch("actual_route").key?("model")
+          refute observed.fetch("actual_route").key?("family")
+        end
+      end
     end
   end
 
@@ -780,24 +803,58 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
           observed
         )
         unless kind == "verification"
+          assert_includes observed, "[a-z][a-z0-9_]{0,63}"
+          assert_match(/Set\s+`residual_evidence` to `\[\]`/, observed)
           rubric_patterns = [
-            /`safe_auto`: one concrete, low-risk, reversible technical correction follows\s+from the plan, product contract, or established repository patterns/,
-            /`gated_auto`: the preferred technical correction is clear, but applying it\s+materially changes architecture, external behavior, compatibility/,
+            /`safe_auto`: one concrete technical correction follows\s+from the plan, product contract, or established repository patterns/,
+            /`gated_auto`: the preferred technical correction is clear, but applying it\s+exceeds the already-authorized requirements by changing architecture, external/,
             /`manual`: a human must supply a choice because the existing contract and\s+repository patterns do not determine a safe answer/,
             /`fyi`: useful information that requires no plan change/
           ]
           rubric_patterns.each { |pattern| assert_match pattern, observed }
-          assert_match(
-            /For the final JSON written to Hive, this rubric is authoritative and overrides\s+any classification, autofix, or routing rubric from an invoked skill/,
-            observed
-          )
+          assert_match(/For the final JSON written to Hive, this rubric is authoritative and overrides\s+any classification, autofix, or routing rubric from an invoked skill/, observed)
           assert_includes observed, "Classification is about decision authority, not severity."
-          assert_match(
-            /Do not use `manual`\s+merely because the plan must choose/,
-            observed
-          )
+          assert_match(/Do not use `manual`\s+merely because the plan must choose/, observed)
         end
       end
+    end
+  end
+
+  def test_decision_triage_validates_complete_bound_dispositions_before_accepting_output
+    with_request do |request, _|
+      source = valid_result(request).fetch("findings").first
+      source = Hive::PlanReview::Finding.new(source.merge("classification" => "gated_auto")).to_h
+      request = request.with(kind: "decision_triage", pending_findings: [ source ], required_coverage: [ "decision_triage" ])
+      rows = [ { "sources" => [ source.fetch("fingerprint") ], "classification" => "safe_auto",
+                "title" => "Test existing behavior", "disposition" => "Add the missing acceptance test",
+                "rationale" => "The delivery requirement already promises this behavior", "boundary" => nil } ]
+      observed = nil
+      extra_findings = []
+      runner = lambda do |prompt:, output_path:, request:, **|
+        observed = prompt
+        output = valid_result(request).merge("findings" => extra_findings, "decision_assessments" => rows)
+        File.write(output_path, JSON.generate(output))
+        { "status" => "ok", "actual_route" => request.reviewer }
+      end
+      adapter = adapter_for(runner)
+      result = adapter.call(request)
+      assert_equal "success", result.outcome
+      assert_equal rows, result.decision_assessments
+      assert_includes observed, "CHANGE\nIN AUTHORIZATION"
+      assert_includes observed, source.fetch("fingerprint")
+      extra_findings << source
+      failed = adapter.call(request)
+      assert_equal "retryable_failure", failed.outcome
+      assert_includes failed.diagnostic, "not findings or verification"
+      extra_findings.clear
+      failed = adapter.call(request.with(kind: "verification"))
+      assert_equal "retryable_failure", failed.outcome
+      assert_includes failed.diagnostic, "only valid during decision triage"
+      rows.clear
+      failed = adapter.call(request)
+      assert_equal "retryable_failure", failed.outcome
+      assert_equal "parser", failed.route_receipt["diagnostic_source"]
+      assert_includes failed.diagnostic, "every pending finding"
     end
   end
 

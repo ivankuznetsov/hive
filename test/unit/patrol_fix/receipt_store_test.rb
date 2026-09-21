@@ -3,6 +3,7 @@ require "tmpdir"
 require "json_schemer"
 require "pathname"
 require "hive/patrol_fix/publication_receipt"
+require "hive/patrol_fix/publication_block_receipt"
 require "hive/patrol_fix/receipt_store"
 
 class PatrolFixReceiptStoreTest < Minitest::Test
@@ -159,8 +160,73 @@ class PatrolFixReceiptStoreTest < Minitest::Test
       )
       assert_equal reopen, store.append!(reopen)
 
+      invalid_stage = Marshal.load(Marshal.dump(reopen))
+      invalid_stage["receipt_id"] = "reopen-invalid-stage"
+      invalid_stage["stage"] = "validate"
+      assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) { store.append!(invalid_stage) }
+
       invalid_time = decision_receipt.merge("receipt_id" => "decision-time", "recorded_at" => "bad")
       assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) { store.append!(invalid_time) }
+    end
+  end
+
+  def test_publication_block_receipt_is_closed_sanitized_and_not_reopenable
+    Dir.mktmpdir do |dir|
+      store = Hive::PatrolFix::ReceiptStore.new(task_folder: dir)
+      block = Hive::PatrolFix::PublicationBlockReceipt.build(
+        task: decision_receipt.fetch("task"),
+        evidence_revision: decision_receipt.fetch("evidence_revision"),
+        blocked_fields: %w[body diff],
+        review_receipt_id: "review-1", fix_receipt_id: "fix-1",
+        validation_receipt_id: "validation-1", head_revision: "1" * 40,
+        diff_digest: "2" * 64, recorded_at: Time.utc(2026, 8, 20, 12)
+      )
+
+      assert_equal block, store.append!(block)
+      assert JSONSchemer.schema(
+        Pathname.new(Hive::Schemas.schema_path("hive-patrol-fix-receipt"))
+      ).valid?(block)
+      refute_includes JSON.generate(block), "ghp_"
+      reordered = block.fetch("payload").merge("blocked_fields" => %w[diff body])
+      assert_equal reordered, Hive::PatrolFix::PublicationBlockReceipt.validate_payload!(reordered)
+      assert_equal Hive::SecretScanner::POLICY_VERSION, block.dig("payload", "secret_policy_version")
+      historical = block.merge("payload" => block.fetch("payload").merge(
+        "secret_policy_version" => "betterleaks-0.0.1"
+      ))
+      Dir.mktmpdir do |historical_dir|
+        historical_store = Hive::PatrolFix::ReceiptStore.new(task_folder: historical_dir)
+        historical_store.append!(historical)
+        assert_equal [ historical ], historical_store.read_all
+      end
+      assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) do
+        store.append!(publication_receipt)
+      end
+
+      reopen = decision_receipt.merge(
+        "receipt_id" => "reopen-publication", "kind" => "reopen", "stage" => "publish",
+        "payload" => {
+          "outcome_receipt_id" => block.fetch("receipt_id"),
+          "operator" => "operator:publication_policy",
+          "carried_receipts" => %w[fix-1 validation-1]
+        }
+      )
+      assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) { store.append!(reopen) }
+
+      [
+        block.merge("payload" => block.fetch("payload").merge("raw" => "ghp_#{'a' * 36}")),
+        block.merge("payload" => block.fetch("payload").merge("blocked_fields" => %w[body body])),
+        block.merge("payload" => block.fetch("payload").merge("blocked_fields" => 42)),
+        block.merge("payload" => block.fetch("payload").merge("blocked_fields" => false)),
+        block.merge("payload" => block.fetch("payload").merge("rework_stage" => "publish"))
+      ].each do |invalid|
+        invalid = Marshal.load(Marshal.dump(invalid))
+        invalid["receipt_id"] = "invalid-#{Digest::SHA256.hexdigest(JSON.generate(invalid))[0, 8]}"
+        Dir.mktmpdir do |invalid_dir|
+          assert_raises(Hive::PatrolFix::ReceiptStore::InvalidReceipt) do
+            Hive::PatrolFix::ReceiptStore.new(task_folder: invalid_dir).append!(invalid)
+          end
+        end
+      end
     end
   end
 
@@ -223,5 +289,22 @@ class PatrolFixReceiptStoreTest < Minitest::Test
         "head_revision" => "b" * 40
       }
     }
+  end
+
+  def publication_receipt
+    Hive::PatrolFix::PublicationReceipt.build(
+      task: { "slug" => "repair-login-260820-abcd", "generation" => 1 },
+      evidence_revision: { "generation" => 1, "digest" => "a" * 64 },
+      publication: {
+        "publication_id" => "pub-#{'1' * 32}", "number" => 42,
+        "url" => "https://github.com/acme/demo/pull/42",
+        "host" => "github.com", "repository" => "acme/demo",
+        "base_branch" => "main", "creation_base_oid" => "1" * 40,
+        "branch" => "hive/repair-login", "head_oid" => "2" * 40,
+        "diff_digest" => "3" * 64, "title_digest" => "4" * 64,
+        "body_digest" => "5" * 64, "marker_digest" => "6" * 64,
+        "hosted_state" => "open", "observed_at" => "2026-08-20T12:02:00Z"
+      }
+    )
   end
 end

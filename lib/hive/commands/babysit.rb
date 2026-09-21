@@ -39,18 +39,6 @@ module Hive
         @quiet = quiet
       end
 
-      # Move a previously supported detached babysitter under the service
-      # manager before enabling the managed unit. Reuse the normal stop path
-      # so PID ownership and the active-repair drain have one policy.
-      def self.prepare_service_takeover!(installer:, hive_home: Hive::Paths.state_home)
-        state = installer.service_lifecycle_state
-        return unless state["service_manager_available"]
-        return if state["service_running"]
-        return unless File.exist?(File.join(hive_home, ".babysitter.pid"))
-
-        new("stop", hive_home: hive_home, quiet: true).call
-      end
-
       def call
         return run_once if @once
 
@@ -84,9 +72,9 @@ module Hive
       def install_babysitter
         require "hive/commands/babysit/service_installer"
         installer = Hive::Commands::Babysit::ServiceInstaller.new(
-          binary_path: Hive::InvokedBinary.path
+          binary_path: Hive::InvokedBinary.path,
+          hive_home: @hive_home
         )
-        self.class.prepare_service_takeover!(installer: installer, hive_home: @hive_home)
         perform_service_install(installer)
       end
 

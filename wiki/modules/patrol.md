@@ -108,20 +108,13 @@ first authoritative mutation; read-only queries do not create state.
 ## Scheduling and capacity
 
 Patrol is opt-in and coding-workflow-only. Ordinary and Architecture scheduled
-discovery have separate per-project, per-engine daily launch allowances.
-`UsageDb` is telemetry, not admission authority. Provider resource exhaustion
-parks only the affected lane.
-
-Allowance reservations and provider holds are typed `patrol_allowances` rows
-keyed by stable registered `project_id`, engine/kind, and window. The project id
-is injected by discovery callers or resolved from `projects.observed_path` /
-`state_root_path`; basename is never an identity fallback. An immediate Sequel
-transaction makes reservation-id idempotency, used-count increment, and lane
-limit enforcement atomic across daemon processes. Reservation ids, legacy
-seed counts, and seed arrays are bounded to 10,000 entries. Legacy UsageDb
-seeding happens before the SQL transaction; an unavailable or ambiguous seed
-fails closed without a compatibility file. Telemetry reservation/finalization
-also stays outside SQL transactions.
+discovery have separate per-project, per-engine daily launch allowances. Each
+allowance is derived from unique `patrol_discovery_launch` reservations in
+`token_usage` for the current UTC date. One immediate transaction recognizes an
+existing session reservation before counting and inserting a new zero-token
+row, so retries are idempotent and concurrent daemon processes cannot
+oversubscribe the limit. The next UTC date resets naturally. Provider failures
+do not create lane holds or other durable usability state.
 
 The Patrol arbiter alternates ready ordinary and architecture candidates under
 `daemon.max_concurrent_patrol_scans`. Candidate discovery is read-only;
@@ -248,9 +241,10 @@ failure frame. Invalid Fix reports emit `fix_report_invalid`; invalid reports
 from the other managed stages emit `agent_report_invalid`. Silent failures
 receive a supervisor-authored terminal diagnostic. The first-party controller
 also publishes semantic failure facts before reraising known worktree head
-drift, dirty worktrees, validation mutation, publication secret blocks, and
-Hive-state Git index-lock conflicts, so those failures retain their typed
-cohort codes even when no managed agent seam ran.
+drift, dirty worktrees, validation mutation, and Hive-state Git index-lock
+conflicts, so those failures retain their typed cohort codes even when no
+managed agent seam ran. Publication secret blocks instead use the sanitized
+terminal receipt below and do not fail the attempt.
 
 Independent review hashes the bounded Git diff as raw bytes, then validates and
 labels a copy as UTF-8 before placing it in the canonical prompt context. Valid
@@ -263,6 +257,20 @@ intent, remote reconciliation, expected-absence leases, and exact hosted
 observation. Discovery code has no remote mutation authority. Escalation creates
 one linked standard coding task through `TaskCapture`; it does not create a
 GitHub issue.
+
+A Patrol Fix `secret_detected` publication refusal parks that exact generation.
+Publish appends one sanitized `publication_block` receipt containing safe field
+names, evidence receipt IDs, HEAD/diff hashes, the policy version, and a fixed
+summary. It never stores matched secrets or source snippets. No authentication,
+push, or PR creation occurs before this block. The `diff` field covers the full
+commit range, including secrets removed from the final diff. Repeated runs
+return the existing park without remote calls or cleanup. Status names the
+operator as owner; daemon dispatch and ordinary retry cannot release it.
+
+There is no publication-specific reopen action or routing back to earlier
+stages. The operator must correct the source problem before starting a new
+task through the normal workflow. Historical secrets require cleaning history,
+not merely editing the latest file. The old blocked generation stays parked.
 
 ## One-time historical import
 
@@ -302,6 +310,8 @@ the standard task projections.
 - No legacy Patrol fixer, issue filer, PR opener, review handoff, action runner,
   or publication engine is runnable.
 - Remote PR publication goes through `Hive::GithubPublication`.
+- Secret-policy publication blocks are append-only, operator-owned, and cannot be
+  released by ordinary retry or automatic stage routing.
 - Generic `hive run` auto-rebase never runs for a controller workflow; exact
   checkout movement belongs to the controller's receipts and transitions.
 - Historical import is explicit, local, one-time, and never daemon-triggered.
@@ -317,3 +327,9 @@ the standard task projections.
 - [[modules/daemon]]
 - [[state-model]]
 - [[testing]]
+
+### Credential-bearing URLs in publication evidence
+
+Patrol Fix PR bodies omit URL userinfo from copied review and finding evidence.
+Original task receipts remain unchanged. Betterleaks still checks the generated
+body and exact commit range before publication; other detected secrets block.

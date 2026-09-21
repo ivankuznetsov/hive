@@ -22,6 +22,7 @@ require "hive/workflow_package/mutation_lock"
 require "hive/tui/text"
 require "hive/dependencies"
 require "hive/worktree"
+require "hive/daily_digest/task_creation_receipt"
 
 module Hive
   module Commands
@@ -211,7 +212,8 @@ module Hive
               name: :waiting,
               attrs: { "decision_id" => SecureRandom.hex(8) }
             } : nil,
-            git_ops: ops
+            git_ops: ops,
+            project: project
           ).call
           unless result.created
             return emit_task_result(result.folder, workflow, created: false)
@@ -225,7 +227,7 @@ module Hive
           task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
           depends_on: depends_on, base_branch: base_branch,
           workflow_info: workflow_info, hive_state: hive_state,
-          idempotency_key: nil, input_fingerprint: nil
+          idempotency_key: nil, input_fingerprint: nil, project: project
         )
         Hive::Lock.with_commit_lock(hive_state) do
           begin
@@ -243,7 +245,7 @@ module Hive
 
       def create_task_candidate!(task_dir, slug:, entry_stage:, workflow:, depends_on:, base_branch:,
                                  workflow_info:, hive_state:, idempotency_key:, input_fingerprint:,
-                                 stable_selection: :unlocked)
+                                 stable_selection: :unlocked, project:)
         created = false
         FileUtils.mkdir_p(File.dirname(task_dir))
         Dir.mkdir(task_dir)
@@ -259,12 +261,18 @@ module Hive
         copy_attachments!(task_dir)
         validate_stable_authored_workflow!(workflow_info, hive_state)
         id = Hive::TaskCounter.next_or_nil
-        write_task_meta(
+        metadata = write_task_meta(
           task_dir, id: id, slug: slug, depends_on: depends_on,
           base_branch: base_branch, workflow: workflow,
           workflow_info: workflow_info, hive_state: hive_state,
           idempotency_key: idempotency_key, input_fingerprint: input_fingerprint,
           stable_selection: stable_selection
+        )
+        Hive::DailyDigest::TaskCreationReceipt.write!(
+          task_folder: task_dir, project: project,
+          task: { "id" => metadata[:id], "slug" => slug },
+          workflow: workflow.id.to_s, stage: entry_stage.dir,
+          created_at: Time.now.utc
         )
       rescue Errno::EEXIST
         if created

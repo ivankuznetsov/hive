@@ -361,10 +361,8 @@ module Hive
         self.class.validate_pin_support!(
           profile, slot.id, model: mapping["model"], effort: mapping["effort"]
         )
-        unless mapping.fetch("profile_fingerprint") == self.class.profile_fingerprint(profile)
-          raise Hive::ConfigError,
-                "managed workflow agent profile drifted for #{slot.id}; reinstall or update the workflow mapping"
-        end
+        # The saved fingerprint describes installation time, not permission to
+        # use an updated runner. Current capabilities are checked at launch.
         mapping
       end
 

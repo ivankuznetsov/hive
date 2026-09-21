@@ -2,15 +2,31 @@
 # Focused test runner for agent sandboxes and developer shells alike.
 #
 #   bin/test test/unit/foo_test.rb [more files...] [-- seed options]
+#   bin/test --changed [--base REF] [--list] [-- minitest options]
+#   bin/test --all                 # bounded local parallel suite
 #
 # Prefers the project bundle; falls back to plain ruby when bundler is
 # absent or the bundle is not installed (common in minimal agent sandboxes).
 set -euo pipefail
 
+if [[ "${1:-}" == "--all" ]]; then
+  shift
+  if [[ $# -gt 0 ]]; then
+    echo "bin/test --all: use HIVE_TEST_WORKERS and TESTOPTS for suite options" >&2
+    exit 1
+  fi
+  exec bundle exec rake test:parallel
+fi
+
+if [[ "${1:-}" == "--changed" ]]; then
+  shift
+  exec bundle exec ruby script/test_changed.rb "$@"
+fi
+
 # Ruby executes only the first file argument; the rest become ARGV and are not
 # loaded. Use one tiny loader so every leading test file is required while the
 # remaining flags stay available to Minitest.
-runner='files = ARGV.take_while { |arg| !arg.start_with?("-") }; abort "bin/test: provide at least one test file" if files.empty?; ARGV.shift(files.length); files.each { |path| require File.expand_path(path) }'
+runner='files = ARGV.take_while { |arg| !arg.start_with?("-") }; abort "bin/test: provide at least one test file" if files.empty?; ARGV.shift(files.length); Thread.current[:hive_test_requested_files] = files; files.each { |path| require File.expand_path(path) }'
 
 if command -v bundle >/dev/null 2>&1 && bundle check >/dev/null 2>&1; then
   exec bundle exec ruby -Itest -Ilib -e "$runner" "$@"

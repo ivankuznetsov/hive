@@ -84,10 +84,6 @@ module Hive
             end
             next if @mapping_overrides.key?(id)
 
-            current_profile = Hive::AgentProfiles.lookup(mapping.fetch("agent"), cfg: @cfg)
-            unless mapping.fetch("profile_fingerprint") == Hive::WorkflowPackage::Configuration.profile_fingerprint(current_profile)
-              raise Hive::ConfigError, "agent profile drifted for #{id}; provide an explicit mapping override to reconfirm"
-            end
             out[id] = mapping.slice("agent", "model", "effort")
           end
         end

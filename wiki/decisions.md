@@ -4,7 +4,7 @@ type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
 updated: 2026-08-30
-tags: [decisions, adr, plan-review]
+tags: [decisions, adr, plan-review, daily-digest]
 ---
 
 **TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — producers now submit SQLite dispatch rows that the daemon consumes, making it the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision.
@@ -205,7 +205,7 @@ behavior is covered in [[commands/web]].
 
 The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). Current producers emit `hive-dispatch-request.v5`. V5 carries generation intent for ordinary delivery and, for recovery, canonical task/stage identity plus marker-bound failures, markerless provider-admission observations, or markerless controller failures, all on the crash-restartable `admitted → cleared → dispatched → terminal` lifecycle. Runtime readers accept v5 SQL rows only; the irreversible fleet cutover discards pending v1-v4 file deliveries rather than importing them. Recovery requests never use a sequence sidecar or adapter-owned clear/run pair.
 
-The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
+The allowlist is closed: `run develop brainstorm plan plan-review-run review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the positional `argv` constraint (`prefixItems` verb enum plus the `daemon`/`evidence` `allOf` branches) in `schemas/hive-dispatch-request.v4.json` and `hive-dispatch-request.v5.json` in lockstep — `SchemaFilesTest#test_dispatch_request_schemas_enforce_positional_argv_allowlist` asserts the cross-list equality and that both schemas reject non-`hive` argv.
 
 **Relationship to ADR-026:** ADR-026's "subprocess caller" model still holds for the **non-queue-routable** verbs that don't bump task-state mtime: `hive status`, `hive doctor`, `hive new`, `hive approve`, `hive accept-finding`, `hive reject-finding`. The bot's `ChildSupervisor#dispatch` continues to spawn those directly via `Process.spawn`. The line is drawn at "does this verb's child write to the task state file?" — if yes, queue-route; if no, direct-spawn.
 
@@ -681,7 +681,7 @@ that earlier decision remains useful history but is no longer current policy.
 
 ## ADR-040: PR digests live outside Hive
 
-**Status:** Active
+**Status:** Partially superseded by ADR-052
 
 **Context:** PRDigest now has two purposeful surfaces: canonical JSON facts for
 agents and provider-written prose for standalone delivery. Hive's adapter and
@@ -698,6 +698,10 @@ rejected when the Hive daemon starts, with those migration commands.
 **Consequences:** Hive has no PR-digest command, cursor, catch-up policy, result
 envelope, or runtime coupling. The unrelated Hive answer digest remains. ADR-030
 and ADR-031 describe removed behavior and are superseded by this decision.
+ADR-052 later reuses the `hive digest` command name for a broader Hive-owned
+activity record, while preserving this decision's absence of a PRDigest runtime
+dependency, its authority boundaries, and its rejection of the retired
+`digest:` block.
 
 ## ADR-041: Released JobStore v2 is an explicit opaque fresh start
 
@@ -875,6 +879,60 @@ Web consume one projection. Existing coding tasks already in execute are
 adopted with an explicit compatibility receipt rather than retroactively
 blocked. See [[modules/plan_review]], [[stages/plan]], and [[stages/execute]].
 
+## ADR-052: Hive owns one durable host-global daily activity record
+
+**Status:** Superseded by the readable PRDigest document integration described in [[modules/daily-digest]]. The following records the earlier workflow-event design.
+
+**Context:** Current status is intentionally present-focused, while project
+task folders, PR observations, CI outcomes, and logs have different scopes and
+retention. Reconstructing a day from those surfaces is lossy and makes an
+external prose generator look authoritative. ADR-040 correctly removed the
+PRDigest runtime adapter, but its blanket removal of a Hive digest also left no
+durable cross-project answer to what advanced, completed, failed, recovered,
+or still needs operator input.
+
+**Decision:** Hive owns one versioned host-global daily activity projection
+under its state home. A newly initialized `daily_digest:` global block persists
+an IANA zone, coverage frontier, initial registry membership, and first
+half-open UTC interval before enablement; the retired top-level `digest:` block
+remains rejected. Open bases may be atomically refreshed. The first
+materialization after the persisted boundary closes the base permanently, and
+all late facts, corrections, and gap recoveries are immutable idempotent
+amendments. Zone changes begin exactly at the previous fixed boundary and use
+monotonic interval identity, so history never moves.
+
+One materiality classifier consumes Hive-owned task, journal, publication,
+operational-transition, and registry-history evidence. Per-source failures
+produce bounded gaps while healthy sources continue. GitHub is fail-soft only
+when required PR evidence cannot be established locally; PRDigest is never
+called and has no authority. Any future PRDigest integration must remain
+optional, provenance-tagged enrichment and non-authoritative; V1 exposes no
+adapter or runtime hook. A single pure reader supplies CLI JSON/text,
+authenticated Web, Telegram rendering, and canonical agent guidance. Project
+filters are views, not new records. Question text and answer bindings are
+excluded at serialization.
+
+The authenticated surface remains private and single-operator: this decision
+adds no team identity, team ACL, or per-project reader ACL. Agent-managed
+schedule/destination/delivery-status policy and an MCP-specific wrapper are
+deferred beyond V1; agents consume the CLI JSON contract. This feature grants
+no release, publication, deployment, or version-selection authority.
+
+The daemon owns open refresh, chronological catch-up, close, and recovery on an
+independent capacity identity. Telegram recap delivery is separately opt-in,
+uses its own scheduler and intent/outcome ledger, targets the preceding closed
+interval, suppresses complete empty days, and cannot gate publication. Reads
+never deliver or materialize. Explicit pruning removes only closed projection
+bytes, retaining tombstone, delivery, and underlying task/attempt/PR evidence.
+
+**Consequences:** `hive digest` once again exists, but it is not the removed
+PR-only adapter described by ADR-030/031/040. Historical completeness and
+content are explicit, partial days remain useful, late knowledge is auditable,
+and zone reconfiguration cannot rewrite history. Durable coverage begins only
+after initialization; pre-feature days are typed missing rather than invented.
+Telegram ambiguity requires an explicit operator retry. See
+[[modules/daily-digest]] and [[commands/digest]].
+
 ## Source
 
 Once `git log` accumulates real history, future updates should add ADRs from substantive merge commits or refactor messages.
@@ -887,3 +945,12 @@ Once `git log` accumulates real history, future updates should add ADRs from sub
 - [[stages/execute]]
 - [[commands/bot]] · [[modules/bot]]
 - [[commands/findings]] · [[modules/task_action]]
+
+## Current-format-only runtime (2026-09-09)
+
+Hive supports only current formats. This supersedes historical requirements for
+automatic project migration, fleet cutover, old wire-schema compatibility and
+historical upgrade survivor lanes. Current setup, database integrity, task journal
+recovery, workflow-package upgrades and source-state visibility remain required.
+Old installations use the external agent conversion guide with verified backups.
+Current release artifact authenticity and native install checks remain required.

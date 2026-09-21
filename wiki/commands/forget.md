@@ -3,7 +3,7 @@ title: hive forget
 type: command
 source: lib/hive/commands/forget.rb
 created: 2026-05-06
-updated: 2026-05-27
+updated: 2026-09-02
 tags: [command, registry, cleanup, json]
 ---
 
@@ -84,7 +84,7 @@ For the bulk-of-stale-entries case, prefer `hive prune`. The TUI grid Shift+X ke
 | `config` | 78 | malformed `config.yml` or missing `$HIVE_HOME` |
 | `internal` | 70 | uncategorised crash |
 
-External consumers validate against `schemas/hive-forget.v1.json`; resolve via `Hive::Schemas.schema_path("hive-forget")`.
+External consumers validate against `schemas/hive-forget.v1.json`; resolve via `Hive::Schemas.schema_path("hive-forget")`. Pre-dispatch argv failures use the same envelope with `error_kind: "usage"`. If command-level error-envelope encoding raises `JSON::GeneratorError`, forget warns on stderr, emits no substitute document, and re-raises the original typed failure.
 
 ## Idempotency
 

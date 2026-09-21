@@ -1,3 +1,4 @@
+<% display_fresh = local_assigns.fetch(:status_display_fresh, status_fresh) %>
 <div id="status-board" class="kanban-board">
   <% if board.empty? %>
     <div class="empty-state">
@@ -18,13 +19,6 @@
           <span class="muted"><%= pluralize(band.task_count, "task") %></span>
         </header>
 
-        <% if band.hidden_archived_task_count.positive? %>
-          <p class="archive-summary">
-            <%= link_to hidden_archive_summary(band.hidden_archived_task_count),
-                  archive_path(project: band.project.name) %>
-          </p>
-        <% end %>
-
         <% if band.unavailable? %>
           <div class="state-banner state-banner-error kanban-band-warning" role="status">
             <%= band.availability_message %>
@@ -33,15 +27,28 @@
 
         <div class="kanban-columns" aria-label="<%= band.project.name %> <%= band.workflow_id %> workflow">
           <% band.columns.each do |column| %>
+            <% folded = column.folded_by_default? && !(local_assigns[:expand_completed] && column.tasks.any?) %>
             <% column_id = stable_dom_id("kanban-column", band.project.name, band.workflow_id, column.stage) %>
             <% heading_id = "#{column_id}-heading" %>
-            <section id="<%= column_id %>" class="kanban-column" data-stage="<%= column.stage %>" aria-labelledby="<%= heading_id %>">
+            <section id="<%= column_id %>" class="kanban-column <%= "is-folded" if folded %>"
+                     data-stage="<%= column.stage %>" aria-labelledby="<%= heading_id %>"
+                     data-controller="kanban-column" data-action="turbo:morph-element->kanban-column#restore"
+                     data-kanban-column-default-folded-value="<%= folded %>"
+                     data-kanban-column-label-value="<%= column.label %>">
               <header class="kanban-column-header">
-                <h3 id="<%= heading_id %>"><%= column.label %></h3>
-                <span class="kanban-count" aria-label="<%= pluralize(column.tasks.size, "task") %>"><%= column.tasks.size %></span>
+                <h3 id="<%= heading_id %>">
+                  <button type="button" class="kanban-column-toggle" data-kanban-column-target="toggle"
+                          data-action="kanban-column#toggle" aria-controls="<%= column_id %>-cards"
+                          aria-expanded="<%= !folded %>"
+                          aria-label="<%= folded ? "Expand" : "Fold" %> <%= column.label %> column">
+                    <span class="kanban-column-label"><%= column.label %></span>
+                    <span class="kanban-count" aria-label="<%= pluralize(column.tasks.size, "task") %>"><%= column.tasks.size %></span>
+                    <span class="kanban-fold-icon" aria-hidden="true">‹</span>
+                  </button>
+                </h3>
               </header>
 
-              <div class="kanban-cards">
+              <div id="<%= column_id %>-cards" class="kanban-cards" data-kanban-column-target="cards" <%= "hidden" if folded %>>
                 <% if column.tasks.empty? %>
                   <p class="kanban-empty">No tasks</p>
                 <% else %>
@@ -49,22 +56,20 @@
                     <article id="<%= stable_dom_id("kanban-card", band.project.name, task.slug) %>"
                              class="kanban-card" data-task-slug="<%= task.slug %>">
                       <div class="kanban-card-heading">
-                        <%= status_dot(task) %>
-                        <%= link_to task.title, task_path(band.project.name, task.slug) %>
+                        <%= status_dot(task, fresh: display_fresh) %>
+                        <%= link_to task.title, task_path(band.project.name, task.slug, source: ("archive" if local_assigns[:archived] || task["archive_source"])) %>
                       </div>
-                      <p class="task-slug"><%= task.slug %></p>
+                      <% display = TaskDisplay.new(task, fresh: display_fresh) %>
                       <div class="kanban-card-meta">
-                        <span><%= task.status_label %></span>
-                        <span class="faint"><%= relative_age(task["age_seconds"]) %></span>
+                        <span><%= display.label %></span>
+                        <span class="faint"><%= "Updated #{relative_age(task["age_seconds"])}" %></span>
                       </div>
-                      <% if (owner = task.dig("implementation_identity", "stages", "execute")) %>
-                        <p class="kanban-owner faint" title="Implementation owner">
-                          <%= owner["provider"] %>/<%= truncate(owner["model"], length: 22) %>
-                        </p>
+                      <% if display.detail.present? && !%w[running completed paused].include?(display.state) %>
+                        <p class="task-state-detail"><%= truncate(display.detail, length: 180) %></p>
                       <% end %>
                       <%= render "tasks/primary_actions", task:,
                             daemon_enabled: band.daemon_enabled, compact: true,
-                            mutations_enabled: status_fresh %>
+                            mutations_enabled: status_fresh && !task["archive_source"] %>
                     </article>
                   <% end %>
                 <% end %>

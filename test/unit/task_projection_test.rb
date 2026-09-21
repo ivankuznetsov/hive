@@ -177,7 +177,7 @@ class TaskProjectionTest < Minitest::Test
     end
   end
 
-  def test_causal_attempt_lookup_uses_self_contained_provenance
+  def test_projection_does_not_publish_attempt_lineage
     records = [
       event(event_id: "attempt-a", attempt_id: "attempt-a"),
       event(event_id: "attempt-b", attempt_id: "attempt-b",
@@ -190,8 +190,9 @@ class TaskProjectionTest < Minitest::Test
       marker: nil, registry: Hive::Conditions::Registry.default
     )
 
-    assert projection.send(:attempt_descends_from?, "attempt-c", "attempt-a")
-    refute projection.send(:attempt_descends_from?, "attempt-a", "attempt-c")
+    projected = projection.project.to_h
+    refute_includes JSON.generate(projected), "predecessor_attempt_id"
+    refute projection.respond_to?(:attempt_descends_from?, true)
   end
 
   def test_implementation_identity_projection_retains_generations_and_first_stage_selection

@@ -10,7 +10,6 @@ module Hive
 
     DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS = 3
     NEVER_ARCHIVE_VISIBILITY_RETENTION = :never
-    DEFAULT_ARCHIVE_VISIBILITY_RETENTION = Object.new.freeze
 
     # Unspecified-default kinds derive no runner; see Stage#execution_strategy.
     GENERIC_KIND_STRATEGIES = { agent: :agent, council: :council, controller: :controller }.freeze
@@ -95,20 +94,16 @@ module Hive
     end
 
     def initialize(id:, stages:,
-                   archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION,
+                   archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS,
                    result: nil, controller: nil)
+      retention = normalize_archive_visibility_retention(
+        archive_visibility_retention_days, workflow_id: id
+      )
       # Shallow freeze: the element Stages stay shared with the caller, which is
       # safe only because Stage is itself frozen. This dup does NOT deep-copy.
       frozen_stages = stages.dup.freeze
       normalized_result = frozen_stages.empty? ? result : normalize_result(
         result, frozen_stages, workflow_id: id
-      )
-      if archive_visibility_retention_days.equal?(DEFAULT_ARCHIVE_VISIBILITY_RETENTION)
-        archive_visibility_retention_days = normalized_result&.kind == :document ?
-          NEVER_ARCHIVE_VISIBILITY_RETENTION : DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS
-      end
-      retention = normalize_archive_visibility_retention(
-        archive_visibility_retention_days, workflow_id: id
       )
       super(
         id: id, stages: frozen_stages,
@@ -155,6 +150,14 @@ module Hive
     # built each call, so freezing it can't surprise a caller.
     def stage_names = map(&:name).freeze
     def stage_dirs = map(&:dir).freeze
+    # Every nonterminal stage may hold live work. A terminal inert stage never
+    # can: it has no runner and TaskAction classifies it as archived on entry.
+    # Other terminal kinds remain potentially active until their completion
+    # contract succeeds, so routine status must continue scanning them.
+    def active_stage_dirs
+      dirs = stage_dirs
+      stages.last.kind == :inert ? dirs[0...-1].freeze : dirs
+    end
     def draft_pr_handoff? = any? { |stage| stage.handoff == :draft_pr }
     def controller? = !controller.nil?
 

@@ -16,7 +16,7 @@ require "hive/commands/daemon/service_installer"
 require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/commands/web/service_installer"
-require "hive/runtime_control_plane/cutover"
+require "hive/runtime_control_plane/installation"
 
 # End-to-end coverage of the `hive setup` orchestrator (lib/hive/commands/setup.rb):
 # #call phase ordering, the --no-bootstrap / --no-init / --service branches, each
@@ -40,6 +40,20 @@ class SetupOrchestratorTest < Minitest::Test
     refute Hive::Commands::Setup.new(input: interactive).send(:unattended_without_yes?)
     assert Hive::Commands::Setup.new(input: noninteractive).send(:unattended_without_yes?)
     assert Hive::Commands::Setup.new(input: closed).send(:unattended_without_yes?)
+  end
+
+  def test_daily_digest_initialization_failure_is_advisory
+    error = StringIO.new
+    setup = Hive::Commands::Setup.new(error: error)
+    with_replaced_singleton_method(
+      Hive::DailyDigest::Migration,
+      :ensure!,
+      -> { raise Hive::DailyDigest::Migration::InitializationError, "zone unavailable" }
+    ) do
+      assert_nil setup.send(:initialize_daily_digest)
+    end
+
+    assert_match(/daily digest remains disabled: zone unavailable/, error.string)
   end
 
   # ── diagnostics fakes ────────────────────────────────────────────────
@@ -78,7 +92,7 @@ class SetupOrchestratorTest < Minitest::Test
 
   # ── installer / init fakes ───────────────────────────────────────────
 
-  FakeOutcome = Struct.new(:success, :wire) do
+  FakeOutcome = Struct.new(:success, :wire, :restarted) do
     def success?
       success
     end
@@ -91,7 +105,7 @@ class SetupOrchestratorTest < Minitest::Test
   def fake_installer(success: true, wire: "written", target_path: "/tmp/unit.service", messages: [ "note" ],
                      state: nil)
     installer = Object.new
-    installer.define_singleton_method(:install!) { |**_kw| FakeOutcome.new(success, wire) }
+    installer.define_singleton_method(:install!) { |**_kw| FakeOutcome.new(success, wire, false) }
     installer.define_singleton_method(:target_path) { target_path }
     installer.define_singleton_method(:messages) { messages }
     observed = state || {
@@ -164,8 +178,8 @@ class SetupOrchestratorTest < Minitest::Test
                     )
                     with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
                       ->(**_kw) { status }) do
-                      runtime = Struct.new(:phase, :database_path).new("active", "/runtime.sqlite3")
-                      with_replaced_singleton_method(Hive::RuntimeControlPlane::Cutover, :bootstrap,
+                      runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" } }
+                      with_replaced_singleton_method(Hive::RuntimeControlPlane::Installation, :setup,
                         ->(**) { runtime }) do
                         stub_web_config { yield }
                       end
@@ -443,7 +457,7 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal %w[diagnostics agent_skills web_bundle runtime_control_plane daemon_service babysitter_service web_service web], names
   end
 
-  def test_setup_does_not_accept_a_healthy_but_unactivated_runtime_database
+  def test_setup_accepts_a_healthy_runtime_database_without_a_manifest
     with_tmp_dir do |root|
       path = File.join(root, "runtime-control-plane.sqlite3")
       Hive::RuntimeControlPlane::Database.new(path: path).migrate!.disconnect
@@ -456,8 +470,8 @@ class SetupOrchestratorTest < Minitest::Test
       end
 
       phase = setup.instance_variable_get(:@phases).last
-      refute phase.fetch("ok")
-      assert_includes phase.fetch("message"), "active cutover manifest"
+      assert phase.fetch("ok")
+      assert_equal "active", phase.fetch("phase")
     end
   end
 
@@ -739,8 +753,11 @@ class SetupOrchestratorTest < Minitest::Test
     setup = Hive::Commands::Setup.new(output: StringIO.new)
     setup.instance_variable_set(:@web_bundle_refreshed, true)
     installer = fake_installer(success: true, wire: "unchanged")
-    restart_calls = 0
-    installer.define_singleton_method(:restart!) { restart_calls += 1; true }
+    install_calls = []
+    installer.define_singleton_method(:install!) do |**kwargs|
+      install_calls << kwargs
+      FakeOutcome.new(true, "unchanged", true)
+    end
     state = installer.service_state.merge(
       "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
     )
@@ -753,7 +770,11 @@ class SetupOrchestratorTest < Minitest::Test
       end
     end
 
-    assert_equal 1, restart_calls
+    assert_equal [ {
+      autostart: true,
+      force: false,
+      restart_if_running: true
+    } ], install_calls
     assert_equal true, setup.instance_variable_get(:@phases).last["restarted"]
   end
 
@@ -1025,19 +1046,15 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal [ "enabled" ], phase["messages"]
   end
 
-  def test_install_babysitter_records_a_failed_takeover_without_installing_unit
+  def test_install_babysitter_records_a_failed_owned_transition
     setup = Hive::Commands::Setup.new(output: StringIO.new)
     installer = fake_installer
     installer.define_singleton_method(:install!) do |**|
-      raise "service install must not run after takeover failure"
+      raise Hive::Error, "ownership could not be verified"
     end
 
     with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, ->(**) { installer }) do
-      with_replaced_singleton_method(Hive::Commands::Babysit, :prepare_service_takeover!, lambda { |**|
-        raise Hive::Error, "ownership could not be verified"
-      }) do
-        setup.send(:install_babysitter)
-      end
+      setup.send(:install_babysitter)
     end
 
     phase = setup.instance_variable_get(:@phases).last

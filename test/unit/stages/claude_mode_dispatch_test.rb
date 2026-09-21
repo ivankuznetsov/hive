@@ -88,20 +88,6 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
-  def test_brainstorm_legacy_headless_runtime_uses_claude_launcher_in_headless_mode
-    with_tmp_dir do |dir|
-      cfg = { "brainstorm" => { "runtime" => "headless" } }
-      task = make_task(dir, stage_name: "brainstorm", state_name: "brainstorm.md")
-      File.write(File.join(task.folder, "idea.md"), "test idea")
-
-      with_spawn_capture do |captured|
-        Hive::Stages::Brainstorm.run!(task, cfg)
-
-        assert_equal :claude, captured.fetch(0).fetch(:launcher)
-        assert_equal "headless", captured[0][:cfg].dig("claude", "mode")
-      end
-    end
-  end
 
   def test_plan_keeps_non_claude_profile_on_headless_spawn
     with_tmp_dir do |dir|
@@ -144,14 +130,11 @@ class ClaudeModeDispatchTest < Minitest::Test
       with_spawn_capture do |captured|
         Hive::Stages::Brainstorm.run_headless!(task, cfg, profile: profile)
         Hive::Stages::Plan.spawn_plan_agent(task, cfg, "prompt", profile)
-        Hive::Stages::Artifacts.spawn_artifacts_agent(
-          task, cfg, "prompt", profile, screenote: { connected: false }
-        )
         Hive::Stages::Finalize.spawn_finalize_agent(
           task, cfg, "prompt", profile, worktree_path
         )
 
-        assert_equal %w[brainstorm plan artifacts finalize],
+        assert_equal %w[brainstorm plan finalize],
                      captured.map { |call| call[:kwargs].fetch(:routing_arguments).stage }
         captured.each do |call|
           routing = call[:kwargs].fetch(:routing_arguments)
@@ -467,26 +450,6 @@ class ClaudeModeDispatchTest < Minitest::Test
     resolver.resolve_stage(stage, execute_identity: execute)
   end
 
-  def test_artifacts_uses_stage_specific_claude_session
-    with_tmp_dir do |dir|
-      cfg = { "claude" => { "mode" => "tmux" } }
-      task = make_task(dir, stage_name: "artifacts", state_name: "artifact.md")
-      worktree_path = File.join(dir, "worktree")
-      FileUtils.mkdir_p(worktree_path)
-      task.define_singleton_method(:worktree_path) { worktree_path }
-
-      with_spawn_capture do |captured|
-        Hive::Stages::Artifacts.spawn_artifacts_agent(task, cfg, "prompt", claude_profile(cfg),
-                                                      screenote: { connected: false })
-
-        assert_equal :claude, captured.fetch(0).fetch(:launcher)
-        assert_equal "hive-7-artifacts-dispatch-test", captured[0][:kwargs][:session_name]
-        # G3: artifacts is on the WIDE allowed_tools set — it inspects
-        # the worktree to gather artifact paths.
-        assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured[0][:kwargs][:allowed_tools]
-      end
-    end
-  end
 
   # G3: brainstorm via the new claude-on-tmux path lands the narrow
   # allowed_tools set. A copy-paste regression that widened brainstorm

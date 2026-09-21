@@ -1,0 +1,8 @@
+.task-log-filters { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; margin-block: .8rem; }
+.task-log-filters input { flex: 1; min-width: 10rem; }
+.task-log-filters select { width: auto; }
+.task-log-entries { white-space: normal; }
+.task-log-entry { display: block; padding-block: .65rem; border-bottom: 1px solid var(--line); }
+.task-log-entry[hidden] { display: none; }
+.task-log-label { display: block; font-family: var(--font-sans, sans-serif); font-size: .75rem; opacity: .7; margin-bottom: .25rem; }
+.task-log-message { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -6,6 +6,7 @@ require "hive/managed_directory"
 require "hive/patrol_fix"
 require "hive/patrol_fix/source_snapshot"
 require "hive/secret_patterns"
+require "hive/secret_scanner"
 
 module Hive
   module PatrolFix
@@ -391,7 +392,7 @@ module Hive
 
       # Explicit project migration. Runtime readers never rebuild the complete
       # projection: an existing record inventory without this index is blocked
-      # until `hive migrate` calls this method.
+      # until an offline agent conversion calls this method.
       def rebuild_pending_index!
         return { changed: false, records: 0, indexed: 0 }.freeze unless
           @directory.entry_type("records", missing: true) == :directory
@@ -593,7 +594,7 @@ module Hive
           indexed = index.fetch("entries").fetch(id, UNINDEXED)
           previous = record ? pending_index_entry(record) : UNINDEXED
           if pending_index_order(indexed) > pending_index_order(previous)
-            corrupt!("pending admission index is inconsistent; run `hive migrate`")
+            corrupt!("pending admission index is inconsistent; read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md")
           end
           replacement_entry = pending_index_entry(replacement)
           moves_earlier = pending_index_order(replacement_entry) < pending_index_order(previous)
@@ -647,7 +648,7 @@ module Hive
         unless bytes
           return [ empty_pending_index, nil ] if record_ids.empty?
 
-          corrupt!("pending admission index is missing; run `hive migrate`")
+          corrupt!("pending admission index is missing; read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md")
         end
         [ parse_pending_index(bytes), bytes ]
       end
@@ -1127,7 +1128,7 @@ module Hive
 
       def reject_secret!(value)
         conflict!("admission decision contains secret-like material") if
-          Hive::SecretPatterns.match?(PatrolFix.canonical_json(value))
+          Hive::SecretScanner.match?(PatrolFix.canonical_json(value))
       end
 
       def conflict!(message)

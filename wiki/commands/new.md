@@ -128,7 +128,7 @@ idempotency_key: workflow-creator:editorial:stable
 input_fingerprint: 3f...
 ```
 
-`id` comes from the installation-scoped SQLite `task_counters` row through one
+`id` comes from the SQLite `installations.next_task_id` column through one
 immediate transaction; no counter file or counter lock remains. `display_name`
 starts nil; status surfaces use the slug until name generation succeeds.
 `depends_on` is omitted when not supplied and remains the authoritative
@@ -177,6 +177,26 @@ The `hive-new.v1` success payload contains `created`, `slug`, `workflow`,
 an idempotency key retain the existing capture behavior. The workflow creator
 uses this surface only when task creation was explicit in the original request;
 creation-only workflow authoring never invokes `hive new`.
+
+## Serialization fallback
+
+Without an idempotency key, `hive new --json` retains its legacy text output.
+With `--idempotency-key KEY --json`, success and error output use `hive-new.v1`.
+The shared envelope emitter wraps success-serialization failures as internal
+errors. If encoding the error envelope also raises `JSON::GeneratorError`, the command
+re-raises that encoding error and emits no fallback document. Programmatic
+`call!` callers receive exceptions.
+
+## Exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | The task was created, or an idempotency-key replay returned its existing task. |
+| 1 | A generic project, slug, collision, filesystem, or I/O failure occurred. |
+| 64 | Arguments, workflow selection, base/dependency shape, or draft-PR combination were invalid. |
+| 70 | An internal software boundary failed. |
+| 75 | A task-capture or commit lock was busy. |
+| 78 | Project or managed-workflow configuration was invalid. |
 
 ## Backlinks
 

@@ -216,6 +216,13 @@ class PlanReviewPolicyTest < Minitest::Test
     assert_match(/classifier_version must be an Integer/, error.message)
   end
 
+  def test_fingerprint_includes_the_reviewer_adapter_contract_version
+    affecting = Hive::PlanReview::Policy.policy_affecting_config(config)
+
+    assert_equal Hive::PlanReview::ADAPTER_CONTRACT_VERSION,
+                 affecting.fetch("adapter_contract_version")
+  end
+
   private
 
   def config

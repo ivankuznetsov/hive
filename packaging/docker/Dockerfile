@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RAILS_ENV=production
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates curl ffmpeg git gh jq libffi-dev libyaml-dev nodejs npm tesseract-ocr tini tmux \
+      build-essential ca-certificates curl ffmpeg git gh jq libffi-dev libyaml-dev nodejs npm sudo tesseract-ocr tini tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Agent CLIs in their own early layer: they are the largest download and
@@ -31,14 +31,17 @@ RUN useradd --create-home --home-dir /data/home --shell /bin/bash hive \
 
 WORKDIR /app
 COPY --chown=hive:hive . /app
-# Prewarm the exact native agent-browser + Chrome payload in an image path
-# that is not hidden by Hivebox's runtime /data volume.
+# Prewarm Chrome outside /data on supported platforms. Chrome for Testing
+# has no Linux ARM64 payload; the ARM64 box still runs web and agent tasks.
 RUN bundle install --without development test \
+    && ruby packaging/betterleaks.rb \
     && gem build hive.gemspec \
     && gem install hive-cli-*.gem \
     && mkdir -p "$HIVE_CAPTURE_TOOLS_CACHE" \
-    && HIVE_CAPTURE_INSTALL_WITH_DEPS=1 ruby -rhive/web/browser_bundle \
-         -e 'Hive::Web::BrowserBundle.new.ensure!' \
+    && if [ "$(dpkg --print-architecture)" = amd64 ]; then \
+         HIVE_CAPTURE_INSTALL_WITH_DEPS=1 ruby -rhive/web/browser_bundle \
+           -e 'Hive::Web::BrowserBundle.new.ensure!'; \
+       fi \
     && chown -R hive:hive "$HIVE_CAPTURE_TOOLS_CACHE"
 
 # The hivebox web UI: a Rails app with its own bundle, served by `hive web`.

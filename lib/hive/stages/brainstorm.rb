@@ -27,25 +27,9 @@ module Hive
         agent_name = (cfg.dig("brainstorm", "agent") || "claude").to_s
         return :headless unless Hive::AgentSupport.supports?(agent_name, :Interactive)
 
-        if !Hive::Config.explicit_claude_mode?(cfg) &&
-           Hive::Config.explicit_brainstorm_runtime?(cfg)
-          return legacy_runtime_for(cfg.dig("brainstorm", "runtime"))
-        end
-
         case Hive::Config.claude_mode(cfg)
         when :headless then :headless
         when :tmux then :tmux_interactive
-        end
-      end
-
-      def legacy_runtime_for(runtime)
-        case runtime
-        when "headless" then :headless
-        when "tmux_interactive" then :tmux_interactive
-        else
-          raise Hive::ConfigError,
-                "brainstorm.runtime must be one of #{Hive::Config::BRAINSTORM_RUNTIMES.inspect}; " \
-                "got #{runtime.inspect}"
         end
       end
 

@@ -42,7 +42,7 @@ Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to 
 | Platform | Channel |
 |----------|---------|
 | macOS arm64 | [`brew install ivankuznetsov/hive/hive`](https://github.com/ivankuznetsov/homebrew-hive) |
-| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.7.2/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
+| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.7.4/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | [`yay -S hive-bin`](https://aur.archlinux.org/packages/hive-bin) |
 
 Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, `opencode` ≥ 1.18.16 when explicitly selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
@@ -211,12 +211,35 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
 
 That is enough to understand what Hive does: it turns a rough idea into durable stage files, then keeps advancing the same task toward code, a pull request, review, and archive. Manual TUI keys still exist for power users who want to steer a specific stage themselves; the happy path is daemon-first. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full dashboard reference.
 
-## PR Digests
+## Daily Activity Digest
 
-[PRDigest](https://github.com/ivankuznetsov/prdigest) is a separate tool. Use
-`prdigest facts` when an agent will write the final message, or schedule
-`prdigest prose --deliver` for a standalone daily Telegram digest. Hive does
-not configure, schedule, or deliver PR digests.
+Hive owns a durable cross-project daily activity record. After initializing its
+IANA time zone and coverage frontier with `hive migrate --all`, opt in with the
+global `daily_digest.enabled` setting. The daemon refreshes the open day and
+closes elapsed days; ordinary reads are side-effect free:
+
+```bash
+hive digest
+hive digest --date 2026-08-29 --project hive --json
+```
+
+The authenticated Web view groups attention and project activity, preserves
+source gaps and late amendments, and hands waiting items back to the existing
+task answer route without copying question text into the digest. Telegram recap
+delivery is a separate `daily_digest.telegram.enabled` opt-in. Complete empty
+days are recorded but not sent. See
+[wiki/commands/digest.md](wiki/commands/digest.md).
+
+V1 is deliberately a private, single-operator surface. It adds no team
+identity, team ACL, or per-project reader ACL. Agents may read the stable JSON
+contract but do not manage recap schedules, destinations, or delivery status,
+and there is no MCP-specific digest wrapper. Digest work does not grant an
+agent authority to choose a version, release, publish, or deploy Hive.
+
+[PRDigest](https://github.com/ivankuznetsov/prdigest) remains a separate tool
+for PR-only facts or prose. Hive's broader activity record has no PRDigest
+runtime dependency, never treats PRDigest as authority, and continues to reject
+the retired top-level `digest:` configuration block.
 
 ## Manage Hive From Telegram in 2 Minutes
 
@@ -375,7 +398,7 @@ The TUI is the recommended human interface and an agent-driven CLI is the recomm
 | Daemon | `hive daemon install/enable/start/status/tail/stop/disable` | Manage the global daemon service plus per-project enrollment. The service reads an internal scheduler projection and dispatches workflow verbs for enrolled projects. Read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |
 | PR babysitter | `hive babysit install/start/status/tail/stop` | Supervise opt-in repair of conflicted or red GitHub PRs. Normal `hive setup` installs the global service; each project remains gated by `babysitter.enabled`. |
 | Diagnostics & agent setup | `hive status [--operational]`, `hive task`, `hive watch`, `hive act`, `hive doctor`, `hive setup-agents`, `hive rebase-status`, `hive markers clear`, `hive metrics rollback-rate` | Inspect current liveness, active workflow state, or one task in depth; observe semantic transitions; execute a fresh closed routine action; or use explicit recovery diagnostics. See [docs/cli.md#diagnostics](docs/cli.md#diagnostics). |
-| Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive migrate`, `hive tree` | Attach Hive to a project, upgrade the installed CLI, remove it, prune the global registry, migrate legacy project state, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
+| Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive tree` | Attach Hive to a project, upgrade the installed CLI, remove it, prune the global registry, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
 
 Full per-command reference, every flag, every envelope field, and every exit code lives in [docs/cli.md](docs/cli.md).
 

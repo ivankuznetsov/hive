@@ -466,7 +466,10 @@ module Hive
               unless existing.same_domain_intent?(operation.receipt)
                 raise Conflict, "conflicting operation receipt #{operation.operation_id}"
               end
-              return begin_retry!(activity: activity, receipt: receipt)
+              # Reconciliation proved this operation had no committed effect.
+              # Reuse its stable identity; attempts already retain retry history.
+              operation.send(:persist!)
+              return operation
             else
               unless existing.same_intent?(operation.receipt)
                 raise Conflict, "conflicting operation receipt #{operation.operation_id}"
@@ -476,34 +479,6 @@ module Hive
           end
           operation.persist_new!
           operation
-        end
-
-        def begin_retry!(activity:, receipt:)
-          base = receipt.fetch("operation_id")
-          1.upto(100) do |number|
-            candidate = "#{base}:retry:#{number}"
-            path = File.join(
-              activity.task_folder, OPERATION_DIRECTORY,
-              "#{Digest::SHA256.hexdigest(candidate)}.json"
-            )
-            candidate_receipt = receipt.merge("operation_id" => candidate)
-            unless File.exist?(path)
-              operation = new(activity: activity, receipt: candidate_receipt)
-              operation.persist_new!
-              return operation
-            end
-
-            existing = open!(activity: activity, filename: File.basename(path))
-            if existing.same_intent?(candidate_receipt)
-              return existing unless existing.receipt["state"] == "aborted"
-              next
-            end
-            unless existing.receipt["state"] == "aborted" &&
-                   existing.same_domain_intent?(candidate_receipt)
-              raise Conflict, "conflicting operation receipt #{candidate}"
-            end
-          end
-          raise Conflict, "operation receipt retry limit exhausted"
         end
 
         def open!(activity:, filename:)

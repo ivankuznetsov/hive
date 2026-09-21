@@ -99,4 +99,27 @@ class AgentObservationCoverageGapsTest < Minitest::Test
       resource_exhaustion: { reason: "future_limit" }
     )
   end
+
+  def test_provider_signal_resources_and_failed_resource_journaling_are_bounded
+    now = Time.iso8601("2026-08-30T12:00:00Z")
+    activity = FailingActivity.new
+    observation = Hive::AgentObservation.new(
+      task: Task.new("task"), context: Context.new("task", "attempt"),
+      session_id: "session", role: "agent", provider: "codex",
+      timeout_sec: 1, guards: [], activity: activity, clock: -> { now }
+    )
+    signal = Struct.new(:failure_class, :reset_hint_seconds)
+                   .new("provider_rate_limit", 60)
+
+    resource = observation.send(:resource_observation, provider_signal: signal)
+
+    assert_equal "provider_rate_limit", resource.fetch("kind")
+    assert_equal "requests", resource.fetch("unit")
+    assert_equal "2026-08-30T12:01:00.000000Z", resource.fetch("retry_at")
+
+    activity.define_singleton_method(:record) do |**|
+      raise Hive::TaskActivity::AppendFailed, "journal unavailable"
+    end
+    refute observation.send(:record_resource_observation, resource, occurred_at: now.iso8601)
+  end
 end

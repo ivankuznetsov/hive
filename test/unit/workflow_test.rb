@@ -12,7 +12,7 @@ class WorkflowTest < Minitest::Test
     )
 
     assert_equal 3, Hive::Workflow::DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS
-    assert_equal :never, defaulted.archive_visibility_retention_days
+    assert_equal 3, defaulted.archive_visibility_retention_days
     assert_equal :never, never.archive_visibility_retention_days
   end
 
@@ -101,6 +101,34 @@ class WorkflowTest < Minitest::Test
     stage = Hive::Workflow::Stage.new(name: "execute", index: 4, state_file: "task.md")
 
     assert_equal "4-execute", stage.dir
+  end
+
+  def test_active_stage_dirs_skip_only_an_inert_terminal_stage
+    agent_terminal = Hive::Workflow.new(
+      id: :agent_terminal,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "publish", index: 2, state_file: "publish.md", kind: :agent
+        )
+      ]
+    )
+    inert_terminal = Hive::Workflow.new(
+      id: :inert_terminal,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "done", index: 2, state_file: "done.md", kind: :inert
+        )
+      ]
+    )
+
+    assert_equal %w[1-draft 2-publish], agent_terminal.active_stage_dirs
+    assert_equal [ "1-draft" ], inert_terminal.active_stage_dirs
   end
 
   def test_stage_defaults_optional_descriptor_fields

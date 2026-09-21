@@ -27,33 +27,27 @@ class AttemptsStorageFoundationTest < Minitest::Test
       terminal = terminal_attempt(repository)
       receipt_json = Hive::RuntimeControlPlane::Codec.dump_json(terminal.receipt)
       pending = repository.database.read do |db|
-        db[:terminal_pending_publications].where(attempt_id: terminal.attempt_id).first
+        db[:attempts].where(attempt_id: terminal.attempt_id).first
       end
-      assert_equal Digest::SHA256.hexdigest(receipt_json), pending.fetch(:expected_receipt_digest)
+      assert_equal Digest::SHA256.hexdigest(receipt_json), pending.fetch(:terminal_receipt_digest)
 
-      repository.prepare_publication(
-        attempt_id: terminal.attempt_id, consumers: %w[journal provider_health]
-      )
+      repository.prepare_publication(attempt_id: terminal.attempt_id)
       repository.acknowledge_publication(terminal.attempt_id, consumer: "journal")
       restarted = Hive::Attempts::Repository.new(root: root, migrate: true)
       refute restarted.publication_complete?(terminal.attempt_id)
-      restarted.acknowledge_publication(terminal.attempt_id, consumer: "provider_health")
+      restarted.acknowledge_publication(terminal.attempt_id, consumer: "accounting")
+      restarted.acknowledge_publication(terminal.attempt_id, consumer: "dispatch")
       assert restarted.publication_complete?(terminal.attempt_id)
       assert restarted.finish_publication(terminal.attempt_id)
-      assert_nil restarted.publication(terminal.attempt_id)
+      assert restarted.publication(terminal.attempt_id)
     end
   end
 
   def test_publication_rejects_conflicting_or_unknown_consumers
     with_repository do |repository|
       terminal = terminal_attempt(repository)
-      repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: %w[journal])
+      repository.prepare_publication(attempt_id: terminal.attempt_id)
 
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.prepare_publication(
-          attempt_id: terminal.attempt_id, consumers: %w[journal provider_health]
-        )
-      end
       assert_raises(Hive::Attempts::RepositoryError) do
         repository.acknowledge_publication(terminal.attempt_id, consumer: "unknown")
       end
@@ -90,58 +84,51 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
-  def test_publication_and_maintenance_inputs_fail_closed
+  def test_publication_inputs_fail_closed
     with_repository do |repository|
       terminal = terminal_attempt(repository)
       assert_raises(Hive::Attempts::RepositoryError) do
         repository.seal_terminal_payloads(Object.new)
       end
+      assert_equal terminal.attempt_id,
+                   repository.prepare_publication(attempt_id: terminal.attempt_id).fetch("attempt_id")
+    end
+  end
+
+  def test_lost_capture_and_publication_boundaries_fail_closed
+    with_repository do |repository|
+      launching = launching_attempt(repository)
+      lost = repository.mark_lost(launching, reason: "launch_timeout", now: NOW + 31)
+
       assert_raises(Hive::Attempts::RepositoryError) do
-        repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: [])
+        repository.seal_lost_capture_payloads(launching, [])
       end
       assert_raises(Hive::Attempts::RepositoryError) do
-        repository.prepare_publication(attempt_id: terminal.attempt_id, consumers: [ "Bad Name" ])
+        repository.seal_lost_capture_payloads(
+          lost, [ { "path" => "open/other/dirty-state/file", "size" => 0,
+                    "sha256" => "0" * 64 } ]
+        )
       end
       assert_raises(Hive::Attempts::RepositoryError) do
-        repository.claim_maintenance(now: NOW, interval_sec: "bad")
+        repository.seal_lost_capture_payloads(lost, [ { "path" => "bad" } ])
       end
       assert_raises(Hive::Attempts::RepositoryError) do
-        repository.advance_maintenance_cursor("after" => "")
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.advance_maintenance_cursor(Object.new)
-      end
-      assert_raises(Hive::Attempts::RepositoryError) do
-        repository.complete_maintenance(now: NOW, result: { promoted: -1 })
+        repository.acknowledge_publication("missing", consumer: "journal")
       end
     end
   end
 
-  def test_publication_persistence_errors_remain_typed
+  def test_publication_promotion_translates_storage_errors
     with_repository do |repository|
-      repository.database.define_singleton_method(:read) do |**|
-        raise Sequel::DatabaseError, "bad read"
+      terminal = terminal_attempt(repository)
+      repository.database.define_singleton_method(:transaction) do |**|
+        raise Sequel::DatabaseError, "write failed"
       end
-      assert_raises(Hive::Attempts::RepositoryError) { repository.maintenance_checkpoint }
-    end
 
-    %i[complete fail].each do |operation|
-      with_repository do |repository|
-        repository.database.define_singleton_method(:transaction) do |**|
-          raise Sequel::DatabaseError, "bad write"
-        end
-        if operation == :complete
-          assert_raises(Hive::Attempts::RepositoryError) do
-            repository.complete_maintenance(
-              now: NOW, result: { promoted: 0, deleted: 0, cold_examined: 0 }
-            )
-          end
-        else
-          assert_raises(Hive::Attempts::RepositoryError) do
-            repository.fail_maintenance(error: ArgumentError.new("bad"), now: NOW)
-          end
-        end
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        repository.finish_publication(terminal.attempt_id)
       end
+      assert_match(/could not be promoted/, error.message)
     end
   end
 
@@ -155,9 +142,10 @@ class AttemptsStorageFoundationTest < Minitest::Test
       repository.database.transaction do |db|
         db[:payload_references].insert(
           payload_id: "payload", attempt_id: terminal.attempt_id,
-          kind: "attempt_log", relative_path: reference.fetch("path"),
-          sha256: reference.fetch("sha256"), bytes: 1,
-          state: "releasable", created_at: NOW.iso8601(6)
+          kind: "attempt_log", relative_path: "sealed/sha256/bb/#{'b' * 64}",
+          sha256: "b" * 64, bytes: 1,
+          state: "releasable", created_at: NOW.iso8601(6),
+          retain_until: (NOW + 3600).iso8601(6)
         )
       end
       spec = { payload_id: "payload", kind: "attempt_log", reference: reference }
@@ -166,6 +154,33 @@ class AttemptsStorageFoundationTest < Minitest::Test
           repository.send(:persist_sealed_reference, db, terminal, spec)
         end
       end
+    end
+  end
+
+  def test_republishing_an_identical_releasable_payload_restores_its_reference
+    with_repository do |repository|
+      terminal = terminal_attempt(repository)
+      reference = {
+        "path" => "sealed/sha256/aa/#{'a' * 64}",
+        "sha256" => "a" * 64, "size" => 1
+      }
+      repository.database.transaction do |db|
+        db[:payload_references].insert(
+          payload_id: "payload", attempt_id: terminal.attempt_id,
+          kind: "attempt_log", relative_path: reference.fetch("path"),
+          sha256: reference.fetch("sha256"), bytes: 1,
+          state: "releasable", created_at: NOW.iso8601(6),
+          retain_until: (NOW + 3600).iso8601(6)
+        )
+        repository.send(
+          :persist_sealed_reference, db, terminal,
+          { payload_id: "payload", kind: "attempt_log", reference: reference }
+        )
+      end
+
+      row = repository.database.read { |db| db[:payload_references].where(payload_id: "payload").first }
+      assert_equal "sealed", row.fetch(:state)
+      assert_nil row.fetch(:retain_until)
     end
   end
 
@@ -178,17 +193,7 @@ class AttemptsStorageFoundationTest < Minitest::Test
   end
 
   def terminal_attempt(repository)
-    launching = repository.create_launching(
-      attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
-      task_id: "42", project: "demo", task_slug: "task",
-      intended_stage: "4-execute", task_generation: "generation-1",
-      ownership_generation: "owner-1", task_input_epoch: 1,
-      progress_token: "progress-1", provider: "codex",
-      worker_argv: [ "hive", "run", "task" ],
-      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
-      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
-      launch_timeout_sec: 30, now: NOW
-    )
+    launching = launching_attempt(repository)
     claimed = repository.claim(
       launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
       first_heartbeat_timeout_sec: 30, now: NOW + 1
@@ -199,6 +204,20 @@ class AttemptsStorageFoundationTest < Minitest::Test
       final_checkpoint: { "revision" => "a" * 40 }, output_references: [],
       log_reference: { "path" => "open/attempt-1.frames", "size" => 0, "sha256" => "0" * 64 },
       now: NOW + 3
+    )
+  end
+
+  def launching_attempt(repository)
+    repository.create_launching(
+      attempt_id: "attempt-1", request_id: "request-1",
+      task_id: "42", project: "demo", task_slug: "task",
+      intended_stage: "4-execute", task_generation: "generation-1",
+      ownership_generation: "owner-1", task_input_epoch: 1,
+      progress_token: "progress-1", provider: "codex",
+      worker_argv: [ "hive", "run", "task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+      launch_timeout_sec: 30, now: NOW
     )
   end
 

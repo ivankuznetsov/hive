@@ -54,7 +54,7 @@ module Hive
         captured = route&.fetch("actual", nil) || route&.fetch("requested", nil)
         return TransitionGuard.reconstructed_planner_identity(cfg) unless captured
 
-        PlannerIdentity.repair(captured, cfg:) || captured
+        captured
       end
     end
   end

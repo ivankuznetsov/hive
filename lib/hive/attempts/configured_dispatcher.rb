@@ -45,8 +45,8 @@ module Hive
         )
       end
 
-      def dispatch_successor(task:, **attributes)
-        dispatcher_for(task, argv: attributes.fetch(:argv)).dispatch_successor(
+      def dispatch_recovery(task:, **attributes)
+        dispatcher_for(task, argv: attributes.fetch(:argv)).dispatch_recovery(
           task: task, **attributes
         )
       end

@@ -14,6 +14,14 @@ workflow descriptors are discovered at runtime by `hive new`, `hive init`,
 `hive status`, `hive run`, `hive approve`, and the daemon path that uses those
 commands.
 
+## Build And Share A Private Workflow
+
+The companion website guide, [Build and share a private workflow](https://hivecli.sh/docs/build-private-workflow/),
+covers a complete YAML/instruction example, repository layout, portable paths,
+dependencies, fresh-state setup, clean-project testing and collaborator access.
+The guide is being prepared with the unreleased private-source importer; the
+website must be deployed before that URL is available.
+
 ## Install From A Private Git Repository
 
 Direct Git imports are **unreleased**. Check `hive workflow --help` for `--from`

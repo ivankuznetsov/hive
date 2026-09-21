@@ -56,3 +56,13 @@ Direct Git imports use authored-project permissions. They are not
 catalogue-reviewed Honeycomb packages. Managed `workflow update` and `remove`
 do not manage these imports; subsequent owner edits use `hive workflow commit ID`.
 Do not imply automatic upstream synchronization or runtime portability.
+
+## Building a repository for other users
+
+Use the website's `/docs/build-private-workflow/` authoring guide (source:
+`hive-site/docs/build-private-workflow.md`) when available. Keep the descriptor
+and imported assets in `workflows/ID.yml` and `workflows/ID/`, document portable
+paths and fresh setup, and test an exact source commit in a clean project.
+Validate the graph and separately exercise a real task and review/revision cycle
+before claiming runtime readiness. Commit source changes in the source repo;
+`hive workflow commit ID` only commits the installed project copy.

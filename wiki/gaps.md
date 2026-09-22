@@ -1575,3 +1575,5 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
 
 - Digest commit and LOC totals describe the PRs merged that day. Direct commits
   outside merged PRs are not counted. The Web label makes that scope explicit.
+
+- Direct Git workflow imports support initial authored installation. Automatic upstream update/merge and companion service installation are not implemented; those remain explicit owner operations.

@@ -63,6 +63,8 @@ rollback without the operator's explicit direction.
 
 ## Load the relevant reference
 
+- Read [workflow-installation.md](references/workflow-installation.md) when installing from a private or direct Git repository; check installed CLI support, repository access, and runtime prerequisites before reporting readiness.
+
 - Read [daily-digest.md](references/daily-digest.md) when asked for recent merged changes; use `hive digest --json`, inspect its `local_date`, and read the saved `document`. Use an explicit date for today or yesterday.
 - Read [workflow-creator.md](references/workflow-creator.md) when ordinary language asks to create a new project-local workflow. This focused route is the `hive-workflow-creator` capability inside the single canonical `/hive` skill; it is not a second skill or package.
 - Read [workflow-creator-example.md](references/workflow-creator-example.md) for the accepted research → draft → approval editorial example.

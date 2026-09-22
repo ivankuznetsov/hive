@@ -39,6 +39,40 @@ hive workflow publish my-flow --version 1.0.0 \
 `hive decide demo:task approve --from research --decision-id visit-7 --json`
 accepts only the current visit-specific identifier returned by `hive run`.
 
+## Private and direct Git sources
+
+This feature is unreleased. Check the installed `hive workflow --help` for
+`--from` and `--ref` before giving these commands to a user. The agent procedure
+is `skills/hive/references/workflow-installation.md`; the public guide lives at
+`/docs/private-workflows/` in hive-site.
+
+`hive workflow install ID --from REPOSITORY [--ref REF]` imports an owner-selected
+workflow as an editable project-authored workflow. SSH, HTTPS with Git's
+configured credential helper, and absolute local Git repositories are supported.
+Credentials must stay in SSH/Git configuration, never in the URL. For GitHub
+HTTPS, `gh auth setup-git` can configure the existing authenticated `gh` helper.
+
+The repository must contain `workflows/ID.yml` and its assets under
+`workflows/ID/`. Hive resolves HEAD (or the supplied branch, tag or commit) to an
+immutable commit, reads Git objects without checkout/hooks, validates the graph,
+and commits the imported files to project state. `ID/hive-source.json` records
+the repository, requested ref, resolved commit and imported file hashes/modes.
+The descriptor is activated only after its assets exist. A failed state commit
+rolls back the owned files. Existing authored or managed IDs are never replaced.
+
+```sh
+hive workflow install company-news --from git@github.com:owner/private-workflows.git --dry-run --json
+hive workflow install company-news --from git@github.com:owner/private-workflows.git --ref FULL_COMMIT
+```
+
+The optional preview writes no project state. Repeat its `source_commit` as
+`--ref` to install the exact previewed revision. This route uses authored-workflow
+permissions and accepts no managed mapping/input overrides. Review the source
+before starting tasks. It does not install packages, run scripts, register
+schedules, configure companion services, or claim Honeycomb review. Edit and
+commit subsequent authored changes using `hive workflow commit ID`; catalogue
+`update`/`remove` continue to address managed Honeycomb packages.
+
 ## Honeycomb Lifecycle
 
 `install`, `list`, `update`, and `remove` are the 0.x command-compatible
@@ -48,7 +82,7 @@ resolution, task provenance, disclosure versus exact runtime enforcement, and
 publication recovery. This command page owns only the operator-visible CLI
 contract.
 
-The accepted source forms are `honeycomb/NAME`, a catalog semantic version, or
+For managed Honeycomb installation, the accepted source forms are `honeycomb/NAME`, a catalog semantic version, or
 a catalog-listed full upstream source SHA. Mutable refs, abbreviated or
 unlisted commits, arbitrary namespaces, and arbitrary repositories fail
 resolution. Exact soft-hidden or yanked versions remain addressable; revoked

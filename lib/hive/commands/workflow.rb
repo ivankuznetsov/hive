@@ -369,7 +369,9 @@ module Hive
 
       def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE,
                      yes: false, dry_run: false, allow_escalation: false, version: nil,
-                     expected_release_digest: nil, mapping_overrides: [], input_bindings: [])
+                     expected_release_digest: nil, mapping_overrides: [], input_bindings: [], from: nil, ref: nil)
+        @from = from
+        @ref = ref
         @subcommand = subcommand
         @id = id
         @project_root = File.expand_path(project_root)
@@ -423,6 +425,12 @@ module Hive
           )
         end
 
+        if (@from && @subcommand != "install") || (@ref && !@from)
+          raise UsageError, "--from and --ref are only supported together with workflow install ID --from REPOSITORY"
+        end
+        if @from && (@mapping_overrides.any? || @input_bindings.any? || @allow_escalation)
+          raise UsageError, "Git sources use authored descriptor settings; mapping and input overrides belong to managed packages"
+        end
         return commit_authored_workflow! if @subcommand == "commit"
         return lifecycle_command.call unless @subcommand == "new"
 
@@ -507,6 +515,13 @@ module Hive
             @id, project_root: @project_root, json: @json, stdout: @stdout
           )
         when "install"
+          if @from
+            require "hive/commands/workflow/git_install"
+            return Hive::Commands::Workflow::GitInstall.new(
+              @id, repository: @from, ref: @ref || "HEAD", project_root: @project_root,
+              json: @json, dry_run: @dry_run, stdout: @stdout
+            )
+          end
           require "hive/commands/workflow/install"
           Hive::Commands::Workflow::Install.new(
             @id, project_root: @project_root, json: @json, yes: @yes,
@@ -594,6 +609,8 @@ module Hive
       # agents do not need to regex `message`. Passed through the local seam to
       # avoid changing the gem-wide ErrorEnvelope.build.
       def error_extras(error)
+        return {} if @subcommand == "install" && (@from || @ref)
+
         extras = {}
         extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
         extras["expected"] = error.expected if error.respond_to?(:expected) && !error.expected.nil?
@@ -610,6 +627,8 @@ module Hive
       end
 
       def response_schema
+        return "hive-workflow-install" if @subcommand == "install" && (@from || @ref)
+
         @subcommand == "validate" ? "hive-workflow-validate" : SCHEMA
       end
 

@@ -17,7 +17,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
-    assert_equal 18, skill.reference_paths.size
+    assert_equal 19, skill.reference_paths.size
     assert skill.reference_paths.all? { |path| path.start_with?("references/") }
     refute_includes skill.rendered_canonical_files.values.join("\n"), "{{HIVE_VERSION}}"
     assert_includes skill.rendered_canonical_files.fetch("references/setup-and-platforms.md"),

@@ -1414,6 +1414,13 @@ intact across a pushed morph while the task workspace remains partial, rejects
 an intervention draft when its opaque binding changes between rounds, and unit
 coverage separately proves non-answer actions still fail closed.
 
+Web system-test setup stops the shared broadcaster and clears the default
+`web-status.json`, archive cache, and pending archive subscriptions before
+recreating fixture repositories. Reusing the same registered project path must
+not restore a previous example's tasks. `saved_status_test.rb` verifies this
+reset boundary while explicit restart scenarios seed their own snapshot stores
+after setup and retain persisted-state coverage.
+
 During implementation, run the smallest named files first. Before handoff run
 `bundle exec rake test` from the repository root, then the Web application's
 complete Rails and system suites plus its lint/security checks. Tests inject

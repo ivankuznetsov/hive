@@ -1,6 +1,26 @@
 require "application_system_test_case"
 
 class SavedStatusTest < ApplicationSystemTestCase
+  test "new fixture lifetime cannot restore the previous workspace at the same path" do
+    name = create_hive_project!("reused-snapshot-fixture")
+    slug = create_task!(name, "Previous example task")
+    project = Project.find!(name)
+    ProjectArchive.request(project.attributes)
+    refresh_status_feed!
+    assert_includes StatusBroadcaster.feed.current_state.payload.fetch("projects").first.fetch("tasks").map { |task| task.fetch("slug") }, slug
+    assert Hive::Web::StatusSnapshotStore.new.read
+    assert ProjectArchive.requested?(project.attributes)
+
+    ProjectArchive::CACHE.write("fixture-lifetime-probe", true)
+    reset_system_test_projects!
+    create_hive_project!(name)
+
+    assert_nil StatusBroadcaster.feed.current_state,
+               "recreating a fixture at the same path must not restore another example's tasks"
+    assert_nil ProjectArchive.requested?(Project.find!(name).attributes)
+    assert_nil ProjectArchive::CACHE.read("fixture-lifetime-probe")
+  end
+
   test "saved completed cards survive a blocked refresh and update through Cable" do
     name = create_hive_project!("saved-history-browser")
     configure_owner!

@@ -72,6 +72,13 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
       raise "refusing to reset a non-test Hive sandbox: #{sandbox}"
     end
 
+    # These caches outlive a feed and would accept a recreated fixture at the
+    # same registered path as the preceding example. Restart tests seed their
+    # own stores after setup; only cross-example state is discarded here.
+    FileUtils.rm_f(File.join(Hive::Config.hive_home, "web-status.json"))
+    ProjectArchive::CACHE.clear
+    ProjectArchive::REQUESTS.clear
+
     Hive::Config.registered_projects.each do |project|
       Hive::Config.unregister_project(name: project.fetch("name"))
     end

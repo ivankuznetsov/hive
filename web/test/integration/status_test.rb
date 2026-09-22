@@ -2,6 +2,96 @@ require "test_helper"
 require "hive/daemon/status_report"
 
 class StatusTest < ActionDispatch::IntegrationTest
+  test "saved project views stay responsive while background history holds the workflow lock" do
+    sign_in!
+    name = create_hive_project!("blocked-history-status")
+    attributes = Project.find!(name).attributes.merge("tasks" => [])
+    old_history = attributes.merge("tasks" => [ { "slug" => "finished-before-restart",
+      "stage" => "9-done", "workflow" => "coding", "action" => "archived" } ])
+    new_history = old_history.merge("tasks" => old_history["tasks"] + [ {
+      "slug" => "newly-finished", "stage" => "9-done", "workflow" => "coding", "action" => "archived" } ])
+    payload = { "projects" => [ attributes ], "project_archives" => { name => old_history },
+      "board_metadata" => Board.new([ Project.new(attributes).with_history(old_history) ]).metadata,
+      "daemon_status" => { "running" => true, "binary_drift" => "none" } }
+    source = Object.new.extend(Hive::Web::StatusCommand)
+    source.define_singleton_method(:json_payload) { |_| { "projects" => [ attributes ] } }
+    report = Object.new
+    report.define_singleton_method(:running_state) { { running: true, pid: 123 } }
+    report.define_singleton_method(:safe_payload) { payload["daemon_status"] }
+    entered, release = Queue.new, Queue.new
+    scan = lambda do |_project|
+      Hive::Workflows::Project.synchronize do
+        entered << true
+        release.pop
+        { "projects" => [ new_history ] }
+      end
+    end
+    previous = StatusBroadcaster.feed
+    feed = refresh = nil
+    store = Hive::Web::StatusSnapshotStore.new(path: File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "blocked-history.json"))
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ attributes ] }) do
+      store.write(payload, last_success_at: 1.hour.ago.iso8601)
+      feed = StatusPageFeed.new(snapshot_store: store, status_command: source, daemon_report: report)
+      StatusBroadcaster.feed = feed
+      ProjectArchive.request(attributes)
+      with_replaced_singleton_method(ProjectArchive, :snapshot, scan) do
+        refresh = Thread.new { feed.snapshot_state }
+        Timeout.timeout(2) { entered.pop }
+        begin
+          [ board_path, grid_path ].each do |path|
+            Timeout.timeout(2) { get path, params: { project: name } }
+            assert_response :success
+            assert_select "a[href='#{task_path(name, "finished-before-restart", source: "archive")}']"
+            assert_select ".daemon-summary", text: /Daemon running/
+            assert_select ".status-history-loading", 0
+          end
+        ensure
+          release << true
+          Timeout.timeout(5) { refresh.value }
+        end
+      end
+      get board_path(project: name)
+      assert_select "[data-task-slug='newly-finished']"
+      assert_equal 2, store.read.dig("payload", "project_archives", name, "tasks").length
+    end
+  ensure
+    release << true if release
+    refresh&.kill
+    refresh&.join
+    feed&.stop
+    StatusBroadcaster.feed = previous if previous
+  end
+
+  test "project navigation reads saved history and daemon status even after cache expiry" do
+    sign_in!
+    name = create_hive_project!("nonblocking-project-status")
+    project = Project.find!(name).attributes.merge("tasks" => [])
+    completed = project.merge("tasks" => [ { "slug" => "saved-completion", "title" => "Saved completion",
+      "stage" => "9-done", "workflow" => "coding", "action" => "archived" } ])
+    payload = { "projects" => [ project ], "project_archives" => { name => completed },
+      "daemon_status" => { "running" => true, "binary_drift" => "none" } }
+    scan = ->(*) { raise "HTTP request rebuilt completed history" }
+    probe = ->(*) { raise "HTTP request probed the daemon" }
+
+    with_replaced_singleton_method(ProjectArchive, :snapshot, scan) do
+      with_replaced_singleton_method(Hive::Daemon::StatusReport, :new, probe) do
+        with_status_snapshot(payload) do
+          [ 0, 61 ].each do |seconds|
+            travel seconds.seconds do
+              [ board_path, grid_path ].each do |path|
+                get path, params: { project: name }
+                assert_response :success
+                assert_select "a[href='#{task_path(name, "saved-completion", source: "archive")}']"
+                assert_select ".daemon-summary", text: /Daemon running/
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   test "state filters preserve unavailable project warnings" do
     sign_in!
     with_status_snapshot("projects" => [ { "name" => "broken", "error" => "project_load_failed", "tasks" => [] } ]) do
@@ -58,14 +148,10 @@ class StatusTest < ActionDispatch::IntegrationTest
       "service_installed" => false,
       "binary_drift" => "unknown"
     }
-    report = Object.new
-    report.define_singleton_method(:safe_payload) { daemon_status }
     original_snapshot = StatusBroadcaster.method(:snapshot_with_version)
-    original_report_new = Hive::Daemon::StatusReport.method(:new)
     StatusBroadcaster.define_singleton_method(:snapshot_with_version) do
-      StatusBroadcaster::PageSnapshot.new(payload: { "projects" => [] }, version: 1)
+      StatusBroadcaster::PageSnapshot.new(payload: { "projects" => [], "daemon_status" => daemon_status }, version: 1)
     end
-    Hive::Daemon::StatusReport.define_singleton_method(:new) { report }
 
     get "/"
 
@@ -77,9 +163,6 @@ class StatusTest < ActionDispatch::IntegrationTest
                   "a live hivebox supervisor intentionally has no platform service unit"
   ensure
     StatusBroadcaster.define_singleton_method(:snapshot_with_version, original_snapshot) if original_snapshot
-    if original_report_new
-      Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new)
-    end
   end
 
   test "a running daemon with binary drift presents one compact repair warning" do
@@ -502,7 +585,7 @@ class StatusTest < ActionDispatch::IntegrationTest
       calls << project&.name
       { "projects" => [ completed ] }
     end
-    with_status_snapshot("projects" => [ project ]) do
+    with_status_snapshot("projects" => [ project ], "project_archives" => { name => completed }) do
       get "/", params: { project: name }
       assert_response :success
       assert_select "[data-workflow='architecture'] [data-stage='8-done']:not(.is-folded) [data-task-slug='finished-architecture']"
@@ -510,7 +593,7 @@ class StatusTest < ActionDispatch::IntegrationTest
       assert_select ".kanban-band-warning", count: 0
       assert_select ".kanban-card form", count: 0
       assert_select ".task-state-filter", text: /Completed\s+1/
-      assert_equal [ name ], calls
+      assert_empty calls, "normal project pages must read history from the saved frame"
       get "/", params: { project: name, state: "completed" }
       assert_select "[data-task-slug='finished-architecture']"
       calls.clear
@@ -581,23 +664,24 @@ class StatusTest < ActionDispatch::IntegrationTest
   private
 
   def with_daemon_status(payload)
-    report = Object.new
-    report.define_singleton_method(:safe_payload) { payload }
     original_snapshot = StatusBroadcaster.method(:snapshot_with_version)
-    original_report_new = Hive::Daemon::StatusReport.method(:new)
     StatusBroadcaster.define_singleton_method(:snapshot_with_version) do
-      StatusBroadcaster::PageSnapshot.new(payload: { "projects" => [] }, version: 1)
+      StatusBroadcaster::PageSnapshot.new(payload: { "projects" => [], "daemon_status" => payload }, version: 1)
     end
-    Hive::Daemon::StatusReport.define_singleton_method(:new) { report }
     yield
   ensure
     StatusBroadcaster.define_singleton_method(:snapshot_with_version, original_snapshot) if original_snapshot
-    Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new) if original_report_new
   end
 
   def with_status_snapshot(payload = nil, version: 1, availability: nil, last_success_at: nil, error: nil, **payload_keywords)
     payload ||= payload_keywords
     original_snapshot = StatusBroadcaster.method(:snapshot_with_version)
+    daemon = payload["daemon_status"] || original_snapshot.call.payload["daemon_status"] || {}
+    projects = StatusBroadcaster.projects(payload).map do |project|
+      project.with_history(payload.dig("project_archives", project.name))
+    end
+    payload = payload.merge("daemon_status" => daemon,
+      "board_metadata" => payload["board_metadata"] || Board.new(projects).metadata)
     StatusBroadcaster.define_singleton_method(:snapshot_with_version) do
       StatusBroadcaster::PageSnapshot.new(
         payload:, version:, availability:, last_success_at:, error:

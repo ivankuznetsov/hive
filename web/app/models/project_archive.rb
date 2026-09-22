@@ -2,6 +2,26 @@
 # each project briefly; a stage move invalidates it immediately.
 class ProjectArchive
   CACHE = ActiveSupport::Cache::MemoryStore.new(size: 16.megabytes)
+  REQUESTS = ActiveSupport::Cache::MemoryStore.new(size: 256.kilobytes, expires_in: 2.minutes)
+
+  # Requests only subscribe to history. The existing status poller performs
+  # the read, publishes it over Cable, and persists it with the active rows.
+  def self.request(project)
+    REQUESTS.write(identity(project).to_json, :pending, expires_in: nil)
+  end
+
+  def self.refreshed(project)
+    key = identity(project).to_json
+    REQUESTS.write(key, :cached) if REQUESTS.read(key) == :pending
+  end
+
+  def self.requested?(project)
+    REQUESTS.read(identity(project).to_json)
+  end
+
+  def self.identity(project)
+    project.values_at("name", "path", "hive_state_path")
+  end
 
   def self.snapshot(project)
     stages = File.join(project.hive_state_path, "stages")

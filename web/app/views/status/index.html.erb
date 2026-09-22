@@ -72,6 +72,9 @@
 <% end %>
 
 <%= render "status/daemon", daemon_status: @daemon_status %>
+<% if @history_loading %>
+  <p class="muted status-history-loading" role="status">Loading completed tasks…</p>
+<% end %>
 
 <div class="status-view-toolbar">
   <div>

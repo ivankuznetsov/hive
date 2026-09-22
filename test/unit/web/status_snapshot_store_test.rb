@@ -3,6 +3,30 @@ require "hive/web/status_snapshot_store"
 
 class StatusSnapshotStoreTest < Minitest::Test
   include HiveTestHelper
+
+  def test_saved_page_data_round_trips_and_rejects_corrupt_or_relocated_history
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "status.json")
+      store = Hive::Web::StatusSnapshotStore.new(path: path)
+      project = { "name" => "demo", "path" => "/demo", "tasks" => [] }
+      payload = { "projects" => [ project ], "project_archives" => { "demo" => project },
+        "board_metadata" => { "demo" => { "workflows" => { "coding" => [ { "dir" => "9-done", "name" => "done" } ], "missing" => nil } } },
+        "daemon_status" => { "running" => true } }
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
+        store.write(payload, last_success_at: "2026-07-25T12:00:00Z")
+        assert_equal payload, store.read.fetch("payload")
+        good = JSON.parse(File.read(path))
+        [ payload.merge("project_archives" => []),
+          payload.merge("project_archives" => { "demo" => project.merge("path" => "/old") }),
+          payload.merge("project_archives" => { "demo" => project.merge("tasks" => [ nil ]) }),
+          payload.merge("daemon_status" => nil),
+          payload.merge("board_metadata" => { "demo" => { "workflows" => { "coding" => [ { "dir" => 9 } ] } } }) ].each do |invalid|
+          File.write(path, JSON.generate(good.merge("payload" => invalid)))
+          assert_nil store.read, "invalid saved page data must fall back to cold loading"
+        end
+      end
+    end
+  end
   def test_round_trip_is_private_and_scoped_to_registered_projects
     Dir.mktmpdir do |dir|
       path = File.join(dir, "status.json")

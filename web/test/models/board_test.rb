@@ -1,6 +1,20 @@
 require "test_helper"
 
 class BoardTest < ActiveSupport::TestCase
+  test "saved history metadata includes the default workflow for the empty fleet board" do
+    name = create_hive_project!("saved-default-workflow")
+    project = Project.find!(name)
+    history = project.attributes.merge("tasks" => [ { "slug" => "finished", "stage" => "6-done",
+      "workflow" => "content", "action" => "archived" } ])
+    metadata = Board.new([ project.with_history(history) ]).metadata
+
+    band = Board.new([ project ], metadata: metadata).bands.sole
+
+    assert_nil band.error
+    assert_equal "coding", band.workflow_id
+    assert_equal Hive::Workflows::Registry.fetch(:coding).stage_dirs, band.columns.map(&:stage)
+  end
+
   test "completed deliverables appear in Done while unfinished delivery stays in its stage" do
     workflow = Hive::Workflow.new(id: :writing, stages: [
       Hive::Workflow::Stage.new(name: "deliver", index: 1, kind: :agent,

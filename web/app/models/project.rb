@@ -19,6 +19,15 @@ class Project
     @attributes = attributes
   end
 
+  def with_history(history)
+    return self unless history && ProjectArchive.identity(history) == ProjectArchive.identity(attributes)
+
+    completed = history.fetch("tasks", []).map { |task| task.merge("archive_source" => true) }
+    # A fresh active row wins if an archived task has since been reopened.
+    tasks = (completed + attributes.fetch("tasks", [])).index_by { |task| task.fetch("slug") }.values
+    self.class.new(attributes.merge("tasks" => tasks, "error" => attributes["error"] || history["error"]))
+  end
+
   def name
     attributes.fetch("name")
   end

@@ -63,7 +63,30 @@ module Hive
           payload["projects"].is_a?(Array) && payload["projects"].all? do |project|
             project.is_a?(Hash) && project.fetch("tasks", []).is_a?(Array) &&
               project.fetch("tasks", []).all? { |task| task.is_a?(Hash) }
+          end && valid_page_data?(payload)
+      end
+
+      def valid_page_data?(payload)
+        archives = payload.fetch("project_archives", {})
+        boards = payload.fetch("board_metadata", {})
+        daemon = payload.fetch("daemon_status", {})
+        return false unless archives.is_a?(Hash) && boards.is_a?(Hash) && daemon.is_a?(Hash)
+
+        projects = payload["projects"].each_with_object({}) { |entry, out| out[entry["name"]] ||= entry }
+        archives.all? do |name, history|
+          project = projects[name]
+          project && history.is_a?(Hash) && history["tasks"].is_a?(Array) &&
+            history["tasks"].all? { |task| task.is_a?(Hash) } &&
+            project_identities([ history ]) == project_identities([ project ])
+        end && boards.all? do |_, board|
+          board.is_a?(Hash) && board.fetch("unavailable_workflows", []).is_a?(Array) &&
+            board.fetch("unavailable_workflows", []).all? { |id| id.is_a?(String) } &&
+            board["workflows"].is_a?(Hash) && board["workflows"].values.all? do |stages|
+            stages.nil? || (stages.is_a?(Array) && stages.all? do |stage|
+              stage.is_a?(Hash) && stage["dir"].is_a?(String) && stage["name"].is_a?(String)
+            end)
           end
+        end
       end
     end
   end

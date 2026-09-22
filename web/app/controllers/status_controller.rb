@@ -20,14 +20,10 @@ class StatusController < ApplicationController
 
     @visible_projects = @selected_project ? [ @selected_project ] : @projects
     if @selected_project && @selected_project["hive_state_path"].present? && !@status_page_snapshot.unavailable?
-      history = StatusBroadcaster.projects(StatusBroadcaster.archive_snapshot(project: @selected_project)).first
-      if history
-        completed = history.attributes.fetch("tasks", []).map { |task| task.merge("archive_source" => true) }
-        tasks = (@selected_project.attributes.fetch("tasks", []) + completed).index_by { |task| task.fetch("slug") }.values
-        @visible_projects = [ Project.new(@selected_project.attributes.merge(
-          "tasks" => tasks, "error" => @selected_project["error"] || history["error"]
-        )) ]
-      end
+      ProjectArchive.request(@selected_project.attributes)
+      history = @payload.dig("project_archives", @selected_project.name)
+      @history_loading = history.nil?
+      @visible_projects = [ @selected_project.with_history(history) ]
     end
     order = TaskDisplay::STATES.keys
     @visible_projects = @visible_projects.map do |project|
@@ -49,8 +45,8 @@ class StatusController < ApplicationController
         Project.new(project.attributes.merge("tasks" => tasks)) if tasks.any? || project["error"].present?
       end
     end
-    @board = Board.new(@visible_projects) if @status_view == "board"
-    @daemon_status = daemon_status
+    @board = Board.new(@visible_projects, metadata: @payload.fetch("board_metadata", {})) if @status_view == "board"
+    @daemon_status = @payload.fetch("daemon_status", {})
   end
 
   def archive
@@ -75,18 +71,5 @@ class StatusController < ApplicationController
   def status_filter_path(**changes)
     query = request.query_parameters.merge(changes.stringify_keys).compact
     query.empty? ? request.path : "#{request.path}?#{query.to_query}"
-  end
-
-  # Build the daemon-status envelope in-process. StatusReport is the same
-  # producer behind `hive daemon status --json`, returning the envelope as a
-  # Hash — so we never reassign the process-global $stdout (which under
-  # threaded Puma would capture/suppress/interleave concurrent requests'
-  # output). `safe_payload` never raises on a not-running daemon.
-  def daemon_status
-    require "hive/daemon/status_report"
-    Hive::Daemon::StatusReport.new.safe_payload
-  rescue StandardError => e
-    Rails.logger.warn("daemon_status probe failed: #{e.class}: #{e.message}")
-    { "ok" => false, "running" => false, "message" => e.message }
   end
 end

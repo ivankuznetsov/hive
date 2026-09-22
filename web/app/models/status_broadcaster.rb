@@ -20,7 +20,7 @@ class StatusBroadcaster
 
   class << self
     def feed
-      @feed ||= Hive::Web::StatusFeed.new(snapshot_store: Hive::Web::StatusSnapshotStore.new)
+      @feed ||= StatusPageFeed.new(snapshot_store: Hive::Web::StatusSnapshotStore.new)
     end
 
     # Injectable for tests; one feed per process in production.

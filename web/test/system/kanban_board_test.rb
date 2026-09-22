@@ -17,6 +17,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     sign_in!
     visit root_path(project: project)
 
+    assert_selector ".kanban-band[data-workflow='content'] .kanban-column[data-stage='6-done']", wait: 15
     within ".kanban-band[data-workflow='content'] .kanban-column[data-stage='6-done']" do
       assert_text "Done"
       assert_selector ".kanban-card[data-task-slug='#{slug}']"
@@ -35,7 +36,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     Hive::TaskMeta.rewrite(archived.to_s, completed_at: Time.now.utc - 30.days)
     sign_in!
     visit root_path(project: project)
-    assert_selector "[data-stage='9-done']:not(.is-folded) .kanban-card", text: "Read the finished architecture"
+    assert_selector "[data-stage='9-done']:not(.is-folded) .kanban-card", text: "Read the finished architecture", wait: 15
     find("a[href='#{task_path(project, slug, source: "archive")}']").click
     assert_selector "h1", text: "Read the finished architecture"
     assert_no_selector "form[action*='/run']"
@@ -137,7 +138,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     visit board_path(project: project)
     assert_selector "#{band} [data-stage='1-inbox'].is-folded"
     assert_selector "#{band} [data-stage='9-done']:not(.is-folded)"
-    assert_selector "#{band} [data-stage='9-done'] .kanban-card", text: "Completed card"
+    assert_selector "#{band} [data-stage='9-done'] .kanban-card", text: "Completed card", wait: 15
 
     # An untouched empty column opens when a live task arrives.
     new_slug = create_task!(project, "New brainstorm card")
@@ -416,7 +417,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       board_token = status_page_token
 
       find(".kanban-card[data-task-slug='#{original_slug}'] .kanban-card-heading a").click
-      assert_current_path task_path(project, original_slug)
+      assert_current_path task_path(project, original_slug), wait: 10
       execute_script("document.querySelector('#status-stream-owner').remove()")
       wait_for_status_subscribers(0)
       restored_slug = create_task!(project, "Visible after history restore")

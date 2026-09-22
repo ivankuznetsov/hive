@@ -19,9 +19,14 @@ class Board
     end
   end
 
-  attr_reader :bands
+  StageSnapshot = Data.define(:dir, :name)
+  WorkflowSnapshot = Data.define(:stages)
 
-  def initialize(projects)
+  attr_reader :bands, :metadata
+
+  def initialize(projects, metadata: nil)
+    @snapshot_metadata = metadata
+    @metadata = {}
     @bands = projects.flat_map { |project| bands_for(project) }
   end
 
@@ -30,14 +35,29 @@ class Board
   private
 
   def bands_for(project)
-    default_workflow = default_workflow_for(project)
+    saved = @snapshot_metadata&.fetch(project.name, {})
+    default_workflow = saved ? saved.fetch("default_workflow", DEFAULT_WORKFLOW) : default_workflow_for(project)
     tasks_by_workflow = project.active_tasks.group_by do |task|
       task["workflow"].presence || default_workflow
     end
     tasks_by_workflow[default_workflow] = [] if tasks_by_workflow.empty?
-    daemon_enabled = project.daemon_enabled?
+    daemon_enabled = saved ? saved.fetch("daemon_enabled", true) : project.daemon_enabled?
     workflow_ids = tasks_by_workflow.keys.sort
-    workflows = workflows_for(project, workflow_ids)
+    workflows = if saved
+      saved.fetch("workflows", {}).transform_values do |stages|
+        WorkflowSnapshot.new(stages: stages.map { |stage| StageSnapshot.new(**stage.symbolize_keys) }) if stages
+      end
+    else
+      workflows_for(project, (workflow_ids + [ default_workflow ]).uniq)
+    end
+    unavailable_workflows = saved ? saved.fetch("unavailable_workflows", []) : workflows.select { |_, workflow| workflow.nil? }.keys
+    @metadata[project.name] = {
+      "default_workflow" => default_workflow, "daemon_enabled" => daemon_enabled,
+      "unavailable_workflows" => unavailable_workflows,
+      "workflows" => workflows.transform_values do |workflow|
+        workflow&.stages&.map { |stage| { "dir" => stage.dir, "name" => stage.name } }
+      end
+    }
 
     workflow_ids.map do |workflow_id|
       tasks = tasks_by_workflow.fetch(workflow_id)
@@ -47,7 +67,7 @@ class Board
         workflow_id:,
         columns: columns_for(workflow, tasks),
         daemon_enabled:,
-        error: project["error"].presence || ("workflow_unavailable" unless workflow)
+        error: project["error"].presence || ("workflow_unavailable" if unavailable_workflows.include?(workflow_id) || (!workflow && saved != {}))
       )
     end
   end

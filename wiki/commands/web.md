@@ -575,7 +575,9 @@ Honeycomb projections.
   snapshots/restores typed text plus caret across morphs, keyed by opaque binding
   (the Q&A textarea name or the intervention field's draft key), so a changed
   question or new round replaces the old field without carrying stale drafts
-  forward), artifacts rendered as sanitized markdown
+  forward). It restores the exact selection range before refocusing a field,
+  so the resulting `focusin` event records the restored range rather than the
+  browser's default end-of-text caret. Artifacts render as sanitized markdown
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
   sanitized after; leading YAML front matter and standalone
   `Hive::Markers::MARKER_RE` comments dropped, while non-marker comments and
@@ -1082,8 +1084,10 @@ The cache uses atomic replacement, a versioned envelope, a 16 MiB bound, and
 exact registered-project matching. Missing, malformed, incompatible, or
 registry-mismatched caches fall back to the neutral “Loading your workspace…”
 panel. Write failures preserve the previous file without degrading a live scan.
-No archive or dependency context is restored, and mutations retain their
-existing targeted current-state validation. The five-second refresh cadence
+Completed history requested on project boards, board column definitions, and
+the daemon banner are saved in the same display frame. Dependency admission
+context is not restored; mutations retain targeted current-state validation.
+The five-second refresh cadence
 and TUI liveness policy are unchanged; this improves time to first display,
 not full-scan cost.
 Loading is identified by the initial `loading` version token, so normal startup
@@ -1308,13 +1312,34 @@ Selecting a project on the normal Board or Grid includes its archived tasks,
 including retained history older than the ordinary retention window. The Board
 expands populated completed columns by default; completed cards link to read-only
 archive task detail. State counts and filters include these rows. The all-project
-page and background active feed remain active-only.
+page and the active task projection remain active-only.
 
-`ProjectArchive` reads the canonical archive projection for only the selected
-registered project. A bounded process-local cache retains each result for one
-minute; stage-directory changes invalidate it immediately. The project-scoped
-Done and Archive pages reuse this cache instead of scanning every project first.
-The all-project Archive remains the lossless fleet-wide history view.
+Normal project navigation subscribes to completed history and reads the latest
+saved frame immediately. `StatusPageFeed` uses the existing background poller
+to read requested projects through `ProjectArchive`, keeping history separate
+from active task rows. It reuses the same persistence, change token, Cable
+broadcast, and reconnect catch-up as the active view. Expiry never removes
+already saved completed cards; failed history refreshes retain them with a
+warning. An active row takes precedence when a completed task is reopened.
+The first visit without saved history shows “Loading completed tasks…” while
+active tasks remain usable. Pending and failed reads keep retrying; after a
+successful read, requests expire after two minutes without a new page render,
+stopping refreshes for projects that are no longer being viewed.
+
+The canonical project history cache still lasts one minute and invalidates on
+stage moves. Its rebuilds happen on the background poller for normal boards.
+Board column definitions are captured there too: HTTP rendering does not acquire
+the workflow registry lock held by scans. The saved definitions include the
+default workflow for an empty fleet band. If a workflow cannot be reloaded, its
+previous definitions preserve Done grouping with an unavailable warning until
+recovery. Definitions are never reused after a project is relocated.
+Daemon liveness is read on background
+refreshes; service/version probes are reused for up to a minute, invalidating
+when the daemon PID or running state changes. A frame without daemon evidence
+shows “Checking daemon status…” without claiming the daemon has stopped.
+
+Explicit project Done and Archive pages reuse the canonical history cache on
+demand. The all-project Archive remains the lossless fleet-wide history view.
 
 Completed terminal deliveries (for example writing workflow `7-deliver`) appear
 in a Done column on the project board. Pending delivery remains in Deliver;

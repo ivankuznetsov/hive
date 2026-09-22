@@ -206,7 +206,7 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
                     "wide tables must scroll inside the document"
   end
 
-  test "pushed morphs preserve the exact Q&A selection range" do
+  test "pushed morphs preserve the exact Q&A selection range after refocusing" do
     brainstorm = stage_dir(@project, "2-brainstorm").join(@slug)
     FileUtils.mv(@folder, brainstorm)
     @folder = brainstorm
@@ -247,6 +247,12 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
       arguments[0].dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }))
       arguments[0].setSelectionRange(2, 9)
       arguments[0].dispatchEvent(new Event("select", { bubbles: true }))
+
+      // Exercise focus restoration even when Turbo preserves the textarea node.
+      // The answers controller snapshots first; the morph may then lose focus.
+      document.addEventListener("turbo:before-render", () => {
+        document.querySelector("textarea[data-question-number='1']").blur()
+      }, { once: true })
     JS
 
     idea_path = @folder.join("idea.md")
@@ -277,6 +283,7 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_equal field_name, selection.fetch("name"),
                  "the normalized question binding must remain stable across the morph"
     assert_equal "precise selection", selection.fetch("value")
+    assert selection.fetch("focused"), "the answer field must regain focus after the morph"
     assert_equal 2, selection.fetch("start")
     assert_equal 9, selection.fetch("end")
   end

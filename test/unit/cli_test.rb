@@ -511,7 +511,7 @@ class HiveCliTest < Minitest::Test
       assert_equal(
         { project_root: Dir.pwd, json: true, template: nil, yes: false, dry_run: false,
           allow_escalation: false, mapping_overrides: [], input_bindings: [], version: nil,
-          expected_release_digest: nil },
+          expected_release_digest: nil, from: nil, ref: nil },
         calls.first.fetch(:kwargs)
       )
       assert_equal :call, calls.last

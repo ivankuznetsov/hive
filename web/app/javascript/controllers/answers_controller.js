@@ -52,8 +52,9 @@ export default class extends Controller {
     if (pendingFocus) {
       const field = this.fieldForKey(pendingFocus.key)
       if (field) {
-        field.focus()
+        // focusin records the current range, so restore it before taking focus.
         field.setSelectionRange(pendingFocus.start, pendingFocus.end)
+        field.focus()
       }
     }
   }

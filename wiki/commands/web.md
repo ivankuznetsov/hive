@@ -575,7 +575,9 @@ Honeycomb projections.
   snapshots/restores typed text plus caret across morphs, keyed by opaque binding
   (the Q&A textarea name or the intervention field's draft key), so a changed
   question or new round replaces the old field without carrying stale drafts
-  forward), artifacts rendered as sanitized markdown
+  forward). It restores the exact selection range before refocusing a field,
+  so the resulting `focusin` event records the restored range rather than the
+  browser's default end-of-text caret. Artifacts render as sanitized markdown
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
   sanitized after; leading YAML front matter and standalone
   `Hive::Markers::MARKER_RE` comments dropped, while non-marker comments and

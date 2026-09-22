@@ -118,6 +118,95 @@ class WorkflowGitInstallTest < Minitest::Test
     end
   end
 
+  def test_rejects_managed_overrides_for_git_sources
+    with_source_and_project do |source, project|
+      error = assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.new("install", "news", project_root: project,
+                                    from: source, allow_escalation: true).call!
+      end
+      assert_includes error.message, "authored descriptor settings"
+      refute File.exist?(File.join(project, ".hive-state/workflows/news.yml"))
+    end
+  end
+
+  def test_rejects_symlink_workflow_root_without_writing_to_target
+    with_source_and_project do |source, project|
+      root = File.join(project, ".hive-state/workflows")
+      FileUtils.rm_rf(root)
+      Dir.mktmpdir do |target|
+        File.symlink(target, root)
+        error = assert_raises(Hive::ConfigError) { install(source, project) }
+        assert_includes error.message, "real directory"
+        assert_empty Dir.children(target)
+      end
+    end
+  end
+
+  def test_invalid_id_is_reported_as_json_usage_error
+    with_source_and_project do |source, project|
+      output = StringIO.new
+      command = Hive::Commands::Workflow::GitInstall.new(
+        "../escape", repository: source, project_root: project, json: true, stdout: output
+      )
+      assert_raises(SystemExit) { command.call }
+      report = JSON.parse(output.string)
+      assert_equal "usage", report.fetch("error_kind")
+      refute report.fetch("ok")
+    end
+  end
+
+  def test_source_rejects_invalid_id_and_malformed_url_before_materializing
+    Dir.mktmpdir do |destination|
+      source = Hive::WorkflowPackage::GitSource.new(repository: "/unused")
+      error = assert_raises(Hive::ConfigError) { source.fetch("../escape", destination: destination) }
+      assert_includes error.message, "invalid Git workflow id"
+      source = Hive::WorkflowPackage::GitSource.new(repository: "https://[invalid")
+      error = assert_raises(Hive::ConfigError) { source.fetch("news", destination: destination) }
+      assert_includes error.message, "invalid Git repository URL"
+      assert_empty Dir.children(destination)
+    end
+  end
+
+  def test_rejects_oversized_blob_before_installing
+    with_source_and_project do |source, project|
+      File.write(File.join(source, "workflows/news/large.txt"), "x" * (Hive::WorkflowPackage::Manifest::MAX_FILE_BYTES + 1))
+      run!("git", "-C", source, "add", ".")
+      run!("git", "-C", source, "commit", "-m", "oversized asset")
+      error = assert_raises(Hive::ConfigError) { install(source, project) }
+      assert_includes error.message, "package size limit"
+      refute File.exist?(File.join(project, ".hive-state/workflows/news.yml"))
+    end
+  end
+
+  def test_missing_ref_emits_redacted_git_error_envelope
+    with_source_and_project do |source, project|
+      output = StringIO.new
+      command = Hive::Commands::Workflow::GitInstall.new(
+        "news", repository: source, ref: "missing-ref", project_root: project, json: true, stdout: output
+      )
+      assert_raises(SystemExit) { command.call }
+      report = JSON.parse(output.string)
+      assert_equal "git", report.fetch("error_kind")
+      refute report.fetch("ok")
+      refute File.exist?(File.join(project, ".hive-state/workflows/news.yml"))
+    end
+  end
+
+  def test_git_timeout_and_missing_executable_are_actionable_without_raw_diagnostics
+    { Timeout::Error => "timed out", Errno::ENOENT => "Git is required" }.each do |exception, message|
+      Dir.mktmpdir do |destination|
+        source = Hive::WorkflowPackage::GitSource.new(repository: "/unused")
+        with_replaced_singleton_method(Hive::WorkflowPackage::RuntimePolicy, :capture3_bounded,
+                                       ->(*) { raise exception, "private diagnostic" }) do
+          error = assert_raises(Hive::GitError) { source.fetch("news", destination: destination) }
+          assert_includes error.message, message
+          refute_includes error.message, "private diagnostic"
+          assert_empty Dir.children(destination)
+        end
+      end
+    end
+  end
+
   private
 
   def install(source, project, **options)

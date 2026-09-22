@@ -10,7 +10,7 @@ class StatusSnapshotStoreTest < Minitest::Test
       store = Hive::Web::StatusSnapshotStore.new(path: path)
       project = { "name" => "demo", "path" => "/demo", "tasks" => [] }
       payload = { "projects" => [ project ], "project_archives" => { "demo" => project },
-        "board_metadata" => { "demo" => { "workflows" => { "coding" => [ { "dir" => "9-done", "name" => "done" } ], "missing" => nil } } },
+        "board_metadata" => { "demo" => { "workflows" => { "coding" => [ { "dir" => "9-done", "name" => "done" } ], "missing" => nil }, "unavailable_workflows" => [ "missing" ] } },
         "daemon_status" => { "running" => true } }
       with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
         store.write(payload, last_success_at: "2026-07-25T12:00:00Z")
@@ -20,6 +20,7 @@ class StatusSnapshotStoreTest < Minitest::Test
           payload.merge("project_archives" => { "demo" => project.merge("path" => "/old") }),
           payload.merge("project_archives" => { "demo" => project.merge("tasks" => [ nil ]) }),
           payload.merge("daemon_status" => nil),
+          payload.merge("board_metadata" => { "demo" => { "workflows" => {}, "unavailable_workflows" => [ nil ] } }),
           payload.merge("board_metadata" => { "demo" => { "workflows" => { "coding" => [ { "dir" => 9 } ] } } }) ].each do |invalid|
           File.write(path, JSON.generate(good.merge("payload" => invalid)))
           assert_nil store.read, "invalid saved page data must fall back to cold loading"

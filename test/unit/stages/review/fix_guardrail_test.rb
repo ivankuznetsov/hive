@@ -1026,7 +1026,82 @@ class FixGuardrailTest < Minitest::Test
       refute_nil match
       assert_match(/new file mode 100755|new mode 100755/, match.snippet)
       assert_equal :medium, match.severity
+      assert_equal "scripts/run.sh", match.file,
+                   "mode lines precede the ---/+++ pair; the path must come from the diff --git header"
     end
+  end
+
+  def test_new_executable_stub_under_test_directory_is_exempt
+    # A fix pass that adds a fake CLI stub for an E2E test (the stub must be
+    # executable to shadow the real binary on PATH) is not a privilege grant.
+    with_two_commits(file: "web/test/e2e/support/codex",
+                     content: "#!/usr/bin/env bash\nexit 0\n",
+                     mode: 0o755) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :clean, result.status
+    end
+  end
+
+  def test_chmod_of_existing_test_file_still_trips_with_its_path
+    # The exemption covers NEW files only. A pure mode flip emits no ---/+++
+    # pair at all, so the diff --git header is the only source of the path.
+    with_two_commits(file: "test/helper.sh", content: "echo hi\n") do |dir, _base, _head|
+      base = `git -C #{dir} rev-parse HEAD`.strip
+      File.chmod(0o755, File.join(dir, "test/helper.sh"))
+      run!("git", "-C", dir, "commit", "-am", "chmod", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :tripped, result.status
+      match = result.matches.find { |m| m.pattern_name == "permission_change" }
+      assert_equal "new mode 100755", match.snippet
+      assert_equal "test/helper.sh", match.file
+    end
+  end
+
+  def test_renamed_executable_reports_the_new_path
+    with_two_commits(file: "old.sh", content: "#!/bin/sh\n#{"echo same\n" * 20}") do |dir, _base, _head|
+      base = `git -C #{dir} rev-parse HEAD`.strip
+      FileUtils.mkdir_p(File.join(dir, "bin"))
+      run!("git", "-C", dir, "mv", "old.sh", "bin/new.sh")
+      File.chmod(0o755, File.join(dir, "bin/new.sh"))
+      run!("git", "-C", dir, "commit", "-am", "rename", "--quiet")
+      head = `git -C #{dir} rev-parse HEAD`.strip
+
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      match = result.matches.find { |m| m.pattern_name == "permission_change" }
+      assert_equal "bin/new.sh", match.file
+    end
+  end
+
+  def test_c_quoted_executable_path_is_decoded
+    with_two_commits(file: "tab\tname.sh", content: "#!/bin/sh\n", mode: 0o755) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      match = result.matches.find { |m| m.pattern_name == "permission_change" }
+      assert_equal "tab\tname.sh", match.file
+    end
+  end
+
+  def test_diff_git_path_splits_unquoted_paths_with_spaces
+    guardrail = Hive::Stages::Review::FixGuardrail
+    assert_equal "my dir/b x.sh", guardrail.send(:diff_git_path, "a/my dir/b x.sh b/my dir/b x.sh")
+    assert_nil guardrail.send(:diff_git_path, "garbage")
   end
 
   # --- permission_change pattern direct coverage -----------------------

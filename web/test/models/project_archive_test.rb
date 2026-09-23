@@ -8,13 +8,18 @@ class ProjectArchiveTest < ActiveSupport::TestCase
     command = Object.new
     command.define_singleton_method(:json_payload) do |projects|
       calls << projects.map { |entry| entry.fetch("name") }
-      { "projects" => projects.map { |entry| entry.merge("tasks" => []) } }
+      { "projects" => projects.map { |entry| entry.merge("tasks" => [ {
+        "slug" => "finished", "plan_review" => { "state" => "cleared", "routes" => [ { "role" => "primary" } ] }
+      } ]) } }
     end
     original = Hive::Commands::Status.method(:new)
     Hive::Commands::Status.define_singleton_method(:new) { |**| command }
     ProjectArchive::CACHE.clear
 
-    2.times { ProjectArchive.snapshot(project) }
+    2.times do
+      snapshot = ProjectArchive.snapshot(project)
+      refute snapshot.dig("projects", 0, "tasks", 0, "plan_review").key?("routes")
+    end
     assert_equal [ [ name ] ], calls
 
     done = stage_dir(name, "9-done")

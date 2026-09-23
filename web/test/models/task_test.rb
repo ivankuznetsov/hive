@@ -569,8 +569,11 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal [ "manual" ], details.fetch("findings").map { |row| row.fetch("classification") }
     assert_equal [ "adversarial" ], details.fetch("coverage").map { |row| row.fetch("name") }
     assert_equal [ "primary_result" ], details.fetch("artifacts").map { |row| row.fetch("name") }
+    refute details.key?("routes")
+    refute details.fetch("summary").key?("routes")
+    refute task.plan_review.key?("routes")
     refute_includes details.dig("artifacts", 0, "content"), "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-    assert store.current_validated
+    assert_equal 1, store.current_validated["routes"].length, "native review history remains available"
   ensure
     FileUtils.remove_entry(root) if root&.exist?
   end
@@ -644,7 +647,8 @@ class TaskTest < ActiveSupport::TestCase
         "kind" => "projection", "version" => 1, "candidate_plan_digest" => nil,
         "state" => "awaiting_decision", "outcome" => nil, "attempt_ids" => [],
         "current_attempt_id" => nil, "coverage" => [ coverage ],
-        "findings" => [ finding.to_h ], "decisions" => [], "routes" => [],
+        "findings" => [ finding.to_h ], "decisions" => [],
+        "routes" => [ { "role" => "primary", "outcome" => "success", "attempt_id" => "old-attempt" } ],
         "artifacts" => { "primary_result" => result_ref, "primary_input" => input_ref },
         "blockers" => [ { "owner" => "operator", "reason" => "manual finding" } ],
         "required_action" => "answer manual finding", "degradation_reason" => nil,

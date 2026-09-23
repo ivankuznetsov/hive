@@ -5,6 +5,7 @@ require "shellwords"
 require "hive/plan_review/projection"
 require "hive/plan_review/store"
 require "hive/web/environment"
+require "hive/web/status_payload"
 require "hive/task_workspace/artifacts"
 require "hive/task_workspace/publication"
 require "hive/task_workspace/correlated_log"
@@ -106,7 +107,7 @@ class Task
 
   def initialize(project:, attributes:)
     @project = project
-    @attributes = attributes
+    @attributes = Hive::Web::StatusPayload.task(attributes)
   end
 
   def [](key)
@@ -165,7 +166,7 @@ class Task
 
     details = {
       "summary" => summary, "coverage" => [], "findings" => [],
-      "routes" => Array(summary["routes"]), "artifacts" => []
+      "artifacts" => []
     }
     return details unless folder && summary["review_id"]
 
@@ -186,7 +187,6 @@ class Task
     details.merge(
       "coverage" => current["coverage"],
       "findings" => current["findings"].sort_by { |finding| finding["display_order"] },
-      "routes" => current["routes"],
       "artifacts" => safe_plan_review_artifacts(store, current["artifacts"])
     )
   rescue Hive::PlanReview::Error, JSON::ParserError, SystemCallError, IOError => error
@@ -198,7 +198,7 @@ class Task
         "required_action" => "refresh plan review state and retry",
         "execution_allowed" => false
       ),
-      "coverage" => [], "findings" => [], "routes" => [], "artifacts" => []
+      "coverage" => [], "findings" => [], "artifacts" => []
     }
   end
 

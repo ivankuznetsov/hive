@@ -66,7 +66,9 @@ module Hive
       end
 
       def dependency_context_snapshot
-        @mutex.synchronize { @source.dependency_context_snapshot }
+        # StateSource publishes the completed context and fingerprint as one
+        # frozen value. Task requests can read it while the next fleet scan runs.
+        @source.dependency_context_snapshot
       end
 
       # Keep the daemon-owned recovery receipt overlay available without

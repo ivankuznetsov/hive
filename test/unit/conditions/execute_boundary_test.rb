@@ -275,6 +275,12 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
           assert_raises(Hive::TaskProjection::InvalidJournal) do
             Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
           end
+
+          File.binwrite(journal_path, "\n\n")
+          error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+            Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+          end
+          assert_match(/journal is empty/, error.message)
         end
       end
     end

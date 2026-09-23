@@ -446,14 +446,17 @@ class TuiStateSourceTest < Minitest::Test
   def test_refresh_payload_raises_poll_failure_without_discarding_latest_good
     source = Hive::Tui::StateSource.new
     stale_payload = { "schema" => "hive-status", "projects" => [] }
+    dependency = { context: Object.new, fingerprint: "previous" }.freeze
     failure = Hive::ConfigError.new("synthetic refresh failure")
     source.instance_variable_set(:@current_payload, stale_payload)
+    source.instance_variable_set(:@dependency_context_snapshot, dependency)
     source.define_singleton_method(:refresh_once) { @last_error = failure }
 
     raised = assert_raises(Hive::ConfigError) { source.refresh_payload_now }
 
     assert_same failure, raised
     assert_same stale_payload, source.instance_variable_get(:@current_payload)
+    assert_same dependency, source.dependency_context_snapshot
   ensure
     source&.stop
   end

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-01
+updated: 2026-09-23
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -88,13 +88,35 @@ no coverage-gate or live-provider result is claimed.
 `task-journal.jsonl` is append-only and routine reads must validate and fold its
 complete history. The bounded process-local Reader cache avoids repeating that
 work while a journal and marker are unchanged, but the first read after each
-append remains O(history), cache entries retain the folded records in memory,
-and no compaction or retention protocol bounds long-lived journals. In
+append remains O(history), and no compaction or retention protocol bounds
+long-lived journals. Routine cache entries now release raw records and replay
+working objects after retaining the projected data and record count. In
 particular, high-volume `activity_recorded` timeline events share the authority
 stream even when most do not affect the current condition projection. Moving
 timeline-only activity to a sibling stream or introducing a compaction protocol
 requires a separate design that preserves JSONL as the sole persistent history
 authority.
+
+## Web projection reuse and memory measurement limits (2026-09-23)
+
+Web still invokes the active status producer on its five-second polling cycle;
+the shared source has a three-second liveness fallback. Extending that fallback
+without a complete input stamp would miss in-place journal/review/artifact
+changes, referenced terminal dependencies, process exits, and time-dependent
+actions. Runtime SQLite/WAL timestamps also change for unrelated observations,
+so they do not identify meaningful task changes. Safe reuse needs observations
+captured with the projection, or a before/after validation of those inputs.
+
+Exact task admission still loads policy snapshots for all registered projects;
+task metadata and journal reads are limited to the target and reachable
+prerequisites. Making unrelated project policy loads lazy is a separate shared
+dependency-context change.
+
+Routine-cache memory measurements isolate retained Ruby objects after GC;
+they do not establish long-running Puma RSS or swap savings. The startup and
+request-blocking regressions have deterministic tests. Sustained local Web
+memory, snapshot age, and task response times still need measurement after
+deployment of this change.
 
 ## Main-wiki QMD freshness
 

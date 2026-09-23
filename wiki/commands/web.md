@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-09-10
+updated: 2026-09-23
 tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
@@ -545,7 +545,7 @@ Honeycomb projections.
   to log, media, diff, answer, intervention, run, approval, rejection,
   recovery, and drop routes. An expired task opened from the archive therefore
   remains usable instead of its child requests becoming false 404s. Each route
-  resolves that exact project/stage rather than rescanning the fleet, and
+  resolves that exact task and its reachable prerequisites, and
   terminal archive logs load once without the live task page's three-second
   polling loop. Native Hive web and Hivebox use this same Rails route and
   producer path.
@@ -1073,11 +1073,21 @@ avatar image and exercise the failure fallback without calling GitHub.
 
 Ordinary task show, log, diff, media, and mutation routes resolve one registered
 project and task through `Hive::Web::TaskTargetResolver`; they do not call the
-fleet-wide status producer. Explicit `source=archive` routes use that same
+fleet-wide status producer. The native targeted status helper projects only
+the selected task and builds authoritative dependency admission from its
+reachable prerequisites, including referenced terminal and cross-project
+tasks. Unrelated tasks in the same stage and unrelated terminal history are
+not projected. Mutations still resolve current task and dependency state.
+Explicit `source=archive` routes use that same
 targeted resolver with retention filtering disabled, so hidden terminal tasks
 remain addressable and mutations revalidate current task state without a stale
 fleet cache. One process-wide `StatusFeed` owns polling,
-single-flight refresh, actual scan count, and latest-good state. Status-page
+single-flight refresh, actual scan count, and latest-good state. Lazy feed
+construction is synchronized independently of subscriber shutdown, so
+concurrent first callers cannot split the visible feed from the broadcaster.
+Task-workspace reads of the last completed dependency context and fingerprint
+do not acquire the lock held by a fleet refresh; an initial refresh exposes no
+context until it publishes one. Refresh writers remain serialized. Status-page
 HTTP renders never perform a fleet scan: they use the latest published state,
 or restore the last successful snapshot from owner-private `HIVE_HOME/web-status.json`
 after a restart. The saved view retains task labels and filters, shows its last

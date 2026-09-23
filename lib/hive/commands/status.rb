@@ -684,6 +684,25 @@ module Hive
         @status_attempt_store = nil if owns_attempt_store
       end
 
+      # A task page needs fresh admission and action evidence for one task,
+      # including its reachable prerequisites, without projecting its peers.
+      def task_target_payload(project, slug:, stage:, now: Time.now.utc)
+        with_project_degradation(project) do
+          workflow_generations = capture_workflow_generations([ project ])
+          admission_context = Hive::DependencySnapshot.targeted_admission_context(
+            Hive::Config.registered_projects,
+            targets: { project.fetch("name") => [ slug ] },
+            workflow_generations: workflow_generations
+          )
+          project_payload(
+            project, project_count: 1, stages: [ stage ], task_slugs: [ slug ],
+            admission_context: admission_context, now: now,
+            workflow_generation: workflow_generation_for(project, workflow_generations),
+            apply_retention: !@archive
+          )
+        end
+      end
+
       # Isolate per-project failures. A single project with a malformed
       # config.yml (e.g. an invalid `dependency_gate_stage`) used to raise
       # out of `project_payload` and abort the daemon's internal task graph;
@@ -718,7 +737,8 @@ module Hive
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
                           admission_context: nil, now: Time.now.utc,
-                          workflow_generation: nil, include_archive_index: false, task_slugs: nil)
+                          workflow_generation: nil, include_archive_index: false, task_slugs: nil,
+                          apply_retention: !@archive && task_slugs.nil?)
         owns_attempt_store = acquire_status_attempt_store
         prepared = prepare_project(
           project,
@@ -732,7 +752,9 @@ module Hive
         )
         return prepared unless prepared.is_a?(PreparedProject)
 
-        complete_project_payload(prepared, admission_context: admission_context, now: now)
+        complete_project_payload(
+          prepared, admission_context: admission_context, now: now, apply_retention: apply_retention
+        )
       ensure
         @status_attempt_store = nil if owns_attempt_store
       end
@@ -809,7 +831,8 @@ module Hive
         end
       end
 
-      def complete_project_payload(prepared, admission_context:, now: Time.now.utc)
+      def complete_project_payload(prepared, admission_context:, now: Time.now.utc,
+                                   apply_retention: !@archive && !prepared.incremental)
         rows = prepared.rows
         rows = if prepared.incremental && admission_context.nil?
           annotate_incremental_dependencies(
@@ -821,7 +844,7 @@ module Hive
         end
         projection = Hive::ArchiveFilter.project(
           rows, now: now,
-          apply_retention: !@archive && !prepared.incremental
+          apply_retention: apply_retention
         )
         note_retention_boundary(projection.next_retention_boundary) unless @archive
         rows =

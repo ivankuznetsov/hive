@@ -299,11 +299,9 @@ module Hive
         parent = File.lstat(File.dirname(path))
         custody_error!(File.dirname(path)) unless
           parent.directory? && !parent.symlink? && parent.uid == Process.euid && (parent.mode & 0o077).zero?
-        [ path, "#{path}-wal", "#{path}-shm" ].each do |candidate|
-          next unless File.exist?(candidate) || File.symlink?(candidate)
-          status = File.lstat(candidate)
-          custody_error!(candidate) unless status.file? && !status.symlink? && status.nlink == 1 &&
-            status.uid == Process.euid && (status.mode & 0o077).zero?
+        validate_database_file_custody!(path)
+        [ "#{path}-wal", "#{path}-shm" ].each do |candidate|
+          validate_database_file_custody!(candidate, tolerate_disappearance: true)
         end
         true
       rescue SystemCallError => error
@@ -311,6 +309,15 @@ module Hive
           "runtime control-plane storage is unsafe: #{error.message}",
           code: :database_custody_invalid, action: BACKUP_ACTION
         )
+      end
+
+      def validate_database_file_custody!(candidate, tolerate_disappearance: false)
+        return unless File.exist?(candidate) || File.symlink?(candidate)
+        status = File.lstat(candidate)
+        custody_error!(candidate) unless status.file? && !status.symlink? && status.nlink == 1 &&
+          status.uid == Process.euid && (status.mode & 0o077).zero?
+      rescue Errno::ENOENT
+        raise unless tolerate_disappearance
       end
 
       def custody_error!(candidate)

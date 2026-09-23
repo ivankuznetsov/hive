@@ -174,10 +174,13 @@ module Hive
     # Builds an authoritative dependency view rooted at an exact set of task
     # slugs. The selected tasks and only their reachable prerequisites are
     # loaded from disk; unrelated active work and terminal history stay out of
-    # the scan. This is the dependency counterpart to Status's partial exact-
-    # task projection used by bounded watchers.
+    # the scan. Project policy is read once per reachable project within this
+    # context; the complete enrollment index still validates project identity.
+    # This is the dependency counterpart to Status's partial exact-task
+    # projection used by bounded watchers.
     def targeted_admission_context(registry_entries, targets:, workflow_generations: nil)
       entries = Array(registry_entries)
+      project_configs = {}
       projects = entries.map do |entry|
         references = Array(targets[entry.fetch("name")]).map do |slug|
           Hive::Dependencies::Reference.new(
@@ -188,19 +191,29 @@ module Hive
           entry,
           live_repository_identity: nil,
           workflow_generation: workflow_generation_for(entry, workflow_generations),
-          task_references: references
+          task_references: references,
+          project_configs: project_configs
         )
       end
       admission_context_with_fallback(
-        entries, projects, workflow_generations: workflow_generations
+        entries, projects, workflow_generations: workflow_generations,
+        project_configs: project_configs
       )
     end
 
-    def admission_context_with_fallback(entries, projects, workflow_generations: nil)
+    def admission_context_with_fallback(entries, projects, workflow_generations: nil, project_configs: nil)
       fallback_tasks, scan_errors = dependency_fallback_tasks(
-        entries, projects, workflow_generations: workflow_generations
+        entries, projects, workflow_generations: workflow_generations,
+        project_configs: project_configs
       )
       projects = projects.map do |project|
+        if (loaded_config = project_configs&.[](project.path))
+          config, config_error = loaded_config
+          project = project.with(
+            dependency_gate_stage: config.fetch("dependency_gate_stage", Hive::Config::DEFAULTS.fetch("dependency_gate_stage")),
+            validation_error: project.validation_error || config_error
+          )
+        end
         error = project.validation_error || scan_errors[project.name]
         error ? project.with(validation_error: error) : project
       end
@@ -311,19 +324,15 @@ module Hive
 
     def admission_project(entry, exclude_archived: false,
                           live_repository_identity: :detect, workflow_generation: nil,
-                          task_references: nil, task_folders: nil)
+                          task_references: nil, task_folders: nil, project_configs: nil)
       root = File.expand_path(entry.fetch("path"))
-      if workflow_generation.is_a?(Exception)
-        raise workflow_generation
-      end
       config, config_error =
-        if workflow_generation
-          [
-            workflow_generation.admission_config,
-            workflow_generation.admission_config_error
-          ]
+        if project_configs && task_references&.empty?
+          # Keep every registration for identity/ambiguity validation without
+          # reading policy for projects outside the selected dependency chain.
+          [ {}, nil ]
         else
-          admission_project_config(root)
+          admission_config_for(root, workflow_generation: workflow_generation, project_configs: project_configs)
         end
       tasks =
         if config_error
@@ -331,7 +340,8 @@ module Hive
         elsif task_references
           Array(task_references).flat_map do |reference|
             dependency_tasks_for_reference(
-              entry, reference, workflow_generation: workflow_generation
+              entry, reference, workflow_generation: workflow_generation,
+              project_configs: project_configs
             )
           end
         elsif !task_folders.nil?
@@ -384,7 +394,7 @@ module Hive
       end.keys.freeze
     end
 
-    def dependency_fallback_tasks(entries, projects, workflow_generations: nil)
+    def dependency_fallback_tasks(entries, projects, workflow_generations: nil, project_configs: nil)
       entries_by_name = entries.group_by { |entry| entry["name"].to_s }
       active_by_name = projects.to_h do |project|
         [ project.name, dependency_task_indexes(project.tasks) ]
@@ -424,7 +434,10 @@ module Hive
 
           entry = matches.first
           generation = workflow_generation_for(entry, workflow_generations)
-          tasks = dependency_tasks_for_reference(entry, reference, workflow_generation: generation)
+          tasks = dependency_tasks_for_reference(
+            entry, reference, workflow_generation: generation,
+            project_configs: project_configs
+          )
           fallback[target_name].concat(tasks)
           tasks.each do |task|
             add_dependency_task_to_indexes(fallback_indexes[target_name], task)
@@ -438,14 +451,12 @@ module Hive
       [ fallback, errors ]
     end
 
-    def dependency_tasks_for_reference(entry, reference, workflow_generation: nil)
+    def dependency_tasks_for_reference(entry, reference, workflow_generation: nil, project_configs: nil)
       root = File.expand_path(entry.fetch("path"))
       scan = lambda do
-        config, config_error = if workflow_generation
-          [ workflow_generation.admission_config, workflow_generation.admission_config_error ]
-        else
-          admission_project_config(root)
-        end
+        config, config_error = admission_config_for(
+          root, workflow_generation: workflow_generation, project_configs: project_configs
+        )
         raise Hive::ConfigError, config_error if config_error
 
         dependency_task_folders(root, reference).map do |folder|
@@ -541,6 +552,19 @@ module Hive
       [ data, nil ]
     rescue Psych::Exception, SystemCallError, IOError => e
       [ {}, "could not read #{path}: #{e.class}: #{e.message}" ]
+    end
+
+    def admission_config_for(root, workflow_generation:, project_configs: nil)
+      return project_configs[root] if project_configs&.key?(root)
+      raise workflow_generation if workflow_generation.is_a?(Exception)
+
+      result = if workflow_generation
+        [ workflow_generation.admission_config, workflow_generation.admission_config_error ]
+      else
+        admission_project_config(root)
+      end
+      project_configs[root] = result if project_configs
+      result
     end
 
     def admission_tasks(root, config, project_name: File.basename(root), exclude_archived: false,

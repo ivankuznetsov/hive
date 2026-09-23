@@ -3,7 +3,7 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
 created: 2026-06-18
-updated: 2026-08-28
+updated: 2026-09-23
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -104,6 +104,12 @@ without retaining or periodically refreshing a fleet archive cache. Bounded
 Watch projections use the same closure builder from an exact set of selected
 roots, so post-selection polling neither scans unrelated active tasks nor
 replaces valid dependency verdicts with the daemon fast-tick hold.
+These targeted contexts keep the complete enrollment index for unknown,
+duplicate, and repository-identity checks, but load project admission policy
+only for the selected roots and reachable prerequisites. A context-local cache
+shares each project config across root and fallback reads; reachable policy
+errors and gate stages populate the completed immutable context. Full
+admission and mutation-time revalidation still read current policy.
 Duplicate or ambiguous identities fail closed. Full-chain walking follows
 only explicit project edges, detects missing tasks, self-reference, corrupt
 upstream nodes, and cycles, and reports a cycle as an ordered qualified path

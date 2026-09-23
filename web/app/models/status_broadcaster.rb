@@ -6,6 +6,9 @@ class StatusBroadcaster
   CHANNEL = "status".freeze
   LOADING_VERSION = "loading".freeze
   LIFECYCLE_MUTEX = Mutex.new
+  # Shutdown joins the broadcaster while holding LIFECYCLE_MUTEX, so feed
+  # construction on that thread must use a separate lock.
+  FEED_MUTEX = Mutex.new
   PageSnapshot = Struct.new(
     :payload, :version, :availability, :last_success_at, :error,
     keyword_init: true
@@ -20,14 +23,18 @@ class StatusBroadcaster
 
   class << self
     def feed
-      @feed ||= StatusPageFeed.new(snapshot_store: Hive::Web::StatusSnapshotStore.new)
+      FEED_MUTEX.synchronize do
+        @feed ||= StatusPageFeed.new(snapshot_store: Hive::Web::StatusSnapshotStore.new)
+      end
     end
 
     # Injectable for tests; one feed per process in production.
     def feed=(new_feed)
-      @feed = new_feed
-      @broadcast_pending = false
-      @dependency_context_cache = {}
+      FEED_MUTEX.synchronize do
+        @feed = new_feed
+        @broadcast_pending = false
+        @dependency_context_cache = {}
+      end
     end
 
     def snapshot

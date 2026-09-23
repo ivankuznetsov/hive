@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/task_projection/reader"
+require "weakref"
 
 class TaskProjectionReaderTest < Minitest::Test
   include HiveTestHelper
@@ -101,7 +102,7 @@ class TaskProjectionReaderTest < Minitest::Test
       assert_equal "invalid", reader.read_bounded.state
       routine = reader.read_routine
       assert routine.current?
-      assert_equal 2_001, routine.journal_records.size
+      assert_equal 2_001, routine.journal_record_count
     end
   end
 
@@ -135,6 +136,54 @@ class TaskProjectionReaderTest < Minitest::Test
     end
   end
 
+  def test_routine_cache_retains_the_projection_but_releases_replay_inputs
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1"), condition_event("event-2") ])
+      replay_inputs = []
+      projector = Object.new
+      projector.define_singleton_method(:project) do |**attributes|
+        projection = Hive::TaskProjection.project(**attributes)
+        replay_inputs << WeakRef.new(attributes.fetch(:records))
+        replay_inputs << WeakRef.new(projection)
+        projection
+      end
+      reader = Hive::TaskProjection::Reader.new(task_folder: dir, projector: projector)
+
+      routine = reader.read_routine
+      expected = Hive::TaskProjection::Reader.new(task_folder: dir).read.to_h
+      GC.start(full_mark: true, immediate_sweep: true)
+
+      assert_equal expected, routine.projection.to_h
+      assert_same routine, reader.read_routine
+      assert replay_inputs.none?(&:weakref_alive?), "cached reads must release journal replay inputs"
+      assert_equal 2, routine.journal_record_count
+    end
+  end
+
+  def test_routine_record_count_distinguishes_empty_history_from_a_nonzero_byte_cursor
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "\n\n")
+
+      result = Hive::TaskProjection::Reader.new(task_folder: dir).read_routine
+
+      assert result.current?
+      assert_equal 2, result.journal_cursor
+      assert_equal 0, result.journal_record_count
+    end
+  end
+
+  def test_bounded_workspace_read_still_returns_the_full_journal_records
+    with_tmp_dir do |dir|
+      events = [ condition_event("event-1"), condition_event("event-2") ]
+      write_journal(dir, events)
+
+      result = Hive::TaskProjection::Reader.new(task_folder: dir).read_bounded
+
+      assert_equal events, result.journal_records
+      assert result.journal_records.frozen?
+    end
+  end
+
   def test_routine_cache_invalidates_when_the_journal_is_appended_or_replaced
     with_tmp_dir do |dir|
       path = File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)
@@ -158,9 +207,9 @@ class TaskProjectionReaderTest < Minitest::Test
         task_folder: dir, projector: projector
       ).read_routine
 
-      assert_equal 1, first.journal_records.size
-      assert_equal 2, appended.journal_records.size
-      assert_equal 3, replaced.journal_records.size
+      assert_equal 1, first.journal_record_count
+      assert_equal 2, appended.journal_record_count
+      assert_equal 3, replaced.journal_record_count
       assert_equal 3, projector.calls
     end
   end

@@ -36,7 +36,7 @@ module Hive
                 history.diagnostics.first&.fetch("message", nil) || "task history is invalid"
         end
         repository = Hive::Attempts::Repository.open_default(create_directories: false)
-        if history.journal_records.empty? && admitted_attempt?(task, repository: repository)
+        if history.journal_record_count.zero? && admitted_attempt?(task, repository: repository)
           raise Hive::TaskProjection::InvalidJournal,
                 "task journal is empty for a task with an admitted attempt"
         end

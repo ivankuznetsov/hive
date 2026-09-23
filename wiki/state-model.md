@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-09-10
+updated: 2026-09-23
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
@@ -406,7 +406,12 @@ task/workflow and each attempt to one stage/generation identity, then fold it
 directly in memory through `Hive::TaskProjection`. Routine scheduling reads the
 complete stream; only bounded task-workspace presentation enforces byte and
 event limits. Unchanged routine read results are memoized in a bounded, process-local
-LRU by the journal's path and file identity plus marker and task identity. Every
+LRU by the journal's path and file identity plus marker and task identity. A
+routine cache entry retains only the projected data, validation diagnostics,
+byte cursor, and record count; raw journal records and intermediate replay
+objects are released. The record count preserves empty-journal admission
+checks even when blank lines make the byte cursor nonzero. Bounded workspace
+reads still return records for explicit history and timeline presentation. Every
 lookup still takes the nonblocking shared journal lock before it can reuse a
 fold, and an append or replacement changes the file identity and misses the
 cache. Replay is self-contained and never asks SQLite to reinterpret old
@@ -517,7 +522,9 @@ under lock before resuming the persisted phase.
 
 Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
-Turbo Streams. Status-page HTTP requests read `StatusFeed#current_state`
+Turbo Streams. Lazy feed construction is serialized separately from subscriber
+lifecycle, so concurrent HTTP requests and the broadcaster share one feed.
+Status-page HTTP requests read `StatusFeed#current_state`
 without scanning. A cold process returns an explicit loading snapshot; the
 first accepted Cable subscription computes
 `Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` on the

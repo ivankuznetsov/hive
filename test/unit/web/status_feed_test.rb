@@ -336,6 +336,39 @@ class StatusFeedTest < Minitest::Test
     feed&.stop
   end
 
+  def test_dependency_context_reads_do_not_wait_for_a_fleet_refresh
+    [ nil, { context: Object.new, fingerprint: "previous" }.freeze ].each do |previous|
+      started = Queue.new
+      release = Queue.new
+      source = RecordingSource.new
+      source.instance_variable_set(:@dependency_snapshot, previous)
+      source.define_singleton_method(:refresh_payload_now) do
+        started << true
+        @dependency_snapshot = release.pop
+        { "projects" => [] }
+      end
+      command = Hive::Web::CachedStatusCommand.new(source: source)
+      feed = Hive::Web::StatusFeed.new(status_command: command)
+      refresh = Thread.new { command.json_payload([]) }
+      Timeout.timeout(2) { started.pop }
+
+      observed = Timeout.timeout(2) { feed.dependency_context_snapshot }
+      if previous
+        assert_same previous, observed, "readers must see the last completed publication"
+      else
+        assert_nil observed, "first refresh must not block readers either"
+      end
+      current = { context: Object.new, fingerprint: "current" }.freeze
+      release << current
+      Timeout.timeout(2) { refresh.value }
+      assert_same current, feed.dependency_context_snapshot
+    ensure
+      refresh&.kill
+      refresh&.join
+      feed&.stop
+    end
+  end
+
   def test_cached_status_command_delegates_recovery_join_with_the_cached_payload
     source = RecordingSource.new
     recovery_status = RecordingRecoveryStatus.new

@@ -835,8 +835,12 @@ complete local UI.
 Applicable coding plan tasks render a dedicated critique panel from the exact
 `tasks[].plan_review` object already produced by status. It shows level/state,
 degradation or mandatory block, coverage counts, typed finding lifecycle,
-planner/reviewer requested and actual identities, independence receipt,
-blocker, one required action, and links to the current safe artifacts. The Web
+blocker, one required action, and links to the current safe artifacts. Historical
+reviewer routes are omitted from Web, including task detail, active and completed
+status caches, and restored snapshots. A bounded `retry_attempt_id` preserves the
+current retry control with its exact observation digest; native review records
+retain the route history. Retry follows the backend's latest eligible attempt,
+including planner revisions and decision triage. The Web
 model opens artifacts only through the projection's content-addressed
 references and rechecks task confinement, regular-file type, byte count, and
 SHA-256; arbitrary paths and stale/tampered files are not served.
@@ -1279,7 +1283,7 @@ is omitted; recorded usage and failure diagnostics are disclosed on demand.
 Dependency panels require an actual relationship; code panels require a real
 worktree or PR. Closure receipt digests, duplicate action/quality fields and
 repeated slugs are omitted from ordinary content. Document outlines and review
-metadata, routes and audit documents are collapsed; review findings and actions
+metadata and audit documents are collapsed; review findings and actions
 remain available. Structured primary files are disclosed on demand instead of
 showing raw JSON as the page body. Task references and manual
 closure remain under Advanced. Bounded publication and mutation guards remain

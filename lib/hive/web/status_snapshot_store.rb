@@ -2,6 +2,7 @@ require "json"
 require "time"
 require "hive/atomic_file"
 require "hive/config"
+require "hive/web/status_payload"
 
 module Hive
   module Web
@@ -25,7 +26,7 @@ module Hive
         return unless valid_payload?(document["payload"])
         return unless Time.iso8601(document.fetch("last_success_at")) <= Time.now.utc
 
-        document
+        document.merge("payload" => StatusPayload.call(document.fetch("payload")))
       rescue StandardError
         nil
       end
@@ -36,6 +37,7 @@ module Hive
         # Never stamp rows from a different fleet with the supplied identity.
         return unless project_identities(payload.fetch("projects")) == project_identities(projects)
 
+        payload = StatusPayload.call(payload)
         bytes = JSON.generate(
           "schema" => SCHEMA, "projects" => projects,
           "payload" => payload, "last_success_at" => last_success_at

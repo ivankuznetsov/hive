@@ -293,9 +293,9 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "section.plan-review[data-review-id=?]", "pr-#{'a' * 64}", count: 1
     assert_select ".plan-review", text: /mandatory.*awaiting decision/m
     assert_select ".plan-review", text: /2 complete.*1 failed/m
-    assert_select ".plan-review", text: /grok-build.*grok-4.6/m
+    assert_select ".plan-review", text: /grok-build|grok-4\.6/, count: 0
     assert_select "details[data-workspace-disclosure-key='review-details']:not([open]) .plan-review-summary"
-    assert_select "details[data-workspace-disclosure-key='review-routes']:not([open]) table"
+    assert_select "details[data-workspace-disclosure-key='review-routes']", count: 0
     assert_select "details[data-workspace-disclosure-key='review-audit']:not([open]) .plan-review-artifact"
     assert_select ".plan-review-findings > li", 2
     assert_select "form[action=?] input[name=expected_artifact_digest][value=?]",
@@ -325,6 +325,30 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "input[name=review_action][value=approve_finding]", 0
     assert_select "input[name=review_action][value=answer_finding]", 0
     assert_select ".plan-review-required-action", text: /start a new linked plan/
+  end
+
+  test "review retry uses the current attempt identity without historical routes" do
+    move_task_to_plan!
+    details = plan_review_details_fixture
+    details.delete("routes")
+    summary = details.fetch("summary")
+    summary.delete("routes")
+    summary["state"] = "retry_scheduled"
+    summary["retry_attempt_id"] = "pra-#{'9' * 64}"
+
+    with_replaced_instance_method(Task, :plan_review_details, -> { details }) do
+      get "/tasks/#{@project}/#{@slug}"
+      assert_response :success
+      assert_select "form:has(input[name=review_action][value=retry])" do
+        assert_select "input[name=target_fingerprint][value=?]", summary["retry_attempt_id"], count: 1
+        assert_select "input[name=expected_artifact_digest][value=?]", summary["observation_digest"], count: 1
+      end
+      assert_select "details[data-workspace-disclosure-key='review-routes']", count: 0
+
+      summary["state"] = "blocked"
+      get "/tasks/#{@project}/#{@slug}"
+      assert_select "input[name=review_action][value=retry]", count: 0
+    end
   end
 
   test "plan review action delegates the exact observation to the shared task mutation" do

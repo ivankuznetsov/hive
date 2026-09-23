@@ -151,41 +151,15 @@
     </ol>
   <% end %>
 
-  <% if plan_review.fetch("routes").any? %>
-    <details data-workspace-disclosure-key="review-routes">
-      <summary>Reviewer details</summary>
-    <div class="plan-review-table-wrap">
-      <table class="plan-review-table">
-        <thead><tr><th>Leg</th><th>Requested</th><th>Actual</th><th>Result</th><th>Independent</th></tr></thead>
-        <tbody>
-          <% plan_review.fetch("routes").each do |route| %>
-            <% requested = route["requested"] || {} %>
-            <% actual = route["actual"] || {} %>
-            <tr>
-              <td><%= route["role"] %></td>
-              <td><%= [requested["provider"], requested["model"], requested["family"], requested["effort"]].compact.join(" / ").presence || "—" %></td>
-              <td><%= [actual["provider"], actual["model"], actual["family"], actual["effort"]].compact.join(" / ").presence || "—" %></td>
-              <td><%= route["outcome"] || route["capability_result"] || "—" %></td>
-              <td><%= route["independence_verified"] ? "verified" : (route["independence_reason"] || "no") %></td>
-            </tr>
-          <% end %>
-        </tbody>
-      </table>
-    </div>
-    </details>
-  <% end %>
-
   <% if mutations_enabled %>
     <div class="plan-review-global-actions">
-      <% transient_route = plan_review.fetch("routes").reverse.find { |route| %w[primary adversarial verification].include?(route["role"]) } %>
-      <% if summary["state"] == "retry_scheduled" && transient_route &&
-            %w[provider_limit timeout retryable_failure].include?(transient_route["outcome"]) %>
+      <% if summary["state"] == "retry_scheduled" && summary["retry_attempt_id"].present? %>
         <%= form_with url: task_plan_review_action_path(
               task.project.name, task.slug, source: task_source
             ), class: "plan-review-inline-form" do |form| %>
           <% identity.each do |name, value| %><%= hidden_field_tag name, value %><% end %>
           <%= hidden_field_tag :review_action, "retry" %>
-          <%= hidden_field_tag :target_fingerprint, transient_route["attempt_id"] %>
+          <%= hidden_field_tag :target_fingerprint, summary["retry_attempt_id"] %>
           <%= form.submit "Retry review" %>
         <% end %>
       <% end %>

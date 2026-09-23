@@ -8,6 +8,7 @@ require "hive/daemon/operational_snapshot"
 require "hive/secret_patterns"
 require "hive/tui/state_source"
 require "hive/web/status_snapshot_store"
+require "hive/web/status_payload"
 
 module Hive
   module Web
@@ -46,7 +47,8 @@ module Hive
 
       def initialize(
         source: Hive::Tui::StateSource.new(
-          poll_interval_seconds: 60
+          poll_interval_seconds: 60,
+          payload_transform: StatusPayload.method(:call)
         ),
         recovery_status_command: Hive::Commands::Status.new(json: true),
         scheduler_snapshot_reader: Hive::Daemon::OperationalSnapshot::Reader.new,
@@ -161,10 +163,10 @@ module Hive
         snapshot_state.payload
       end
 
-      # Dedicated archive reads are lossless and deliberately stay outside
+      # Dedicated reads include all archived tasks and stay outside
       # the ordinary feed's priming, availability, and dedup lifecycle.
       def archive_snapshot
-        @archive_status_command.json_payload(Hive::Config.registered_projects)
+        StatusPayload.call(@archive_status_command.json_payload(Hive::Config.registered_projects))
       end
 
       # One fresh scan, coalesced across all callers already waiting for it.
@@ -189,6 +191,7 @@ module Hive
       # payload. A competing page receives the token for its own content but
       # cannot replace the active lifecycle's baseline.
       def prime(payload)
+        payload = StatusPayload.call(payload)
         key = state_key("fresh", payload)
         token = cached_token_for(key)
         @monitor.synchronize do
@@ -386,6 +389,7 @@ module Hive
       end
 
       def publish_success(payload, projects: Hive::Config.registered_projects)
+        payload = StatusPayload.call(payload)
         key = state_key("fresh", payload)
         token = cached_token_for(key)
         now = iso_time(@clock.call)

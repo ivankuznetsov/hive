@@ -3,6 +3,7 @@ require "hive/commands/init"
 require "hive/commands/new"
 require "hive/task_meta"
 require "hive/tui/state_source"
+require "hive/web/status_feed"
 require "thread"
 
 class TuiStateSourceTest < Minitest::Test
@@ -94,6 +95,31 @@ class TuiStateSourceTest < Minitest::Test
       assert_nil source.instance_variable_get(:@archive_refresh_thread)
     ensure
       source&.stop
+    end
+  end
+
+  def test_web_source_retains_compact_reviews_while_native_status_keeps_route_history
+    with_direct_project do |project, hive_state|
+      write_task(hive_state, "1-inbox", "active-task-260828-abcd", marker: "WAITING", id: 1)
+      review = { "state" => "retry_scheduled",
+        "routes" => [ { "role" => "primary", "outcome" => "timeout", "attempt_id" => "current" } ] }
+      producer = Hive::Commands::Status.new
+      projection = producer.active_projection([ project ], now: Time.now.utc)
+      projection.payload.fetch("projects").first.fetch("tasks").first["plan_review"] = review
+      producer.define_singleton_method(:active_projection) { |*, **| projection }
+
+      with_replaced_singleton_method(Hive::Commands::Status, :new, ->(*, **) { producer }) do
+        command = Hive::Web::CachedStatusCommand.new
+        payload = command.json_payload([])
+        source = command.instance_variable_get(:@source)
+        refute payload.dig("projects", 0, "tasks", 0, "plan_review").key?("routes")
+        refute source.current.rows.first.plan_review.key?("routes"), "the source must not retain the original history"
+        assert_equal "current", source.current.rows.first.plan_review["retry_attempt_id"]
+
+        native = Hive::Tui::StateSource.new.refresh_now
+        assert_equal review, native.rows.first.plan_review
+        assert_equal 1, review.fetch("routes").length
+      end
     end
   end
 

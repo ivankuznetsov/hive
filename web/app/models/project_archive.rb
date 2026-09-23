@@ -1,3 +1,5 @@
+require "hive/web/status_payload"
+
 # Project pages read history independently of the active fleet poller. Cache
 # each project briefly; a stage move invalidates it immediately.
 class ProjectArchive
@@ -31,7 +33,9 @@ class ProjectArchive
       [ path, nil ]
     end
     CACHE.fetch([ project.path, project.hive_state_path, revision ], expires_in: 1.minute) do
-      Hive::Commands::Status.new(json: true, archive: true).json_payload([ project.attributes ])
+      Hive::Web::StatusPayload.call(
+        Hive::Commands::Status.new(json: true, archive: true).json_payload([ project.attributes ])
+      )
     end
   end
 end

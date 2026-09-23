@@ -21,8 +21,9 @@ module Hive
       # unchanged. Do not add value equality to this marker.
       class StatError; end
 
-      def initialize(poll_interval_seconds: 1.0)
+      def initialize(poll_interval_seconds: 1.0, payload_transform: nil)
         @poll_interval_seconds = poll_interval_seconds
+        @payload_transform = payload_transform
         @current = nil
         @current_payload = nil
         @active_snapshot = nil
@@ -322,6 +323,7 @@ module Hive
 
       def publish_active_snapshot(payload, admission_context: nil,
                                   generation: @lifecycle_generation)
+        payload = @payload_transform.call(payload) if @payload_transform
         active_snapshot = Snapshot.from_payload(payload)
         next_mtime_fingerprint = mtime_fingerprint_for(active_snapshot)
         next_policy_fingerprint = policy_fingerprint_for(active_snapshot)
@@ -394,6 +396,7 @@ module Hive
         end
         return unless lifecycle_active?(generation)
 
+        payload = @payload_transform.call(payload) if @payload_transform
         archive_projects = Snapshot.from_payload(payload).projects
         @publication_mutex.synchronize do
           return unless lifecycle_active?(generation)

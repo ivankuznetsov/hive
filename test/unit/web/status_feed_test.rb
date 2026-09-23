@@ -8,6 +8,20 @@ require "hive/web/status_feed"
 class StatusFeedTest < Minitest::Test
   include HiveTestHelper
 
+  def test_feed_drops_plan_review_route_history_but_keeps_retry_target
+    review = { "state" => "retry_scheduled", "observation_digest" => "current",
+      "routes" => [ { "role" => "primary", "outcome" => "timeout", "attempt_id" => "retry-this" } ] }
+    payload = { "projects" => [ { "name" => "demo", "tasks" => [ { "plan_review" => review } ] } ] }
+    feed = Hive::Web::StatusFeed.new(status_command: CountingStatus.new([ payload ]))
+
+    actual = feed.snapshot_state.payload.dig("projects", 0, "tasks", 0, "plan_review")
+
+    refute actual.key?("routes")
+    assert_equal "retry-this", actual["retry_attempt_id"]
+    assert_equal "current", actual["observation_digest"]
+    assert_equal 1, review.fetch("routes").length, "the native producer must remain unchanged"
+  end
+
   def test_saved_snapshot_is_available_without_scan_and_refreshes_immediately_in_background
     Dir.mktmpdir do |dir|
       store = Hive::Web::StatusSnapshotStore.new(path: File.join(dir, "status.json"))

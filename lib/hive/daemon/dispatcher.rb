@@ -1948,6 +1948,16 @@ module Hive
           )
         end
         outcome
+      rescue Hive::Attempts::StaleTaskSource => e
+        # A concurrent task observation won the admission fence. Leave the
+        # baseline untouched so a fresh status row can retry on a later tick;
+        # retrying this command here would reuse the superseded observation.
+        @logger.event(
+          :blocked,
+          project: row.project, slug: row.slug, stage: row.stage,
+          reason: "task_source_changed", error: e.message
+        )
+        :task_source_changed
       end
 
       def failed_automatic_advance_replay?(row, trigger, result)
@@ -2021,6 +2031,8 @@ module Hive
           [ "hive", "durable worker launch handoff failed" ]
         when :attempt_deferred
           [ "hive", "durable attempt admission was deferred" ]
+        when :task_source_changed
+          [ "scheduler", "task source changed before admission; waiting for a fresh status observation" ]
         when :global_cap
           [ "scheduler", "global dispatch capacity is exhausted" ]
         when :project_cap
@@ -2277,7 +2289,7 @@ module Hive
           project_key = row.project.to_s
           capacity_fence = global_fence || project_fences[project_key]
           outcome = handle_row(row, now: now, capacity_fence: capacity_fence)
-          if %i[dispatched in_flight attempt_terminal_replay].include?(outcome)
+          if %i[dispatched in_flight attempt_terminal_replay task_source_changed].include?(outcome)
             @advance_rows_by_key.delete(task_key(row))
           end
           case outcome

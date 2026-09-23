@@ -1959,6 +1959,109 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal launch_time, request_created_at
   end
 
+  def test_task_source_race_defers_automatic_dispatch_until_a_fresh_status_tick
+    stale = row(
+      slug: "changed", stage: "4-execute", action: "ready_to_run",
+      command: "hive run changed --project p1"
+    )
+    other = row(slug: "other", command: "hive brainstorm other --project p1")
+    requests = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **|
+      requests << request
+      if requests.length == 1
+        raise Hive::Attempts::StaleTaskSource, "attempt task source observation was superseded"
+      end
+
+      Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: nil, receipt: nil, attach_descriptor: nil, reason: nil
+      )
+    end
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, supervisor, controller, logger = make_dispatcher(
+      rows: [ stale, other ], attempt_dispatcher: attempt_dispatcher,
+      operational_snapshot: snapshot
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "changed", "other" ], requests.map(&:slug)
+    assert_empty supervisor.spawned
+    assert_nil controller.last_dispatched_state_file_mtime_for(project: "p1", slug: "changed")
+    assert_equal 1, dispatcher.instance_variable_get(:@dispatched_today)
+    assert logger.events.any? { |name, attributes|
+      name == :blocked && attributes[:slug] == "changed" && attributes[:reason] == "task_source_changed"
+    }
+    disposition = snapshot.calls.find { |method, attributes|
+      method == :observe && attributes[:decision] == :task_source_changed
+    }.last
+    assert_equal "scheduler", disposition.fetch(:owner)
+    assert_equal :complete, snapshot.calls.last.first
+
+    fresh = row(
+      slug: "changed", stage: "5-open-pr", action: "ready_to_open_pr", folder: stale.folder,
+      command: "hive open-pr changed --project p1 --from 5-open-pr", mtime: T0 + 1
+    )
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    status.next_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ fresh ])
+    dispatcher.tick(now: T0 + 30)
+
+    assert_equal 2, status.fetch_count
+    assert_equal [ "changed", "other", "changed" ], requests.map(&:slug)
+    assert_equal Shellwords.split(fresh.suggested_command), requests.last.argv
+    assert_equal T0 + 30, requests.last.created_at
+    assert_equal fresh.state_file_mtime,
+                 controller.last_dispatched_state_file_mtime_for(project: "p1", slug: "changed")
+  end
+
+  def test_changed_task_tick_evicts_a_superseded_cached_approval_until_it_is_refreshed
+    approval = row(
+      slug: "changed", workflow: "patrol-fix", action: "ready_to_advance",
+      command: "hive approve changed --project p1 --from 1-inbox --force"
+    )
+    other = row(slug: "other", action: "ready_to_run", command: "hive run other --project p1")
+    requests = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **|
+      requests << request.slug
+      if requests.length == 1
+        raise Hive::Attempts::StaleTaskSource, "attempt task source observation was superseded"
+      end
+
+      Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: nil, receipt: nil, attach_descriptor: nil, reason: nil
+      )
+    end
+    dispatcher, = make_dispatcher(rows: [ approval ], attempt_dispatcher: attempt_dispatcher)
+    dispatcher.send(:refresh_status_index, [ approval ])
+    dispatcher.send(:cache_terminal_advances, [ approval ])
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ approval ])
+
+    assert dispatcher.tick_changed(task_keys: [ [ "p1", "changed" ] ], now: T0)
+    assert_equal [ "changed" ], requests
+
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ other ])
+    assert dispatcher.tick_changed(task_keys: [ [ "p1", "other" ] ], now: T0 + 1)
+    assert_equal [ "changed", "other" ], requests,
+                 "an unrelated change must not retry a cached command whose source was superseded"
+
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [ approval ])
+    assert dispatcher.tick_changed(task_keys: [ [ "p1", "changed" ] ], now: T0 + 2)
+    assert_equal [ "changed", "other", "changed" ], requests
+  end
+
+  def test_automatic_dispatch_does_not_hide_other_attempt_repository_errors
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |*_args, **|
+      raise Hive::Attempts::RepositoryError, "attempt storage unavailable"
+    end
+    dispatcher, = make_dispatcher(rows: [ row ], attempt_dispatcher: attempt_dispatcher)
+
+    error = assert_raises(Hive::Attempts::RepositoryError) { dispatcher.tick(now: T0) }
+    assert_equal "attempt storage unavailable", error.message
+  end
+
   def test_durable_dispatch_publishes_the_exact_provider_routing_decision
     route = Hive::ProviderRouting::Route.new(
       id: "account-a/model-a", account: "account-a", adapter: "codex",

@@ -107,10 +107,19 @@ actions. Runtime SQLite/WAL timestamps also change for unrelated observations,
 so they do not identify meaningful task changes. Safe reuse needs observations
 captured with the projection, or a before/after validation of those inputs.
 
-Exact task admission still loads policy snapshots for all registered projects;
-task metadata and journal reads are limited to the target and reachable
-prerequisites. Making unrelated project policy loads lazy is a separate shared
-dependency-context change.
+The existing daemon SQLite status cache is a completed full-tick observation,
+not a live display feed. Local observation on 2026-09-23 found a median full
+tick duration of 22 seconds and a 50-second interval between starts; one frame
+was already 18.59 seconds old when published. A five-second cache-age limit
+would not reuse that frame. Incremental ticks check only known state files,
+omit raw partial display payloads, and inject dependency-validation holds;
+they cannot simply replace the complete Web frame. Useful shared display
+reuse needs complete source invalidation, distinct full/row observation times,
+and separation from scheduler authority before removing Web's fallback scans.
+
+Exact task admission now limits project policy reads as well as task metadata
+and journals to the selected roots and reachable prerequisites. The complete
+enrollment index remains available for ambiguity and repository checks.
 
 Routine-cache memory measurements isolate retained Ruby objects after GC;
 they do not establish long-running Puma RSS or swap savings. The startup and

@@ -7,15 +7,15 @@ class TasksController < Tasks::BaseController
     )
     respond_to do |format|
       format.html do
-        @workspace = builder.call
+        @workspace = builder.page
         @workspace_action_evidence_current = @task_source.nil? &&
                                              @workspace.dig("status", "state") == "current"
         # Bound questions are revalidated by Hive::Commands::Answer on write; the
         # workspace decision keeps their readiness independent of execution evidence.
         @answer_input_enabled = @workspace.dig("decision", "posture") == "answer" &&
                                 @workspace.dig("decision", "action", "enabled") == true
-        # v1 remains private compatibility state for guarded mutations and
-        # bound questions. Every visible task meaning is composed from v2.
+        # Page evidence retains guarded mutations and bound questions.
+        # Every visible task meaning is composed from the semantic workspace.
         @semantic_workspace = builder.semantic
         @publication_refresh_available = @task_source.nil? &&
                                          session[:github_token].present? &&

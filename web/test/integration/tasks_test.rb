@@ -23,6 +23,26 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "#status-grid", 1
   end
 
+  test "task HTML does not build hidden provenance or timeline panels" do
+    audit_reads = 0
+    audit_reader = lambda do |**|
+      audit_reads += 1
+      Hive::TaskWorkspace.unavailable_panel("provenance")
+    end
+
+    with_replaced_instance_method(Hive::TaskWorkspace::Provenance, :call, audit_reader) do
+      with_replaced_instance_method(Hive::TaskWorkspace::Timeline, :call, audit_reader) do
+        get "/tasks/#{@project}/#{@slug}"
+
+        assert_response :success
+        assert_select "#task-state", 1
+        assert_match "actions probe", response.body
+      end
+    end
+
+    assert_equal 0, audit_reads, "ordinary task navigation must not read hidden audit panels"
+  end
+
   test "closure entry requires authentication" do
     post "/logout"
 

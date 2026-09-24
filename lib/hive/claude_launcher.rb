@@ -104,13 +104,16 @@ module Hive
                 routing_arguments: nil, runtime_policy: nil,
                 additional_read_roots: [], additional_write_roots: [],
                 edit_patterns: [], bash_patterns: [],
-                resource_guards: nil, agent_custody: nil)
+                resource_guards: nil, agent_custody: nil,
+                model: nil, effort: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
       profile.validate_routing_arguments!(routing_arguments) if routing_arguments
       routed_flags = routing_arguments&.native_arguments
-      cli_flags = routed_flags || identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
+      # Per-stage model/effort override the project-global claude.* pins.
+      cli_flags = routed_flags || identity_arguments ||
+                  (cfg ? Hive::Config.claude_cli_flags(cfg, model: model, effort: effort) : [])
       launch_mode = if defined?(Hive::Attempts::Context) &&
                        Hive::Attempts::Context.current&.explicit_routing?
         :headless

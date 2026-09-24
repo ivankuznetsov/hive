@@ -764,6 +764,56 @@ class ClaudeLauncherTest < Minitest::Test
     assert Hive::ClaudeLauncher.claude_trust_prompt?(pane)
   end
 
+  # Newer Claude Code layout captured from a live launch in a fresh project:
+  # no "Quick safety check" heading and the caret starts on "No, exit".
+  def test_claude_trust_prompt_matches_newer_layout_and_never_confirms_no_exit
+    pane = "Accessing workspace:\n\n /home/user/Dev/newproj\n\n" \
+           " Quick check: Is this a project you created or one you trust? (Like your own code, a well-known\n" \
+           " open source project, or work from your team). If not, take a moment to review what's in this\n" \
+           " folder first.\n\n Claude Code'll be able to read, edit, and execute files here.\n\n Security guide\n\n" \
+           " ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel"
+
+    assert Hive::ClaudeLauncher.claude_trust_prompt?(pane)
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+    assert_equal [ "Down" ], Hive::ClaudeLauncher.claude_trust_prompt_keys(pane)
+
+    on_yes = pane.sub(" ❯ No, exit\n   Yes, I trust", "   No, exit\n ❯ Yes, I trust")
+    assert_equal [ "Enter" ], Hive::ClaudeLauncher.claude_trust_prompt_keys(on_yes)
+  end
+
+  def test_claude_trust_prompt_keys_confirm_the_older_first_option_layout
+    pane = "Quick safety check\n❯ 1. Yes, I trust this folder\nEnter to confirm"
+
+    assert_equal [ "Enter" ], Hive::ClaudeLauncher.claude_trust_prompt_keys(pane)
+  end
+
+  def test_prepare_claude_session_moves_off_no_exit_before_confirming_trust
+    panes = [
+      "Accessing workspace:\n\n /home/user/Dev/newproj\n\n" \
+           " Quick check: Is this a project you created or one you trust? (Like your own code, a well-known\n" \
+           " open source project, or work from your team). If not, take a moment to review what's in this\n" \
+           " folder first.\n\n Claude Code'll be able to read, edit, and execute files here.\n\n Security guide\n\n" \
+           " ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+      "Accessing workspace:\n\n /home/user/Dev/newproj\n\n" \
+           " Quick check: Is this a project you created or one you trust? (Like your own code, a well-known\n" \
+           " open source project, or work from your team). If not, take a moment to review what's in this\n" \
+           " folder first.\n\n Claude Code'll be able to read, edit, and execute files here.\n\n Security guide\n\n" \
+           " ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel".sub(" ❯ No, exit\n   Yes, I trust", "   No, exit\n ❯ Yes, I trust"),
+      "Claude Code v2.1.179\n\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+    ]
+    sent = []
+    runner = Object.new
+    runner.define_singleton_method(:name) { "hive-trust-layout" }
+    runner.define_singleton_method(:session_exists?) { true }
+    runner.define_singleton_method(:capture_pane_tail) { |bytes:| panes.size > 1 ? panes.shift : panes.first }
+    runner.define_singleton_method(:send_keys) { |*keys| sent << keys }
+
+    with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(*) { }) do
+      assert Hive::ClaudeLauncher.prepare_claude_session!(runner)
+    end
+    assert_equal [ [ "Down" ], [ "Enter" ] ], sent
+  end
+
   def test_spawn_claude_bang_propagates_agent_error_unchanged
     # `spawn_claude!` no longer catches tmux-unavailable AgentErrors;
     # the propagation is what lets the review stage's outer rescue

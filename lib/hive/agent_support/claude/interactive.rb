@@ -6,6 +6,9 @@ module Hive::AgentSupport::Claude::Interactive
   READY_BANNER = "Claude Code".freeze
   READY_FOOTER = "for agents".freeze
   FOOTER_HINT = "bypass permissions".freeze
+  # Claude Code keeps the input caret and footer painted while a turn runs;
+  # only the footer's interrupt hint distinguishes a working pane from idle.
+  BUSY_MARKER = "esc to interrupt".freeze
   READY_LINE = /\A❯(?:[\p{Zs}\s]|\z)|(?:[\p{Zs}\s])❯\z/u.freeze
   MENU_LINE = /\A\s*❯\s*\d+\./.freeze
   CHROME_LINE = /\A[\p{Zs}\s?+\-─━│┄┈┉┅┇┊┋┆┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬╭╮╰╯╴╵╶╷╸╹╺╻╼╽╾╿]+\z/u.freeze
@@ -69,6 +72,7 @@ module Hive::AgentSupport::Claude::Interactive
     lines = text.each_line.map(&:strip).reject(&:empty?)
     return false if TRUST_MARKERS.all? { |marker| text.include?(marker) }
     return false if text.include?(PERMISSION_MARKER)
+    return false if text.include?(BUSY_MARKER)
     return false unless pane.include?(READY_BANNER) || text.include?(READY_FOOTER)
 
     caret = lines.rindex { |line| line.match?(READY_LINE) && !line.match?(MENU_LINE) }

@@ -664,6 +664,57 @@ class ClaudeLauncherTest < Minitest::Test
     refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
   end
 
+  # Claude Code keeps painting the input caret and footer while a turn runs.
+  # This pane was captured from a live execute attempt a few seconds after the
+  # prompt was sent; reading it as idle sealed the turn and killed Claude.
+  def test_claude_ready_prompt_rejects_working_pane_with_interrupt_hint
+    pane = "Claude Code v2.1.179\n\n" \
+           "* Cultivating… (7s · thinking with high effort)\n" \
+           "                                                          ● high · /effort\n" \
+           "────────────────────────────────────────────────────────────────────────\n" \
+           "❯ \n" \
+           "────────────────────────────────────────────────────────────────────────\n" \
+           "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a pane whose footer offers to interrupt a running turn is not idle"
+  end
+
+  def test_launch_passes_per_stage_model_and_effort_to_tmux_session
+    with_tmp_task do |task|
+      cfg = { "claude" => { "mode" => "tmux", "model" => "sonnet", "effort" => "medium" } }
+      captured_flags = nil
+      shared = lambda do |**kwargs, &_block|
+        captured_flags = kwargs[:cli_flags]
+        nil
+      end
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :with_shared_session, shared) do
+        Hive::ClaudeLauncher.launch!(
+          task: task, cfg: cfg, prompt: "prompt", add_dirs: [], cwd: task.folder,
+          max_budget_usd: 1, timeout_sec: 5, log_label: "brainstorm",
+          session_name: "hive-test-session", model: "claude-opus-5-5", effort: "high"
+        )
+      end
+
+      assert_equal %w[--model claude-opus-5-5 --effort high], captured_flags
+    end
+  end
+
+  # Stages splat `model_launch_arguments` into spawn_claude!, so every key it
+  # can return must be an accepted keyword (a missing one raised
+  # "unknown keywords: :model, :effort" from brainstorm under tmux mode).
+  def test_spawn_claude_accepts_every_model_launch_argument
+    accepted = Hive::Stages::Base.method(:spawn_claude!).parameters
+                                 .select { |kind, _| %i[key keyreq].include?(kind) }.map(&:last)
+    launch_accepted = Hive::ClaudeLauncher.method(:launch!).parameters
+                                          .select { |kind, _| %i[key keyreq].include?(kind) }.map(&:last)
+
+    %i[model effort routing_arguments].each do |key|
+      assert_includes accepted, key
+      assert_includes launch_accepted, key
+    end
+  end
+
   # The `❯` glyph appears in Claude's OWN output (prose, shell snippets,
   # bullets). A caret embedded mid-line is not the idle prompt; matching it
   # would send the prompt into a busy pane and silently lose keystrokes.

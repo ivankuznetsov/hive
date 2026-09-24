@@ -1212,7 +1212,8 @@ module Hive
                          implementation_stage: nil,
                          additional_read_roots: [], additional_write_roots: [],
                          edit_patterns: [], bash_patterns: [],
-                         resource_guards: nil, agent_custody: nil)
+                         resource_guards: nil, agent_custody: nil,
+                         model: nil, effort: nil)
         require "hive/claude_launcher"
 
         context = Hive::Attempts::Context.current
@@ -1242,7 +1243,8 @@ module Hive
             edit_patterns: edit_patterns,
             bash_patterns: bash_patterns,
             resource_guards: resource_guards,
-            agent_custody: agent_custody
+            agent_custody: agent_custody,
+            model: model, effort: effort
           )
         end
 
@@ -1270,7 +1272,8 @@ module Hive
             additional_write_roots: additional_write_roots,
             edit_patterns: edit_patterns,
             bash_patterns: bash_patterns,
-            resource_guards: resource_guards, agent_custody: agent_custody
+            resource_guards: resource_guards, agent_custody: agent_custody,
+            model: model, effort: effort
           )
         end
 
@@ -1280,8 +1283,8 @@ module Hive
         observation = session_observation(
           task: task, context: context, profile: profile,
           role: log_label || task.stage_name,
-          requested_model: requested_model(context, routing_arguments, nil, nil),
-          requested_effort: requested_effort(context, routing_arguments, nil, nil),
+          requested_model: requested_model(context, routing_arguments, nil, model),
+          requested_effort: requested_effort(context, routing_arguments, nil, effort),
           timeout_sec: timeout_sec,
           guards: runtime_resource_guards(
             resource_guards, profile: profile, max_budget_usd: max_budget_usd,
@@ -1307,7 +1310,8 @@ module Hive
               additional_read_roots: additional_read_roots,
               additional_write_roots: additional_write_roots,
               edit_patterns: edit_patterns,
-              bash_patterns: bash_patterns
+              bash_patterns: bash_patterns,
+              model: model, effort: effort
             )
           end
           record_usage(

@@ -187,7 +187,7 @@ module Hive
         raise
       rescue StandardError => e
         release_manual_claim("command_error")
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        wrapped = Hive::InternalError.wrap(e)
         emit_error(wrapped)
         raise wrapped
       end

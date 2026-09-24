@@ -5,6 +5,14 @@ require "hive/agent_limit"
 class AgentLimitTest < Minitest::Test
   include HiveTestHelper
 
+  def test_detects_codex_chatgpt_plan_model_wall
+    line = '{"type":"error","message":"{\\"type\\":\\"error\\",\\"status\\":400,\\"error\\":' \
+           '{\\"message\\":\\"The \'gpt-6-luna\' model is not supported when using Codex with a ChatGPT account.\\"}}"}'
+
+    assert Hive::AgentLimit.limit_reached?(line)
+    refute Hive::AgentLimit.limit_reached?("This model is not supported by the linter.")
+  end
+
   def test_detects_claude_usage_limit_menu
     text = <<~TEXT
       What do you want to do?

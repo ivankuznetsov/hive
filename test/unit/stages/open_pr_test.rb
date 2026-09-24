@@ -403,6 +403,36 @@ class HiveStagesOpenPrTest < Minitest::Test
           assert_equal({ commit: "open_pr_authoring_failed", status: :error }, result)
           assert_equal "provider failed", Hive::Markers.current(task.state_file).attrs.fetch("detail")
         end
+
+        # A classified provider wall keeps the daemon's cooldown path.
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent,
+          lambda do |*|
+            { status: :error, error_reason: "limits_reached",
+              error_message: "limits reached for codex: usage limit reached" }
+          end
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "limits_reached", status: :error }, result)
+          assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        end
+
+        # Codex answers an exhausted ChatGPT-plan model with a 400 "not
+        # supported" error; that is a quota wall, not a bad authoring run.
+        codex_wall = "{'type':'error','status':400,'error':{'type':'invalid_request_error'," \
+                     "'message':'The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.'}}"
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent,
+          ->(*) { { status: :error, error_message: codex_wall } }
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "limits_reached", status: :error }, result)
+          assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        end
       end
     end
   end

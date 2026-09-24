@@ -124,12 +124,40 @@ module Hive
         Hive::Stages::Base.record_deferred_agent_observation(
           task, cfg, "open_pr", spawn_result
         )
+        return limits_reached_error(task, profile, spawn_result) if authoring_limit?(spawn_result)
+
         unless spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
           return authoring_error(
             task, "open_pr_authoring_failed", spawn_result&.fetch(:error_message, nil)
           )
         end
         read_authoring(path)
+      end
+
+      # A provider quota wall during authoring must publish limits_reached so
+      # the daemon applies the provider cooldown instead of spending identical
+      # retries on the same wall and parking the task as deterministic.
+      def authoring_limit?(spawn_result)
+        return false unless spawn_result.is_a?(Hash) && spawn_result[:status] != :ok
+
+        spawn_result[:error_reason].to_s == "limits_reached" ||
+          Hive::AgentLimit.limit_reached?(spawn_result[:error_message].to_s)
+      end
+
+      def limits_reached_error(task, profile, spawn_result)
+        message = spawn_result[:error_message].to_s
+        limit_text = spawn_result[:limit_text].to_s
+        limit_text = message if limit_text.empty?
+        Hive::Markers.set(
+          task.state_file, :error,
+          **{
+            reason: "limits_reached",
+            provider: profile&.name&.to_s,
+            message: message.byteslice(0, 200).to_s.scrub,
+            retry_after: spawn_result[:retry_at] || Hive::AgentLimit.retry_after(text: limit_text)
+          }.compact
+        )
+        { commit: "limits_reached", status: :error }
       end
 
       def authoring_error(task, reason, detail = nil)

@@ -1290,6 +1290,47 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_unexpected_poller_exit_releases_its_page_claim_and_allows_a_replacement_subscription
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      primed = { "projects" => [ { "name" => "replacement page" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 0.01, status_command: producer)
+      feed.prime(previous)
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal previous, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+
+      lost_poller = feed.instance_variable_get(:@poller)
+      lost_poller.kill
+      lost_poller.join
+      subscriber.kill
+      subscriber.join
+      assert_equal previous, feed.current_state.payload, "worker loss must retain the latest complete snapshot"
+      assert_equal 0, producer.calls, "the interrupted producer did not publish a result"
+      page_token = feed.prime(primed)
+      assert feed.current_version?(page_token), "the failed lifecycle must release its page's baseline claim"
+
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal primed, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      feed.stop
+      producer.release(updated)
+      assert_equal updated, Timeout.timeout(2) { states.pop }.payload
+      assert_equal 1, producer.calls
+      assert_equal 1, producer.max_active
+      assert_equal 2, feed.scan_count, "one replacement scan must recover from the aborted scan"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+      lost_poller&.kill
+      lost_poller&.join
+    end
+  end
+
   def test_state_serializes_every_public_field
     state = Hive::Web::StatusFeed::State.new(
       payload: { "projects" => [] },

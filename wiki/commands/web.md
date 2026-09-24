@@ -371,10 +371,14 @@ Honeycomb projections.
   enforce that limit while spooling them. The status view then renders
   per-project
   task rows with stage badges and liveness dots. Live-updates over **Turbo
-  Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
+  Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_state`;
   a dedicated `StatusChannel` starts that shared subscription when the first
   live page connects and stops it when the last page disconnects, so booting
-  or leaving the server idle performs no fleet scans. Pending, active, and
+  or leaving the server idle performs no fleet scans. The status source also
+  releases its subscription when its document becomes hidden and reconnects
+  when visible again. A source mounted or changed while hidden stays dormant;
+  pending setup uses the same bounded cleanup as DOM removal. Visibility
+  listeners are removed with the source. Pending, active, and
   closed ownership is synchronized per channel: teardown during stream
   verification prevents later acquisition, and repeated cleanup releases an
   accepted channel at most once without blocking unrelated connections. Failed
@@ -401,8 +405,15 @@ Honeycomb projections.
   property rather than cloneable DOM state, so navigation—including history
   restoration after a page without the status source—cannot revive an older
   URL's attempt. A genuine socket disconnect releases it for later recovery.
-  Connected
-  pages share one five-second polling cadence regardless of their count. The
+  Visible pages share one five-second polling cadence regardless of their count.
+  If another page remains visible, hiding a tab keeps that shared poller running.
+  After the last subscriber leaves, the feed stops scheduling new scans. An
+  already-running refresh finishes and publishes its result, so brief tab visits
+  do not repeatedly discard the same work. A returning subscriber shares that
+  refresh. Restarting an idle feed serves its completed snapshot immediately and
+  refreshes in the background without waiting five seconds. This uses the existing projection cache and
+  invalidation rules. Returning tabs use the normal catch-up protocol, with the
+  old connection's refresh latch cleared on hiding. The
   subscribing page already rendered the primed snapshot, so the broadcaster
   does not send a duplicate first refresh.
   The ordinary feed uses `Hive::Tui::StateSource` as a shared active-projection

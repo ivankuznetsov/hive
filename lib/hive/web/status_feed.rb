@@ -146,6 +146,7 @@ module Hive
         @monitor = Monitor.new
         @tick = @monitor.new_cond
         @refresh_done = @monitor.new_cond
+        @poll_wait = @monitor.new_cond
         @generation = 0
         @scan_count = 0
         @state = nil
@@ -155,6 +156,9 @@ module Hive
         @prime_claim = nil
         @refreshing = false
         @poller = nil
+        @polling = false
+        @poller_refreshing = false
+        @refresh_on_start = false
         restore_snapshot
       end
 
@@ -267,23 +271,20 @@ module Hive
       end
 
       def stop
-        thread = nil
-        detached_prime_claim = nil
-        @monitor.synchronize do
-          thread = @poller
-          @poller = nil
-          detached_prime_claim = @prime_claim
-          @prime_claim = nil unless thread
-        end
-        return unless thread
-
-        thread.kill
-        thread.join
-        @monitor.synchronize do
-          if !@poller&.alive? && @prime_claim.equal?(detached_prime_claim)
+        thread = @monitor.synchronize do
+          @polling = false
+          @refresh_on_start = true if @poller
+          # Finish an already-started scan even when no page remains visible.
+          # A quick return shares that work instead of repeatedly aborting it.
+          unless @poller_refreshing
+            previous = @poller
+            @poller = nil
             @prime_claim = nil
+            @poll_wait.broadcast
+            previous
           end
         end
+        thread&.join
       end
 
       private
@@ -372,21 +373,54 @@ module Hive
       end
 
       def ensure_poller!
-        needs_initial = @monitor.synchronize { @state.nil? }
-        refresh_state if needs_initial
-
         @monitor.synchronize do
-          return if @poller&.alive?
+          @polling = true
+          unless @poller&.alive?
+            refresh_on_start = @refresh_on_start || @state.nil? || @state.availability == "cached"
+            @poller = Thread.new { poll_loop(refresh_on_start: refresh_on_start) }
+            @poller_refreshing = refresh_on_start
+          end
 
-          @poller = Thread.new { poll_loop }
+          @refresh_on_start = false
+          # Even the cold scan belongs to the poller: losing the subscribing
+          # broadcaster must not kill the producer before its first result.
+          @tick.wait until @state
         end
       end
 
-      def poll_loop
-        loop do
-          refresh_state if current_state&.availability == "cached"
-          sleep @interval
+      def poll_loop(refresh_on_start:)
+        # The last visible page may have left this snapshot idle for hours.
+        # Keep serving it while the restarted poller catches up immediately.
+        refresh_state if refresh_on_start
+
+        while wait_for_next_poll
           refresh_state
+        end
+      ensure
+        @monitor.synchronize do
+          if @poller.equal?(Thread.current)
+            @poller = nil
+            @poller_refreshing = false
+            @prime_claim = nil
+          end
+        end
+      end
+
+      def wait_for_next_poll
+        @monitor.synchronize do
+          return false unless @poller.equal?(Thread.current)
+
+          @poller_refreshing = false
+          unless @polling
+            @poller = nil
+            @prime_claim = nil
+            return false
+          end
+
+          @poll_wait.wait(@interval)
+          return false unless @poller.equal?(Thread.current)
+
+          @poller_refreshing = true
         end
       end
 

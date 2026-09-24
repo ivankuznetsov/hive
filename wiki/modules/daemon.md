@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-30
+updated: 2026-09-23
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -165,6 +165,14 @@ revalidating their generation, so a queue of N requests does not build N
 fleet-wide dependency snapshots. A temporary task-history outage fences merge
 recovery for that observation. The next scan rebuilds the candidate from current
 task metadata and revalidates its generation before taking any archive action.
+
+When an automatic admission loses the task-source observation race,
+`Attempts::StaleTaskSource` becomes a scheduler-owned `task_source_changed`
+deferral for that row. Other rows continue, dispatch capacity and the previous
+mtime baseline remain unchanged, and a cached automatic approval is evicted.
+The next full or exact task scan must supply a fresh observation before retry;
+the dispatcher never retries the rejected command in place or weakens the
+repository's admission fence. Other repository errors still propagate.
 
 Lease-backed `attempt_lost` outcomes bypass marker recovery entirely.
 `StaleAgentHealer#heal_attempt_losses` applies

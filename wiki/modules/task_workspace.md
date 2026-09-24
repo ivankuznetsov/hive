@@ -3,7 +3,7 @@ title: Task workspace projection
 type: module
 source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v2.json, schemas/hive-context-receipt.v1.json, lib/hive/commands/task.rb, web/app/controllers/tasks/, web/app/views/tasks/
 created: 2026-08-12
-updated: 2026-09-01
+updated: 2026-09-23
 tags: [task, web, projection, semantic, result, usage, provenance, attempts, timeline, dependencies, publication]
 ---
 
@@ -13,7 +13,7 @@ and native-agent contract: canonical headline/action, workflow result and
 applicability, primary/supporting artifacts, exactly attributed usage with an
 API-equivalent estimate, and an attempt-correlated diagnostic-log reference.
 The internal audit snapshot retains attempts, provenance, resources, and
-timeline panels for mutation checks and the semantic builder; its old public
+timeline panels for explicit audit reads; its old public
 v1 contract is no longer shipped or served. Neither read model replaces
 `hive-status` v7, enters `Commands::Status`, scans the fleet or the global
 attempt store, contacts GitHub from any read path, performs provider/pricing
@@ -30,7 +30,7 @@ and injected bounded readers to `Hive::TaskWorkspace::Builder`.
 Both authenticated JSON routes serve the current semantic contract:
 
 ```text
-GET /tasks/:project/:slug            # HTML composed from semantic v2; audit data is private mutation state
+GET /tasks/:project/:slug            # semantic v2 HTML with bounded action, dependency and publication evidence
 GET /tasks/:project/:slug.json       # semantic v2 JSON
 GET /tasks/:project/:slug/workspace  # semantic v2 JSON
 GET /tasks/:project/:slug/timeline   # signed audit cursor page
@@ -80,8 +80,8 @@ remain distinct. API-equivalent USD is a local rate-card estimate with coverage
 and missing dimensions, never an invoice or a claim that subscription use cost
 zero. Provider-reported cost is deliberately absent from v2.
 
-One request-wide `BoundedUsageReader` shares exact-attempt results between the
-v1 and v2 projections. It caps each attempt at 100 usage sessions and applies a
+One request-wide `BoundedUsageReader` shares exact-attempt results between page
+evidence and the semantic projection. It caps each attempt at 100 usage sessions and applies a
 single two-second deadline; row/deadline exhaustion makes coverage partial or
 unavailable and never invents zero. `UsageDb.exact_attempt` applies the same
 row bound to SQLite and bounds its unattributed-legacy sample/count.
@@ -104,6 +104,13 @@ commands/tokens, prompts, credentials, secrets, and provider-reported cost are
 rejected recursively.
 
 ## Internal audit document and evidence states
+
+Ordinary HTML uses `Builder#page` alongside `#semantic`. Page evidence follows
+the same normalization, total byte budget, question bindings, and execution
+readiness rules as the full audit document, but skips current repository/wiki
+provenance, timeline assembly, and audit artifact contents. Those unused panel
+envelopes are explicitly `not_projected`; semantic result artifacts are read
+once. `Builder#call` and the explicit timeline read retain their audit behavior.
 
 The internal audit document contains exact task identity, generation time, status
 freshness, normalized operator state, one decision posture, and seven panel

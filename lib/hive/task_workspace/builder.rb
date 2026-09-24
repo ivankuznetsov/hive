@@ -60,55 +60,13 @@ module Hive
       end
 
       def call
-        read = history_read
-        projection = projection_hash(read)
-        attempts = attempts_panel(read: read, projection: projection)
-        resources = panel("resources") do
-          Resources.new(
-            attempts_panel: attempts, usage_reader: @usage_reader, limits: @limits
-          ).call
-        end
-        provenance = panel("provenance") do
-          Provenance.new(
-            task: @native_task, attempts_panel: attempts, limits: @limits,
-            current_observation: @current_context_observation, clock: @clock
-          ).call
-        end
-        publication = panel("publication") { publication_panel }
-        dependencies = panel("dependencies") do
-          dependency_panel(publication)
-        end
-        timeline = timeline_panel(read: read)
-        artifacts = artifacts_panel
-        panels = {
-          "provenance" => provenance, "attempts" => attempts,
-          "resources" => resources, "timeline" => timeline,
-          "dependencies" => dependencies, "publication" => publication,
-          "artifacts" => artifacts
-        }
-        status = status_payload(read)
-        operator = operator_payload
-        answerable_questions = status["freshness"] == "fresh" ? operator.fetch("questions") : []
-        action_evidence_current = status["state"] == "current" &&
-                                  decision_panels_current?(attempts, resources)
+        build_snapshot(audit: true)
+      end
 
-        snapshot_with_budget(
-          generated_at: now,
-          task: {
-            "project" => @project, "slug" => task_value("slug"),
-            "id" => task_value("id"), "stage" => task_value("stage"),
-            "generation" => projection.dig("identity", "task_generation") ||
-              task_value("condition_task_generation") || task_value("task_generation")
-          },
-          status: status,
-          operator: operator,
-          decision: decision_payload(
-            attempts: attempts, resources: resources,
-            action_evidence_current: action_evidence_current,
-            answerable_questions: answerable_questions
-          ),
-          panels: panels
-        )
+      # HTML needs the existing action, dependency and publication evidence,
+      # but not the repository/wiki audit, timeline or a second artifact copy.
+      def page
+        build_snapshot(audit: false)
       end
 
       # Concise, workflow-aware read model used by operator HTML and native
@@ -144,6 +102,58 @@ module Hive
       end
 
       private
+
+      def build_snapshot(audit:)
+        read = history_read
+        projection = projection_hash(read)
+        attempts = attempts_panel(read: read, projection: projection)
+        resources = panel("resources") do
+          Resources.new(
+            attempts_panel: attempts, usage_reader: @usage_reader, limits: @limits
+          ).call
+        end
+        provenance = audit ? panel("provenance") do
+          Provenance.new(
+            task: @native_task, attempts_panel: attempts, limits: @limits,
+            current_observation: @current_context_observation, clock: @clock
+          ).call
+        end : TaskWorkspace.unavailable_panel("provenance")
+        publication = panel("publication") { publication_panel }
+        dependencies = panel("dependencies") do
+          dependency_panel(publication)
+        end
+        timeline = audit ? timeline_panel(read: read) : TaskWorkspace.unavailable_panel("timeline")
+        artifacts = audit ? artifacts_panel : TaskWorkspace.unavailable_panel("artifacts")
+        panels = {
+          "provenance" => provenance, "attempts" => attempts,
+          "resources" => resources, "timeline" => timeline,
+          "dependencies" => dependencies, "publication" => publication,
+          "artifacts" => artifacts
+        }
+        status = status_payload(read)
+        operator = operator_payload
+        answerable_questions = status["freshness"] == "fresh" ? operator.fetch("questions") : []
+        action_evidence_current = status["state"] == "current" &&
+                                  decision_panels_current?(attempts, resources)
+
+        snapshot_with_budget(
+          generated_at: now,
+          task: {
+            "project" => @project, "slug" => task_value("slug"),
+            "id" => task_value("id"), "stage" => task_value("stage"),
+            "generation" => projection.dig("identity", "task_generation") ||
+              task_value("condition_task_generation") || task_value("task_generation")
+          },
+          status: status,
+          operator: operator,
+          decision: decision_payload(
+            attempts: attempts, resources: resources,
+            action_evidence_current: action_evidence_current,
+            answerable_questions: answerable_questions
+          ),
+          panels: panels
+        )
+      end
 
       def attempts_panel(read:, projection:)
         @attempts_panel ||= panel("attempts") do

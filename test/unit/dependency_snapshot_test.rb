@@ -433,18 +433,191 @@ class DependencySnapshotTest < Minitest::Test
         dependent, id: 2, slug: "dependent-task", display_name: nil,
         depends_on: "terminal-base"
       )
-      write_task_meta(root, "9-done", "terminal-base", id: 1)
+      write_task_meta(root, "8-finalize", "terminal-base", id: 1)
       project_name = File.basename(root)
       project = { "name" => project_name, "path" => root, "repository_identity" => nil }
-      generation = Hive::Task.capture_workflow_generation(root)
-
-      context = Hive::DependencySnapshot.targeted_admission_context(
-        [ project ],
-        targets: { project_name => [ "dependent-task" ] },
-        workflow_generations: { File.expand_path(root) => generation }
+      generation = Hive::Task.capture_workflow_generation(
+        root, config: Hive::Config::DEFAULTS.merge("dependency_gate_stage" => "9-done")
       )
 
-      assert context.verdict(project: project_name, slug: "dependent-task").clear?
+      context = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :admission_project_config,
+        ->(*) { flunk "captured admission config must not be reread" }
+      ) do
+        Hive::DependencySnapshot.targeted_admission_context(
+          [ project ],
+          targets: { project_name => [ "dependent-task" ] },
+          workflow_generations: { File.expand_path(root) => generation }
+        )
+      end
+
+      verdict = context.verdict(project: project_name, slug: "dependent-task")
+      assert verdict.wait?, verdict.inspect
+      assert_equal "8-finalize", verdict.dependency_stage
+    end
+  end
+
+  def test_targeted_admission_context_reads_config_only_for_reachable_projects
+    with_tmp_dir do |home|
+      roots = %w[app data archive unrelated].to_h { |name| [ name, File.join(home, name) ] }
+      registry = roots.map do |name, path|
+        { "name" => name, "path" => path, "repository_identity" => "github.com/acme/#{name}" }
+      end
+      dependent = write_task_meta(roots.fetch("app"), "4-execute", "dependent-task", id: 4)
+      Hive::TaskMeta.write(
+        dependent, id: 4, slug: "dependent-task", display_name: nil,
+        depends_on: "local-base"
+      )
+      local_base = write_task_meta(roots.fetch("app"), "9-done", "local-base", id: 3)
+      Hive::TaskMeta.write(
+        local_base, id: 3, slug: "local-base", display_name: nil,
+        depends_on: "data:terminal-base"
+      )
+      terminal_base = write_task_meta(roots.fetch("data"), "9-done", "terminal-base", id: 2)
+      Hive::TaskMeta.write(
+        terminal_base, id: 2, slug: "terminal-base", display_name: nil,
+        depends_on: "archive:old-base"
+      )
+      write_task_meta(roots.fetch("archive"), "8-finalize", "old-base", id: 1)
+      File.write(File.join(roots.fetch("data"), ".hive-state", "config.yml"), "dependency_gate_stage: 9-done\n")
+      write_task_meta(roots.fetch("unrelated"), "4-execute", "other-task", id: 5)
+      File.write(File.join(roots.fetch("unrelated"), ".hive-state", "config.yml"), "- not a mapping\n")
+      config_reader = Hive::DependencySnapshot.method(:admission_project_config)
+      reads = []
+      context = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :admission_project_config,
+        ->(root) { reads << root; config_reader.call(root) }
+      ) do
+        with_replaced_singleton_method(
+          Hive::RepositoryIdentity, :current, ->(root) { "github.com/acme/#{File.basename(root)}" }
+        ) do
+          Hive::DependencySnapshot.targeted_admission_context(
+            registry, targets: { "app" => [ "dependent-task" ] }
+          )
+        end
+      end
+
+      verdict = context.verdict(project: "app", slug: "dependent-task")
+      assert verdict.wait?, verdict.inspect
+      assert_equal "archive:old-base", verdict.blocked_by
+      assert_equal "8-finalize", verdict.dependency_stage
+      assert_equal roots.values_at("app", "data", "archive").sort, reads.sort
+      assert_equal roots.keys.sort, context.projects.map(&:name).sort
+      assert_equal %w[local-base old-base terminal-base],
+                   context.project_snapshot_layers.drop(1).flatten.flat_map(&:tasks).map(&:slug).sort
+    end
+  end
+
+  def test_targeted_admission_context_preserves_relevant_config_errors
+    %w[app data].each do |invalid_project|
+      with_tmp_dir do |home|
+        app = File.join(home, "app")
+        data = File.join(home, "data")
+        dependent = write_task_meta(app, "4-execute", "dependent-task", id: 2)
+        Hive::TaskMeta.write(
+          dependent, id: 2, slug: "dependent-task", display_name: nil,
+          depends_on: "data:terminal-base"
+        )
+        write_task_meta(data, "9-done", "terminal-base", id: 1)
+        File.write(File.join(home, invalid_project, ".hive-state", "config.yml"), "- not a mapping\n")
+        registry = [
+          { "name" => "app", "path" => app, "repository_identity" => "github.com/acme/app" },
+          { "name" => "data", "path" => data, "repository_identity" => "github.com/acme/data" }
+        ]
+
+        context = Hive::DependencySnapshot.targeted_admission_context(
+          registry, targets: { "app" => [ "dependent-task" ] }
+        )
+        verdict = context.verdict(project: "app", slug: "dependent-task")
+
+        assert verdict.error?, verdict.inspect
+        assert_equal "dependency_validation_failed", verdict.admission_error.reason_code
+        assert_includes verdict.admission_error.safe_correction, "must contain a mapping"
+      end
+    end
+  end
+
+  def test_targeted_admission_context_rejects_unknown_or_duplicate_project_names
+    with_tmp_dir do |home|
+      app = File.join(home, "app")
+      data = File.join(home, "data")
+      dependent = write_task_meta(app, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "data:terminal-base"
+      )
+      write_task_meta(data, "9-done", "terminal-base", id: 1)
+      app_entry = { "name" => "app", "path" => app }
+      data_entry = { "name" => "data", "path" => data }
+      registries = [
+        [ app_entry ],
+        [ app_entry, data_entry, data_entry.merge("path" => File.join(home, "duplicate")) ],
+        [ app_entry, app_entry.merge("path" => File.join(home, "duplicate")), data_entry ]
+      ]
+
+      registries.each do |registry|
+        context = Hive::DependencySnapshot.targeted_admission_context(
+          registry, targets: { "app" => [ "dependent-task" ] }
+        )
+        verdict = context.verdict(project: "app", slug: "dependent-task")
+
+        assert verdict.error?, verdict.inspect
+        assert_equal "dependency_project_unknown", verdict.admission_error.reason_code
+      end
+    end
+  end
+
+  def test_targeted_admission_context_keeps_duplicate_project_paths_for_enrollment_validation
+    with_tmp_dir do |root|
+      write_task_meta(root, "4-execute", "independent-task", id: 1)
+      registry = [
+        { "name" => "app", "path" => root },
+        { "name" => "alias", "path" => root }
+      ]
+      context = Hive::DependencySnapshot.targeted_admission_context(
+        registry, targets: { "app" => [ "independent-task" ] }
+      )
+
+      assert context.verdict(project: "app", slug: "independent-task").clear?
+      assert_equal 2, context.project_path_match_count(root)
+      assert_nil context.project_for_path(root)
+      assert_equal "dependency_project_unknown",
+                   context.verdict(project: "unknown", slug: "independent-task").admission_error.reason_code
+    end
+  end
+
+  def test_targeted_admission_context_rejects_missing_or_mismatched_repository_identity
+    with_tmp_dir do |home|
+      app = File.join(home, "app")
+      data = File.join(home, "data")
+      dependent = write_task_meta(app, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "data:terminal-base"
+      )
+      write_task_meta(data, "9-done", "terminal-base", id: 1)
+      registry = [
+        { "name" => "app", "path" => app, "repository_identity" => "github.com/acme/app" },
+        { "name" => "data", "path" => data, "repository_identity" => "github.com/acme/data" }
+      ]
+      {
+        nil => "dependency_repository_identity_missing",
+        "github.com/acme/other" => "dependency_repository_mismatch"
+      }.each do |identity, reason|
+        looked_up = []
+        context = with_replaced_singleton_method(
+          Hive::RepositoryIdentity, :current, ->(root) { looked_up << root; identity }
+        ) do
+          Hive::DependencySnapshot.targeted_admission_context(
+            registry, targets: { "app" => [ "dependent-task" ] }
+          )
+        end
+        verdict = context.verdict(project: "app", slug: "dependent-task")
+
+        assert verdict.error?, verdict.inspect
+        assert_equal reason, verdict.admission_error.reason_code
+        assert_equal [ data ], looked_up
+      end
     end
   end
 

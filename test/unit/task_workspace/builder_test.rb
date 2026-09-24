@@ -45,6 +45,34 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
+  def test_page_preserves_question_and_execution_authority_without_audit_work
+    with_fixture do |native, task|
+      [
+        { questions: 1 },
+        { questions: 1, projection_state: "partial" },
+        { questions: 1, projection_truncated: true },
+        { questions: 1, usage_available: false },
+        { questions: 1, status_availability: "degraded" },
+        { questions: 0, projection_state: "partial" },
+        { questions: 0 }
+      ].each do |options|
+        audit = builder(native, task, **options).call
+        projector = builder(native, task, **options)
+        projector.define_singleton_method(:timeline_panel) { |**| raise "unused timeline read" }
+        projector.define_singleton_method(:artifacts_panel) { raise "unused artifact read" }
+        page = projector.page
+
+        assert_equal audit.slice("status", "operator", "decision"),
+                     page.slice("status", "operator", "decision"), options.inspect
+        assert_equal audit.fetch("panels").slice("dependencies", "publication"),
+                     page.fetch("panels").slice("dependencies", "publication")
+        %w[provenance timeline artifacts].each do |name|
+          assert_equal "not_projected", page.dig("panels", name, "diagnostics", 0, "reason")
+        end
+      end
+    end
+  end
+
   def test_stale_status_disables_the_sanitized_action_and_never_exposes_command_or_token
     with_fixture do |native, task|
       snapshot = builder(
@@ -329,7 +357,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
-  def test_v1_and_v2_share_exact_usage_reads
+  def test_page_and_semantic_share_exact_usage_reads
     calls = 0
     usage_reader = lambda do |**|
       calls += 1
@@ -341,7 +369,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
         usage_session: true
       )
 
-      projector.call
+      projector.page
       projector.semantic
 
       assert_equal 1, calls,

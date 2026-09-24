@@ -607,8 +607,8 @@ Honeycomb projections.
 
   Raw attempt cards, provenance receipts, `agent_start`/`agent_end`, session
   lifecycle rows, stage chronology, and the newest-log tail no longer render in
-  normal task HTML. Their authenticated v1 workspace, timeline, and log
-  endpoints remain available for audit and deep diagnosis. A red task's
+  normal task HTML. Authenticated timeline and log endpoints remain available
+  for audit and deep diagnosis; workspace JSON is semantic v2. A red task's
   diagnostic disclosure binds the current attempt receipt's exact bounded
   `log_reference` digest before loading raw content; a newer unrelated log file
   cannot displace it.
@@ -655,10 +655,9 @@ Honeycomb projections.
   so content, bench, managed, and project-authored workflows do not inherit the
   coding workflow's `9-done` assumption.
 
-  The compatibility paths stay explicit. `GET
-  /tasks/:project/:slug.json` returns strict `hive-task-workspace` v1 for audit
-  and guarded mutation state. `GET /tasks/:project/:slug/workspace` returns the
-  same semantic v2 document consumed by normal HTML and native `hive task
+  Both `GET /tasks/:project/:slug.json` and
+  `GET /tasks/:project/:slug/workspace` return the same semantic v2 document
+  consumed by normal HTML and native `hive task
   TARGET --project NAME --json`. Signed task-bound timeline cursors remain on
   the namespaced timeline GET. None of these routes changes `hive-status` v7.
   Diff and publication retain bounded/lazy frames when applicable; the
@@ -1077,7 +1076,10 @@ fleet-wide status producer. The native targeted status helper projects only
 the selected task and builds authoritative dependency admission from its
 reachable prerequisites, including referenced terminal and cross-project
 tasks. Unrelated tasks in the same stage and unrelated terminal history are
-not projected. Mutations still resolve current task and dependency state.
+not projected. Admission policy is read only for the target and reachable
+projects, once per project within that context, while the complete enrollment
+index still validates identity and ambiguity. Mutations still resolve current
+task and dependency state.
 Explicit `source=archive` routes use that same
 targeted resolver with retention filtering disabled, so hidden terminal tasks
 remain addressable and mutations revalidate current task state without a stale
@@ -1123,9 +1125,12 @@ share typed `available`, `empty`, `truncated`, and `unavailable` results with
 abortable timeout at a time, pauses while hidden, backs off failures, and
 ignores late responses after disconnect.
 
-Task detail v1 JSON, v2 JSON, and HTML share
-`Hive::TaskWorkspace::Builder`. HTML and `/workspace` consume `#semantic`; the
-content-negotiated `.json` compatibility path consumes strict v1. The
+Task detail JSON and HTML share `Hive::TaskWorkspace::Builder`. Both `.json`
+and `/workspace` consume semantic v2. HTML combines `#semantic` with bounded
+`#page` evidence for questions, execution readiness, dependencies, and
+publication. It skips hidden provenance and timeline construction, and reads
+artifact contents only for the semantic result. Explicit audit construction
+retains its existing normalization and byte limits. The
 projection-store reader validates a checkpoint-anchored journal prefix and
 replays only a bounded suffix under the journal lock; HTTP never repairs by
 replaying an unbounded journal. Known artifacts are descriptor-opened without

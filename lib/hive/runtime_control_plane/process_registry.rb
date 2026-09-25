@@ -169,10 +169,29 @@ module Hive
         end
       end
 
-      def settle_preclose_reservations!(generation:, authority:)
+      def mark_stopped_by_process!(process_id, authority:, reason: nil, timeout_sec: nil)
+        @database.transaction(authority: authority, timeout_sec: timeout_sec) do |db|
+          process = db[:owned_processes].where(process_id: process_id.to_s).first
+          next false unless process && process.fetch(:state) != "stopped"
+
+          timestamp = now
+          db[:owned_processes].where(process_id: process.fetch(:process_id)).update(
+            state: "stopped", unknown_reason: reason, stopped_at: timestamp,
+            updated_at: timestamp
+          )
+          if process[:reservation_id]
+            db[:launch_reservations].where(
+              reservation_id: process.fetch(:reservation_id)
+            ).update(state: "released", reason: reason, updated_at: timestamp)
+          end
+          true
+        end
+      end
+
+      def settle_preclose_reservations!(generation:, authority:, timeout_sec: nil)
         cancelled = []
         generation = Integer(generation)
-        @database.transaction(authority: authority) do |db|
+        @database.transaction(authority: authority, timeout_sec: timeout_sec) do |db|
           scope = db[:launch_reservations].where(state: "reserved")
             .where { admission_generation < generation }
           cancelled = scope.select_map(:reservation_id)

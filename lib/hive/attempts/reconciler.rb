@@ -97,7 +97,8 @@ module Hive
       # Publish interruption only after both the wrapper identity and the
       # worker process group are proven absent. A genuine terminal receipt that
       # wins the CAS race remains authoritative and is returned unchanged.
-      def finalize_interruption(observed, pause_generation:, now: Time.now.utc, authority: nil)
+      def finalize_interruption(observed, pause_generation:, now: Time.now.utc, authority: nil,
+                                timeout_sec: nil)
         current = @store.fetch(observed.attempt_id)
         return reconciled(current, :terminal, :not_applicable, { receipt: "valid" }) if
           current&.state == "terminal"
@@ -136,7 +137,8 @@ module Hive
           exit_status: Hive::ExitCodes::TEMPFAIL,
           final_checkpoint: current.checkpoint,
           output_references: current["current_outputs"],
-          log_reference: log_reference, now: now, authority: authority
+          log_reference: log_reference, now: now, authority: authority,
+          timeout_sec: timeout_sec
         )
         reconciled(
           interrupted, :interrupted, wrapper_status,

@@ -142,6 +142,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @identity = { process_start_time: "start", pgid: 100 }
       @terminate_result = true
       @shutdown_proof = { drained: true, child_inventory: [] }
+      @termination_graces = []
     end
 
     def spawn(command_string:, project:, slug:, stage:,
@@ -171,8 +172,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     def terminate_all(grace_sec: 600)
+      @termination_graces << grace_sec
       @shutdown_exits
     end
+
+    attr_reader :termination_graces
 
     def update_timeouts(default_timeout_sec:, verb_timeouts:, stage_timeouts:, kill_grace_sec:)
       @timeouts = { default_timeout_sec: default_timeout_sec,
@@ -600,7 +604,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil,
                       dispatch_repository: nil, patrol_discovery_async: false,
-                      persistent_admission: nil)
+                      persistent_admission: nil, quiescence_lifecycle: nil,
+                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                      boot_id_reader: nil)
     dispatch_request_state_home ||= Dir.mktmpdir("hive-dispatch-test")
     config = {
       "daemon" => {
@@ -667,7 +673,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       runtime_ready_callback: runtime_ready_callback,
       clock: clock,
       patrol_discovery_async: patrol_discovery_async,
-      persistent_admission: persistent_admission
+      persistent_admission: persistent_admission,
+      quiescence_lifecycle: quiescence_lifecycle,
+      monotonic: monotonic,
+      boot_id_reader: boot_id_reader
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # Bypass the Hive::Config.find_project / Config.load lookup chain
@@ -5216,6 +5225,31 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   assert_equal 0, supervisor.spawned.size
 end
 
+def test_quiescing_shutdown_clamps_configured_grace_before_finalization_reserve
+  state = Hive::RuntimeControlPlane::Lifecycle.new(
+    phase: "quiescing", generation: 1, revision: 1, mutation_sequence: 3,
+    boot_id: "boot-test", deadline_monotonic: 110.0, shutdown_grace_sec: 2.5,
+    interrupted_attempt_ids: [], quiesce_started_at: nil, paused_at: nil,
+    resumed_at: nil, updated_at: nil
+  )
+  lifecycle = Object.new
+  lifecycle.define_singleton_method(:current) { state }
+  dispatcher, supervisor = make_dispatcher(
+    quiescence_lifecycle: lifecycle, monotonic: -> { 106.0 },
+    boot_id_reader: -> { "boot-test" }
+  )
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+  dispatcher.define_singleton_method(:tick) { |now: Time.now| request_shutdown! }
+
+  dispatcher.run_forever
+
+  # The configured ordinary-stop grace is 60 seconds. This generation's
+  # entire timeout is 10 seconds (2.5s escalation + 1.5s reserve), so the
+  # daemon must hand the supervisor only the remaining escalation slice.
+  assert_equal [ 2.5 ], supervisor.termination_graces
+end
+
 def test_run_forever_publishes_runtime_readiness_before_releasing_activation
   snapshot = FakeOperationalSnapshot.new
   callback_observation = nil
@@ -6705,7 +6739,7 @@ def test_interruptible_sleep_stops_after_shutdown_request
 
   dispatcher.send(:interruptible_sleep, 30)
 
-  assert_equal [ 0.5 ], sleeps
+  assert_equal [ 0.05 ], sleeps
 end
 
   # ── dispatch-baseline persistence across restart ───────────────────────

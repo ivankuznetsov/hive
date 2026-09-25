@@ -74,8 +74,11 @@ from replacing an already committed terminal result.
 During quiescing, an already admitted supervisor stops ordinary heartbeat
 writes and may use its single bounded cleanup-write window to publish the
 terminal receipt. A quiesce signal uses the lifecycle generation and clamps
-worker termination to the persisted shutdown grace and remaining lifecycle
-deadline. The same signal outside quiescing remains an ordinary cancellation.
+worker termination to the persisted escalation slice without consuming the
+generation's finalization reserve. The same signal outside quiescing remains
+an ordinary cancellation. The installation controller aggregates any receipt
+the supervisor already committed for that generation with interruptions it
+finishes after verified wrapper and worker-group absence.
 
 `request_id` is immutable provenance, not a foreign key to the disposable
 dispatch queue. Completing or pruning a request must not change an attempt

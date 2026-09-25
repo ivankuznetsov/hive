@@ -396,6 +396,7 @@ components:
           - lib/hive/artifacts/outcome_evidence/store.rb
           - lib/hive/implementation_identity/store.rb
           - lib/hive/modules/inspector.rb
+          - lib/hive/daemon/quiescence.rb
           - lib/hive/daemon/recovery_coordinator.rb
           - lib/hive/task_activity.rb
           - lib/hive/task_closure.rb
@@ -408,12 +409,14 @@ components:
       - constant: Hive::Attempts::Reconciler
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root injects reconciliation into its scheduler without exposing lifecycle operations through the admission facade."
+          - lib/hive/daemon/quiescence.rb
+        reason: "The daemon composition root and quiescence controller reconcile attempts without exposing lifecycle operations through the admission facade."
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/daemon/quiescence.rb
           - lib/hive/runtime_control_plane/process_registry.rb
-        reason: "The daemon composition root and installation-owned process registry use the process-identity verifier to classify live workers safely."
+        reason: "The daemon composition root, quiescence controller, and installation-owned process registry use the process-identity verifier to classify live workers safely."
       - constant: Hive::Attempts::LostOutcomeTransition
         files:
           - lib/hive/commands/daemon.rb

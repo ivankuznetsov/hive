@@ -36,6 +36,7 @@ module Hive
       "hive-decide" => 1,
       "hive-plan-review" => 1,
       "hive-plan-review-action" => 1,
+      "hive-plan-review-show" => 1,
       "hive-plan-review-level" => 1,
       "hive-plan-review-adoption" => 1,
       "hive-findings" => 1,

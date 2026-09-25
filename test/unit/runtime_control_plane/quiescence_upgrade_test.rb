@@ -110,6 +110,17 @@ class RuntimeControlPlaneQuiescenceUpgradeTest < Minitest::Test
   def convert_to_pinned_v1(path)
     database = Sequel.connect(adapter: "sqlite", database: path, max_connections: 1)
     database.run("PRAGMA foreign_keys = OFF")
+    attempt_rows = database[:attempts].all
+    attempt_sql = database[:sqlite_master].where(type: "table", name: "attempts").get(:sql)
+      .sub(", 'interrupted'", "")
+    attempt_indexes = database[:sqlite_master].where(type: "index", tbl_name: "attempts")
+      .exclude(sql: nil).order(:name).select_map(:sql)
+    database.transaction do
+      database.drop_table(:attempts)
+      database.run(attempt_sql)
+      database[:attempts].multi_insert(attempt_rows) unless attempt_rows.empty?
+      attempt_indexes.each { |sql| database.run(sql) }
+    end
     %i[quiescence_cleanup_writes owned_processes launch_reservations runtime_lifecycle].each do |table|
       database.drop_table(table)
     end

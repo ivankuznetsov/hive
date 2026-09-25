@@ -51,6 +51,23 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_interrupted_hook_attempt_retries_as_non_success
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      first = runtime.fetch(:attempt_store).active_attempts.first
+      terminalize(runtime.fetch(:attempt_store), first, outcome: "interrupted")
+
+      runtime.fetch(:daemon_runtime).tick(now: NOW + 3)
+      attempts = runtime.fetch(:attempt_store).active_attempts.sort_by { |record| record["retry_charge"] }
+
+      assert_equal 2, attempts.size
+      assert_equal "interrupted", attempts.first.outcome
+      assert_equal 1, attempts.last["retry_charge"]
+    end
+  end
+
   def test_disable_closes_pending_retry_without_replay
     with_runtime do |runtime|
       runtime.fetch(:module_dispatcher).dispatch(
@@ -531,12 +548,16 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       first_heartbeat_timeout_sec: 30, now: NOW + 1
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 1)
-    store.terminalize(
-      running, outcome: outcome, exit_status: 1, final_checkpoint: running.checkpoint,
-      output_references: [],
+    attributes = {
+      exit_status: 1, final_checkpoint: running.checkpoint, output_references: [],
       log_reference: { "path" => "logs/a", "size" => 0, "sha256" => "0" * 64 },
       now: NOW + 2
-    )
+    }
+    if outcome == "interrupted"
+      store.interrupt(running, pause_generation: 1, **attributes)
+    else
+      store.terminalize(running, outcome: outcome, **attributes)
+    end
   end
 
 

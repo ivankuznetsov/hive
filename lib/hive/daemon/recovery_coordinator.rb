@@ -992,7 +992,7 @@ module Hive
         receipt_for_request(refreshed, attempt_id: attempt_id)
       end
 
-      RETRYABLE_TERMINAL_OUTCOMES = %w[failed cancelled lost].freeze
+      RETRYABLE_TERMINAL_OUTCOMES = %w[failed cancelled interrupted lost].freeze
 
       # A stage normally writes a fresh ERROR/REVIEW_ERROR before its failed
       # recovery attempt terminalizes. An exception before that stage-owned

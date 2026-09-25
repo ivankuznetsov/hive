@@ -235,7 +235,9 @@ Sequel.migration do
         "(subject_kind = 'module_hook' AND task_id IS NULL)"
       )
       check Sequel.lit("state IN ('launching', 'running', 'terminal', 'lost')")
-      check Sequel.lit("outcome IS NULL OR outcome IN ('succeeded', 'failed', 'cancelled')")
+      check Sequel.lit(
+        "outcome IS NULL OR outcome IN ('succeeded', 'failed', 'cancelled', 'interrupted')"
+      )
       check Sequel.lit("(state = 'terminal' AND outcome IS NOT NULL) OR (state != 'terminal' AND outcome IS NULL)")
       check Sequel.lit(
         "(admission_workflow IS NULL AND admission_runtime_digest IS NULL) OR " \

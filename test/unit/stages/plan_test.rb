@@ -91,4 +91,77 @@ class HiveStagesPlanTest < Minitest::Test
   def test_action_for_unknown_marker_stringifies_marker
     assert_equal "review_waiting", Hive::Stages::Plan.action_for(:review_waiting)
   end
+
+  def with_review_record(state:, findings:, decisions:)
+    record = Object.new
+    record.define_singleton_method(:state) { state }
+    data = { "findings" => findings, "decisions" => decisions }
+    record.define_singleton_method(:[]) { |key| data.fetch(key) }
+    projection = Struct.new(:record).new(record)
+    with_replaced_singleton_method(Hive::PlanReview::Projection, :load, ->(task_folder:) { projection }) do
+      yield FakeTask.new(folder: "/tmp/task", slug: "task")
+    end
+  end
+
+  def review_finding(fingerprint, title, order, lifecycle: "approved")
+    { "fingerprint" => fingerprint, "title" => title, "classification" => "gated_auto",
+      "risk" => "high", "description" => "#{title} details", "lifecycle" => lifecycle,
+      "display_order" => order }
+  end
+
+  def test_blocked_review_decisions_are_carried_into_the_next_plan
+    findings = [
+      review_finding("prf-b", "Storage substrate", 2, lifecycle: "verified"),
+      review_finding("prf-a", "Operator exit", 1),
+      review_finding("prf-c", "Still open", 3, lifecycle: "open")
+    ]
+    decisions = [
+      { "action" => "approve_finding", "target_fingerprint" => "prf-a" },
+      { "action" => "answer_finding", "target_fingerprint" => "prf-b",
+        "value" => { "answer" => "Use the SQLite control plane." } },
+      { "action" => "raise_level", "target_fingerprint" => nil }
+    ]
+    with_review_record(state: "blocked", findings: findings, decisions: decisions) do |task|
+      text = Hive::Stages::Plan.carried_decisions_text(task)
+
+      assert_equal [ "Operator exit", "Storage substrate" ], text.scan(/^- (.+?) \(/).flatten
+      assert_includes text, "Operator decision: approved; apply the reviewer's recommendation."
+      assert_includes text, "Operator answer (follow exactly): Use the SQLite control plane."
+      refute_includes text, "Still open"
+    end
+  end
+
+  def test_no_decisions_are_carried_unless_the_review_is_blocked
+    findings = [ review_finding("prf-a", "Operator exit", 1) ]
+    decisions = [ { "action" => "approve_finding", "target_fingerprint" => "prf-a" } ]
+    with_review_record(state: "awaiting_decision", findings: findings, decisions: decisions) do |task|
+      assert_equal "", Hive::Stages::Plan.carried_decisions_text(task)
+    end
+  end
+
+  def test_missing_review_carries_nothing
+    missing = ->(task_folder:) { raise Hive::PlanReview::InvalidRecord, "no review" }
+    with_replaced_singleton_method(Hive::PlanReview::Projection, :load, missing) do
+      assert_equal "", Hive::Stages::Plan.carried_decisions_text(FakeTask.new(folder: "/tmp/task", slug: "task"))
+    end
+  end
+
+  def test_plan_prompt_wraps_carried_decisions_as_user_supplied_data
+    tag = Hive::Stages::Base.user_supplied_tag
+    render = lambda do |carried|
+      Hive::Stages::Base.render(
+        "plan_prompt.md.erb",
+        Hive::Stages::Base::TemplateBindings.new(
+          project_name: "demo", task_folder: "/tmp/task", brainstorm_text: "idea",
+          carried_decisions_text: carried, user_supplied_tag: tag, skill_invocation: "/plan"
+        )
+      )
+    end
+
+    with_decisions = render.call("- Operator exit (gated_auto, high risk; prf-a)")
+    assert_includes with_decisions, "<#{tag} content_type=\"plan_review_decisions\">"
+    assert_includes with_decisions, "- Operator exit (gated_auto, high risk; prf-a)"
+    refute_includes render.call(""), "plan_review_decisions"
+  end
 end
+

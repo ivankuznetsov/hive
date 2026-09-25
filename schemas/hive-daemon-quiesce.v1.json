@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:daemon-quiesce:v1",
+  "title": "hive daemon quiesce output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/ResultPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "ResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "result", "paused", "reason",
+        "phase", "admission_open", "generation", "lifecycle_revision",
+        "interrupted_attempt_ids", "remaining", "checkpoint", "proof",
+        "quiescence_capability", "details"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-quiesce" },
+        "schema_version": { "const": 1 },
+        "ok": { "type": "boolean" },
+        "result": { "enum": ["paused", "not_paused"] },
+        "paused": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "phase": { "enum": ["running", "quiescing", "paused", "resuming", "unknown"] },
+        "admission_open": { "type": "boolean" },
+        "generation": { "type": ["integer", "null"], "minimum": 0 },
+        "lifecycle_revision": { "type": ["integer", "null"], "minimum": 0 },
+        "interrupted_attempt_ids": {
+          "type": "array", "items": { "type": "string" }, "uniqueItems": true
+        },
+        "remaining": { "type": "array", "items": { "$ref": "#/$defs/InventoryEntry" } },
+        "checkpoint": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Checkpoint" }] },
+        "proof": { "type": ["object", "null"], "additionalProperties": true },
+        "quiescence_capability": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Capability" }]
+        },
+        "details": { "type": "object", "additionalProperties": true },
+        "resume_required": { "const": true },
+        "resume_command": { "const": "hive daemon resume" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "paused": { "const": false },
+              "admission_open": { "const": false }
+            },
+            "required": ["paused", "admission_open"]
+          },
+          "then": { "required": ["resume_required", "resume_command"] }
+        },
+        {
+          "if": { "properties": { "paused": { "const": true } }, "required": ["paused"] },
+          "then": {
+            "properties": {
+              "ok": { "const": true }, "result": { "const": "paused" },
+              "reason": { "type": "null" }, "admission_open": { "const": false }
+            }
+          },
+          "else": {
+            "properties": { "ok": { "const": false }, "result": { "const": "not_paused" } }
+          }
+        }
+      ]
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message", "action", "runtime_code", "next_action", "details"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-quiesce" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["usage", "storage", "migration_required"] },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "action": { "const": "quiesce" },
+        "runtime_code": { "type": "string" },
+        "next_action": { "type": ["string", "null"] },
+        "details": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "Checkpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["complete", "busy", "log_frames", "checkpointed_frames"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "busy": { "type": "integer", "minimum": 0 },
+        "log_frames": { "type": "integer", "minimum": 0 },
+        "checkpointed_frames": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eligible", "reason", "ownership_mode", "disqualifying_inventory"],
+      "properties": {
+        "eligible": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "ownership_mode": { "type": "string" },
+        "disqualifying_inventory": {
+          "type": "array", "items": { "$ref": "#/$defs/InventoryEntry" }
+        }
+      }
+    },
+    "InventoryEntry": {
+      "type": "object", "additionalProperties": true
+    }
+  }
+}

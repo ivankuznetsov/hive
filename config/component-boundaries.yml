@@ -415,8 +415,9 @@ components:
         files:
           - lib/hive/commands/daemon.rb
           - lib/hive/daemon/quiescence.rb
+          - lib/hive/daemon/status_report.rb
           - lib/hive/runtime_control_plane/process_registry.rb
-        reason: "The daemon composition root, quiescence controller, and installation-owned process registry use the process-identity verifier to classify live workers safely."
+        reason: "The daemon composition root, quiescence controller, read-only paused-status probe, and installation-owned process registry use the process-identity verifier to classify live workers safely."
       - constant: Hive::Attempts::LostOutcomeTransition
         files:
           - lib/hive/commands/daemon.rb

@@ -1,5 +1,6 @@
 require "json"
 require "time"
+require "timeout"
 require "hive/atomic_file"
 require "hive/attempts/process_identity"
 require "hive/attempts/process_custody"
@@ -29,6 +30,23 @@ module Hive
           "remaining" => remaining, "checkpoint" => checkpoint,
           "proof" => proof, "capability" => capability&.to_h,
           "details" => details
+        }
+      end
+    end
+
+    ResumeResult = Data.define(
+      :status, :resumed, :reason, :phase, :admission_open, :admission_reopened,
+      :generation, :lifecycle_revision, :reconciled_attempt_ids,
+      :remaining, :services, :details
+    ) do
+      def to_h
+        {
+          "status" => status, "resumed" => resumed, "reason" => reason,
+          "phase" => phase, "admission_open" => admission_open,
+          "admission_reopened" => admission_reopened, "generation" => generation,
+          "lifecycle_revision" => lifecycle_revision,
+          "reconciled_attempt_ids" => reconciled_attempt_ids,
+          "remaining" => remaining, "services" => services, "details" => details
         }
       end
     end
@@ -251,6 +269,8 @@ module Hive
         lock.synchronize { run_under_operation_lock }
       rescue Hive::ConcurrentRunError => error
         nonpaused("controller_busy", details: { "error" => error.message })
+      rescue Hive::RuntimeControlPlane::MigrationRequired
+        raise
       rescue Hive::RuntimeControlPlane::Error, Sequel::Error, SystemCallError, IOError => error
         reason = @budget && expired?(@budget.drain_cutoff) ? "deadline_exhausted" : "storage_error"
         nonpaused(reason, details: { "error" => "#{error.class}: #{error.message}" })
@@ -750,6 +770,341 @@ module Hive
           value
         end
       end
+    end
+
+    # Explicit inverse of Quiescence. Admission remains closed while stale
+    # process and attempt evidence is reconciled under operation + writer
+    # ownership. Managed services are restored only after the generation CAS
+    # has reopened admission, and their outcomes are reported independently.
+    class Resume
+      DEFAULT_TIMEOUT_SEC = 600.0
+
+      def initialize(state_home: Hive::Paths.state_home, timeout_sec: DEFAULT_TIMEOUT_SEC,
+                     database: nil, lifecycle: nil, registry: nil,
+                     process_identity: Hive::Attempts::ProcessIdentity.new,
+                     attempt_store: nil, reconciler: nil, proof_store: nil,
+                     service_restorer: nil,
+                     monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                     clock: -> { Time.now.utc }, operation_lock_factory: nil)
+        @state_home = File.expand_path(state_home)
+        @timeout_sec = Float(timeout_sec)
+        unless @timeout_sec.positive? && @timeout_sec.finite?
+          raise ArgumentError, "resume timeout must be positive and finite"
+        end
+        @database = database || Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(@state_home)
+        )
+        @lifecycle = lifecycle || Hive::RuntimeControlPlane::LifecycleRepository.new(
+          database: @database, clock: clock
+        )
+        @process_identity = process_identity
+        @registry = registry || Hive::RuntimeControlPlane::ProcessRegistry.new(
+          database: @database, state_home: @state_home,
+          process_identity: process_identity, clock: clock
+        )
+        @attempt_store = attempt_store
+        @reconciler = reconciler
+        @proof_store = proof_store || FinalizationProof.new(state_home: @state_home)
+        @service_restorer = service_restorer || method(:restore_managed_service)
+        @monotonic = monotonic
+        @clock = clock
+        @operation_lock_factory = operation_lock_factory || lambda do |timeout|
+          Hive::RuntimeControlPlane::OperationLock.new(
+            state_home: @state_home, timeout_sec: timeout
+          )
+        end
+      end
+
+      def call
+        @started_at = @monotonic.call
+        @deadline = @started_at + @timeout_sec
+        @database.open!
+        lock = @operation_lock_factory.call(remaining)
+        lock.synchronize { run_under_operation_lock }
+      rescue Hive::ConcurrentRunError => error
+        nonresumed("controller_busy", details: { "error" => error.message })
+      rescue Hive::RuntimeControlPlane::MigrationRequired
+        raise
+      rescue Hive::RuntimeControlPlane::Error, Hive::Attempts::RepositoryError,
+             Sequel::Error, SystemCallError, IOError => error
+        nonresumed(
+          "storage_error", details: { "error" => "#{error.class}: #{error.message}" }
+        )
+      ensure
+        @database.disconnect
+      end
+
+      private
+
+      def run_under_operation_lock
+        state = @lifecycle.current
+        generation = state.generation
+        @proof_store.remove!
+        if state.phase == "running"
+          return restore_services(state)
+        end
+        unless %w[quiescing paused resuming].include?(state.phase)
+          return nonresumed("lifecycle_busy", lifecycle: state)
+        end
+        return nonresumed("deadline_exhausted", lifecycle: state) unless remaining.positive?
+
+        reopened = nil
+        reconciled = []
+        unresolved = []
+        @database.with_exclusive_writer(role: :controller, timeout_sec: remaining) do |authority|
+          state = @lifecycle.begin_resume!(
+            generation: generation, authority: authority, now: @clock.call,
+            timeout_sec: remaining
+          )
+          reconciled, unresolved = reconcile_closed_work(
+            generation: generation, authority: authority
+          )
+          unless unresolved.empty?
+            return nonresumed(
+              "reconciliation_incomplete", lifecycle: @lifecycle.current,
+              reconciled_attempt_ids: reconciled, remaining_entries: unresolved
+            )
+          end
+          unless remaining.positive?
+            return nonresumed(
+              "deadline_exhausted", lifecycle: @lifecycle.current,
+              reconciled_attempt_ids: reconciled
+            )
+          end
+          current = @lifecycle.current
+          reopened = @lifecycle.reopen!(
+            generation: generation, expected_revision: current.revision,
+            authority: authority, now: @clock.call, timeout_sec: remaining
+          )
+        end
+        restore_services(reopened, reconciled_attempt_ids: reconciled)
+      end
+
+      def reconcile_closed_work(generation:, authority:)
+        unresolved = []
+        active_process_rows.each do |row|
+          status = begin
+            @process_identity.status(identity_hash(row))
+          rescue StandardError => error
+            unresolved << normalize_process(row).merge(
+              "last_known_state" => "unverifiable",
+              "unknown_reason" => "process_identity_probe_failed:#{error.class}"
+            )
+            next
+          end
+          if %i[missing mismatched].include?(status)
+            @registry.mark_stopped_by_process!(
+              row.fetch(:process_id), authority: authority, reason: "resume_reconciled",
+              timeout_sec: remaining
+            )
+          else
+            unresolved << normalize_process(row).merge(
+              "last_known_state" => status.to_s,
+              "unknown_reason" => (status == :matching ? "owned_process_alive" :
+                "process_identity_unverifiable")
+            )
+          end
+        end
+
+        unresolved.concat(active_reservations)
+        store = attempt_store_if_needed
+        return [ [], unresolved ] unless store
+
+        reconciler = @reconciler || Hive::Attempts::Reconciler.new(
+          store: store, process_identity: @process_identity
+        )
+        reconciled_ids = []
+        store.active_attempts.select { |record| record.state == "running" }.each do |record|
+          outcome = reconciler.finalize_interruption(
+            record, pause_generation: generation, now: @clock.call,
+            authority: authority, timeout_sec: remaining
+          )
+          if %i[interrupted terminal].include?(outcome.classification)
+            reconciled_ids << outcome.attempt.attempt_id
+          else
+            unresolved << attempt_remaining(outcome)
+          end
+        end
+        snapshot = reconciler.reconcile(
+          now: @clock.call, authority: authority, timeout_sec: remaining
+        )
+        snapshot.attempts.each do |outcome|
+          if %w[launching running].include?(outcome.attempt.state)
+            unresolved << attempt_remaining(outcome)
+          elsif %i[lost terminal].include?(outcome.classification)
+            reconciled_ids << outcome.attempt.attempt_id
+          end
+        end
+        [ reconciled_ids.uniq.sort, unresolved.uniq ]
+      end
+
+      def restore_services(state, reconciled_attempt_ids: [])
+        outcomes = service_identities.map do |service_identity|
+          timeout = remaining
+          if timeout <= 0
+            {
+              "service_identity" => service_identity, "ok" => false,
+              "reason" => "deadline_exhausted"
+            }
+          else
+            outcome = Timeout.timeout(timeout) do
+              @service_restorer.call(
+                service_identity: service_identity, timeout_sec: timeout
+              )
+            end
+            normalized = stringify(outcome).merge("service_identity" => service_identity)
+            mark_service_restored(service_identity) if normalized["ok"] == true
+            normalized
+          end
+        rescue Timeout::Error
+          {
+            "service_identity" => service_identity, "ok" => false,
+            "reason" => "deadline_exhausted"
+          }
+        rescue StandardError => error
+          {
+            "service_identity" => service_identity, "ok" => false,
+            "reason" => "start_failed", "error" => "#{error.class}: #{error.message}"
+          }
+        end
+        failed = outcomes.reject { |outcome| outcome["ok"] == true }
+        if failed.empty?
+          ResumeResult.new(
+            status: "resumed", resumed: true, reason: nil, phase: state.phase,
+            admission_open: true, admission_reopened: true,
+            generation: state.generation, lifecycle_revision: state.revision,
+            reconciled_attempt_ids: reconciled_attempt_ids,
+            remaining: [], services: outcomes, details: {}
+          )
+        else
+          ResumeResult.new(
+            status: "partially_resumed", resumed: false,
+            reason: failed.any? { |entry| entry["reason"] == "deadline_exhausted" } ?
+              "deadline_exhausted" : "service_restore_failed",
+            phase: state.phase, admission_open: true, admission_reopened: true,
+            generation: state.generation, lifecycle_revision: state.revision,
+            reconciled_attempt_ids: reconciled_attempt_ids,
+            remaining: [], services: outcomes, details: {}
+          )
+        end
+      end
+
+      def active_process_rows
+        @database.read { |db| db[:owned_processes].exclude(state: "stopped").all }
+      end
+
+      def active_reservations
+        @database.read do |db|
+          db[:launch_reservations].where(state: "reserved").all.map do |row|
+            stringify(row).merge("unknown_reason" => "launch_reservation_unresolved")
+          end
+        end
+      end
+
+      def service_identities
+        @database.read do |db|
+          db[:owned_processes].where(state: "stopped", unknown_reason: "quiesced")
+            .exclude(service_identity: nil).select_map(:service_identity).uniq.sort
+        end
+      end
+
+      def mark_service_restored(service_identity)
+        @database.transaction(timeout_sec: remaining) do |db|
+          db[:owned_processes].where(
+            state: "stopped", unknown_reason: "quiesced",
+            service_identity: service_identity
+          ).update(unknown_reason: "service_restored", updated_at: dump_time(@clock.call))
+        end
+      end
+
+      def attempt_store_if_needed
+        return @attempt_store if @attempt_store
+        has_active = @database.read do |db|
+          db[:attempts].where(state: %w[launching running]).any?
+        end
+        return unless has_active
+
+        @attempt_store = Hive::Attempts::Repository.new(
+          database: @database, root: Hive::Paths.runtime_payload_root(@state_home),
+          create_directories: false
+        )
+      end
+
+      def restore_managed_service(service_identity:, timeout_sec:)
+        installer = case service_identity.to_s
+        when "hive-daemon"
+          require "hive/commands/daemon/service_installer"
+          Hive::Commands::Daemon::ServiceInstaller.new
+        when "hive-web"
+          require "hive/commands/web/service_installer"
+          Hive::Commands::Web::ServiceInstaller.new
+        when "hive-bot"
+          require "hive/commands/bot/service_installer"
+          Hive::Commands::Bot::ServiceInstaller.new
+        when "hive-babysitter"
+          require "hive/commands/babysit/service_installer"
+          Hive::Commands::Babysit::ServiceInstaller.new(hive_home: @state_home)
+        end
+        return {
+          "service_identity" => service_identity, "ok" => false,
+          "reason" => "unsupported_service_identity"
+        } unless installer
+
+        installer.start!
+        { "service_identity" => service_identity, "ok" => true, "reason" => nil }
+      end
+
+      def identity_hash(row)
+        {
+          "pid" => row[:pid], "start_fingerprint" => row[:start_fingerprint],
+          "session_id" => row[:session_id], "process_group_id" => row[:process_group_id]
+        }
+      end
+
+      def normalize_process(row)
+        stringify(row).slice(
+          "process_id", "reservation_id", "task_id", "attempt_id",
+          "service_identity", "origin", "role", "pid", "start_fingerprint",
+          "session_id", "process_group_id", "state"
+        )
+      end
+
+      def attempt_remaining(outcome)
+        {
+          "attempt_id" => outcome.attempt.attempt_id,
+          "task_id" => outcome.attempt["task_id"], "role" => "attempt",
+          "last_known_state" => outcome.classification.to_s,
+          "unknown_reason" => outcome.evidence.to_s
+        }
+      end
+
+      def nonresumed(reason, lifecycle: nil, reconciled_attempt_ids: [],
+                     remaining_entries: [], details: {})
+        lifecycle ||= safe_lifecycle
+        ResumeResult.new(
+          status: "not_resumed", resumed: false, reason: reason,
+          phase: lifecycle&.phase || "unknown",
+          admission_open: lifecycle&.admission_open? || false,
+          admission_reopened: lifecycle&.admission_open? || false,
+          generation: lifecycle&.generation, lifecycle_revision: lifecycle&.revision,
+          reconciled_attempt_ids: reconciled_attempt_ids,
+          remaining: remaining_entries, services: [], details: details
+        )
+      end
+
+      def safe_lifecycle
+        @database.open! if @database.disconnected?
+        @lifecycle.current
+      rescue StandardError
+        nil
+      end
+
+      def stringify(value)
+        value.to_h.each_with_object({}) { |(key, item), result| result[key.to_s] = item }
+      end
+
+      def dump_time(value) = Hive::RuntimeControlPlane::Codec.dump_time(value)
+      def remaining = [ @deadline - @monotonic.call, 0.0 ].max
     end
   end
 end

@@ -48,6 +48,13 @@ class RuntimeControlPlaneCommandRegistrationTest < Minitest::Test
           argv: %w[new task], state_home: root
         )
       end
+      %w[start reload].each do |action|
+        assert_raises(Hive::RuntimeControlPlane::AdmissionClosed) do
+          Hive::RuntimeControlPlane::CommandRegistration.start!(
+            argv: [ "daemon", action ], state_home: root
+          )
+        end
+      end
       assert_equal 0, database.read { |db| db[:owned_processes].count }
     end
   end

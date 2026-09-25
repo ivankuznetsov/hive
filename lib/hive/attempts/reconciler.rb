@@ -38,7 +38,7 @@ module Hive
         @store.fetch(attempt_id)
       end
 
-      def reconcile(now: Time.now.utc)
+      def reconcile(now: Time.now.utc, authority: nil, timeout_sec: nil)
         records = @store.active_attempts
         statuses = []
         newly_lost = []
@@ -47,7 +47,9 @@ module Hive
         effective_records = []
 
         records.each do |record|
-          reconciled = reconcile_record(record, now: now)
+          reconciled = reconcile_record(
+            record, now: now, authority: authority, timeout_sec: timeout_sec
+          )
           prepared = @finalization_maintenance&.prepare(reconciled.attempt)
           observation = observe_condition(reconciled, now: now)
           if prepared && %i[delivered acknowledged not_applicable].include?(observation)
@@ -191,20 +193,25 @@ module Hive
         end
       end
 
-      def reconcile_record(record, now:)
+      def reconcile_record(record, now:, authority: nil, timeout_sec: nil)
         return reconciled(record, :terminal, :not_applicable, { receipt: "valid" }) if record.state == "terminal"
         return reconciled(record, :already_lost, :not_applicable, { loss: record["loss"] }) if record.state == "lost"
 
         if record.state == "launching" && !record.claimed?
-          return expire(record, "launch_timeout", now: now) if expired?(record, now)
+          return expire(
+            record, "launch_timeout", now: now,
+            authority: authority, timeout_sec: timeout_sec
+          ) if expired?(record, now)
 
           return reconciled(record, :reserved, :not_claimed, { deadline: record.active_deadline_value })
         end
 
         owner_status = @process_identity.status(record.wrapper)
         if record.state == "launching"
-          return expire(record, "first_heartbeat_timeout", now: now,
-                        owner_status: owner_status) if expired?(record, now)
+          return expire(
+            record, "first_heartbeat_timeout", now: now,
+            owner_status: owner_status, authority: authority, timeout_sec: timeout_sec
+          ) if expired?(record, now)
           classification = owner_status == :matching ? :adopted : :suspect
           return reconciled(record, classification, owner_status, { deadline: record.active_deadline_value })
         end
@@ -223,15 +230,18 @@ module Hive
           record,
           reason: owner_status == :mismatched ? "owner_identity_mismatch" : "owner_gone",
           now: now,
-          diagnostics: evidence.merge("owner_status" => owner_status.to_s)
+          diagnostics: evidence.merge("owner_status" => owner_status.to_s),
+          authority: authority, timeout_sec: timeout_sec
         )
         reconciled(lost, :lost, owner_status, evidence)
       end
 
-      def expire(record, reason, now:, owner_status: :not_applicable)
+      def expire(record, reason, now:, owner_status: :not_applicable,
+                 authority: nil, timeout_sec: nil)
         lost = @store.mark_lost(
           record, reason: reason, now: now,
-          diagnostics: { "owner_status" => owner_status.to_s }
+          diagnostics: { "owner_status" => owner_status.to_s },
+          authority: authority, timeout_sec: timeout_sec
         )
         reconciled(lost, :lost, owner_status, { deadline: record.active_deadline_value })
       end

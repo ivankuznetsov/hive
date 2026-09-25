@@ -220,6 +220,40 @@ module Hive
         end
       end
 
+      # Bounded status-only view of the lifecycle and ownership rows. Unlike
+      # #open!/#read this always uses SQLite's readonly mode, does not request
+      # WAL, run migrations, perform housekeeping, or require the source
+      # schema to match this binary. That makes daemon status useful during a
+      # paused version-skew recovery without letting observation mutate the
+      # storage it is meant to diagnose.
+      def quiescence_status_snapshot
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          diagnosis = diagnostics_uncoordinated
+          return empty_quiescence_snapshot(diagnosis) if diagnosis.status == :missing
+
+          validate_database_custody!
+          inspect_database do |database|
+            {
+              diagnosis: diagnosis,
+              installation_id: first_value(database, :installations, :installation_id),
+              lifecycle: first_row(database, :runtime_lifecycle),
+              reservations: rows_with_states(database, :launch_reservations, %w[reserved]),
+              processes: rows_except_state(database, :owned_processes, "stopped"),
+              attempts: rows_with_states(database, :attempts, %w[launching running])
+            }
+          end
+        end
+      rescue Error
+        raise
+      rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        raise IntegrityError.new(
+          "runtime lifecycle status is unreadable: #{error.message}",
+          code: :database_corrupt, action: BACKUP_ACTION,
+          details: { error_class: error.class.name }
+        )
+      end
+
       def diagnostics = ProcessGuard.checkout { diagnostics_uncoordinated }
       def disconnect
         connection = @connection
@@ -233,6 +267,50 @@ module Hive
       def disconnected? = @connection.nil?
 
       private
+
+      def empty_quiescence_snapshot(diagnosis)
+        {
+          diagnosis: diagnosis, installation_id: nil, lifecycle: nil,
+          reservations: [], processes: [], attempts: []
+        }
+      end
+
+      def table_has_columns?(database, table, *columns)
+        database.table_exists?(table) &&
+          columns.all? { |column| database.schema(table).any? { |entry| entry.first == column } }
+      rescue Sequel::Error
+        false
+      end
+
+      def first_value(database, table, column)
+        return unless table_has_columns?(database, table, column)
+
+        database[table].get(column)
+      end
+
+      def first_row(database, table)
+        return unless database.table_exists?(table)
+
+        database[table].first
+      rescue Sequel::Error
+        nil
+      end
+
+      def rows_with_states(database, table, states)
+        return [] unless table_has_columns?(database, table, :state)
+
+        database[table].where(state: states).all
+      rescue Sequel::Error
+        []
+      end
+
+      def rows_except_state(database, table, state)
+        return [] unless table_has_columns?(database, table, :state)
+
+        database[table].exclude(state: state).all
+      rescue Sequel::Error
+        []
+      end
 
       def diagnostics_uncoordinated
         ensure_process_owner!

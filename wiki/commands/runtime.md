@@ -2,7 +2,7 @@
 title: hive runtime
 type: command
 source: lib/hive/commands/runtime.rb, lib/hive/runtime_control_plane/installation.rb
-updated: 2026-09-09
+updated: 2026-09-25
 tags: [command, sqlite, status]
 ---
 
@@ -10,6 +10,10 @@ tags: [command, sqlite, status]
 Healthy storage reports `active`; missing storage reports `absent`, exits 1 and
 points to `hive setup`. Unsupported or corrupt storage returns a typed error.
 The JSON contract is `hive-runtime-maintenance.v1`. `resume` is not supported.
+For a current database, the result also includes a distinct read-only
+`lifecycle` object (`phase`, `generation`, `revision`, and `admission_open`).
+This does not replace installation health: storage remains `active` while work
+is quiescing or paused. Missing storage reports `lifecycle: null`.
 
 `Installation.setup` serializes explicit setup, builds a complete current database
 privately and publishes without replacing an existing destination. Repeated setup

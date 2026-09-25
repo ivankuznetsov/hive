@@ -46,11 +46,27 @@
     "StatusResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["phase", "installation_id", "next_action", "database"],
+      "required": ["phase", "installation_id", "next_action", "lifecycle", "database"],
       "properties": {
         "phase": { "type": "string", "enum": ["absent", "active"] },
         "installation_id": { "type": ["string", "null"] },
         "next_action": { "type": ["string", "null"] },
+        "lifecycle": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["phase", "generation", "revision", "admission_open"],
+              "properties": {
+                "phase": { "enum": ["running", "quiescing", "paused", "resuming"] },
+                "generation": { "type": "integer", "minimum": 0 },
+                "revision": { "type": "integer", "minimum": 0 },
+                "admission_open": { "type": "boolean" }
+              }
+            }
+          ]
+        },
         "database": { "$ref": "#/$defs/DatabaseDiagnosis" }
       }
     },

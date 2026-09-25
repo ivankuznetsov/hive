@@ -484,3 +484,13 @@ module Hive
     end
   end
 end
+
+require "hive/cli_usage_contracts"
+require "hive/one_shot/result"
+
+Hive::CliUsageContracts.declare("babysit") do |argv, command_index:, option_argv:|
+  next unless Hive::OneShot::Result.requested?(option_argv)
+
+  project = Hive::CliUsageContracts.positionals(argv, command_index).first
+  Hive::OneShot::Result.usage_contract(component: :babysitter, project: project)
+end

@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-09-02
+updated: 2026-09-25
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -18,6 +18,8 @@ branches, publish pull requests, or hand work directly to review.
 ```bash
 # On-demand discovery
 hive refactor-patrol my-project
+hive refactor-patrol my-project --once --json
+hive refactor-patrol my-project --once --dry-run
 hive refactor-patrol my-project --feature route-home --changed-since origin/main
 hive refactor-patrol my-project --entrypoint bin/server
 hive refactor-patrol my-project --path lib/payments --json
@@ -54,6 +56,14 @@ with the prior outcome to each pending action, and marks the job complete.
 Repeating it for a complete job is a no-op. The command emits
 the final `hive-refactor-patrol-jobs.v2` show projection, so no second archive
 status contract exists.
+
+`--once` runs the daemon's merged-PR intake, classification, durable job
+discovery, and downstream handoff path for one project, then emits
+`hive-one-shot.v1`. It does not run the daemon's separately wired current-main
+scheduled-slice producer. Manual selectors (`--pr`, `--job-manifest`, scope
+hints, list/show/archive options) are incompatible with `--once`.
+`--once --dry-run` observes readiness without intake, reservation, checkpoint
+writes, or child execution.
 
 ## Read-only job-query pagination
 

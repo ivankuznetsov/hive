@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-09-09
+updated: 2026-09-25
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -40,6 +40,7 @@ hive daemon install [--force]
 hive daemon enable  PROJECT | --all  [--json]
 hive daemon disable PROJECT | --all  [--json]
 hive daemon queue   [list | show <id> | prune]  [--json]
+hive daemon --once PROJECT [--json] [--dry-run]
 ```
 
 | Subcommand | Behavior |
@@ -53,6 +54,46 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 | `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
 | `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
 | `queue`    | Read-only inspection of the dispatch-request rows all adapters write and the daemon consumes. Runtime SQL uses only `hive-dispatch-request.v5`; the irreversible fleet cutover discards pending legacy file queues rather than upgrading them. V5 binds recovery to canonical task/stage/marker/generation identity, carries markerless provider-admission observations, and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. `list`/`show`/`prune` JSON uses the `hive-daemon-queue.v1` success or error arm; failures distinguish `unknown_action`, `missing_request_id`, and `internal`. |
+
+## External scheduler one-shot
+
+`hive daemon --once PROJECT` runs one project-scoped dispatch admission round,
+then drains and reconciles the work it owns before returning. It applies the
+normal completion receipts, request acknowledgements, sequence promotion, and
+dispatch-baseline updates. It does not run Patrol, Architecture Patrol, daily
+digests, update checks, or another project's work, and it does not sleep while
+waiting for a future PR or CI change. `--once --dry-run` observes policy and
+live work without recovery, claims, launches, or checkpoint writes.
+
+All four scheduler entry points (`patrol`, `refactor-patrol`, `babysit`, and
+`daemon`) emit `hive-one-shot.v1`. `pending` separates `runnable_now`,
+`waiting_external`, and `waiting_operator`. Timed waits carry `next_check_at`;
+event waits carry deduplicated `wake_conditions`. `next_due_at` is the pass
+finish time while runnable work remains, otherwise the earliest known timed
+wait, or null when only an event/operator can make progress.
+
+An external scheduler should apply this decision in order:
+
+```text
+if any report is error: keep the host running and retry or alert
+else if any runnable_now item exists: run another pass immediately
+else if an earliest next_due_at exists: schedule that deadline
+else: wait for a matching event or operator action
+
+stop only when every enabled component/project reports:
+  status == ok && safe_to_stop && runnable_now is empty
+for --all, also require host_stop_allowed == true
+```
+
+`safe_to_stop: true` with runnable work is legal: no worker remains, but the
+next bounded pass is due immediately. A verified daemon or one-shot owner
+causes a typed refusal; standalone refusals exit 75. In an `--all` report,
+routine live-owner refusals do not fail successful projects, but are excluded
+from combined readiness, listed in `owning_projects`, and veto host stopping.
+Observation errors, invalid state, and unknown ownership instead yield
+`partial_failure`, exit 75, null combined readiness, and false stop fields.
+These fields cover only the selected Hive scope; the scheduler must also know
+that no unrelated host workload requires the machine.
 
 ## What the daemon dispatches
 

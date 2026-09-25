@@ -51,7 +51,7 @@ module Hive
         Hive::Patrol::Shutdown.install_trap!
         emit(run_cycle)
       rescue Hive::Error => e
-        emit_error(e)
+        emit_error(e) unless @once
         raise
       rescue StandardError => e
         wrapped = Hive::InternalError.wrap(e)
@@ -461,5 +461,12 @@ end
 # rejections that never reach the handler still ride this command's JSON
 # envelope (see Hive::CliUsageContracts).
 require "hive/cli_usage_contracts"
+require "hive/one_shot/result"
 
-Hive::CliUsageContracts.declare("patrol", { schema: "hive-patrol", error_kind: "error" })
+Hive::CliUsageContracts.declare("patrol") do |argv, command_index:, option_argv:|
+  if Hive::OneShot::Result.requested?(option_argv)
+    project = Hive::CliUsageContracts.positionals(argv, command_index).first
+    next Hive::OneShot::Result.usage_contract(component: :patrol, project: project)
+  end
+  { schema: "hive-patrol", error_kind: "error" }
+end

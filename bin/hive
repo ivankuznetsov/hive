@@ -108,6 +108,7 @@ require "hive/cli"
 require "hive/cli_argv_policy"
 require "hive/cli_json_options"
 require "hive/cli_usage_contracts"
+require "hive/one_shot/result"
 require "json"
 
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
@@ -160,6 +161,11 @@ rescue Thor::Error => e
   warn(emitted_json ? "hive: #{error.message}" : error.message)
   exit(error.exit_code)
 rescue Hive::Error => e
+  if Hive::CliArgvPolicy.one_shot_requested?(original_argv) &&
+     !e.is_a?(Hive::OneShot::Result::ReportedError)
+    contract = Hive::CliUsageContracts.contract(original_argv)
+    emit_json_usage_error(contract, original_argv, e)
+  end
   warn "hive: #{e.message}"
   exit(e.respond_to?(:exit_code) ? e.exit_code : 1)
 end

@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, lib/hive/babysitter/git_policy.rb, lib/hive/babysitter/gh_policy.rb, lib/hive/babysitter/passthrough_runner.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb
 created: 2026-05-26
-updated: 2026-08-30
+updated: 2026-09-25
 tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
@@ -23,7 +23,9 @@ hive babysit --once PROJECT [--dry-run]
 hive babysit --once --all [--dry-run]
 ```
 
-The command is bare-text in v1; it does not emit a `--json` envelope.
+Service lifecycle subcommands remain human-readable. Every `--once` invocation
+emits exactly one `hive-one-shot.v1` document, with or without an explicit
+`--json`, including `--all` when no project is enabled.
 
 `install` writes and starts the supervised per-user service through
 `Hive::UserService`: `hive-babysitter.service` on Linux systemd-user or
@@ -54,7 +56,24 @@ GitHub or another provider is healthy.
 
 The log file is `$HIVE_HOME/logs/babysitter.log`, written by `Hive::Babysitter::Logger` as rotated JSON lines using the same global log-size knobs as the daemon.
 
-`--once PROJECT` runs one dispatcher tick for the named registered project. `--once --all` runs one tick across every enabled registered project. These paths are intended for smoke tests and manual dry-run checks.
+`--once PROJECT` runs one bounded project pass under both the main project
+guard and babysitter execution guard. It retains each PR outcome and projects
+remaining PRs as immediately runnable, waiting on checks or PR changes, or
+waiting for an operator. It does not poll until those facts change.
+
+`--once --all` returns the per-project envelopes plus combined readiness from
+successful projects. A verified live-owner refusal remains visible in
+`projects` and `owning_projects`, but is not an aggregate failure; it always
+forces `safe_to_stop` and `host_stop_allowed` false. Observation failures make
+the aggregate `partial_failure`, return exit 75, and null its combined
+readiness. A daemon-owned standalone project refuses with `daemon_owned` and
+exit 75; stop the daemon or unenroll that project before scheduling its
+babysitter one-shot. The normal long-lived daemon and babysitter services may
+still coexist because their service loops retain separate execution guards.
+
+`--once --dry-run` performs the real read-only observation but starts no repair
+and reports no `ran` entries. Eligible unadmitted repairs remain
+`runnable_now`; observed live workers keep `safe_to_stop` false.
 
 ## Project Contract
 

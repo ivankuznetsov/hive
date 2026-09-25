@@ -1016,13 +1016,13 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Patrol) do |calls|
       Hive::CLI.start([ "patrol", "proj", "--dry-run", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
-      assert_equal({ json: true, dry_run: true, list: false }, calls.first.fetch(:kwargs))
+      assert_equal({ json: true, dry_run: true, list: false, once: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Patrol) do |calls|
       Hive::CLI.start([ "patrol", "proj", "--list", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
-      assert_equal({ json: true, dry_run: false, list: true }, calls.first.fetch(:kwargs))
+      assert_equal({ json: true, dry_run: false, list: true, once: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::RefactorPatrol) do |calls|
@@ -1092,6 +1092,34 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "metrics", "rollback-rate", "--days", "30", "--project", "proj", "--json" ])
       assert_equal [ "rollback-rate" ], calls.first.fetch(:args)
       assert_equal({ days: 30, project: "proj", json: true }, calls.first.fetch(:kwargs))
+    end
+  end
+
+  def test_one_shot_modes_route_to_all_four_components
+    require "hive/commands/babysit"
+    result = Hive::OneShot::Result.ok(
+      component: :dispatch, project: "demo", started_at: Time.utc(2026, 9, 25),
+      finished_at: Time.utc(2026, 9, 25), ran: [], items: [], safe_to_stop: true
+    )
+
+    with_command_new_stub(Hive::Commands::Patrol, return_value: result) do |calls|
+      Hive::CLI.start(%w[patrol demo --once --dry-run])
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:dry_run)
+    end
+    with_command_new_stub(Hive::Commands::RefactorPatrol, return_value: result) do |calls|
+      Hive::CLI.start(%w[refactor-patrol demo --once --dry-run])
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+    end
+    with_command_new_stub(Hive::Commands::Babysit, return_value: result) do |calls|
+      Hive::CLI.start(%w[babysit demo --once --dry-run])
+      assert_equal [ nil, "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+    end
+    with_command_new_stub(Hive::Commands::Daemon, return_value: result) do |calls|
+      Hive::CLI.start(%w[daemon demo --once --dry-run])
+      assert_equal [ nil, "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
     end
   end
 

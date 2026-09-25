@@ -77,7 +77,7 @@ class BabysitterCoverageGapsTest < Minitest::Test
     end
     assert_equal [
       [ "status", nil ],
-      { detach: false, dry_run: false, once: false, all: false, force: false }
+      { detach: false, dry_run: false, once: false, all: false, force: false, json: false }
     ], calls.first
 
     cli = Hive::CLI.new([], { once: false, detach: false, dry_run: true, all: false, force: false })

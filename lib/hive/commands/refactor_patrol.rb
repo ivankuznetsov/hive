@@ -187,7 +187,7 @@ module Hive
         emit(payload, theses)
       rescue Hive::Error => e
         release_manual_claim("command_error")
-        emit_error(e)
+        emit_error(e) unless @once
         raise
       rescue StandardError => e
         release_manual_claim("command_error")
@@ -1373,8 +1373,13 @@ end
 # variants ride the generic hive-refactor-patrol-jobs envelope with the
 # action they named (see Hive::CliUsageContracts).
 require "hive/cli_usage_contracts"
+require "hive/one_shot/result"
 
-Hive::CliUsageContracts.declare("refactor-patrol") do |_argv, command_index:, option_argv:|
+Hive::CliUsageContracts.declare("refactor-patrol") do |argv, command_index:, option_argv:|
+  if Hive::OneShot::Result.requested?(option_argv)
+    project = Hive::CliUsageContracts.positionals(argv, command_index).first
+    next Hive::OneShot::Result.usage_contract(component: :architecture_patrol, project: project)
+  end
   jobs = Hive::Commands::RefactorPatrol.usage_jobs_argv(option_argv)
   if jobs
     next {

@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-09-23
+updated: 2026-09-25
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -56,6 +56,34 @@ upgrade of an existing active SQLite database to this rewritten bootstrap
 schema. That deployment needs a separately implemented and verified
 token-preserving cutover while writers are stopped; see [[gaps]]. Startup opens
 only the current layout and rejects an incompatible schema fingerprint.
+
+## One-shot ownership and bounded lifecycle
+
+`Hive::OneShot::ProjectGuard` gives each canonical project state root a stable
+kernel-backed execution lock. The daemon synchronizes these guards before each
+admission tick, including projects enabled by an ordinary config edit, and
+retains a removed project's guard while its local or durable work remains
+live. One-shot commands acquire the same guard before constructing mutating
+stores. `ActivationLock` serializes the daemon transition, while
+`daemon_runtime` PID/start identity remains diagnostic evidence rather than a
+second lifetime lock. Child processes close inherited guard descriptors.
+
+`Hive::OneShot::Runner` builds a project-filtered dispatcher for task dispatch.
+It performs recovery and one admission round, then stops admitting, drains
+ancillary children, reconciles durable attempts, and applies the normal
+completion path. The project filter reaches status, dispatch requests,
+attempt deliveries, PR merge observation, and module hooks; global capacity is
+still observed. Patrol, architecture intake, digests, update checks, and other
+projects are excluded from this runner.
+
+`Hive::OneShot::ScheduleState` stores only volatile gates whose reset would
+change admission: observation/retry/cadence and controller holds not already
+owned by the runtime control plane. Its versioned
+`<project>/.hive-state/scheduler/checkpoint.json` is replaced atomically under
+project ownership, preserves other component keys, and fails closed on corrupt
+or newer state. Durable requests, attempts, leases, budgets, jobs, and workflow
+state remain in their existing authorities rather than being copied into this
+checkpoint.
 
 ## Task-local history isolation
 

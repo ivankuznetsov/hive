@@ -9,10 +9,23 @@ module Hive
 
       attr_reader :exit_code
 
+      class ReportedError < Hive::Error
+        attr_reader :exit_code
+
+        def initialize(result)
+          @exit_code = result.exit_code
+          super(result.to_h.dig("error", "message") || "one-shot execution failed")
+        end
+      end
+
+      def self.requested?(argv)
+        Array(argv).any? { |arg| arg == "--once" || arg.match?(/\A--once=(?:true|t)\z/i) }
+      end
+
       def self.ok(component:, project:, started_at:, finished_at:, ran:, items:, safe_to_stop:, owner: nil)
         readiness = Readiness.project(items: items, finished_at: finished_at)
         new(base(component, project, started_at, finished_at).merge(
-          "status" => "ok", "ran" => Array(ran), "owner" => owner,
+          "status" => "ok", "ran" => Array(ran), "owner" => owner_hash(owner),
           "error" => nil, "safe_to_stop" => safe_to_stop == true
         ).merge(readiness), exit_code: Hive::ExitCodes::SUCCESS)
       end
@@ -29,6 +42,30 @@ module Hive
                finished_at: finished_at, status: "error", code: code,
                message: message, owner: owner, ran: ran, exit_code: exit_code,
                details: details)
+      end
+
+      def self.error_payload(component:, project:, error:, now: Time.now.utc)
+        code = if error.respond_to?(:code) && error.code
+          error.code
+        elsif error.is_a?(Hive::ConfigError)
+          "config"
+        else
+          "usage"
+        end
+        self.error(
+          component: component, project: project, started_at: now, finished_at: now,
+          code: code, message: error.message,
+          exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::USAGE
+        ).to_h
+      end
+
+      def self.usage_contract(component:, project:)
+        {
+          error_kind: "usage",
+          payload: lambda do |error, argv: []|
+            error_payload(component: component, project: project, error: error)
+          end
+        }
       end
 
       def self.aggregate(component:, reports:, started_at:, finished_at:)
@@ -92,7 +129,7 @@ module Hive
           new(base(component, project, started_at, finished_at).merge(
             "status" => status, "ran" => Array(ran), "pending" => nil,
             "next_due_at" => nil, "wake_conditions" => [], "safe_to_stop" => false,
-            "owner" => owner, "error" => error
+            "owner" => owner_hash(owner), "error" => error
           ), exit_code: exit_code)
         end
 
@@ -107,6 +144,12 @@ module Hive
 
         def error_hash(code, message)
           { "code" => code.to_s, "message" => message.to_s }
+        end
+
+        def owner_hash(owner)
+          return nil unless owner.is_a?(Hash)
+
+          owner.slice("kind", "pid", "process_identity", "state_root", "started_at")
         end
 
         def document_for(report)

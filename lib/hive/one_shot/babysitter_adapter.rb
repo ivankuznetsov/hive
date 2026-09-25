@@ -142,7 +142,7 @@ module Hive
           [ "waiting_operator", nil, "operator_action" ]
         elsif RETRY_OUTCOMES.include?(outcome)
           [ "waiting_external", deadline, "time_due" ]
-        elsif outcome == :pipeline_owned
+        elsif outcome.eql?(:pipeline_owned)
           [ "waiting_external", nil, "task_changed" ]
         elsif outcome == :inflight
           [ "waiting_external", nil, "attempt_completed" ]

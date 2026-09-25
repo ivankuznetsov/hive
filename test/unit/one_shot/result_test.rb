@@ -5,6 +5,13 @@ class OneShotResultTest < Minitest::Test
   STARTED = Time.utc(2026, 9, 23, 11, 59, 59)
   FINISHED = Time.utc(2026, 9, 23, 12, 0, 0)
 
+  def test_requested_recognizes_enabled_once_boolean_forms_only
+    assert Hive::OneShot::Result.requested?(%w[patrol --once])
+    assert Hive::OneShot::Result.requested?(%w[patrol --once=true])
+    assert Hive::OneShot::Result.requested?(%w[patrol --once=T])
+    refute Hive::OneShot::Result.requested?(%w[patrol --once=false])
+  end
+
   def test_ok_report_retains_completed_work_and_readiness
     result = Hive::OneShot::Result.ok(
       component: "dispatch", project: "app", started_at: STARTED, finished_at: FINISHED,
@@ -39,6 +46,23 @@ class OneShotResultTest < Minitest::Test
     end
     assert_equal owner, refused.to_h["owner"]
     assert_equal 1, failed.to_h["ran"].size
+  end
+
+  def test_usage_contract_builds_a_single_error_envelope
+    contract = Hive::OneShot::Result.usage_contract(component: "patrol", project: "app")
+    payload = contract.fetch(:payload).call(Hive::InvalidTaskPath.new("bad argv"))
+
+    assert_equal "usage", contract.fetch(:error_kind)
+    assert_equal "error", payload.fetch("status")
+    assert_equal "usage", payload.dig("error", "code")
+    assert_equal Hive::ExitCodes::USAGE,
+                 Hive::OneShot::Result::ReportedError.new(
+                   Hive::OneShot::Result.error(
+                     component: "patrol", project: "app", started_at: STARTED,
+                     finished_at: FINISHED, code: "usage", message: "bad argv",
+                     exit_code: Hive::ExitCodes::USAGE
+                   )
+                 ).exit_code
   end
 
   def test_aggregate_combines_successful_projects_and_vetoes_host_stop_for_owner

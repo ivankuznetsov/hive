@@ -6,6 +6,9 @@ class HiveCliArgvPolicyTest < Minitest::Test
 
   def test_json_and_encoding_policy
     assert Hive::CliArgvPolicy.json_requested?(%w[status --json])
+    assert Hive::CliArgvPolicy.json_requested?(%w[patrol app --once])
+    assert Hive::CliArgvPolicy.json_requested?(%w[patrol app --once=true])
+    refute Hive::CliArgvPolicy.json_requested?(%w[patrol app --once=false])
     refute Hive::CliArgvPolicy.json_requested?(%w[status --json --no-json])
     assert_equal %w[status --json=maybe],
                  Hive::CliArgvPolicy.reject_unsupported_json_assignments(

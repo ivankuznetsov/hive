@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-09-02
+updated: 2026-09-25
 tags: [command, patrol, review, findings]
 ---
 
@@ -19,6 +19,8 @@ requests, or create review tasks.
 hive patrol my-project
 hive patrol my-project --dry-run
 hive patrol my-project --json
+hive patrol my-project --once --json
+hive patrol my-project --once --dry-run
 hive patrol my-project --list
 hive patrol my-project --list --json
 ```
@@ -27,6 +29,15 @@ The project must be registered, use the `coding` default workflow, and have
 Patrol enabled. `--list` reads the bounded finding projection without starting
 a review. `--dry-run` maps and reviews but does not persist findings, cursors,
 or admission records.
+
+`--once` runs one scheduler admission round for the project under the shared
+project-execution guard and always emits `hive-one-shot.v1`, even when `--json`
+is omitted. It observes all eligible work, but preserves the durable launch
+allowance, post-reservation scan cadence, and failure backoff. An explicit
+one-shot may refresh external observations early; it cannot reserve another
+scan inside an unexpired policy gate. `--once --dry-run` admits nothing and
+reports eligible work as `runnable_now`. `--once` cannot be combined with
+`--list`.
 
 ## Discovery lifecycle
 
@@ -54,6 +65,8 @@ GitHub mutation capability.
 
 Pre-dispatch usage failures, including a missing `PROJECT` or extra
 positionals, use the `hive-patrol.v3` error arm with `error_kind: "error"`.
+When `--once` is present, the same failures use the shared `hive-one-shot.v1`
+error envelope instead.
 
 `--json` emits `hive-patrol.v3`. Its historical delivery fields remain present
 for schema compatibility but are fixed to the discovery-only values:

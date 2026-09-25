@@ -1546,7 +1546,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "#status-stream-owner[data-controller~='task-workspace']", 1
     assert_select "#workspace-summary-heading", text: "Ready"
-    assert_select "#workspace-summary", text: /Current step.*Inbox/m
+    assert_select "#workspace-summary .workspace-eyebrow", text: "Inbox"
+    assert_select "#workspace-summary", text: /Current step/, count: 0
     assert_select "#workspace-usage", 0
     assert_select "#workspace-primary-result[data-primary-artifact=?]",
                   semantic.dig("result", "primary", "reference")

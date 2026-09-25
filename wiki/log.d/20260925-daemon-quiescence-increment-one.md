@@ -4,6 +4,13 @@
   same-generation status confirmation, fail-before-drain ownership refusals,
   detached-descendant persistence across controller restart, bystander safety,
   proof-publication crash recovery, and reconciliation before admission reopens.
+- The same integration boundary now covers a paused historical quiescence
+  revision: ordinary resume rejects schema skew without changing the database
+  or proof, supervised `QuiescenceUpgrade` preserves the installation,
+  generation, terminal attempt, and payload while invalidating the proof, and
+  a later explicit resume is the step that reopens admission. An injected crash
+  immediately after proof invalidation leaves the historical generation closed
+  and retryable without restoring the old proof.
 - The audited launch-coverage table qualifies no non-empty process surface as
   child-safe. Increment 1 is therefore explicitly idle-registry-only; agent
   roots and every registered service surface remain non-paused without verified

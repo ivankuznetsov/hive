@@ -55,7 +55,7 @@ module Hive
         raise
       rescue StandardError => e
         wrapped = Hive::InternalError.wrap(e)
-        emit_error(wrapped)
+        emit_error(wrapped) unless @once
         raise wrapped
       end
 

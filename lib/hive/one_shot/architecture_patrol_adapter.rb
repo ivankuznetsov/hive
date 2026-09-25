@@ -1,9 +1,12 @@
 require "hive/config"
+require "digest"
+require "json"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/lock"
 require "hive/one_shot/process_executor"
 require "hive/one_shot/project_guard"
+require "hive/one_shot/project_liveness"
 require "hive/one_shot/result"
 require "hive/one_shot/schedule_state"
 
@@ -13,22 +16,27 @@ module Hive
       def initialize(entry:, dry_run: false, scheduler: nil, reconciler: nil,
                      executor: ProcessExecutor.new, guard: nil,
                      config_loader: ->(path) { Hive::Config.load(path) },
+                     poll_interval_sec: nil, liveness: nil,
                      clock: -> { Time.now.utc })
         @entry = entry
         @dry_run = dry_run
         @clock = clock
         @executor = executor
         @config_loader = config_loader
+        @poll_interval_sec = Integer(
+          poll_interval_sec || Hive::Config.load_global_daemon.fetch("pr_merge_poll_interval_sec")
+        )
         registry = -> { [ entry ] }
         @guard = guard || ProjectGuard.new(
           state_root: entry.fetch("hive_state_path"), project: entry.fetch("name"),
           kind: :one_shot
         )
+        @liveness = liveness || ProjectLiveness.new(entry: entry)
         @scheduler = scheduler || Hive::Daemon::RefactorPatrolScheduler.new(
           registry: registry, dry_run: dry_run
         )
         @reconciler = reconciler || Hive::Daemon::RefactorPatrolMergeReconciler.new(
-          registry: registry, dry_run: dry_run
+          registry: registry, dry_run: dry_run, poll_interval_sec: @poll_interval_sec
         )
         @schedule_state = ScheduleState.new(state_root: entry.fetch("hive_state_path"))
       end
@@ -47,11 +55,16 @@ module Hive
           finished = @clock.call
           items = @scheduler.readiness(project: project, now: finished)
           items.concat(intake_items(intake, finished)) if enabled?
-          items.concat(event_items(@scheduler.drain_events))
+          events = @scheduler.drain_events
+          return event_observation_error(started, ran, events) if observation_failure?(events)
+
+          items.concat(event_items(events))
+          persist_intake_deadline(intake_deadline(intake, finished), finished) unless
+            @dry_run || !enabled?
           return Result.ok(
             component: :architecture_patrol, project: project,
             started_at: started, finished_at: finished, ran: ran,
-            items: items, safe_to_stop: true
+            items: items, safe_to_stop: @liveness.safe_to_stop?
           )
         end
       rescue ProjectGuard::OwnershipError => error
@@ -59,6 +72,12 @@ module Hive
           component: :architecture_patrol, project: project,
           started_at: started, finished_at: @clock.call, code: error.code,
           message: error.message, owner: error.owner
+        )
+      rescue Interrupt, SignalException => error
+        Result.interrupted(
+          component: :architecture_patrol, project: project,
+          started_at: started, finished_at: @clock.call, ran: ran,
+          message: error.message
         )
       rescue StandardError => error
         Result.error(
@@ -91,17 +110,12 @@ module Hive
             "details" => { "enqueued_prs" => Array(result[:enqueued_prs]) }
           }
         end
-        persist_intake_deadline(now) unless @dry_run || !enabled?
         result
       end
 
-      def persist_intake_deadline(now)
+      def persist_intake_deadline(deadline, now)
         @schedule_state.update("architecture_patrol", now: now) do |state|
-          state.merge(
-            "intake_next_check_at" =>
-              (now + Hive::Daemon::RefactorPatrolMergeReconciler::DEFAULT_POLL_INTERVAL_SEC)
-                .utc.iso8601(6)
-          )
+          state.merge("intake_next_check_at" => deadline.utc.iso8601(6))
         end
       end
 
@@ -113,6 +127,22 @@ module Hive
           started_at: started, finished_at: @clock.call,
           code: "observation_failed", message: result[:reason] || "architecture intake failed",
           details: result[:error] && { "error" => result[:error] }, ran: ran
+        )
+      end
+
+      def observation_failure?(events)
+        Array(events).any? { |event| event[:status].to_s == "blocked" }
+      end
+
+      def event_observation_error(started, ran, events)
+        failures = Array(events).select { |event| event[:status].to_s == "blocked" }
+        Result.error(
+          component: :architecture_patrol, project: project,
+          started_at: started, finished_at: @clock.call,
+          code: "observation_failed",
+          message: failures.map { |event| event[:reason] || "scheduler event blocked" }.uniq.join(", "),
+          details: { "events" => failures.map { |event| stringify_keys(event) } },
+          ran: ran
         )
       end
 
@@ -150,20 +180,36 @@ module Hive
           return [ item("runnable_now", "intake", result[:status].to_s) ]
         end
         if result && result[:status] == :backoff
-          return [ item("waiting_external", "intake", "backoff", result[:retry_at]) ]
+          return [ item("waiting_external", "intake", "backoff", intake_deadline(result, now)) ]
         end
 
-        deadline = now + Hive::Daemon::RefactorPatrolMergeReconciler::DEFAULT_POLL_INTERVAL_SEC
+        deadline = intake_deadline(result, now)
         [ item("waiting_external", "intake", "recurring_intake", deadline) ]
       end
 
+      def intake_deadline(result, now)
+        return now if result && %i[partial deferred].include?(result[:status])
+        return result.fetch(:retry_at) if result && result[:status] == :backoff
+
+        now + @poll_interval_sec
+      end
+
       def event_items(events)
-        Array(events).map do |event|
-          item(
-            "waiting_operator", "event:#{event[:job_id] || event[:occurrence_id] || event[:reason]}",
+        Array(events).each_with_object({}) do |event, items|
+          canonical = JSON.generate(stringify_keys(event).sort.to_h)
+          identity = event[:job_id] || event[:occurrence_id] || event[:batch_id] || "anonymous"
+          fingerprint = Digest::SHA256.hexdigest(canonical)[0, 16]
+          id = "event:#{identity}:#{fingerprint}"
+          items[id] ||= item(
+            "waiting_operator", id,
             event[:reason] || event[:status].to_s, nil, "operator_action"
           )
         end
+          .values
+      end
+
+      def stringify_keys(value)
+        value.to_h { |key, child| [ key.to_s, child ] }
       end
 
       def item(bucket, suffix, reason, deadline = nil, kind = "time_due")

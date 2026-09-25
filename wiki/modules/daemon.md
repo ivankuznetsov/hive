@@ -62,28 +62,43 @@ only the current layout and rejects an incompatible schema fingerprint.
 `Hive::OneShot::ProjectGuard` gives each canonical project state root a stable
 kernel-backed execution lock. The daemon synchronizes these guards before each
 admission tick, including projects enabled by an ordinary config edit, and
-retains a removed project's guard while its local or durable work remains
-live. One-shot commands acquire the same guard before constructing mutating
-stores. `ActivationLock` serializes the daemon transition, while
-`daemon_runtime` PID/start identity remains diagnostic evidence rather than a
-second lifetime lock. Child processes close inherited guard descriptors.
+contains an unreadable project's config failure without blocking other
+projects. It retains a disabled or removed project's guard while its durable
+attempts or identity-verified task workers remain live, then releases the
+drained project. One-shot commands acquire the same guard before constructing
+mutating stores. A verified live daemon PID plus current enabled enrollment
+also fences daemons started before this guard existed. `ActivationLock`
+serializes the daemon transition; PID/start identity is a compatibility fence,
+not a second lifetime lock. Owner metadata is atomically replaced beside the
+stable lock inode and removed before unlock. Child processes close inherited
+guard descriptors.
 
 `Hive::OneShot::Runner` builds a project-filtered dispatcher for task dispatch.
 It performs recovery and one admission round, then stops admitting, drains
 ancillary children, reconciles durable attempts, and applies the normal
 completion path. The project filter reaches status, dispatch requests,
 attempt deliveries, PR merge observation, and module hooks; global capacity is
-still observed. Patrol, architecture intake, digests, update checks, and other
-projects are excluded from this runner.
+still observed. Its final readiness projection reuses the same project-enable,
+legacy-layout, retry, cooldown, and capacity gates as admission, and includes
+module event backlogs, retrying runs, and the next enabled module schedule.
+Patrol, architecture intake, digests, update checks, and other projects are
+excluded from this runner.
+
+Every component uses the same project-wide liveness proof before reporting
+`safe_to_stop: true`: no live durable attempt and no identity-verified runner
+or agent process in the project's task leases. The proof is applied in dry-run
+too; malformed or over-limit lease observations fail closed.
 
 `Hive::OneShot::ScheduleState` stores only volatile gates whose reset would
 change admission: observation/retry/cadence and controller holds not already
 owned by the runtime control plane. Its versioned
 `<project>/.hive-state/scheduler/checkpoint.json` is replaced atomically under
 project ownership, preserves other component keys, and fails closed on corrupt
-or newer state. Durable requests, attempts, leases, budgets, jobs, and workflow
-state remain in their existing authorities rather than being copied into this
-checkpoint.
+or newer state. Component-specific dispatch restoration also validates every
+cooldown, transient-failure, quarantine, and dropped-project field and reports
+malformed rows as typed `checkpoint_invalid` failures. Durable requests,
+attempts, leases, budgets, jobs, and workflow state remain in their existing
+authorities rather than being copied into this checkpoint.
 
 ## Task-local history isolation
 
@@ -134,11 +149,11 @@ contract. See [[modules/conditions]].
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Turns an already-cleared coding `3-plan` pause into `hive develop ... --from 3-plan`. It validates command shape, prepares and re-verifies the exact `PlanReview::TransitionGuard` observation under the task lock, and only then flips `WAITING` to `COMPLETE`; uncleared review never mutates the marker. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership. For an unchanged `markerless_stalled` row it converts marker-driven workflows to `ERROR reason=agent_exited_without_terminal_marker`; controller workflows instead enqueue a generation-bound markerless recovery without changing their structured state file. It is the sole automatic scheduler that submits these failures and cooled recoverable marker observations to `RecoveryCoordinator`, including `REVIEW_CI_STALE` and resolved `REVIEW_STALE`; a newer operator-edited escalation remains parked, and invalid task-history rows are always skipped. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher` using the reconciler's bounded `AdmissionView`; it never falls back to a global attempt scan or clears a compatibility marker. The obsolete attributed `execute_waiting reason=dirty_worktree` rewrite lives only in one-shot `hive migrate`, not the tick loop. |
-| `Hive::Modules::DaemonRuntime` | `lib/hive/modules/daemon_runtime.rb` | Sole autonomous module hook/schedule drain. It receives the dispatcher's process-lifetime shutdown predicate and rechecks it between projects, retries, setup outboxes, schedules, events, selections, and hooks. An event cursor advances only after every eligible hook finished while admission stayed open; a shutdown-interrupted event therefore replays, and the decision journal suppresses a second Attempt for hooks already admitted. |
+| `Hive::Modules::DaemonRuntime` | `lib/hive/modules/daemon_runtime.rb` | Sole autonomous module hook/schedule drain. It receives the dispatcher's process-lifetime shutdown predicate and rechecks it between projects, retries, setup outboxes, schedules, events, selections, and hooks. Normal daemon ticks pass only projects whose execution guards they own. Its read-only one-shot inventory exposes setup/event backlogs, active or retrying runs, and recurring schedule deadlines without advancing cursors or repairing indexes. An event cursor advances only after every eligible hook finished while admission stayed open; a shutdown-interrupted event therefore replays, and the decision journal suppresses a second Attempt for hooks already admitted. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Rebuilds coding task candidates in stages 5–8 from current task/PR metadata on every observation. Candidates, poll cadence, and oldest-polled fairness are process-local and disposable; one eligible candidate per project advances per tick. GitHub facts are reread after restart, and architecture intake is idempotently repeated before evidence-bound `TaskClosure` archival. Closure receipts remain durable. Blank or `local:` repository registrations are skipped; mismatched or malformed existing PR bindings fail closed. A stage-5 task without PR metadata is not enrolled. `OPEN` and closed-unmerged facts release ordinary recovery even if the local head has drifted; merged archival still requires exact repository, immutable head, reachable merge, generation, ownership, and worktree checks. Held or unreadable candidates fence recovery until a fresh observation resolves the hold. The watcher has no SQL reconciliation ledger or durable retry counter. |
 | `Hive::Daemon::RefactorPatrolMergeReconciler` | `lib/hive/daemon/refactor_patrol_merge_reconciler.rb` | Converges incremental exact-host GitHub catch-up and exact-PR intake into one durable merge-classification occurrence per repository/PR/merge identity. Deterministic skips settle inline; ambiguous provider work is only hydrated here and launches later as a supervised Patrol scan. Existing immutable PR-manifest v2 delivery is adopted without reclassification. The task-bound reconciler gets the first intake opportunity each tick; repository catch-up then uses the remaining bounded deadline. Persisted GitHub backoff begins at observed failure time (tick wall anchor plus monotonic elapsed), not stale tick start. First enablement still seeds a current high-water baseline instead of importing history; the authoritative checkpoint remains schema v2. |
 | `Hive::Daemon::RefactorPatrolMergeProgressStore` | `lib/hive/daemon/refactor_patrol_merge_progress_store.rb` | Crash-safe `reconciler-progress.json` sidecar for page cursors, accumulated merge identities, intake position, and GitHub retry state. It binds continuation to registration/repository identity plus the base v2 checkpoint fingerprint, writes atomically, fsyncs directory-entry changes, quarantines unsafe shapes/identity drift, and persists bounded exponential backoff with jitter. |
-| `Hive::Daemon::RefactorPatrolScheduler` | `lib/hive/daemon/refactor_patrol_scheduler.rb` | Exposes oldest-first merge-classification and post-merge batch-owner discovery. Classification and accepted discovery are supervised Patrol scans but consume no scheduled Architecture allowance or workflow-task slot. The scheduler freezes overlapping current-main mappings in `PostMergeBatchStore`, materializes only synthetic owner JobStore rows/events, validates exact registration/repository authority, and reuses each owner's durable `analysis_sha`. Scheduled and post-merge mapping share `FrozenRevisionMapRig`, which creates, asserts, and removes one detached exact-SHA worktree. Finalized post-merge groups and successfully admitted scheduled results compact safely instead of reaching lifetime hard caps. |
+| `Hive::Daemon::RefactorPatrolScheduler` | `lib/hive/daemon/refactor_patrol_scheduler.rb` | Exposes oldest-first merge-classification and post-merge batch-owner discovery. Classification and accepted discovery are supervised Patrol scans but consume no scheduled Architecture allowance or workflow-task slot. Readiness inventories classification records before they become eligible, preserving retry and active-claim deadlines alongside JobStore work. The scheduler freezes overlapping current-main mappings in `PostMergeBatchStore`, materializes only synthetic owner JobStore rows/events, validates exact registration/repository authority, and reuses each owner's durable `analysis_sha`. Scheduled and post-merge mapping share `FrozenRevisionMapRig`, which creates, asserts, and removes one detached exact-SHA worktree. Finalized post-merge groups and successfully admitted scheduled results compact safely instead of reaching lifetime hard caps. |
 | `Hive::Daemon::PatrolArbiter` | `lib/hive/daemon/patrol_arbiter.rb` | Shares each project's patrol-scan capacity between ordinary and architecture patrol and persists alternation state so either ready kind eventually runs. |
 | `Hive::Daemon::DigestSchedulerBase` | `lib/hive/daemon/digest_scheduler_base.rb` | Shared daily-digest lifecycle: stage-scoped pending dates, dispatcher-compatible cancellation, bounded per-stage failure backoff, dispatch envelope construction, observable tolerant state reads, and atomic cursor persistence. Concrete schedulers retain independent refresh/close/delivery cadence and cursor rules. |
 | `Hive::Daemon::AnswerDigestScheduler` | `lib/hive/daemon/answer_digest_scheduler.rb` | Host-local daily answer reminder cadence. Persists `last_fired_date` in `<state_home>/answer_digest_state.json` and emits at most one `hive answer-digest --date D --json` child per day after the configured hour. |
@@ -916,10 +931,11 @@ persists that map to `daemon_dispatch_baselines.json` under
 `schema_version`, `Hive::AtomicFile` replacement (tempfile + fsync + rename +
 directory fsync), and a **fail-closed** load — a torn / partial /
 corrupt / newer-schema file degrades to an empty map and the daemon boots
-normally (worst case: one task is re-baselined once). The daemon's existing
-activation lock and live-process check own single-writer custody; there is no
-second baseline-file lock that can block advancement. Stale temporary files
-from both the former private writer and AtomicFile are swept on construction.
+normally (worst case: one task is re-baselined once). A per-file flock
+serializes writers, and each daemon or bounded one-shot merges only the
+projects whose execution guards it owns, preserving concurrent baselines for
+other projects. Stale temporary files from both the former private writer and
+AtomicFile are swept on construction.
 The controller
 write-throughs on every baseline mutation — first-sight record, dispatch,
 terminal-attempt replay, local-child completion, durable-attempt completion,

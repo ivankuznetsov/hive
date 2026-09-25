@@ -70,6 +70,8 @@ authority out of project task folders.
 `ProcessGuard` also closes registered non-database fork resources in the child.
 The one-shot project guard uses that hook so a detached attempt cannot inherit
 and accidentally extend a completed parent's project-ownership lock.
+The one-shot process executor is also a direct consumer: it brackets fork/spawn
+with the same process guard and pins Hive child commands to `HIVE_BIN`.
 The dispatch one-shot runner is a second typed composition root for the same
 Attempts internals as the long-lived daemon; it scopes reconciliation and
 admission to one owned project and does not expose those lifecycle classes as

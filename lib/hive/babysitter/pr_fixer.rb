@@ -1,4 +1,5 @@
 require "fileutils"
+require "set"
 require "shellwords"
 require "hive/agent_profiles"
 require "hive/babysitter/context_builder"
@@ -19,6 +20,13 @@ module Hive
         outcome = fixer.run
         detail_sink&.call(fixer.last_status)
         outcome
+      end
+
+      def self.observe(pr, project, cfg)
+        fixer = new(
+          pr, project, cfg, dry_run: true, logger: nil, inflight: Set.new
+        )
+        [ fixer.observe, fixer.last_status ]
       end
 
       attr_reader :last_status
@@ -80,6 +88,16 @@ module Hive
         outcome
       ensure
         @inflight.delete(key) if key
+      end
+
+      def observe
+        @last_status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
+        return :fork_pr if fork_pr?
+        return :already_green if checks_pending?(@last_status["statusCheckRollup"])
+        return :eligible if behind?(@last_status) && auto_rebase_enabled?
+        return :already_green if already_green?(@last_status)
+
+        :eligible
       end
 
       private
@@ -245,6 +263,24 @@ module Hive
             %w[SUCCESS].include?(state) ||
             %w[QUEUED PENDING IN_PROGRESS].include?(status) ||
             %w[PENDING EXPECTED].include?(state)
+        end
+      end
+
+      def checks_pending?(checks)
+        entries = Array(checks)
+        return false if entries.any? do |entry|
+          next false unless entry.is_a?(Hash)
+
+          %w[FAILURE TIMED_OUT CANCELLED ACTION_REQUIRED STARTUP_FAILURE]
+            .include?(entry["conclusion"].to_s.upcase) ||
+            entry["state"].to_s.upcase == "FAILURE"
+        end
+
+        entries.any? do |entry|
+          next false unless entry.is_a?(Hash)
+
+          %w[QUEUED PENDING IN_PROGRESS].include?(entry["status"].to_s.upcase) ||
+            %w[PENDING EXPECTED].include?(entry["state"].to_s.upcase)
         end
       end
 

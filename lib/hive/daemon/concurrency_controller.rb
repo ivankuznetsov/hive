@@ -1,6 +1,7 @@
 require "set"
 require "date"
 require "time"
+require "hive/one_shot/schedule_state"
 
 module Hive
   module Daemon
@@ -112,14 +113,15 @@ module Hive
       # Returns one of :ok | :global_cap | :project_cap | :daily_cap |
       #   :cooldown | :quarantined | :project_dropped
       def can_dispatch?(project:, slug:, now: Time.now,
-                        external_global_count: 0, external_project_count: 0)
+                        external_global_count: 0, external_project_count: 0,
+                        mutate: true)
         restore_schedule_state(project)
         return :project_dropped if @dropped_projects.include?(project)
         return :quarantined     if @quarantine.include?([ project, slug ])
 
         cooldown_expiry = @cooldown_until[[ project, slug ]]
         return :cooldown if cooldown_expiry && cooldown_expiry > now
-        if cooldown_expiry
+        if cooldown_expiry && mutate
           @cooldown_until.delete([ project, slug ])
           persist_schedule_state(project, now: now)
         end
@@ -475,15 +477,34 @@ module Hive
           return
         end
         state = store.read("dispatch")
-        Array(state["cooldowns"]).each do |entry|
+        unless state.is_a?(Hash) && state.fetch("cooldowns", []).is_a?(Array) &&
+               state.fetch("transient_failures", {}).is_a?(Hash) &&
+               state.fetch("quarantined", []).is_a?(Array) &&
+               [ true, false, nil ].include?(state["dropped"])
+          invalid_schedule_state!("dispatch state has an invalid shape")
+        end
+        state.fetch("cooldowns", []).each do |entry|
+          invalid_schedule_state!("dispatch cooldown must be an object") unless entry.is_a?(Hash)
+
           @cooldown_until[[ project, entry.fetch("slug") ]] = Time.iso8601(entry.fetch("next_check_at"))
         end
         state.fetch("transient_failures", {}).each do |slug, count|
-          @transient_failures[[ project, slug ]] = Integer(count)
+          value = Integer(count)
+          invalid_schedule_state!("dispatch transient failure count must be positive") unless value.positive?
+
+          @transient_failures[[ project, slug ]] = value
         end
-        Array(state["quarantined"]).each { |slug| @quarantine.add([ project, slug ]) }
+        state.fetch("quarantined", []).each do |slug|
+          invalid_schedule_state!("dispatch quarantined slug must be non-empty") if slug.to_s.empty?
+
+          @quarantine.add([ project, slug ])
+        end
         @dropped_projects.add(project) if state["dropped"] == true
         @restored_schedule_projects.add(project)
+      rescue Hive::OneShot::ScheduleState::StateError
+        raise
+      rescue ArgumentError, KeyError, TypeError => error
+        invalid_schedule_state!("dispatch state is malformed: #{error.message}")
       end
 
       def persist_schedule_state(project, now: Time.now.utc)
@@ -518,13 +539,21 @@ module Hive
         return unless @dispatch_state
 
         if @persistence_scope_projects
+          scope = @persistence_scope_projects.respond_to?(:call) ?
+            @persistence_scope_projects.call : @persistence_scope_projects
           @dispatch_state.write(
             @last_dispatched_mtime,
-            scope_projects: @persistence_scope_projects
+            scope_projects: scope
           )
         else
           @dispatch_state.write(@last_dispatched_mtime)
         end
+      end
+
+      def invalid_schedule_state!(message)
+        raise Hive::OneShot::ScheduleState::StateError.new(
+          "scheduler checkpoint is invalid: #{message}", code: "checkpoint_invalid"
+        )
       end
 
       def running_count_for(project)

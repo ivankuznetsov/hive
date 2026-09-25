@@ -14,8 +14,12 @@ module Hive
         out_read, out_write = IO.pipe
         err_read, err_write = IO.pipe
         Hive::RuntimeControlPlane::ProcessGuard.before_fork!
+        argv = Shellwords.split(command)
+        hive_bin = ENV.fetch("HIVE_BIN", "hive")
+        argv[0] = hive_bin if argv.first == "hive" || argv.first&.end_with?("/hive") ||
+          argv.first == File.basename(hive_bin)
         pid = Process.spawn(
-          *Shellwords.split(command), in: File::NULL, out: out_write,
+          *argv, in: File::NULL, out: out_write,
           err: err_write, pgroup: true
         )
         Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!

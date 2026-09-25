@@ -68,6 +68,7 @@ components:
       - lib/hive/daemon/operational_snapshot.rb
       - lib/hive/lock.rb
       - lib/hive/one_shot/project_guard.rb
+      - lib/hive/one_shot/process_executor.rb
       - lib/hive/patrol/launch_budget.rb
       - lib/hive/runtime_control_plane/installation.rb
       - lib/hive/task_counter.rb
@@ -391,6 +392,7 @@ components:
           - lib/hive/commands/attempt_supervise.rb
           - lib/hive/commands/daemon.rb
           - lib/hive/one_shot/runner.rb
+          - lib/hive/one_shot/project_liveness.rb
           - lib/hive/commands/module/dry_run.rb
           - lib/hive/commands/status.rb
           - lib/hive/conditions/execute_boundary.rb
@@ -437,6 +439,7 @@ components:
       - lib/hive/commands/stage_action.rb
       - lib/hive/commands/daemon.rb
       - lib/hive/one_shot/runner.rb
+      - lib/hive/one_shot/project_liveness.rb
       - lib/hive/bot/dispatch_request_writer.rb
     mutation_authority: "The facade accepts explicit admission requests; the repository owns atomic admission, lifecycle, live-capacity, accounting, lost-recovery, failure, and terminal-publication transitions."
     recovery_surface: "The facade admits independent recovery attempts; reconciliation, healing, cancellation, export, and generic lifecycle policy remain internal."

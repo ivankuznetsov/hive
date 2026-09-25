@@ -3,16 +3,13 @@ require "hive/babysitter/interval"
 require "hive/babysitter/project_tick"
 require "hive/config"
 require "hive/one_shot/project_guard"
+require "hive/one_shot/project_liveness"
 require "hive/one_shot/result"
 require "hive/one_shot/schedule_state"
 
 module Hive
   module OneShot
     class BabysitterAdapter
-      OPERATOR_OUTCOMES = %i[give_up fork_pr rebase_conflict].freeze
-      RETRY_OUTCOMES = %i[failure timeout budget_exceeded budget_exhausted].freeze
-      IMMEDIATE_OUTCOMES = %i[eligible capacity_deferred].freeze
-
       class NullLogger
         def event(*) = nil
       end
@@ -20,7 +17,8 @@ module Hive
       def initialize(entry:, dry_run: false, logger: NullLogger.new,
                      config_loader: ->(path) { Hive::Config.load(path) },
                      tick: Hive::Babysitter::ProjectTick, main_guard: nil,
-                     babysitter_guard: nil, clock: -> { Time.now.utc })
+                     babysitter_guard: nil, liveness: nil,
+                     clock: -> { Time.now.utc })
         @entry = entry
         @dry_run = dry_run
         @logger = logger
@@ -28,7 +26,10 @@ module Hive
         @tick = tick
         @clock = clock
         @main_guard = main_guard || guard(:one_shot, ProjectGuard::LOCK_NAME)
-        @babysitter_guard = babysitter_guard || guard(:babysitter, "babysitter-execution.lock")
+        @babysitter_guard = babysitter_guard || guard(
+          :babysitter, Hive::Babysitter::ProjectTick::EXECUTION_LOCK_NAME
+        )
+        @liveness = liveness || ProjectLiveness.new(entry: entry)
         @schedule_state = ScheduleState.new(state_root: entry.fetch("hive_state_path"))
       end
 
@@ -41,7 +42,8 @@ module Hive
             unless eligible?(cfg)
               return Result.ok(
                 component: :babysitter, project: project, started_at: started,
-                finished_at: @clock.call, ran: [], items: [], safe_to_stop: true
+                finished_at: @clock.call, ran: [], items: [],
+                safe_to_stop: @liveness.safe_to_stop?
               )
             end
             summary = @tick.run(
@@ -57,7 +59,7 @@ module Hive
               component: :babysitter, project: project, started_at: started,
               finished_at: finished, ran: ran_items(summary),
               items: pending_items(summary, deadline),
-              safe_to_stop: summary[:interrupted] != true
+              safe_to_stop: summary[:interrupted] != true && @liveness.safe_to_stop?
             )
           end
         end
@@ -67,11 +69,17 @@ module Hive
           finished_at: @clock.call, code: error.code, message: error.message,
           owner: error.owner
         )
+      rescue Interrupt, SignalException => error
+        Result.interrupted(
+          component: :babysitter, project: project, started_at: started,
+          finished_at: @clock.call, message: error.message,
+          ran: summary ? ran_items(summary) : []
+        )
       rescue StandardError => error
         Result.error(
           component: :babysitter, project: project, started_at: started,
           finished_at: @clock.call, code: error.respond_to?(:code) ? error.code : "observation_failed",
-          message: error.message,
+          message: error.message, ran: summary ? ran_items(summary) : [],
           exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
         )
       end
@@ -113,7 +121,9 @@ module Hive
 
         Array(summary[:prs]).filter_map do |pr|
           outcome = pr.fetch(:outcome).to_sym
-          next if (IMMEDIATE_OUTCOMES + %i[pipeline_owned inflight]).include?(outcome)
+          next if %i[runnable pipeline_owned inflight].include?(
+            Hive::Babysitter::ProjectTick.outcome_class(outcome)
+          )
 
           { "id" => "babysitter:pr:#{pr.fetch(:number)}", "action" => "inspect_or_repair",
             "outcome" => outcome.to_s }
@@ -136,20 +146,20 @@ module Hive
 
       def pr_item(pr, deadline)
         outcome = pr.fetch(:outcome).to_sym
-        bucket, due, kind = if IMMEDIATE_OUTCOMES.include?(outcome)
-          [ "runnable_now", nil, nil ]
-        elsif OPERATOR_OUTCOMES.include?(outcome)
-          [ "waiting_operator", nil, "operator_action" ]
-        elsif RETRY_OUTCOMES.include?(outcome)
-          [ "waiting_external", deadline, "time_due" ]
-        elsif outcome.eql?(:pipeline_owned)
-          [ "waiting_external", nil, "task_changed" ]
-        elsif outcome == :inflight
-          [ "waiting_external", nil, "attempt_completed" ]
-        else
-          [ "waiting_external", nil,
-            pr[:wait] == "checks_pending" ? "check_state_changed" : "pr_changed" ]
-        end
+        projections = {
+          runnable: [ "runnable_now", nil, nil ],
+          operator: [ "waiting_operator", nil, "operator_action" ],
+          retry: [ "waiting_external", deadline, "time_due" ],
+          pipeline_owned: [ "waiting_external", nil, "task_changed" ],
+          inflight: [ "waiting_external", nil, "attempt_completed" ],
+          observed: [
+            "waiting_external", nil,
+            pr[:wait] == "checks_pending" ? "check_state_changed" : "pr_changed"
+          ]
+        }
+        bucket, due, kind = projections.fetch(
+          Hive::Babysitter::ProjectTick.outcome_class(outcome)
+        )
         condition = kind && {
           "kind" => kind, "repository" => @entry.fetch("repository_identity"),
           "pr" => pr.fetch(:number)

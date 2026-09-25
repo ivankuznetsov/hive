@@ -67,17 +67,6 @@ class OneShotScheduleStateTest < Minitest::Test
     end
   end
 
-  def test_delete_persists_only_when_the_component_exists
-    with_tmp_dir do |root|
-      state = Hive::OneShot::ScheduleState.new(state_root: root)
-      state.update("patrol") { { "failure_count" => 1 } }
-
-      assert state.delete("patrol", now: Time.utc(2026, 9, 23, 12))
-      refute state.delete("patrol", now: Time.utc(2026, 9, 23, 12, 1))
-      assert_empty state.read("patrol")
-    end
-  end
-
   def test_lock_and_serialization_failures_are_typed
     with_tmp_dir do |root|
       state = Hive::OneShot::ScheduleState.new(state_root: root)

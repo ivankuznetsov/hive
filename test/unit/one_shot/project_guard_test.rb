@@ -65,7 +65,7 @@ class OneShotProjectGuardTest < Minitest::Test
   def test_unreadable_owner_metadata_fails_closed
     with_tmp_dir do |root|
       holder = guard(root, kind: "daemon").acquire!
-      File.binwrite(holder.path, "not-json")
+      File.binwrite(holder.owner_path, "not-json")
 
       error = assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) do
         guard(root, kind: "one_shot").acquire!
@@ -156,7 +156,8 @@ class OneShotProjectGuardTest < Minitest::Test
       enabled = { "one" => true, "two" => false }
       collection = Hive::OneShot::ProjectGuard::Collection.new(
         kind: "daemon", registry: -> { entries },
-        enabled: ->(entry) { enabled.fetch(entry.fetch("name")) }
+        enabled: ->(entry) { enabled.fetch(entry.fetch("name")) },
+        drained: ->(*) { true }
       )
 
       assert_equal %w[one], collection.refresh!
@@ -175,6 +176,153 @@ class OneShotProjectGuardTest < Minitest::Test
     end
   end
 
+  def test_collection_contains_one_project_config_failure
+    with_tmp_dir do |root|
+      entries = %w[broken healthy].map do |name|
+        state = File.join(root, name, ".hive-state")
+        FileUtils.mkdir_p(state)
+        { "name" => name, "path" => File.dirname(state), "hive_state_path" => state }
+      end
+      collection = Hive::OneShot::ProjectGuard::Collection.new(
+        kind: "daemon", registry: -> { entries }, drained: ->(*) { true },
+        enabled: lambda { |entry|
+          raise Hive::ConfigError, "bad config" if entry.fetch("name") == "broken"
+
+          true
+        }
+      )
+
+      assert_equal [ "healthy" ], collection.refresh!
+      assert_equal "project_config_unavailable", collection.contentions.fetch("broken").code
+    ensure
+      collection&.release_all!
+    end
+  end
+
+  def test_collection_releases_disabled_or_removed_projects_only_after_they_drain
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      FileUtils.mkdir_p(state)
+      entry = { "name" => "demo", "path" => root, "hive_state_path" => state }
+      entries = [ entry ]
+      enabled = true
+      drained = false
+      collection = Hive::OneShot::ProjectGuard::Collection.new(
+        kind: "daemon", registry: -> { entries }, enabled: ->(*) { enabled },
+        drained: ->(*) { drained }
+      )
+
+      assert_equal [ "demo" ], collection.refresh!
+      enabled = false
+      assert_equal [ "demo" ], collection.refresh!
+      drained = true
+      assert_empty collection.refresh!
+
+      enabled = true
+      assert_equal [ "demo" ], collection.refresh!
+      entries.clear
+      drained = false
+      assert_equal [ "demo" ], collection.refresh!
+      drained = true
+      assert_empty collection.refresh!
+    ensure
+      collection&.release_all!
+    end
+  end
+
+  def test_one_shot_refuses_identity_verified_pre_guard_daemon
+    with_tmp_dir do |root|
+      owner = {
+        "kind" => "daemon", "project" => "app", "pid" => 123,
+        "process_identity" => "start"
+      }
+      one_shot = Hive::OneShot::ProjectGuard.new(
+        state_root: root, project: "app", kind: :one_shot,
+        legacy_daemon_owner: -> { owner }
+      )
+
+      error = assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) do
+        one_shot.acquire!
+      end
+      assert_equal "daemon_owned", error.code
+      assert_equal owner, error.owner
+    end
+  end
+
+  def test_default_pre_guard_daemon_probe_requires_live_identity_and_enabled_enrollment
+    with_tmp_global_config do |home|
+      with_tmp_dir do |root|
+        state = File.join(root, ".hive-state")
+        FileUtils.mkdir_p(state)
+        File.write(
+          File.join(state, "config.yml"),
+          Hive::Config.deep_merge(
+            Hive::Config.deep_dup(Hive::Config::DEFAULTS), "daemon" => { "enabled" => true }
+          ).to_yaml
+        )
+        Hive::Config.register_project(
+          name: "app", path: root, repository_identity: "local:test"
+        )
+        identity = Hive::Lock.process_start_time(Process.pid)
+        File.write(
+          File.join(home, ".daemon.pid"),
+          { "pid" => Process.pid, "process_start_time" => identity }.to_yaml
+        )
+
+        error = assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) do
+          guard(state, kind: "one_shot").acquire!
+        end
+        assert_equal "daemon_owned", error.code
+        assert_equal identity.to_s, error.owner.fetch("process_identity")
+
+        config = YAML.safe_load(File.read(File.join(state, "config.yml")))
+        config["daemon"]["enabled"] = false
+        File.write(File.join(state, "config.yml"), config.to_yaml)
+        acquired = guard(state, kind: "one_shot").acquire!
+        assert acquired.release!
+      end
+    end
+  end
+
+  def test_live_pre_guard_daemon_with_missing_identity_fails_closed
+    with_tmp_global_config do |home|
+      with_tmp_dir do |root|
+        state = File.join(root, ".hive-state")
+        FileUtils.mkdir_p(state)
+        File.write(File.join(home, ".daemon.pid"), { "pid" => Process.pid }.to_yaml)
+
+        error = assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) do
+          guard(state, kind: "one_shot").acquire!
+        end
+        assert_equal "ownership_unverifiable", error.code
+        assert_nil error.owner
+      end
+    end
+  end
+
+  def test_removed_project_contention_is_cleared
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      FileUtils.mkdir_p(state)
+      entry = { "name" => "demo", "path" => root, "hive_state_path" => state }
+      entries = [ entry ]
+      blocker = guard(state, kind: "one_shot").acquire!
+      collection = Hive::OneShot::ProjectGuard::Collection.new(
+        kind: "daemon", registry: -> { entries }, enabled: ->(*) { true },
+        drained: ->(*) { true }
+      )
+      collection.refresh!
+      assert collection.contentions.key?("demo")
+
+      entries.clear
+      collection.refresh!
+      refute collection.contentions.key?("demo")
+    ensure
+      blocker&.release!
+      collection&.release_all!
+    end
+  end
+
   def test_rejects_unsafe_lock_names_and_reports_its_live_owner
     with_tmp_dir do |root|
       assert_raises(ArgumentError) do
@@ -184,9 +332,9 @@ class OneShotProjectGuardTest < Minitest::Test
       end
 
       active = guard(root, kind: "one_shot").acquire!
-      assert_equal "one_shot", active.owner.fetch("kind")
+      assert File.file?(active.owner_path)
       assert active.release!
-      assert_nil active.owner
+      refute_path_exists active.owner_path
     end
   end
 
@@ -209,7 +357,8 @@ class OneShotProjectGuardTest < Minitest::Test
   def test_owner_validation_and_process_probes_fail_closed
     with_tmp_dir do |root|
       current = guard(root, kind: "one_shot")
-      assert_nil current.send(:verified_owner, StringIO.new("{}"))
+      File.binwrite(current.owner_path, "{}")
+      assert_nil current.send(:verified_owner)
 
       with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::EPERM }) do
         assert current.send(:process_alive?, Process.pid)

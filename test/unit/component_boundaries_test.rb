@@ -96,6 +96,7 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/commands/attempt_supervise.rb",
           "lib/hive/commands/daemon.rb",
           "lib/hive/one_shot/runner.rb",
+          "lib/hive/one_shot/project_liveness.rb",
           "lib/hive/commands/module/dry_run.rb",
           "lib/hive/commands/status.rb",
           "lib/hive/conditions/execute_boundary.rb",

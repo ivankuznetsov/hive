@@ -209,17 +209,18 @@ module Hive
         entry = managed_entries.find { |item| item.fetch("name").to_s == project.to_s }
         return [] unless entry
 
-        runnable_ids = candidates.map { |candidate| candidate[:job_id].to_s }
+        runnable_ids = candidates.map { |candidate| readiness_candidate_id(candidate) }
         items = candidates.map do |candidate|
           {
             "bucket" => "runnable_now",
-            "id" => "architecture:#{candidate.fetch(:action_phase)}:#{candidate.fetch(:job_id)}",
+            "id" => readiness_candidate_id(candidate),
             "component" => "architecture_patrol", "reason" => "eligible",
             "next_check_at" => nil, "condition" => nil
           }
         end
         store_for(entry).jobs.each do |job|
-          next if job.fetch("complete") || runnable_ids.include?(job.fetch("job_id").to_s)
+          job_id = "architecture:discovery:#{job.fetch('job_id')}"
+          next if job.fetch("complete") || runnable_ids.include?(job_id)
 
           attempt = Array(job["attempts"]).last || {}
           deadline = attempt["next_eligible_at"] || attempt["expires_at"]
@@ -234,6 +235,7 @@ module Hive
             "next_check_at" => deadline, "condition" => condition
           }
         end
+        items.concat(classification_readiness(entry, runnable_ids: runnable_ids, now: now))
         items
       end
 
@@ -485,6 +487,42 @@ module Hive
       end
 
       private
+
+      def readiness_candidate_id(candidate)
+        identity = candidate[:classification_occurrence_id] || candidate.fetch(:job_id)
+        "architecture:#{candidate.fetch(:action_phase)}:#{identity}"
+      end
+
+      def classification_readiness(entry, runnable_ids:, now:)
+        classifier = classifier_for(entry)
+        return [] unless classifier.respond_to?(:each_record)
+
+        classifier.each_record.filter_map do |record|
+          next if record["materialization"]
+          next unless %w[pending retry_wait feature].include?(record["status"])
+
+          phase = record.fetch("status") == "feature" ? :post_merge : :classification
+          id = "architecture:#{phase}:#{record.fetch('occurrence_id')}"
+          next if runnable_ids.include?(id)
+
+          claim_deadline = record.dig("claim", "expires_at")
+          retry_deadline = record["retry_at"]
+          deadline = [ claim_deadline, retry_deadline ].compact
+            .map { |value| Time.iso8601(value) }
+            .select { |value| value > now }.min
+          condition = if deadline
+            { "kind" => "time_due", "task" => record.fetch("occurrence_id"),
+              "deadline" => deadline.utc.iso8601(6) }
+          else
+            { "kind" => "attempt_completed", "task" => record.fetch("occurrence_id") }
+          end
+          {
+            "bucket" => "waiting_external", "id" => id,
+            "component" => "architecture_patrol", "reason" => record.fetch("status"),
+            "next_check_at" => deadline, "condition" => condition
+          }
+        end
+      end
 
       def claim_discovery!(entry, store, aggregate, analysis_sha:, now:)
         @discovery_transitions.claim(

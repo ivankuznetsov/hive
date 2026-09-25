@@ -16,6 +16,7 @@ require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/status_consumer"
 require "hive/modules/daemon_runtime"
 require "hive/one_shot/schedule_state"
+require "hive/one_shot/project_liveness"
 
 module Hive
   module OneShot
@@ -106,6 +107,9 @@ module Hive
             registry: -> { [ entry ] }
           ),
           project_ownership: ScopedOwnership.new(project), scope_projects: [ project ],
+          project_liveness: Hive::OneShot::ProjectLiveness.new(
+            entry: entry, state_home: hive_home, attempt_store: attempt_store
+          ),
           dispatch_repository: Hive::RuntimeControlPlane::DispatchRepository.new(
             database: attempt_store.database
           ),
@@ -134,7 +138,7 @@ module Hive
         end
         @ran = result.fetch(:ran)
         result
-      rescue StandardError
+      rescue StandardError, SignalException
         @ran = @dispatcher.one_shot_ran.dup
         raise
       end

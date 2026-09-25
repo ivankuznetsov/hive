@@ -1,13 +1,14 @@
 require "hive/daemon/patrol_scheduler"
 require "hive/one_shot/process_executor"
 require "hive/one_shot/project_guard"
+require "hive/one_shot/project_liveness"
 require "hive/one_shot/result"
 
 module Hive
   module OneShot
     class PatrolAdapter
       def initialize(entry:, dry_run: false, scheduler: nil, executor: ProcessExecutor.new,
-                     guard: nil, clock: -> { Time.now.utc })
+                     guard: nil, liveness: nil, clock: -> { Time.now.utc })
         @entry = entry
         @dry_run = dry_run
         @clock = clock
@@ -16,6 +17,7 @@ module Hive
           state_root: entry.fetch("hive_state_path"), project: entry.fetch("name"),
           kind: :one_shot
         )
+        @liveness = liveness || ProjectLiveness.new(entry: entry)
         @scheduler = scheduler || Hive::Daemon::PatrolScheduler.new(
           registry: -> { [ entry ] }
         )
@@ -36,7 +38,8 @@ module Hive
           items = @scheduler.readiness(project: project, now: finished, persist: !@dry_run)
           return Result.ok(
             component: :patrol, project: project, started_at: started,
-            finished_at: finished, ran: ran, items: items, safe_to_stop: true
+            finished_at: finished, ran: ran, items: items,
+            safe_to_stop: @liveness.safe_to_stop?
           )
         end
       rescue ProjectGuard::OwnershipError => error
@@ -44,6 +47,11 @@ module Hive
           component: :patrol, project: project, started_at: started,
           finished_at: @clock.call, code: error.code, message: error.message,
           owner: error.owner
+        )
+      rescue Interrupt, SignalException => error
+        Result.interrupted(
+          component: :patrol, project: project, started_at: started,
+          finished_at: @clock.call, message: error.message, ran: ran
         )
       rescue StandardError => error
         Result.error(

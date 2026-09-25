@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/one_shot/process_executor"
 
 class OneShotProcessExecutorTest < Minitest::Test
+  include HiveTestHelper
+
   def test_executes_a_child_and_returns_its_json_envelope
     command = "ruby -rjson -e 'STDERR.write(\"warning\\n\"); puts JSON.generate(ok: true)'"
 
@@ -23,6 +25,19 @@ class OneShotProcessExecutorTest < Minitest::Test
       Hive::OneShot::ProcessExecutor.new.call("ruby -e 'puts \"not-json\"'")
     end
     assert_match(/invalid JSON/, error.message)
+  end
+
+  def test_hive_command_uses_the_pinned_runtime_binary
+    with_tmp_dir do |dir|
+      hive = File.join(dir, "hive")
+      File.write(hive, "#!/bin/sh\nprintf '%s\\n' '{\"pinned\":true}'\n")
+      FileUtils.chmod(0o755, hive)
+
+      with_env("HIVE_BIN" => hive) do
+        execution = Hive::OneShot::ProcessExecutor.new.call("hive patrol demo --json")
+        assert_equal({ "pinned" => true }, execution.envelope)
+      end
+    end
   end
 
   def test_exception_terminates_an_unsettled_process_group

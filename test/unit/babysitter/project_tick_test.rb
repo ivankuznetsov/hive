@@ -598,17 +598,33 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
-  def test_observe_only_reports_selected_prs_without_running_fixer
+  def test_observe_only_uses_live_check_state_without_running_repairs
     with_tmp_dir do |dir|
       project = project_entry(dir)
       write_config(
         dir,
-        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 1 }
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 2 }
       )
       logger = make_logger(dir)
-      prs = [ { "number" => 4, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" } ]
+      prs = [
+        { "number" => 4, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 5, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" }
+      ]
 
       with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, lambda { |_path, number, **_kwargs|
+          if number == 4
+            {
+              "mergeable" => "MERGEABLE", "mergeStateStatus" => "CLEAN",
+              "statusCheckRollup" => [ { "status" => "QUEUED" } ]
+            }
+          else
+            {
+              "mergeable" => "CONFLICTING",
+              "statusCheckRollup" => [ { "conclusion" => "FAILURE", "status" => "QUEUED" } ]
+            }
+          end
+        }) do
         with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |*|
           flunk "observe-only ticks must not run the fixer"
         }) do
@@ -617,7 +633,12 @@ class BabysitterProjectTickTest < Minitest::Test
             observe_only: true, detailed: true
           )
 
-          assert_equal [ :eligible ], summary.fetch(:prs).map { |row| row.fetch(:outcome) }
+          actual = summary.fetch(:prs).map do |row|
+            [ row.fetch(:number), row.fetch(:outcome), row[:wait] ]
+          end
+          assert_equal [ [ 4, :already_green, "checks_pending" ],
+                         [ 5, :eligible, nil ] ], actual
+        end
         end
       end
     ensure

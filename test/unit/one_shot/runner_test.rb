@@ -32,6 +32,13 @@ class OneShotRunnerTest < Minitest::Test
     end
   end
 
+  class InterruptingDispatcher < Dispatcher
+    def run_one_shot(**options)
+      @calls << [ :run, options ]
+      raise Interrupt, "stopped"
+    end
+  end
+
   def test_runs_one_admission_and_captures_result
     dispatcher = Dispatcher.new
     runner = Hive::OneShot::Runner.new(
@@ -62,6 +69,16 @@ class OneShotRunnerTest < Minitest::Test
     )
 
     assert_raises(RuntimeError) { runner.call }
+    assert_equal "failed", runner.ran.fetch(0).fetch("outcome")
+  end
+
+  def test_interruption_preserves_dispatcher_run_evidence
+    dispatcher = InterruptingDispatcher.new
+    runner = Hive::OneShot::Runner.new(
+      dispatcher: dispatcher, project: "hive", clock: -> { NOW }
+    )
+
+    assert_raises(Interrupt) { runner.call }
     assert_equal "failed", runner.ran.fetch(0).fetch("outcome")
   end
 

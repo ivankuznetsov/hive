@@ -784,6 +784,67 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal [ "p1" ], writes.last.fetch(1).fetch(:scope_projects)
   end
 
+  def test_malformed_dispatch_checkpoint_raises_typed_invalid_state
+    store = Object.new
+    store.define_singleton_method(:read) do |_component|
+      { "cooldowns" => [ { "next_check_at" => (T0 + 60).iso8601(6) } ] }
+    end
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+
+    error = assert_raises(Hive::OneShot::ScheduleState::StateError) do
+      controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+    end
+    assert_equal "checkpoint_invalid", error.code
+  end
+
+  def test_read_only_gate_does_not_delete_or_persist_an_expired_cooldown
+    updates = 0
+    store = Object.new
+    store.define_singleton_method(:read) do |_component|
+      {
+        "cooldowns" => [ { "slug" => "task", "next_check_at" => (T0 - 1).iso8601(6) } ],
+        "transient_failures" => {}, "quarantined" => [], "dropped" => false
+      }
+    end
+    store.define_singleton_method(:update) do |*, **, &block|
+      updates += 1
+      block.call({})
+    end
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+
+    assert_equal :ok,
+                 controller.can_dispatch?(project: "p1", slug: "task", now: T0, mutate: false)
+    assert_equal 0, updates
+    assert controller.instance_variable_get(:@cooldown_until).key?([ "p1", "task" ])
+  end
+
+  def test_baseline_persistence_resolves_owned_project_scope_at_each_write
+    writes = []
+    owned = [ "p1" ]
+    dispatch_state = Object.new
+    dispatch_state.define_singleton_method(:load) { {} }
+    dispatch_state.define_singleton_method(:write) { |_value, **options| writes << options }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50, dispatch_state: dispatch_state,
+      persistence_scope_projects: -> { owned.dup }
+    )
+
+    controller.observe_state_file_mtime(project: "p1", slug: "one", mtime: T0)
+    owned.replace([ "p2" ])
+    controller.observe_state_file_mtime(project: "p2", slug: "two", mtime: T0)
+
+    assert_equal [ [ "p1" ], [ "p2" ] ], writes.map { |write| write.fetch(:scope_projects) }
+  end
+
   def test_persisted_schedule_state_includes_quarantined_tasks
     Dir.mktmpdir do |root|
       factory = ->(project) { Hive::OneShot::ScheduleState.new(state_root: File.join(root, project)) }

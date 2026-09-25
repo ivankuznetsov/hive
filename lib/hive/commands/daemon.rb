@@ -38,6 +38,7 @@ require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
 require "hive/one_shot/project_guard"
+require "hive/one_shot/result"
 require "hive/one_shot/schedule_state"
 require "hive/one_shot/dispatch_adapter"
 require "hive/commands/service_installer/result_presenter"
@@ -271,6 +272,7 @@ module Hive
           # re-strand already-answered needs_input tasks. The store owns all
           # `:daemon_dispatch_baselines_*` typed events via its own logger.
           dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger),
+          persistence_scope_projects: -> { project_ownership.owned_projects },
           schedule_state_factory: lambda do |project|
             entry = Hive::Config.find_project(project)
             entry && Hive::OneShot::ScheduleState.new(state_root: entry.fetch("hive_state_path"))

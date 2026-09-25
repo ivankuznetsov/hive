@@ -56,6 +56,25 @@ class OneShotDispatchAdapterTest < Minitest::Test
     assert runner.closed
   end
 
+  def test_dry_run_keeps_eligible_work_runnable
+    runner = Runner.new(result: {
+      ran: [], safe_to_stop: true,
+      items: [ {
+        "bucket" => "runnable_now", "id" => "dispatch:task:next",
+        "component" => "dispatch", "reason" => "eligible",
+        "next_check_at" => nil, "condition" => nil
+      } ]
+    })
+    result = Hive::OneShot::DispatchAdapter.new(
+      entry: entry, dry_run: true, guard: Guard.new,
+      runner_factory: -> { runner }, clock: -> { NOW }
+    ).call
+
+    assert_empty result.to_h.fetch("ran")
+    assert_equal [ "dispatch:task:next" ],
+                 result.to_h.dig("pending", "runnable_now").map { |item| item.fetch("id") }
+  end
+
   def test_ownership_refusal_does_not_construct_runtime
     error = Hive::OneShot::ProjectGuard::OwnershipError.new(
       "daemon owns hive", code: "daemon_owned",
@@ -85,6 +104,19 @@ class OneShotDispatchAdapterTest < Minitest::Test
 
     assert_equal "error", result.to_h.fetch("status")
     assert_equal "dispatch_failed", result.to_h.dig("error", "code")
+    assert_equal runner.ran, result.to_h.fetch("ran")
+    refute result.safe_to_stop?
+    assert runner.closed
+  end
+
+  def test_interrupt_becomes_single_unsafe_result
+    runner = Runner.new(error: Interrupt.new("stopping"))
+    result = Hive::OneShot::DispatchAdapter.new(
+      entry: entry, guard: Guard.new, runner_factory: -> { runner }, clock: -> { NOW }
+    ).call
+
+    assert_equal "error", result.to_h.fetch("status")
+    assert_equal "interrupted", result.to_h.dig("error", "code")
     assert_equal runner.ran, result.to_h.fetch("ran")
     refute result.safe_to_stop?
     assert runner.closed

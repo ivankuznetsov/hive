@@ -39,6 +39,12 @@ module Hive
           finished_at: @clock.call, code: error.code, message: error.message,
           owner: error.owner
         )
+      rescue Interrupt, SignalException => error
+        Result.interrupted(
+          component: :dispatch, project: project, started_at: started,
+          finished_at: @clock.call, message: error.message,
+          ran: runner&.ran || []
+        )
       rescue StandardError => error
         Result.error(
           component: :dispatch, project: project, started_at: started,

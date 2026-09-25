@@ -63,7 +63,11 @@ discovery, and downstream handoff path for one project, then emits
 scheduled-slice producer. Manual selectors (`--pr`, `--job-manifest`, scope
 hints, list/show/archive options) are incompatible with `--once`.
 `--once --dry-run` observes readiness without intake, reservation, checkpoint
-writes, or child execution.
+writes, or child execution. Intake deadlines use the configured daemon
+`pr_merge_poll_interval_sec`; the reported deadline and persisted checkpoint
+are the same absolute timestamp. Classification retries and active claims stay
+visible before a job exists, while a blocked scheduler observation fails the
+pass instead of being reported as an operator wait.
 
 ## Read-only job-query pagination
 

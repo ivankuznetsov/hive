@@ -65,6 +65,17 @@ class OneShotResultTest < Minitest::Test
                  ).exit_code
   end
 
+  def test_usage_contract_without_a_project_builds_an_aggregate_shaped_error
+    contract = Hive::OneShot::Result.usage_contract(component: "patrol", project: nil)
+
+    payload = contract.fetch(:payload).call(Hive::InvalidTaskPath.new("missing project"))
+
+    assert_nil payload.fetch("project")
+    assert_empty payload.fetch("projects")
+    assert_empty payload.fetch("owning_projects")
+    refute payload.fetch("host_stop_allowed")
+  end
+
   def test_aggregate_combines_successful_projects_and_vetoes_host_stop_for_owner
     success = Hive::OneShot::Result.ok(
       component: "babysitter", project: "app", started_at: STARTED, finished_at: FINISHED,
@@ -125,6 +136,24 @@ class OneShotResultTest < Minitest::Test
       refute aggregate.to_h["host_stop_allowed"]
       assert_equal Hive::ExitCodes::TEMPFAIL, aggregate.exit_code
     end
+  end
+
+  def test_aggregate_rejects_success_without_authoritative_readiness
+    malformed = {
+      "status" => "ok", "project" => "demo", "safe_to_stop" => true,
+      "pending" => nil
+    }
+
+    aggregate = Hive::OneShot::Result.aggregate(
+      component: "babysitter", reports: [ malformed ],
+      started_at: STARTED, finished_at: FINISHED
+    )
+
+    assert_equal "error", aggregate.to_h.fetch("status")
+    assert_equal "partial_failure", aggregate.to_h.dig("error", "code")
+    assert_nil aggregate.to_h.fetch("pending")
+    refute aggregate.to_h.fetch("host_stop_allowed")
+    assert_equal Hive::ExitCodes::TEMPFAIL, aggregate.exit_code
   end
 
   def test_unverifiable_refusal_is_partial_failure

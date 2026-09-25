@@ -1,6 +1,8 @@
 require "json"
+require "json_schemer"
 require "hive/errors"
 require "hive/one_shot/readiness"
+require "hive/schemas"
 
 module Hive
   module OneShot
@@ -42,6 +44,15 @@ module Hive
                finished_at: finished_at, status: "error", code: code,
                message: message, owner: owner, ran: ran, exit_code: exit_code,
                details: details)
+      end
+
+      def self.interrupted(component:, project:, started_at:, finished_at:, message:, ran: [])
+        error(
+          component: component, project: project, started_at: started_at,
+          finished_at: finished_at, code: "interrupted",
+          message: message.to_s.empty? ? "one-shot execution interrupted" : message,
+          ran: ran
+        )
       end
 
       def self.error_payload(component:, project:, error:, now: Time.now.utc)
@@ -126,11 +137,17 @@ module Hive
                    owner:, ran:, exit_code: Hive::ExitCodes::TEMPFAIL, details: nil)
           error = error_hash(code, message)
           error["details"] = details if details
-          new(base(component, project, started_at, finished_at).merge(
+          document = base(component, project, started_at, finished_at).merge(
             "status" => status, "ran" => Array(ran), "pending" => nil,
             "next_due_at" => nil, "wake_conditions" => [], "safe_to_stop" => false,
             "owner" => owner_hash(owner), "error" => error
-          ), exit_code: exit_code)
+          )
+          if project.nil?
+            document.merge!(
+              "projects" => [], "owning_projects" => [], "host_stop_allowed" => false
+            )
+          end
+          new(document, exit_code: exit_code)
         end
 
         def base(component, project, started_at, finished_at)
@@ -154,7 +171,19 @@ module Hive
 
         def document_for(report)
           document = report.respond_to?(:to_h) ? report.to_h : report
-          document if document.is_a?(Hash) && %w[ok refused error].include?(document["status"])
+          document if authoritative_document?(document)
+        end
+
+        def authoritative_document?(document)
+          document.is_a?(Hash) &&
+            document["project"].is_a?(String) && !document["project"].empty? &&
+            one_shot_schemer.valid?(document)
+        end
+
+        def one_shot_schemer
+          @one_shot_schemer ||= JSONSchemer.schema(
+            JSON.parse(File.read(Hive::Schemas.schema_path("hive-one-shot")))
+          )
         end
 
         def routine_refusal?(document)

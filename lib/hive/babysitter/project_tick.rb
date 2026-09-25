@@ -16,6 +16,16 @@ module Hive
     module ProjectTick
       module_function
 
+      EXECUTION_LOCK_NAME = "babysitter-execution.lock".freeze
+      OUTCOME_CLASSES = {
+        eligible: :runnable, capacity_deferred: :runnable,
+        give_up: :operator, fork_pr: :operator, rebase_conflict: :operator,
+        failure: :retry, timeout: :retry, budget_exhausted: :retry,
+        pipeline_owned: :pipeline_owned, inflight: :inflight,
+        success: :observed, rebased: :observed, already_green: :observed,
+        noop: :observed, dry_run: :observed
+      }.freeze
+
       def run(project_entry, dry_run:, logger:, inflight:, admission_open: -> { true },
               observe_only: false, detailed: false)
         started = Time.now
@@ -57,7 +67,10 @@ module Hive
           summary[:prs] << pr_result(pr, :capacity_deferred)
         end
         if observe_only
-          selected.each { |pr| summary[:prs] << pr_result(pr, :eligible) }
+          selected.each do |pr|
+            outcome, status = Hive::Babysitter::PrFixer.observe(pr, project_entry, cfg)
+            summary[:prs] << pr_result(pr, outcome, status: status)
+          end
           return report(summary, detailed)
         end
         interrupted = false
@@ -138,6 +151,12 @@ module Hive
       def empty_summary
         { total: 0, fixed: 0, untouched: 0, needs_human: 0, prs: [],
           error: nil, interrupted: false }
+      end
+
+      def outcome_class(outcome)
+        OUTCOME_CLASSES.fetch(outcome.to_sym)
+      rescue KeyError
+        raise ArgumentError, "unknown babysitter outcome #{outcome.inspect}"
       end
 
       def report(summary, detailed)
@@ -247,7 +266,8 @@ module Hive
           number: pr.fetch("number").to_i, outcome: outcome.to_sym,
           head_sha: pr["headRefOid"], head_ref: pr["headRefName"], url: pr["url"]
         }
-        result[:wait] = "checks_pending" if checks_pending?(status)
+        result[:wait] = "checks_pending" if outcome_class(outcome) == :observed &&
+          checks_pending?(status)
         result
       end
 

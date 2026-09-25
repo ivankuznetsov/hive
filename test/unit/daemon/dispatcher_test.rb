@@ -11,6 +11,7 @@ require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
 require "hive/daemon/scheduled_architecture_scheduler"
+require "hive/one_shot/project_guard"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
 # these tests is the routing decisions: which Policy outcome maps to
@@ -601,6 +602,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       attempt_dispatcher: nil, attempt_reconciler: nil,
                       operational_snapshot: nil, module_runtime: nil,
                       project_ownership: nil,
+                      project_liveness: nil,
                       scope_projects: nil,
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
@@ -626,7 +628,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
     # is empty and prune_dispatch_baselines never drops anything — making the
     # prune-on-tick path effectively dead in any test that relies on the
     # default `status_result`.
-    projects_for_rows = rows.map(&:project).uniq.map do |name|
+    project_names = rows.map(&:project)
+    project_names.concat(Array(scope_projects))
+    projects_for_rows = project_names.uniq.map do |name|
       Hive::Daemon::StatusConsumer::ProjectInfo.new(name: name, legacy_stage_dirs: [])
     end
     status.next_result = status_result ||
@@ -668,6 +672,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       operational_snapshot: operational_snapshot,
       module_runtime: module_runtime,
       project_ownership: project_ownership,
+      project_liveness: project_liveness,
       scope_projects: scope_projects,
       recovery_coordinator: recovery_coordinator,
       plan_approval: plan_approval,
@@ -773,12 +778,47 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "daemon_owned", event.fetch(1).fetch(:reason)
   end
 
+  def test_normal_tick_scopes_module_runtime_to_owned_projects
+    ownership = Object.new
+    ownership.define_singleton_method(:refresh!) { [ "p1" ] }
+    ownership.define_singleton_method(:contentions) { {} }
+    ownership.define_singleton_method(:owned_projects) { [ "p1" ] }
+    ownership.define_singleton_method(:owned?) { |project| project == "p1" }
+    calls = []
+    runtime = Object.new
+    runtime.define_singleton_method(:tick) { |**options| calls << options; [] }
+    dispatcher, = make_dispatcher(
+      rows: [], module_runtime: runtime, project_ownership: ownership
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "p1" ], calls.fetch(0).fetch(:projects)
+  end
+
   def test_run_one_shot_drains_supervised_work_and_validates_scope
     dispatcher, supervisor = make_dispatcher(rows: [], scope_projects: [ "p1" ])
     supervisor.in_flight_results = [ true, false ]
     sleeps = []
 
     assert_raises(ArgumentError) { dispatcher.run_one_shot(project: "p2", now: T0) }
+    result = dispatcher.run_one_shot(
+      project: "p1", now: T0, sleeper: ->(seconds) { sleeps << seconds }
+    )
+
+    assert_equal [ 0.25 ], sleeps
+    assert_equal true, result.fetch(:safe_to_stop)
+  end
+
+  def test_dispatch_one_shot_drains_project_wide_legacy_workers_before_stop_safe
+    checks = [ false, true, true ]
+    liveness = Object.new
+    liveness.define_singleton_method(:safe_to_stop?) { checks.empty? ? true : checks.shift }
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], project_liveness: liveness
+    )
+    sleeps = []
+
     result = dispatcher.run_one_shot(
       project: "p1", now: T0, sleeper: ->(seconds) { sleeps << seconds }
     )
@@ -826,6 +866,39 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert dispatcher.send(:live_attempt?, "p1")
   end
 
+  def test_one_shot_readiness_rejects_missing_target_project_observation
+    result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true, rows: [], projects: [], error: nil
+    )
+    dispatcher, = make_dispatcher(
+      status_result: result, scope_projects: [ "p1" ]
+    )
+
+    error = assert_raises(Hive::Error) do
+      dispatcher.send(:one_shot_readiness, project: "p1", now: T0)
+    end
+    assert_match(/failed for project p1/, error.message)
+  end
+
+  def test_one_shot_readiness_includes_module_inventory
+    runtime = Object.new
+    runtime.define_singleton_method(:readiness) do |project:, now:|
+      [ {
+        "bucket" => "waiting_external", "id" => "dispatch:module:schedule:1",
+        "component" => "dispatch", "reason" => "module_schedule",
+        "next_check_at" => now + 60,
+        "condition" => { "kind" => "time_due", "deadline" => (now + 60).iso8601(6) }
+      } ]
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], module_runtime: runtime
+    )
+
+    items = dispatcher.send(:one_shot_readiness, project: "p1", now: T0)
+
+    assert_includes items.map { |item| item.fetch("id") }, "dispatch:module:schedule:1"
+  end
+
   def test_one_shot_row_projection_covers_every_policy_owner
     dispatcher, _supervisor, controller = make_dispatcher(
       rows: [], scope_projects: [ "p1" ]
@@ -843,7 +916,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.define_singleton_method(:one_shot_policy_decision) do |item, **|
       decisions.fetch(item.slug, :dispatch)
     end
-    controller.define_singleton_method(:can_dispatch?) do |project:, slug:, now:|
+    controller.define_singleton_method(:can_dispatch?) do |project:, slug:, now:, **|
       gates.fetch(slug)
     end
     controller.define_singleton_method(:next_check_at) do |**|
@@ -877,6 +950,110 @@ class HiveDaemonDispatcherTest < Minitest::Test
     actual_dispatcher, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
     assert_equal :dispatch,
                  actual_dispatcher.send(:one_shot_policy_decision, row(slug: "actual"), now: T0)
+  end
+
+  def test_one_shot_row_projection_honors_project_and_retry_gates
+    disabled, = make_dispatcher(rows: [], scope_projects: [ "p1" ], project_enabled: false)
+    item = disabled.send(:row_pending_item, row(slug: "disabled"), now: T0)
+    assert_equal [ "waiting_operator", "project_disabled" ],
+                 item.values_at("bucket", "reason")
+
+    dispatcher, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    dispatcher.instance_variable_set(:@legacy_layout_projects, { "p1" => true })
+    item = dispatcher.send(:row_pending_item, row(slug: "legacy"), now: T0)
+    assert_equal [ "waiting_operator", "legacy_layout" ],
+                 item.values_at("bucket", "reason")
+
+    dispatcher.instance_variable_set(:@legacy_layout_projects, {})
+    healer = dispatcher.instance_variable_get(:@stale_agent_healer)
+    healer.define_singleton_method(:retry_assessment) do |*, **|
+      { safe: true, due: false, retry_at: T0 + 90, safety_reason: nil }
+    end
+    item = dispatcher.send(
+      :row_pending_item,
+      row(slug: "retry", marker: "error", action: "error"), now: T0
+    )
+    assert_equal [ "waiting_external", "retry_cooldown", T0 + 90 ],
+                 item.values_at("bucket", "reason", "next_check_at")
+  end
+
+  def test_malformed_project_checkpoint_does_not_stop_other_daemon_projects
+    broken = row(project: "p1", slug: "broken")
+    healthy = row(project: "p2", slug: "healthy")
+    dispatcher, supervisor, controller, logger = make_dispatcher(rows: [ broken, healthy ])
+    original = controller.method(:can_dispatch?)
+    controller.define_singleton_method(:can_dispatch?) do |project:, **options|
+      if project == "p1"
+        raise Hive::OneShot::ScheduleState::StateError.new(
+          "malformed", code: "checkpoint_invalid"
+        )
+      end
+      original.call(project: project, **options)
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ "healthy" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
+    assert logger.events.any? { |name, attrs|
+      name == :blocked && attrs[:reason] == "checkpoint_invalid" && attrs[:project] == "p1"
+    }
+  end
+
+  def test_one_shot_queue_projection_honors_capacity_and_recovery_deadlines
+    dispatcher, _supervisor, controller = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ]
+    )
+    request = Q::Request.new(
+      request_id: "queued", created_at: T0, project: "p1", slug: "queued",
+      argv: %w[hive run queued], requestor: "web"
+    )
+    controller.define_singleton_method(:can_dispatch?) { |**| :global_cap }
+    item = dispatcher.send(:dispatch_request_pending_item, request, row: nil, now: T0)
+    assert_equal [ "waiting_external", "global_cap", T0 + 30 ],
+                 item.values_at("bucket", "reason", "next_check_at")
+
+    recovery = request.with(
+      request_id: "recovery", trigger: "recovery",
+      recovery: {
+        "phase" => "admitted", "next_eligible_at" => (T0 + 120).iso8601(6)
+      }
+    )
+    item = dispatcher.send(
+      :dispatch_request_pending_item, recovery, row: row(slug: "queued"), now: T0
+    )
+    assert_equal [ "waiting_external", "recovery_cooldown", T0 + 120 ],
+                 item.values_at("bucket", "reason", "next_check_at")
+
+    missing = recovery.with(recovery: recovery.recovery.merge("next_eligible_at" => nil))
+    item = dispatcher.send(:dispatch_request_pending_item, missing, row: nil, now: T0)
+    assert_equal [ "waiting_operator", "recovery_observation_unavailable" ],
+                 item.values_at("bucket", "reason")
+
+    invalid = row(slug: "queued", task_history_invalid: true)
+    item = dispatcher.send(:dispatch_request_pending_item, request, row: invalid, now: T0)
+    assert_equal [ "waiting_operator", "task_history_invalid" ],
+                 item.values_at("bucket", "reason")
+
+    blocked = row(slug: "queued", blocked: true, blocked_by: "parent")
+    item = dispatcher.send(:dispatch_request_pending_item, request, row: blocked, now: T0)
+    assert_equal [ "waiting_external", "dependency_blocked" ],
+                 item.values_at("bucket", "reason")
+
+    admission_error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_task_missing", offending_ref: "parent",
+      safe_correction: "repair dependency"
+    )
+    admission_blocked = row(slug: "queued", blocked: true, admission_error: admission_error)
+    item = dispatcher.send(
+      :dispatch_request_pending_item, request, row: admission_blocked, now: T0
+    )
+    assert_equal [ "waiting_operator", "admission_error" ],
+                 item.values_at("bucket", "reason")
+
+    controller.define_singleton_method(:running_task?) { |**| true }
+    item = dispatcher.send(:dispatch_request_pending_item, request, row: nil, now: T0)
+    assert_equal [ "waiting_external", "in_flight" ],
+                 item.values_at("bucket", "reason")
   end
 
   def test_one_shot_completion_and_scope_helpers_preserve_target_evidence

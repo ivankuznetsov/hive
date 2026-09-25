@@ -103,6 +103,7 @@ module Hive
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
                      project_ownership: nil,
+                     project_liveness: nil,
                      scope_projects: nil,
                      runtime_ready_callback: nil,
                      clock: nil,
@@ -136,6 +137,7 @@ module Hive
         @clock = clock
         @module_runtime = module_runtime
         @project_ownership = project_ownership
+        @project_liveness = project_liveness
         @scope_projects = if scope_projects
           Array(scope_projects).map(&:to_s).to_h { |name| [ name, true ] }.freeze
         end
@@ -412,7 +414,12 @@ module Hive
         # intake, so no command-side producer can become a second dispatcher.
         begin
           module_options = { now: now, admission_open: -> { admission_open? } }
-          module_options[:projects] = @scope_projects.keys if scoped_execution?
+          module_projects = if scoped_execution?
+            @scope_projects.keys
+          elsif @project_ownership
+            @project_ownership.owned_projects
+          end
+          module_options[:projects] = module_projects if module_projects
           @module_runtime&.tick(**module_options)&.each do |module_result|
             next if module_result.fetch(:status) == :idle
             @logger.event(:module_runtime, **module_result)
@@ -530,6 +537,7 @@ module Hive
         @one_shot_ran = []
         recover_dispatch_claims(now: now)
         tick(now: now)
+        raise @one_shot_failure if @one_shot_failure.is_a?(Exception)
         raise Hive::Error, @one_shot_failure if @one_shot_failure
 
         loop do
@@ -538,12 +546,13 @@ module Hive
           enforce_child_timeouts(now: current)
           raise Hive::Error, "attempt reconciliation failed while draining" unless
             reconcile_attempts(now: current)
-          break unless @supervisor.in_flight?(project: project) || live_attempt?(project)
+          break unless project_worker_live?(project)
 
           sleeper.call([ @fast_poll_sec.to_f, 0.25 ].min)
         end
         finalize_one_shot_runs
-        { ran: @one_shot_ran.dup, items: one_shot_readiness(project: project), safe_to_stop: true }
+        { ran: @one_shot_ran.dup, items: one_shot_readiness(project: project),
+          safe_to_stop: !project_worker_live?(project) }
       rescue Interrupt, SignalException
         entries = @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
         record_completed(Array(entries), now: Time.now.utc)
@@ -556,7 +565,7 @@ module Hive
           @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
         end
         { ran: [], items: one_shot_readiness(project: project, now: now),
-          safe_to_stop: !@supervisor.in_flight?(project: project) && !live_attempt?(project) }
+          safe_to_stop: !project_worker_live?(project) }
       end
 
       # A fast tick is intentionally task-local. It refreshes only rows whose
@@ -745,6 +754,11 @@ module Hive
         end
       end
 
+      def project_worker_live?(project)
+        @supervisor.in_flight?(project: project) || live_attempt?(project) ||
+          (@project_liveness && !@project_liveness.safe_to_stop?)
+      end
+
       def finalize_one_shot_runs
         @one_shot_ran.each do |run|
           attempt_id = run.dig("details", "attempt_id")
@@ -756,11 +770,24 @@ module Hive
       def one_shot_readiness(project:, now: (@clock ? @clock.call.utc : Time.now.utc))
         result = @status_consumer.fetch
         raise Hive::Error, "status observation failed: #{result.error}" unless result.ok
+        unless Array(result.projects).any? { |observed| observed.name.to_s == project.to_s }
+          raise Hive::Error, "status observation failed for project #{project}"
+        end
 
         result = scope_status_result(result)
+        refresh_legacy_layout_projects(result.projects)
+        project_observation = result.projects.find do |observed|
+          observed.name.to_s == project.to_s
+        end
         queue = dispatch_repository.pending(state_home: dispatch_request_state_home)
           .select { |request| request.project.to_s == project.to_s }
-        items = queue.map { |request| dispatch_request_pending_item(request) }
+        rows_by_slug = result.rows.to_h { |row| [ row.slug.to_s, row ] }
+        items = queue.map do |request|
+          dispatch_request_pending_item(
+            request, row: rows_by_slug[request.slug.to_s], now: now,
+            project_observation: project_observation
+          )
+        end
         active = active_attempts_for(project)
         active_slugs = active.to_h { |attempt| [ attempt["task_slug"].to_s, true ] }
         items.concat(active.map { |attempt| active_attempt_pending_item(attempt) })
@@ -769,6 +796,9 @@ module Hive
 
           item = row_pending_item(row, now: now)
           items << item if item
+        end
+        if @module_runtime&.respond_to?(:readiness)
+          items.concat(@module_runtime.readiness(project: project, now: now))
         end
         items.uniq { |item| item.fetch("id") }
       end
@@ -780,9 +810,93 @@ module Hive
         end
       end
 
-      def dispatch_request_pending_item(request)
-        pending_item("runnable_now", "dispatch:request:#{request.request_id}",
-                     "queued_dispatch_request", condition: nil)
+      def dispatch_request_pending_item(request, row:, now:, project_observation: nil)
+        id = "dispatch:request:#{request.request_id}"
+        unless project_enabled?(request.project) || explicit_action_recovery?(request)
+          return pending_item("waiting_operator", id, "project_disabled",
+                              condition: operator_condition(row || request))
+        end
+        if @legacy_layout_projects.key?(request.project)
+          return pending_item("waiting_operator", id, "legacy_layout",
+                              condition: operator_condition(row || request))
+        end
+        if row && task_history_invalid_row?(row)
+          return pending_item("waiting_operator", id, "task_history_invalid",
+                              condition: operator_condition(row))
+        end
+        if request.recovery.is_a?(Hash)
+          if stale_recovery_request?(
+            request, row, project_observation: project_observation
+          )
+            return pending_item("waiting_operator", id, "stale_task_identity",
+                                condition: operator_condition(row || request))
+          end
+          unless row
+            return pending_item("waiting_operator", id, "recovery_observation_unavailable",
+                                condition: operator_condition(request))
+          end
+          blocked_reason = request.recovery["blocked_reason"].to_s
+          unless blocked_reason.empty?
+            return pending_item(
+              "waiting_operator", id, blocked_reason,
+              condition: operator_condition(row)
+            )
+          end
+          lifecycle = recovery_lifecycle_pending_item(request, row: row, now: now, id: id)
+          return lifecycle if lifecycle
+        end
+        if dependency_gated_request?(request) && row&.admission_error
+          return pending_item("waiting_operator", id, "admission_error",
+                              condition: operator_condition(row))
+        end
+        if dependency_gated_request?(request) && row&.blocked == true
+          bucket = row.blocked_by ? "waiting_external" : "waiting_operator"
+          condition = if row.blocked_by
+            { "kind" => "dependency_completed", "task" => row.slug,
+              "dependency" => row.blocked_by }
+          else
+            operator_condition(row)
+          end
+          return pending_item(bucket, id, "dependency_blocked", condition: condition)
+        end
+        if @controller.running_task?(project: request.project, slug: request.slug)
+          return pending_item(
+            "waiting_external", id, "in_flight",
+            condition: { "kind" => "task_changed", "task" => request.slug }
+          )
+        end
+
+        gate = @controller.can_dispatch?(
+          project: request.project, slug: request.slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(request.project),
+          mutate: !@dry_run
+        )
+        gate_pending_item(row || request, gate, now: now, id: id,
+                          eligible_reason: "queued_dispatch_request")
+      end
+
+      def recovery_lifecycle_pending_item(request, row:, now:, id:)
+        receipt = @recovery_coordinator.receipt_for_request(request, now: now)
+        return nil if receipt.status == "queued" && %w[admitted cleared].include?(receipt.phase)
+
+        if %w[cooldown running].include?(receipt.status)
+          deadline = receipt.next_eligible_at && Time.iso8601(receipt.next_eligible_at)
+          condition = if receipt.status == "running"
+            { "kind" => "attempt_completed", "attempt" => receipt.attempt_id }
+          else
+            time_condition(deadline, :recovery)
+          end
+          return pending_item(
+            "waiting_external", id, "recovery_#{receipt.status}",
+            next_check_at: deadline, condition: condition
+          )
+        end
+
+        pending_item(
+          "waiting_operator", id, receipt.reason || "recovery_#{receipt.status}",
+          condition: operator_condition(row)
+        )
       end
 
       def active_attempt_pending_item(attempt)
@@ -800,11 +914,25 @@ module Hive
                             "task_history_invalid", condition: operator_condition(row)) if
           task_history_invalid_row?(row)
         return nil if row.action.nil? || row.action == "archived"
+        unless project_enabled?(row.project)
+          return pending_item("waiting_operator", "dispatch:task:#{row.slug}",
+                              "project_disabled", condition: operator_condition(row))
+        end
+        if @legacy_layout_projects.key?(row.project)
+          return pending_item("waiting_operator", "dispatch:task:#{row.slug}",
+                              "legacy_layout", condition: operator_condition(row))
+        end
+        return retry_pending_item(row, now: now) if retryable_error_row?(row)
 
         decision = one_shot_policy_decision(row, now: now)
         case decision
         when :dispatch
-          gate = @controller.can_dispatch?(project: row.project, slug: row.slug, now: now)
+          gate = @controller.can_dispatch?(
+            project: row.project, slug: row.slug, now: now,
+            external_global_count: @external_active_agent_total,
+            external_project_count: external_active_agent_count_for(row.project),
+            mutate: !@dry_run
+          )
           gate_pending_item(row, gate, now: now)
         when :wait_for_debounce
           due = row.state_file_mtime && row.state_file_mtime + @edit_debounce_sec
@@ -833,6 +961,33 @@ module Hive
         end
       end
 
+      def retry_pending_item(row, now:)
+        assessment = @stale_agent_healer.retry_assessment(row, now: now)
+        id = "dispatch:task:#{row.slug}"
+        if row.live_task_lock == true
+          return pending_item(
+            "waiting_external", id, "retry_in_flight",
+            condition: { "kind" => "task_changed", "task" => row.slug }
+          )
+        end
+        unless assessment[:safe]
+          if assessment[:safety_reason].to_s.start_with?("inspection failed:")
+            raise Hive::Error,
+                  "automatic recovery observation failed: #{assessment[:safety_reason]}"
+          end
+          return pending_item("waiting_operator", id, "retry_safety_blocked",
+                              condition: operator_condition(row))
+        end
+        if assessment[:due]
+          return pending_item("runnable_now", id, "retry_pending", condition: nil)
+        end
+
+        deadline = assessment[:retry_at]
+        pending_item("waiting_external", id, "retry_cooldown",
+                     next_check_at: deadline,
+                     condition: time_condition(deadline, :recovery))
+      end
+
       def one_shot_policy_decision(row, now:)
         answers = brainstorm_answer_state(row)
         Policy.decide(
@@ -846,19 +1001,20 @@ module Hive
         )
       end
 
-      def gate_pending_item(row, gate, now:)
-        return pending_item("runnable_now", "dispatch:task:#{row.slug}", "eligible",
-                            condition: nil) if %i[ok project_cap].include?(gate)
-        if %i[global_cap cooldown daily_cap].include?(gate)
-          due = if gate == :global_cap
+      def gate_pending_item(row, gate, now:, id: "dispatch:task:#{row.slug}",
+                            eligible_reason: "eligible")
+        return pending_item("runnable_now", id, eligible_reason,
+                            condition: nil) if gate == :ok
+        if %i[global_cap project_cap cooldown daily_cap].include?(gate)
+          due = if %i[global_cap project_cap].include?(gate)
             now + @poll_interval_sec
           else
             @controller.next_check_at(project: row.project, slug: row.slug, gate: gate, now: now)
           end
-          return pending_item("waiting_external", "dispatch:task:#{row.slug}", gate.to_s,
+          return pending_item("waiting_external", id, gate.to_s,
                               next_check_at: due, condition: time_condition(due, gate))
         end
-        pending_item("waiting_operator", "dispatch:task:#{row.slug}", gate.to_s,
+        pending_item("waiting_operator", id, gate.to_s,
                      condition: operator_condition(row))
       end
 
@@ -2539,7 +2695,16 @@ module Hive
 
           project_key = row.project.to_s
           capacity_fence = global_fence || project_fences[project_key]
-          outcome = handle_row(row, now: now, capacity_fence: capacity_fence)
+          outcome = begin
+            handle_row(row, now: now, capacity_fence: capacity_fence)
+          rescue Hive::OneShot::ScheduleState::StateError => error
+            @one_shot_failure ||= error if scoped_execution?
+            @logger.event(
+              :blocked, project: row.project, slug: row.slug, stage: row.stage,
+              reason: error.code, message: error.message
+            )
+            next
+          end
           if %i[dispatched in_flight attempt_terminal_replay task_source_changed].include?(outcome)
             @advance_rows_by_key.delete(task_key(row))
           end

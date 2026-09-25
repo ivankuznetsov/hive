@@ -64,6 +64,11 @@ dispatch-baseline updates. It does not run Patrol, Architecture Patrol, daily
 digests, update checks, or another project's work, and it does not sleep while
 waiting for a future PR or CI change. `--once --dry-run` observes policy and
 live work without recovery, claims, launches, or checkpoint writes.
+The readiness projection applies the same project-enable, legacy-layout,
+dependency, recovery, capacity, cooldown, and in-flight gates as admission. It
+also inventories module event backlogs, retrying runs, and recurring schedule
+deadlines. Stop safety covers durable attempts and identity-verified legacy
+task workers, not only children launched by the current pass.
 
 All four scheduler entry points (`patrol`, `refactor-patrol`, `babysit`, and
 `daemon`) emit `hive-one-shot.v1`. `pending` separates `runnable_now`,

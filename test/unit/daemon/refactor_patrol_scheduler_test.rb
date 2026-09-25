@@ -1536,6 +1536,42 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_readiness_preserves_unready_classification_retry_and_claim_deadlines
+    with_project do |_dir, entry, store|
+      records = [
+        {
+          "occurrence_id" => "due", "status" => "pending", "materialization" => nil,
+          "claim" => nil, "retry_at" => nil
+        },
+        {
+          "occurrence_id" => "retry", "status" => "retry_wait", "materialization" => nil,
+          "claim" => nil, "retry_at" => (T0 + 60).iso8601(6)
+        },
+        {
+          "occurrence_id" => "claimed", "status" => "pending", "materialization" => nil,
+          "claim" => { "expires_at" => (T0 + 120).iso8601(6) }, "retry_at" => nil
+        }
+      ]
+      classifier = Object.new
+      classifier.define_singleton_method(:each_record) { records.each }
+      active = scheduler(entry, store, classifier_factory: ->(*) { classifier })
+      candidates = [ {
+        action_phase: :classification, job_id: "classification-due",
+        classification_occurrence_id: "due"
+      } ]
+
+      items = active.readiness(project: "demo", now: T0, candidates: candidates)
+
+      assert_equal %w[
+        architecture:classification:due
+        architecture:classification:retry
+        architecture:classification:claimed
+      ], items.map { |item| item.fetch("id") }
+      assert_equal [ T0 + 60, T0 + 120 ],
+                   items.drop(1).map { |item| item.fetch("next_check_at") }
+    end
+  end
+
   private
 
   def with_project

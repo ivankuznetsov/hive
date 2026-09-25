@@ -172,6 +172,50 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_readiness_inventories_event_backlog_and_future_schedule_without_advancing_cursor
+    with_runtime(schedules: [ "0 * * * *" ]) do |runtime|
+      daemon = runtime.fetch(:daemon_runtime)
+      cursor = File.join(
+        runtime.fetch(:store).hive_state_path,
+        "module-runtime", "daemon-event-cursor.json"
+      )
+
+      before = daemon.readiness(project: "demo", now: NOW + 1)
+
+      assert_includes before.map { |item| item.fetch("reason") }, "module_event_pending"
+      assert_includes before.map { |item| item.fetch("reason") }, "module_schedule_due"
+      refute_path_exists cursor
+
+      daemon.tick(now: NOW + 1)
+      after = daemon.readiness(project: "demo", now: NOW + 2)
+      schedule = after.find { |item| item.fetch("reason") == "module_schedule" }
+      assert_equal "waiting_external", schedule.fetch("bucket")
+      assert_equal Time.utc(2026, 7, 22, 11, 0, 0), schedule.fetch("next_check_at")
+    end
+  end
+
+  def test_readiness_preserves_deferred_module_retry_deadline
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      path = Dir.glob(
+        File.join(runtime.fetch(:store).runtime_path("demo"), "runs", "*.json")
+      ).fetch(0)
+      run = JSON.parse(File.binread(path))
+      run["status"] = "retrying"
+      run["updated_at"] = NOW.utc.iso8601(6)
+      File.binwrite(path, Hive::WorkflowPackage::CanonicalJSON.generate(run))
+
+      item = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + 1
+      ).find { |candidate| candidate.fetch("reason") == "module_retry_cooldown" }
+
+      assert_equal NOW + Hive::Modules::DaemonRuntime::RETRY_DELAY_SEC,
+                   item.fetch("next_check_at")
+    end
+  end
+
   def test_shutdown_closes_later_hook_admission_without_advancing_the_event_cursor
     hooks = %w[first second].map do |id|
       {

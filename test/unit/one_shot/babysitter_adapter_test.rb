@@ -20,6 +20,15 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  class InterruptingGuard
+    def synchronize = raise Interrupt, "stopping"
+  end
+
+  class Liveness
+    def initialize(safe = true) = @safe = safe
+    def safe_to_stop? = @safe
+  end
+
   class Tick
     attr_reader :arguments
 
@@ -71,6 +80,17 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  def test_dry_run_withholds_stop_safety_for_a_live_project_worker
+    with_tmp_dir do |dir|
+      result = adapter(
+        dir, tick: Tick.new(summary(pr(9, :eligible))), dry_run: true,
+        liveness: Liveness.new(false)
+      ).call
+
+      refute result.safe_to_stop?
+    end
+  end
+
   def test_observation_failure_withholds_readiness
     with_tmp_dir do |dir|
       tick = Tick.new(summary.merge(
@@ -92,6 +112,19 @@ class OneShotBabysitterAdapterTest < Minitest::Test
       assert_equal "refused", result.to_h.fetch("status")
       assert_equal "daemon_owned", result.to_h.dig("error", "code")
       assert_nil tick.arguments
+    end
+  end
+
+  def test_interrupt_becomes_unsafe_result
+    with_tmp_dir do |dir|
+      result = adapter(
+        dir, tick: Tick.new(summary), main_guard: InterruptingGuard.new
+      ).call
+
+      assert_equal "error", result.to_h.fetch("status")
+      assert_equal "interrupted", result.to_h.dig("error", "code")
+      refute result.safe_to_stop?
+      assert_schema(result)
     end
   end
 
@@ -133,6 +166,28 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  def test_post_tick_failure_preserves_completed_repairs
+    with_tmp_dir do |dir|
+      result = adapter(
+        dir, tick: Tick.new(summary(pr(8, :success))),
+        config: Hive::Config.deep_merge(
+          Hive::Config.deep_dup(Hive::Config::DEFAULTS),
+          "babysitter" => { "enabled" => true, "interval" => "invalid" }
+        )
+      ).call
+
+      assert_equal "error", result.to_h.fetch("status")
+      assert_equal [ "success" ], result.to_h.fetch("ran").map { |item| item.fetch("outcome") }
+    end
+  end
+
+  def test_unknown_outcome_fails_loudly
+    error = assert_raises(ArgumentError) do
+      Hive::Babysitter::ProjectTick.outcome_class(:new_unclassified_outcome)
+    end
+    assert_match(/unknown babysitter outcome/, error.message)
+  end
+
   def test_default_guards_and_config_loader_are_constructed
     with_tmp_dir do |dir|
       state = File.join(dir, ".hive-state")
@@ -154,7 +209,8 @@ class OneShotBabysitterAdapterTest < Minitest::Test
 
   private
 
-  def adapter(dir, tick:, dry_run: false, main_guard: Guard.new, config: nil)
+  def adapter(dir, tick:, dry_run: false, main_guard: Guard.new, config: nil,
+              liveness: Liveness.new)
     state = File.join(dir, ".hive-state")
     FileUtils.mkdir_p(state)
     Hive::OneShot::BabysitterAdapter.new(
@@ -163,7 +219,7 @@ class OneShotBabysitterAdapterTest < Minitest::Test
         "repository_identity" => "github.com/acme/demo"
       },
       dry_run: dry_run, tick: tick, main_guard: main_guard,
-      babysitter_guard: Guard.new, clock: -> { NOW },
+      babysitter_guard: Guard.new, liveness: liveness, clock: -> { NOW },
       config_loader: ->(*) {
         config || Hive::Config.deep_merge(
           Hive::Config.deep_dup(Hive::Config::DEFAULTS),

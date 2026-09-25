@@ -199,7 +199,7 @@ module Hive
       end
 
       def complete(project:, exit_code:, envelope: nil, now: Time.now)
-        @pending.delete(project)
+        pending = @pending.delete(project)
         if exit_code == Hive::ExitCodes::SUCCESS
           @failures.delete(project)
         else
@@ -215,16 +215,16 @@ module Hive
           )
           @failures[project] = { count: count, next_eligible_at: now + interval }
         end
-        entry = Array(@registry.call).find { |item| item.fetch("name") == project }
+        entry = pending && pending[:entry]
         persist_gates(entry, now: now) if entry
       end
 
       # Release process-local admission when the dispatcher gates a candidate
       # before spawning it.
       def cancel(project:)
-        @pending.delete(project)
+        pending = @pending.delete(project)
         @next_check_at.delete(project)
-        entry = Array(@registry.call).find { |item| item.fetch("name") == project }
+        entry = pending && pending[:entry]
         persist_gates(entry, now: Time.now) if entry
       end
 

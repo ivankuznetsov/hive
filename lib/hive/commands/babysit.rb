@@ -149,7 +149,13 @@ module Hive
         resolve_once_project_name
         entries = @all ? Hive::Config.registered_projects : [ @once_entry ]
         started = Time.now.utc
-        reports = entries.map { |entry| one_shot_adapter(entry).call }
+        reports = entries.map do |entry|
+          if @all
+            one_shot_report(entry)
+          else
+            one_shot_adapter(entry).call
+          end
+        end
         result = if @all
           Hive::OneShot::Result.aggregate(
             component: :babysitter, reports: reports, started_at: started,
@@ -166,6 +172,19 @@ module Hive
         return @one_shot_factory.call(entry) if @one_shot_factory
 
         Hive::OneShot::BabysitterAdapter.new(entry: entry, dry_run: @dry_run)
+      end
+
+      def one_shot_report(entry)
+        started = Time.now.utc
+        one_shot_adapter(entry).call
+      rescue StandardError => error
+        Hive::OneShot::Result.error(
+          component: :babysitter, project: entry.fetch("name"),
+          started_at: started, finished_at: Time.now.utc,
+          code: error.respond_to?(:code) ? error.code : "observation_failed",
+          message: error.message,
+          exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
+        )
       end
 
       def resolve_once_project_name

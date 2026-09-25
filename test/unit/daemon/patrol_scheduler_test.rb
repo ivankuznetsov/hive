@@ -625,4 +625,25 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     sched.instance_variable_set(:@failures, "p1" => { next_eligible_at: T0 + 10 })
     assert sched.send(:backed_off?, "p1", T0)
   end
+
+  def test_complete_and_cancel_persist_through_reserved_entry_without_registry_reread
+    entry = { "name" => "p1", "path" => "/tmp/p1", "hive_state_path" => "/tmp/p1/state" }
+    updates = []
+    schedule_state = Object.new
+    schedule_state.define_singleton_method(:update) do |component, now:, &block|
+      updates << [ component, now ]
+      block.call({})
+    end
+    sched = Hive::Daemon::PatrolScheduler.new(
+      registry: -> { raise "registry must not be reread" },
+      schedule_state_factory: ->(_entry) { schedule_state }
+    )
+
+    sched.instance_variable_get(:@pending)["p1"] = { entry: entry, started_at: T0 }
+    sched.complete(project: "p1", exit_code: Hive::ExitCodes::SUCCESS, now: T0)
+    sched.instance_variable_get(:@pending)["p1"] = { entry: entry, started_at: T0 }
+    sched.cancel(project: "p1")
+
+    assert_equal 2, updates.size
+  end
 end

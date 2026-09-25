@@ -29,11 +29,13 @@ module Hive
 
       attr_reader :root, :events_root
 
-      def initialize(root:)
+      def initialize(root:, create_directories: true)
         @root = File.expand_path(root)
         @events_root = File.join(@root, "events")
-        FileUtils.mkdir_p(@events_root, mode: 0o700)
-        File.chmod(0o700, @events_root)
+        if create_directories
+          FileUtils.mkdir_p(@events_root, mode: 0o700)
+          File.chmod(0o700, @events_root)
+        end
       rescue SystemCallError => e
         raise EventLedgerError, "module event ledger is unavailable: #{e.message}"
       end
@@ -109,6 +111,31 @@ module Hive
         raise EventLedgerError, "module event cursor is malformed"
       end
 
+      # Read-only projection used by one-shot readiness. Unlike `events_after`,
+      # this never creates a lock file or repairs the derived index.
+      def inspect_events_after(cursor)
+        offset = Integer(cursor)
+        raise EventLedgerError, "module event cursor is malformed" if offset.negative?
+
+        index = inspect_index
+        ids = index.fetch("event_ids")
+        EventPage.new(
+          events: ids.drop(offset).map { |event_id| fetch_unlocked(event_id) }.freeze,
+          cursor: ids.length
+        )
+      rescue ArgumentError, TypeError
+        raise EventLedgerError, "module event cursor is malformed"
+      end
+
+      def inspect_latest_schedule(schedule, target_module: nil)
+        value = inspect_index.fetch("latest_schedules")[
+          schedule_index_key(schedule, target_module)
+        ]
+        value && Time.iso8601(value)
+      rescue ArgumentError
+        raise EventLedgerError, "module event schedule index is malformed"
+      end
+
       def latest_schedule(schedule, target_module: nil)
         value = with_lock do
           index_unlocked.fetch("latest_schedules")[
@@ -121,6 +148,28 @@ module Hive
       end
 
       private
+
+      def inspect_index
+        return { "event_ids" => [], "latest_schedules" => {} } unless File.directory?(events_root)
+
+        paths = Dir.glob(File.join(events_root, "evt-*.json")).sort
+        return { "event_ids" => [], "latest_schedules" => {} } if paths.empty? && !File.file?(index_path)
+
+        bytes = File.binread(index_path)
+        index = JSON.parse(bytes)
+        expected = paths.map { |path| File.basename(path, ".json") }
+        valid = bytes == canonical(index) && index.is_a?(Hash) &&
+                index.keys.sort == %w[event_ids latest_schedules schema_version] &&
+                index["schema_version"] == 1 && index["event_ids"].is_a?(Array) &&
+                index["event_ids"].uniq == index["event_ids"] &&
+                index["event_ids"].sort == expected &&
+                index["latest_schedules"].is_a?(Hash)
+        raise EventLedgerError, "module event ledger index is malformed" unless valid
+
+        index
+      rescue JSON::ParserError, EncodingError, SystemCallError, IOError
+        raise EventLedgerError, "module event ledger index is malformed"
+      end
 
       def update_index_unlocked(event, index)
         index["event_ids"] << event.fetch("event_id")

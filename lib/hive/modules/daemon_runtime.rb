@@ -1,4 +1,5 @@
 require "hive/attempts/configured_dispatcher"
+require "digest"
 require "json"
 require "hive/atomic_file"
 require "hive/config"
@@ -44,7 +45,143 @@ module Hive
         end
       end
 
+      # Side-effect-free inventory for the dispatch one-shot contract. It
+      # deliberately uses ManagedStore/EventLedger inspection APIs so a
+      # scheduler preview cannot reconcile transactions, create locks, or
+      # advance an event cursor.
+      def readiness(project:, now: @clock.call)
+        entry = Array(@registry.call).find do |candidate|
+          candidate.fetch("name").to_s == project.to_s
+        end
+        return [] unless entry
+
+        store = Hive::ModulePackage::ManagedStore.new(entry.fetch("hive_state_path"))
+        selections = store.inspect_selections(include_tombstones: true)
+        return [] if selections.empty?
+        installed_selections = selections.select { |selection| selection.fetch("installed") }
+
+        runtime_root = File.join(entry.fetch("hive_state_path"), "module-runtime")
+        ledger = EventLedger.new(root: runtime_root, create_directories: false)
+        items = readiness_runs(store, selections, now)
+        items.concat(readiness_setup_outboxes(store, selections))
+        items.concat(readiness_event_backlog(store, installed_selections, ledger, runtime_root))
+        items.concat(readiness_schedules(store, installed_selections, ledger, now))
+        items.uniq { |item| item.fetch("id") }
+      rescue Hive::Error, SystemCallError, IOError, JSON::ParserError, KeyError => error
+        raise Hive::ConfigError, "module readiness is unavailable: #{error.message}"
+      end
+
       private
+
+      def readiness_runs(store, selections, now)
+        selections.flat_map do |selection|
+          module_name = selection.fetch("name")
+          Dir.glob(File.join(store.runtime_path(module_name), "runs", "*.json")).sort.filter_map do |path|
+            run = JSON.parse(File.binread(path))
+            status = run.fetch("status")
+            next unless %w[admitting running retrying].include?(status)
+
+            id = "dispatch:module:run:#{run.fetch('run_id')}"
+            if status == "retrying"
+              deadline = Time.iso8601(run.fetch("updated_at")) + RETRY_DELAY_SEC
+              if deadline > now
+                readiness_item(
+                  "waiting_external", id, "module_retry_cooldown",
+                  next_check_at: deadline,
+                  condition: { "kind" => "time_due", "deadline" => deadline.utc.iso8601(6),
+                               "resource" => "module_retry" }
+                )
+              else
+                readiness_item("runnable_now", id, "module_retry_due")
+              end
+            else
+              attempt_id = run["attempt_id"]
+              condition = if attempt_id
+                { "kind" => "attempt_completed", "attempt" => attempt_id }
+              else
+                { "kind" => "task_changed", "task" => run.fetch("run_id") }
+              end
+              readiness_item(
+                "waiting_external", id, "module_attempt_running",
+                condition: condition
+              )
+            end
+          end
+        end
+      end
+
+      def readiness_setup_outboxes(store, selections)
+        selections.filter_map do |selection|
+          intent = store.inspect_setup_outbox(selection.fetch("name"))
+          next unless intent
+
+          readiness_item(
+            "runnable_now",
+            "dispatch:module:setup:#{intent.fetch('idempotency_key')}",
+            "module_setup_pending"
+          )
+        end
+      end
+
+      def readiness_event_backlog(store, selections, ledger, runtime_root)
+        cursor = read_event_cursor(File.join(runtime_root, "daemon-event-cursor.json"))
+        events = ledger.inspect_events_after(cursor).events
+        events.flat_map do |event|
+          selections.flat_map do |selection|
+            module_name = selection.fetch("name")
+            configuration = store.configuration(
+              module_name, selection.dig("active", "configuration_digest")
+            )
+            configuration.contract.fetch("hooks").filter_map do |hook|
+              next unless EventScope.matches?(event: event, selection: selection, hook: hook)
+
+              readiness_item(
+                "runnable_now",
+                "dispatch:module:event:#{event.fetch('event_id')}:#{module_name}:#{hook.fetch('id')}",
+                "module_event_pending"
+              )
+            end
+          end
+        end
+      end
+
+      def readiness_schedules(store, selections, ledger, now)
+        selections.select { |selection| selection.fetch("enabled") }.flat_map do |selection|
+          module_name = selection.fetch("name")
+          configuration = store.configuration(
+            module_name, selection.dig("active", "configuration_digest")
+          )
+          configuration.contract.fetch("hooks").flat_map do |hook|
+            hook.fetch("schedules").map do |schedule|
+              baseline = ledger.inspect_latest_schedule(schedule, target_module: module_name) ||
+                         Time.iso8601(selection.fetch("high_water_at"))
+              due = @planner.due(schedule: schedule, after: baseline, now: now)
+              identity = Digest::SHA256.hexdigest("#{module_name}\0#{schedule}")[0, 24]
+              id = "dispatch:module:schedule:#{identity}"
+              if due
+                readiness_item("runnable_now", id, "module_schedule_due")
+              else
+                deadline = @planner.next_after(schedule: schedule, now: now)
+                readiness_item(
+                  "waiting_external", id, "module_schedule",
+                  next_check_at: deadline,
+                  condition: deadline && {
+                    "kind" => "time_due", "deadline" => deadline.utc.iso8601(6),
+                    "resource" => "module_schedule"
+                  }
+                )
+              end
+            end
+          end
+        end
+      end
+
+      def readiness_item(bucket, id, reason, next_check_at: nil, condition: nil)
+        {
+          "bucket" => bucket, "id" => id, "component" => "dispatch", "reason" => reason,
+          "next_check_at" => next_check_at, "condition" => condition
+        }
+      end
 
       def tick_project(entry, now:, admission_open:)
         return result(entry, :idle, 0, 0) unless admission_open?(admission_open)

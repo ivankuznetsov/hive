@@ -192,7 +192,7 @@ module Hive
       rescue StandardError => e
         release_manual_claim("command_error")
         wrapped = Hive::InternalError.wrap(e)
-        emit_error(wrapped)
+        emit_error(wrapped) unless @once
         raise wrapped
       end
 

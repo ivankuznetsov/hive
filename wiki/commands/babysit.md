@@ -73,7 +73,8 @@ still coexist because their service loops retain separate execution guards.
 
 `--once --dry-run` performs the real read-only observation but starts no repair
 and reports no `ran` entries. Eligible unadmitted repairs remain
-`runnable_now`; observed live workers keep `safe_to_stop` false.
+`runnable_now`; green PRs and queued checks retain their external-wait state,
+and observed live workers keep `safe_to_stop` false.
 
 ## Project Contract
 

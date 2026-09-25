@@ -27,7 +27,7 @@ module Hive
         @guard_factory = guard_factory || lambda do |entry|
           Hive::OneShot::ProjectGuard.new(
             state_root: entry.fetch("hive_state_path"), project: entry.fetch("name"),
-            kind: :babysitter, lock_name: "babysitter-execution.lock"
+            kind: :babysitter, lock_name: Hive::Babysitter::ProjectTick::EXECUTION_LOCK_NAME
           )
         end
       end

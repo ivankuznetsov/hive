@@ -48,18 +48,6 @@ module Hive
         end
       end
 
-      def delete(component, now: Time.now.utc)
-        with_lock do
-          document = load_document
-          removed = document.fetch("components").delete(component.to_s)
-          if removed
-            document["updated_at"] = now.utc.iso8601(6)
-            persist(document)
-          end
-          !!removed
-        end
-      end
-
       private
 
       def with_lock
@@ -94,8 +82,6 @@ module Hive
         end
         document
       rescue JSON::ParserError, ArgumentError, KeyError, TypeError => error
-        raise error if error.is_a?(StateError)
-
         raise StateError.new("scheduler checkpoint is corrupt: #{error.message}", code: "checkpoint_corrupt")
       end
 

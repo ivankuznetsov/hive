@@ -16,9 +16,12 @@ module Hive
     module ProjectTick
       module_function
 
-      def run(project_entry, dry_run:, logger:, inflight:, admission_open: -> { true })
+      def run(project_entry, dry_run:, logger:, inflight:, admission_open: -> { true },
+              observe_only: false, detailed: false)
         started = Time.now
-        return empty_summary unless admission_open?(admission_open)
+        unless admission_open?(admission_open)
+          return report(empty_summary.merge(interrupted: true), detailed)
+        end
 
         # Re-read config here (rather than accepting the dispatcher's cached
         # cfg) so a per-tick edit to babysitter.* takes effect on the next
@@ -26,7 +29,7 @@ module Hive
         cfg = Hive::Config.load(project_entry.fetch("path"))
         unless cfg.dig("babysitter", "enabled") == true
           logger.event(:project_skipped, project: project_entry["name"], reason: "babysitter_disabled")
-          return empty_summary
+          return report(empty_summary, detailed)
         end
 
         prs = Hive::Gh.list_open_prs(project_entry.fetch("path"), cfg: cfg)
@@ -37,11 +40,26 @@ module Hive
           duration_ms: duration_ms(started),
           count: prs.size
         )
-        return empty_summary unless admission_open?(admission_open)
+        return report(empty_summary.merge(interrupted: true), detailed) unless
+          admission_open?(admission_open)
 
         owned_branches = pipeline_owned_branches(project_entry)
-        selected = select_prs(prs, project_entry, cfg, inflight, owned_branches)
+        observations = []
+        eligible = select_prs(
+          prs, project_entry, cfg, inflight, owned_branches,
+          observations: observations, limit: false
+        )
+        limit = cfg.dig("babysitter", "max_concurrent_prs").to_i
+        selected = eligible.first(limit)
         summary = empty_summary
+        summary[:prs].concat(observations)
+        eligible.drop(limit).each do |pr|
+          summary[:prs] << pr_result(pr, :capacity_deferred)
+        end
+        if observe_only
+          selected.each { |pr| summary[:prs] << pr_result(pr, :eligible) }
+          return report(summary, detailed)
+        end
         interrupted = false
         selected.each do |pr|
           unless admission_open?(admission_open)
@@ -49,6 +67,7 @@ module Hive
             break
           end
 
+          status = nil
           outcome =
             begin
               Hive::Babysitter::PrFixer.run(
@@ -58,7 +77,8 @@ module Hive
                 dry_run: dry_run,
                 logger: logger,
                 inflight: inflight,
-                admission_open: admission_open
+                admission_open: admission_open,
+                detail_sink: ->(value) { status = value }
               )
             rescue StandardError => e
               Hive::Babysitter::Events.emit(
@@ -81,12 +101,14 @@ module Hive
           end
 
           summary[:total] += 1
+          summary[:prs] << pr_result(pr, outcome, status: status)
           case outcome
           when :success, :rebased then summary[:fixed] += 1
           when :already_green, :noop, :dry_run then summary[:untouched] += 1
           when :give_up, :failure, :timeout, :budget_exhausted, :fork_pr, :rebase_conflict then summary[:needs_human] += 1
           end
         end
+        summary[:interrupted] = interrupted
 
         unless interrupted
           Hive::Babysitter::StatusWriter.append(
@@ -97,7 +119,7 @@ module Hive
             needs_human: summary[:needs_human]
           )
         end
-        summary
+        report(summary, detailed)
       rescue Hive::GhError => e
         Hive::Babysitter::Events.emit(
           project: project_entry,
@@ -107,10 +129,22 @@ module Hive
           message: e.message
         )
         logger.event(:fatal, project: project_entry["name"], message: "gh pr list failed: #{e.message}")
-        empty_summary
+        report(
+          empty_summary.merge(error: { code: "github_observation_failed", message: e.message }),
+          detailed
+        )
       end
 
-      def empty_summary = { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
+      def empty_summary
+        { total: 0, fixed: 0, untouched: 0, needs_human: 0, prs: [],
+          error: nil, interrupted: false }
+      end
+
+      def report(summary, detailed)
+        return summary if detailed
+
+        summary.slice(:total, :fixed, :untouched, :needs_human)
+      end
 
       def admission_open?(predicate)
         predicate.call == true
@@ -118,9 +152,9 @@ module Hive
         false
       end
 
-      def select_prs(prs, project_entry, cfg, inflight, owned_branches = Set.new)
+      def select_prs(prs, project_entry, cfg, inflight, owned_branches = Set.new,
+                     observations: nil, limit: true)
         ignored = Array(cfg.dig("babysitter", "labels_ignore")).map { |label| label.to_s.downcase }
-        limit = cfg.dig("babysitter", "max_concurrent_prs").to_i
         prs.filter_map do |pr|
           number = pr["number"]
           # hive-state (git) is the source of truth for ownership: a PR whose
@@ -136,6 +170,7 @@ module Hive
               action: "skipped",
               outcome: "pipeline_owned"
             )
+            observations&.push(pr_result(pr, :pipeline_owned))
             next
           end
 
@@ -159,10 +194,15 @@ module Hive
             )
             next
           end
-          next if inflight.include?(inflight_key(project_entry, number))
+          if inflight.include?(inflight_key(project_entry, number))
+            observations&.push(pr_result(pr, :inflight))
+            next
+          end
 
           pr
-        end.then { |candidates| fair_order(candidates, project_entry) }.first(limit)
+        end.then { |candidates| fair_order(candidates, project_entry) }.then do |rows|
+          limit ? rows.first(cfg.dig("babysitter", "max_concurrent_prs").to_i) : rows
+        end
       end
 
       # Round-robin across open PRs: never-attempted PRs first, then the least
@@ -200,6 +240,24 @@ module Hive
         end
       rescue SystemCallError, IOError
         {}
+      end
+
+      def pr_result(pr, outcome, status: nil)
+        result = {
+          number: pr.fetch("number").to_i, outcome: outcome.to_sym,
+          head_sha: pr["headRefOid"], head_ref: pr["headRefName"], url: pr["url"]
+        }
+        result[:wait] = "checks_pending" if checks_pending?(status)
+        result
+      end
+
+      def checks_pending?(status)
+        Array(status && status["statusCheckRollup"]).any? do |check|
+          next false unless check.is_a?(Hash)
+
+          %w[QUEUED PENDING IN_PROGRESS].include?(check["status"].to_s.upcase) ||
+            %w[PENDING EXPECTED].include?(check["state"].to_s.upcase)
+        end
       end
 
       # Branches owned by a task still moving through the pipeline — read from

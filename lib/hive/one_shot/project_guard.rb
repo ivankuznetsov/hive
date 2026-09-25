@@ -71,7 +71,8 @@ module Hive
         end
       end
 
-      def initialize(state_root:, project:, kind:, process_start_time: Hive::Lock.method(:process_start_time),
+      def initialize(state_root:, project:, kind:, lock_name: LOCK_NAME,
+                     process_start_time: Hive::Lock.method(:process_start_time),
                      process_alive: nil)
         FileUtils.mkdir_p(state_root, mode: 0o700)
         @state_root = File.realpath(state_root)
@@ -81,7 +82,10 @@ module Hive
 
         lock_dir = File.join(@state_root, "scheduler")
         FileUtils.mkdir_p(lock_dir, mode: 0o700)
-        @path = File.join(lock_dir, LOCK_NAME)
+        unless File.basename(lock_name.to_s) == lock_name.to_s && !lock_name.to_s.empty?
+          raise ArgumentError, "invalid project guard lock name"
+        end
+        @path = File.join(lock_dir, lock_name)
         @process_start_time = process_start_time
         @process_alive = process_alive || method(:process_alive?)
         @handle = nil

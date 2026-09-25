@@ -40,6 +40,27 @@ class OneShotProjectGuardTest < Minitest::Test
     end
   end
 
+  def test_babysitter_guard_coexists_with_main_daemon_but_excludes_another_babysitter
+    with_tmp_dir do |root|
+      daemon = guard(root, kind: "daemon").acquire!
+      babysitter = Hive::OneShot::ProjectGuard.new(
+        state_root: root, project: "demo", kind: :babysitter,
+        lock_name: "babysitter-execution.lock"
+      ).acquire!
+
+      error = assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) do
+        Hive::OneShot::ProjectGuard.new(
+          state_root: root, project: "demo", kind: :babysitter,
+          lock_name: "babysitter-execution.lock"
+        ).acquire!
+      end
+      assert_equal "babysitter_owned", error.code
+    ensure
+      babysitter&.release!
+      daemon&.release!
+    end
+  end
+
   def test_unreadable_owner_metadata_fails_closed
     with_tmp_dir do |root|
       holder = guard(root, kind: "daemon").acquire!

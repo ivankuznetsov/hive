@@ -42,12 +42,22 @@ class BabysitterProjectTickTest < Minitest::Test
       logger = make_logger(dir)
 
       with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
-        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, _project, _cfg, **_kwargs|
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, _project, _cfg, **kwargs|
           called << pr["number"]
+          kwargs[:detail_sink]&.call(
+            "statusCheckRollup" => [ { "status" => "QUEUED" } ]
+          )
           :success
         }) do
-          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: true, logger: logger, inflight: Set.new)
-          assert_equal({ total: 2, fixed: 2, untouched: 0, needs_human: 0 }, summary)
+          summary = Hive::Babysitter::ProjectTick.run(
+            project, dry_run: true, logger: logger, inflight: Set.new,
+            detailed: true
+          )
+          assert_equal 2, summary.fetch(:total)
+          assert_equal [ [ 3, :capacity_deferred ], [ 4, :success ], [ 2, :success ] ],
+                       summary.fetch(:prs).map { |row| [ row[:number], row[:outcome] ] }
+          assert_equal %w[checks_pending checks_pending],
+                       summary.fetch(:prs).drop(1).map { |row| row[:wait] }
         end
       end
 

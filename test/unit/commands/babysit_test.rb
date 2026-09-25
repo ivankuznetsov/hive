@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/invoked_binary"
+require "hive/one_shot/result"
 
 class HiveCommandsBabysitTest < Minitest::Test
   include HiveTestHelper
@@ -202,28 +203,65 @@ class HiveCommandsBabysitTest < Minitest::Test
     end
   end
 
-  def test_once_registered_project_runs_one_dispatcher_pass
+  def test_once_registered_project_emits_one_shot_report
     with_tmp_global_config do |home|
       with_tmp_dir do |project|
         data = YAML.safe_load(File.read(File.join(home, "config.yml")))
-        data["registered_projects"] = [ { "name" => "proj", "path" => project } ]
+        data["registered_projects"] = [ {
+          "name" => "proj", "path" => project,
+          "repository_identity" => "github.com/acme/proj"
+        } ]
         File.write(File.join(home, "config.yml"), data.to_yaml)
 
-        dispatcher = FakeDispatcher.new([])
-        captured = nil
-        config = daemon_config
-        with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
-          with_replaced_singleton_method(Hive::Babysitter::Dispatcher, :new, lambda { |**kwargs|
-            captured = kwargs
-            dispatcher
-          }) do
-            Hive::Commands::Babysit.new(nil, "proj", once: true, hive_home: @home).call
-          end
+        report = Hive::OneShot::Result.ok(
+          component: :babysitter, project: "proj", started_at: Time.now,
+          finished_at: Time.now, ran: [], items: [], safe_to_stop: true
+        )
+        selected = nil
+        adapter = Struct.new(:report) { def call = report }.new(report)
+        out, = capture_io do
+          result = Hive::Commands::Babysit.new(
+            nil, "proj", once: true, hive_home: @home,
+            one_shot_factory: ->(entry) { selected = entry; adapter }
+          ).call
+          assert_same report, result
         end
 
-        assert_equal [ :run_forever ], dispatcher.calls
-        assert_equal "proj", captured.fetch(:project_name)
-        assert_equal 1, captured.fetch(:max_ticks)
+        assert_equal "proj", selected.fetch("name")
+        assert_equal report.to_h, JSON.parse(out)
+      end
+    end
+  end
+
+  def test_once_all_retains_routine_refusal_and_vetoes_host_stop
+    with_tmp_global_config do
+      entries = %w[one two].map { |name| { "name" => name, "path" => "/tmp/#{name}" } }
+      now = Time.now
+      reports = {
+        "one" => Hive::OneShot::Result.ok(
+          component: :babysitter, project: "one", started_at: now,
+          finished_at: now, ran: [], items: [], safe_to_stop: true
+        ),
+        "two" => Hive::OneShot::Result.refused(
+          component: :babysitter, project: "two", started_at: now,
+          finished_at: now, code: "daemon_owned", message: "owned",
+          owner: { "kind" => "daemon", "pid" => 42, "process_identity" => "boot:42" }
+        )
+      }
+      factory = ->(entry) { Struct.new(:report) { def call = report }.new(reports.fetch(entry["name"])) }
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { entries }) do
+        out, = capture_io do
+          result = Hive::Commands::Babysit.new(
+            nil, nil, once: true, all: true, one_shot_factory: factory
+          ).call
+          assert_equal Hive::ExitCodes::SUCCESS, result.exit_code
+        end
+        payload = JSON.parse(out)
+        assert_equal "ok", payload.fetch("status")
+        refute payload.fetch("safe_to_stop")
+        refute payload.fetch("host_stop_allowed")
+        assert_equal [ "two" ], payload.fetch("owning_projects").map { |row| row["project"] }
       end
     end
   end

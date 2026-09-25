@@ -98,7 +98,10 @@ class BabysitterDispatcherTest < Minitest::Test
       logger = Hive::Babysitter::Logger.new(path: File.join(dir, "babysitter.log"))
       dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger)
       entries = %w[one two].map do |name|
-        { project: { "name" => name }, cfg: { "babysitter" => { "interval" => "10m" } } }
+        state_root = File.join(dir, name, ".hive-state")
+        FileUtils.mkdir_p(state_root)
+        { project: { "name" => name, "hive_state_path" => state_root },
+          cfg: { "babysitter" => { "interval" => "10m" } } }
       end
       dispatcher.define_singleton_method(:enabled_projects) { entries }
       calls = []

@@ -26,7 +26,8 @@ module Hive
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
                      once: false, all: false, force: false,
-                     hive_home: Hive::Paths.state_home, quiet: false)
+                     hive_home: Hive::Paths.state_home, quiet: false, json: false,
+                     one_shot_factory: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -34,7 +35,8 @@ module Hive
         @once = once
         @all = all
         @force = force
-        @json = false
+        @json = json
+        @one_shot_factory = one_shot_factory
         @hive_home = hive_home
         @quiet = quiet
       end
@@ -143,14 +145,27 @@ module Hive
       end
 
       def run_once
-        project_name = resolve_once_project_name
-        if @all && Hive::Config.registered_projects.empty?
-          puts "babysitter: 0 enabled projects, nothing to do"
-          return
+        require "hive/one_shot/babysitter_adapter"
+        resolve_once_project_name
+        entries = @all ? Hive::Config.registered_projects : [ @once_entry ]
+        started = Time.now.utc
+        reports = entries.map { |entry| one_shot_adapter(entry).call }
+        result = if @all
+          Hive::OneShot::Result.aggregate(
+            component: :babysitter, reports: reports, started_at: started,
+            finished_at: Time.now.utc
+          )
+        else
+          reports.fetch(0)
         end
+        puts result.to_json
+        result
+      end
 
-        dispatcher = build_dispatcher(project_name: project_name, max_ticks: 1)
-        dispatcher.run_forever
+      def one_shot_adapter(entry)
+        return @one_shot_factory.call(entry) if @one_shot_factory
+
+        Hive::OneShot::BabysitterAdapter.new(entry: entry, dry_run: @dry_run)
       end
 
       def resolve_once_project_name
@@ -170,6 +185,7 @@ module Hive
                 "hive babysit --once: unknown project #{@target.inspect} " \
                 "(see `hive status` for the registered set)"
         end
+        @once_entry = entry
         entry["name"]
       end
 

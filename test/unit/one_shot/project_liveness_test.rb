@@ -74,7 +74,7 @@ class OneShotProjectLivenessTest < Minitest::Test
       refute liveness(root, lease_repository: missing).safe_to_stop?
 
       unreadable = LeaseRepository.new([ lease(Process.pid, "recorded") ])
-      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(*) {}) do
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(*) { }) do
         refute liveness(root, lease_repository: unreadable).safe_to_stop?
       end
     end

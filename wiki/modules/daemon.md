@@ -125,6 +125,36 @@ contract. See [[modules/conditions]].
 | `Hive::Commands::Daemon::QueueCommand` | `lib/hive/commands/daemon/queue_command.rb` | Extracted read-only queue-inspection surface (`hive daemon queue list/show/prune`) — touches only `queue_args`/`json`/`hive_home`, orthogonal to the daemon lifecycle, mirroring the `ServiceInstaller` extraction (#254). Internal IO/parse failures are wrapped in `Hive::InternalError` (exit 70). |
 | `Hive::Commands::ServiceInstaller::ResultPresenter` | `lib/hive/commands/service_installer/result_presenter.rb` | Shared command-side service-install boundary for daemon and bot. It invokes their platform installer, preserves human outcome summaries, builds the service-specific success/error envelopes, translates drift/failure outcomes to the service-specific typed exceptions, and degrades hostile installer accessors safely while each command supplies only its label, schema, and error classes. |
 
+### Increment-1 ownership envelope
+
+`RuntimeControlPlane::LaunchCoverage` is the source-audited table used by the
+registered-only predicate, not a configurable allowlist:
+
+| Origin | Admission/registration gate | Proven child-safe in increment 1 |
+|--------|-----------------------------|----------------------------------|
+| `direct_cli` | `bin/hive` command registration | No |
+| `attempt` | detached-wrapper reservation and handshake | No |
+| `daemon_child` | registered `bin/hive` child | No |
+| `hivebox_supervisor` | durable lifecycle restart gate | No |
+| `web_capture` | registered capture-server launch | No |
+
+Because no row qualifies, increment 1 can acknowledge paused only for an idle
+registry with no attempt roots, reservations, registered processes, or known
+legacy service roots. This is still useful for a hosted installation that has
+already been made idle: the controller closes admission, checkpoints SQLite,
+disconnects, and publishes its bound proof. It is not evidence for stopping a
+non-empty registered service inventory, and it is not general backup readiness.
+
+The integration proof uses real subprocesses. It verifies that agent and
+unproven-service roots are rejected before admission or signals change, that a
+session-detached descendant cannot turn a retained agent root into an empty
+success after controller restart, and that an unrelated process is never
+signalled. It also kills a controller after the paused database candidate is
+durable but before proof publication: status reports only `quiescing`, and a
+retry reuses the generation before publishing a valid proof. A real process
+advertised as the Hivebox supervisor after proof publication similarly
+downgrades status without a database write.
+
 ## Wiring
 
 ```

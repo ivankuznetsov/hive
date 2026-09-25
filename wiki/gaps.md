@@ -1566,6 +1566,18 @@ Markers still serve current stages outside execute; `legacy_baseline` remains a
 current ad-hoc task initialization event, and provider routing's `legacy` mode
 still denotes current default routing. Their names do not imply removable code.
 
+## Increment-1 quiescence cannot create its own idle window (2026-09-25)
+
+The first daemon-quiescence increment can safely acknowledge only an already-
+idle registry. Its audited launch table has no surface classified as unable to
+spawn unregistered descendants, and any agent attempt root remains
+`ownership_unverifiable` without the later delegated-cgroup custody proof.
+Operators must stop direct submissions and managed ingress with existing
+service controls, let attempts finish, and retry. A pre-drain refusal leaves
+admission open, so another submission can race that preparation. Do not close
+this gap by weakening the ownership predicate; it needs either a first-class
+idle-window coordinator or the separately verified custody increment.
+
 - 2026-09-11: Three blocked adversarial reviews recorded Haiku for an Opus
   request. The mixed-model attribution defect is reproduced and fixed in code;
   native task diagnostics expose no correlated raw stream for those attempts,

@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-09-04
+updated: 2026-09-25
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -79,6 +79,23 @@ generation's finalization reserve. The same signal outside quiescing remains
 an ordinary cancellation. The installation controller aggregates any receipt
 the supervisor already committed for that generation with interruptions it
 finishes after verified wrapper and worker-group absence.
+
+Increment 1 does not treat process-tree polling, a PID/start fingerprint,
+inherited invocation tokens, or the existing transient systemd attempt scope as
+complete descendant custody. Every registered attempt root therefore makes the
+entry capability `ownership_unverifiable` unless the Linux delegated-cgroup
+adapter can prove the root's custody evidence. The increment-1 delivery does
+not claim that Linux success path: its positive result is an idle registry only,
+because no non-attempt launch surface is currently classified child-safe either.
+Darwin and other hosts without usable delegated custody get the same fail-closed
+answer whenever unregistered descendants may exist.
+
+`interrupted` remains fully implemented and independently tested at the real
+supervisor/reconciler boundary. Command-level interruption is intentionally not
+claimed by increment 1, because its pre-drain gate refuses an agent root before
+drain or signals. That end-to-end path belongs to the later custody increment;
+the idle success contract does not manufacture an interruption receipt merely
+to exercise it.
 
 `request_id` is immutable provenance, not a foreign key to the disposable
 dispatch queue. Completing or pruning a request must not change an attempt

@@ -91,6 +91,7 @@ module Hive
                       timeout_sec: nil)
         fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
           [ Float(timeout_sec), 0.0 ].max
+        ProcessGuard.checkout { ensure_open! }
         with_writer_fence(authority: authority, timeout_sec: fence_timeout) do
           ProcessGuard.checkout(transaction: true) do
             ensure_open!

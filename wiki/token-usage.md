@@ -90,7 +90,9 @@ joins them to an attempt from similar timestamps. Session writes are
 idempotent upserts in bounded immediate transactions. An exact attributed read
 failure is `available: false`, not zero usage, while an authoritative write
 failure raises a typed runtime-control-plane error and cannot be acknowledged
-as successful accounting.
+as successful accounting. Database custody is validated before the writer
+fence is acquired, so an unsafe database path remains an integrity failure
+rather than being masked by a derived fence-path error.
 
 Conflicting non-unknown billing routes, attempt/generation ownership, or token
 inclusion flags cannot overwrite an existing exact session. A profile that

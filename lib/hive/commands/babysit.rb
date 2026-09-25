@@ -187,7 +187,7 @@ module Hive
           max_files: daemon_cfg.fetch("log_max_files")
         )
         runtime_database = Hive::RuntimeControlPlane::Database.new(
-          path: Hive::Paths.runtime_control_plane_path
+          path: Hive::Paths.runtime_control_plane_path(@hive_home)
         ).open!
         lifecycle_repository = Hive::RuntimeControlPlane::LifecycleRepository.new(
           database: runtime_database

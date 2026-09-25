@@ -69,7 +69,7 @@ module Hive
         emit_error(e) if @json
         raise
       rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        wrapped = Hive::InternalError.wrap(e)
         emit_error(wrapped) if @json
         raise wrapped
       end

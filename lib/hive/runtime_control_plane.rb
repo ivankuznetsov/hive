@@ -6,7 +6,9 @@ module Hive
   module RuntimeControlPlane
     APPLICATION_ID = 0x48495645
     SCHEMA_VERSION = 1
-    BUSY_TIMEOUT_MS = 5_000
+    # Daemon dispatch, stage runners, and operator commands share this file;
+    # under concurrent writes a 5s wait expired with only healthy holders.
+    BUSY_TIMEOUT_MS = 15_000
     MINIMUM_SQLITE_VERSION = "3.35.0".freeze
     MIGRATIONS_DIR = File.expand_path("runtime_control_plane/migrations", __dir__).freeze
 

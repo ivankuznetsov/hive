@@ -50,7 +50,7 @@ module Hive
         emit_error(e)
         raise
       rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        wrapped = Hive::InternalError.wrap(e)
         emit_error(wrapped)
         raise wrapped
       end

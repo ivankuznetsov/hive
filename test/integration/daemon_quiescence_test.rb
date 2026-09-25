@@ -11,6 +11,7 @@ require "hive/daemon/status_report"
 require "hive/runtime_control_plane/installation"
 require "hive/runtime_control_plane/launch_coverage"
 require "hive/runtime_control_plane/process_registry"
+require "hive/runtime_control_plane/quiescence_upgrade"
 
 class DaemonQuiescenceIntegrationTest < Minitest::Test
   include HiveTestHelper
@@ -257,6 +258,102 @@ class DaemonQuiescenceIntegrationTest < Minitest::Test
     end
   end
 
+  def test_version_skewed_paused_restore_upgrades_in_place_before_resume_reopens
+    with_runtime_home do |root, env|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      database = Hive::RuntimeControlPlane::Database.new(path: path).open!
+      installation_id = seed_terminal_attempt_and_payload(database)
+      database.disconnect
+
+      output, errors, process = run_hive(
+        env, "daemon", "quiesce", "--timeout", "2", "--json"
+      )
+      assert_equal 0, process.exitstatus, errors
+      generation = JSON.parse(output).fetch("generation")
+      proof_path = Hive::Paths.runtime_quiescence_proof_path(root)
+      proof_before = File.binread(proof_path)
+
+      fingerprint = convert_to_supported_quiescence_revision(path)
+      assert_equal "process-custody-v1",
+                   Hive::RuntimeControlPlane::QuiescenceUpgrade::QUIESCENCE_SCHEMA_REVISIONS
+                     .fetch(fingerprint)
+      skewed_before_resume = File.binread(path)
+
+      output, _errors, process = run_hive(
+        env, "daemon", "resume", "--timeout", "2", "--json"
+      )
+      assert_equal Hive::ExitCodes::CONFIG, process.exitstatus
+      refused = JSON.parse(output)
+      assert_equal "migration_required", refused.fetch("error_kind")
+      assert_match(/current-format-migration/, refused.fetch("next_action"))
+      assert_equal proof_before, File.binread(proof_path)
+      assert_equal skewed_before_resume, File.binread(path),
+                   "ordinary resume must not mutate skewed closed storage"
+      closed = quiescence_upgrade_source(path).fetch(:lifecycle)
+      assert_equal "paused", closed.fetch(:phase)
+      assert_equal generation, closed.fetch(:generation)
+
+      crashing_upgrade = Class.new(Hive::RuntimeControlPlane::QuiescenceUpgrade) do
+        private
+
+        def invalidate_proof!
+          super
+          raise IOError, "injected crash after proof invalidation"
+        end
+      end
+      assert_raises(IOError) do
+        crashing_upgrade.new(
+          state_home: root, timeout_sec: 2, ownership_verifier: -> { true }
+        ).call
+      end
+      refute_path_exists proof_path
+      assert_equal skewed_before_resume, File.binread(path),
+                   "a crash after proof removal must leave closed storage unchanged"
+      closed_after_crash = quiescence_upgrade_source(path).fetch(:lifecycle)
+      assert_equal "paused", closed_after_crash.fetch(:phase)
+      assert_equal generation, closed_after_crash.fetch(:generation)
+
+      upgraded = Hive::RuntimeControlPlane::QuiescenceUpgrade.new(
+        state_home: root, timeout_sec: 2, ownership_verifier: -> { true }
+      ).call
+
+      assert_equal "quiescing", upgraded.dig("lifecycle", "phase")
+      assert_equal generation, upgraded.dig("lifecycle", "generation")
+      refute_path_exists proof_path
+      preserved = runtime_records(path)
+      assert_equal installation_id, preserved.fetch(:installation_id)
+      assert_equal [ [ "historical-attempt", "terminal", "succeeded" ] ],
+                   preserved.fetch(:attempts)
+      assert_equal [ [ "historical-payload", "historical-attempt" ] ],
+                   preserved.fetch(:payloads)
+      assert_equal "quiescing", preserved.dig(:lifecycle, :phase)
+      assert_equal generation, preserved.dig(:lifecycle, :generation)
+
+      output, errors, process = run_hive(
+        env, "daemon", "resume", "--timeout", "2", "--json"
+      )
+      assert_equal 0, process.exitstatus, errors
+      resumed = JSON.parse(output)
+      assert_equal true, resumed.fetch("resumed")
+      assert_equal true, resumed.fetch("admission_reopened")
+      assert_equal generation, resumed.fetch("generation")
+      assert_equal [], resumed.fetch("services"),
+                   "no managed service may be invented during restore"
+      refute_path_exists proof_path
+
+      reopened = runtime_records(path)
+      assert_equal installation_id, reopened.fetch(:installation_id)
+      assert_equal [ [ "historical-attempt", "terminal", "succeeded" ] ],
+                   reopened.fetch(:attempts)
+      assert_equal [ [ "historical-payload", "historical-attempt" ] ],
+                   reopened.fetch(:payloads)
+      assert_equal "running", reopened.dig(:lifecycle, :phase)
+      assert_equal generation, reopened.dig(:lifecycle, :generation)
+    ensure
+      database&.disconnect
+    end
+  end
+
   private
 
   def coordinator(root, database, registry:)
@@ -396,6 +493,85 @@ class DaemonQuiescenceIntegrationTest < Minitest::Test
       end
     end
     assert_equal generation, lifecycle_tuple(database).fetch(:generation)
+  end
+
+  def seed_terminal_attempt_and_payload(database)
+    now = Time.now.utc.iso8601(6)
+    installation_id = database.installation_identity.fetch(:installation_id)
+    database.transaction do |db|
+      db[:projects].insert(
+        project_id: "historical-project", installation_id: installation_id,
+        registration_id: "historical-registration", name: "historical-demo",
+        observed_path: "/tmp/historical-demo",
+        state_root_path: "/tmp/historical-demo/.hive-state", active: 1,
+        registered_at: now
+      )
+      db[:task_subjects].insert(
+        task_id: "historical-task", project_id: "historical-project",
+        workflow_id: "coding", task_slug: "historical-task",
+        observed_path: "/tmp/historical-demo/historical-task",
+        source_fingerprint: "historical-source", generation: 1,
+        created_at: now, last_observed_at: now
+      )
+      db[:attempts].insert(
+        attempt_id: "historical-attempt", project_id: "historical-project",
+        task_id: "historical-task", subject_kind: "task_stage",
+        subject_key: "4-execute", subject_json: "{}",
+        task_generation: "historical-generation",
+        ownership_generation: "historical-owner", state: "terminal",
+        outcome: "succeeded", ended_at: now, lease_version: 0,
+        retry_charge: 0, refunded: 0, source_fingerprint: "historical-source",
+        details_json: "{}", project_name: "historical-demo",
+        task_slug: "historical-task", accepted_date: "2026-09-25",
+        created_at: now, accepted_at: now
+      )
+      db[:payload_references].insert(
+        payload_id: "historical-payload", attempt_id: "historical-attempt",
+        kind: "attempt_log", relative_path: "terminal/attempt.log",
+        state: "open", created_at: now
+      )
+    end
+    installation_id
+  end
+
+  def convert_to_supported_quiescence_revision(path)
+    connection = Sequel.connect(adapter: "sqlite", database: path, max_connections: 1)
+    connection.run("PRAGMA foreign_keys = OFF")
+    rows = connection[:attempts].all
+    sql = connection[:sqlite_master].where(type: "table", name: "attempts").get(:sql)
+      .sub(", 'interrupted'", "")
+    indexes = connection[:sqlite_master].where(type: "index", tbl_name: "attempts")
+      .exclude(sql: nil).order(:name).select_map(:sql)
+    connection.transaction do
+      connection.drop_table(:attempts)
+      connection.run(sql)
+      connection[:attempts].multi_insert(rows) unless rows.empty?
+      indexes.each { |statement| connection.run(statement) }
+    end
+    connection.run("PRAGMA foreign_keys = ON")
+    quiescence_upgrade_source(path).fetch(:schema_fingerprint)
+  ensure
+    connection&.disconnect
+  end
+
+  def quiescence_upgrade_source(path)
+    Hive::RuntimeControlPlane::Database.new(path: path).quiescence_upgrade_source
+  end
+
+  def runtime_records(path)
+    database = Hive::RuntimeControlPlane::Database.new(path: path).open!
+    database.read do |db|
+      {
+        installation_id: db[:installations].get(:installation_id),
+        attempts: db[:attempts].order(:attempt_id)
+          .select_map([ :attempt_id, :state, :outcome ]),
+        payloads: db[:payload_references].order(:payload_id)
+          .select_map([ :payload_id, :attempt_id ]),
+        lifecycle: db[:runtime_lifecycle].first
+      }
+    end
+  ensure
+    database&.disconnect
   end
 
   def wait_for_path(path)

@@ -6,7 +6,7 @@ class PlanReviewShowCommandTest < Minitest::Test
   include HiveTestHelper
 
   FakeProjection = Struct.new(:summary, :record)
-  FakeTask = Struct.new(:slug, :folder)
+  FakeTask = Struct.new(:slug, :folder, :project_root)
 
   def projection
     summary = {
@@ -26,7 +26,7 @@ class PlanReviewShowCommandTest < Minitest::Test
   end
 
   def run_show(json:, freshness: { "status" => "current", "reason" => nil })
-    task = FakeTask.new("demo-task", "/tmp/demo-task")
+    task = FakeTask.new("demo-task", "/tmp/demo-task", "/tmp/demo-project")
     out = StringIO.new
     payload = nil
     fixture = projection
@@ -73,5 +73,45 @@ class PlanReviewShowCommandTest < Minitest::Test
 
     _payload, stdout = run_show(json: false, freshness: stale)
     assert_match(/freshness: stale \(canonical plan changed after plan review\); decisions need a linked review first/, stdout)
+  end
+
+  def test_default_dependencies_resolve_the_task_and_calculate_freshness
+    task = FakeTask.new("demo-task", "/tmp/demo-task", "/tmp/demo-project")
+    resolver = Struct.new(:resolve).new(task)
+    freshness = { status: "current", reason: nil }
+    fixture = projection
+    config_root = nil
+    freshness_inputs = nil
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::Config, :load, ->(root) { config_root = root; {} }) do
+        with_replaced_singleton_method(
+          Hive::PlanReview::TransitionGuard, :freshness,
+          ->(task:, projection:, config:) { freshness_inputs = [ task, projection, config ]; freshness }
+        ) do
+          with_replaced_singleton_method(Hive::PlanReview::Projection, :load, ->(task_folder:) { fixture }) do
+            payload = nil
+            capture_io { payload = Hive::Commands::PlanReviewShow.new("demo-task", json: true).call }
+            assert_equal({ "status" => "current", "reason" => nil }, payload.fetch("freshness"))
+          end
+        end
+      end
+    end
+
+    assert_equal task.project_root, config_root
+    assert_equal [ task, fixture, {} ], freshness_inputs
+  end
+
+  def test_envelope_error_kind_classifies_resolver_and_plan_review_errors
+    command = Hive::Commands::PlanReviewShow.new("demo-task", resolver: -> { raise "not called" })
+
+    {
+      Hive::AmbiguousSlug.new("ambiguous", slug: "demo-task", candidates: []) => "ambiguous_slug",
+      Hive::InvalidTaskPath.new("bad path") => "invalid_task_path",
+      Hive::PlanReview::Error.new("review unavailable") => "plan_review_unavailable",
+      StandardError.new("unclassified") => "error"
+    }.each do |error, expected|
+      assert_equal expected, command.envelope_error_kind(error), error.class.name
+    end
   end
 end

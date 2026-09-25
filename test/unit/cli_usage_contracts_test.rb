@@ -3,6 +3,8 @@
 require "test_helper"
 require "json"
 require "hive/cli_usage_contracts"
+require "hive/commands/patrol"
+require "hive/commands/refactor_patrol"
 require "open3"
 require "rbconfig"
 
@@ -64,6 +66,13 @@ class CliUsageContractsTest < Minitest::Test
     assert_equal(
       { schema: "hive-running-status", error_kind: "error" },
       Hive::CliUsageContracts.contract(%w[status extra])
+    )
+  end
+
+  def test_patrol_manual_mode_keeps_its_legacy_error_envelope
+    assert_equal(
+      { schema: "hive-patrol", error_kind: "error" },
+      Hive::CliUsageContracts.contract(%w[patrol demo --json])
     )
   end
 

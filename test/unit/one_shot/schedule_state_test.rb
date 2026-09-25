@@ -27,7 +27,12 @@ class OneShotScheduleStateTest < Minitest::Test
     with_tmp_dir do |root|
       first = Hive::OneShot::ScheduleState.new(state_root: root)
       second = Hive::OneShot::ScheduleState.new(state_root: root)
-      first.update("patrol") { { "failure_count" => 1 } }
+      first.update("patrol") do
+        {
+          "failure_count" => 1,
+          "failure_retry_at" => "2026-09-23T12:05:00Z"
+        }
+      end
       second.update("architecture_patrol") { { "retry_at" => "2026-09-23T12:10:00Z" } }
 
       assert_equal 1, first.read("patrol")["failure_count"]
@@ -64,6 +69,45 @@ class OneShotScheduleStateTest < Minitest::Test
       assert_raises(Hive::OneShot::ScheduleState::StateError) do
         state.update("patrol") { [] }
       end
+    end
+  end
+
+  def test_invalid_patrol_failure_gate_is_rejected_before_restore_or_write
+    with_tmp_dir do |root|
+      state = Hive::OneShot::ScheduleState.new(state_root: root)
+      FileUtils.mkdir_p(File.dirname(state.path))
+      File.binwrite(state.path, JSON.generate(
+        "schema" => "hive-scheduler-checkpoint", "schema_version" => 1,
+        "updated_at" => "2026-09-23T12:00:00Z",
+        "components" => {
+          "patrol" => {
+            "failure_count" => "invalid",
+            "failure_retry_at" => "2026-09-23T12:10:00Z"
+          }
+        }
+      ))
+
+      error = assert_raises(Hive::OneShot::ScheduleState::StateError) do
+        state.read("patrol")
+      end
+      assert_equal "checkpoint_invalid", error.code
+
+      FileUtils.rm_f(state.path)
+      error = assert_raises(Hive::OneShot::ScheduleState::StateError) do
+        state.update("patrol") do
+          { "failure_count" => 1, "failure_retry_at" => nil }
+        end
+      end
+      assert_equal "checkpoint_invalid", error.code
+      refute_path_exists state.path
+
+      error = assert_raises(Hive::OneShot::ScheduleState::StateError) do
+        state.update("patrol") do
+          { "failure_count" => 0, "failure_retry_at" => "2026-09-23T12:10:00Z" }
+        end
+      end
+      assert_equal "checkpoint_invalid", error.code
+      refute_path_exists state.path
     end
   end
 

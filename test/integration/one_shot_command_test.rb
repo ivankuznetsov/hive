@@ -210,7 +210,7 @@ class OneShotCommandTest < Minitest::Test
     end
   end
 
-  def test_daemon_dry_run_succeeds_for_an_idle_registered_project
+  def test_all_commands_succeed_for_an_idle_registered_project
     with_tmp_global_config do |home|
       root = File.join(home, "project")
       state = File.join(root, ".hive-state")
@@ -227,14 +227,56 @@ class OneShotCommandTest < Minitest::Test
       prepare_runtime_project(state_home: home, name: "demo", path: root,
                               state_root_path: state).disconnect
 
-      out, _err, status = run_hive(home, "daemon", "demo", "--once", "--dry-run")
-      assert status.success?
-      document = one_document(out)
-      assert_equal "ok", document.fetch("status")
-      assert_empty document.fetch("ran")
-      assert_empty document.dig("pending", "runnable_now")
-      assert_schema(document)
+      {
+        "patrol" => "patrol",
+        "refactor-patrol" => "architecture_patrol",
+        "babysit" => "babysitter",
+        "daemon" => "dispatch"
+      }.each do |command, component|
+        out, err, status = run_hive(home, command, "demo", "--once", "--dry-run")
+        assert status.success?, "#{command}: #{err}"
+        document = one_document(out)
+        assert_equal component, document.fetch("component")
+        assert_equal "ok", document.fetch("status")
+        assert_empty document.fetch("ran")
+        assert_empty document.dig("pending", "runnable_now")
+        assert_schema(document)
+      end
     end
+  end
+
+  def test_successful_command_output_retains_completed_work_deadline_and_wake
+    entry = { "name" => "demo", "path" => "/tmp/demo" }
+    now = Time.utc(2026, 9, 25, 12)
+    due = now + 300
+    report = Hive::OneShot::Result.ok(
+      component: :patrol, project: "demo", started_at: now,
+      finished_at: now, safe_to_stop: true,
+      ran: [ { "id" => "patrol:scan", "action" => "scan", "outcome" => "completed" } ],
+      items: [ {
+        "bucket" => "waiting_external", "id" => "patrol:checks",
+        "component" => "patrol", "reason" => "checks_pending",
+        "next_check_at" => due,
+        "condition" => {
+          "kind" => "check_state_changed", "repository" => "acme/demo",
+          "pr" => 7, "head_sha" => "a" * 40
+        }
+      } ]
+    )
+    adapter = Struct.new(:report) { def call = report }.new(report)
+
+    out, = capture_io do
+      result = Hive::Commands::Patrol.new(
+        "demo", once: true, project_entry: entry,
+        one_shot_factory: ->(_project) { adapter }
+      ).call
+      assert_equal Hive::ExitCodes::SUCCESS, result.exit_code
+    end
+    document = one_document(out)
+    assert_equal due.iso8601(6), document.fetch("next_due_at")
+    assert_equal [ "patrol:scan" ], document.fetch("ran").map { |item| item.fetch("id") }
+    assert_equal [ "patrol:checks" ],
+                 document.fetch("wake_conditions").first.fetch("affected_pending_ids")
   end
 
   private

@@ -275,9 +275,10 @@ module Hive
         data = @schedule_state_factory.call(entry).read("patrol")
         @next_check_at[project] = parse_time(data["observation_check_at"])
         @post_reserve_at[project] = parse_time(data["post_reserve_at"])
-        if data["failure_count"].to_i.positive?
+        failure_count = data.fetch("failure_count", 0)
+        if failure_count.positive?
           @failures[project] = {
-            count: data.fetch("failure_count").to_i,
+            count: failure_count,
             next_eligible_at: parse_time(data["failure_retry_at"])
           }
         end

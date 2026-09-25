@@ -213,6 +213,36 @@ class ModulesDaemonRuntimeTest < Minitest::Test
 
       assert_equal NOW + Hive::Modules::DaemonRuntime::RETRY_DELAY_SEC,
                    item.fetch("next_check_at")
+
+      due = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + Hive::Modules::DaemonRuntime::RETRY_DELAY_SEC
+      ).find { |candidate| candidate.fetch("id").include?(run.fetch("run_id")) }
+      assert_equal [ "runnable_now", "module_retry_due" ],
+                   due.values_at("bucket", "reason")
+    end
+  end
+
+  def test_readiness_identifies_running_module_attempts_with_and_without_attempt_ids
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      path = Dir.glob(
+        File.join(runtime.fetch(:store).runtime_path("demo"), "runs", "*.json")
+      ).fetch(0)
+      run = JSON.parse(File.binread(path))
+
+      item = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + 1
+      ).find { |candidate| candidate.fetch("id").include?(run.fetch("run_id")) }
+      assert_equal "attempt_completed", item.dig("condition", "kind")
+
+      run.delete("attempt_id")
+      File.binwrite(path, Hive::WorkflowPackage::CanonicalJSON.generate(run))
+      item = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + 1
+      ).find { |candidate| candidate.fetch("id").include?(run.fetch("run_id")) }
+      assert_equal "task_changed", item.dig("condition", "kind")
     end
   end
 
@@ -380,6 +410,23 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_reconcile_dispatcher_clock_is_fixed_to_the_pass_timestamp
+    with_runtime(publish_event: false) do |runtime|
+      fake_dispatcher = Object.new
+      observed_times = []
+      with_replaced_singleton_method(
+        Hive::Modules::Dispatcher, :new, lambda { |**options|
+          observed_times << options.fetch(:clock).call
+          fake_dispatcher
+        }
+      ) do
+        result = runtime.fetch(:daemon_runtime).reconcile(now: NOW + 3).first
+        assert_equal :ok, result.fetch(:status)
+      end
+      assert_equal [ NOW + 3 ], observed_times
+    end
+  end
+
   def test_empty_and_corrupt_projects_return_idle_or_bounded_blocked_results
     with_tmp_dir do |root|
       attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
@@ -416,6 +463,16 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       ).tick(now: NOW).first
       assert_equal :blocked, blocked.fetch(:status)
       assert_match(/malformed|JSON/, blocked.fetch(:reason))
+
+      daemon = Hive::Modules::DaemonRuntime.new(
+        attempt_store: attempt_store, attempt_dispatcher: attempt_dispatcher,
+        registry: -> { [ corrupt_entry ] }
+      )
+      assert_raises(Hive::ConfigError) do
+        daemon.readiness(project: "corrupt", now: NOW)
+      end
+      reconciled = daemon.reconcile(now: NOW).first
+      assert_equal :blocked, reconciled.fetch(:status)
     end
   end
 
@@ -526,6 +583,11 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         attempt_store: attempt_store, attempt_dispatcher: attempt_dispatcher,
         registry: -> { [ entry ] }
       )
+
+      setup = daemon.readiness(project: "demo", now: NOW).find do |item|
+        item.fetch("reason") == "module_setup_pending"
+      end
+      assert_equal "runnable_now", setup.fetch("bucket")
 
       first = daemon.tick(now: NOW).first
       second = daemon.tick(now: NOW + 1).first

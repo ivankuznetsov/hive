@@ -41,6 +41,9 @@ require "hive/commands/digest"
 require "hive/commands/digest_refresh"
 require "hive/commands/digest_send"
 require "hive/commands/digest_prune"
+require "hive/commands/module"
+require "hive/commands/drop"
+require "hive/tui"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
@@ -206,6 +209,28 @@ class HiveCliTest < Minitest::Test
 
     out, _err = capture_io { Hive::CLI.start([ "version" ]) }
     assert_equal "#{Hive::VERSION}\n", out
+  end
+
+  def test_module_drop_and_tui_routes_reach_their_command_boundaries
+    with_command_new_stub(Hive::Commands::Module) do |calls|
+      Hive::CLI.start([ "module", "status", "demo", "--json" ])
+      assert_equal [ "status", "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.dig(:kwargs, :json)
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Drop) do |calls|
+      Hive::CLI.start([ "drop", "demo:task", "--project", "demo" ])
+      assert_equal [ "demo:task" ], calls.first.fetch(:args)
+      assert_equal "demo", calls.first.dig(:kwargs, :project)
+      assert_equal :call, calls.last
+    end
+
+    called = false
+    with_replaced_singleton_method(Hive::Tui, :run, -> { called = true }) do
+      Hive::CLI.start([ "tui" ])
+    end
+    assert called
   end
 
   def test_version_json_identifies_the_active_dogfood_build

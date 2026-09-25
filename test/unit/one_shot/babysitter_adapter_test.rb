@@ -80,6 +80,23 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  def test_project_dry_run_configuration_prevents_repairs_and_checkpoint_writes
+    with_tmp_dir do |dir|
+      tick = Tick.new(summary(pr(9, :eligible)))
+      config = Hive::Config.deep_merge(
+        Hive::Config.deep_dup(Hive::Config::DEFAULTS),
+        "babysitter" => { "enabled" => true, "interval" => "10m", "dry_run" => true }
+      )
+      result = adapter(dir, tick: tick, config: config).call
+
+      assert_empty result.to_h.fetch("ran")
+      assert_equal [ "babysitter:pr:9" ], ids(result, "runnable_now")
+      assert tick.arguments.last.fetch(:dry_run)
+      assert tick.arguments.last.fetch(:observe_only)
+      refute File.exist?(File.join(dir, ".hive-state", "scheduler", "checkpoint.json"))
+    end
+  end
+
   def test_dry_run_withholds_stop_safety_for_a_live_project_worker
     with_tmp_dir do |dir|
       result = adapter(

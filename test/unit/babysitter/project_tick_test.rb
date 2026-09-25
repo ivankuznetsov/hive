@@ -713,6 +713,34 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_observe_only_github_failure_is_an_observation_error
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 1 }
+      )
+      logger = make_logger(dir)
+      prs = [ { "number" => 1, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" } ]
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(*) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :observe, lambda { |*|
+          raise Hive::GhError, "status unavailable"
+        }) do
+          summary = Hive::Babysitter::ProjectTick.run(
+            project, dry_run: true, observe_only: true,
+            logger: logger, inflight: Set.new, detailed: true
+          )
+
+          assert_equal "github_observation_failed", summary.dig(:error, :code)
+          assert_equal :failure, summary.fetch(:prs).fetch(0).fetch(:outcome)
+        end
+      end
+    ensure
+      logger&.close
+    end
+  end
+
   def test_observe_only_does_not_emit_events_or_write_status
     with_tmp_dir do |dir|
       project = project_entry(dir)

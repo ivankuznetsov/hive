@@ -1550,6 +1550,10 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         {
           "occurrence_id" => "claimed", "status" => "pending", "materialization" => nil,
           "claim" => { "expires_at" => (T0 + 120).iso8601(6) }, "retry_at" => nil
+        },
+        {
+          "occurrence_id" => "unclaimed", "status" => "pending", "materialization" => nil,
+          "claim" => nil, "retry_at" => nil
         }
       ]
       classifier = Object.new
@@ -1566,9 +1570,11 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         architecture:classification:due
         architecture:classification:retry
         architecture:classification:claimed
+        architecture:classification:unclaimed
       ], items.map { |item| item.fetch("id") }
       assert_equal [ T0 + 60, T0 + 120 ],
-                   items.drop(1).map { |item| item.fetch("next_check_at") }
+                   items.drop(1).filter_map { |item| item.fetch("next_check_at") }
+      assert_equal "attempt_completed", items.last.dig("condition", "kind")
     end
   end
 

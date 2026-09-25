@@ -104,7 +104,10 @@ change admission: observation/retry/cadence and controller holds not already
 owned by the runtime control plane. Its versioned
 `<project>/.hive-state/scheduler/checkpoint.json` is replaced atomically under
 project ownership, preserves other component keys, and fails closed on corrupt
-or newer state. Component-specific dispatch restoration also validates every
+or newer state. Patrol restoration requires a non-negative integer failure
+count and a retry deadline exactly when that count is positive, so malformed
+backoff state cannot silently clear admission policy. Component-specific
+dispatch restoration also validates every
 cooldown, transient-failure, quarantine, and dropped-project field and reports
 malformed rows as typed `checkpoint_invalid` failures. Durable requests,
 attempts, leases, budgets, jobs, and workflow state remain in their existing

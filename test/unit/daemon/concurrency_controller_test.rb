@@ -801,6 +801,54 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal "checkpoint_invalid", error.code
   end
 
+  def test_dispatch_checkpoint_shape_quarantine_and_typed_errors_are_restored_strictly
+    state = { "cooldowns" => "invalid" }
+    store = Object.new
+    store.define_singleton_method(:read) { |_component| state }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+    assert_raises(Hive::OneShot::ScheduleState::StateError) do
+      controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+    end
+
+    state = { "cooldowns" => [], "transient_failures" => {},
+              "quarantined" => [ "" ], "dropped" => false }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+    assert_raises(Hive::OneShot::ScheduleState::StateError) do
+      controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+    end
+
+    state = { "cooldowns" => [], "transient_failures" => {},
+              "quarantined" => [ "task" ], "dropped" => false }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+    assert_equal :quarantined,
+                 controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+
+    typed = Hive::OneShot::ScheduleState::StateError.new(
+      "unavailable", code: "checkpoint_unavailable"
+    )
+    store.define_singleton_method(:read) { |_component| raise typed }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+    assert_same typed, assert_raises(Hive::OneShot::ScheduleState::StateError) {
+      controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+    }
+  end
+
   def test_read_only_gate_does_not_delete_or_persist_an_expired_cooldown
     updates = 0
     store = Object.new

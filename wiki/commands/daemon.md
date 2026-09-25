@@ -106,6 +106,37 @@ Observation errors, invalid state, and unknown ownership instead yield
 These fields cover only the selected Hive scope; the scheduler must also know
 that no unrelated host workload requires the machine.
 
+A fixed cron interval is the simplest conservative driver. Point it at a
+wrapper that runs all enabled component/project pairs sequentially and applies
+the predicate above, for example:
+
+```cron
+# Poll at most five minutes late. run-hive-passes must aggregate every enabled
+# patrol, refactor-patrol, babysit, and daemon one-shot before stopping a host.
+*/5 * * * * /usr/local/bin/run-hive-passes my-project >>/var/log/hive-passes.log 2>&1
+```
+
+Cron cannot honor an arbitrary `next_due_at` exactly and cannot wake early for
+a `wake_conditions` event, so the wrapper should treat each invocation as a
+bounded poll. A deadline-aware supervisor can instead parse the aggregate
+report, arm its next timer for the exact UTC deadline, and replace that timer
+when a matching event arrives. For example, after reading
+`next_due_at=2026-09-25T15:42:00Z`, a Linux scheduler may create a transient
+timer without installing a permanent unit:
+
+```sh
+systemd-run --user --unit=hive-passes-my-project \
+  --on-calendar='2026-09-25 15:42:00 UTC' \
+  /usr/local/bin/run-hive-passes my-project
+```
+
+The wrapper name is illustrative, not a Hive command. Its implementation must
+run every enabled scope, rerun immediately while any `runnable_now` item
+exists, and apply the aggregate stop predicate. Supervisors that can subscribe
+to PR, check, review, or task events should also match `wake_conditions` and
+invoke an earlier pass; an event requests reevaluation but never bypasses the
+deadline, budget, approval, or ownership gates enforced by Hive.
+
 ## What the daemon dispatches
 
 Per `Hive::Daemon::Policy.decide`, the daemon classifies each internal

@@ -79,7 +79,9 @@ still coexist because their service loops retain separate execution guards.
 and reports no `ran` entries. It does not append babysitter event or status
 state. Eligible unadmitted repairs remain
 `runnable_now`; green PRs and queued checks retain their external-wait state,
-and observed live workers keep `safe_to_stop` false.
+and observed live workers keep `safe_to_stop` false. Project configuration
+`babysitter.dry_run: true` enforces the same observation-only behavior for a
+one-shot even when the CLI omits `--dry-run`.
 
 ## Project Contract
 

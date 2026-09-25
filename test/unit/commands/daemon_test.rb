@@ -164,6 +164,8 @@ class HiveCommandsDaemonTest < Minitest::Test
         with_replaced_singleton_method(Hive::Patrol::LaunchBudget, :new, ->(*) { budget }) do
           ownership = captured.fetch(:project_ownership)
           assert_equal [ "demo" ], ownership.refresh!
+          scope = captured.fetch(:controller).instance_variable_get(:@persistence_scope_projects)
+          assert_equal [ "demo" ], scope.call
           candidate = captured.fetch(:patrol_arbiter).candidates(now: Time.now).find do |item|
             item[:action_phase] == :scheduled
           end

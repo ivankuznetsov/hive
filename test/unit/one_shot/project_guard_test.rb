@@ -300,6 +300,30 @@ class OneShotProjectGuardTest < Minitest::Test
     end
   end
 
+  def test_pre_guard_daemon_probe_ignores_a_reused_pid_and_fails_closed_on_read_error
+    with_tmp_global_config do |home|
+      with_tmp_dir do |root|
+        state = File.join(root, ".hive-state")
+        FileUtils.mkdir_p(state)
+        File.write(
+          File.join(home, ".daemon.pid"),
+          { "pid" => Process.pid, "process_start_time" => "old" }.to_yaml
+        )
+        project_guard = guard(state, kind: "one_shot")
+
+        with_replaced_singleton_method(Hive::PidFile, :ownership, ->(*) { :reused }) do
+          assert_nil project_guard.send(:legacy_daemon_owner)
+        end
+        with_replaced_singleton_method(
+          Hive::PidFile, :read, ->(*) { raise IOError, "unreadable" }
+        ) do
+          assert_same Hive::OneShot::ProjectGuard::UNVERIFIABLE_OWNER,
+                      project_guard.send(:legacy_daemon_owner)
+        end
+      end
+    end
+  end
+
   def test_removed_project_contention_is_cleared
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")

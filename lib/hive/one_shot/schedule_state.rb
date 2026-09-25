@@ -37,11 +37,12 @@ module Hive
       def update(component, now: Time.now.utc)
         with_lock do
           document = load_document
-          current = deep_copy(document.fetch("components").fetch(component.to_s, {}))
+          component_name = component.to_s
+          current = deep_copy(document.fetch("components").fetch(component_name, {}))
           replacement = yield(current)
           invalid!("component state must be an object") unless replacement.is_a?(Hash)
-          validate_deadlines!(replacement)
-          document.fetch("components")[component.to_s] = replacement
+          validate_component!(component_name, replacement)
+          document.fetch("components")[component_name] = replacement
           document["updated_at"] = now.utc.iso8601(6)
           persist(document)
           deep_copy(replacement)
@@ -76,9 +77,9 @@ module Hive
           raise StateError.new("unsupported scheduler checkpoint schema #{version.inspect}", code: code)
         end
         Time.iso8601(document.fetch("updated_at"))
-        document.fetch("components").each_value do |component|
+        document.fetch("components").each do |component_name, component|
           invalid!("component state must be an object") unless component.is_a?(Hash)
-          validate_deadlines!(component)
+          validate_component!(component_name, component)
         end
         document
       rescue JSON::ParserError, ArgumentError, KeyError, TypeError => error
@@ -104,6 +105,25 @@ module Hive
           end
         rescue ArgumentError
           invalid!("#{key} must be an absolute RFC3339 timestamp")
+        end
+      end
+
+      def validate_component!(name, value)
+        validate_deadlines!(value)
+        validate_patrol!(value) if name == "patrol"
+      end
+
+      def validate_patrol!(value)
+        failure_count = value.fetch("failure_count", 0)
+        unless failure_count.is_a?(Integer) && failure_count >= 0
+          invalid!("patrol failure_count must be a non-negative integer")
+        end
+
+        failure_retry_at = value["failure_retry_at"]
+        if failure_count.positive? && failure_retry_at.nil?
+          invalid!("patrol failure_retry_at is required after a failure")
+        elsif failure_count.zero? && failure_retry_at
+          invalid!("patrol failure_retry_at requires a positive failure_count")
         end
       end
 

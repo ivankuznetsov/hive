@@ -69,5 +69,14 @@ class HiveCliArgvPolicyTest < Minitest::Test
     argv = %w[new demo write --workflow]
     assert_equal %w[new demo -- write --workflow],
                  Hive::CliArgvPolicy.lift_new_options(argv, value_options: VALUE_OPTIONS)
+
+    argv = %w[new demo -- --json literal]
+    assert_equal argv,
+                 Hive::CliArgvPolicy.lift_new_options(argv, value_options: VALUE_OPTIONS)
+
+    assert_equal %w[new --workflow=content demo -- text],
+                 Hive::CliArgvPolicy.lift_new_options(
+                   %w[new demo text --workflow=content], value_options: VALUE_OPTIONS
+                 )
   end
 end

@@ -36,6 +36,7 @@ module Hive
       def call
         started = @clock.call
         summary = nil
+        effective_dry_run = @dry_run
         @main_guard.synchronize do
           @babysitter_guard.synchronize do
             cfg = @config_loader.call(@entry.fetch("path"))
@@ -46,18 +47,19 @@ module Hive
                 safe_to_stop: @liveness.safe_to_stop?
               )
             end
+            effective_dry_run ||= cfg.dig("babysitter", "dry_run") == true
             summary = @tick.run(
-              @entry, dry_run: @dry_run, logger: @logger, inflight: Set.new,
-              observe_only: @dry_run, detailed: true
+              @entry, dry_run: effective_dry_run, logger: @logger, inflight: Set.new,
+              observe_only: effective_dry_run, detailed: true
             )
-            return failed_result(started, summary) if summary[:error]
+            return failed_result(started, summary, dry_run: effective_dry_run) if summary[:error]
 
             finished = @clock.call
             deadline = finished + Hive::Babysitter::Interval.parse(cfg.dig("babysitter", "interval"))
-            persist_deadline(deadline, finished) unless @dry_run
+            persist_deadline(deadline, finished) unless effective_dry_run
             return Result.ok(
               component: :babysitter, project: project, started_at: started,
-              finished_at: finished, ran: ran_items(summary),
+              finished_at: finished, ran: ran_items(summary, dry_run: effective_dry_run),
               items: pending_items(summary, deadline),
               safe_to_stop: summary[:interrupted] != true && @liveness.safe_to_stop?
             )
@@ -73,13 +75,14 @@ module Hive
         Result.interrupted(
           component: :babysitter, project: project, started_at: started,
           finished_at: @clock.call, message: error.message,
-          ran: summary ? ran_items(summary) : []
+          ran: summary ? ran_items(summary, dry_run: effective_dry_run) : []
         )
       rescue StandardError => error
         Result.error(
           component: :babysitter, project: project, started_at: started,
           finished_at: @clock.call, code: error.respond_to?(:code) ? error.code : "observation_failed",
-          message: error.message, ran: summary ? ran_items(summary) : [],
+          message: error.message,
+          ran: summary ? ran_items(summary, dry_run: effective_dry_run) : [],
           exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
         )
       end
@@ -107,17 +110,17 @@ module Hive
         end
       end
 
-      def failed_result(started, summary)
+      def failed_result(started, summary, dry_run:)
         error = summary.fetch(:error)
         Result.error(
           component: :babysitter, project: project, started_at: started,
           finished_at: @clock.call, code: error.fetch(:code),
-          message: error.fetch(:message), ran: ran_items(summary)
+          message: error.fetch(:message), ran: ran_items(summary, dry_run: dry_run)
         )
       end
 
-      def ran_items(summary)
-        return [] if @dry_run
+      def ran_items(summary, dry_run:)
+        return [] if dry_run
 
         Array(summary[:prs]).filter_map do |pr|
           outcome = pr.fetch(:outcome).to_sym

@@ -816,16 +816,36 @@ class HiveDaemonDispatcherTest < Minitest::Test
     runtime.define_singleton_method(:tick) { |**| [] }
     runtime.define_singleton_method(:reconcile) do |**options|
       reconciliations << options
-      []
+      options.fetch(:admission_open).call
+      [ { project: "p1", status: :ok, decisions: 0, schedules: 0, reason: nil } ]
     end
     runtime.define_singleton_method(:readiness) { |**| [] }
-    dispatcher, = make_dispatcher(
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
       rows: [], scope_projects: [ "p1" ], module_runtime: runtime
     )
 
     dispatcher.run_one_shot(project: "p1", now: T0)
 
     assert_equal [ "p1" ], reconciliations.fetch(0).fetch(:projects)
+    assert logger.events.any? { |name, _attributes| name == :module_runtime }
+  end
+
+  def test_run_one_shot_fails_when_module_reconciliation_is_blocked
+    runtime = Object.new
+    runtime.define_singleton_method(:tick) { |**| [] }
+    runtime.define_singleton_method(:readiness) { |**| [] }
+    runtime.define_singleton_method(:reconcile) do |**|
+      [ { project: "p1", status: :blocked, decisions: 0, schedules: 0,
+          reason: "receipt unavailable" } ]
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], module_runtime: runtime
+    )
+
+    error = assert_raises(Hive::Error) do
+      dispatcher.run_one_shot(project: "p1", now: T0)
+    end
+    assert_match(/receipt unavailable/, error.message)
   end
 
   def test_dispatch_one_shot_drains_project_wide_legacy_workers_before_stop_safe
@@ -1072,6 +1092,127 @@ class HiveDaemonDispatcherTest < Minitest::Test
     item = dispatcher.send(:dispatch_request_pending_item, request, row: nil, now: T0)
     assert_equal [ "waiting_external", "in_flight" ],
                  item.values_at("bucket", "reason")
+  end
+
+  def test_one_shot_queue_projection_fails_closed_for_scope_and_operator_gates
+    request = Q::Request.new(
+      request_id: "queued", created_at: T0, project: "p1", slug: "queued",
+      argv: %w[hive run queued], requestor: "web"
+    )
+    dispatcher, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    dispatcher.define_singleton_method(:project_owned?) { |_project| false }
+    assert_raises(Hive::Error) do
+      dispatcher.send(:dispatch_request_pending_item, request, row: nil, now: T0)
+    end
+
+    disabled, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], project_enabled: false
+    )
+    item = disabled.send(:dispatch_request_pending_item, request, row: nil, now: T0)
+    assert_equal [ "waiting_operator", "project_disabled" ],
+                 item.values_at("bucket", "reason")
+
+    legacy, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    legacy.instance_variable_set(:@legacy_layout_projects, { "p1" => true })
+    item = legacy.send(:dispatch_request_pending_item, request, row: nil, now: T0)
+    assert_equal [ "waiting_operator", "legacy_layout" ],
+                 item.values_at("bucket", "reason")
+
+    recovery = request.with(
+      trigger: "recovery", recovery: {
+        "phase" => "admitted", "blocked_reason" => "generation_conflict",
+        "next_eligible_at" => nil
+      }
+    )
+    guarded_row = row(slug: "queued")
+    stale, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    stale.define_singleton_method(:stale_recovery_request?) { |*| true }
+    item = stale.send(
+      :dispatch_request_pending_item, recovery, row: guarded_row, now: T0
+    )
+    assert_equal "stale_task_identity", item.fetch("reason")
+
+    blocked, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    blocked.define_singleton_method(:stale_recovery_request?) { |*| false }
+    item = blocked.send(
+      :dispatch_request_pending_item, recovery, row: guarded_row, now: T0
+    )
+    assert_equal "generation_conflict", item.fetch("reason")
+
+    dependency = row(slug: "queued", blocked: true, blocked_by: nil)
+    dependency_dispatcher, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    item = dependency_dispatcher.send(
+      :dispatch_request_pending_item, request, row: dependency, now: T0
+    )
+    assert_equal [ "waiting_operator", "operator_action" ],
+                 [ item.fetch("bucket"), item.dig("condition", "kind") ]
+  end
+
+  def test_recovery_and_retry_projection_cover_running_unknown_and_safety_states
+    request = Q::Request.new(
+      request_id: "recovery", created_at: T0, project: "p1", slug: "queued",
+      argv: %w[hive run queued], requestor: "healer", trigger: "recovery",
+      recovery: { "phase" => "dispatched", "next_eligible_at" => nil }
+    )
+    observed_row = row(slug: "queued")
+    receipt = nil
+    coordinator = Object.new
+    coordinator.define_singleton_method(:receipt_for_request) { |*, **| receipt }
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], recovery_coordinator: coordinator
+    )
+    receipt = Hive::Daemon::RecoveryCoordinator::Receipt.new(
+      status: "running", request_id: request.request_id, attempt_id: "attempt-1",
+      phase: "dispatched", failure_origin: nil, next_eligible_at: nil,
+      owner: "agent", reason: nil, remediation: nil, retry_count: 1,
+      provider_hint: nil
+    )
+    item = dispatcher.send(
+      :recovery_lifecycle_pending_item, request, row: observed_row, now: T0,
+      id: "dispatch:request:recovery"
+    )
+    assert_equal "attempt_completed", item.dig("condition", "kind")
+
+    receipt = receipt.with(status: "parked", attempt_id: nil, reason: nil)
+    item = dispatcher.send(
+      :recovery_lifecycle_pending_item, request, row: observed_row, now: T0,
+      id: "dispatch:request:recovery"
+    )
+    assert_equal [ "waiting_operator", "recovery_parked" ],
+                 item.values_at("bucket", "reason")
+
+    healer = Object.new
+    assessment = nil
+    healer.define_singleton_method(:retry_assessment) { |*, **| assessment }
+    dispatcher.instance_variable_set(:@stale_agent_healer, healer)
+    live = row(slug: "retry", live_task_lock: true)
+    assessment = { safe: true, due: true, retry_at: T0, safety_reason: "safe" }
+    assert_equal "retry_in_flight",
+                 dispatcher.send(:retry_pending_item, live, now: T0).fetch("reason")
+
+    unsafe = row(slug: "retry")
+    assessment = { safe: false, due: false, retry_at: nil,
+                   safety_reason: "inspection failed: unavailable" }
+    assert_raises(Hive::Error) do
+      dispatcher.send(:retry_pending_item, unsafe, now: T0)
+    end
+    assessment = { safe: false, due: false, retry_at: nil,
+                   safety_reason: "ownership ambiguous" }
+    assert_equal "retry_safety_blocked",
+                 dispatcher.send(:retry_pending_item, unsafe, now: T0).fetch("reason")
+    assessment = { safe: true, due: true, retry_at: T0, safety_reason: "safe" }
+    assert_equal "runnable_now",
+                 dispatcher.send(:retry_pending_item, unsafe, now: T0).fetch("bucket")
+  end
+
+  def test_project_owned_fails_closed_when_ownership_probe_raises
+    ownership = Object.new
+    ownership.define_singleton_method(:owned?) { |_project| raise "unavailable" }
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], project_ownership: ownership
+    )
+
+    refute dispatcher.send(:project_owned?, "p1")
   end
 
   def test_one_shot_completion_and_scope_helpers_preserve_target_evidence

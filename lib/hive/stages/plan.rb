@@ -2,6 +2,7 @@ require "hive/stages/base"
 require "hive/claude_launcher"
 require "hive/plan_review/marker_sync"
 require "hive/plan_review/orchestrator"
+require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/planner_identity"
 require "hive/plan_frontmatter"
 require "hive/dependencies"
@@ -40,6 +41,24 @@ module Hive
       module_function
 
       def run!(task, cfg)
+        with_source_checkout(task) { |source| run_with_source!(task, cfg, source) }
+      end
+
+      # The planner must inspect the revision execution will start from.
+      # Reading the project checkout directly can show an unrelated branch far
+      # behind the default (plans then cite code that main has removed), so
+      # give it a disposable detached checkout of the execution base. Planning
+      # still proceeds without one if the checkout cannot be created.
+      def with_source_checkout(task)
+        Hive::PlanReview::DisposableWorktree.open(
+          project_root: task.project_root, prefix: "hive-plan-source-"
+        ) { |path| yield path }
+      rescue Hive::PlanReview::InvalidRecord => e
+        warn "[hive] plan: source checkout unavailable (#{e.message}); planning against the project checkout"
+        yield nil
+      end
+
+      def run_with_source!(task, cfg, source_checkout)
         brainstorm_path = File.join(task.folder, "brainstorm.md")
         brainstorm_text = File.exist?(brainstorm_path) ? File.read(brainstorm_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "plan")
@@ -51,6 +70,7 @@ module Hive
             task_folder: task.folder,
             brainstorm_text: brainstorm_text,
             carried_decisions_text: carried_decisions_text(task),
+            source_checkout: source_checkout,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
             skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
               profile, skill, project_root: task.project_root
@@ -60,7 +80,7 @@ module Hive
         # See brainstorm.rb: add-dir narrowed to the task folder so a
         # prompt-injected brainstorm.md cannot reach the project source.
         ensure_durable_checkpoint!(task)
-        result = spawn_plan_agent(task, cfg, prompt, profile)
+        result = spawn_plan_agent(task, cfg, prompt, profile, source_checkout: source_checkout)
         marker = Hive::Markers.current(task.state_file)
         adopt_plan_dependency!(task, marker)
         review = start_plan_review(task, cfg, profile, result, marker)
@@ -158,14 +178,14 @@ module Hive
         nil
       end
 
-      def spawn_plan_agent(task, cfg, prompt, profile)
+      def spawn_plan_agent(task, cfg, prompt, profile, source_checkout: nil)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "plan", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
         kwargs = {
           prompt: prompt,
-          add_dirs: scope.fetch(:add_dirs),
+          add_dirs: (scope.fetch(:add_dirs) + [ source_checkout ].compact).uniq,
           cwd: task.folder,
           max_budget_usd: cfg.dig("budget_usd", "plan"),
           timeout_sec: cfg.dig("timeout_sec", "plan"),

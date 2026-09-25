@@ -102,6 +102,7 @@ module Hive
                      digest_hold_observer: Hive::DailyDigest::HoldObserver.new,
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
+                     project_ownership: nil,
                      runtime_ready_callback: nil,
                      clock: nil,
                      patrol_discovery_async: false)
@@ -133,6 +134,7 @@ module Hive
         @runtime_ready_callback = runtime_ready_callback
         @clock = clock
         @module_runtime = module_runtime
+        @project_ownership = project_ownership
         @dispatch_repository = dispatch_repository
         @dispatch_state_home = dispatch_request_state_home || dispatch_result_state_home ||
           Hive::Paths.state_home
@@ -268,6 +270,12 @@ module Hive
         # cache populated on first sight stuck for the daemon's
         # lifetime and the only way to honour a disable was SIGHUP.
         @enabled_cache.clear
+        unless refresh_project_ownership
+          publish_operational_snapshot(
+            :fail, phase: "failed", reason: "project_ownership_unavailable", now: now
+          )
+          return
+        end
         @routing_observations.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
         reset_active_agent_snapshot
@@ -508,6 +516,7 @@ module Hive
         return true if keys.empty?
 
         @enabled_cache.clear
+        return false unless refresh_project_ownership
         @logger.event(:tick_begin, now: now.utc.iso8601, scope: "changed_tasks", tasks: keys.length)
         result = @status_consumer.fetch_tasks(keys)
         return false unless admission_open?
@@ -1240,7 +1249,9 @@ module Hive
       def run_refactor_patrol_merge_reconciler_tick(now:)
         return unless @refactor_patrol_merge_reconciler
 
-        @refactor_patrol_merge_reconciler.tick(now: now).each do |result|
+        arguments = { now: now }
+        arguments[:projects] = @project_ownership.owned_projects if @project_ownership
+        @refactor_patrol_merge_reconciler.tick(**arguments).each do |result|
           case result.fetch(:status)
           when :blocked
             @logger.event(
@@ -3513,7 +3524,9 @@ module Hive
       def reconcile_attempts(now:)
         return true unless @attempt_reconciler
 
-        @attempt_snapshot = @attempt_reconciler.reconcile(now: now.utc)
+        arguments = { now: now.utc }
+        arguments[:mutate_projects] = @project_ownership.owned_projects if @project_ownership
+        @attempt_snapshot = @attempt_reconciler.reconcile(**arguments)
         @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
         refresh_attempt_storage_snapshot
         reconcile_attempt_deliveries(now: now)
@@ -4181,9 +4194,30 @@ module Hive
         end
 
         cfg = Hive::Config.load(entry["path"])
-        @enabled_cache[project_name] = cfg.dig("daemon", "enabled") == true
+        enabled = cfg.dig("daemon", "enabled") == true
+        enabled &&= @project_ownership.owned?(project_name) if @project_ownership
+        @enabled_cache[project_name] = enabled
       rescue Hive::ConfigError
         @enabled_cache[project_name] = false
+      end
+
+      def refresh_project_ownership
+        return true unless @project_ownership
+
+        @project_ownership.refresh!
+        @project_ownership.contentions.each do |project, error|
+          @logger.event(
+            :blocked, project: project, stage: "daemon", action: "project_ownership",
+            reason: error.code, owner: error.owner
+          )
+        end
+        true
+      rescue StandardError => error
+        @logger.event(
+          :fatal, message: "project ownership refresh failed: #{error.class}: #{error.message}",
+          keeping_previous: true
+        )
+        false
       end
 
       def reload_config!

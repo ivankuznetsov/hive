@@ -67,6 +67,10 @@ and the complete target coordination schema. The
 boundary does not activate any legacy runtime consumer or move task/workflow
 authority out of project task folders.
 
+`ProcessGuard` also closes registered non-database fork resources in the child.
+The one-shot project guard uses that hook so a detached attempt cannot inherit
+and accidentally extend a completed parent's project-ownership lock.
+
 `PayloadStore` moves retained bytes from stable open paths to immutable SHA-256
 addresses at terminal publication. `Installation.setup` creates the current
 runtime database explicitly; status and startup validate it read-only. The

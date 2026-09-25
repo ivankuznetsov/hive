@@ -23,6 +23,7 @@ module Hive
         @ordinary_scheduler = ordinary_scheduler
         @architecture_scheduler = architecture_scheduler
         @state_path = state_path
+        @lock_path = "#{state_path}.lock"
         @dry_run = dry_run
       end
 
@@ -43,16 +44,26 @@ module Hive
         kind = candidate.fetch(:patrol_kind).to_sym
         raise ArgumentError, "unknown patrol kind #{kind.inspect}" unless KINDS.include?(kind)
 
-        state = load_state
-        state.fetch("projects")[candidate.fetch(:project).to_s] = {
-          "last_selected" => kind.to_s,
-          "updated_at" => now.utc.iso8601
-        }
-        persist(state)
+        with_state_lock do
+          state = load_state
+          state.fetch("projects")[candidate.fetch(:project).to_s] = {
+            "last_selected" => kind.to_s,
+            "updated_at" => now.utc.iso8601
+          }
+          persist(state)
+        end
         candidate
       end
 
       private
+
+      def with_state_lock
+        FileUtils.mkdir_p(File.dirname(@lock_path))
+        File.open(@lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          yield
+        end
+      end
 
       def select_for(candidates, last_selected:)
         ordinary = candidates.find { |candidate| candidate[:patrol_kind].to_sym == :ordinary }

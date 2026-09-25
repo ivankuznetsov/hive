@@ -170,4 +170,23 @@ class HiveDaemonPatrolArbiterTest < Minitest::Test
       assert File.file?(path), "the durable write succeeds even where directory fsync is unsupported"
     end
   end
+
+  def test_separate_instances_merge_project_cursors_under_lock
+    with_tmp_dir do |dir|
+      path = File.join(dir, "arbiter.json")
+      first = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil, architecture_scheduler: nil, state_path: path
+      )
+      second = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil, architecture_scheduler: nil, state_path: path
+      )
+
+      first.commit({ project: "p1", patrol_kind: :ordinary }, now: T0)
+      second.commit({ project: "p2", patrol_kind: :architecture }, now: T0 + 1)
+
+      state = JSON.parse(File.binread(path))
+      assert_equal %w[p1 p2], state.fetch("projects").keys.sort
+      assert_path_exists "#{path}.lock"
+    end
+  end
 end

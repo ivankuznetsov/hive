@@ -39,7 +39,8 @@ module Hive
                   :max_runs_per_day_per_project, :max_concurrent_patrol_scans
 
       def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:,
-                     max_concurrent_patrol_scans: 1, dispatch_state: nil)
+                     max_concurrent_patrol_scans: 1, dispatch_state: nil,
+                     schedule_state_factory: nil, persistence_scope_projects: nil)
         @max_concurrent_runs = max_concurrent_runs
         @max_concurrent_per_project = max_concurrent_per_project
         @max_runs_per_day_per_project = max_runs_per_day_per_project
@@ -56,6 +57,9 @@ module Hive
         # (`:daemon_dispatch_baselines_*`) for both expected I/O errors and the
         # defense-in-depth broad-StandardError rescue.
         @dispatch_state = dispatch_state
+        @schedule_state_factory = schedule_state_factory
+        @persistence_scope_projects = persistence_scope_projects
+        @restored_schedule_projects = Set.new
 
         # pid → { project, slug, stage, command, started_at, state_file_mtime_at_dispatch }
         @running = {}
@@ -109,11 +113,16 @@ module Hive
       #   :cooldown | :quarantined | :project_dropped
       def can_dispatch?(project:, slug:, now: Time.now,
                         external_global_count: 0, external_project_count: 0)
+        restore_schedule_state(project)
         return :project_dropped if @dropped_projects.include?(project)
         return :quarantined     if @quarantine.include?([ project, slug ])
 
         cooldown_expiry = @cooldown_until[[ project, slug ]]
         return :cooldown if cooldown_expiry && cooldown_expiry > now
+        if cooldown_expiry
+          @cooldown_until.delete([ project, slug ])
+          persist_schedule_state(project, now: now)
+        end
 
         external_global = [ @external_running_global, external_global_count.to_i ].max
         external_project = [ @external_running_by_project[project].to_i, external_project_count.to_i ].max
@@ -138,6 +147,7 @@ module Hive
       # cap is 1).
       #   :ok | :project_dropped | :patrol_scan_cap
       def can_dispatch_patrol_scan?(project:, now: Time.now)
+        restore_schedule_state(project)
         return :project_dropped if @dropped_projects.include?(project)
 
         scan_count = @running.count { |_pid, entry| entry[:kind] == :patrol_scan && entry[:project] == project }
@@ -250,6 +260,7 @@ module Hive
       # exits with TEMPFAIL — see record_completion).
       def record_dispatch(pid:, project:, slug:, stage:, command:,
                           started_at:, state_file_mtime:, kind: :task)
+        restore_schedule_state(project)
         @restored_dispatch_baseline_keys.delete([ project, slug ])
         @running[pid] = {
           project: project,
@@ -354,13 +365,16 @@ module Hive
             @cooldown_until[key] = completed_at + TRANSIENT_BACKOFF_SCHEDULE[n - 1]
           end
         end
+        persist_schedule_state(entry[:project], now: completed_at)
       end
 
       # Drop a project from active dispatch for the daemon's lifetime.
       # Direct API for callers (e.g., dispatcher catching a CONFIG=78
       # before a child even spawns).
       def record_project_dropped(project:)
+        restore_schedule_state(project)
         @dropped_projects.add(project)
+        persist_schedule_state(project)
       end
 
       def running_task?(project:, slug:)
@@ -441,6 +455,46 @@ module Hive
 
       private
 
+      def restore_schedule_state(project)
+        return unless @schedule_state_factory && project
+        return if @restored_schedule_projects.include?(project)
+
+        store = @schedule_state_factory.call(project)
+        unless store
+          @restored_schedule_projects.add(project)
+          return
+        end
+        state = store.read("dispatch")
+        Array(state["cooldowns"]).each do |entry|
+          @cooldown_until[[ project, entry.fetch("slug") ]] = Time.iso8601(entry.fetch("next_check_at"))
+        end
+        state.fetch("transient_failures", {}).each do |slug, count|
+          @transient_failures[[ project, slug ]] = Integer(count)
+        end
+        Array(state["quarantined"]).each { |slug| @quarantine.add([ project, slug ]) }
+        @dropped_projects.add(project) if state["dropped"] == true
+        @restored_schedule_projects.add(project)
+      end
+
+      def persist_schedule_state(project, now: Time.now.utc)
+        return unless @schedule_state_factory && project
+
+        component = {
+          "cooldowns" => @cooldown_until.filter_map do |(candidate, slug), deadline|
+            next unless candidate == project && deadline
+
+            { "slug" => slug, "next_check_at" => deadline.utc.iso8601(6) }
+          end,
+          "transient_failures" => @transient_failures.each_with_object({}) do |((candidate, slug), count), memo|
+            memo[slug] = count if candidate == project && count.positive?
+          end,
+          "quarantined" => @quarantine.filter_map { |candidate, slug| slug if candidate == project }.sort,
+          "dropped" => @dropped_projects.include?(project)
+        }
+        store = @schedule_state_factory.call(project)
+        store&.update("dispatch", now: now.utc) { component }
+      end
+
       def digest_kind?(kind)
         DIGEST_KINDS.include?(kind&.to_sym)
       end
@@ -451,7 +505,16 @@ module Hive
       # a typed `:daemon_dispatch_baselines_*` event. The controller stays
       # ignorant of file I/O.
       def persist_dispatch_baselines!
-        @dispatch_state&.write(@last_dispatched_mtime)
+        return unless @dispatch_state
+
+        if @persistence_scope_projects
+          @dispatch_state.write(
+            @last_dispatched_mtime,
+            scope_projects: @persistence_scope_projects
+          )
+        else
+          @dispatch_state.write(@last_dispatched_mtime)
+        end
       end
 
       def running_count_for(project)

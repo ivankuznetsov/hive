@@ -37,6 +37,8 @@ require "hive/attempts/finalization_maintenance"
 require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
+require "hive/one_shot/project_guard"
+require "hive/one_shot/schedule_state"
 require "hive/commands/service_installer/result_presenter"
 
 module Hive
@@ -219,6 +221,13 @@ module Hive
           max_bytes: daemon_cfg.fetch("log_max_bytes"),
           max_files: daemon_cfg.fetch("log_max_files")
         )
+        project_ownership = Hive::OneShot::ProjectGuard::Collection.new(
+          kind: "daemon", registry: -> { Hive::Config.registered_projects },
+          enabled: lambda do |entry|
+            Hive::Config.load(entry.fetch("path")).dig("daemon", "enabled") == true
+          end
+        )
+        project_ownership.refresh!
         if daily_digest_error
           logger.event(
             :daily_digest_configuration_disabled,
@@ -234,7 +243,11 @@ module Hive
           # Persist first-sight dispatch baselines so a daemon restart doesn't
           # re-strand already-answered needs_input tasks. The store owns all
           # `:daemon_dispatch_baselines_*` typed events via its own logger.
-          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger)
+          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger),
+          schedule_state_factory: lambda do |project|
+            entry = Hive::Config.find_project(project)
+            entry && Hive::OneShot::ScheduleState.new(state_root: entry.fetch("hive_state_path"))
+          end
         )
         supervisor = Hive::Daemon::ChildSupervisor.new(
           dry_run: @dry_run,
@@ -360,6 +373,7 @@ module Hive
           lost_outcome_processor: lost_outcome_processor,
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
+          project_ownership: project_ownership,
           runtime_ready_callback: -> { activation_lock.release! },
           clock: -> { Time.now.utc },
           patrol_discovery_async: true
@@ -370,6 +384,7 @@ module Hive
           dispatcher.run_forever
           reexec_requested = dispatcher.reexec_requested?
         ensure
+          project_ownership&.release_all!
           # PR-40 follow-up review C2: parse via read_pid_file_payload
           # so the cleanup matches the YAML-payload format the daemon
           # writes. The earlier `File.read.strip.to_i` returned 0 against

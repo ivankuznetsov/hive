@@ -67,6 +67,7 @@ components:
       - lib/hive/daemon/dispatcher.rb
       - lib/hive/daemon/operational_snapshot.rb
       - lib/hive/lock.rb
+      - lib/hive/one_shot/project_guard.rb
       - lib/hive/patrol/launch_budget.rb
       - lib/hive/runtime_control_plane/installation.rb
       - lib/hive/task_counter.rb

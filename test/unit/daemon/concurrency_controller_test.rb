@@ -2,6 +2,7 @@ require "test_helper"
 require "tmpdir"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
+require "hive/one_shot/schedule_state"
 
 # Pin the concurrency controller's caps + backoff + quarantine + daily-
 # rate semantics. Pure unit — no I/O, no Process.spawn. The controller
@@ -344,6 +345,30 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     c.record_project_dropped(project: "p2")
 
     assert_equal %w[p1 p2], c.dropped_projects.sort
+  end
+
+  def test_scheduler_holds_survive_a_fresh_controller
+    Dir.mktmpdir do |root|
+      factory = ->(project) { Hive::OneShot::ScheduleState.new(state_root: File.join(root, project)) }
+      first = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      dispatch(first, 900, "p1", "bad")
+      first.record_completion(
+        pid: 900, exit_code: Hive::ExitCodes::SOFTWARE, completed_at: T0
+      )
+      first.record_project_dropped(project: "p2")
+
+      fresh = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      assert_equal :cooldown, fresh.can_dispatch?(project: "p1", slug: "bad", now: T0 + 1)
+      assert_equal :project_dropped,
+                   fresh.can_dispatch?(project: "p2", slug: "anything", now: T0 + 1)
+      assert_equal :ok, fresh.can_dispatch?(project: "p3", slug: "good", now: T0 + 1)
+    end
   end
 
   # ── mtime tracking ────────────────────────────────────────────────────

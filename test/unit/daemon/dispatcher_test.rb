@@ -596,6 +596,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       patrol_fix_admission_scheduler: nil,
                       attempt_dispatcher: nil, attempt_reconciler: nil,
                       operational_snapshot: nil, module_runtime: nil,
+                      project_ownership: nil,
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil,
@@ -661,6 +662,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       attempt_reconciler: attempt_reconciler,
       operational_snapshot: operational_snapshot,
       module_runtime: module_runtime,
+      project_ownership: project_ownership,
       recovery_coordinator: recovery_coordinator,
       plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback,
@@ -675,6 +677,37 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       answer_digest_scheduler, daily_digest_close_scheduler, daily_digest_delivery_scheduler
     ]
+  end
+
+  def test_project_ownership_refresh_scopes_attempt_mutation_before_admission
+    ownership = Object.new
+    refreshes = 0
+    ownership.define_singleton_method(:refresh!) { refreshes += 1; [ "p1" ] }
+    ownership.define_singleton_method(:contentions) { {} }
+    ownership.define_singleton_method(:owned_projects) { [ "p1" ] }
+    ownership.define_singleton_method(:owned?) { |project| project == "p1" }
+    capacity = Hive::Attempts::CapacitySnapshot.new(
+      global_count: 0, per_project: {}, per_task: {}, daily_counts: {},
+      reserved_attempt_ids: []
+    )
+    snapshot = Hive::Attempts::ReconciliationSnapshot.new(
+      capacity: capacity, attempts: [], lost_attempts: [], newly_lost_attempts: [],
+      terminal_attempts: [], admission_view: nil
+    )
+    reconciler = Object.new
+    calls = []
+    reconciler.define_singleton_method(:reconcile) do |**arguments|
+      calls << arguments
+      snapshot
+    end
+
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_reconciler: reconciler, project_ownership: ownership
+    )
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, refreshes
+    assert_equal [ "p1" ], calls.fetch(0).fetch(:mutate_projects)
   end
 
   def test_async_patrol_discovery_keeps_authoritative_ticks_responsive

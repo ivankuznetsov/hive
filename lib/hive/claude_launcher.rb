@@ -533,7 +533,7 @@ module Hive
         last_tail = runner.capture_pane_tail(bytes: SENTINEL_CAPTURE_BYTES)
 
         if claude_trust_prompt?(last_tail)
-          runner.send_keys("Enter")
+          runner.send_keys(*claude_trust_prompt_keys(last_tail))
           remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
           break if remaining <= 0
 

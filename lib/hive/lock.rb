@@ -97,11 +97,22 @@ module Hive
       false
     end
 
-    COMMIT_LOCK_TIMEOUT_SEC = 30
+    # Each hive/state commit stages task files and logs; on a large state
+    # branch (100k+ tracked files) one commit takes several seconds, so a few
+    # stage commands starting together queue past 30s without any holder
+    # being stuck. Wait long enough for such a queue to drain, still bounded.
+    COMMIT_LOCK_TIMEOUT_SEC = 120
+    COMMIT_LOCK_TIMEOUT_ENV = "HIVE_COMMIT_LOCK_TIMEOUT_SEC".freeze
+
+    def commit_lock_timeout
+      raw = ENV[COMMIT_LOCK_TIMEOUT_ENV].to_s.strip
+      value = Float(raw, exception: false) if raw.match?(/\A\d+(?:\.\d+)?\z/)
+      value&.positive? ? value : COMMIT_LOCK_TIMEOUT_SEC
+    end
 
     # Bounded acquire — flock(LOCK_EX) without timeout would hang forever if a
     # frozen 45-min agent holds the lock. Poll non-blocking with a deadline.
-    def with_commit_lock(project_hive_state_path, timeout: COMMIT_LOCK_TIMEOUT_SEC)
+    def with_commit_lock(project_hive_state_path, timeout: commit_lock_timeout)
       FileUtils.mkdir_p(project_hive_state_path)
       lock_path = File.join(project_hive_state_path, ".commit-lock")
       lock_key = File.realpath(project_hive_state_path)

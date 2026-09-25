@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-plan-review-show.v1.json",
+  "title": "Hive plan review show (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "ok", "slug", "task_folder", "review_id", "task_generation",
+               "policy_fingerprint", "observation_digest", "state", "outcome", "execution_allowed",
+               "required_action", "freshness", "open_findings"],
+  "properties": {
+    "schema": {"const": "hive-plan-review-show"},
+    "schema_version": {"const": 1},
+    "ok": {"const": true},
+    "slug": {"type": "string", "minLength": 1},
+    "task_folder": {"type": "string", "minLength": 1},
+    "review_id": {"type": "string", "minLength": 1},
+    "task_generation": {"type": "string", "minLength": 1},
+    "policy_fingerprint": {"type": "string", "minLength": 1},
+    "observation_digest": {"type": "string", "minLength": 1},
+    "state": {"type": "string", "minLength": 1},
+    "outcome": {"type": ["string", "null"]},
+    "execution_allowed": {"type": "boolean"},
+    "required_action": {"type": ["string", "null"]},
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason"],
+      "properties": {
+        "status": {"enum": ["current", "stale", "invalid"]},
+        "reason": {"type": ["string", "null"]}
+      }
+    },
+    "open_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fingerprint", "classification", "risk", "lifecycle", "title"],
+        "properties": {
+          "fingerprint": {"type": "string", "minLength": 1},
+          "classification": {"type": "string", "minLength": 1},
+          "risk": {"type": "string", "minLength": 1},
+          "lifecycle": {"const": "open"},
+          "title": {"type": "string"}
+        }
+      }
+    }
+  }
+}

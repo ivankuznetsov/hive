@@ -23,6 +23,7 @@ require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/plan_review"
+require "hive/commands/plan_review_show"
 require "hive/commands/plan_review_run"
 require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
@@ -964,6 +965,16 @@ class HiveCliTest < Minitest::Test
         assert_equal "3-plan", raises.first.last.fetch(:stage)
         assert_equal [ "plan", "slug" ], calls.first.fetch(:args)
       end
+    end
+  end
+
+  def test_plan_review_show_wires_read_only_target_project_and_json_options
+    with_command_new_stub(Hive::Commands::PlanReviewShow) do |calls|
+      Hive::CLI.start([ "plan-review", "demo:task", "show", "--project", "demo", "--json" ])
+
+      assert_equal [ "demo:task" ], calls.first.fetch(:args)
+      assert_equal({ project: "demo", json: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
     end
   end
 

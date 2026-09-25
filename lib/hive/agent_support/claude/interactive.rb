@@ -1,7 +1,12 @@
 module Hive::AgentSupport::Claude::Interactive
   READY_WAIT_TIMEOUT_SEC = 120
   READY_POLL_INTERVAL_SEC = 0.25
-  TRUST_MARKERS = [ "Quick safety check", "Yes, I trust this folder" ].freeze
+  TRUST_OPTION = "Yes, I trust this folder".freeze
+  # Claude Code has shipped two folder-trust layouts: the older "Quick safety
+  # check" with "Yes" as option 1, and a newer "Is this a project you created
+  # or one you trust?" whose caret starts on "No, exit". Either context line
+  # plus the trust option identifies the prompt.
+  TRUST_CONTEXT_MARKERS = [ "Quick safety check", "one you trust", "Enter to confirm" ].freeze
   PERMISSION_MARKER = "Do you want to".freeze
   READY_BANNER = "Claude Code".freeze
   READY_FOOTER = "for agents".freeze
@@ -13,6 +18,9 @@ module Hive::AgentSupport::Claude::Interactive
   MENU_LINE = /\A\s*❯\s*\d+\./.freeze
   CHROME_LINE = /\A[\p{Zs}\s?+\-─━│┄┈┉┅┇┊┋┆┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬╭╮╰╯╴╵╶╷╸╹╺╻╼╽╾╿]+\z/u.freeze
   PROMPT_LINES = 12
+  TRUST_PROMPT_LINES = 16
+  # A repainted session banner means any trust dialog above it is scrollback.
+  VERSION_BANNER_LINE = /\AClaude Code v\d/.freeze
 
   PLANNER_TOOLS = "Read,Write,Edit,LS".freeze
   IMPLEMENTER_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
@@ -64,13 +72,34 @@ module Hive::AgentSupport::Claude::Interactive
   end
 
   def claude_trust_prompt?(pane)
-    current_prompt_text(pane).then { |text| TRUST_MARKERS.all? { |marker| text.include?(marker) } }
+    trust_prompt_text?(trust_prompt_region(pane))
+  end
+
+  # Keys that move the folder-trust prompt toward accepting trust. Enter only
+  # confirms when the caret is on the trust option; otherwise move down and let
+  # the next poll re-read the menu, so a "No, exit" default is never confirmed.
+  def claude_trust_prompt_keys(pane)
+    caret = trust_prompt_region(pane).each_line.map(&:strip).find { |line| line.start_with?("❯") }
+    caret&.include?(TRUST_OPTION) ? [ "Enter" ] : [ "Down" ]
+  end
+
+  # The newer trust dialog separates its options and footer with blank lines,
+  # so read a window of recent non-empty lines instead of only the text after
+  # the last blank line.
+  def trust_prompt_region(pane)
+    lines = pane.each_line.map(&:strip)
+    banner = lines.rindex { |line| line.match?(VERSION_BANNER_LINE) }
+    lines[(banner ? banner + 1 : 0)..].reject(&:empty?).last(TRUST_PROMPT_LINES).join("\n")
+  end
+
+  def trust_prompt_text?(text)
+    text.include?(TRUST_OPTION) && TRUST_CONTEXT_MARKERS.any? { |marker| text.include?(marker) }
   end
 
   def claude_ready_prompt?(pane)
     text = current_prompt_text(pane)
     lines = text.each_line.map(&:strip).reject(&:empty?)
-    return false if TRUST_MARKERS.all? { |marker| text.include?(marker) }
+    return false if trust_prompt_text?(text)
     return false if text.include?(PERMISSION_MARKER)
     return false if text.include?(BUSY_MARKER)
     return false unless pane.include?(READY_BANNER) || text.include?(READY_FOOTER)

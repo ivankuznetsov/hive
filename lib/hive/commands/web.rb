@@ -168,7 +168,9 @@ module Hive
       def capture_control_io
         return $stdin unless @control_fd
 
-        IO.for_fd(Integer(@control_fd, 10), autoclose: false)
+        # Thor's `type: :numeric` hands the CLI value over as an Integer, and
+        # Integer(12, 10) raises; normalize before the strict base-10 parse.
+        IO.for_fd(Integer(@control_fd.to_s, 10), autoclose: false)
       rescue ArgumentError, RangeError, Errno::EBADF
         raise Hive::InvalidTaskPath,
               "hive web capture-server --control-fd must be an open integer file descriptor"

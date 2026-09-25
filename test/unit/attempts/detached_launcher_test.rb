@@ -23,12 +23,12 @@ class AttemptsDetachedLauncherTest < Minitest::Test
       caller_sid = Process.getsid(0)
       launcher = Hive::Attempts::DetachedLauncher.new(
         store: store, heartbeat_sec: 0.02, stale_sec: 1,
-        first_heartbeat_timeout_sec: 1, ready_timeout_sec: 2,
+        first_heartbeat_timeout_sec: 1,
         systemd_scope: -> { false }
       )
 
       handoff = launcher.launch(attempt, claim_capability: CLAIM_CAPABILITY)
-      assert_equal true, handoff.fetch("claimed")
+      assert_equal true, handoff.fetch("claimed"), handoff.inspect
 
       terminal = wait_for_terminal(store, attempt.attempt_id)
       assert_equal "succeeded", terminal.outcome
@@ -55,11 +55,11 @@ class AttemptsDetachedLauncherTest < Minitest::Test
       )
       launcher = Hive::Attempts::DetachedLauncher.new(
         store: store, heartbeat_sec: 0.02, stale_sec: 1,
-        first_heartbeat_timeout_sec: 1, ready_timeout_sec: 2
+        first_heartbeat_timeout_sec: 1
       )
 
       handoff = launcher.launch(attempt, claim_capability: CLAIM_CAPABILITY)
-      assert_equal true, handoff.fetch("claimed")
+      assert_equal true, handoff.fetch("claimed"), handoff.inspect
       wrapper_pid = store.fetch(attempt.attempt_id).wrapper.fetch("pid")
       wrapper_cgroup = File.read("/proc/#{wrapper_pid}/cgroup")
       refute_equal File.read("/proc/self/cgroup"), wrapper_cgroup

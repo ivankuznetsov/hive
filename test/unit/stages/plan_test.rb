@@ -164,4 +164,3 @@ class HiveStagesPlanTest < Minitest::Test
     refute_includes render.call(""), "plan_review_decisions"
   end
 end
-

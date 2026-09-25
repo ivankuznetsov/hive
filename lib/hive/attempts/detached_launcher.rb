@@ -4,6 +4,7 @@ require "digest"
 require "hive/attempts/contracts"
 require "hive/attempts/repository"
 require "hive/runtime_control_plane"
+require "hive/runtime_control_plane/process_registry"
 
 module Hive
   module Attempts
@@ -21,6 +22,7 @@ module Hive
                      capability: -> { self.class.supported? },
                      systemd_scope: -> { self.class.systemd_scope_available? },
                      systemd_run: "systemd-run",
+                     process_registry: nil,
                      hive_executable: File.expand_path("../../../bin/hive", __dir__))
         @store = store
         @heartbeat_sec = heartbeat_sec
@@ -32,6 +34,7 @@ module Hive
         @capability = capability
         @systemd_scope = systemd_scope
         @systemd_run = systemd_run
+        @process_registry = process_registry
         @hive_executable = hive_executable
       end
 
@@ -65,13 +68,21 @@ module Hive
 
       def launch(record, claim_capability:)
         preflight!
+        reservation = process_registry&.reserve!(
+          origin: "attempt", role: "attempt_wrapper", attempt_id: record.attempt_id,
+          task_id: record.respond_to?(:[]) ? record["task_id"] : nil,
+          timeout_sec: @ready_timeout_sec
+        )
         use_systemd_scope = @systemd_scope.call == true
         reader, writer = IO.pipe
         launcher_pid = fork do
           reader.close
           begin
             Process.setsid
-            fork_wrapper(record, claim_capability, writer, use_systemd_scope:)
+            fork_wrapper(
+              record, claim_capability, writer, use_systemd_scope:,
+              reservation_id: reservation&.id
+            )
           rescue StandardError => e
             writer.write(JSON.generate(
               "claimed" => false, "attempt_id" => record.attempt_id,
@@ -93,6 +104,7 @@ module Hive
       ensure
         reader&.close unless reader&.closed?
         writer&.close unless writer&.closed?
+        reservation&.release_fence!
       end
 
       private
@@ -105,7 +117,8 @@ module Hive
         Hive::RuntimeControlPlane::ProcessGuard.exec(*arguments, **options)
       end
 
-      def fork_wrapper(record, claim_capability, writer, use_systemd_scope: false)
+      def fork_wrapper(record, claim_capability, writer, use_systemd_scope: false,
+                       reservation_id: nil)
         claim_reader, claim_writer = IO.pipe
         claim_writer.write(claim_capability)
         claim_writer.close
@@ -126,6 +139,7 @@ module Hive
           env = ENV.keys.grep(/\AHIVE_ATTEMPT_/).to_h { |key| [ key, nil ] }.merge(
             "HIVE_ATTEMPT_READY_FD" => writer.fileno.to_s,
             "HIVE_ATTEMPT_CLAIM_FD" => claim_reader.fileno.to_s,
+            "HIVE_ATTEMPT_RESERVATION_ID" => reservation_id,
             # The wrapper re-enters Hive itself. It must not inherit the
             # caller's Bundler loader, which can point at a different checkout
             # or an ephemeral test HOME before the supervisor reports ready.
@@ -156,6 +170,7 @@ module Hive
         unit = "hive-attempt-#{Digest::SHA256.hexdigest(record.attempt_id.to_s)[0, 24]}"
         [
           @systemd_run, "--user", "--scope", "--quiet", "--collect",
+          "--property=Delegate=yes",
           "--unit=#{unit}", "--description=Hive durable attempt #{record.attempt_id}",
           *command
         ]
@@ -169,6 +184,15 @@ module Hive
           .join(File::PATH_SEPARATOR)
       rescue SystemCallError
         ""
+      end
+
+      def process_registry
+        return @process_registry if @process_registry
+        return nil unless @store.database.respond_to?(:transaction)
+
+        @process_registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+          database: @store.database, state_home: File.dirname(@store.database.path)
+        )
       end
     end
   end

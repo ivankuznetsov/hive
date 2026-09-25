@@ -23,6 +23,7 @@ require "hive/daily_digest/migration"
 require "hive/daemon/daily_digest_delivery_scheduler"
 require "hive/daemon/logger"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_fix_runtime"
 require "hive/daemon/status_report"
@@ -339,6 +340,9 @@ module Hive
           ),
           poll_interval_sec: daemon_cfg.fetch("poll_interval_sec", 30)
         )
+        lifecycle_repository = Hive::RuntimeControlPlane::LifecycleRepository.new(
+          database: attempt_store.database
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
@@ -361,6 +365,7 @@ module Hive
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
           runtime_ready_callback: -> { activation_lock.release! },
+          persistent_admission: -> { lifecycle_repository.current.admission_open? },
           clock: -> { Time.now.utc },
           patrol_discovery_async: true
         )

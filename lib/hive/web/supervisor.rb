@@ -29,11 +29,12 @@ module Hive
       # exposure remains the operator's compose port-mapping choice.
       WEB_CHILD_ARGV = %w[hive web --bind 0.0.0.0 --allow-public].freeze
 
-      def initialize
+      def initialize(persistent_admission: nil)
         @children = []
         @stopping = false
         @reload_requested = false
         @restart_at = {}
+        @persistent_admission = persistent_admission
       end
 
       def run
@@ -208,7 +209,7 @@ module Hive
       end
 
       def start_due_restarts
-        return if @stopping
+        return if @stopping || !admission_open?
 
         @restart_at.to_a.each do |name, at|
           next if Time.now < at
@@ -219,6 +220,13 @@ module Hive
           start_child(name, c.argv)
           @restart_at.delete(name)
         end
+      end
+
+      def admission_open?
+        @persistent_admission.nil? || @persistent_admission.call == true
+      rescue StandardError => e
+        warn "hivebox supervisor: persistent admission check failed (#{e.class}: #{e.message})"
+        false
       end
 
       def terminate_all

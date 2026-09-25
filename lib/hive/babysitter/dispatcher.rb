@@ -12,7 +12,8 @@ module Hive
 
       attr_reader :logger, :inflight
 
-      def initialize(logger:, dry_run: false, project_name: nil, max_ticks: nil)
+      def initialize(logger:, dry_run: false, project_name: nil, max_ticks: nil,
+                     persistent_admission: nil)
         @logger = logger
         @dry_run = dry_run
         @project_name = project_name
@@ -21,6 +22,7 @@ module Hive
         @reload = false
         @poll_interval_sec = DEFAULT_INTERVAL_SEC
         @inflight = Set.new
+        @persistent_admission = persistent_admission
       end
 
       def tick(now: Time.now)
@@ -93,7 +95,12 @@ module Hive
       private
 
       def admission_open?
-        @shutdown == false
+        @shutdown == false &&
+          (@persistent_admission.nil? || @persistent_admission.call == true)
+      rescue StandardError => e
+        @logger.event(:admission_check_failed,
+                      message: "persistent admission check failed: #{e.class}: #{e.message}")
+        false
       end
 
       def enabled_projects

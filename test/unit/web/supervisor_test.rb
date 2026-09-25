@@ -38,6 +38,21 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
+  def test_persistent_admission_closure_preserves_due_restart_intent
+    sup = Hive::Web::Supervisor.new(persistent_admission: -> { false })
+    child = Child.new(name: "web", argv: %w[x], pid: nil,
+                      started_at: Time.now - 3600, desired: true)
+    sup.instance_variable_get(:@children) << child
+    restart_at(sup)["web"] = Time.now - 1
+    started = stub_start_child(sup)
+
+    sup.send(:start_due_restarts)
+
+    assert_empty started
+    assert restart_at(sup).key?("web"),
+           "resume must retain the restart intent suppressed while admission is closed"
+  end
+
   def test_reap_schedules_restart_for_every_crashed_child
     with_tmp_global_config do
       sup = build

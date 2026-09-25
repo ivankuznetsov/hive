@@ -13,5 +13,6 @@ fi
 # NameError and the container never starts.
 # Initialize a fresh data volume through setup's current-format contract.
 # Existing incompatible storage is rejected rather than converted.
-exec ruby -rhive -rhive/runtime_control_plane/installation -rhive/web/supervisor \
-  -e 'Hive::RuntimeControlPlane::Installation.setup; Hive::Web::Supervisor.new.run'
+exec ruby -rhive -rhive/runtime_control_plane/installation \
+  -rhive/runtime_control_plane/lifecycle_repository -rhive/web/supervisor \
+  -e 'Hive::RuntimeControlPlane::Installation.setup; db = Hive::RuntimeControlPlane.database(path: Hive::Paths.runtime_control_plane_path).open!; lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: db); Hive::Web::Supervisor.new(persistent_admission: -> { lifecycle.current.admission_open? }).run'

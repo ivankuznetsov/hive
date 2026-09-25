@@ -9,6 +9,7 @@ require "hive/attempts/repository"
 require "hive/attempts/stream_log"
 require "hive/lock"
 require "hive/patrol_fix/attempt_diagnostic"
+require "hive/runtime_control_plane/process_registry"
 
 module Hive
   module Attempts
@@ -32,7 +33,8 @@ module Hive
                      kill_grace_sec: 1, busy_tolerance_sec: BUSY_TOLERANCE_SEC,
                      clock: -> { Time.now.utc },
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
-                     install_signal_handlers: false)
+                     install_signal_handlers: false, process_registry: nil,
+                     reservation_id: ENV["HIVE_ATTEMPT_RESERVATION_ID"])
         @store = store
         @attempt_id = attempt_id
         @claim_io = claim_io
@@ -46,6 +48,9 @@ module Hive
         @clock = clock
         @monotonic = monotonic
         @install_signal_handlers = install_signal_handlers
+        @process_registry = process_registry
+        @reservation_id = reservation_id
+        @wrapper_registered = false
         @ready_sent = false
         @cancel_reason = nil
         @cancel_signal = nil
@@ -60,6 +65,8 @@ module Hive
 
         record = @store.fetch(@attempt_id)
         return fail_before_start("attempt_not_launching") unless record&.state == "launching"
+
+        register_wrapper! if @reservation_id
 
         log = @store.log_archive.open_writer(record.attempt_id, clock: @clock)
         now = @clock.call
@@ -101,6 +108,12 @@ module Hive
           )
         end
         terminal.receipt.fetch("exit_status")
+      rescue RuntimeControlPlane::AdmissionClosed => e
+        signal_ready(
+          "claimed" => false, "attempt_id" => @attempt_id,
+          "state" => "quiescing", "error" => e.message
+        )
+        Hive::ExitCodes::TEMPFAIL
       rescue CompareAndSwapFailed, RepositoryError => e
         warn "hive attempt supervisor: #{@attempt_id} lost its lease: #{e.class}: #{e.message}"
         terminate_worker_group
@@ -136,9 +149,32 @@ module Hive
         @ready_io&.close unless @ready_io&.closed?
         @claim_io&.close unless @claim_io&.closed?
         log&.close unless log&.closed?
+        release_wrapper_registration
       end
 
       private
+
+      def register_wrapper!
+        registry.register!(
+          @reservation_id, pid: Process.pid,
+          service_identity: "attempt:#{@attempt_id}", proven_child_safe: false
+        )
+        @wrapper_registered = true
+      end
+
+      def release_wrapper_registration
+        return unless @reservation_id && @process_registry && @wrapper_registered
+
+        @process_registry.mark_stopped_by_reservation!(@reservation_id)
+      rescue RuntimeControlPlane::Error, Sequel::Error
+        nil
+      end
+
+      def registry
+        @process_registry ||= Hive::RuntimeControlPlane::ProcessRegistry.new(
+          database: @store.database, state_home: File.dirname(@store.database.path)
+        )
+      end
 
       def run_worker(record, log)
         stdout_r, stdout_w = IO.pipe

@@ -11,6 +11,31 @@ class AttemptsSupervisorTest < Minitest::Test
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
   CLAIM_CAPABILITY = "c" * 64
 
+  def test_quiescing_handshake_denial_exits_before_worker_and_leaves_reservation_for_controller
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "touch should-not-run" ]) do |store, attempt|
+      releases = []
+      registry = Object.new
+      registry.define_singleton_method(:register!) do |*, **|
+        raise Hive::RuntimeControlPlane::AdmissionClosed.new(
+          "admission closed", details: { generation: 2, phase: "quiescing" }
+        )
+      end
+      registry.define_singleton_method(:mark_stopped_by_reservation!) { |id| releases << id }
+      ready = StringIO.new
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), ready_io: ready,
+        process_registry: registry, reservation_id: "reservation-1"
+      )
+
+      assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run
+      assert_equal "quiescing", JSON.parse(ready.string).fetch("state")
+      assert_empty releases,
+                   "the privileged controller, not the denied child, settles the reservation"
+      assert_equal "launching", store.fetch(attempt.attempt_id).state
+    end
+  end
+
   def test_claims_before_worker_and_writes_failed_receipt_with_ordered_output
     worker_argv = [ "/bin/sh", "-c", "printf out; printf err >&2; exit 7" ]
     with_attempt(worker_argv: worker_argv) do |store, attempt|

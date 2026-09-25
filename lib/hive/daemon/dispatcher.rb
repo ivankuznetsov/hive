@@ -104,12 +104,14 @@ module Hive
                      module_runtime: nil,
                      runtime_ready_callback: nil,
                      clock: nil,
-                     patrol_discovery_async: false)
+                     patrol_discovery_async: false,
+                     persistent_admission: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
         @status_consumer = status_consumer
         @logger = logger
+        @persistent_admission = persistent_admission
         @merge_watcher = merge_watcher
         @refactor_patrol_merge_reconciler = refactor_patrol_merge_reconciler
         @patrol_scheduler = patrol_scheduler
@@ -683,7 +685,12 @@ module Hive
       # recheck this predicate after blocking work, between candidates, and at
       # the final launch boundary.
       def admission_open?
-        @shutdown != true
+        @shutdown != true &&
+          (@persistent_admission.nil? || @persistent_admission.call == true)
+      rescue StandardError => e
+        @logger&.event(:admission_check_failed,
+                       message: "persistent admission check failed: #{e.class}: #{e.message}")
+        false
       end
 
       # Throttled (~daily) probe of the latest published release. On the

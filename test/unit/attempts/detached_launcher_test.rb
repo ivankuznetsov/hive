@@ -242,6 +242,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     assert_includes args, "--user"
     assert_includes args, "--scope"
     assert_includes args, "--collect"
+    assert_includes args, "--property=Delegate=yes"
     assert_includes args, "--unit=hive-attempt-5a3f8270644f411031e77d7f"
     ruby_index = args.index(RbConfig.ruby)
     refute_nil ruby_index

@@ -721,6 +721,22 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ "p1" ], calls.fetch(0).fetch(:mutate_projects)
   end
 
+  def test_completion_scope_excludes_projects_not_owned_by_daemon
+    ownership = Object.new
+    ownership.define_singleton_method(:owned?) { |project| project == "p1" }
+    dispatcher, = make_dispatcher(rows: [], project_ownership: ownership)
+    deliveries = [
+      Struct.new(:request).new(Struct.new(:project).new("p1")),
+      Struct.new(:request).new(Struct.new(:project).new("p2"))
+    ]
+    attempts = [ { "project" => "p1" }, { "project" => "p2" } ]
+
+    assert_equal [ "p1" ], dispatcher.send(:scoped_deliveries, deliveries)
+      .map { |delivery| delivery.request.project }
+    assert_equal [ "p1" ], dispatcher.send(:scoped_attempts, attempts)
+      .map { |attempt| attempt.fetch("project") }
+  end
+
   def test_scoped_tick_only_dispatches_target_and_skips_fleet_schedulers
     target = row(project: "p1", slug: "target", command: "hive brainstorm target")
     unrelated = row(project: "p2", slug: "other", command: "hive brainstorm other")
@@ -743,6 +759,89 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ "target" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
     assert_equal [ "p1" ], module_calls.fetch(0).fetch(:projects)
     assert_equal 1, digest.next_dispatches.length
+  end
+
+  def test_scoped_tick_counts_unrelated_legacy_workers_against_global_capacity
+    target = row(project: "p1", slug: "target", command: "hive brainstorm target")
+    unrelated = row(
+      project: "p2", slug: "running", action: "agent_running", command: nil,
+      claude_pid_alive: true
+    )
+    dispatcher, supervisor, controller = make_dispatcher(
+      rows: [ target, unrelated ], scope_projects: [ "p1" ]
+    )
+    controller.update_limits(
+      max_concurrent_runs: 1, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert_equal 1, dispatcher.instance_variable_get(:@external_active_agent_total)
+  end
+
+  def test_dry_run_readiness_counts_unrelated_legacy_workers_against_global_capacity
+    target = row(project: "p1", slug: "target", command: "hive brainstorm target")
+    unrelated = row(
+      project: "p2", slug: "running", action: "agent_running", command: nil,
+      claude_pid_alive: true
+    )
+    dispatcher, _supervisor, controller = make_dispatcher(
+      rows: [ target, unrelated ], scope_projects: [ "p1" ], dry_run: true
+    )
+    controller.update_limits(
+      max_concurrent_runs: 1, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1
+    )
+
+    result = dispatcher.observe_one_shot(project: "p1", now: T0)
+
+    item = result.fetch(:items).find { |candidate| candidate.fetch("id") == "dispatch:task:target" }
+    assert_equal "waiting_external", item.fetch("bucket")
+    assert_equal "global_cap", item.fetch("reason")
+  end
+
+  def test_one_shot_readiness_reports_provider_capacity_as_external_wait
+    target = row(project: "p1", slug: "target", command: "hive brainstorm target")
+    decision = Object.new
+    decision.define_singleton_method(:capacity_saturated?) { true }
+    decision.define_singleton_method(:reason) { "capacity_saturated" }
+    attempts = Object.new
+    attempts.define_singleton_method(:routing_decision_for_request) do |*, **|
+      decision
+    end
+    dispatcher, = make_dispatcher(
+      rows: [ target ], scope_projects: [ "p1" ], dry_run: true,
+      attempt_dispatcher: attempts
+    )
+
+    item = dispatcher.observe_one_shot(project: "p1", now: T0).fetch(:items)
+      .find { |candidate| candidate.fetch("id") == "dispatch:task:target" }
+
+    assert_equal "waiting_external", item.fetch("bucket")
+    assert_equal "provider_capacity", item.fetch("reason")
+    assert_equal (T0 + 30).iso8601(6), item.fetch("next_check_at").iso8601(6)
+  end
+
+  def test_one_shot_readiness_keeps_runnable_provider_route_runnable
+    target = row(project: "p1", slug: "target", command: "hive brainstorm target")
+    decision = Object.new
+    decision.define_singleton_method(:capacity_saturated?) { false }
+    attempts = Object.new
+    attempts.define_singleton_method(:routing_decision_for_request) do |*, **|
+      decision
+    end
+    dispatcher, = make_dispatcher(
+      rows: [ target ], scope_projects: [ "p1" ], dry_run: true,
+      attempt_dispatcher: attempts
+    )
+
+    item = dispatcher.observe_one_shot(project: "p1", now: T0).fetch(:items)
+      .find { |candidate| candidate.fetch("id") == "dispatch:task:target" }
+
+    assert_equal "runnable_now", item.fetch("bucket")
+    assert_equal "eligible", item.fetch("reason")
   end
 
   def test_scoped_tick_fails_closed_when_project_ownership_refresh_fails

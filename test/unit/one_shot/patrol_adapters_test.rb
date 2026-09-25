@@ -168,6 +168,59 @@ class OneShotPatrolAdaptersTest < Minitest::Test
     end
   end
 
+  def test_patrol_and_architecture_honor_persisted_project_drop
+    with_tmp_dir do |dir|
+      state = Hive::OneShot::ScheduleState.new(state_root: File.join(dir, ".hive-state"))
+      state.update("dispatch", now: NOW) do
+        {
+          "cooldowns" => [], "transient_failures" => {},
+          "quarantined" => [], "dropped" => true
+        }
+      end
+
+      patrol_executor = Executor.new
+      patrol = Hive::OneShot::PatrolAdapter.new(
+        entry: entry(dir), scheduler: PatrolScheduler.new, executor: patrol_executor,
+        guard: Guard.new, liveness: Liveness.new, clock: -> { NOW }
+      ).call
+      architecture_executor = Executor.new
+      architecture = Hive::OneShot::ArchitecturePatrolAdapter.new(
+        entry: entry(dir), scheduler: ArchitectureScheduler.new,
+        reconciler: Reconciler.new, executor: architecture_executor,
+        guard: Guard.new, liveness: Liveness.new, clock: -> { NOW },
+        config_loader: ->(*) { enabled_config }
+      ).call
+
+      assert_empty patrol_executor.commands
+      assert_empty architecture_executor.commands
+      [ patrol, architecture ].each do |result|
+        assert_empty result.to_h.dig("pending", "runnable_now")
+        assert_equal "project_dropped",
+                     result.to_h.dig("pending", "waiting_operator", 0, "reason")
+      end
+    end
+  end
+
+  def test_patrol_admission_projects_transient_capacity_without_rewriting_other_waits
+    with_tmp_dir do |dir|
+      admission = Hive::OneShot::PatrolAdmission.new(entry: entry(dir))
+      waiting = {
+        "bucket" => "waiting_operator", "id" => "patrol:operator",
+        "reason" => "manual", "next_check_at" => nil,
+        "condition" => { "kind" => "operator_action", "project" => "demo" }
+      }
+      items = admission.apply(
+        [ item("runnable_now"), waiting ], gate: :patrol_scan_cap, now: NOW
+      )
+
+      projected = items.first
+      assert_equal "waiting_external", projected.fetch("bucket")
+      assert_equal "patrol_scan_cap", projected.fetch("reason")
+      assert_equal (NOW + 30).iso8601(6), projected.fetch("next_check_at").iso8601(6)
+      assert_equal waiting, items.last
+    end
+  end
+
   def test_patrol_and_architecture_withhold_stop_safety_for_live_project_workers
     with_tmp_dir do |dir|
       patrol = Hive::OneShot::PatrolAdapter.new(
@@ -445,6 +498,13 @@ class OneShotPatrolAdaptersTest < Minitest::Test
     {
       "name" => "demo", "path" => dir, "hive_state_path" => File.join(dir, ".hive-state"),
       "project_id" => "demo-id", "registration_id" => "demo-registration"
+    }
+  end
+
+  def item(bucket)
+    {
+      "bucket" => bucket, "id" => "patrol:scan", "reason" => "eligible",
+      "next_check_at" => nil, "condition" => nil
     }
   end
 

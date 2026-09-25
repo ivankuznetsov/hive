@@ -386,6 +386,7 @@ module Hive
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
+        capacity_result = result
         result = scope_status_result(result) if scoped_execution?
         # Non-fatal projection advisory captured by the in-process producer.
         # Log it once per tick while continuing with the valid graph.
@@ -393,7 +394,7 @@ module Hive
         # Rebuild the per-tick set of half-migrated projects from the
         # status snapshot. Issue #95.
         refresh_legacy_layout_projects(result.projects)
-        refresh_active_agent_snapshot(result.rows)
+        refresh_active_agent_snapshot(capacity_result.rows)
 
         apply_external_running_counts
 
@@ -798,6 +799,8 @@ module Hive
           raise Hive::Error, "status observation failed for project #{project}"
         end
 
+        refresh_active_agent_snapshot(result.rows)
+        apply_external_running_counts
         result = scope_status_result(result)
         refresh_legacy_layout_projects(result.projects)
         project_observation = result.projects.find do |observed|
@@ -899,8 +902,13 @@ module Hive
           external_project_count: external_active_agent_count_for(request.project),
           mutate: !@dry_run
         )
-        gate_pending_item(row || request, gate, now: now, id: id,
-                          eligible_reason: "queued_dispatch_request")
+        return gate_pending_item(row || request, gate, now: now, id: id,
+                                 eligible_reason: "queued_dispatch_request") unless gate == :ok
+
+        provider_capacity_pending_item(
+          request, row || request, now: now, id: id,
+          eligible_reason: "queued_dispatch_request"
+        )
       end
 
       def recovery_lifecycle_pending_item(request, row:, now:, id:)
@@ -960,7 +968,12 @@ module Hive
             external_project_count: external_active_agent_count_for(row.project),
             mutate: !@dry_run
           )
-          gate_pending_item(row, gate, now: now)
+          return gate_pending_item(row, gate, now: now) unless gate == :ok
+
+          provider_capacity_pending_item(
+            readiness_request(row, now: now), row, now: now,
+            id: "dispatch:task:#{row.slug}", eligible_reason: "eligible"
+          )
         when :wait_for_debounce
           due = row.state_file_mtime && row.state_file_mtime + @edit_debounce_sec
           pending_item("waiting_external", "dispatch:task:#{row.slug}", "edit_debounce",
@@ -1045,6 +1058,36 @@ module Hive
                      condition: operator_condition(row))
       end
 
+      def provider_capacity_pending_item(request, row, now:, id:, eligible_reason:)
+        unless @attempt_dispatcher&.respond_to?(:routing_decision_for_request)
+          return pending_item("runnable_now", id, eligible_reason, condition: nil)
+        end
+
+        decision = @attempt_dispatcher.routing_decision_for_request(
+          request, now: now, admission_view: @attempt_snapshot&.admission_view
+        )
+        unless decision&.capacity_saturated?
+          return pending_item("runnable_now", id, eligible_reason, condition: nil)
+        end
+
+        due = now + @poll_interval_sec
+        pending_item(
+          "waiting_external", id, "provider_capacity", next_check_at: due,
+          condition: time_condition(due, :provider_capacity)
+        )
+      end
+
+      def readiness_request(row, now:)
+        Hive::RuntimeControlPlane::DispatchRepository::Request.new(
+          request_id: "one-shot-readiness-#{row.project}-#{row.slug}",
+          created_at: now.utc, project: row.project, slug: row.slug,
+          argv: Shellwords.split(row.suggested_command), requestor: "daemon",
+          chat_id: nil, update_id: nil, trigger: "readiness",
+          task_generation: row.task_generation, inherited_outputs: [],
+          schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION
+        )
+      end
+
       def pending_item(bucket, id, reason, next_check_at: nil, condition:)
         { "bucket" => bucket, "id" => id, "component" => "dispatch", "reason" => reason,
           "next_check_at" => next_check_at, "condition" => condition }
@@ -1088,15 +1131,17 @@ module Hive
       end
 
       def scoped_deliveries(deliveries)
-        return deliveries unless scoped_execution?
-
-        deliveries.select { |delivery| scoped_project?(delivery.request.project) }
+        deliveries.select do |delivery|
+          scoped_project?(delivery.request.project) && project_owned?(delivery.request.project)
+        end
       end
 
       def scoped_attempts(attempts)
-        return attempts unless scoped_execution?
+        return attempts unless scoped_execution? || @project_ownership
 
-        attempts.select { |attempt| scoped_project?(attempt["project"]) }
+        attempts.select do |attempt|
+          scoped_project?(attempt["project"]) && project_owned?(attempt["project"])
+        end
       end
 
       def dispatch_repository
@@ -2811,7 +2856,7 @@ module Hive
 
           per_project[row.project] += 1
         end
-        if @attempt_snapshot
+        if @attempt_snapshot&.respond_to?(:capacity)
           @controller.set_capacity_snapshot(
             @attempt_snapshot.capacity,
             legacy_per_project: per_project

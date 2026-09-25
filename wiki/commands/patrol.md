@@ -35,8 +35,10 @@ project-execution guard and always emits `hive-one-shot.v1`, even when `--json`
 is omitted. It observes all eligible work, but preserves the durable launch
 allowance, post-reservation scan cadence, and failure backoff. An explicit
 one-shot may refresh external observations early; it cannot reserve another
-scan inside an unexpired policy gate. `--once --dry-run` admits nothing and
-reports eligible work as `runnable_now`. `--once` cannot be combined with
+scan inside an unexpired policy gate. It also restores the daemon controller's
+persisted project-drop hold, which suppresses the scan and reports operator
+action instead of runnable work. `--once --dry-run` admits nothing and reports
+otherwise eligible work as `runnable_now`. `--once` cannot be combined with
 `--list`.
 
 ## Discovery lifecycle

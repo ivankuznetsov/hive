@@ -82,8 +82,10 @@ schedules, or event cursors; any retry admitted by that completion effect is
 drained before final projection. The project filter reaches status, dispatch requests,
 attempt deliveries, PR merge observation, and module hooks; global capacity is
 still observed. Its final readiness projection reuses the same project-enable,
-legacy-layout, retry, cooldown, and capacity gates as admission, and includes
-module event backlogs, retrying runs, and the next enabled module schedule.
+legacy-layout, retry, cooldown, task-capacity, and provider-account gates as
+admission. Global task capacity includes legacy workers in unrelated projects,
+including for dry-run projection. Readiness also includes module event
+backlogs, retrying runs, and the next enabled module schedule.
 Patrol, architecture intake, digests, update checks, and other projects are
 excluded from this runner.
 
@@ -95,9 +97,11 @@ one-shot child executor has a wall-clock deadline and bounded TERM-to-KILL
 escalation, so a hung or TERM-resistant command cannot pin the pass forever.
 
 Every component uses the same project-wide liveness proof before reporting
-`safe_to_stop: true`: no live durable attempt and no identity-verified runner
-or agent process in the project's task leases. The proof is applied in dry-run
-too; malformed or over-limit lease observations fail closed.
+`safe_to_stop: true`: no live durable attempt, no live runner or agent process
+in the project's task leases, and no active Architecture Patrol discovery
+claim. A live task PID with missing or unreadable start identity is treated as
+unsettled, not dead. The proof is applied in dry-run too; malformed, unreadable,
+or over-limit observations fail closed.
 
 `Hive::OneShot::ScheduleState` stores only volatile gates whose reset would
 change admission: observation/retry/cadence and controller holds not already

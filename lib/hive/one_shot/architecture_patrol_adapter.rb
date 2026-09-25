@@ -5,6 +5,7 @@ require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/lock"
 require "hive/one_shot/process_executor"
+require "hive/one_shot/patrol_admission"
 require "hive/one_shot/project_guard"
 require "hive/one_shot/project_liveness"
 require "hive/one_shot/result"
@@ -16,7 +17,7 @@ module Hive
       def initialize(entry:, dry_run: false, scheduler: nil, reconciler: nil,
                      executor: nil, guard: nil,
                      config_loader: ->(path) { Hive::Config.load(path) },
-                     poll_interval_sec: nil, liveness: nil,
+                     poll_interval_sec: nil, liveness: nil, controller: nil,
                      clock: -> { Time.now.utc })
         @entry = entry
         @dry_run = dry_run
@@ -34,6 +35,7 @@ module Hive
           kind: :one_shot
         )
         @liveness = liveness || ProjectLiveness.new(entry: entry)
+        @admission = PatrolAdmission.new(entry: entry, controller: controller)
         @scheduler = scheduler || Hive::Daemon::RefactorPatrolScheduler.new(
           registry: registry, dry_run: dry_run
         )
@@ -47,13 +49,14 @@ module Hive
         started = @clock.call
         ran = []
         @guard.synchronize do
+          gate = @admission.gate(now: started)
           intake = run_intake(started, ran)
           return observation_error(started, ran, intake) if intake_error?(intake)
 
           candidates = @scheduler.candidates(
             now: @clock.call, projects: [ project ], include_scheduled: false
           )
-          run_candidate(candidates.first, ran) if candidates.first && !@dry_run
+          run_candidate(candidates.first, ran) if candidates.first && !@dry_run && gate == :ok
           finished = @clock.call
           items = @scheduler.readiness(project: project, now: finished)
           items.concat(intake_items(intake, finished)) if enabled?
@@ -61,6 +64,7 @@ module Hive
           return event_observation_error(started, ran, events) if observation_failure?(events)
 
           items.concat(event_items(events))
+          items = @admission.apply(items, gate: gate, now: finished)
           persist_intake_deadline(intake_deadline(intake, finished), finished) unless
             @dry_run || !enabled?
           return Result.ok(

@@ -22,6 +22,11 @@ class OneShotProjectLivenessTest < Minitest::Test
     def active_leases(**) = leases
   end
 
+  class ArchitectureStore
+    attr_accessor :jobs
+    def initialize(jobs = []) = @jobs = jobs
+  end
+
   class LifecycleDispatcher
     attr_reader :one_shot_ran
 
@@ -63,6 +68,46 @@ class OneShotProjectLivenessTest < Minitest::Test
     end
   end
 
+  def test_live_pid_with_missing_or_unreadable_identity_fails_closed
+    with_tmp_dir do |root|
+      missing = LeaseRepository.new([ lease(Process.pid, nil) ])
+      refute liveness(root, lease_repository: missing).safe_to_stop?
+
+      unreadable = LeaseRepository.new([ lease(Process.pid, "recorded") ])
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(*) {}) do
+        refute liveness(root, lease_repository: unreadable).safe_to_stop?
+      end
+    end
+  end
+
+  def test_active_architecture_discovery_claim_withholds_stop_safety
+    with_tmp_dir do |root|
+      store = ArchitectureStore.new([
+        {
+          "attempts" => [
+            { "kind" => "discovery_claim", "state" => "running",
+              "pid" => Process.pid,
+              "process_start_time" => Hive::Lock.process_start_time(Process.pid) }
+          ]
+        }
+      ])
+
+      refute liveness(root, architecture_store: store).safe_to_stop?
+
+      store.jobs.first.fetch("attempts").last["state"] = "finished"
+      assert liveness(root, architecture_store: store).safe_to_stop?
+    end
+  end
+
+  def test_unreadable_architecture_claim_authority_fails_closed
+    with_tmp_dir do |root|
+      store = Object.new
+      store.define_singleton_method(:jobs) { raise IOError, "unreadable" }
+
+      refute liveness(root, architecture_store: store).safe_to_stop?
+    end
+  end
+
   def test_runner_reports_stop_safe_only_after_controlled_worker_exits
     with_tmp_dir do |root|
       ready_r, ready_w = IO.pipe
@@ -100,10 +145,12 @@ class OneShotProjectLivenessTest < Minitest::Test
 
   private
 
-  def liveness(root, attempt_store: AttemptStore.new, lease_repository: LeaseRepository.new)
+  def liveness(root, attempt_store: AttemptStore.new, lease_repository: LeaseRepository.new,
+               architecture_store: ArchitectureStore.new)
     Hive::OneShot::ProjectLiveness.new(
       entry: { "name" => "demo", "hive_state_path" => root },
-      attempt_store: attempt_store, lease_repository: lease_repository
+      attempt_store: attempt_store, lease_repository: lease_repository,
+      architecture_store: architecture_store
     )
   end
 

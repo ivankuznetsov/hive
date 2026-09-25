@@ -69,9 +69,13 @@ waiting for a future PR or CI change. `--once --dry-run` observes policy and
 live work without recovery, claims, launches, or checkpoint writes.
 The readiness projection applies the same project-enable, legacy-layout,
 dependency, recovery, capacity, cooldown, and in-flight gates as admission. It
+includes provider-account saturation and counts legacy workers from every
+project against the global task cap, even during a project-scoped dry-run. It
 also inventories module event backlogs, retrying runs, and recurring schedule
-deadlines. Stop safety covers durable attempts and identity-verified legacy
-task workers, not only children launched by the current pass.
+deadlines. Stop safety covers durable attempts, live legacy task workers, and
+active Architecture Patrol discovery claims, not only children launched by the
+current pass. A live worker whose process identity cannot be read or verified
+fails closed and prevents a stop-safe report.
 Queued durable admissions are included in `ran`; merge-watcher failures,
 exceptions, and invalid observations return an error with null readiness
 instead of an authoritative idle result.

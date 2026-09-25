@@ -1,5 +1,6 @@
 require "hive/daemon/patrol_scheduler"
 require "hive/one_shot/process_executor"
+require "hive/one_shot/patrol_admission"
 require "hive/one_shot/project_guard"
 require "hive/one_shot/project_liveness"
 require "hive/one_shot/result"
@@ -8,7 +9,8 @@ module Hive
   module OneShot
     class PatrolAdapter
       def initialize(entry:, dry_run: false, scheduler: nil, executor: nil,
-                     guard: nil, liveness: nil, clock: -> { Time.now.utc })
+                     guard: nil, liveness: nil, controller: nil,
+                     clock: -> { Time.now.utc })
         @entry = entry
         @dry_run = dry_run
         @clock = clock
@@ -18,6 +20,7 @@ module Hive
           kind: :one_shot
         )
         @liveness = liveness || ProjectLiveness.new(entry: entry)
+        @admission = PatrolAdmission.new(entry: entry, controller: controller)
         @scheduler = scheduler || Hive::Daemon::PatrolScheduler.new(
           registry: -> { [ entry ] }
         )
@@ -27,15 +30,17 @@ module Hive
         started = @clock.call
         ran = []
         @guard.synchronize do
+          gate = @admission.gate(now: started)
           unless @dry_run
             candidate = @scheduler.candidates(
               now: started, projects: [ project ],
               bypass_observation_throttle: true, strict: true
             ).first
-            run_candidate(candidate, ran) if candidate
+            run_candidate(candidate, ran) if candidate && gate == :ok
           end
           finished = @clock.call
           items = @scheduler.readiness(project: project, now: finished, persist: !@dry_run)
+          items = @admission.apply(items, gate: gate, now: finished)
           return Result.ok(
             component: :patrol, project: project, started_at: started,
             finished_at: finished, ran: ran, items: items,

@@ -2,6 +2,7 @@ require "hive/attempts/repository"
 require "hive/lock"
 require "hive/paths"
 require "hive/pid_file"
+require "hive/refactor_patrol/job_store"
 
 module Hive
   module OneShot
@@ -12,15 +13,17 @@ module Hive
       MAX_LEASES = 10_000
 
       def initialize(entry:, state_home: Hive::Paths.state_home, attempt_store: nil,
-                     lease_repository: nil)
+                     lease_repository: nil, architecture_store: nil)
         @entry = entry
         @state_home = state_home
         @attempt_store = attempt_store
         @lease_repository = lease_repository
+        @architecture_store = architecture_store
       end
 
       def safe_to_stop?
-        !durable_attempt_live? && !task_lease_worker_live?
+        !durable_attempt_live? && !task_lease_worker_live? &&
+          !architecture_claim_unsettled?
       end
 
       private
@@ -47,9 +50,24 @@ module Hive
       end
 
       def identity_alive?(pid, process_start_time)
-        Hive::PidFile.identity_alive?(
-          pid, recorded_start_time: process_start_time, require_start_time: true
-        )
+        return false unless pid.is_a?(Integer) && pid.positive?
+        return false unless Hive::PidFile.alive?(pid)
+
+        live_start_time = Hive::Lock.process_start_time(pid)
+        return true if process_start_time.to_s.empty? || live_start_time.to_s.empty?
+
+        live_start_time.to_s == process_start_time.to_s
+      end
+
+      def architecture_claim_unsettled?
+        architecture_store.jobs.any? do |job|
+          Array(job["attempts"]).any? do |attempt|
+            attempt["kind"] == Hive::RefactorPatrol::JobStore::DISCOVERY_ATTEMPT_KIND &&
+              Hive::RefactorPatrol::JobStore::ACTIVE_CLAIM_STATES.include?(attempt["state"])
+          end
+        end
+      rescue StandardError
+        true
       end
 
       def attempt_store
@@ -58,6 +76,12 @@ module Hive
 
       def lease_repository
         @lease_repository ||= Hive::Lock.task_lease_repository
+      end
+
+      def architecture_store
+        @architecture_store ||= Hive::RefactorPatrol::JobStore.new(
+          @entry.fetch("path"), hive_state_path: @entry.fetch("hive_state_path")
+        )
       end
     end
   end

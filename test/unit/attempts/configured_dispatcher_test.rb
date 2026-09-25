@@ -101,6 +101,39 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert dispatcher_options.fetch(:routing_policy_resolver).call(nil, "4-execute").legacy?
   end
 
+  def test_routing_decision_uses_resolved_project_configuration_without_dispatch
+    task = FakeTask.new(slug: "task", project_root: "/projects/demo")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    call = nil
+    downstream = Object.new
+    downstream.define_singleton_method(:routing_decision_for_request) do |request, **options|
+      call = [ request, options ]
+      :capacity_saturated
+    end
+    dispatcher_class = Class.new
+    dispatcher_class.define_singleton_method(:new) { |**_options| downstream }
+    adapter = Hive::Attempts::ConfiguredDispatcher.new(
+      store: :store,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) },
+      daemon_config_loader: -> { Hive::Config::DEFAULTS.fetch("daemon") },
+      launcher_class: Class.new { def self.new(**) = :launcher },
+      dispatcher_class: dispatcher_class
+    )
+    request = FakeRequest.new(slug: "task", project: "demo", argv: %w[hive review task])
+
+    result = with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }
+    ) do
+      adapter.routing_decision_for_request(
+        request, now: Time.at(0), admission_view: :tick
+      )
+    end
+
+    assert_equal :capacity_saturated, result
+    assert_same request, call.first
+    assert_equal :tick, call.last.fetch(:admission_view)
+  end
+
   def test_evidence_rework_bypasses_provider_routing
     task = FakeTask.new(slug: "task", project_root: "/projects/demo")
     resolver = Struct.new(:task) { def resolve = task }.new(task)

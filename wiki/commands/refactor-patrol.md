@@ -66,8 +66,9 @@ hints, list/show/archive options) are incompatible with `--once`.
 writes, or child execution. Intake deadlines use the configured daemon
 `pr_merge_poll_interval_sec`; the reported deadline and persisted checkpoint
 are the same absolute timestamp. Classification retries and active claims stay
-visible before a job exists, while a blocked scheduler observation fails the
-pass instead of being reported as an operator wait.
+visible before a job exists. A persisted daemon controller project-drop hold
+suppresses child discovery and reports operator action; a blocked scheduler
+observation still fails the pass instead of being reported as an operator wait.
 
 ## Read-only job-query pagination
 

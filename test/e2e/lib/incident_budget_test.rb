@@ -48,11 +48,11 @@ class E2EIncidentBudgetTest < Minitest::Test
     assert checked.ok?
   end
 
-  def test_enabled_incident_group_must_be_below_thirty_seconds
+  def test_enabled_incident_group_must_be_below_thirty_two_seconds
     checked = Hive::E2E::IncidentBudget.check(
       report(
         metadata: [ metadata("one"), metadata("two") ],
-        scenarios: [ result("one", 16.0), result("two", 14.0) ]
+        scenarios: [ result("one", 16.0), result("two", 16.0) ]
       ),
       per_scenario_limit: 20.0
     )
@@ -60,7 +60,7 @@ class E2EIncidentBudgetTest < Minitest::Test
     refute checked.ok?
     assert checked.ok?(:integrity)
     refute checked.ok?(:timing)
-    assert_equal [ "incident group took 30.000s (must be below 30.000s)" ], checked.violations
+    assert_equal [ "incident group took 32.000s (must be below 32.000s)" ], checked.violations
   end
 
   def test_enabled_incident_without_a_result_fails_closed

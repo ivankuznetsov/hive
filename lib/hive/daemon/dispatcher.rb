@@ -1972,7 +1972,7 @@ module Hive
           Policy.advance?(row.action) &&
           result.is_a?(Hive::Attempts::DispatchResult) &&
           result.status == :terminal_replay &&
-          %w[failed cancelled].include?(result.attempt&.outcome)
+          %w[failed cancelled interrupted].include?(result.attempt&.outcome)
       end
 
       def record_markerless_stall(row, attempt: nil)

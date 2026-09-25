@@ -17,6 +17,11 @@ class AttemptsReconcilerTest < Minitest::Test
     def status(_owner) = owner_status
   end
 
+  InterruptionIdentity = Struct.new(:wrapper_status, :worker_status) do
+    def status(_owner) = wrapper_status
+    def orphan_group_status(wrapper:, worker:) = worker_status
+  end
+
   class FakeLogger
     attr_reader :events
 
@@ -112,6 +117,120 @@ class AttemptsReconcilerTest < Minitest::Test
       assert_empty snapshot.lost_attempts
       assert_equal [ terminal.attempt_id ], snapshot.terminal_attempts.map(&:attempt_id)
       assert_equal :terminal, snapshot.attempts.first.classification
+    end
+  end
+
+  def test_verified_stopped_attempt_becomes_interrupted_and_retains_checkpoint_and_outputs
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      writer = store.log_archive.open_writer(running.attempt_id)
+      writer.append(:stdout, "partial output\n")
+      writer.close
+      output_path = store.output_path(running.attempt_id, "checkpoint.txt", create_directory: true)
+      File.write(output_path, "retained\n")
+      reference = Hive::OutputReference.build(output_path, root: store.root)
+      worker = OWNER.merge(
+        "pid" => 456, "start_fingerprint" => "worker-start",
+        "process_group_id" => 456
+      )
+      running = store.checkpoint(
+        running, checkpoint: { "revision" => "rev-2", "progress_token" => "progress" },
+        worker: worker, output_references: [ reference ], now: NOW + 2
+      )
+      service = Hive::Attempts::Reconciler.new(
+        store: store,
+        process_identity: InterruptionIdentity.new(:missing, :absent)
+      )
+
+      result = service.finalize_interruption(
+        running, pause_generation: 4, now: NOW + 3
+      )
+
+      assert_equal :interrupted, result.classification
+      assert_equal "interrupted", result.attempt.outcome
+      assert_equal 4, result.attempt.receipt.fetch("pause_generation")
+      assert_equal running.checkpoint, result.attempt.receipt.fetch("final_checkpoint")
+      assert_equal [ reference ], result.attempt.receipt.fetch("output_references")
+      assert_equal "partial output\n",
+                   store.read_log(running.attempt_id).frames.map(&:bytes).join
+    end
+  end
+
+  def test_interruption_remains_unverified_while_any_owned_identity_may_be_live
+    [
+      InterruptionIdentity.new(:matching, :absent),
+      InterruptionIdentity.new(:unverifiable, :absent),
+      InterruptionIdentity.new(:missing, :matching),
+      InterruptionIdentity.new(:missing, :unverifiable)
+    ].each do |identity|
+      with_store do |store|
+        running = running_attempt(store, stale_sec: 30)
+        running = store.checkpoint(
+          running, checkpoint: running.checkpoint,
+          worker: OWNER.merge("pid" => 456, "process_group_id" => 456), now: NOW + 2
+        )
+        result = Hive::Attempts::Reconciler.new(
+          store: store, process_identity: identity
+        ).finalize_interruption(running, pause_generation: 2, now: NOW + 3)
+
+        assert_includes %i[still_running unverifiable], result.classification
+        assert_equal "running", store.fetch(running.attempt_id).state
+      end
+    end
+  end
+
+  def test_interruption_remains_unverified_without_a_durable_log_reference
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      running = store.checkpoint(
+        running, checkpoint: running.checkpoint,
+        worker: OWNER.merge("pid" => 456, "process_group_id" => 456), now: NOW + 2
+      )
+
+      result = Hive::Attempts::Reconciler.new(
+        store: store,
+        process_identity: InterruptionIdentity.new(:missing, :absent)
+      ).finalize_interruption(running, pause_generation: 2, now: NOW + 3)
+
+      assert_equal :unverifiable, result.classification
+      assert_equal "unavailable", result.evidence.fetch(:log)
+      assert_equal "running", store.fetch(running.attempt_id).state
+    end
+  end
+
+  def test_genuine_terminal_receipt_wins_interruption_compare_and_swap_race
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      running = store.checkpoint(
+        running, checkpoint: running.checkpoint,
+        worker: OWNER.merge("pid" => 456, "process_group_id" => 456), now: NOW + 2
+      )
+      writer = store.log_archive.open_writer(running.attempt_id)
+      writer.close
+      interrupt = store.method(:interrupt)
+      store.define_singleton_method(:interrupt) do |observed, **kwargs|
+        terminalize(
+          observed, outcome: "succeeded", exit_status: 0,
+          final_checkpoint: observed.checkpoint,
+          output_references: observed["current_outputs"],
+          log_reference: Hive::OutputReference.build(
+            log_archive.hot_path(observed.attempt_id), root: root
+          ), now: kwargs.fetch(:now)
+        )
+        interrupt.call(observed, **kwargs)
+      end
+      service = Hive::Attempts::Reconciler.new(
+        store: store,
+        process_identity: InterruptionIdentity.new(:missing, :absent)
+      )
+
+      result = service.finalize_interruption(
+        running, pause_generation: 3, now: NOW + 3
+      )
+
+      assert_equal :terminal, result.classification
+      assert_equal "succeeded", result.attempt.outcome
+      assert_nil result.attempt.receipt.fetch("pause_generation")
     end
   end
 

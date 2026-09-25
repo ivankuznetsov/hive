@@ -9,6 +9,7 @@ require "hive/attempts/repository"
 require "hive/attempts/stream_log"
 require "hive/lock"
 require "hive/patrol_fix/attempt_diagnostic"
+require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/runtime_control_plane/process_registry"
 
 module Hive
@@ -57,6 +58,9 @@ module Hive
         @worker_signal = nil
         @worker_pid = nil
         @worker_pgid = nil
+        @pause_generation = nil
+        @quiescence_grace_sec = nil
+        @admission_closed = false
       end
 
       def run
@@ -99,13 +103,22 @@ module Hive
         )
         output_references << diagnostic_reference if diagnostic_reference
         terminal = with_store_retry do
-          @store.terminalize(
-            record, outcome: outcome, exit_status: exit_status,
-            final_checkpoint: record.checkpoint,
-            output_references: output_references,
-            log_reference: log_reference, provider_evidence: provider_evidence,
-            now: @clock.call
-          )
+          if outcome == "interrupted"
+            @store.interrupt(
+              record, pause_generation: @pause_generation, exit_status: exit_status,
+              final_checkpoint: record.checkpoint,
+              output_references: output_references,
+              log_reference: log_reference, now: @clock.call
+            )
+          else
+            @store.terminalize(
+              record, outcome: outcome, exit_status: exit_status,
+              final_checkpoint: record.checkpoint,
+              output_references: output_references,
+              log_reference: log_reference, provider_evidence: provider_evidence,
+              now: @clock.call
+            )
+          end
         end
         terminal.receipt.fetch("exit_status")
       rescue RuntimeControlPlane::AdmissionClosed => e
@@ -247,11 +260,23 @@ module Hive
         until status && readers.empty? && !lingering_group
           now_mono = @monotonic.call
           if @cancel_reason && forced_exit.nil?
-            forced_exit = @cancel_reason == :timeout ? 124 : 143
             if status.nil?
-              signal_worker_group("TERM")
-              termination_deadline = now_mono + @kill_grace_sec
+              waited = Process.wait2(@worker_pid, Process::WNOHANG)
+              status = waited&.last
             end
+            if status && !recorded_worker_group_alive?
+              @cancel_reason = nil
+              next
+            end
+
+            capture_quiescence_context(now_mono) if @cancel_reason == :signal
+            forced_exit = @cancel_reason == :timeout ? 124 : 143
+            signalled = status ? signal_recorded_worker_group("TERM") : signal_worker_group("TERM")
+            unless signalled
+              forced_exit = nil
+              next
+            end
+            termination_deadline = now_mono + effective_kill_grace
           elsif timeout_at && now_mono >= timeout_at && @cancel_reason.nil?
             @cancel_reason = :timeout
             next
@@ -264,14 +289,18 @@ module Hive
           end
 
           if now_mono >= next_heartbeat
-            renewed = renew_lease(record, log, busy_deadline)
-            now_mono = @monotonic.call
-            if renewed
-              record = renewed
-              busy_deadline = now_mono + @busy_tolerance_sec
-              next_heartbeat = now_mono + @heartbeat_sec
+            unless admission_closed?
+              renewed = renew_lease(record, log, busy_deadline)
+              now_mono = @monotonic.call
+              if renewed
+                record = renewed
+                busy_deadline = now_mono + @busy_tolerance_sec
+                next_heartbeat = now_mono + @heartbeat_sec
+              else
+                next_heartbeat = now_mono + [ STORE_RETRY_SEC, @heartbeat_sec ].min
+              end
             else
-              next_heartbeat = now_mono + [ STORE_RETRY_SEC, @heartbeat_sec ].min
+              next_heartbeat = now_mono + @heartbeat_sec
             end
           end
 
@@ -320,7 +349,11 @@ module Hive
 
         exit_status = forced_exit || status_exit(status)
         @worker_signal = signal_name(status.termsig) if status && !status.exited?
-        outcome = @cancel_reason ? "cancelled" : (exit_status.zero? ? "succeeded" : "failed")
+        outcome = if forced_exit
+          @pause_generation ? "interrupted" : "cancelled"
+        else
+          exit_status.zero? ? "succeeded" : "failed"
+        end
         provider_signal = EvidenceChannel.read(
           evidence_r,
           route: record["routing"].fetch("route")
@@ -543,6 +576,9 @@ module Hive
         end
 
         Process.kill(signal, -pgid)
+        true
+      rescue Errno::ESRCH
+        false
       end
 
       def signal_recorded_worker_group(signal)
@@ -616,6 +652,35 @@ module Hive
             @cancel_reason ||= :signal
           end
         end
+      end
+
+      def lifecycle
+        @lifecycle ||= Hive::RuntimeControlPlane::LifecycleRepository.new(database: @store.database)
+      end
+
+      def admission_closed?
+        return true if @admission_closed
+
+        @admission_closed = lifecycle.current.closed?
+      rescue Hive::RuntimeControlPlane::Error, Sequel::Error
+        false
+      end
+
+      def capture_quiescence_context(now_mono)
+        state = lifecycle.current
+        return unless state.phase == "quiescing"
+
+        @admission_closed = true
+        @pause_generation = state.generation
+        remaining = state.deadline_monotonic && [ state.deadline_monotonic - now_mono, 0.0 ].max
+        candidates = [ @kill_grace_sec, state.shutdown_grace_sec, remaining ].compact.map(&:to_f)
+        @quiescence_grace_sec = candidates.min
+      rescue Hive::RuntimeControlPlane::Error, Sequel::Error, ArgumentError, TypeError
+        nil
+      end
+
+      def effective_kill_grace
+        @quiescence_grace_sec || @kill_grace_sec
       end
 
       def signal_name(number)

@@ -3,6 +3,7 @@ require "timeout"
 require "hive/attempts/diagnostic_channel"
 require "hive/attempts/supervisor"
 require "hive/patrol_fix/attempt_diagnostic"
+require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/task_resolver"
 
 class AttemptsSupervisorTest < Minitest::Test
@@ -224,6 +225,97 @@ class AttemptsSupervisorTest < Minitest::Test
         capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
         assert_equal 1, calls, "#{name} must not retry a lost lease"
       end
+    end
+  end
+
+  def test_quiesce_signal_is_terminal_interrupted_only_after_worker_stops
+    worker_argv = [ "/bin/sh", "-c", "trap '' TERM; printf partial; while :; do sleep 1; done" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 60
+      )
+      checkpoint = store.method(:checkpoint)
+      store.define_singleton_method(:checkpoint) do |*args, **kwargs|
+        recorded = checkpoint.call(*args, **kwargs)
+        lifecycle.begin_quiesce!(
+          deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+          boot_id: "test-boot", shutdown_grace_sec: 0.05
+        )
+        supervisor.instance_variable_set(:@cancel_reason, :signal)
+        supervisor.instance_variable_set(:@cancel_signal, "TERM")
+        recorded
+      end
+
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+
+      assert_equal "terminal", terminal.state
+      assert_equal "interrupted", terminal.outcome
+      assert_equal lifecycle.current.generation, terminal.receipt.fetch("pause_generation")
+      assert_equal terminal.checkpoint, terminal.receipt.fetch("final_checkpoint")
+      assert File.file?(File.join(store.root, terminal.receipt.dig("log_reference", "path")))
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(terminal.worker)
+      assert_equal 1, store.database.read { |db| db[:quiescence_cleanup_writes].count }
+    end
+  end
+
+  def test_natural_completion_after_admission_closes_keeps_genuine_success
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.1; exit 0" ]) do |store, attempt|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)
+      checkpoint = store.method(:checkpoint)
+      store.define_singleton_method(:checkpoint) do |*args, **kwargs|
+        recorded = checkpoint.call(*args, **kwargs)
+        lifecycle.begin_quiesce!(
+          deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+          boot_id: "test-boot", shutdown_grace_sec: 0.05
+        )
+        recorded
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+
+      assert_equal 0, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+
+      assert_equal "terminal", terminal.state
+      assert_equal "succeeded", terminal.outcome
+      assert_nil terminal.receipt.fetch("pause_generation")
+      assert_equal 1, store.database.read { |db| db[:quiescence_cleanup_writes].count }
+    end
+  end
+
+  def test_worker_completed_before_quiesce_signal_keeps_genuine_success
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.05
+      )
+      checkpoint = store.method(:checkpoint)
+      store.define_singleton_method(:checkpoint) do |*args, **kwargs|
+        recorded = checkpoint.call(*args, **kwargs)
+        sleep 0.05
+        lifecycle.begin_quiesce!(
+          deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+          boot_id: "test-boot", shutdown_grace_sec: 0.05
+        )
+        supervisor.instance_variable_set(:@cancel_reason, :signal)
+        supervisor.instance_variable_set(:@cancel_signal, "TERM")
+        recorded
+      end
+
+      assert_equal 0, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+
+      assert_equal "succeeded", terminal.outcome
+      assert_nil terminal.receipt.fetch("pause_generation")
     end
   end
 

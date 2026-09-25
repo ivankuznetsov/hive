@@ -688,6 +688,7 @@ class TaskActionTest < Minitest::Test
     task = fake_task(stage_name: "execute", stage_index: 4)
     %w[dirty_worktree branch_mismatch head_not_descendant no_worktree_changes
        missing_research_output attempt_lost attempt_terminal_failed attempt_terminal_cancelled
+       attempt_terminal_interrupted
        worktree_evidence_unverifiable evidence_unverifiable attempt_state_unverifiable].each do |reason|
       action = Hive::TaskAction.for(task, marker(:execute_waiting, "reason" => reason))
 

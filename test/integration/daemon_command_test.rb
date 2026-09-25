@@ -1174,7 +1174,7 @@ class HiveDaemonCommandTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus,
                    "bare `hive daemon` must exit 64 (USAGE) with the same shape as `hive daemon frobnicate`"
       assert_match(/missing SUBCOMMAND/, err)
-      assert_match(/start, stop, status, reload, tail, enable, disable/, err)
+      assert_match(/start, stop, status, quiesce, resume, reload, tail, enable, disable/, err)
     end
   end
 

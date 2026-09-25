@@ -6,6 +6,12 @@ require "hive"
 require "hive/paths"
 require "hive/pid_file"
 require "hive/update_check/state"
+require "hive/attempts/process_custody"
+require "hive/attempts/process_identity"
+require "hive/daemon/quiescence"
+require "hive/runtime_control_plane/database"
+require "hive/runtime_control_plane/lifecycle_repository"
+require "hive/runtime_control_plane/process_registry"
 
 module Hive
   module Daemon
@@ -27,10 +33,23 @@ module Hive
 
       attr_reader :pid_file, :log_file
 
-      def initialize(hive_home: Hive::Paths.state_home, environment: ENV)
-        @pid_file = File.join(hive_home, ".daemon.pid")
-        @log_file = File.join(hive_home, "logs", "daemon.log")
+      def initialize(hive_home: Hive::Paths.state_home, environment: ENV,
+                     database: nil,
+                     process_identity: Hive::Attempts::ProcessIdentity.new,
+                     custody: Hive::Attempts::ProcessCustody.detect,
+                     monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                     liveness_timeout_sec: 1.0)
+        @hive_home = File.expand_path(hive_home)
+        @pid_file = File.join(@hive_home, ".daemon.pid")
+        @log_file = File.join(@hive_home, "logs", "daemon.log")
         @environment = environment
+        @database = database || Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(@hive_home)
+        )
+        @process_identity = process_identity
+        @custody = custody
+        @monotonic = monotonic
+        @liveness_timeout_sec = Float(liveness_timeout_sec)
       end
 
       # Liveness plus producer-runtime evidence from the PID file.
@@ -82,6 +101,7 @@ module Hive
         running = state[:running]
         service_state = probe_service_state
         binary = binary_state(service_state)
+        quiescence = quiescence_status
         {
           "schema" => "hive-daemon-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
@@ -100,6 +120,9 @@ module Hive
           "installed_binary_version" => binary.fetch("installed_binary_version"),
           "cli_version" => Hive::VERSION,
           "binary_drift" => binary.fetch("binary_drift"),
+          "runtime_installation" => quiescence.fetch("runtime_installation"),
+          "lifecycle" => quiescence.fetch("lifecycle"),
+          "quiescence_capability" => quiescence.fetch("quiescence_capability"),
           # Agent-native parity with the TUI footer / bot push: expose the
           # update nudge so a programmatic caller can detect "behind" too.
           "current_version" => Hive::VERSION,
@@ -117,6 +140,161 @@ module Hive
       end
 
       private
+
+      def quiescence_status
+        snapshot = @database.quiescence_status_snapshot
+        diagnosis = snapshot.fetch(:diagnosis)
+        installation = {
+          "phase" => diagnosis.status == :missing ? "absent" : "active",
+          "installation_id" => snapshot[:installation_id],
+          "database_status" => diagnosis.status.to_s,
+          "next_action" => diagnosis.error&.action ||
+            (diagnosis.status == :missing ? "hive setup" : nil)
+        }
+        unless diagnosis.ok? && snapshot[:lifecycle]
+          reason = diagnosis.status == :missing ? "runtime_absent" : "schema_#{diagnosis.status}"
+          return {
+            "runtime_installation" => installation,
+            "lifecycle" => unknown_lifecycle(snapshot[:lifecycle], reason),
+            "quiescence_capability" => unknown_capability(reason)
+          }
+        end
+
+        lifecycle = build_lifecycle(snapshot.fetch(:lifecycle))
+        capability = Hive::RuntimeControlPlane::QuiescenceCapability.new(
+          database: @database, state_home: @hive_home,
+          process_identity: @process_identity, custody: @custody
+        ).call(
+          snapshot: {
+            reservations: snapshot.fetch(:reservations),
+            processes: snapshot.fetch(:processes),
+            attempts: snapshot.fetch(:attempts)
+          }
+        )
+        proof = proof_verdict(lifecycle, installation_id: snapshot[:installation_id])
+        liveness = liveness_verdict(snapshot, proof)
+        phase = lifecycle.phase
+        if lifecycle.phase == "paused" &&
+           (!proof.fetch("valid") || !liveness.fetch("clear") || !capability.eligible?)
+          phase = "quiescing"
+        end
+
+        {
+          "runtime_installation" => installation,
+          "lifecycle" => {
+            "phase" => phase, "durable_phase" => lifecycle.phase,
+            "generation" => lifecycle.generation, "revision" => lifecycle.revision,
+            "mutation_sequence" => lifecycle.mutation_sequence,
+            "admission_open" => lifecycle.admission_open?,
+            "interrupted_attempt_ids" => lifecycle.interrupted_attempt_ids,
+            "proof" => proof.reject { |key, _value| key == "payload" },
+            "liveness" => liveness
+          },
+          "quiescence_capability" => capability.to_h
+        }
+      rescue Hive::RuntimeControlPlane::Error, Sequel::Error, SystemCallError, IOError => error
+        reason = error.respond_to?(:code) ? error.code.to_s : "status_unavailable"
+        {
+          "runtime_installation" => {
+            "phase" => "active", "installation_id" => nil,
+            "database_status" => "unreadable", "next_action" =>
+              (error.respond_to?(:action) ? error.action : nil)
+          },
+          "lifecycle" => unknown_lifecycle(nil, reason),
+          "quiescence_capability" => unknown_capability(reason)
+        }
+      end
+
+      def build_lifecycle(row)
+        Hive::RuntimeControlPlane::Lifecycle.new(
+          phase: row.fetch(:phase), generation: row.fetch(:generation),
+          revision: row.fetch(:revision), mutation_sequence: row.fetch(:mutation_sequence),
+          boot_id: row[:boot_id], deadline_monotonic: row[:deadline_monotonic],
+          shutdown_grace_sec: row[:shutdown_grace_sec],
+          interrupted_attempt_ids: Hive::RuntimeControlPlane::Codec.load_json(
+            row.fetch(:interrupted_attempt_ids_json)
+          ),
+          quiesce_started_at: row[:quiesce_started_at], paused_at: row[:paused_at],
+          resumed_at: row[:resumed_at], updated_at: row[:updated_at]
+        )
+      end
+
+      def proof_verdict(lifecycle, installation_id:)
+        return { "valid" => nil, "reason" => "not_applicable", "payload" => nil } unless
+          lifecycle.phase == "paused"
+
+        verdict = Hive::Daemon::FinalizationProof.new(state_home: @hive_home).verify(
+          lifecycle: lifecycle, installation_id: installation_id
+        )
+        { "valid" => verdict.valid?, "reason" => verdict.reason, "payload" => verdict.payload }
+      rescue StandardError => error
+        { "valid" => false, "reason" => "proof_probe_failed:#{error.class}", "payload" => nil }
+      end
+
+      def liveness_verdict(snapshot, proof)
+        return { "clear" => nil, "reason" => "not_applicable", "remaining" => [] } unless
+          snapshot.dig(:lifecycle, :phase) == "paused"
+
+        inventory = snapshot.fetch(:processes).map { |row| stringify(row) }
+        inventory.concat(Array(proof.dig("payload", "inventory")))
+        inventory.uniq! { |entry| [ entry["pid"], entry["start_fingerprint"], entry["service_identity"] ] }
+        deadline = @monotonic.call + @liveness_timeout_sec
+        remaining = inventory.filter_map do |entry|
+          timeout = deadline - @monotonic.call
+          if timeout <= 0
+            entry.merge("last_known_state" => "unverifiable", "unknown_reason" => "probe_deadline")
+          else
+            status = Timeout.timeout(timeout) { @process_identity.status(entry) }
+            next if %i[missing mismatched].include?(status)
+            entry.merge(
+              "last_known_state" => status.to_s,
+              "unknown_reason" => (status == :matching ? "owned_process_alive" :
+                "process_identity_unverifiable")
+            )
+          end
+        rescue Timeout::Error
+          entry.merge("last_known_state" => "unverifiable", "unknown_reason" => "probe_deadline")
+        rescue StandardError => error
+          entry.merge(
+            "last_known_state" => "unverifiable",
+            "unknown_reason" => "probe_failed:#{error.class}"
+          )
+        end
+        {
+          "clear" => remaining.empty?,
+          "reason" => remaining.empty? ? nil : "owned_process_present_or_unverifiable",
+          "remaining" => remaining
+        }
+      end
+
+      def unknown_lifecycle(row, reason)
+        durable_phase = row && row[:phase].to_s
+        durable_phase = "unknown" unless %w[running quiescing paused resuming].include?(durable_phase)
+        reported = durable_phase == "paused" ? "quiescing" : durable_phase
+        {
+          "phase" => reported, "durable_phase" => durable_phase,
+          "generation" => integer_or_nil(row && row[:generation]),
+          "revision" => integer_or_nil(row && row[:revision]),
+          "mutation_sequence" => integer_or_nil(row && row[:mutation_sequence]),
+          "admission_open" => durable_phase == "running" ? nil : false,
+          "interrupted_attempt_ids" => [],
+          "proof" => { "valid" => false, "reason" => reason },
+          "liveness" => { "clear" => false, "reason" => reason, "remaining" => [] }
+        }
+      end
+
+      def unknown_capability(reason)
+        {
+          "eligible" => false, "reason" => reason,
+          "ownership_mode" => "unknown", "disqualifying_inventory" => []
+        }
+      end
+
+      def integer_or_nil(value) = Integer(value, exception: false)
+
+      def stringify(value)
+        value.to_h.each_with_object({}) { |(key, item), result| result[key.to_s] = item }
+      end
 
       # Read-only autostart-state snapshot for the envelope. A status probe
       # must never take down the running/pid reporting that precedes it, so

@@ -27,6 +27,7 @@ require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_fix_runtime"
 require "hive/daemon/status_report"
+require "hive/daemon/quiescence"
 require "hive/invoked_binary"
 require "hive/update_check/state"
 require "hive/attempts/repository"
@@ -58,7 +59,18 @@ module Hive
       include Hive::PidFile
       include Hive::Commands::ServiceInstaller::ResultPresenter
 
-      VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable install queue].freeze
+      VALID_SUBCOMMANDS = %w[
+        start stop status quiesce resume reload tail enable disable install queue
+      ].freeze
+
+      class LifecycleIncomplete < Hive::Error
+        def initialize(message, exit_code: Hive::ExitCodes::TEMPFAIL)
+          super(message)
+          @exit_code = exit_code
+        end
+
+        attr_reader :exit_code
+      end
 
       # Actions for `hive daemon queue ACTION` (AN-1/2/3). `list` is the
       # default when no action is given.
@@ -80,6 +92,7 @@ module Hive
 
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
                      all: false, json: false, force: false,
+                     timeout: nil, quiescence_factory: nil, resume_factory: nil,
                      queue_args: [],
                      hive_home: Hive::Paths.state_home,
                      activation_lock: nil)
@@ -90,6 +103,9 @@ module Hive
         @all = all
         @json = json
         @force = force
+        @timeout = timeout
+        @quiescence_factory = quiescence_factory
+        @resume_factory = resume_factory
         @queue_args = Array(queue_args)
         @hive_home = hive_home
         @activation_lock = activation_lock
@@ -106,6 +122,8 @@ module Hive
         when "start"            then start_daemon
         when "stop"             then stop_daemon
         when "status"           then status_daemon
+        when "quiesce"          then quiesce_daemon
+        when "resume"           then resume_daemon
         when "reload"           then reload_daemon
         when "tail"             then tail_daemon
         when "install"          then install_daemon
@@ -532,6 +550,148 @@ module Hive
         end
         # Exit code: 0 for running, 1 for not running (per plan U8)
         raise Hive::Error, "daemon not running" unless state[:running]
+      end
+
+      def quiesce_daemon
+        timeout = lifecycle_timeout!("quiesce")
+        ensure_current_runtime!("hive-daemon-quiesce") unless @quiescence_factory
+        controller = (@quiescence_factory || lambda { |timeout_sec:|
+          Hive::Daemon::Quiescence.new(state_home: @hive_home, timeout_sec: timeout_sec)
+        }).call(timeout_sec: timeout)
+        result = call_lifecycle_controller("hive-daemon-quiesce", controller)
+        payload = lifecycle_result_envelope("quiesce", result)
+        emit_lifecycle_result(payload)
+        return 0 if result.paused
+
+        exit_code = result.reason == "storage_error" ?
+          Hive::ExitCodes::SOFTWARE : Hive::ExitCodes::TEMPFAIL
+        raise LifecycleIncomplete.new(
+          "hive daemon quiesce did not pause: #{result.reason}", exit_code: exit_code
+        )
+      end
+
+      def resume_daemon
+        timeout = lifecycle_timeout!("resume")
+        ensure_current_runtime!("hive-daemon-resume") unless @resume_factory
+        controller = (@resume_factory || lambda { |timeout_sec:|
+          Hive::Daemon::Resume.new(state_home: @hive_home, timeout_sec: timeout_sec)
+        }).call(timeout_sec: timeout)
+        result = call_lifecycle_controller("hive-daemon-resume", controller)
+        payload = lifecycle_result_envelope("resume", result)
+        emit_lifecycle_result(payload)
+        return 0 if result.resumed
+
+        exit_code = result.reason == "storage_error" ?
+          Hive::ExitCodes::SOFTWARE : Hive::ExitCodes::TEMPFAIL
+        raise LifecycleIncomplete.new(
+          "hive daemon resume did not complete: #{result.reason}", exit_code: exit_code
+        )
+      end
+
+      def lifecycle_timeout!(action)
+        default = action == "resume" ?
+          Hive::Daemon::Resume::DEFAULT_TIMEOUT_SEC :
+          Hive::Daemon::Quiescence::DEFAULT_TIMEOUT_SEC
+        value = @timeout.nil? ? default : Float(@timeout)
+        return value if value.positive? && value.finite?
+
+        raise ArgumentError
+      rescue ArgumentError, TypeError
+        error = Hive::UsageError.new(
+          "hive daemon #{action}: --timeout must be a finite positive number"
+        )
+        emit_lifecycle_error(action, error, error_kind: "usage")
+        raise error
+      end
+
+      def call_lifecycle_controller(schema, controller)
+        controller.call
+      rescue Hive::RuntimeControlPlane::MigrationRequired => error
+        emit_lifecycle_storage_error(schema, error)
+        raise
+      end
+
+      def ensure_current_runtime!(schema)
+        database = Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(@hive_home)
+        )
+        diagnosis = database.diagnostics
+        error = diagnosis.error
+        unless diagnosis.ok?
+          error ||= Hive::RuntimeControlPlane::MigrationRequired.new(
+            "runtime control-plane database is missing; run hive setup",
+            code: :missing_database, action: "run hive setup"
+          )
+          emit_lifecycle_storage_error(schema, error)
+          raise error
+        end
+        true
+      ensure
+        database&.disconnect
+      end
+
+      def emit_lifecycle_storage_error(schema, error)
+        return unless @json
+
+        action = schema.delete_prefix("hive-daemon-")
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error,
+          error_kind: error.is_a?(Hive::RuntimeControlPlane::MigrationRequired) ?
+            "migration_required" : "storage",
+          extras: {
+            "action" => action,
+            "runtime_code" => error.respond_to?(:code) ? error.code.to_s : "storage_error",
+            "next_action" => error.respond_to?(:action) ? error.action : nil,
+            "details" => error.respond_to?(:details) ?
+              Hive::RuntimeControlPlane::Codec.normalize(error.details) : {}
+          }
+        )
+        puts JSON.generate(payload)
+        @stdout_written = true
+      end
+
+      def emit_lifecycle_error(action, error, error_kind:)
+        return unless @json
+
+        schema = "hive-daemon-#{action}"
+        puts JSON.generate(Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error, error_kind: error_kind,
+          extras: {
+            "action" => action, "runtime_code" => "usage",
+            "next_action" => nil, "details" => {}
+          }
+        ))
+        @stdout_written = true
+      end
+
+      def lifecycle_result_envelope(action, result)
+        schema = "hive-daemon-#{action}"
+        payload = {
+          "schema" => schema,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(schema),
+          "ok" => action == "quiesce" ? result.paused : result.resumed,
+          "result" => result.status
+        }.merge(result.to_h.reject { |key, _value| key == "status" })
+        if action == "quiesce"
+          payload["quiescence_capability"] = payload.delete("capability")
+        end
+        if action == "quiesce" && !result.paused && !result.admission_open
+          payload["resume_required"] = true
+          payload["resume_command"] = "hive daemon resume"
+        end
+        payload
+      end
+
+      def emit_lifecycle_result(payload)
+        if @json
+          puts JSON.generate(payload)
+          @stdout_written = true
+        elsif payload.fetch("ok")
+          puts "hive daemon: #{payload.fetch('result')} (generation #{payload['generation']})"
+        else
+          warn "hive daemon: #{payload.fetch('result')} (#{payload['reason']})"
+          warn "hive daemon: run #{payload['resume_command']}" if payload["resume_required"]
+        end
       end
 
       def reload_daemon
@@ -1193,4 +1353,21 @@ module Hive
       end
     end
   end
+end
+
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("daemon") do |argv, command_index:, option_argv:|
+  action = Hive::CliUsageContracts.subcommand(
+    argv, command_index, value_options: %w[--timeout]
+  )
+  next unless %w[quiesce resume].include?(action)
+
+  {
+    schema: "hive-daemon-#{action}", error_kind: "usage",
+    extras: {
+      "action" => action, "runtime_code" => "usage",
+      "next_action" => nil, "details" => {}
+    }
+  }
 end

@@ -234,8 +234,8 @@ module Hive
         @legacy_inventory = legacy_inventory || method(:known_legacy_processes)
       end
 
-      def call
-        rows = @database.read do |db|
+      def call(snapshot: nil)
+        rows = snapshot || @database.read do |db|
           {
             reservations: db[:launch_reservations].where(state: "reserved").all,
             processes: db[:owned_processes].exclude(state: "stopped").all,

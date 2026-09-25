@@ -85,6 +85,7 @@ class ComponentBoundariesTest < Minitest::Test
         "Hive::Attempts::ProcessIdentity" => [
           "lib/hive/commands/daemon.rb",
           "lib/hive/daemon/quiescence.rb",
+          "lib/hive/daemon/status_report.rb",
           "lib/hive/runtime_control_plane/process_registry.rb"
         ],
         "Hive::Attempts::Reconciler" => [

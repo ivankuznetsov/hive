@@ -29,6 +29,7 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
         %w[runtime], %w[runtime --json], %w[runtime status],
         %w[runtime status --json], %w[runtime --json status], %w[--json runtime status],
         %w[daemon status], %w[daemon quiesce], %w[daemon resume],
+        %w[daemon --timeout 2 quiesce],
         %w[daemon quiesce --json], %w[--json daemon resume],
         %w[doctor], %w[setup], %w[--version]
       ].each do |argv|
@@ -77,5 +78,14 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
     gate = source.index("ActivationGate.check!")
     assert gate < source.index('require "hive/llm_wiki_bootstrap"')
     assert gate < source.index("Scheduler.reconcile_existing!")
+  end
+
+  def test_lifecycle_observation_and_control_skip_startup_housekeeping
+    source = File.binread(File.expand_path("../../../bin/hive", __dir__))
+
+    assert_includes source, "%w[status quiesce resume].include?("
+    assert_includes source, "unless strict_no_write_route"
+    assert_operator source.index("%w[status quiesce resume].include?("), :<,
+                    source.index("Scheduler.reconcile_existing!")
   end
 end

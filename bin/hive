@@ -84,7 +84,17 @@ require "hive/llm_wiki_bootstrap"
 init_index = ARGV.index("init")
 workflow_index = ARGV.index("workflow")
 strict_no_write_route =
-  if init_index && (!workflow_index || init_index < workflow_index)
+  if Hive::RuntimeControlPlane::ActivationGate.command(ARGV) == "daemon"
+    %w[status quiesce resume].include?(
+      Hive::RuntimeControlPlane::ActivationGate.subcommand_after(
+        ARGV, "daemon", value_options: %w[--timeout]
+      )
+    )
+  elsif Hive::RuntimeControlPlane::ActivationGate.command(ARGV) == "runtime"
+    [ nil, "status" ].include?(
+      Hive::RuntimeControlPlane::ActivationGate.subcommand_after(ARGV, "runtime")
+    )
+  elsif init_index && (!workflow_index || init_index < workflow_index)
     ARGV.drop(init_index + 1).any? do |arg|
       arg == "--preview" || arg.match?(/\A--preview=true\z/i)
     end

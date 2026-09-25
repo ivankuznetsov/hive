@@ -450,8 +450,12 @@ module Hive
         )
       end
 
-      def mark_lost(observed, reason:, now:, diagnostics: {})
-        mutate(observed, allowed_states: %w[launching running], pending_receipt: {}) do |data|
+      def mark_lost(observed, reason:, now:, diagnostics: {}, authority: nil,
+                    timeout_sec: nil)
+        mutate(
+          observed, allowed_states: %w[launching running], pending_receipt: {},
+          authority: authority, timeout_sec: timeout_sec
+        ) do |data|
           data.merge(
             "state" => "lost", "lease_version" => data.fetch("lease_version") + 1,
             "claim_deadline" => nil, "first_heartbeat_deadline" => nil,

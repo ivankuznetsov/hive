@@ -339,6 +339,23 @@ class LockTest < Minitest::Test
     assert status.success?
   end
 
+  def test_commit_lock_timeout_defaults_to_a_bounded_queue_drain
+    with_env("HIVE_COMMIT_LOCK_TIMEOUT_SEC" => nil) do
+      assert_equal 120, Hive::Lock.commit_lock_timeout
+    end
+  end
+
+  def test_commit_lock_timeout_honors_a_positive_env_override
+    with_env("HIVE_COMMIT_LOCK_TIMEOUT_SEC" => "45") do
+      assert_in_delta 45.0, Hive::Lock.commit_lock_timeout
+    end
+    %w[0 -5 abc 1e9].each do |raw|
+      with_env("HIVE_COMMIT_LOCK_TIMEOUT_SEC" => raw) do
+        assert_equal 120, Hive::Lock.commit_lock_timeout, "#{raw.inspect} must fall back to the default"
+      end
+    end
+  end
+
   def test_commit_lock_remains_reentrant_and_process_scoped
     directory = File.join(@root, "git-state")
     result = Hive::Lock.with_commit_lock(directory) do

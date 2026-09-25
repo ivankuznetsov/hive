@@ -374,7 +374,7 @@ module Hive
         emit_envelope(e) if envelope_enabled? && !@stdout_written
         raise
       rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        wrapped = Hive::InternalError.wrap(e)
         emit_envelope(wrapped) if envelope_enabled? && !@stdout_written
         raise wrapped
       end

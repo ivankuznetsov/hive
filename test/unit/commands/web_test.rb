@@ -234,6 +234,20 @@ class CommandsWebTest < Minitest::Test
     writer&.close unless writer&.closed?
   end
 
+  def test_capture_control_fd_accepts_the_numeric_value_thor_passes
+    # The CLI declares --control-fd as `type: :numeric`, so the command
+    # receives an Integer, not the String the other test uses.
+    reader, writer = IO.pipe
+    command = Hive::Commands::Web.new("capture-server", control_fd: reader.fileno)
+
+    control = command.send(:capture_control_io)
+    assert_equal reader.fileno, control.fileno
+  ensure
+    control&.close unless control&.closed?
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+  end
+
   def test_capture_server_rejects_source_head_changes_during_bootstrap
     Dir.mktmpdir("capture-command") do |root|
       source = File.join(root, "source")

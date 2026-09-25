@@ -159,7 +159,8 @@ module Hive
               status: :present,
               application_id: integer_pragma(database, "application_id"),
               schema_version: schema_version_for(database),
-              schema_fingerprint: schema_fingerprint(database)
+              schema_fingerprint: schema_fingerprint(database),
+              lifecycle: first_row(database, :runtime_lifecycle)
             }
           end
         end
@@ -167,14 +168,19 @@ module Hive
 
       # Database-owned preserving conversion used only by QuiescenceUpgrade
       # while it holds operation ownership and the exclusive writer fence.
-      def upgrade_quiescence_v1!(authority:, expected_fingerprint:, now: @clock.call)
+      def upgrade_quiescence!(authority:, expected_schema_version:, expected_fingerprint:,
+                              preserve_lifecycle:, now: @clock.call)
         unless valid_authority?(authority) && authority.role == :migrator
           raise ArgumentError, "quiescence upgrade requires migrator authority"
         end
 
         source = quiescence_upgrade_source
-        supported = source[:application_id] == APPLICATION_ID && source[:schema_version] == 1 &&
+        supported = source[:application_id] == APPLICATION_ID &&
+          source[:schema_version] == Integer(expected_schema_version) &&
           source[:schema_fingerprint] == expected_fingerprint
+        if preserve_lifecycle
+          supported &&= %w[quiescing paused].include?(source.dig(:lifecycle, :phase))
+        end
         unless supported
           raise MigrationRequired.new(
             "runtime control-plane format is not a supported quiescence upgrade source",
@@ -194,7 +200,9 @@ module Hive
         ).migrate!
         target.disconnect
 
-        copy_quiescence_v1!(temporary_path, now: now)
+        copy_quiescence_source!(
+          temporary_path, now: now, preserve_lifecycle: preserve_lifecycle
+        )
         replace_with_upgraded_database!(temporary_path)
         open!
         self
@@ -545,7 +553,7 @@ module Hive
         Digest::SHA256.hexdigest(Codec.dump_json(rows))
       end
 
-      def copy_quiescence_v1!(temporary_path, now:)
+      def copy_quiescence_source!(temporary_path, now:, preserve_lifecycle:)
         source = Sequel.connect(
           adapter: "sqlite", database: path, readonly: true, max_connections: 1,
           timeout: @busy_timeout_ms, disable_dqs: true
@@ -556,22 +564,26 @@ module Hive
         )
         target.run("PRAGMA foreign_keys = OFF")
         retained = %i[
-          installations projects task_subjects dispatch_requests attempts task_leases
-          token_usage daemon_runtime payload_references
+          installations runtime_lifecycle launch_reservations owned_processes
+          quiescence_cleanup_writes projects task_subjects dispatch_requests attempts
+          task_leases token_usage daemon_runtime payload_references
         ]
         target.transaction(mode: :immediate, rollback: :reraise) do
           target.tables.reject { |table| table == :schema_info }.reverse_each do |table|
             target[table].delete
           end
           retained.each do |table|
-            source[table].each_slice(250) { |rows| target[table].multi_insert(rows) unless rows.empty? }
+            next unless source.table_exists?(table)
+
+            source_columns = source.schema(table).map(&:first)
+            target_columns = target.schema(table).map(&:first)
+            columns = source_columns & target_columns
+            source[table].select(*columns).each_slice(250) do |rows|
+              target[table].multi_insert(rows) unless rows.empty?
+            end
           end
-          identity = target[:installations].get(:installation_id)
-          target[:runtime_lifecycle].insert(
-            installation_id: identity, phase: "quiescing", generation: 1, revision: 0,
-            mutation_sequence: 1, interrupted_attempt_ids_json: "[]",
-            quiesce_started_at: Codec.dump_time(now), updated_at: Codec.dump_time(now)
-          )
+          preserve_lifecycle ? preserve_closed_lifecycle!(target, now: now) :
+            establish_closed_lifecycle!(target, now: now)
           target[:schema_info].update(version: SCHEMA_VERSION)
         end
         violations = target.fetch("PRAGMA foreign_key_check").all
@@ -583,10 +595,55 @@ module Hive
           )
         end
         target.run("PRAGMA foreign_keys = ON")
+        unless integer_pragma(target, "foreign_keys") == 1
+          raise IntegrityError.new(
+            "runtime quiescence upgrade could not restore foreign-key enforcement",
+            code: :quiescence_upgrade_foreign_keys_disabled, action: BACKUP_ACTION
+          )
+        end
+        unless schema_fingerprint(target) == EXPECTED_SCHEMA_SHA256
+          raise IntegrityError.new(
+            "runtime quiescence upgrade did not render the current schema",
+            code: :quiescence_upgrade_schema_mismatch, action: BACKUP_ACTION
+          )
+        end
         target.fetch("PRAGMA wal_checkpoint(TRUNCATE)").all
       ensure
         source&.disconnect
         target&.disconnect
+      end
+
+      def establish_closed_lifecycle!(target, now:)
+        identity = target[:installations].get(:installation_id)
+        target[:runtime_lifecycle].insert(
+          installation_id: identity, phase: "quiescing", generation: 1, revision: 0,
+          mutation_sequence: 1, interrupted_attempt_ids_json: "[]",
+          quiesce_started_at: Codec.dump_time(now), updated_at: Codec.dump_time(now)
+        )
+      end
+
+      def preserve_closed_lifecycle!(target, now:)
+        lifecycle = target[:runtime_lifecycle].first
+        unless lifecycle && %w[quiescing paused].include?(lifecycle.fetch(:phase))
+          raise IntegrityError.new(
+            "quiescence upgrade source no longer has closed admission",
+            code: :quiescence_upgrade_requires_closed_lifecycle, action: MIGRATE_ACTION
+          )
+        end
+
+        changed = target[:runtime_lifecycle].where(
+          installation_id: lifecycle.fetch(:installation_id)
+        ).update(
+          phase: "quiescing", revision: lifecycle.fetch(:revision) + 1,
+          mutation_sequence: lifecycle.fetch(:mutation_sequence) + 1,
+          paused_at: nil, updated_at: Codec.dump_time(now)
+        )
+        unless changed == 1
+          raise IntegrityError.new(
+            "quiescence upgrade could not preserve the lifecycle row",
+            code: :quiescence_upgrade_lifecycle_failed, action: BACKUP_ACTION
+          )
+        end
       end
 
       def replace_with_upgraded_database!(temporary_path)

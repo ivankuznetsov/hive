@@ -6,10 +6,17 @@ require "hive/runtime_control_plane/operation_lock"
 
 module Hive
   module RuntimeControlPlane
-    # Explicit supervised conversion for the one schema that immediately
-    # preceded quiescence. Ordinary setup/startup continue to reject it.
+    # Explicit supervised conversion for the pinned pre-quiescence schema and
+    # the exact quiescence-era revisions named below. Ordinary setup/startup
+    # continue to reject every non-current schema.
     class QuiescenceUpgrade
       PINNED_V1_SCHEMA_SHA256 = "f237684b17dfd8f7ded175a5e3c7a1b0445c4a7bee109fca4f2f51e498ead0a7".freeze
+      QUIESCENCE_SCHEMA_REVISIONS = {
+        "484dfc25ef94ab9c06867351308121ba2ce904f1e7f1ef6dc004f45b8d65e479" =>
+          "lifecycle-v1",
+        "f31651456b27230ef802d910733887fcb5a64b65dead502a2752b1c183f592f3" =>
+          "process-custody-v1"
+      }.freeze
 
       def initialize(state_home: Hive::Paths.state_home, timeout_sec: 600,
                      ownership_verifier: -> { false }, clock: -> { Time.now.utc })
@@ -35,10 +42,15 @@ module Hive
 
         OperationLock.new(state_home: @state_home, timeout_sec: @timeout_sec).synchronize do
           database.with_exclusive_writer(role: :migrator, timeout_sec: @timeout_sec) do |authority|
+            # Revalidate after both fences are held. An unsupported or reopened
+            # source must not invalidate the existing paused proof.
+            source = database.quiescence_upgrade_source
+            source_kind = validate_source!(source)
             invalidate_proof!
-            database.upgrade_quiescence_v1!(
-              authority: authority, expected_fingerprint: PINNED_V1_SCHEMA_SHA256,
-              now: @clock.call
+            database.upgrade_quiescence!(
+              authority: authority, expected_schema_version: source.fetch(:schema_version),
+              expected_fingerprint: source.fetch(:schema_fingerprint),
+              preserve_lifecycle: source_kind == :quiescence_revision, now: @clock.call
             )
           end
         end
@@ -58,8 +70,23 @@ module Hive
       private
 
       def validate_source!(source)
-        return if source[:application_id] == APPLICATION_ID && source[:schema_version] == 1 &&
-          source[:schema_fingerprint] == PINNED_V1_SCHEMA_SHA256
+        if source[:application_id] == APPLICATION_ID && source[:schema_version] == 1 &&
+            source[:schema_fingerprint] == PINNED_V1_SCHEMA_SHA256
+          return :pre_quiescence
+        end
+
+        revision = QUIESCENCE_SCHEMA_REVISIONS[source[:schema_fingerprint]]
+        if source[:application_id] == APPLICATION_ID && source[:schema_version] == 2 && revision
+          lifecycle = source[:lifecycle]
+          return :quiescence_revision if %w[quiescing paused].include?(lifecycle&.fetch(:phase, nil))
+
+          raise Unavailable.new(
+            "quiescence-era runtime must already have admission closed before upgrade",
+            code: :quiescence_upgrade_requires_closed_lifecycle,
+            action: "quiesce with the matching Hive version before supervised conversion",
+            details: { revision: revision, phase: lifecycle&.fetch(:phase, nil) }
+          )
+        end
 
         raise MigrationRequired.new(
           "runtime control-plane format is not a supported quiescence upgrade source",

@@ -10,7 +10,7 @@ require "hive/runtime_control_plane/file_fence"
 
 module Hive
   module RuntimeControlPlane
-    EXPECTED_SCHEMA_SHA256 = "f31651456b27230ef802d910733887fcb5a64b65dead502a2752b1c183f592f3".freeze
+    EXPECTED_SCHEMA_SHA256 = "92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0".freeze
 
     class Database
       MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze

@@ -395,7 +395,7 @@ module Hive
       end
 
       def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
-                      log_reference:, now:, provider_evidence: nil)
+                      log_reference:, now:, provider_evidence: nil, pause_generation: nil)
         version = observed.lease_version + 1
         receipt = {
           "receipt_version" => Record::RECEIPT_VERSION,
@@ -408,7 +408,8 @@ module Hive
           "final_checkpoint" => Hive::StringifyKeys.call(final_checkpoint),
           "output_references" => Hive::StringifyKeys.call(output_references),
           "log_reference" => Hive::StringifyKeys.call(log_reference),
-          "provider_evidence" => Hive::StringifyKeys.call(provider_evidence)
+          "provider_evidence" => Hive::StringifyKeys.call(provider_evidence),
+          "pause_generation" => pause_generation
         }
         Record.validate_receipt!(
           receipt, attempt_id: observed.attempt_id,
@@ -427,6 +428,19 @@ module Hive
             "log_reference" => Hive::StringifyKeys.call(log_reference), "receipt" => receipt
           )
         end
+      end
+
+      # A quiescence controller may publish interruption only after it has
+      # identity-verified that the running worker is gone. The ordinary CAS in
+      # terminalize keeps a genuine completion receipt authoritative when the
+      # two race.
+      def interrupt(observed, pause_generation:, exit_status:, final_checkpoint:,
+                    output_references:, log_reference:, now:)
+        terminalize(
+          observed, outcome: "interrupted", exit_status: exit_status,
+          final_checkpoint: final_checkpoint, output_references: output_references,
+          log_reference: log_reference, pause_generation: Integer(pause_generation), now: now
+        )
       end
 
       def mark_lost(observed, reason:, now:, diagnostics: {})

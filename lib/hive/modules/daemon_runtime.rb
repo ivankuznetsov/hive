@@ -245,7 +245,7 @@ module Hive
 
             if attempt.state == "terminal" && attempt.outcome == "succeeded"
               finalize_run(path, run, status: "succeeded", attempt: attempt, now: now)
-            elsif ((attempt.state == "terminal" && attempt.outcome == "failed") ||
+            elsif ((attempt.state == "terminal" && %w[failed interrupted].include?(attempt.outcome)) ||
                    attempt.state == "lost") &&
                   attempt["retry_charge"] < MAX_RETRIES
               dispatcher.retry(

@@ -87,22 +87,33 @@ module Hive
         end
       end
 
-      def transaction(mode: :immediate, authority: nil, cleanup_attempt_id: nil)
-        with_writer_fence(authority: authority) do
+      def transaction(mode: :immediate, authority: nil, cleanup_attempt_id: nil,
+                      timeout_sec: nil)
+        fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
+          [ Float(timeout_sec), 0.0 ].max
+        with_writer_fence(authority: authority, timeout_sec: fence_timeout) do
           ProcessGuard.checkout(transaction: true) do
             ensure_open!
-            @connection.transaction(mode: mode, rollback: :reraise) do
-              authorize_mutation!(@connection, authority: authority,
-                                  cleanup_attempt_id: cleanup_attempt_id)
-              increment_mutation_sequence!(@connection)
-              yield @connection
+            prior = integer_pragma(@connection, "busy_timeout") unless timeout_sec.nil?
+            @connection.run("PRAGMA busy_timeout = #{(fence_timeout * 1000).ceil}") if prior
+            begin
+              @connection.transaction(mode: mode, rollback: :reraise) do
+                authorize_mutation!(@connection, authority: authority,
+                                    cleanup_attempt_id: cleanup_attempt_id)
+                increment_mutation_sequence!(@connection)
+                yield @connection
+              end
+            ensure
+              @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
             end
           end
         end
       end
 
-      def controller_transaction(mode: :immediate, &block)
-        transaction(mode: mode, authority: authority_for(:controller), &block)
+      def controller_transaction(mode: :immediate, timeout_sec: nil, &block)
+        transaction(
+          mode: mode, authority: authority_for(:controller), timeout_sec: timeout_sec, &block
+        )
       end
 
       def migrator_transaction(mode: :immediate, &block)
@@ -121,7 +132,7 @@ module Hive
       end
 
       def checkpoint!(timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
-        timeout_ms = [(Float(timeout_sec) * 1000).floor, 0].max
+        timeout_ms = [ (Float(timeout_sec) * 1000).floor, 0 ].max
         ProcessGuard.checkout do
           ensure_open!
           prior = integer_pragma(@connection, "busy_timeout")
@@ -385,11 +396,11 @@ module Hive
         )
       end
 
-      def with_writer_fence(authority:)
+      def with_writer_fence(authority:, timeout_sec:)
         if valid_authority?(authority)
           yield
         else
-          fence = writer_fence(timeout_sec: @busy_timeout_ms / 1000.0)
+          fence = writer_fence(timeout_sec: timeout_sec)
           fence.synchronize(:shared) { yield }
         end
       end

@@ -295,6 +295,27 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_transaction_timeout_bounds_sqlite_writer_contention_and_restores_default
+    with_database do |database, path|
+      blocker = SQLite3::Database.new(path)
+      blocker.execute("BEGIN IMMEDIATE")
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      assert_raises(Sequel::DatabaseError) do
+        database.transaction(timeout_sec: 0.05) do |connection|
+          connection[:installations].update(next_task_id: 1)
+        end
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      assert_operator elapsed, :<, 0.5
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |connection| connection.fetch("PRAGMA busy_timeout").get }
+    ensure
+      blocker&.execute("ROLLBACK")
+      blocker&.close
+    end
+  end
+
   def test_migration_and_feature_probe_failures_are_typed
     with_tmp_dir do |root|
       database = Hive::RuntimeControlPlane::Database.new(path: File.join(root, "runtime.sqlite3"))

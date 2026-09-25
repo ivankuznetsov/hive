@@ -672,8 +672,13 @@ module Hive
 
         @admission_closed = true
         @pause_generation = state.generation
-        remaining = state.deadline_monotonic && [ state.deadline_monotonic - now_mono, 0.0 ].max
-        candidates = [ @kill_grace_sec, state.shutdown_grace_sec, remaining ].compact.map(&:to_f)
+        escalation = state.shutdown_grace_sec&.to_f
+        finalization_reserve = escalation && (escalation * (15.0 / 25.0))
+        escalation_cutoff = if state.deadline_monotonic && finalization_reserve
+          state.deadline_monotonic - finalization_reserve
+        end
+        remaining = escalation_cutoff && [ escalation_cutoff - now_mono, 0.0 ].max
+        candidates = [ @kill_grace_sec, escalation, remaining ].compact.map(&:to_f)
         @quiescence_grace_sec = candidates.min
       rescue Hive::RuntimeControlPlane::Error, Sequel::Error, ArgumentError, TypeError
         nil

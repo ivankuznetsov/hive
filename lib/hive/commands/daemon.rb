@@ -366,6 +366,7 @@ module Hive
           module_runtime: module_runtime,
           runtime_ready_callback: -> { activation_lock.release! },
           persistent_admission: -> { lifecycle_repository.current.admission_open? },
+          quiescence_lifecycle: lifecycle_repository,
           clock: -> { Time.now.utc },
           patrol_discovery_async: true
         )

@@ -37,14 +37,17 @@ module Hive
         )
       end
 
-      def begin_quiesce!(deadline_monotonic:, boot_id:, shutdown_grace_sec:, now: @clock.call)
+      def begin_quiesce!(deadline_monotonic:, boot_id:, shutdown_grace_sec:, now: @clock.call,
+                         timeout_sec: nil)
         existing = current
         return existing if existing.phase == "quiescing"
         unless existing.phase == "running"
           raise StaleLifecycle.new("cannot quiesce while lifecycle is #{existing.phase}")
         end
 
-        mutate(expected: existing, from: "running", privileged: false) do |row|
+        mutate(
+          expected: existing, from: "running", privileged: false, timeout_sec: timeout_sec
+        ) do |row|
           {
             phase: "quiescing", generation: row.fetch(:generation) + 1,
             boot_id: boot_id.to_s, deadline_monotonic: Float(deadline_monotonic),
@@ -60,11 +63,14 @@ module Hive
       end
 
       def mark_paused!(generation:, expected_revision:, interrupted_attempt_ids:, now: @clock.call,
-                       authority: nil)
+                       authority: nil, timeout_sec: nil)
         expected = current
         validate_expected!(expected, generation: generation, revision: expected_revision,
                            phases: [ "quiescing" ])
-        mutate(expected: expected, from: "quiescing", authority: authority) do
+        mutate(
+          expected: expected, from: "quiescing", authority: authority,
+          timeout_sec: timeout_sec
+        ) do
           {
             phase: "paused", paused_at: dump_time(now),
             interrupted_attempt_ids_json: Codec.dump_json(Array(interrupted_attempt_ids).map(&:to_s).uniq)
@@ -72,21 +78,45 @@ module Hive
         end
       end
 
-      def begin_resume!(generation:, now: @clock.call, authority: nil)
+      # A paused row is only a durable candidate until the external
+      # finalization proof has been flushed. Checkpoint/proof failure and a
+      # retry after a controller crash move that candidate back to quiescing
+      # without changing its generation or reopening admission.
+      def return_to_quiescing!(generation:, expected_revision:, now: @clock.call,
+                               authority: nil, timeout_sec: nil)
+        expected = current
+        validate_expected!(expected, generation: generation, revision: expected_revision,
+                           phases: [ "paused" ])
+        mutate(
+          expected: expected, from: "paused", authority: authority,
+          timeout_sec: timeout_sec
+        ) do
+          { phase: "quiescing", paused_at: nil, updated_at: dump_time(now) }
+        end
+      end
+
+      def begin_resume!(generation:, now: @clock.call, authority: nil, timeout_sec: nil)
         expected = current
         validate_expected!(expected, generation: generation, phases: %w[quiescing paused resuming])
         return expected if expected.phase == "resuming"
 
-        mutate(expected: expected, from: expected.phase, authority: authority) do
+        mutate(
+          expected: expected, from: expected.phase, authority: authority,
+          timeout_sec: timeout_sec
+        ) do
           { phase: "resuming", resumed_at: dump_time(now), paused_at: nil }
         end
       end
 
-      def reopen!(generation:, expected_revision:, now: @clock.call, authority: nil)
+      def reopen!(generation:, expected_revision:, now: @clock.call, authority: nil,
+                  timeout_sec: nil)
         expected = current
         validate_expected!(expected, generation: generation, revision: expected_revision,
                            phases: [ "resuming" ])
-        mutate(expected: expected, from: "resuming", authority: authority) do
+        mutate(
+          expected: expected, from: "resuming", authority: authority,
+          timeout_sec: timeout_sec
+        ) do
           {
             phase: "running", boot_id: nil, deadline_monotonic: nil,
             shutdown_grace_sec: nil, interrupted_attempt_ids_json: "[]",
@@ -97,7 +127,7 @@ module Hive
 
       private
 
-      def mutate(expected:, from:, privileged: true, authority: nil)
+      def mutate(expected:, from:, privileged: true, authority: nil, timeout_sec: nil)
         operation = lambda do |db|
           row = db[:runtime_lifecycle].where(
             installation_id: installation_id(db), phase: from,
@@ -112,10 +142,11 @@ module Hive
         end
 
         if privileged
-          authority ? database.transaction(authority: authority, &operation) :
-            database.controller_transaction(&operation)
+          authority ? database.transaction(
+            authority: authority, timeout_sec: timeout_sec, &operation
+          ) : database.controller_transaction(timeout_sec: timeout_sec, &operation)
         else
-          database.transaction(&operation)
+          database.transaction(timeout_sec: timeout_sec, &operation)
         end
       end
 

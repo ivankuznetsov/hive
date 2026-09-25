@@ -262,6 +262,27 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_quiesce_signal_never_consumes_the_finalization_reserve
+    state = Hive::RuntimeControlPlane::Lifecycle.new(
+      phase: "quiescing", generation: 4, revision: 1, mutation_sequence: 2,
+      boot_id: "boot", deadline_monotonic: 110.0, shutdown_grace_sec: 25.0,
+      interrupted_attempt_ids: [], quiesce_started_at: nil, paused_at: nil,
+      resumed_at: nil, updated_at: nil
+    )
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) { state }
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new,
+      kill_grace_sec: 60, monotonic: -> { 95.0 }
+    )
+    supervisor.define_singleton_method(:lifecycle) { lifecycle }
+
+    supervisor.send(:capture_quiescence_context, 95.0)
+
+    assert_equal 4, supervisor.instance_variable_get(:@pause_generation)
+    assert_equal 0.0, supervisor.send(:effective_kill_grace)
+  end
+
   def test_natural_completion_after_admission_closes_keeps_genuine_success
     with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.1; exit 0" ]) do |store, attempt|
       lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)

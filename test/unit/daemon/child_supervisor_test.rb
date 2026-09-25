@@ -415,6 +415,33 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
                  "an unverifiable process tree must keep its scheduler claim fenced"
   end
 
+  def test_quiescence_shutdown_clamp_bounds_term_and_kill_waits
+    sup = make
+    sup.instance_variable_set(:@running, {
+      123 => {
+        project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+        dry_run: false, pgid: 99
+      }
+    })
+    tree = [ { pid: 123, ppid: 1, pgid: 99, start_time: "start", depth: 0 } ]
+    deadlines = []
+    sup.define_singleton_method(:capture_shutdown_targets) do
+      { 123 => { pgids: [ 99 ], tree: tree } }
+    end
+    sup.define_singleton_method(:signal_shutdown_targets) { |*| nil }
+    sup.define_singleton_method(:drain_shutdown) do |targets:, pending:, completed:, deadline:|
+      deadlines << deadline
+    end
+    sup.define_singleton_method(:shutdown_drained?) { |_| false }
+    sup.clamp_quiescence_shutdown!(remaining_sec: 0)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+    sup.terminate_all(grace_sec: 60)
+
+    assert_equal 2, deadlines.length
+    assert deadlines.all? { |deadline| deadline <= started + 0.1 }, deadlines.inspect
+  end
+
   def test_terminate_all_wait_loop_reaps_before_deadline
     sup = make
     sup.instance_variable_set(:@running, {

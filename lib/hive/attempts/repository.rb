@@ -396,7 +396,7 @@ module Hive
 
       def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
                       log_reference:, now:, provider_evidence: nil, pause_generation: nil,
-                      authority: nil)
+                      authority: nil, timeout_sec: nil)
         version = observed.lease_version + 1
         receipt = {
           "receipt_version" => Record::RECEIPT_VERSION,
@@ -421,7 +421,8 @@ module Hive
         )
         mutate(
           observed, allowed_states: [ "running" ], pending_receipt: receipt,
-          authority: authority, cleanup_attempt_id: observed.attempt_id
+          authority: authority, cleanup_attempt_id: observed.attempt_id,
+          timeout_sec: timeout_sec
         ) do |data|
           data.merge(
             "state" => "terminal", "outcome" => outcome, "lease_version" => version,
@@ -439,12 +440,13 @@ module Hive
       # terminalize keeps a genuine completion receipt authoritative when the
       # two race.
       def interrupt(observed, pause_generation:, exit_status:, final_checkpoint:,
-                    output_references:, log_reference:, now:, authority: nil)
+                    output_references:, log_reference:, now:, authority: nil,
+                    timeout_sec: nil)
         terminalize(
           observed, outcome: "interrupted", exit_status: exit_status,
           final_checkpoint: final_checkpoint, output_references: output_references,
           log_reference: log_reference, pause_generation: Integer(pause_generation), now: now,
-          authority: authority
+          authority: authority, timeout_sec: timeout_sec
         )
       end
 
@@ -485,9 +487,12 @@ module Hive
       end
 
       def mutate(observed, allowed_states:, pending_receipt: nil, authority: nil,
-                 cleanup_attempt_id: nil)
+                 cleanup_attempt_id: nil, timeout_sec: nil)
         replacement = nil
-        database.transaction(authority: authority, cleanup_attempt_id: cleanup_attempt_id) do |db|
+        database.transaction(
+          authority: authority, cleanup_attempt_id: cleanup_attempt_id,
+          timeout_sec: timeout_sec
+        ) do |db|
           row = db[:attempts].where(attempt_id: observed.attempt_id).first
           current = row && record_from(row)
           verify_cas!(current, observed, allowed_states)

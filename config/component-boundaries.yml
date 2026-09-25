@@ -412,7 +412,8 @@ components:
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root uses the process-identity verifier to classify live workers safely."
+          - lib/hive/runtime_control_plane/process_registry.rb
+        reason: "The daemon composition root and installation-owned process registry use the process-identity verifier to classify live workers safely."
       - constant: Hive::Attempts::LostOutcomeTransition
         files:
           - lib/hive/commands/daemon.rb

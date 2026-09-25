@@ -599,7 +599,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil,
-                      dispatch_repository: nil, patrol_discovery_async: false)
+                      dispatch_repository: nil, patrol_discovery_async: false,
+                      persistent_admission: nil)
     dispatch_request_state_home ||= Dir.mktmpdir("hive-dispatch-test")
     config = {
       "daemon" => {
@@ -665,7 +666,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback,
       clock: clock,
-      patrol_discovery_async: patrol_discovery_async
+      patrol_discovery_async: patrol_discovery_async,
+      persistent_admission: persistent_admission
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # Bypass the Hive::Config.find_project / Config.load lookup chain
@@ -675,6 +677,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       answer_digest_scheduler, daily_digest_close_scheduler, daily_digest_delivery_scheduler
     ]
+  end
+
+  def test_persistent_admission_closure_blocks_dispatch_before_status_work
+    dispatcher, = make_dispatcher(persistent_admission: -> { false })
+    dispatcher.define_singleton_method(:perform_tick) do |**|
+      flunk "closed durable admission must prevent a daemon tick from dispatching"
+    end
+
+    refute dispatcher.send(:admission_open?)
   end
 
   def test_async_patrol_discovery_keeps_authoritative_ticks_responsive

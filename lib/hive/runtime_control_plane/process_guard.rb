@@ -121,6 +121,9 @@ module Hive
         before_fork!
         Process.daemon(*arguments)
         after_fork_child!
+        if defined?(Hive::RuntimeControlPlane::CommandRegistration)
+          Hive::RuntimeControlPlane::CommandRegistration.rebind_after_daemonize!
+        end
         true
       rescue Exception
         after_fork_parent!

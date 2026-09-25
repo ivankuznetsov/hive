@@ -73,6 +73,8 @@ Sequel.migration do
       String :state, null: false
       Integer :proven_child_safe, null: false, default: 0
       String :custody_mode, null: false, default: "unverified"
+      String :custody_path
+      String :custody_evidence_json, text: true
       String :unknown_reason
       String :created_at, null: false
       String :updated_at, null: false

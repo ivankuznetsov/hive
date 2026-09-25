@@ -69,7 +69,8 @@ class PackagingVerifyReleaseTest < Minitest::Test
   def test_hivebox_initializes_current_storage_before_starting_children
     body = File.read(File.expand_path("../../../packaging/docker/entrypoint.sh", __dir__))
     assert_includes body, "-rhive/runtime_control_plane/installation"
-    assert_includes body, "Hive::RuntimeControlPlane::Installation.setup; Hive::Web::Supervisor.new.run"
+    assert_includes body, "Hive::RuntimeControlPlane::Installation.setup; db ="
+    assert_includes body, "persistent_admission: -> { lifecycle.current.admission_open? }"
     assert_operator body.index('exec "$@"'), :<, body.index("Installation.setup")
   end
 

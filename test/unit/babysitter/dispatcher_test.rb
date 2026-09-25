@@ -142,6 +142,23 @@ class BabysitterDispatcherTest < Minitest::Test
     end
   end
 
+  def test_tick_does_not_enumerate_projects_after_persistent_admission_closes
+    with_tmp_dir do |dir|
+      logger = Hive::Babysitter::Logger.new(path: File.join(dir, "babysitter.log"))
+      dispatcher = Hive::Babysitter::Dispatcher.new(
+        logger: logger,
+        persistent_admission: -> { false }
+      )
+      dispatcher.define_singleton_method(:enabled_projects) do
+        flunk "closed durable admission must prevent project enumeration"
+      end
+
+      assert_equal 0, dispatcher.tick
+    ensure
+      logger&.close
+    end
+  end
+
   def test_tick_skips_local_and_unresolved_repositories_before_github_calls
     with_tmp_dir do |root|
       local = File.join(root, "local")

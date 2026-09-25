@@ -411,6 +411,11 @@ left alone; for an already-waiting row, daemon `PlanApproval` owns the guarded
 required review that has not completed cannot leave the plan artifact claiming
 terminal completion, including on legacy capability-recovery re-entry.
 
+When a review ends `blocked` and a new linked plan runs, the planner receives
+every operator approval and answer from that review as a `plan_review_decisions`
+data block, so accepted decisions that only reached unpromoted candidate plans are
+not lost and are not re-asked.
+
 Authority-bearing actions use:
 
 ```text

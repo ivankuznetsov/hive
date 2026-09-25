@@ -50,6 +50,7 @@ module Hive
             project_name: File.basename(task.project_root),
             task_folder: task.folder,
             brainstorm_text: brainstorm_text,
+            carried_decisions_text: carried_decisions_text(task),
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
             skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
               profile, skill, project_root: task.project_root
@@ -69,6 +70,48 @@ module Hive
           commit: action_for(marker.name), status: marker.name,
           plan_review: review&.summary
         }
+      end
+
+      CARRIED_DESCRIPTION_BYTES = 2_000
+      CARRIED_ANSWER_BYTES = 4_000
+      CARRIED_ACTIONS = %w[approve_finding answer_finding].freeze
+
+      # A review that ends blocked (for example at its revision-round limit)
+      # asks for a new linked plan. Its operator decisions may exist only in
+      # candidate plans that were never promoted to plan.md, and the planner
+      # prompt otherwise carries only brainstorm.md and plan.md, so those
+      # decisions were silently dropped and the next review re-raised the same
+      # questions. Hand every operator approval and answer from that review to
+      # the planner as data to integrate.
+      def carried_decisions_text(task)
+        record = Hive::PlanReview::Projection.load(task_folder: task.folder).record
+        return "" unless record.state == "blocked"
+
+        findings = record["findings"].to_h { |finding| [ finding["fingerprint"], finding ] }
+        decisions = record["decisions"].select { |decision| CARRIED_ACTIONS.include?(decision["action"]) }
+        entries = decisions.filter_map do |decision|
+          finding = findings[decision["target_fingerprint"]]
+          next unless finding
+
+          [ finding, decision ]
+        end
+        return "" if entries.empty?
+
+        entries.sort_by { |finding, _| finding["display_order"].to_i }.map do |finding, decision|
+          outcome = if decision["action"] == "answer_finding"
+            answer = decision["value"].is_a?(Hash) ? decision["value"]["answer"] : decision["value"]
+            "Operator answer (follow exactly): #{answer.to_s.byteslice(0, CARRIED_ANSWER_BYTES).scrub}"
+          else
+            "Operator decision: approved; apply the reviewer's recommendation."
+          end
+          <<~ENTRY
+            - #{finding['title']} (#{finding['classification']}, #{finding['risk']} risk; #{finding['fingerprint']})
+              Reviewer finding: #{finding['description'].to_s.byteslice(0, CARRIED_DESCRIPTION_BYTES).scrub}
+              #{outcome}
+          ENTRY
+        end.join("\n")
+      rescue Hive::PlanReview::Error, SystemCallError, IOError
+        ""
       end
 
       # Seed before Agent.run! appends AGENT_WORKING. Provider errors then

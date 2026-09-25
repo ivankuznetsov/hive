@@ -56,10 +56,26 @@ These are fixed one-to-one facts. Hive does not maintain separate accounting,
 capacity-reservation, lost-outcome, failure-event, publication-obligation, or
 attempt-relationship tables. `payload_references` remains separate because it
 is genuinely one-to-many. Patrol retry pacing reads the latest final attempt
-for the same task, generation, stage and runtime. A failed, cancelled or lost
+for the same task, generation, stage and runtime. A failed, cancelled, interrupted or lost
 attempt delays automatic retry by `AgentLimit.retry_cooldown_sec`; success or
 changed inputs/runtime clears that delay. Explicit retry bypasses pacing, not
 live capacity or unresolved-loss recovery. There are no cohort counters or probes.
+
+An interrupted attempt is terminal non-success, not a successful checkpoint
+and not an inferred loss. Its version-2 terminal receipt binds the pause
+generation and retains the last durable checkpoint, output references, and log
+reference. The supervisor publishes interruption only after its worker and
+recorded process group have stopped; a natural completion that wins first keeps
+its genuine success receipt. A restarted controller may finalize the same
+outcome only after identity checks prove both the wrapper and worker group are
+absent, and the attempt lease compare-and-swap prevents a later interruption
+from replacing an already committed terminal result.
+
+During quiescing, an already admitted supervisor stops ordinary heartbeat
+writes and may use its single bounded cleanup-write window to publish the
+terminal receipt. A quiesce signal uses the lifecycle generation and clamps
+worker termination to the persisted shutdown grace and remaining lifecycle
+deadline. The same signal outside quiescing remains an ordinary cancellation.
 
 `request_id` is immutable provenance, not a foreign key to the disposable
 dispatch queue. Completing or pruning a request must not change an attempt

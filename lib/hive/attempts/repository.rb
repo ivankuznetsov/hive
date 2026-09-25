@@ -395,7 +395,8 @@ module Hive
       end
 
       def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
-                      log_reference:, now:, provider_evidence: nil, pause_generation: nil)
+                      log_reference:, now:, provider_evidence: nil, pause_generation: nil,
+                      authority: nil)
         version = observed.lease_version + 1
         receipt = {
           "receipt_version" => Record::RECEIPT_VERSION,
@@ -418,7 +419,10 @@ module Hive
           task_input_epoch: observed.task_input_epoch,
           terminal_lease_version: version, routing: observed["routing"]
         )
-        mutate(observed, allowed_states: [ "running" ], pending_receipt: receipt) do |data|
+        mutate(
+          observed, allowed_states: [ "running" ], pending_receipt: receipt,
+          authority: authority, cleanup_attempt_id: observed.attempt_id
+        ) do |data|
           data.merge(
             "state" => "terminal", "outcome" => outcome, "lease_version" => version,
             "heartbeat_deadline" => nil, "ended_at" => Record.iso8601(now),
@@ -435,11 +439,12 @@ module Hive
       # terminalize keeps a genuine completion receipt authoritative when the
       # two race.
       def interrupt(observed, pause_generation:, exit_status:, final_checkpoint:,
-                    output_references:, log_reference:, now:)
+                    output_references:, log_reference:, now:, authority: nil)
         terminalize(
           observed, outcome: "interrupted", exit_status: exit_status,
           final_checkpoint: final_checkpoint, output_references: output_references,
-          log_reference: log_reference, pause_generation: Integer(pause_generation), now: now
+          log_reference: log_reference, pause_generation: Integer(pause_generation), now: now,
+          authority: authority
         )
       end
 
@@ -479,9 +484,10 @@ module Hive
         ).count
       end
 
-      def mutate(observed, allowed_states:, pending_receipt: nil)
+      def mutate(observed, allowed_states:, pending_receipt: nil, authority: nil,
+                 cleanup_attempt_id: nil)
         replacement = nil
-        database.transaction do |db|
+        database.transaction(authority: authority, cleanup_attempt_id: cleanup_attempt_id) do |db|
           row = db[:attempts].where(attempt_id: observed.attempt_id).first
           current = row && record_from(row)
           verify_cas!(current, observed, allowed_states)

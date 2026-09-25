@@ -1355,6 +1355,32 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_interrupted_terminal_recovery_repairs_marker_as_non_success
+    with_fixture do |coordinator, row, state_home|
+      coordinator.request(
+        row: row, requestor: "healer", request_id: "recover-interrupted",
+        now: NOW
+      )
+      admitted = Q.fetch("recover-interrupted", state_home: state_home)
+      coordinator.resume(request: admitted, row: row, now: NOW)
+      cleared = Q.fetch("recover-interrupted", state_home: state_home)
+      coordinator.mark_dispatched(cleared, attempt_id: "attempt-interrupted", now: NOW)
+      dispatched = Q.fetch("recover-interrupted", state_home: state_home)
+      coordinator.mark_dispatched(
+        dispatched, attempt_id: "attempt-interrupted", terminal: true,
+        outcome: "interrupted", now: NOW + 1
+      )
+      terminal = Q.fetch("recover-interrupted", state_home: state_home)
+
+      assert coordinator.repair_failed_terminal_marker(terminal)
+      marker = Hive::Markers.current(row.state_file)
+      assert_equal :error, marker.name
+      assert_equal "recovery_attempt_failed", marker.attrs.fetch("reason")
+      assert_equal "interrupted", marker.attrs.fetch("outcome")
+      refute_includes Hive::Markers::TERMINAL_MARKER_NAMES, marker.name
+    end
+  end
+
   # Marker repair runs on every daemon tick against on-disk state that may be
   # mid-write or gone. A raise here would abort the whole delivery
   # reconciliation loop, so the repair fails closed and leaves the request for

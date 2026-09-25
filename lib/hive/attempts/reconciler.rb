@@ -3,6 +3,7 @@ require "hive/attempts/capacity_snapshot"
 require "hive/attempts/process_identity"
 require "hive/attempts/storage_status"
 require "hive/markers"
+require "hive/output_reference"
 require "hive/task"
 
 module Hive
@@ -93,6 +94,62 @@ module Hive
         @finalization_maintenance&.sweep_if_due(now: now)
       end
 
+      # Publish interruption only after both the wrapper identity and the
+      # worker process group are proven absent. A genuine terminal receipt that
+      # wins the CAS race remains authoritative and is returned unchanged.
+      def finalize_interruption(observed, pause_generation:, now: Time.now.utc, authority: nil)
+        current = @store.fetch(observed.attempt_id)
+        return reconciled(current, :terminal, :not_applicable, { receipt: "valid" }) if
+          current&.state == "terminal"
+        return reconciled(current, :unverifiable, :not_applicable, { state: current&.state }) unless
+          current&.state == "running"
+
+        wrapper_status = @process_identity.status(current.wrapper)
+        if wrapper_status == :matching
+          return reconciled(current, :still_running, wrapper_status, { wrapper: "matching" })
+        end
+        if wrapper_status == :unverifiable
+          return reconciled(current, :unverifiable, wrapper_status, { wrapper: "unverifiable" })
+        end
+
+        worker_status = @process_identity.orphan_group_status(
+          wrapper: current.wrapper, worker: current.worker
+        )
+        unless worker_status == :absent
+          classification = worker_status == :matching ? :still_running : :unverifiable
+          return reconciled(
+            current, classification, wrapper_status,
+            { wrapper: wrapper_status.to_s, worker_group: worker_status.to_s }
+          )
+        end
+
+        log_reference = interruption_log_reference(current)
+        unless log_reference
+          return reconciled(
+            current, :unverifiable, wrapper_status,
+            { wrapper: wrapper_status.to_s, worker_group: "absent", log: "unavailable" }
+          )
+        end
+
+        interrupted = @store.interrupt(
+          current, pause_generation: pause_generation,
+          exit_status: Hive::ExitCodes::TEMPFAIL,
+          final_checkpoint: current.checkpoint,
+          output_references: current["current_outputs"],
+          log_reference: log_reference, now: now, authority: authority
+        )
+        reconciled(
+          interrupted, :interrupted, wrapper_status,
+          { wrapper: wrapper_status.to_s, worker_group: "absent" }
+        )
+      rescue CompareAndSwapFailed
+        winner = @store.fetch(observed.attempt_id)
+        return reconciled(winner, :terminal, :not_applicable, { receipt: "valid" }) if
+          winner&.state == "terminal"
+
+        raise
+      end
+
       def operational_storage_status(snapshot)
         attempts = snapshot&.admission_view&.records
         unless @finalization_maintenance
@@ -111,6 +168,17 @@ module Hive
       end
 
       private
+
+      def interruption_log_reference(record)
+        return record["log_reference"] if record["log_reference"]
+
+        resolution = @store.log_archive.resolve(record.attempt_id)
+        return unless resolution.availability == :available && resolution.path
+
+        Hive::OutputReference.build(resolution.path, root: @store.root)
+      rescue Hive::InvalidOutputReference, RepositoryError, SystemCallError, IOError
+        nil
+      end
 
       def observe_condition(status, now:)
         return :pending unless @condition_observer

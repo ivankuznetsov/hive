@@ -2797,6 +2797,22 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_interrupted_automatic_advance_replay_enters_markerless_recovery
+    observed = row(
+      stage: "6-review", marker: "none", action: "ready_for_review",
+      command: "hive review s1 --from 6-review"
+    )
+    attempt = Struct.new(:outcome).new("interrupted")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :terminal_replay, attempt: attempt,
+      receipt: { "outcome" => "interrupted", "exit_status" => Hive::ExitCodes::TEMPFAIL },
+      attach_descriptor: nil, reason: nil
+    )
+    dispatcher, = make_dispatcher(rows: [])
+
+    assert dispatcher.send(:failed_automatic_advance_replay?, observed, "advance", result)
+  end
+
   def test_marked_advance_keeps_fresh_retry_semantics
     attempt = Struct.new(:attempt_id, :task_generation, :state, :outcome)
                     .new("attempt-1", "generation-1", "running", nil)

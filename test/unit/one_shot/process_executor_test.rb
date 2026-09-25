@@ -119,7 +119,7 @@ class OneShotProcessExecutorTest < Minitest::Test
 
   def test_terminate_escalates_a_surviving_process_group
     executor = Hive::OneShot::ProcessExecutor.new(
-      monotonic_clock: -> { 0.0 }, sleeper: ->(*) {}
+      monotonic_clock: -> { 0.0 }, sleeper: ->(*) { }
     )
     signals = []
     waits = [ nil, :killed ]
@@ -149,7 +149,7 @@ class OneShotProcessExecutorTest < Minitest::Test
 
   def test_process_group_probe_and_wait_handle_permission_and_exit
     executor = Hive::OneShot::ProcessExecutor.new(
-      monotonic_clock: -> { 0.0 }, sleeper: ->(*) {}
+      monotonic_clock: -> { 0.0 }, sleeper: ->(*) { }
     )
     with_replaced_singleton_method(Process, :kill, ->(*) { true }) do
       assert executor.send(:process_group_alive?, 123)

@@ -58,6 +58,41 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 | `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
 | `queue`    | Read-only inspection of the dispatch-request rows all adapters write and the daemon consumes. Runtime SQL uses only `hive-dispatch-request.v5`; the irreversible fleet cutover discards pending legacy file queues rather than upgrading them. V5 binds recovery to canonical task/stage/marker/generation identity, carries markerless provider-admission observations, and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. `list`/`show`/`prune` JSON uses the `hive-daemon-queue.v1` success or error arm; failures distinguish `unknown_action`, `missing_request_id`, and `internal`. |
 
+## Increment-1 quiescence boundary
+
+The first quiescence increment is deliberately idle-registry-only. The audited
+launch table covers direct CLI commands, attempt wrappers, daemon children, the
+Hivebox supervisor, and web capture, but none of those surfaces is yet proven
+unable to create an unregistered descendant. A successful `paused: true`
+therefore requires no agent attempt roots, no unresolved launch reservation,
+no active registered process, and no discoverable legacy Hive service. Setting
+a registration's `proven_child_safe` bit cannot widen this rule: its origin must
+also be qualified by the fixed `LaunchCoverage` table, and currently none is.
+
+For the narrow backup-safe result, the two observations are inseparable:
+
+1. `hive daemon quiesce --json` must return `paused: true`, generation `G`, and
+   a complete checkpoint plus proof.
+2. Immediately before copying, `hive daemon status --json` must still report
+   lifecycle `paused`, the same generation `G`, a valid proof, and clear
+   liveness. Status capability is advisory; it cannot replace step 1.
+
+Any `quiescing` status invalidates that copy attempt. Re-run quiesce and restart
+the copy from the beginning. Keep admission paused for the entire copy, then use
+explicit `hive daemon resume`. In this increment the acknowledged backup set is
+only `Paths.runtime_control_plane_path` together with its generation-bound
+`Paths.runtime_quiescence_proof_path`; no runtime payload directory, workflow
+publication, daily-digest file, or per-project `.hive-state` tree has qualifying
+writer proof yet.
+
+An `ownership_unverifiable` refusal before closure leaves admission open and
+does not allocate a generation; new work may still start. A refusal against an
+already-closed generation or after the launch-fence recheck keeps admission
+closed and includes the explicit resume obligation. On Darwin, Linux without
+usable delegated custody, and any other unsupported host, possible unregistered
+descendants remain non-paused. There is no weaker macOS success mode beyond the
+same exact idle-registry predicate.
+
 ## What the daemon dispatches
 
 Per `Hive::Daemon::Policy.decide`, the daemon classifies each internal
@@ -289,6 +324,8 @@ Every public daemon JSON contract is version 1:
 | Surface | Schema |
 |---|---|
 | `status --json` | `hive-daemon-status.v1` |
+| `quiesce --json` | `hive-daemon-quiesce.v1` |
+| `resume --json` | `hive-daemon-resume.v1` |
 | `stop --json` | `hive-daemon-stop.v1` |
 | `reload --json` | `hive-daemon-reload.v1` |
 | `install --json` | `hive-daemon-install.v1` |
@@ -308,6 +345,12 @@ original typed failure.
 | `stop`     | 0    | Always (idempotent) |
 | `status`   | 0    | Daemon is running |
 | `status`   | 1    | Daemon is not running |
+| `quiesce`  | 0    | Verified paused acknowledgement |
+| `quiesce`  | 75   | Busy, timed out, or ownership unverifiable |
+| `quiesce`  | 70 / 78 | Storage failure / schema upgrade required |
+| `resume`   | 0    | Reconciliation completed and admission reopened |
+| `resume`   | 75   | Busy, timed out, or reconciliation incomplete |
+| `resume`   | 70 / 78 | Storage failure / supervised schema upgrade required |
 | `reload`   | 0    | SIGHUP sent successfully |
 | `reload`   | 1    | Daemon is not running |
 | `tail`     | 0    | Stream ended via Ctrl-C |

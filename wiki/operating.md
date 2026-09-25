@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-08-30
+updated: 2026-09-25
 tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood]
 ---
 
@@ -678,6 +678,48 @@ drain path when you are not using systemd/launchd.
 cache is also cleared at the start of every tick (PR-40 follow-up
 #2), so within one `poll_interval_sec` the toggle takes effect on
 its own. Reload is just for instant pickup.
+
+### Increment-1 idle backup procedure
+
+Quiescence currently has one positive backup case: an already-idle runtime
+registry. No registered launch surface is yet certified unable to create
+unregistered descendants, and an agent attempt root is always disqualifying
+without delegated Linux custody. Do not use ordinary `hive daemon stop`, daemon
+absence, or an advisory capability result as backup authorization.
+
+First create an idle window using existing controls:
+
+1. Stop new direct CLI submissions and other external submitters.
+2. Disable enrolled daemon dispatch (`hive daemon disable --all`) and stop the
+   daemon, bot, babysitter, and web services you run using their existing
+   `stop` commands. These are ingress controls, not a successful quiesce.
+3. Let existing attempts finish. Check `hive daemon status --json` until
+   `quiescence_capability.eligible` is true, while remembering that this result
+   is advisory and can race a new launch.
+4. Run `hive daemon quiesce --json`. It must return `paused: true`, a generation
+   `G`, `checkpoint.complete: true`, and a proof for `G`.
+5. Immediately before copying, run `hive daemon status --json` again. It must
+   still report lifecycle `paused`, generation `G`, valid proof, and clear
+   liveness. Keep the installation paused until the copy finishes.
+6. Copy only `runtime-control-plane.sqlite3` and its bound
+   `runtime-quiescence-proof.json` from `Hive::Paths.state_home` (normally
+   `~/.local/state/hive`). This increment does not certify the runtime payload
+   root, workflow publication, daily-digest state, or any project's
+   `.hive-state` directory.
+7. Run `hive daemon resume --json`. Admission reopens only after reconciliation;
+   managed-service restart outcomes are reported separately.
+
+If either status check says `quiescing`, discard the in-progress copy, retry
+quiesce, and start the copy again. A pre-drain `ownership_unverifiable` response
+with `admission_open: true` changed nothing, so work can still arrive while you
+are trying to make the installation idle. A refusal with admission closed has
+`resume_required: true`; either retry the same generation or resume explicitly.
+
+This limitation applies on macOS as well as Linux without usable delegated
+custody. Darwin has no promised arbitrary-descendant success mode; only the
+same exact idle-registry predicate can pause there. Increment 1 also has no
+single command that creates its own idle window, so coordinating the existing
+ingress controls remains an operator step.
 
 **Bot shutdown latency**: `hive bot stop` sends `SIGTERM` and waits up to
 `shutdown_grace_sec` (default 60) for in-flight children before

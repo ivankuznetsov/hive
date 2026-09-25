@@ -14,6 +14,10 @@ For a current database, the result also includes a distinct read-only
 `lifecycle` object (`phase`, `generation`, `revision`, and `admission_open`).
 This does not replace installation health: storage remains `active` while work
 is quiescing or paused. Missing storage reports `lifecycle: null`.
+`hive runtime status` is not a backup acknowledgement. The increment-1 backup
+contract requires a successful `hive daemon quiesce --json` followed
+immediately by `hive daemon status --json` reporting the same paused generation
+with valid proof and clear liveness.
 
 `Installation.setup` serializes explicit setup, builds a complete current database
 privately and publishes without replacing an existing destination. Repeated setup

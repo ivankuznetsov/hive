@@ -37,8 +37,12 @@ Help me move this Hive installation to the current checkout's formats.
    quiescence operation and writer fences, invalidates any old paused proof before
    its first schema write, preserves installation/attempt/payload identities, and
    leaves admission closed in `quiescing`. Run explicit `hive daemon resume` only
-   after validating the converted database. If the helper rejects the fingerprint,
-   archive the old runtime together with its WAL/SHM after all writers stop, and
+   after validating the converted database. The helper invalidates any old
+   quiescence proof; a pre-upgrade paused acknowledgement never authorizes a
+   post-upgrade copy. After resume, obtain a new quiesce acknowledgement and
+   same-generation daemon-status confirmation before any backup. If the helper
+   rejects the fingerprint, archive the old runtime together with its WAL/SHM
+   after all writers stop, and
    initialize a fresh current runtime with services still stopped.
    `Hive::RuntimeControlPlane::Installation.setup` is the explicit initializer;
    inspect its current API before calling it. Never alter schema hashes or version

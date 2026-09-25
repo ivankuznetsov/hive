@@ -2,13 +2,6 @@
 
 ## Unreleased
 
-- Codex transport retry notices (`"Reconnecting... n/m (...)"` error events)
-  are no longer extracted as provider errors, so the terminal failure that
-  follows them (for example `401 Unauthorized` from a revoked login) becomes
-  the reported provider error instead of a transient disconnect. Codex's
-  `unexpected status NNN` text now yields a status code, so its 402/429
-  failures classify as provider limits.
-
 ## 0.2.4 - 2026-08-25
 
 - Expose the OpenCode permission compiler independently from the prepared

@@ -1623,4 +1623,24 @@ class HiveCommandsDaemonTest < Minitest::Test
     end
     assert_match(/insufficient permissions/, err)
   end
+
+  def test_once_emits_dispatch_report
+    entry = { "name" => "hive", "path" => "/repo", "hive_state_path" => "/state" }
+    result = Hive::OneShot::Result.ok(
+      component: :dispatch, project: "hive", started_at: Time.utc(2026, 9, 25),
+      finished_at: Time.utc(2026, 9, 25), ran: [], items: [], safe_to_stop: true
+    )
+    adapter = Object.new
+    adapter.define_singleton_method(:call) { result }
+    command = Hive::Commands::Daemon.new(
+      nil, "hive", once: true, hive_home: @home,
+      one_shot_factory: ->(actual) { assert_equal entry, actual; adapter }
+    )
+
+    out = with_replaced_singleton_method(Hive::Config, :find_project, ->(_) { entry }) do
+      capture_io { assert_same result, command.call }.first
+    end
+
+    assert_equal "hive-one-shot", JSON.parse(out).fetch("schema")
+  end
 end

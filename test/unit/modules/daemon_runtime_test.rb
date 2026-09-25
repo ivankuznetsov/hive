@@ -352,6 +352,23 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_tick_can_scope_registry_to_one_project
+    with_tmp_dir do |root|
+      entries = %w[chosen unrelated].map do |name|
+        { "name" => name, "hive_state_path" => File.join(root, name),
+          "project_id" => "#{name}-id" }
+      end
+      daemon = Hive::Modules::DaemonRuntime.new(
+        attempt_store: Object.new, attempt_dispatcher: Object.new,
+        registry: -> { entries }
+      )
+
+      results = daemon.tick(now: NOW, projects: [ "chosen" ])
+
+      assert_equal [ "chosen" ], results.map { |result| result.fetch(:project) }
+    end
+  end
+
   def test_setup_identity_cursor_and_retry_timestamp_validation_fail_closed
     daemon = Hive::Modules::DaemonRuntime.new(
       attempt_store: Object.new, attempt_dispatcher: Object.new, registry: -> { [] }

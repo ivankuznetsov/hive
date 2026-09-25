@@ -396,6 +396,16 @@ module Hive
           @durable_daily_counts.fetch([ project, now.to_date ], 0) ].max
       end
 
+      def next_check_at(project:, slug:, gate:, now: Time.now.utc)
+        restore_schedule_state(project)
+        case gate.to_sym
+        when :cooldown
+          @cooldown_until[[ project, slug ]]&.utc
+        when :daily_cap
+          Time.utc(now.year, now.month, now.day) + 86_400
+        end
+      end
+
       # Minimal read-only scheduler facts for the dispatcher-owned operational
       # snapshot. Commands and raw argv are deliberately excluded: this is an
       # explanation surface, not another execution channel.

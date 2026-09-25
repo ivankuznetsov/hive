@@ -39,6 +39,7 @@ require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
 require "hive/one_shot/project_guard"
 require "hive/one_shot/schedule_state"
+require "hive/one_shot/dispatch_adapter"
 require "hive/commands/service_installer/result_presenter"
 
 module Hive
@@ -83,7 +84,7 @@ module Hive
                      all: false, json: false, force: false,
                      queue_args: [],
                      hive_home: Hive::Paths.state_home,
-                     activation_lock: nil)
+                     activation_lock: nil, once: false, one_shot_factory: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -94,9 +95,13 @@ module Hive
         @queue_args = Array(queue_args)
         @hive_home = hive_home
         @activation_lock = activation_lock
+        @once = once
+        @one_shot_factory = one_shot_factory
       end
 
       def call
+        return run_once if @once
+
         unless VALID_SUBCOMMANDS.include?(@subcommand)
           raise Hive::InvalidTaskPath,
                 "hive daemon: unknown subcommand #{@subcommand.inspect} " \
@@ -131,6 +136,28 @@ module Hive
       end
 
       private
+
+      def run_once
+        if @target.to_s.empty?
+          raise Hive::InvalidTaskPath, "hive daemon --once: missing PROJECT"
+        end
+        entry = Hive::Config.find_project(@target)
+        unless entry
+          raise Hive::InvalidTaskPath, "hive daemon --once: unknown project #{@target.inspect}"
+        end
+
+        adapter = if @one_shot_factory
+          @one_shot_factory.call(entry)
+        else
+          Hive::OneShot::DispatchAdapter.new(
+            entry: entry, hive_home: @hive_home, dry_run: @dry_run
+          )
+        end
+        result = adapter.call
+        puts result.to_json
+        @stdout_written = true
+        result
+      end
 
       def start_daemon
         warn_unsupported_json_flag if @json

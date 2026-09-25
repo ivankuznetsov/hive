@@ -70,6 +70,10 @@ authority out of project task folders.
 `ProcessGuard` also closes registered non-database fork resources in the child.
 The one-shot project guard uses that hook so a detached attempt cannot inherit
 and accidentally extend a completed parent's project-ownership lock.
+The dispatch one-shot runner is a second typed composition root for the same
+Attempts internals as the long-lived daemon; it scopes reconciliation and
+admission to one owned project and does not expose those lifecycle classes as
+public APIs.
 
 `PayloadStore` moves retained bytes from stable open paths to immutable SHA-256
 addresses at terminal publication. `Installation.setup` creates the current

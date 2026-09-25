@@ -29,10 +29,13 @@ module Hive
         @clock = clock
       end
 
-      def tick(now: @clock.call, admission_open: -> { true })
+      def tick(now: @clock.call, admission_open: -> { true }, projects: nil)
         return [] unless admission_open?(admission_open)
 
-        Array(@registry.call).each_with_object([]) do |entry, results|
+        selected_projects = Array(projects).map(&:to_s).to_h { |name| [ name, true ] }
+        entries = Array(@registry.call)
+        entries = entries.select { |entry| selected_projects.key?(entry.fetch("name").to_s) } if projects
+        entries.each_with_object([]) do |entry, results|
           break results unless admission_open?(admission_open)
 
           results << tick_project(

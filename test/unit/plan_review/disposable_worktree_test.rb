@@ -48,4 +48,24 @@ class PlanReviewDisposableWorktreeTest < Minitest::Test
       end
     end
   end
+
+  def test_unreadable_config_falls_back_to_the_repository_default_branch
+    with_tmp_git_repo do |dir|
+      run!("git", "-C", dir, "branch", "-M", "main")
+      head = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      with_replaced_singleton_method(Hive::Config, :load, ->(*) { raise Hive::ConfigError, "broken" }) do
+        base = Hive::PlanReview::DisposableWorktree.execution_base(dir)
+        assert_equal head, run!("git", "-C", dir, "rev-parse", base).strip
+      end
+    end
+  end
+
+  def test_unresolvable_execution_base_falls_back_to_head
+    require "hive/worktree"
+    with_replaced_singleton_method(Hive::Config, :load, ->(*) { { "default_branch" => "main" } }) do
+      with_replaced_singleton_method(Hive::Worktree, :new, ->(*) { raise Hive::Error, "no base" }) do
+        assert_equal "HEAD", Hive::PlanReview::DisposableWorktree.execution_base("/tmp/project")
+      end
+    end
+  end
 end

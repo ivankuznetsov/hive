@@ -11,7 +11,9 @@ require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
 require "hive/daemon/scheduled_architecture_scheduler"
+require "hive/one_shot/dispatch_adapter"
 require "hive/one_shot/project_guard"
+require "hive/one_shot/project_liveness"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
 # these tests is the routing decisions: which Policy outcome maps to
@@ -607,6 +609,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil,
+                      monotonic_clock: nil, one_shot_drain_timeout_sec: nil,
                       dispatch_repository: nil, patrol_discovery_async: false)
     dispatch_request_state_home ||= Dir.mktmpdir("hive-dispatch-test")
     config = {
@@ -678,6 +681,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback,
       clock: clock,
+      monotonic_clock: monotonic_clock,
+      one_shot_drain_timeout_sec: one_shot_drain_timeout_sec,
       patrol_discovery_async: patrol_discovery_async
     )
     # Generic dispatcher tests exercise routing, not the detached production
@@ -962,6 +967,29 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal [ 0.25 ], sleeps
     assert_equal true, result.fetch(:safe_to_stop)
+  end
+
+  def test_run_one_shot_bounds_an_expired_architecture_claim_and_preserves_evidence
+    architecture_store = Object.new
+    architecture_store.define_singleton_method(:jobs) do
+      [ {
+        "attempts" => [ {
+          "kind" => Hive::RefactorPatrol::JobStore::DISCOVERY_ATTEMPT_KIND,
+          "state" => "claimed", "expires_at" => (T0 - 60).iso8601
+        } ]
+      } ]
+    end
+
+    assert_bounded_one_shot_liveness_failure(architecture_store)
+  end
+
+  def test_run_one_shot_bounds_an_unreadable_architecture_store_and_preserves_evidence
+    architecture_store = Object.new
+    architecture_store.define_singleton_method(:jobs) do
+      raise IOError, "architecture store unreadable"
+    end
+
+    assert_bounded_one_shot_liveness_failure(architecture_store)
   end
 
   def test_run_one_shot_terminates_children_when_interrupted
@@ -11283,6 +11311,54 @@ end
   end
 
   private
+
+  def assert_bounded_one_shot_liveness_failure(architecture_store)
+    attempt_store = Object.new
+    attempt_store.define_singleton_method(:active_attempts) { [] }
+    lease_repository = Object.new
+    lease_repository.define_singleton_method(:active_leases) { |**| [] }
+    liveness = Hive::OneShot::ProjectLiveness.new(
+      entry: { "name" => "p1", "path" => "/tmp/p1", "hive_state_path" => "/tmp/p1/state" },
+      attempt_store: attempt_store, lease_repository: lease_repository,
+      architecture_store: architecture_store
+    )
+    monotonic_now = 0.0
+    clock = -> { T0 + monotonic_now }
+    sleeps = []
+    sleeper = lambda do |seconds|
+      sleeps << seconds
+      monotonic_now += seconds
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], project_liveness: liveness,
+      clock: clock, monotonic_clock: -> { monotonic_now },
+      one_shot_drain_timeout_sec: 0.5
+    )
+    dispatcher.define_singleton_method(:tick) do |now:|
+      one_shot_ran << {
+        "id" => "dispatch:task:completed", "action" => "hive run completed",
+        "outcome" => "completed"
+      }
+    end
+    guard = Object.new
+    guard.define_singleton_method(:synchronize) { |&block| block.call }
+    runner_factory = lambda do
+      Hive::OneShot::Runner.new(
+        dispatcher: dispatcher, project: "p1", clock: clock, sleeper: sleeper
+      )
+    end
+    report = Hive::OneShot::DispatchAdapter.new(
+      entry: { "name" => "p1", "hive_state_path" => "/tmp/p1/state" },
+      guard: guard, runner_factory: runner_factory, clock: clock
+    ).call.to_h
+
+    assert_equal [ 0.25, 0.25 ], sleeps
+    assert_equal "error", report.fetch("status")
+    assert_equal "drain_timeout", report.dig("error", "code")
+    assert_equal false, report.fetch("safe_to_stop")
+    assert_nil report.fetch("pending")
+    assert_equal [ "dispatch:task:completed" ], report.fetch("ran").map { |run| run.fetch("id") }
+  end
 
   def recovery_scan_requests(*slugs)
     slugs.map do |slug|

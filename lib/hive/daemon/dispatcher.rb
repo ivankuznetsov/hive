@@ -58,6 +58,20 @@ module Hive
     class Dispatcher
       attr_reader :controller, :supervisor, :logger
 
+      class OneShotDrainTimeout < Hive::Error
+        attr_reader :code
+
+        def initialize(project:, timeout_sec:)
+          @code = "drain_timeout"
+          super(
+            "one-shot drain timed out after #{timeout_sec} seconds; " \
+            "project #{project} still has unsettled work"
+          )
+        end
+
+        def exit_code = Hive::ExitCodes::TEMPFAIL
+      end
+
       OperationalQueueState = Data.define(:pending, :claimed, :malformed, :error)
       FastProbe = Data.define(:task_keys, :full_tick)
       DISPATCH_AGING_STEP_SEC = 30 * 60
@@ -107,6 +121,8 @@ module Hive
                      scope_projects: nil,
                      runtime_ready_callback: nil,
                      clock: nil,
+                     monotonic_clock: nil,
+                     one_shot_drain_timeout_sec: nil,
                      patrol_discovery_async: false)
         @config = config
         @controller = controller
@@ -135,6 +151,9 @@ module Hive
         @operational_snapshot = operational_snapshot
         @runtime_ready_callback = runtime_ready_callback
         @clock = clock
+        @monotonic_clock = monotonic_clock || lambda do
+          Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        end
         @module_runtime = module_runtime
         @project_ownership = project_ownership
         @project_liveness = project_liveness
@@ -170,6 +189,7 @@ module Hive
         # channel is nudge-only. U7 will read it when it lands.
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
+        @one_shot_drain_timeout_sec = one_shot_drain_timeout_sec || @shutdown_grace_sec
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
         @fast_poll_sec = @daemon_cfg.fetch("fast_poll_sec", 1)
         # Grace window for AGENT_WORKING markers with no PID attribute
@@ -541,6 +561,7 @@ module Hive
         raise @one_shot_failure if @one_shot_failure.is_a?(Exception)
         raise Hive::Error, @one_shot_failure if @one_shot_failure
 
+        drain_deadline = @monotonic_clock.call + @one_shot_drain_timeout_sec
         loop do
           loop do
             current = @clock ? @clock.call.utc : Time.now.utc
@@ -550,7 +571,9 @@ module Hive
               reconcile_attempts(now: current)
             break unless project_worker_live?(project)
 
-            sleeper.call([ @fast_poll_sec.to_f, 0.25 ].min)
+            remaining = drain_deadline - @monotonic_clock.call
+            fail_one_shot_drain!(project: project) unless remaining.positive?
+            sleeper.call([ @fast_poll_sec.to_f, 0.25, remaining ].min)
           end
 
           reconcile_one_shot_module_runs(project: project)
@@ -766,6 +789,17 @@ module Hive
       def project_worker_live?(project)
         @supervisor.in_flight?(project: project) || live_attempt?(project) ||
           (@project_liveness && !@project_liveness.safe_to_stop?)
+      end
+
+      def fail_one_shot_drain!(project:)
+        entries = @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
+        current = @clock ? @clock.call.utc : Time.now.utc
+        record_completed(Array(entries), now: current)
+        reconcile_attempts(now: current)
+        finalize_one_shot_runs
+        raise OneShotDrainTimeout.new(
+          project: project, timeout_sec: @one_shot_drain_timeout_sec
+        )
       end
 
       def finalize_one_shot_runs

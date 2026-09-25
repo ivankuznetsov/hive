@@ -65,8 +65,11 @@ admission tick, including projects enabled by an ordinary config edit, and
 contains an unreadable project's config failure without blocking other
 projects. It retains a disabled or removed project's guard while its durable
 attempts or identity-verified task workers remain live, then releases the
-drained project. One-shot commands acquire the same guard before constructing
-mutating stores. A verified live daemon PID plus current enabled enrollment
+drained project. Guard collections key ownership by canonical state-root
+identity: aliases share one lock, while re-registering a project name at a new
+root cannot authorize that root through the old lock. The previous root stays
+guarded until its own work drains. One-shot commands acquire the same guard
+before constructing mutating stores. A verified live daemon PID plus current enabled enrollment
 also fences daemons started before this guard existed. `ActivationLock`
 serializes the daemon transition; PID/start identity is a compatibility fence,
 not a second lifetime lock. Owner metadata is atomically replaced beside the
@@ -100,8 +103,11 @@ Every component uses the same project-wide liveness proof before reporting
 `safe_to_stop: true`: no live durable attempt, no live runner or agent process
 in the project's task leases, and no active Architecture Patrol discovery
 claim. A live task PID with missing or unreadable start identity is treated as
-unsettled, not dead. The proof is applied in dry-run too; malformed, unreadable,
-or over-limit observations fail closed.
+unsettled, not dead. Dispatch draining applies a monotonic deadline to this
+proof. If an orphaned discovery claim or unreadable Architecture Patrol store
+cannot settle, the pass preserves completed-work evidence and returns the typed
+unsafe `drain_timeout` error instead of waiting forever. The proof is applied in
+dry-run too; malformed, unreadable, or over-limit observations fail closed.
 
 `Hive::OneShot::ScheduleState` stores only volatile gates whose reset would
 change admission: observation/retry/cadence and controller holds not already

@@ -76,6 +76,10 @@ deadlines. Stop safety covers durable attempts, live legacy task workers, and
 active Architecture Patrol discovery claims, not only children launched by the
 current pass. A live worker whose process identity cannot be read or verified
 fails closed and prevents a stop-safe report.
+If project liveness remains unsettled through the bounded monotonic drain
+window, including for an orphaned discovery claim or unreadable Architecture
+Patrol store, the command returns `error.code: drain_timeout`, retains completed
+`ran` entries, and reports `safe_to_stop: false` with null readiness.
 Queued durable admissions are included in `ran`; merge-watcher failures,
 exceptions, and invalid observations return an error with null readiness
 instead of an authoritative idle result.

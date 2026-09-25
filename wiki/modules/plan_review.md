@@ -423,6 +423,15 @@ hive plan-review TARGET ACTION \
   [--coverage NAME] [--level LEVEL] [--reason TEXT]
 ```
 
+Read the current identities first with the lock-free, read-only
+`hive plan-review TARGET show [--json]` (`hive-plan-review-show.v1`). It reads
+the task's plan-review projection directly, reports the `TransitionGuard`
+freshness verdict decisions must pass, and lists open findings with their
+fingerprints; operational status can be a daemon-cached snapshot that lags each
+decision, which made chained decisions fail as stale. Each successful action's
+JSON also returns the next `observation_digest`, so several decisions can be
+chained without re-reading.
+
 Actions are `approve-finding`, `answer-finding`, `waive-coverage`,
 `downgrade-level`, `raise-level`, `retry`, and `request-review`. Every action is
 observation-bound and idempotent: an identical replay is a no-op, a stale

@@ -203,6 +203,7 @@ module AgentCliRuntime
         ->(effort) { [ "-c", "model_reasoning_effort=#{effort}" ] },
       launcher_identity: "codex-cli/v1",
       usage_extractor: UsageExtractors::CODEX,
+      error_extractor: ErrorExtractors::CODEX,
       credential_environment_keys: %w[OPENAI_API_KEY],
       configuration_environment_key: "CODEX_HOME",
       default_configuration_directory: ".codex",

@@ -47,6 +47,19 @@ module AgentCliRuntime
       DEFAULT.call(event)
     end
 
+    # Codex reports each transport retry as its own "error" event
+    # ("Reconnecting... 2/5 (stream disconnected ...)") before the terminal
+    # error and turn.failed. Callers keep the first provider error, so a
+    # retry notice used to mask the real failure (for example a 401 from a
+    # revoked login). Retry notices are progress, not the failure.
+    CODEX_RETRY_NOTICE = /\AReconnecting\.\.\.\s*\d+\s*\/\s*\d+\b/
+    CODEX = lambda do |event|
+      text = DEFAULT.call(event)
+      next nil if text.is_a?(String) && text.match?(CODEX_RETRY_NOTICE)
+
+      text
+    end
+
     # pi keeps the envelope type ("message_start"/"message_end") and moves the
     # terminal state into stopReason. Provider refusals use
     # stopReason=error/errorMessage. A model that consumes its entire output

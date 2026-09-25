@@ -178,4 +178,32 @@ class BabysitterDispatcherTest < Minitest::Test
       logger&.close
     end
   end
+
+  def test_tick_logs_project_guard_contention_and_continues
+    with_tmp_dir do |root|
+      logger = Hive::Babysitter::Logger.new(path: File.join(root, "babysitter.log"))
+      guard = Object.new
+      guard.define_singleton_method(:acquire!) do
+        raise Hive::OneShot::ProjectGuard::OwnershipError.new(
+          "owned", code: "one_shot_busy", owner: { "kind" => "one_shot" }
+        )
+      end
+      dispatcher = Hive::Babysitter::Dispatcher.new(
+        logger: logger, guard_factory: ->(*) { guard }
+      )
+      dispatcher.define_singleton_method(:enabled_projects) do
+        [ {
+          project: { "name" => "demo" },
+          cfg: { "babysitter" => { "interval" => "10m" } }
+        } ]
+      end
+
+      assert_equal 1, dispatcher.tick
+      event = File.readlines(File.join(root, "babysitter.log")).map { |line| JSON.parse(line) }
+        .find { |row| row["event"] == "project_skipped" }
+      assert_equal "one_shot_busy", event.fetch("reason")
+    ensure
+      logger&.close
+    end
+  end
 end

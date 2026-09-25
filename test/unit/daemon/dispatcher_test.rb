@@ -133,7 +133,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   class FakeSupervisor
     attr_reader :spawned, :next_pid
     attr_accessor :next_exits, :shutdown_exits, :identity, :terminate_result, :spawn_error,
-                  :shutdown_proof
+                  :shutdown_proof, :in_flight_results
     def initialize
       @spawned = []
       @next_pid = 100
@@ -189,6 +189,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def in_flight_count
       @spawned.size
+    end
+
+    def in_flight?(project:)
+      Array(@in_flight_results).empty? ? false : @in_flight_results.shift
     end
 
     def process_identity(_pid)
@@ -734,6 +738,183 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ "target" ], supervisor.spawned.map { |spawn| spawn.fetch(:slug) }
     assert_equal [ "p1" ], module_calls.fetch(0).fetch(:projects)
     assert_equal 1, digest.next_dispatches.length
+  end
+
+  def test_scoped_tick_fails_closed_when_project_ownership_refresh_fails
+    ownership = Object.new
+    ownership.define_singleton_method(:refresh!) { raise IOError, "lock unavailable" }
+    ownership.define_singleton_method(:contentions) { {} }
+    ownership.define_singleton_method(:owned_projects) { [ "p1" ] }
+    dispatcher, = make_dispatcher(
+      rows: [], project_ownership: ownership, scope_projects: [ "p1" ]
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal "project ownership unavailable",
+                 dispatcher.instance_variable_get(:@one_shot_failure)
+  end
+
+  def test_project_ownership_contentions_are_logged
+    error = Hive::OneShot::ProjectGuard::OwnershipError.new(
+      "owned", code: "daemon_owned", owner: { "kind" => "daemon" }
+    )
+    ownership = Object.new
+    ownership.define_singleton_method(:refresh!) { [ "p1" ] }
+    ownership.define_singleton_method(:contentions) { { "p2" => error } }
+    ownership.define_singleton_method(:owned_projects) { [ "p1" ] }
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], project_ownership: ownership
+    )
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find { |name, _| name == :blocked }
+    assert_equal "daemon_owned", event.fetch(1).fetch(:reason)
+  end
+
+  def test_run_one_shot_drains_supervised_work_and_validates_scope
+    dispatcher, supervisor = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    supervisor.in_flight_results = [ true, false ]
+    sleeps = []
+
+    assert_raises(ArgumentError) { dispatcher.run_one_shot(project: "p2", now: T0) }
+    result = dispatcher.run_one_shot(
+      project: "p1", now: T0, sleeper: ->(seconds) { sleeps << seconds }
+    )
+
+    assert_equal [ 0.25 ], sleeps
+    assert_equal true, result.fetch(:safe_to_stop)
+  end
+
+  def test_run_one_shot_terminates_children_when_interrupted
+    dispatcher, supervisor = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    dispatcher.define_singleton_method(:tick) { |**| raise Interrupt }
+
+    assert_raises(Interrupt) { dispatcher.run_one_shot(project: "p1", now: T0) }
+    assert_equal [], supervisor.shutdown_exits
+  end
+
+  def test_one_shot_readiness_covers_queue_attempt_and_task_decisions
+    active = Object.new
+    values = { "project" => "p1", "task_slug" => "active" }
+    active.define_singleton_method(:[]) { |key| values[key] }
+    active.define_singleton_method(:live?) { true }
+    active.define_singleton_method(:attempt_id) { "attempt-1" }
+    active.define_singleton_method(:active_deadline) { T0 + 120 }
+    status = Struct.new(:attempt).new(active)
+    snapshot = Struct.new(:attempts).new([ status ])
+    request = Q::Request.new(
+      request_id: "queued-1", created_at: T0, project: "p1", slug: "queued",
+      argv: %w[hive run queued], requestor: "web"
+    )
+    repository = Object.new
+    repository.define_singleton_method(:pending) { |**| [ request ] }
+    active_row = row(slug: "active")
+    eligible_row = row(slug: "eligible")
+    dispatcher, = make_dispatcher(
+      rows: [ active_row, eligible_row ], scope_projects: [ "p1" ],
+      dispatch_repository: repository
+    )
+    dispatcher.instance_variable_set(:@attempt_snapshot, snapshot)
+    dispatcher.define_singleton_method(:one_shot_policy_decision) { |*, **| :dispatch }
+
+    items = dispatcher.send(:one_shot_readiness, project: "p1", now: T0)
+
+    assert_equal %w[dispatch:request:queued-1 dispatch:attempt:attempt-1 dispatch:task:eligible],
+                 items.map { |item| item.fetch("id") }
+    assert dispatcher.send(:live_attempt?, "p1")
+  end
+
+  def test_one_shot_row_projection_covers_every_policy_owner
+    dispatcher, _supervisor, controller = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ]
+    )
+    decisions = {
+      "eligible" => :dispatch, "debounce" => :wait_for_debounce,
+      "dependency" => :blocked_on_dependency, "operator-dependency" => :blocked_on_dependency,
+      "merge" => :poll_for_merge, "answers" => :wait_for_answers,
+      "running" => :skip, "input" => :skip
+    }
+    gates = {
+      "eligible" => :ok, "global" => :global_cap, "cooldown" => :cooldown,
+      "daily" => :daily_cap, "quarantine" => :quarantined
+    }
+    dispatcher.define_singleton_method(:one_shot_policy_decision) do |item, **|
+      decisions.fetch(item.slug, :dispatch)
+    end
+    controller.define_singleton_method(:can_dispatch?) do |project:, slug:, now:|
+      gates.fetch(slug)
+    end
+    controller.define_singleton_method(:next_check_at) do |**|
+      T0 + 60
+    end
+
+    invalid = dispatcher.send(:row_pending_item, row(slug: "invalid", task_history_invalid: true), now: T0)
+    assert_equal "task_history_invalid", invalid.fetch("reason")
+    assert_nil dispatcher.send(:row_pending_item, row(slug: "none", action: nil), now: T0)
+
+    rows = [
+      row(slug: "eligible"), row(slug: "global"), row(slug: "cooldown"),
+      row(slug: "daily"), row(slug: "quarantine"), row(slug: "debounce"),
+      row(slug: "dependency", blocked_by: "parent"),
+      row(slug: "operator-dependency", depends_on: [ "parent" ]),
+      row(slug: "merge", action: "pull_request_pending").tap {
+        |item| item.pr_url = "https://github.com/acme/repo/pull/42"
+      },
+      row(slug: "answers"), row(slug: "running", action: "agent_running"),
+      row(slug: "input", action: "needs_input")
+    ]
+    projected = rows.map { |item| dispatcher.send(:row_pending_item, item, now: T0) }
+
+    assert_equal "runnable_now", projected.fetch(0).fetch("bucket")
+    assert_equal %w[waiting_external waiting_external waiting_external],
+                 projected.slice(1, 3).map { |item| item.fetch("bucket") }
+    assert_equal "waiting_operator", projected.fetch(4).fetch("bucket")
+    assert_equal 42, projected.fetch(8).dig("condition", "pr")
+    assert_nil dispatcher.send(:time_condition, nil)
+
+    actual_dispatcher, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    assert_equal :dispatch,
+                 actual_dispatcher.send(:one_shot_policy_decision, row(slug: "actual"), now: T0)
+  end
+
+  def test_one_shot_completion_and_scope_helpers_preserve_target_evidence
+    dispatcher, supervisor, controller = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ]
+    )
+    controller.record_dispatch(
+      pid: 700, project: "p1", slug: "task", stage: "1-inbox",
+      command: "hive run task", started_at: T0, state_file_mtime: T0
+    )
+    dispatcher.one_shot_ran << {
+      "id" => "dispatch:task:task", "outcome" => "started", "details" => { "pid" => 700 }
+    }
+    entry = ChildExit.new(
+      pid: 700, exit_code: 1, project: "p1", slug: "task", stage: "1-inbox",
+      command: "hive run task", state_file_path: nil, started_at: T0,
+      finished_at: T0 + 1, json_envelope: nil, dispatch_token: nil
+    )
+    dispatcher.send(:record_completed, [ entry ], now: T0 + 1)
+    assert_equal "failed", dispatcher.one_shot_ran.fetch(0).fetch("outcome")
+
+    deliveries = [
+      Struct.new(:request).new(Struct.new(:project).new("p1")),
+      Struct.new(:request).new(Struct.new(:project).new("p2"))
+    ]
+    attempts = [ { "project" => "p1" }, { "project" => "p2" } ]
+    assert_equal 1, dispatcher.send(:scoped_deliveries, deliveries).size
+    assert_equal [ "p1" ], dispatcher.send(:scoped_attempts, attempts).map { |item| item["project"] }
+
+    final_attempt = Object.new
+    final_attempt.define_singleton_method(:final?) { true }
+    final_attempt.define_singleton_method(:outcome) { :completed }
+    reconciler = Object.new
+    reconciler.define_singleton_method(:fetch) { |_| final_attempt }
+    dispatcher.instance_variable_set(:@attempt_reconciler, reconciler)
+    dispatcher.one_shot_ran.fetch(0)["details"]["attempt_id"] = "attempt-1"
+    dispatcher.send(:finalize_one_shot_runs)
+    assert_equal "completed", dispatcher.one_shot_ran.fetch(0).fetch("outcome")
   end
 
   def test_async_patrol_discovery_keeps_authoritative_ticks_responsive

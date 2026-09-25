@@ -1123,6 +1123,21 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_one_shot_modes_reject_service_and_manual_selector_options
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[refactor-patrol demo --once --pr 7])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[babysit demo --once --detach])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[daemon demo extra --once])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[daemon demo --once --detach])
+    end
+  end
+
   def test_internal_patrol_commands_forward_fenced_identifiers
     require "hive/commands/refactor_patrol_scheduled"
     with_command_new_stub(Hive::Commands::RefactorPatrolScheduled, return_value: { "ok" => true }) do |calls|

@@ -66,4 +66,34 @@ class OneShotScheduleStateTest < Minitest::Test
       end
     end
   end
+
+  def test_delete_persists_only_when_the_component_exists
+    with_tmp_dir do |root|
+      state = Hive::OneShot::ScheduleState.new(state_root: root)
+      state.update("patrol") { { "failure_count" => 1 } }
+
+      assert state.delete("patrol", now: Time.utc(2026, 9, 23, 12))
+      refute state.delete("patrol", now: Time.utc(2026, 9, 23, 12, 1))
+      assert_empty state.read("patrol")
+    end
+  end
+
+  def test_lock_and_serialization_failures_are_typed
+    with_tmp_dir do |root|
+      state = Hive::OneShot::ScheduleState.new(state_root: root)
+      blocked_directory = File.join(root, "blocked")
+      File.write(blocked_directory, "file")
+      state.instance_variable_set(:@directory, blocked_directory)
+      assert_equal "checkpoint_unavailable",
+                   assert_raises(Hive::OneShot::ScheduleState::StateError) {
+                     state.read("patrol")
+                   }.code
+
+      serializing = Hive::OneShot::ScheduleState.new(state_root: root)
+      error = assert_raises(Hive::OneShot::ScheduleState::StateError) do
+        serializing.send(:persist, "bad" => Float::NAN)
+      end
+      assert_equal "checkpoint_invalid", error.code
+    end
+  end
 end

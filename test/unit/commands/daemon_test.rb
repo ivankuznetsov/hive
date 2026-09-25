@@ -162,6 +162,8 @@ class HiveCommandsDaemonTest < Minitest::Test
     with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ entry ] }) do
       with_replaced_singleton_method(Hive::Config, :load, ->(*) { cfg }) do
         with_replaced_singleton_method(Hive::Patrol::LaunchBudget, :new, ->(*) { budget }) do
+          ownership = captured.fetch(:project_ownership)
+          assert_equal [ "demo" ], ownership.refresh!
           candidate = captured.fetch(:patrol_arbiter).candidates(now: Time.now).find do |item|
             item[:action_phase] == :scheduled
           end
@@ -169,6 +171,8 @@ class HiveCommandsDaemonTest < Minitest::Test
           dispatch = captured.fetch(:refactor_patrol_scheduler).reserve(candidate, now: Time.now)
           assert_includes dispatch.fetch(:command), "refactor-patrol-scheduled"
           assert_equal :architecture_patrol, dispatch.dig(:dispatch_token, :kind)
+        ensure
+          ownership&.release_all!
         end
       end
     end
@@ -1642,5 +1646,11 @@ class HiveCommandsDaemonTest < Minitest::Test
     end
 
     assert_equal "hive-one-shot", JSON.parse(out).fetch("schema")
+  end
+
+  def test_once_requires_a_project
+    command = Hive::Commands::Daemon.new(nil, nil, once: true, hive_home: @home)
+
+    assert_raises(Hive::InvalidTaskPath) { command.call }
   end
 end

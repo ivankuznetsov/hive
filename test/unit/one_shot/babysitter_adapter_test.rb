@@ -33,6 +33,11 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  class CodedError < StandardError
+    def code = "coded_failure"
+    def exit_code = Hive::ExitCodes::CONFIG
+  end
+
   def test_reports_capacity_ci_operator_and_retry_readiness
     with_tmp_dir do |dir|
       tick = Tick.new(summary(
@@ -90,9 +95,66 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  def test_ineligible_project_is_idle_without_polling
+    with_tmp_dir do |dir|
+      tick = Tick.new(summary)
+      result = adapter(
+        dir, tick: tick,
+        config: Hive::Config.deep_dup(Hive::Config::DEFAULTS)
+      ).call
+
+      assert_equal "ok", result.to_h.fetch("status")
+      assert_empty result.to_h.fetch("ran")
+      assert_nil tick.arguments
+    end
+  end
+
+  def test_pipeline_and_attempt_ownership_become_external_wakes
+    with_tmp_dir do |dir|
+      result = adapter(
+        dir, tick: Tick.new(summary(pr(5, :pipeline_owned), pr(6, :inflight)))
+      ).call
+
+      kinds = result.to_h.dig("pending", "waiting_external").filter_map do |item|
+        item.dig("condition", "kind") unless item["id"] == "babysitter:poll"
+      end
+      assert_equal %w[task_changed attempt_completed], kinds
+    end
+  end
+
+  def test_unexpected_tick_errors_preserve_typed_exit_information
+    with_tmp_dir do |dir|
+      tick = Object.new
+      tick.define_singleton_method(:run) { |*| raise CodedError, "broken" }
+      result = adapter(dir, tick: tick).call
+
+      assert_equal "coded_failure", result.to_h.dig("error", "code")
+      assert_equal Hive::ExitCodes::CONFIG, result.exit_code
+    end
+  end
+
+  def test_default_guards_and_config_loader_are_constructed
+    with_tmp_dir do |dir|
+      state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(state)
+      instance = Hive::OneShot::BabysitterAdapter.new(
+        entry: {
+          "name" => "demo", "path" => dir, "hive_state_path" => state,
+          "repository_identity" => "github.com/acme/demo"
+        }, tick: Tick.new(summary)
+      )
+
+      assert_instance_of Hive::OneShot::ProjectGuard,
+                         instance.instance_variable_get(:@main_guard)
+      assert_instance_of Hive::OneShot::ProjectGuard,
+                         instance.instance_variable_get(:@babysitter_guard)
+      assert_instance_of Hash, instance.instance_variable_get(:@config_loader).call(dir)
+    end
+  end
+
   private
 
-  def adapter(dir, tick:, dry_run: false, main_guard: Guard.new)
+  def adapter(dir, tick:, dry_run: false, main_guard: Guard.new, config: nil)
     state = File.join(dir, ".hive-state")
     FileUtils.mkdir_p(state)
     Hive::OneShot::BabysitterAdapter.new(
@@ -103,7 +165,7 @@ class OneShotBabysitterAdapterTest < Minitest::Test
       dry_run: dry_run, tick: tick, main_guard: main_guard,
       babysitter_guard: Guard.new, clock: -> { NOW },
       config_loader: ->(*) {
-        Hive::Config.deep_merge(
+        config || Hive::Config.deep_merge(
           Hive::Config.deep_dup(Hive::Config::DEFAULTS),
           "babysitter" => { "enabled" => true, "interval" => "10m" }
         )

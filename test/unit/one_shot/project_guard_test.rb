@@ -1,4 +1,5 @@
 require "test_helper"
+require "stringio"
 require "hive/one_shot/project_guard"
 
 class OneShotProjectGuardTest < Minitest::Test
@@ -171,6 +172,51 @@ class OneShotProjectGuardTest < Minitest::Test
     ensure
       contender&.release!
       collection&.release_all!
+    end
+  end
+
+  def test_rejects_unsafe_lock_names_and_reports_its_live_owner
+    with_tmp_dir do |root|
+      assert_raises(ArgumentError) do
+        Hive::OneShot::ProjectGuard.new(
+          state_root: root, project: "demo", kind: :one_shot, lock_name: "../lock"
+        )
+      end
+
+      active = guard(root, kind: "one_shot").acquire!
+      assert_equal "one_shot", active.owner.fetch("kind")
+      assert active.release!
+      assert_nil active.owner
+    end
+  end
+
+  def test_guard_io_failures_are_typed
+    with_tmp_dir do |root|
+      acquiring = guard(root, kind: "one_shot")
+      acquiring.define_singleton_method(:open_handle) { raise IOError, "closed" }
+      error = assert_raises(Hive::ConfigError) { acquiring.acquire! }
+      assert_match(/guard is unavailable/, error.message)
+
+      releasing = guard(root, kind: "one_shot").acquire!
+      handle = releasing.instance_variable_get(:@handle)
+      handle.define_singleton_method(:flock) { |*| raise IOError, "closed" }
+      error = assert_raises(Hive::ConfigError) { releasing.release! }
+      assert_match(/could not be released/, error.message)
+      handle.close unless handle.closed?
+    end
+  end
+
+  def test_owner_validation_and_process_probes_fail_closed
+    with_tmp_dir do |root|
+      current = guard(root, kind: "one_shot")
+      assert_nil current.send(:verified_owner, StringIO.new("{}"))
+
+      with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::EPERM }) do
+        assert current.send(:process_alive?, Process.pid)
+      end
+      with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::ESRCH }) do
+        refute current.send(:process_alive?, Process.pid)
+      end
     end
   end
 

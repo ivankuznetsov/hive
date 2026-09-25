@@ -91,6 +91,14 @@ class OneShotReadinessTest < Minitest::Test
     end
   end
 
+  def test_invalid_timestamp_and_scalar_stringification_fail_closed
+    error = assert_raises(ArgumentError) do
+      Hive::OneShot::Readiness.time("not-a-time")
+    end
+    assert_match(/invalid one-shot timestamp/, error.message)
+    assert_equal "value", Hive::OneShot::Readiness.stringify("value")
+  end
+
   private
 
   def item(id, bucket, reason, next_check_at: nil, condition: nil)

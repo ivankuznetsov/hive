@@ -1509,6 +1509,33 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_readiness_includes_runnable_and_waiting_jobs_with_both_wake_shapes
+    with_project do |_dir, entry, store|
+      active = scheduler(entry, store)
+      jobs = [
+        { "job_id" => "done", "complete" => true, "state" => "complete" },
+        { "job_id" => "run", "complete" => false, "state" => "queued" },
+        {
+          "job_id" => "timed", "complete" => false, "state" => "retry",
+          "attempts" => [ { "next_eligible_at" => (T0 + 60).iso8601(6) } ]
+        },
+        { "job_id" => "active", "complete" => false, "state" => "claimed" }
+      ]
+      fake_store = Object.new
+      fake_store.define_singleton_method(:jobs) { jobs }
+      active.define_singleton_method(:store_for) { |_| fake_store }
+      candidates = [ { job_id: "run", action_phase: :discovery } ]
+
+      items = active.readiness(project: "demo", now: T0, candidates: candidates)
+
+      assert_equal %w[runnable_now waiting_external waiting_external],
+                   items.map { |item| item.fetch("bucket") }
+      assert_equal %w[time_due attempt_completed],
+                   items.drop(1).map { |item| item.dig("condition", "kind") }
+      assert_empty active.readiness(project: "missing", now: T0, candidates: [])
+    end
+  end
+
   private
 
   def with_project

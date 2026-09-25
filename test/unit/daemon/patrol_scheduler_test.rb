@@ -601,4 +601,28 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_nil sched.send(:parse_retry_time, "not-a-time")
     end
   end
+
+  def test_readiness_projects_disabled_runnable_timed_and_event_waits
+    sched = Hive::Daemon::PatrolScheduler.new(registry: -> { [] })
+    observations = [
+      { state: :disabled },
+      { state: :runnable_now, reason: "due" },
+      { state: :waiting_external, reason: "cadence", deadline: T0 + 60 },
+      { state: :waiting_external, reason: "commits", trigger: "new_commits" },
+      { state: :waiting_external, reason: "running" }
+    ]
+    sched.define_singleton_method(:candidates) do |projects:, **|
+      @observations[projects.fetch(0).to_s] = observations.shift
+      []
+    end
+
+    assert_empty sched.readiness(project: "p1", now: T0)
+    assert_nil sched.readiness(project: "p1", now: T0).dig(0, "condition")
+    assert_equal "time_due", sched.readiness(project: "p1", now: T0).dig(0, "condition", "kind")
+    assert_equal "task_changed", sched.readiness(project: "p1", now: T0).dig(0, "condition", "kind")
+    assert_equal "attempt_completed", sched.readiness(project: "p1", now: T0).dig(0, "condition", "kind")
+
+    sched.instance_variable_set(:@failures, "p1" => { next_eligible_at: T0 + 10 })
+    assert sched.send(:backed_off?, "p1", T0)
+  end
 end

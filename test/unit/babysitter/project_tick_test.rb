@@ -597,4 +597,31 @@ class BabysitterProjectTickTest < Minitest::Test
       logger&.close
     end
   end
+
+  def test_observe_only_reports_selected_prs_without_running_fixer
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 1 }
+      )
+      logger = make_logger(dir)
+      prs = [ { "number" => 4, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" } ]
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |*|
+          flunk "observe-only ticks must not run the fixer"
+        }) do
+          summary = Hive::Babysitter::ProjectTick.run(
+            project, dry_run: true, logger: logger, inflight: Set.new,
+            observe_only: true, detailed: true
+          )
+
+          assert_equal [ :eligible ], summary.fetch(:prs).map { |row| row.fetch(:outcome) }
+        end
+      end
+    ensure
+      logger&.close
+    end
+  end
 end

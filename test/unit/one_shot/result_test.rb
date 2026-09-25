@@ -140,6 +140,30 @@ class OneShotResultTest < Minitest::Test
     assert_empty aggregate.to_h["owning_projects"]
   end
 
+  def test_error_payload_preserves_a_typed_code
+    error = Class.new(StandardError) { def code = "typed" }.new("broken")
+
+    payload = Hive::OneShot::Result.error_payload(
+      component: :dispatch, project: "app", error: error, now: FINISHED
+    )
+
+    assert_equal "typed", payload.dig("error", "code")
+  end
+
+  def test_aggregate_with_runnable_work_is_due_at_completion
+    report = Hive::OneShot::Result.ok(
+      component: :dispatch, project: "app", started_at: STARTED, finished_at: FINISHED,
+      ran: [], items: [ item("task:1", "runnable_now") ], safe_to_stop: true
+    )
+
+    aggregate = Hive::OneShot::Result.aggregate(
+      component: :dispatch, reports: [ report ], started_at: STARTED, finished_at: FINISHED
+    )
+
+    assert_equal FINISHED.iso8601(6), aggregate.to_h.fetch("next_due_at")
+    refute aggregate.to_h.fetch("host_stop_allowed")
+  end
+
   private
 
   def item(id, bucket, next_check_at = nil)

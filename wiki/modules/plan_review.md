@@ -416,6 +416,11 @@ every operator approval and answer from that review as a `plan_review_decisions`
 data block, so accepted decisions that only reached unpromoted candidate plans are
 not lost and are not re-asked.
 
+Plan-review agents, planner revisions, and the planner itself inspect a disposable
+detached checkout of the execution base (`origin/<default>` after a fetch, else
+the local default branch), never the project checkout's `HEAD`, which may be an
+unrelated or stale branch with local edits.
+
 Authority-bearing actions use:
 
 ```text

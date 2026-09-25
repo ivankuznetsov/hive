@@ -73,6 +73,20 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
+  def test_plan_adds_the_execution_base_checkout_to_the_planner_dirs
+    with_tmp_dir do |dir|
+      cfg = { "claude" => { "mode" => "tmux" } }
+      task = make_task(dir)
+      with_spawn_capture do |captured|
+        Hive::Stages::Plan.spawn_plan_agent(
+          task, cfg, "prompt", claude_profile(cfg), source_checkout: "/tmp/base-checkout"
+        )
+
+        assert_includes captured.fetch(0).fetch(:kwargs).fetch(:add_dirs), "/tmp/base-checkout"
+      end
+    end
+  end
+
   def test_brainstorm_headless_claude_mode_still_uses_claude_launcher
     with_tmp_dir do |dir|
       cfg = { "claude" => { "mode" => "headless" } }

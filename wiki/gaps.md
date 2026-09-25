@@ -1578,6 +1578,26 @@ admission open, so another submission can race that preparation. Do not close
 this gap by weakening the ownership predicate; it needs either a first-class
 idle-window coordinator or the separately verified custody increment.
 
+## Increment-2 Linux custody is not qualified on the execution host (2026-09-25)
+
+The execution host uses unified cgroup v2, and a real transient
+`systemd-run --user --scope --property=Delegate=yes` scope reports delegation.
+That is not a containment proof. Both the attempt scope and its `app.slice`
+parent are owned by the same unprivileged user; the parent's directory and
+`cgroup.procs` are writable. A real workload moved its own PID from the
+delegated attempt scope into a sibling cgroup and `/proc/self/cgroup` confirmed
+the escape. The capability adapter therefore reports
+`parent_cgroup_writable`, and the arbitrary-descendant U2b/U6b success path is
+not qualified here. Increment 1 remains the delivered fail-closed behavior;
+this host must not advertise Linux backup readiness for active attempt roots.
+
+Qualifying increment 2 still needs an installation custody parent that the
+workload identity cannot write or create siblings beneath, plus real-process
+proof across fork, reparenting, `setsid`, controller restart, attempted escape,
+permission loss, and legacy work outside custody. A transient user scope alone
+continues to provide OOM isolation, not the required adversarial ownership
+boundary.
+
 - 2026-09-11: Three blocked adversarial reviews recorded Haiku for an Opus
   request. The mixed-model attribution defect is reproduced and fixed in code;
   native task diagnostics expose no correlated raw stream for those attempts,

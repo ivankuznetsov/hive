@@ -96,7 +96,7 @@ module Hive
                  File.writable?(File.join(domain, "cgroup.subtree_control"))
             return failure("domain_not_delegated")
           end
-          if parent != @cgroup_root && File.writable?(File.join(parent, "cgroup.procs"))
+          if File.writable?(parent) || File.writable?(File.join(parent, "cgroup.procs"))
             return failure("parent_cgroup_writable")
           end
 

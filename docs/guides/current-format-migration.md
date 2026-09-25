@@ -28,15 +28,18 @@ Help me move this Hive installation to the current checkout's formats.
    Preserve secrets without printing them. Do not overwrite or delete the backup.
    Work on copies first and show the exact conversion inventory before replacing
    live state. Never run two Hive versions against the same live storage.
-4. Retain a healthy current SQLite database unchanged. If status reports the exact
-   immediately preceding quiescence-compatible schema, inspect
+4. Retain a healthy current SQLite database unchanged. If status reports the pinned
+   pre-quiescence layout or one of the exact supported quiescence-era revisions, inspect
    `Hive::RuntimeControlPlane::QuiescenceUpgrade` in the target checkout and invoke
    its `#call` Ruby API directly under supervision, with an ownership verifier that
    returns true only after step 2 has proved every Hive service and legacy worker is
    stopped. This helper is intentionally not a `bin/hive` action: it takes the
-   quiescence operation and writer fences, invalidates any old paused proof before
-   its first schema write, preserves installation/attempt/payload identities, and
-   leaves admission closed in `quiescing`. Run explicit `hive daemon resume` only
+   quiescence operation and writer fences, rechecks the exact fingerprint under
+   those fences, and invalidates any old paused proof before its first schema write.
+   A quiescence-era source must already be `quiescing` or `paused`; conversion
+   preserves its generation, deadline, interrupted-attempt references, and
+   installation/attempt/payload identities while leaving admission closed in
+   `quiescing`. Run explicit `hive daemon resume` only
    after validating the converted database. The helper invalidates any old
    quiescence proof; a pre-upgrade paused acknowledgement never authorizes a
    post-upgrade copy. After resume, obtain a new quiesce acknowledgement and

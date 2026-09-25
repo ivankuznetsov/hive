@@ -1,0 +1,165 @@
+require "json"
+require "hive/errors"
+require "hive/one_shot/readiness"
+
+module Hive
+  module OneShot
+    class Result
+      ROUTINE_REFUSALS = %w[daemon_owned one_shot_busy babysitter_owned].freeze
+
+      attr_reader :exit_code
+
+      def self.ok(component:, project:, started_at:, finished_at:, ran:, items:, safe_to_stop:, owner: nil)
+        readiness = Readiness.project(items: items, finished_at: finished_at)
+        new(base(component, project, started_at, finished_at).merge(
+          "status" => "ok", "ran" => Array(ran), "owner" => owner,
+          "error" => nil, "safe_to_stop" => safe_to_stop == true
+        ).merge(readiness), exit_code: Hive::ExitCodes::SUCCESS)
+      end
+
+      def self.refused(component:, project:, started_at:, finished_at:, code:, message:, owner: nil)
+        failed(component: component, project: project, started_at: started_at,
+               finished_at: finished_at, status: "refused", code: code,
+               message: message, owner: owner, ran: [])
+      end
+
+      def self.error(component:, project:, started_at:, finished_at:, code:, message:, ran: [],
+                     owner: nil, exit_code: Hive::ExitCodes::TEMPFAIL, details: nil)
+        failed(component: component, project: project, started_at: started_at,
+               finished_at: finished_at, status: "error", code: code,
+               message: message, owner: owner, ran: ran, exit_code: exit_code,
+               details: details)
+      end
+
+      def self.aggregate(component:, reports:, started_at:, finished_at:)
+        reports = Array(reports)
+        documents = reports.filter_map { |report| document_for(report) }
+        valid_count = documents.size == reports.size
+        routine_refusals = documents.select { |doc| routine_refusal?(doc) }
+        invalid = documents.any? do |doc|
+          doc["status"] != "ok" && !routine_refusal?(doc)
+        end
+        partial_failure = !valid_count || invalid
+        successful = documents.select { |doc| doc["status"] == "ok" }
+        owning = routine_refusals.map do |doc|
+          { "project" => doc.fetch("project"), "owner" => doc.fetch("owner") }
+        end
+
+        if partial_failure
+          document = base(component, nil, started_at, finished_at).merge(
+            "status" => "error", "ran" => aggregate_ran(successful), "pending" => nil,
+            "next_due_at" => nil, "wake_conditions" => [], "safe_to_stop" => false,
+            "owner" => nil, "error" => error_hash("partial_failure", "one or more projects did not report authoritative readiness"),
+            "projects" => documents, "owning_projects" => owning, "host_stop_allowed" => false
+          )
+          return new(document, exit_code: Hive::ExitCodes::TEMPFAIL)
+        end
+
+        pending = aggregate_pending(successful)
+        aggregate_finished = Readiness.timestamp(finished_at)
+        next_due = if pending.fetch("runnable_now").any?
+          aggregate_finished
+        else
+          successful.filter_map { |doc| doc["next_due_at"] }.min
+        end
+        stop_safe = routine_refusals.empty? && successful.all? { |doc| doc["safe_to_stop"] == true }
+        document = base(component, nil, started_at, finished_at).merge(
+          "status" => "ok", "ran" => aggregate_ran(successful), "pending" => pending,
+          "next_due_at" => next_due, "wake_conditions" => aggregate_wakes(successful),
+          "safe_to_stop" => stop_safe, "owner" => nil, "error" => nil,
+          "projects" => documents, "owning_projects" => owning,
+          "host_stop_allowed" => stop_safe && pending.fetch("runnable_now").empty?
+        )
+        new(document, exit_code: Hive::ExitCodes::SUCCESS)
+      end
+
+      def initialize(document, exit_code:)
+        @document = document
+        @exit_code = exit_code
+      end
+
+      def to_h = @document
+      def to_json(*args) = JSON.generate(@document, *args)
+      def safe_to_stop? = @document["safe_to_stop"] == true
+
+      class << self
+        private
+
+        def failed(component:, project:, started_at:, finished_at:, status:, code:, message:,
+                   owner:, ran:, exit_code: Hive::ExitCodes::TEMPFAIL, details: nil)
+          error = error_hash(code, message)
+          error["details"] = details if details
+          new(base(component, project, started_at, finished_at).merge(
+            "status" => status, "ran" => Array(ran), "pending" => nil,
+            "next_due_at" => nil, "wake_conditions" => [], "safe_to_stop" => false,
+            "owner" => owner, "error" => error
+          ), exit_code: exit_code)
+        end
+
+        def base(component, project, started_at, finished_at)
+          {
+            "schema" => "hive-one-shot", "schema_version" => 1,
+            "component" => component.to_s, "project" => project,
+            "started_at" => Readiness.timestamp(started_at),
+            "finished_at" => Readiness.timestamp(finished_at)
+          }
+        end
+
+        def error_hash(code, message)
+          { "code" => code.to_s, "message" => message.to_s }
+        end
+
+        def document_for(report)
+          document = report.respond_to?(:to_h) ? report.to_h : report
+          document if document.is_a?(Hash) && %w[ok refused error].include?(document["status"])
+        end
+
+        def routine_refusal?(document)
+          document["status"] == "refused" &&
+            ROUTINE_REFUSALS.include?(document.dig("error", "code")) &&
+            document["owner"].is_a?(Hash)
+        end
+
+        def aggregate_pending(documents)
+          Readiness::BUCKETS.to_h do |bucket|
+            rows = documents.flat_map do |document|
+              Array(document.dig("pending", bucket)).map do |item|
+                prefix_item(document.fetch("project"), item)
+              end
+            end
+            [ bucket, rows ]
+          end
+        end
+
+        def aggregate_ran(documents)
+          documents.flat_map do |document|
+            Array(document["ran"]).map { |item| prefix_item(document.fetch("project"), item) }
+          end
+        end
+
+        def prefix_item(project, item)
+          item.merge("id" => "#{project}:#{item.fetch("id")}", "project" => project)
+        end
+
+        def aggregate_wakes(documents)
+          grouped = {}
+          documents.each do |document|
+            Array(document["wake_conditions"]).each do |raw|
+              wake = raw.dup
+              affected = Array(wake.delete("affected_pending_ids")).map do |id|
+                "#{document.fetch("project")}:#{id}"
+              end
+              key = JSON.generate(wake.sort.to_h)
+              grouped[key] ||= wake.merge("affected_pending_ids" => [])
+              grouped[key]["affected_pending_ids"].concat(affected)
+            end
+          end
+          grouped.values.each do |wake|
+            wake["affected_pending_ids"].uniq!
+            wake["affected_pending_ids"].sort!
+          end
+        end
+      end
+    end
+  end
+end

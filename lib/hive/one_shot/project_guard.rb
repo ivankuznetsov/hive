@@ -51,67 +51,107 @@ module Hive
           @drained = drained || ->(entry) { ProjectLiveness.new(entry: entry).safe_to_stop? }
           @guards = {}
           @entries = {}
+          @projects = {}
           @contentions = {}
         end
 
         def refresh!
           entries = Array(@registry.call)
           seen = {}
+          enabled_associations = {}
           entries.each do |entry|
             name = entry.fetch("name").to_s
             seen[name] = true
-            @entries[name] = entry
+            identity = nil
 
             begin
-              unless @enabled.call(entry)
-                release_if_drained(name, entry)
+              identity = canonical_identity(entry)
+              @projects[name] = identity
+              (@entries[identity] ||= {})[name] = entry
+              enabled = @enabled.call(entry)
+              enabled_associations[[ identity, name ]] = enabled
+              unless enabled
                 @contentions.delete(name)
                 next
               end
-              if @guards.key?(name)
+              if @guards.key?(identity)
                 @contentions.delete(name)
                 next
               end
 
-              @guards[name] = @guard_factory.call(entry).acquire!
+              @guards[identity] = @guard_factory.call(entry).acquire!
               @contentions.delete(name)
             rescue OwnershipError => error
               @contentions[name] = error
             rescue StandardError => error
+              @projects[name] = nil if identity.nil?
               @contentions[name] = OwnershipError.new(
                 "project #{name} configuration is unavailable: #{error.message}",
                 code: "project_config_unavailable"
               )
             end
           end
-          removed = (@entries.keys | @contentions.keys) - seen.keys
+          removed = @projects.keys - seen.keys
           removed.each do |name|
-            release_if_drained(name, @entries.fetch(name))
+            @projects.delete(name)
             @contentions.delete(name)
-            @entries.delete(name) unless @guards.key?(name)
           end
+          release_drained_associations(enabled_associations)
           owned_projects
         end
 
-        def owned?(project) = @guards.key?(project.to_s)
-        def owned_projects = @guards.keys.sort
+        def owned?(project)
+          name = project.to_s
+          if @projects.key?(name)
+            identity = @projects[name]
+            return identity && @guards.key?(identity) && @entries.fetch(identity, {}).key?(name)
+          end
+
+          @entries.any? do |identity, identity_entries|
+            @guards.key?(identity) && identity_entries.key?(name)
+          end
+        end
+
+        def owned_projects
+          @entries.each_with_object([]) do |(identity, identity_entries), names|
+            names.concat(identity_entries.keys) if @guards.key?(identity)
+          end.uniq.select { |name| owned?(name) }.sort
+        end
 
         def release_all!
           @guards.each_value(&:release!)
           @guards.clear
           @entries.clear
+          @projects.clear
           true
         end
 
         private
 
-        def release_if_drained(name, entry)
-          guard = @guards[name]
-          return unless guard && @drained.call(entry)
+        def canonical_identity(entry)
+          path = File.expand_path(entry.fetch("hive_state_path"))
+          suffix = []
+          until File.exist?(path)
+            suffix.unshift(File.basename(path))
+            path = File.dirname(path)
+          end
+          File.join(File.realpath(path), *suffix)
+        end
 
-          guard.release!
-          @guards.delete(name)
-          @entries.delete(name)
+        def release_drained_associations(enabled_associations)
+          empty_identities = []
+          @entries.each do |identity, identity_entries|
+            identity_entries.delete_if do |name, entry|
+              current = @projects[name] == identity
+              should_drain = !current || enabled_associations[[ identity, name ]] == false
+              should_drain && (!@guards.key?(identity) || @drained.call(entry))
+            end
+            empty_identities << identity if identity_entries.empty?
+          end
+          empty_identities.each do |identity|
+            @guards.delete(identity)&.release!
+            @entries.delete(identity)
+          end
         end
       end
 

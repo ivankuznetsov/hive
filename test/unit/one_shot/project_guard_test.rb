@@ -230,6 +230,97 @@ class OneShotProjectGuardTest < Minitest::Test
     end
   end
 
+  def test_collection_reconciles_replaced_project_by_canonical_state_root
+    with_tmp_dir do |root|
+      old_state = File.join(root, "old", ".hive-state")
+      new_state = File.join(root, "new", ".hive-state")
+      FileUtils.mkdir_p([ old_state, new_state ])
+      old_entry = { "name" => "demo", "path" => File.dirname(old_state),
+                    "hive_state_path" => old_state }
+      new_entry = { "name" => "demo", "path" => File.dirname(new_state),
+                    "hive_state_path" => new_state }
+      entries = [ old_entry ]
+      drained = []
+      collection = Hive::OneShot::ProjectGuard::Collection.new(
+        kind: "daemon", registry: -> { entries }, enabled: ->(*) { true },
+        drained: ->(entry) { drained.include?(entry.fetch("hive_state_path")) }
+      )
+
+      assert_equal [ "demo" ], collection.refresh!
+      ready_r, ready_w = IO.pipe
+      release_r, release_w = IO.pipe
+      pid = Hive::RuntimeControlPlane::ProcessGuard.fork do
+        ready_r.close
+        release_w.close
+        replacement_owner = guard(new_state, kind: "one_shot").acquire!
+        ready_w.write("1")
+        ready_w.close
+        release_r.read(1)
+        replacement_owner.release!
+        exit! 0
+      end
+      ready_w.close
+      release_r.close
+      assert_equal "1", ready_r.read(1)
+      entries.replace([ new_entry ])
+
+      assert_empty collection.refresh!
+      refute collection.owned?("demo")
+      assert_equal "one_shot_busy", collection.contentions.fetch("demo").code
+      assert_equal "daemon_owned", assert_raises(
+        Hive::OneShot::ProjectGuard::OwnershipError
+      ) { guard(old_state, kind: "one_shot").acquire! }.code
+
+      release_w.write("1")
+      release_w.close
+      Process.wait(pid)
+      pid = nil
+      assert_equal [ "demo" ], collection.refresh!
+      assert_equal "daemon_owned", assert_raises(
+        Hive::OneShot::ProjectGuard::OwnershipError
+      ) { guard(old_state, kind: "one_shot").acquire! }.code
+
+      drained << old_state
+      assert_equal [ "demo" ], collection.refresh!
+      released_old_root = guard(old_state, kind: "one_shot").acquire!
+      assert released_old_root.release!
+    ensure
+      released_old_root&.release!
+      release_w&.close unless release_w&.closed?
+      Process.kill("KILL", pid) if pid && process_alive?(pid)
+      Process.wait(pid) if pid && process_alive?(pid)
+      collection&.release_all!
+    end
+  end
+
+  def test_collection_shares_a_guard_across_current_state_root_aliases
+    with_tmp_dir do |root|
+      state = File.join(root, "state")
+      state_alias = File.join(root, "state-alias")
+      FileUtils.mkdir_p(state)
+      File.symlink(state, state_alias)
+      entries = [
+        { "name" => "primary", "path" => root, "hive_state_path" => state },
+        { "name" => "alias", "path" => root, "hive_state_path" => state_alias }
+      ]
+      drained = []
+      collection = Hive::OneShot::ProjectGuard::Collection.new(
+        kind: "daemon", registry: -> { entries }, enabled: ->(*) { true },
+        drained: ->(entry) { drained.include?(entry.fetch("name")) }
+      )
+
+      assert_equal %w[alias primary], collection.refresh!
+      assert_empty collection.contentions
+
+      entries.shift
+      assert_equal %w[alias primary], collection.refresh!
+      drained << "primary"
+      assert_equal [ "alias" ], collection.refresh!
+    ensure
+      collection&.release_all!
+    end
+  end
+
   def test_one_shot_refuses_identity_verified_pre_guard_daemon
     with_tmp_dir do |root|
       owner = {

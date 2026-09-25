@@ -12,7 +12,7 @@ class AttemptsProcessCustodyTest < Minitest::Test
     refute custody.verifiable?("custody_path" => nil)
   end
 
-  def test_linux_adapter_requires_delegated_domain_and_unwritable_parent
+  def test_linux_adapter_requires_delegated_domain_and_non_writable_parent_boundary
     with_tmp_dir do |root|
       parent = File.join(root, "parent")
       domain = File.join(parent, "attempt.scope")
@@ -27,6 +27,12 @@ class AttemptsProcessCustodyTest < Minitest::Test
       custody = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
         cgroup_root: root, current_path_reader: -> { "/parent/attempt.scope" }
       )
+
+      refute custody.current_evidence.fetch("eligible")
+      assert_equal "parent_cgroup_writable", custody.reason,
+                   "a writable parent remains an unverified escape surface"
+
+      File.chmod(0o555, parent)
       evidence = custody.current_evidence
       assert custody.available?
       assert_equal "delegated_cgroup_v2", evidence.fetch("mode")
@@ -39,6 +45,8 @@ class AttemptsProcessCustodyTest < Minitest::Test
       File.chmod(0o600, File.join(parent, "cgroup.procs"))
       refute custody.current_evidence.fetch("eligible")
       assert_equal "parent_cgroup_writable", custody.reason
+    ensure
+      File.chmod(0o755, parent) if parent && File.exist?(parent)
     end
   end
 
@@ -55,11 +63,32 @@ class AttemptsProcessCustodyTest < Minitest::Test
       File.write(File.join(domain, "cgroup.subtree_control"), "")
       File.write(File.join(domain, "cgroup.events"), "populated 1\n")
       File.write(File.join(nested, "cgroup.procs"), "4242\n")
+      File.chmod(0o555, parent)
 
       custody = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
         cgroup_root: root, current_path_reader: -> { "/parent/attempt.scope" }
       )
       assert_equal [ 4242 ], custody.members("/parent/attempt.scope")
+    ensure
+      File.chmod(0o755, parent) if parent && File.exist?(parent)
+    end
+  end
+
+  def test_linux_adapter_does_not_exempt_a_writable_hierarchy_root
+    with_tmp_dir do |root|
+      domain = File.join(root, "attempt.scope")
+      FileUtils.mkdir_p(domain)
+      File.write(File.join(root, "cgroup.controllers"), "memory pids\n")
+      File.write(File.join(root, "cgroup.procs"), "")
+      File.write(File.join(domain, "cgroup.procs"), "#{Process.pid}\n")
+      File.write(File.join(domain, "cgroup.subtree_control"), "")
+
+      custody = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
+        cgroup_root: root, current_path_reader: -> { "/attempt.scope" }
+      )
+
+      refute custody.current_evidence.fetch("eligible")
+      assert_equal "parent_cgroup_writable", custody.reason
     end
   end
 end

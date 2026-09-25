@@ -7,12 +7,12 @@ require "hive/one_shot/result"
 module Hive
   module OneShot
     class PatrolAdapter
-      def initialize(entry:, dry_run: false, scheduler: nil, executor: ProcessExecutor.new,
+      def initialize(entry:, dry_run: false, scheduler: nil, executor: nil,
                      guard: nil, liveness: nil, clock: -> { Time.now.utc })
         @entry = entry
         @dry_run = dry_run
         @clock = clock
-        @executor = executor
+        @executor = executor || ProcessExecutor.for_entry(entry)
         @guard = guard || ProjectGuard.new(
           state_root: entry.fetch("hive_state_path"), project: entry.fetch("name"),
           kind: :one_shot

@@ -14,15 +14,17 @@ module Hive
   module OneShot
     class ArchitecturePatrolAdapter
       def initialize(entry:, dry_run: false, scheduler: nil, reconciler: nil,
-                     executor: ProcessExecutor.new, guard: nil,
+                     executor: nil, guard: nil,
                      config_loader: ->(path) { Hive::Config.load(path) },
                      poll_interval_sec: nil, liveness: nil,
                      clock: -> { Time.now.utc })
         @entry = entry
         @dry_run = dry_run
         @clock = clock
-        @executor = executor
         @config_loader = config_loader
+        @executor = executor || ProcessExecutor.for_entry(
+          entry, config_loader: @config_loader
+        )
         @poll_interval_sec = Integer(
           poll_interval_sec || Hive::Config.load_global_daemon.fetch("pr_merge_poll_interval_sec")
         )

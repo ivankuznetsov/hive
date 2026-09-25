@@ -541,14 +541,22 @@ module Hive
         raise Hive::Error, @one_shot_failure if @one_shot_failure
 
         loop do
+          loop do
+            current = @clock ? @clock.call.utc : Time.now.utc
+            reap_completed(now: current)
+            enforce_child_timeouts(now: current)
+            raise Hive::Error, "attempt reconciliation failed while draining" unless
+              reconcile_attempts(now: current)
+            break unless project_worker_live?(project)
+
+            sleeper.call([ @fast_poll_sec.to_f, 0.25 ].min)
+          end
+
+          reconcile_one_shot_module_runs(project: project)
           current = @clock ? @clock.call.utc : Time.now.utc
-          reap_completed(now: current)
-          enforce_child_timeouts(now: current)
-          raise Hive::Error, "attempt reconciliation failed while draining" unless
+          raise Hive::Error, "attempt reconciliation failed after module completion" unless
             reconcile_attempts(now: current)
           break unless project_worker_live?(project)
-
-          sleeper.call([ @fast_poll_sec.to_f, 0.25 ].min)
         end
         finalize_one_shot_runs
         { ran: @one_shot_ran.dup, items: one_shot_readiness(project: project),
@@ -767,6 +775,22 @@ module Hive
         end
       end
 
+      def reconcile_one_shot_module_runs(project:)
+        return unless @module_runtime&.respond_to?(:reconcile)
+
+        current = @clock ? @clock.call.utc : Time.now.utc
+        results = @module_runtime.reconcile(
+          now: current, admission_open: -> { admission_open? }, projects: [ project ]
+        )
+        Array(results).each do |module_result|
+          @logger.event(:module_runtime, **module_result)
+          next unless module_result.fetch(:status) == :blocked
+
+          raise Hive::Error,
+                "module runtime reconciliation failed: #{module_result[:reason] || 'unknown error'}"
+        end
+      end
+
       def one_shot_readiness(project:, now: (@clock ? @clock.call.utc : Time.now.utc))
         result = @status_consumer.fetch
         raise Hive::Error, "status observation failed: #{result.error}" unless result.ok
@@ -812,6 +836,9 @@ module Hive
 
       def dispatch_request_pending_item(request, row:, now:, project_observation: nil)
         id = "dispatch:request:#{request.request_id}"
+        unless project_owned?(request.project)
+          raise Hive::Error, "project ownership lost while observing #{request.project}"
+        end
         unless project_enabled?(request.project) || explicit_action_recovery?(request)
           return pending_item("waiting_operator", id, "project_disabled",
                               condition: operator_condition(row || request))
@@ -1691,9 +1718,10 @@ module Hive
           project_enabled?(project) && !@legacy_layout_projects.key?(project)
         end
         eligible_rows = rows.select { |row| projects.include?(row.project) }
-        @merge_watcher.observe(
+        observation_results = @merge_watcher.observe(
           eligible_rows, now: now, projects: projects
-        ).each do |result|
+        )
+        Array(observation_results).each do |result|
           next unless result.fetch(:status) == :blocked
 
           @logger.event(
@@ -1704,7 +1732,8 @@ module Hive
             reason: result.fetch(:reason)
           )
         end
-        @merge_watcher.tick(now: now, projects: projects).each do |result|
+        merge_results = @merge_watcher.tick(now: now, projects: projects)
+        Array(merge_results).each do |result|
           status = result.fetch(:status)
           payload = {
             project: result.fetch(:project),
@@ -1728,7 +1757,18 @@ module Hive
             )
           end
         end
+        failures = Array(observation_results).select do |result|
+          %i[blocked failed].include?(result.fetch(:status))
+        end
+        failures.concat(Array(merge_results).select do |result|
+          %i[blocked failed].include?(result.fetch(:status))
+        end)
+        if scoped_execution? && failures.any?
+          reasons = failures.map { |result| result[:reason] || result.fetch(:status).to_s }.uniq
+          @one_shot_failure ||= "merge observation failed: #{reasons.join(', ')}"
+        end
       rescue StandardError => e
+        @one_shot_failure ||= e if scoped_execution?
         @logger.event(
           :fatal,
           message: "task merge reconciliation failed: #{e.class}: #{e.message}"
@@ -3400,6 +3440,15 @@ module Hive
           return
         end
 
+        unless project_owned?(req.project)
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: "project_not_owned"
+          )
+          return
+        end
+
         # A disabled project suppresses autonomous work, but an operator's
         # freshness-bound `hive act workflow.retry` remains an explicit
         # one-shot instruction. Let only that recovery request reach the
@@ -3705,6 +3754,13 @@ module Hive
             command: command, trigger: req.trigger,
             chat_id: req.chat_id, update_id: req.update_id
           )
+          if scoped_execution? && result.status == :accepted
+            @one_shot_ran << {
+              "id" => "dispatch:attempt:#{result.attempt.attempt_id}",
+              "action" => command, "outcome" => "admitted",
+              "details" => { "attempt_id" => result.attempt.attempt_id }
+            }
+          end
           return result
         end
 
@@ -4615,6 +4671,12 @@ module Hive
         @enabled_cache[project_name] = enabled
       rescue Hive::ConfigError
         @enabled_cache[project_name] = false
+      end
+
+      def project_owned?(project_name)
+        !@project_ownership || @project_ownership.owned?(project_name)
+      rescue StandardError
+        false
       end
 
       def refresh_project_ownership

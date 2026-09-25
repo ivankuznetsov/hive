@@ -62,6 +62,34 @@ class OneShotProcessExecutorTest < Minitest::Test
     end
   end
 
+  def test_timeout_escalates_past_term_resistance_without_hanging
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    error = assert_raises(Hive::InternalError) do
+      Hive::OneShot::ProcessExecutor.new(
+        timeout_sec: 0.05, kill_grace_sec: 0.05
+      ).call("ruby -e 'trap(\"TERM\") {}; sleep 30'")
+    end
+
+    assert_match(/timed out/, error.message)
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 2
+  end
+
+  def test_project_factory_uses_existing_worker_timeout_and_kill_grace
+    executor = Hive::OneShot::ProcessExecutor.for_entry(
+      { "path" => "/tmp/project" },
+      config_loader: ->(*) {
+        {
+          "timeout_sec" => { "patrol" => 7200 },
+          "refactor_patrol" => { "max_review_seconds_per_run" => 3600 }
+        }
+      },
+      daemon_config_loader: -> { { "child_kill_grace_sec" => 12 } }
+    )
+
+    assert_equal 7200.0, executor.instance_variable_get(:@timeout_sec)
+    assert_equal 12.0, executor.instance_variable_get(:@kill_grace_sec)
+  end
+
   def test_terminate_tolerates_an_already_gone_process
     executor = Hive::OneShot::ProcessExecutor.new
 

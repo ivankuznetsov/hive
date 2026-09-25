@@ -76,13 +76,23 @@ guard descriptors.
 `Hive::OneShot::Runner` builds a project-filtered dispatcher for task dispatch.
 It performs recovery and one admission round, then stops admitting, drains
 ancillary children, reconciles durable attempts, and applies the normal
-completion path. The project filter reaches status, dispatch requests,
+completion path. A completion-only module pass then finalizes terminal hook
+runs or applies their bounded retry policy without advancing setup outboxes,
+schedules, or event cursors; any retry admitted by that completion effect is
+drained before final projection. The project filter reaches status, dispatch requests,
 attempt deliveries, PR merge observation, and module hooks; global capacity is
 still observed. Its final readiness projection reuses the same project-enable,
 legacy-layout, retry, cooldown, and capacity gates as admission, and includes
 module event backlogs, retrying runs, and the next enabled module schedule.
 Patrol, architecture intake, digests, update checks, and other projects are
 excluded from this runner.
+
+Project ownership is checked independently from `daemon.enabled`, including
+explicit action-recovery requests, so the recovery exemption cannot cross into
+a project held by a concurrent one-shot. Merge observation blocks, failures,
+and exceptions become one-shot errors. The Patrol and Architecture Patrol
+one-shot child executor has a wall-clock deadline and bounded TERM-to-KILL
+escalation, so a hung or TERM-resistant command cannot pin the pass forever.
 
 Every component uses the same project-wide liveness proof before reporting
 `safe_to_stop: true`: no live durable attempt and no identity-verified runner

@@ -357,6 +357,29 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_reconcile_finalizes_runs_without_admitting_event_backlog
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      attempt = runtime.fetch(:attempt_store).active_attempts.first
+      terminalize(runtime.fetch(:attempt_store), attempt, outcome: "succeeded")
+      cursor = File.join(
+        runtime.fetch(:store).hive_state_path,
+        "module-runtime", "daemon-event-cursor.json"
+      )
+
+      result = runtime.fetch(:daemon_runtime).reconcile(
+        now: NOW + 3, projects: [ "demo" ]
+      ).first
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal "succeeded", current_run(runtime).fetch("status")
+      refute_path_exists cursor,
+                         "completion-only reconciliation must not drain event admissions"
+    end
+  end
+
   def test_empty_and_corrupt_projects_return_idle_or_bounded_blocked_results
     with_tmp_dir do |root|
       attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)

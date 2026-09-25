@@ -60,7 +60,10 @@ hive daemon --once PROJECT [--json] [--dry-run]
 `hive daemon --once PROJECT` runs one project-scoped dispatch admission round,
 then drains and reconciles the work it owns before returning. It applies the
 normal completion receipts, request acknowledgements, sequence promotion, and
-dispatch-baseline updates. It does not run Patrol, Architecture Patrol, daily
+dispatch-baseline updates. After durable attempts drain, it runs a
+completion-only module reconciliation pass so terminal hook attempts finalize
+or enter their bounded retry policy before readiness is projected. It does not
+run Patrol, Architecture Patrol, daily
 digests, update checks, or another project's work, and it does not sleep while
 waiting for a future PR or CI change. `--once --dry-run` observes policy and
 live work without recovery, claims, launches, or checkpoint writes.
@@ -69,6 +72,9 @@ dependency, recovery, capacity, cooldown, and in-flight gates as admission. It
 also inventories module event backlogs, retrying runs, and recurring schedule
 deadlines. Stop safety covers durable attempts and identity-verified legacy
 task workers, not only children launched by the current pass.
+Queued durable admissions are included in `ran`; merge-watcher failures,
+exceptions, and invalid observations return an error with null readiness
+instead of an authoritative idle result.
 
 All four scheduler entry points (`patrol`, `refactor-patrol`, `babysit`, and
 `daemon`) emit `hive-one-shot.v1`. `pending` separates `runnable_now`,

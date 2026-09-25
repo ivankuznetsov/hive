@@ -810,6 +810,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, result.fetch(:safe_to_stop)
   end
 
+  def test_run_one_shot_reconciles_module_runs_after_attempts_drain
+    reconciliations = []
+    runtime = Object.new
+    runtime.define_singleton_method(:tick) { |**| [] }
+    runtime.define_singleton_method(:reconcile) do |**options|
+      reconciliations << options
+      []
+    end
+    runtime.define_singleton_method(:readiness) { |**| [] }
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], module_runtime: runtime
+    )
+
+    dispatcher.run_one_shot(project: "p1", now: T0)
+
+    assert_equal [ "p1" ], reconciliations.fetch(0).fetch(:projects)
+  end
+
   def test_dispatch_one_shot_drains_project_wide_legacy_workers_before_stop_safe
     checks = [ false, true, true ]
     liveness = Object.new
@@ -4342,6 +4360,36 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "gh api failed", event[1][:reason]
   end
 
+  def test_one_shot_merge_reconciliation_failures_withhold_readiness
+    rows = [ row(stage: "6-review", action: "error") ]
+    dispatcher, _supervisor, _controller, _logger, watcher = make_dispatcher(
+      rows: rows, with_merge_watcher: true, scope_projects: [ "p1" ]
+    )
+    watcher.next_results = [ {
+      project: "p1", slug: "s1", status: :failed, reason: "gh api failed"
+    } ]
+
+    error = assert_raises(Hive::Error) do
+      dispatcher.run_one_shot(project: "p1", now: T0)
+    end
+
+    assert_match(/merge observation failed.*gh api failed/, error.message)
+  end
+
+  def test_one_shot_merge_reconciliation_exceptions_withhold_readiness
+    rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
+    dispatcher, _supervisor, _controller, _logger, watcher = make_dispatcher(
+      rows: rows, with_merge_watcher: true, scope_projects: [ "p1" ]
+    )
+    watcher.tick_error = IOError.new("registry unavailable")
+
+    error = assert_raises(IOError) do
+      dispatcher.run_one_shot(project: "p1", now: T0)
+    end
+
+    assert_equal "registry unavailable", error.message
+  end
+
   def test_merge_reconciliation_skips_disabled_project
     rows = [ row(stage: "8-finalize", action: "ready_to_archive") ]
     dispatcher, sup, _ctrl, logger, mw = make_dispatcher(
@@ -7729,6 +7777,38 @@ end
     end
   end
 
+  def test_scoped_durable_queue_admission_is_recorded_in_one_shot_ran
+    Dir.mktmpdir("hive-dispatch-queue-ran") do |state_home|
+      attempt = Struct.new(:attempt_id, :task_generation, :state)
+                      .new("attempt-queued", "generation-1", "launching")
+      result = Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: attempt, receipt: nil,
+        attach_descriptor: nil, reason: nil
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |*_args, **_kwargs|
+        result
+      end
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher, scope_projects: [ "p1" ]
+      )
+      Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-ran", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).first
+
+      dispatcher.send(:dispatch_request!, request, now: T0)
+
+      assert_equal [ {
+        "id" => "dispatch:attempt:attempt-queued",
+        "action" => "hive run demo-task", "outcome" => "admitted",
+        "details" => { "attempt_id" => "attempt-queued" }
+      } ], dispatcher.one_shot_ran
+    end
+  end
+
   def test_nondurable_request_releases_preclaim_when_final_spawn_gate_closes
     Dir.mktmpdir("hive-dispatch-final-gate") do |state_home|
       dispatcher, supervisor, = make_dispatcher(
@@ -9912,6 +9992,46 @@ end
       assert_empty sup.spawned
       refute logger.events.any? { |name, attrs|
         name == :dispatch_request_blocked && attrs[:reason] == "project_disabled"
+      }
+    end
+  end
+
+  def test_explicit_action_recovery_still_requires_daemon_project_ownership
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      coordinator = FakeRecoveryCoordinator.new(status: "blocked")
+      observed = row(
+        stage: "4-execute", marker: "error", action: "error",
+        marker_attrs: { "reason" => "timeout", "marker_id" => "marker-1" }
+      )
+      ownership = Object.new
+      ownership.define_singleton_method(:refresh!) { [] }
+      ownership.define_singleton_method(:contentions) { {} }
+      ownership.define_singleton_method(:owned_projects) { [] }
+      ownership.define_singleton_method(:owned?) { |_| false }
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        rows: [ observed ], dispatch_request_state_home: state_home,
+        recovery_coordinator: coordinator, project_enabled: false,
+        project_ownership: ownership
+      )
+      Q.write_request!(
+        project: "p1", slug: "s1",
+        argv: %w[hive run s1 --stage 4-execute --project p1 --json],
+        requestor: "action", trigger: "recovery", request_id: "ACTION-RECOVERY",
+        task_generation: "c" * 64, task_id: 1, expected_stage: "4-execute",
+        expected_marker_name: "error", expected_marker_id: "marker-1",
+        recovery: dispatcher_recovery, state_home: state_home, now: T0
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+      ensure
+        restore_find_project!
+      end
+
+      assert_empty coordinator.resumes
+      assert_empty supervisor.spawned
+      assert logger.events.any? { |name, attrs|
+        name == :dispatch_request_blocked && attrs[:reason] == "project_not_owned"
       }
     end
   end

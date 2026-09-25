@@ -45,6 +45,24 @@ module Hive
         end
       end
 
+      # Completion-only pass used after a bounded one-shot has drained its
+      # durable attempts. It applies run finalization and bounded retry policy
+      # without advancing setup outboxes, schedules, or event cursors.
+      def reconcile(now: @clock.call, admission_open: -> { true }, projects: nil)
+        return [] unless admission_open?(admission_open)
+
+        selected_projects = Array(projects).map(&:to_s).to_h { |name| [ name, true ] }
+        entries = Array(@registry.call)
+        entries = entries.select { |entry| selected_projects.key?(entry.fetch("name").to_s) } if projects
+        entries.each_with_object([]) do |entry, results|
+          break results unless admission_open?(admission_open)
+
+          results << reconcile_project(
+            entry, now: now, admission_open: admission_open
+          )
+        end
+      end
+
       # Side-effect-free inventory for the dispatch one-shot contract. It
       # deliberately uses ManagedStore/EventLedger inspection APIs so a
       # scheduler preview cannot reconcile transactions, create locks, or
@@ -72,6 +90,29 @@ module Hive
       end
 
       private
+
+      def reconcile_project(entry, now:, admission_open:)
+        return result(entry, :idle, 0, 0) unless admission_open?(admission_open)
+
+        store = Hive::ModulePackage::ManagedStore.new(entry.fetch("hive_state_path"))
+        selections = store.selections(include_tombstones: true)
+        return result(entry, :idle, 0, 0) if selections.empty?
+
+        runtime_root = File.join(entry.fetch("hive_state_path"), "module-runtime")
+        dispatcher = Dispatcher.new(
+          store: store, attempt_store: @attempt_store,
+          attempt_dispatcher: @attempt_dispatcher,
+          project_id: entry.fetch("project_id"), project: entry.fetch("name"),
+          decision_journal: DecisionJournal.new(root: runtime_root), clock: -> { now }
+        )
+        reconcile_runs(
+          store, selections, dispatcher: dispatcher, now: now,
+          admission_open: admission_open
+        )
+        result(entry, :ok, 0, 0)
+      rescue Hive::Error, SystemCallError, IOError, JSON::ParserError => e
+        result(entry, :blocked, 0, 0, reason: "#{e.class}: #{e.message}")
+      end
 
       def readiness_runs(store, selections, now)
         selections.flat_map do |selection|

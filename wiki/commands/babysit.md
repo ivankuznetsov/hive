@@ -59,7 +59,11 @@ The log file is `$HIVE_HOME/logs/babysitter.log`, written by `Hive::Babysitter::
 `--once PROJECT` runs one bounded project pass under both the main project
 guard and babysitter execution guard. It retains each PR outcome and projects
 remaining PRs as immediately runnable, waiting on checks or PR changes, or
-waiting for an operator. It does not poll until those facts change.
+waiting for an operator. PRs beyond the repair capacity are still observed:
+only an actionable repair remains `capacity_deferred`, while green or
+externally waiting PRs retain their observed wait. A GitHub error for any PR
+makes the project result an observation error rather than successful
+readiness. It does not poll until those facts change.
 
 `--once --all` returns the per-project envelopes plus combined readiness from
 successful projects. A verified live-owner refusal remains visible in
@@ -72,7 +76,8 @@ babysitter one-shot. The normal long-lived daemon and babysitter services may
 still coexist because their service loops retain separate execution guards.
 
 `--once --dry-run` performs the real read-only observation but starts no repair
-and reports no `ran` entries. Eligible unadmitted repairs remain
+and reports no `ran` entries. It does not append babysitter event or status
+state. Eligible unadmitted repairs remain
 `runnable_now`; green PRs and queued checks retain their external-wait state,
 and observed live workers keep `safe_to_stop` false.
 

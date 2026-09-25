@@ -38,18 +38,21 @@ module Hive
         # tick without restarting the daemon.
         cfg = Hive::Config.load(project_entry.fetch("path"))
         unless cfg.dig("babysitter", "enabled") == true
-          logger.event(:project_skipped, project: project_entry["name"], reason: "babysitter_disabled")
+          logger.event(:project_skipped, project: project_entry["name"], reason: "babysitter_disabled") unless
+            observe_only
           return report(empty_summary, detailed)
         end
 
         prs = Hive::Gh.list_open_prs(project_entry.fetch("path"), cfg: cfg)
-        Hive::Babysitter::Events.emit(
-          project: project_entry,
-          action: "list-prs",
-          outcome: "success",
-          duration_ms: duration_ms(started),
-          count: prs.size
-        )
+        unless observe_only
+          Hive::Babysitter::Events.emit(
+            project: project_entry,
+            action: "list-prs",
+            outcome: "success",
+            duration_ms: duration_ms(started),
+            count: prs.size
+          )
+        end
         return report(empty_summary.merge(interrupted: true), detailed) unless
           admission_open?(admission_open)
 
@@ -57,18 +60,33 @@ module Hive
         observations = []
         eligible = select_prs(
           prs, project_entry, cfg, inflight, owned_branches,
-          observations: observations, limit: false
+          observations: observations, limit: false, emit_events: !observe_only
         )
         limit = cfg.dig("babysitter", "max_concurrent_prs").to_i
         selected = eligible.first(limit)
         summary = empty_summary
         summary[:prs].concat(observations)
         eligible.drop(limit).each do |pr|
-          summary[:prs] << pr_result(pr, :capacity_deferred)
+          unless detailed || observe_only
+            summary[:prs] << pr_result(pr, :capacity_deferred)
+            next
+          end
+
+          outcome, status, error = observe_pr(pr, project_entry, cfg)
+          record_observation_error(
+            summary, error, project_entry: project_entry, pr: pr,
+            logger: logger, emit_events: !observe_only
+          ) if error
+          outcome = :capacity_deferred if outcome == :eligible
+          summary[:prs] << pr_result(pr, outcome, status: status)
         end
         if observe_only
           selected.each do |pr|
-            outcome, status = Hive::Babysitter::PrFixer.observe(pr, project_entry, cfg)
+            outcome, status, error = observe_pr(pr, project_entry, cfg)
+            record_observation_error(
+              summary, error, project_entry: project_entry, pr: pr,
+              logger: logger, emit_events: false
+            ) if error
             summary[:prs] << pr_result(pr, outcome, status: status)
           end
           return report(summary, detailed)
@@ -93,6 +111,12 @@ module Hive
                 admission_open: admission_open,
                 detail_sink: ->(value) { status = value }
               )
+            rescue Hive::GhError => e
+              record_observation_error(
+                summary, e, project_entry: project_entry, pr: pr,
+                logger: logger, emit_events: true
+              )
+              :failure
             rescue StandardError => e
               Hive::Babysitter::Events.emit(
                 project: project_entry,
@@ -134,14 +158,16 @@ module Hive
         end
         report(summary, detailed)
       rescue Hive::GhError => e
-        Hive::Babysitter::Events.emit(
-          project: project_entry,
-          action: "list-prs",
-          outcome: "gh-error",
-          duration_ms: duration_ms(started),
-          message: e.message
-        )
-        logger.event(:fatal, project: project_entry["name"], message: "gh pr list failed: #{e.message}")
+        unless observe_only
+          Hive::Babysitter::Events.emit(
+            project: project_entry,
+            action: "list-prs",
+            outcome: "gh-error",
+            duration_ms: duration_ms(started),
+            message: e.message
+          )
+          logger.event(:fatal, project: project_entry["name"], message: "gh pr list failed: #{e.message}")
+        end
         report(
           empty_summary.merge(error: { code: "github_observation_failed", message: e.message }),
           detailed
@@ -171,8 +197,31 @@ module Hive
         false
       end
 
+      def observe_pr(pr, project_entry, cfg)
+        outcome, status = Hive::Babysitter::PrFixer.observe(pr, project_entry, cfg)
+        [ outcome, status, nil ]
+      rescue Hive::GhError => error
+        [ :failure, nil, error ]
+      end
+
+      def record_observation_error(summary, error, project_entry:, pr:, logger:, emit_events:)
+        summary[:error] ||= {
+          code: "github_observation_failed", message: error.message
+        }
+        return unless emit_events
+
+        Hive::Babysitter::Events.emit(
+          project: project_entry, pr: pr["number"], action: "list-prs",
+          outcome: "gh-error", message: error.message
+        )
+        logger.event(
+          :fatal, project: project_entry["name"], pr: pr["number"],
+          message: "PR observation failed: #{error.message}"
+        )
+      end
+
       def select_prs(prs, project_entry, cfg, inflight, owned_branches = Set.new,
-                     observations: nil, limit: true)
+                     observations: nil, limit: true, emit_events: true)
         ignored = Array(cfg.dig("babysitter", "labels_ignore")).map { |label| label.to_s.downcase }
         prs.filter_map do |pr|
           number = pr["number"]
@@ -188,7 +237,7 @@ module Hive
               pr: number,
               action: "skipped",
               outcome: "pipeline_owned"
-            )
+            ) if emit_events
             observations&.push(pr_result(pr, :pipeline_owned))
             next
           end
@@ -199,7 +248,7 @@ module Hive
               pr: number,
               action: "skipped",
               outcome: "draft_pr"
-            )
+            ) if emit_events
             next
           end
 
@@ -210,7 +259,7 @@ module Hive
               pr: number,
               action: "skipped",
               outcome: "label_ignored"
-            )
+            ) if emit_events
             next
           end
           if inflight.include?(inflight_key(project_entry, number))

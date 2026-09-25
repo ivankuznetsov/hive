@@ -11,7 +11,10 @@ module Hive
         route = command(argv)
         maintenance = %w[setup doctor version].include?(route) ||
           argv == [ "--version" ] || argv == [ "-v" ] ||
-          (route == "runtime" && [ nil, "status" ].include?(command(argv.drop(argv.index(route) + 1))))
+          (route == "runtime" && [ nil, "status" ].include?(command(argv.drop(argv.index(route) + 1)))) ||
+          (route == "daemon" && %w[status quiesce resume].include?(
+            command(argv.drop(argv.index(route) + 1))
+          ))
         runtime_status(state_home) unless maintenance
         before_allow&.call || true
       end

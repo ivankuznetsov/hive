@@ -28,6 +28,8 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
       [
         %w[runtime], %w[runtime --json], %w[runtime status],
         %w[runtime status --json], %w[runtime --json status], %w[--json runtime status],
+        %w[daemon status], %w[daemon quiesce], %w[daemon resume],
+        %w[daemon quiesce --json], %w[--json daemon resume],
         %w[doctor], %w[setup], %w[--version]
       ].each do |argv|
         assert Hive::RuntimeControlPlane::ActivationGate.check!(argv: argv, state_home: root)

@@ -1,3 +1,4 @@
+require "fileutils"
 require "json"
 require "securerandom"
 require "hive/artifacts/capture_mailbox"
@@ -307,6 +308,7 @@ module Hive
             expected_generation: @generation,
             expected_digest: @recovery_digest
           )
+          archive_review_passes!(locked_task, receipt.fetch("sequence"))
         end
         @approve_factory.call(
           task.folder,
@@ -325,6 +327,23 @@ module Hive
           "reviewed_generation" => receipt.fetch("generation"),
           "rework_sequence" => receipt.fetch("sequence")
         }
+      end
+
+      REVIEW_PASS_FILE = /-\d{2}\.md\z/
+
+      # A rework sends the task back through execute and a fresh review of the
+      # reworked code. Review numbers passes from the pass-numbered files at the
+      # top of reviews/ and refuses once they exceed review.max_passes, so
+      # without this a task that needed rework could never be reviewed again.
+      # Keep the earlier passes for provenance under reviews/archive/.
+      def archive_review_passes!(locked_task, sequence)
+        reviews = File.join(locked_task.folder, "reviews")
+        passes = Dir[File.join(reviews, "*.md")].select { |path| File.basename(path).match?(REVIEW_PASS_FILE) }
+        return if passes.empty?
+
+        archive = File.join(reviews, "archive", format("rework-%02d", sequence.to_i))
+        FileUtils.mkdir_p(archive)
+        passes.each { |path| FileUtils.mv(path, File.join(archive, File.basename(path))) }
       end
 
       def emit_rework(payload)

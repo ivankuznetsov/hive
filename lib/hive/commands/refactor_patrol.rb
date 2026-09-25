@@ -117,6 +117,7 @@ module Hive
                      heartbeat_clock: -> { Time.now },
                      heartbeat_resolver: Hive::RefactorPatrol::ClaimLivenessResolver.new,
                      project_entry: nil, capability_context: nil,
+                     once: false, one_shot_factory: nil,
                      scheduled_slice: nil, output: nil,
                      config_loader: ->(path) { Hive::Config.load(path) })
         @output = output
@@ -166,6 +167,8 @@ module Hive
         @heartbeat_resolver = heartbeat_resolver
         @project_entry = project_entry
         @capability_context = capability_context
+        @once = once
+        @one_shot_factory = one_shot_factory
         @scheduled_slice = scheduled_slice
         @feature_hint = @scheduled_slice.fetch("feature_id") if @scheduled_slice
         @config_loader = config_loader
@@ -176,6 +179,7 @@ module Hive
       end
 
       def call
+        return run_once if @once
         validate_mode!
         return run_job_archive if archive_mode?
         return run_job_query if query_mode?
@@ -193,6 +197,22 @@ module Hive
       end
 
       private
+
+      def run_once
+        require "hive/one_shot/architecture_patrol_adapter"
+        entry = @project_entry || Hive::Config.find_project(@project)
+        raise Hive::ConfigError,
+              "hive refactor-patrol: unknown project #{@project.inspect}" unless entry
+
+        factory = @one_shot_factory || lambda do |project_entry|
+          Hive::OneShot::ArchitecturePatrolAdapter.new(
+            entry: project_entry, dry_run: @dry_run
+          )
+        end
+        result = factory.call(entry).call
+        (@output || $stdout).puts result.to_json
+        result
+      end
 
       def run_cycle
         entry, project_root, cfg = resolve_project!

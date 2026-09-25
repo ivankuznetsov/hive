@@ -21,6 +21,7 @@ module Hive
   module Commands
     class Patrol
       def initialize(project, json: false, dry_run: false, list: false,
+                     once: false, one_shot_factory: nil,
                      mapper_factory: nil, reviewer_factory: nil,
                      project_entry: nil,
                      capability_context: nil,
@@ -29,6 +30,8 @@ module Hive
         @json = json
         @dry_run = dry_run
         @list = list
+        @once = once
+        @one_shot_factory = one_shot_factory
         @mapper_factory = mapper_factory || lambda do |root, cfg, state|
           Hive::Patrol::Mapper.new(root, cfg: cfg, state: state, capabilities: [ :architecture ])
         end
@@ -39,6 +42,7 @@ module Hive
       end
 
       def call
+        return run_once if @once
         return list_findings if @list
 
         # The daemon SIGTERMs this child on shutdown and SIGKILLs it once the
@@ -56,6 +60,19 @@ module Hive
       end
 
       private
+
+      def run_once
+        require "hive/one_shot/patrol_adapter"
+        entry = @project_entry || Hive::Config.find_project(@project)
+        raise Hive::ConfigError, "hive patrol: unknown project #{@project.inspect}" unless entry
+
+        factory = @one_shot_factory || lambda do |project_entry|
+          Hive::OneShot::PatrolAdapter.new(entry: project_entry, dry_run: @dry_run)
+        end
+        result = factory.call(entry).call
+        puts result.to_json
+        result
+      end
 
       def list_findings
         entry = @project_entry || Hive::Config.find_project(@project)

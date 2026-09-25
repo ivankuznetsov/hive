@@ -209,7 +209,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       write_state(dir, "last_run_at" => (T0 - 600).utc.iso8601)
       sched = scheduler(project_entry(dir), cfg)
-      assert_equal 1, sched.tick(now: T0).size
+      assert_empty sched.tick(now: T0)
+      assert_equal 1, sched.tick(now: T0 + 1).size
     end
   end
 
@@ -323,20 +324,18 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_empty sched.tick(now: T0 + 30),
                    "failed patrol should respect the first backoff interval"
 
-      # A project with an outstanding failure retries on the backoff
-      # cadence (60s), not the slow poll interval — the throttle is
-      # exempt while a failure is recorded.
-      retry_dispatch = sched.tick(now: T0 + 71).fetch(0)
+      # Failure backoff cannot shorten the post-reservation scan cadence.
+      retry_dispatch = sched.tick(now: T0 + 601).fetch(0)
       assert_equal "hive patrol p1 --json", retry_dispatch.fetch(:command)
 
-      sched.complete(project: "p1", exit_code: 0, now: T0 + 80)
+      sched.complete(project: "p1", exit_code: 0, now: T0 + 610)
       refute sched.pending?("p1")
       # Success clears the failure backoff; the project is now governed by
       # the slow poll cadence (poll_interval_sec), so it does NOT
       # re-dispatch on the very next tick.
-      assert_empty sched.tick(now: T0 + 81),
+      assert_empty sched.tick(now: T0 + 611),
                    "after success the project waits the slow poll interval"
-      assert_equal 1, sched.tick(now: T0 + 672).size,
+      assert_equal 1, sched.tick(now: T0 + 1202).size,
                    "project is due again once poll_interval_sec elapses"
     end
   end
@@ -351,8 +350,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       assert_empty sched.tick(now: T0 + 30),
                    "a signal-terminated patrol must not be recorded as success"
-      assert_equal 1, sched.tick(now: T0 + 71).size,
-                   "a signal-terminated patrol retries on failure backoff"
+      assert_equal 1, sched.tick(now: T0 + 601).size,
+                   "a signal-terminated patrol retries after scan cadence"
     end
   end
 
@@ -434,7 +433,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_provider_retry_backoff_is_process_local_and_not_retained_after_restart
+  def test_provider_retry_backoff_is_retained_after_restart
     old_database = Hive::UsageDb.database
     with_tmp_dir do |dir|
       entry = project_entry(dir)
@@ -456,7 +455,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       )
 
       restarted = scheduler(entry, cfg)
-      assert_equal 1, restarted.tick(now: T0 + 20).size
+      assert_empty restarted.tick(now: T0 + 20)
+      assert_equal 1, restarted.tick(now: retry_at).size
       architecture = Hive::Patrol::LaunchBudget.new(
         dir, cfg: cfg, project_id: entry.fetch("project_id"),
         project_name: entry.fetch("name"), engine: :architecture,

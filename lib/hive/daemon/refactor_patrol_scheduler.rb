@@ -114,10 +114,13 @@ module Hive
         end
       end
 
-      def candidates(now: Time.now)
+      def candidates(now: Time.now, projects: nil, include_scheduled: true)
         @events.clear
-        scheduled = @scheduled_scheduler ? @scheduled_scheduler.candidates(now: now) : []
+        selected = Array(projects).map(&:to_s) if projects
+        scheduled = include_scheduled && @scheduled_scheduler ?
+          @scheduled_scheduler.candidates(now: now) : []
         managed = managed_entries
+        managed.select! { |entry| selected.include?(entry.fetch("name").to_s) } if selected
         stores_by_project = {}
         block_configuration_errors(now)
         due_by_project = managed.to_h do |entry|
@@ -197,6 +200,41 @@ module Hive
         drained = @events.dup + (@scheduled_scheduler ? @scheduled_scheduler.drain_events : [])
         @events.clear
         drained
+      end
+
+      def readiness(project:, now: Time.now, candidates: nil)
+        candidates ||= self.candidates(
+          now: now, projects: [ project ], include_scheduled: false
+        )
+        entry = managed_entries.find { |item| item.fetch("name").to_s == project.to_s }
+        return [] unless entry
+
+        runnable_ids = candidates.map { |candidate| candidate[:job_id].to_s }
+        items = candidates.map do |candidate|
+          {
+            "bucket" => "runnable_now",
+            "id" => "architecture:#{candidate.fetch(:action_phase)}:#{candidate.fetch(:job_id)}",
+            "component" => "architecture_patrol", "reason" => "eligible",
+            "next_check_at" => nil, "condition" => nil
+          }
+        end
+        store_for(entry).jobs.each do |job|
+          next if job.fetch("complete") || runnable_ids.include?(job.fetch("job_id").to_s)
+
+          attempt = Array(job["attempts"]).last || {}
+          deadline = attempt["next_eligible_at"] || attempt["expires_at"]
+          condition = deadline ?
+            { "kind" => "time_due", "task" => job.fetch("job_id"),
+              "deadline" => deadline } :
+            { "kind" => "attempt_completed", "task" => job.fetch("job_id") }
+          items << {
+            "bucket" => "waiting_external",
+            "id" => "architecture:job:#{job.fetch('job_id')}",
+            "component" => "architecture_patrol", "reason" => job.fetch("state"),
+            "next_check_at" => deadline, "condition" => condition
+          }
+        end
+        items
       end
 
       def reserve(candidate, now: Time.now)

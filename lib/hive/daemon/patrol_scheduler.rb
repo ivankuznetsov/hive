@@ -7,6 +7,7 @@ require "hive/git_ops"
 require "hive/patrol/decision_projection"
 require "hive/patrol/launch_budget"
 require "hive/patrol/state_store"
+require "hive/one_shot/schedule_state"
 require "hive/workflows"
 
 module Hive
@@ -36,6 +37,7 @@ module Hive
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
                      git: GitHelper.new, state_store_factory: nil,
+                     schedule_state_factory: nil,
                      database: Hive::RuntimeControlPlane.database)
         @registry = registry
         @config_loader = config_loader
@@ -46,9 +48,15 @@ module Hive
             entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path")
           )
         end
+        @schedule_state_factory = schedule_state_factory || lambda do |entry|
+          Hive::OneShot::ScheduleState.new(state_root: entry.fetch("hive_state_path"))
+        end
         @pending = {}
         @failures = {}
         @next_check_at = {}
+        @post_reserve_at = {}
+        @loaded_gates = {}
+        @observations = {}
         @events = []
       end
 
@@ -63,13 +71,24 @@ module Hive
       # candidate remains eligible until `reserve` acquires dispatch
       # ownership. Timer schedules wake at their exact due time rather than
       # a full poll interval after the most recent daemon scan.
-      def candidates(now: Time.now)
+      def candidates(now: Time.now, projects: nil, bypass_observation_throttle: false,
+                     persist: true, strict: false)
         @events.clear
         dispatches = []
+        selected = Array(projects).map(&:to_s) if projects
         @registry.call.each do |entry|
           project = entry.fetch("name")
-          next if pending?(project)
-          next if backed_off?(project, now)
+          next if selected && !selected.include?(project.to_s)
+
+          load_gates(entry)
+          if pending?(project)
+            observe(project, :waiting_external, "worker_active")
+            next
+          end
+          if (deadline = blocked_until(project, now))
+            observe(project, :waiting_external, "cadence", deadline)
+            next
+          end
           # Slow patrol cadence (U2): once a project has been evaluated,
           # don't re-run its per-project git/config checks until
           # poll_interval_sec has elapsed. Without this the `new_commits`
@@ -77,12 +96,17 @@ module Hive
           # (~30s) instead of the configured patrol interval. A project
           # with an outstanding failure is exempt so its backoff schedule
           # governs the retry rather than the slow poll.
-          next if throttled?(project, now)
+          if !bypass_observation_throttle && throttled?(project, now)
+            observe(project, :waiting_external, "observation_throttled", @next_check_at[project])
+            next
+          end
 
           cfg = @config_loader.call(entry.fetch("path"))
           patrol = cfg.fetch("patrol", {})
           unless Hive::Workflows.coding_id?(cfg["default_workflow"])
             @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+            persist_gates(entry, now: now) if persist
+            observe(project, :disabled, "non_coding_workflow")
             next
           end
           # Throttle every project we evaluate, including opted-out ones:
@@ -100,15 +124,40 @@ module Hive
             @next_check_at[project] = next_schedule_check_at(
               state, patrol, selection_input, now
             )
+            persist_gates(entry, now: now) if persist
+            if selection_input.fetch("enabled")
+              observe(project, :waiting_external, selection.rationale,
+                      @next_check_at[project], trigger: selection_input.fetch("trigger"))
+            else
+              observe(project, :disabled, "disabled")
+            end
             next
           end
-          next unless launch_capacity_available?(entry, cfg, now)
+          unless launch_capacity_available?(entry, cfg, now)
+            persist_gates(entry, now: now) if persist
+            observe(project, :waiting_external, "launch_capacity",
+                    @next_check_at[project])
+            next
+          end
 
+          observe(project, :runnable_now, "due")
           dispatches << dispatch_for(entry)
-        rescue Hive::ConfigError, Hive::GitError, KeyError
+        rescue Hive::ConfigError, Hive::GitError, KeyError => error
+          raise if strict
+
+          @observations[project] = { state: :error, reason: error.message }
           next
         end
         dispatches
+      end
+
+      def readiness(project:, now: Time.now, persist: false)
+        candidates(
+          now: now, projects: [ project ], bypass_observation_throttle: true,
+          persist: persist, strict: true
+        )
+        observation = @observations.fetch(project.to_s, { state: :disabled })
+        readiness_item(project.to_s, observation)
       end
 
       def drain_events
@@ -126,7 +175,8 @@ module Hive
         # tick. A Patrol child can fail after this hint was produced but before
         # the main thread reserves it; recheck the newer backoff here so a
         # stale hint cannot immediately undo failure pacing.
-        return nil if backed_off?(project, now)
+        load_gates(entry)
+        return nil if blocked_until(project, now)
 
         cfg = @config_loader.call(entry.fetch("path"))
         return nil unless cfg.dig("patrol", "enabled") == true
@@ -138,8 +188,10 @@ module Hive
           started_at: now,
           entry: entry
         }
-        @next_check_at[project] = now +
-          (cfg.dig("patrol", "poll_interval_sec") || 600).to_i
+        cadence = now + (cfg.dig("patrol", "poll_interval_sec") || 600).to_i
+        @next_check_at[project] = cadence
+        @post_reserve_at[project] = cadence
+        persist_gates(entry, now: now)
         candidate.reject { |key, _| key == :entry }
       rescue StandardError
         @pending.delete(project)
@@ -163,6 +215,8 @@ module Hive
           )
           @failures[project] = { count: count, next_eligible_at: now + interval }
         end
+        entry = Array(@registry.call).find { |item| item.fetch("name") == project }
+        persist_gates(entry, now: now) if entry
       end
 
       # Release process-local admission when the dispatcher gates a candidate
@@ -170,6 +224,8 @@ module Hive
       def cancel(project:)
         @pending.delete(project)
         @next_check_at.delete(project)
+        entry = Array(@registry.call).find { |item| item.fetch("name") == project }
+        persist_gates(entry, now: Time.now) if entry
       end
 
       def pending?(project)
@@ -177,6 +233,80 @@ module Hive
       end
 
       private
+
+      def observe(project, state, reason, deadline = nil, trigger: nil)
+        @observations[project.to_s] = {
+          state: state, reason: reason.to_s, deadline: deadline, trigger: trigger
+        }
+      end
+
+      def readiness_item(project, observation)
+        return [] if observation.fetch(:state) == :disabled
+
+        state = observation.fetch(:state)
+        deadline = observation[:deadline]
+        condition = if state == :runnable_now
+          nil
+        elsif deadline
+          {
+            "kind" => "time_due", "project" => project,
+            "deadline" => deadline.utc.iso8601(6)
+          }
+        elsif observation[:trigger] == "new_commits"
+          { "kind" => "task_changed", "project" => project }
+        else
+          { "kind" => "attempt_completed", "project" => project }
+        end
+        [
+          {
+            "bucket" => state.to_s,
+            "id" => "patrol:scan", "component" => "patrol",
+            "reason" => observation.fetch(:reason),
+            "next_check_at" => deadline,
+            "condition" => condition
+          }
+        ]
+      end
+
+      def load_gates(entry)
+        project = entry.fetch("name")
+        return if @loaded_gates[project]
+
+        data = @schedule_state_factory.call(entry).read("patrol")
+        @next_check_at[project] = parse_time(data["observation_check_at"])
+        @post_reserve_at[project] = parse_time(data["post_reserve_at"])
+        if data["failure_count"].to_i.positive?
+          @failures[project] = {
+            count: data.fetch("failure_count").to_i,
+            next_eligible_at: parse_time(data["failure_retry_at"])
+          }
+        end
+        @loaded_gates[project] = true
+      end
+
+      def persist_gates(entry, now:)
+        return unless entry
+
+        project = entry.fetch("name")
+        failure = @failures[project]
+        @schedule_state_factory.call(entry).update("patrol", now: now) do |state|
+          state.merge(
+            "observation_check_at" => iso_time(@next_check_at[project]),
+            "post_reserve_at" => iso_time(@post_reserve_at[project]),
+            "failure_count" => failure&.fetch(:count, 0).to_i,
+            "failure_retry_at" => iso_time(failure && failure[:next_eligible_at])
+          )
+        end
+      end
+
+      def iso_time(value) = value&.utc&.iso8601(6)
+
+      def blocked_until(project, now)
+        deadlines = [
+          @post_reserve_at[project], @failures.dig(project, :next_eligible_at)
+        ].compact.select { |deadline| deadline > now }
+        deadlines.max
+      end
 
       # Candidate rows are hints captured before the dispatcher regains
       # control. Re-resolve the registration so a removed/replaced project

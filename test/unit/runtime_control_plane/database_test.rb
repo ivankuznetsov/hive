@@ -54,6 +54,26 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_read_callbacks_are_sqlite_enforced_read_only
+    with_database do |database|
+      assert_raises(Sequel::DatabaseError) do
+        database.read { |connection| connection[:installations].update(activation_epoch: 3) }
+      end
+      assert_equal 0, database.read { |connection| connection[:installations].get(:activation_epoch) }
+    end
+  end
+
+  def test_database_is_the_only_runtime_control_plane_connection_owner
+    root = File.expand_path("../../../lib/hive/runtime_control_plane", __dir__)
+    offenders = Dir.glob(File.join(root, "**/*.rb")).reject do |path|
+      path == File.join(root, "database.rb")
+    end.select do |path|
+      File.binread(path).include?("Sequel.connect")
+    end
+
+    assert_empty offenders
+  end
+
   def test_migration_creates_owner_private_database_and_sidecars_under_permissive_umask
     with_tmp_dir do |root|
       path = File.join(root, "state", "runtime.sqlite3")

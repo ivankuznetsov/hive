@@ -614,7 +614,8 @@ module Hive
       end
 
       def translate_store_error(error, prefix)
-        raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed)
+        raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed) ||
+          error.is_a?(RuntimeControlPlane::AdmissionClosed)
         raise RepositoryError, "#{prefix}: #{error.message}"
       end
     end

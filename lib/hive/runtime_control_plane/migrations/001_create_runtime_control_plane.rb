@@ -12,6 +12,93 @@ Sequel.migration do
       check Sequel.lit("next_task_id IS NULL OR next_task_id >= 1")
     end
 
+    create_table(:runtime_lifecycle) do
+      foreign_key :installation_id, :installations, type: String, key: :installation_id,
+                  primary_key: true, null: false, on_delete: :cascade, on_update: :cascade
+      String :phase, null: false, default: "running"
+      Integer :generation, null: false, default: 0
+      Integer :revision, null: false, default: 0
+      Integer :mutation_sequence, null: false, default: 0
+      String :boot_id
+      Float :deadline_monotonic
+      Float :shutdown_grace_sec
+      String :interrupted_attempt_ids_json, text: true, null: false, default: "[]"
+      String :quiesce_started_at
+      String :paused_at
+      String :resumed_at
+      String :updated_at, null: false
+      check Sequel.lit("phase IN ('running', 'quiescing', 'paused', 'resuming')")
+      check Sequel.lit("generation >= 0 AND revision >= 0 AND mutation_sequence >= 0")
+      check Sequel.lit("deadline_monotonic IS NULL OR deadline_monotonic >= 0")
+      check Sequel.lit("shutdown_grace_sec IS NULL OR shutdown_grace_sec >= 0")
+    end
+
+    create_table(:launch_reservations) do
+      String :reservation_id, primary_key: true, null: false
+      foreign_key :installation_id, :installations, type: String, key: :installation_id,
+                  null: false, on_delete: :cascade, on_update: :cascade
+      String :attempt_id
+      String :task_id
+      String :origin, null: false
+      String :role, null: false
+      String :state, null: false
+      Integer :admission_generation, null: false
+      Integer :owner_pid
+      String :owner_start_fingerprint
+      String :reason
+      String :created_at, null: false
+      String :updated_at, null: false
+      check Sequel.lit("state IN ('reserved', 'registered', 'cancelled_by_quiesce', 'released')")
+      check Sequel.lit("admission_generation >= 0")
+      check Sequel.lit("owner_pid IS NULL OR owner_pid > 0")
+      index [ :installation_id, :state ], name: :launch_reservations_installation_state_idx
+      index [ :attempt_id ], name: :launch_reservations_attempt_idx
+    end
+
+    create_table(:owned_processes) do
+      String :process_id, primary_key: true, null: false
+      foreign_key :installation_id, :installations, type: String, key: :installation_id,
+                  null: false, on_delete: :cascade, on_update: :cascade
+      foreign_key :reservation_id, :launch_reservations, type: String, key: :reservation_id,
+                  on_delete: :set_null, on_update: :cascade
+      String :attempt_id
+      String :task_id
+      String :service_identity
+      String :origin, null: false
+      String :role, null: false
+      Integer :pid
+      String :start_fingerprint
+      Integer :process_group_id
+      Integer :session_id
+      String :state, null: false
+      Integer :proven_child_safe, null: false, default: 0
+      String :custody_mode, null: false, default: "unverified"
+      String :unknown_reason
+      String :created_at, null: false
+      String :updated_at, null: false
+      String :stopped_at
+      check Sequel.lit("pid IS NULL OR pid > 0")
+      check Sequel.lit("process_group_id IS NULL OR process_group_id > 0")
+      check Sequel.lit("session_id IS NULL OR session_id > 0")
+      check Sequel.lit("proven_child_safe IN (0, 1)")
+      check Sequel.lit("state IN ('starting', 'running', 'stopping', 'stopped', 'unknown')")
+      index [ :installation_id, :state ], name: :owned_processes_installation_state_idx
+      index [ :reservation_id ], name: :owned_processes_reservation_idx
+      index [ :attempt_id ], name: :owned_processes_attempt_idx
+      index [ :pid ], name: :owned_processes_pid_idx
+    end
+
+    create_table(:quiescence_cleanup_writes) do
+      foreign_key :installation_id, :installations, type: String, key: :installation_id,
+                  null: false, on_delete: :cascade, on_update: :cascade
+      Integer :generation, null: false
+      String :attempt_id, null: false
+      String :created_at, null: false
+      primary_key [ :installation_id, :generation, :attempt_id ],
+                  name: :quiescence_cleanup_writes_pk
+      check Sequel.lit("generation >= 0")
+    end
+
     create_table(:projects) do
       String :project_id, primary_key: true, null: false
       foreign_key :installation_id, :installations, type: String, key: :installation_id,

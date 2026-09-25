@@ -18,6 +18,8 @@ module Hive
     # commits the only valid terminal receipt.
     class Supervisor
       READ_CHUNK = 16 * 1024
+      # Pause between retries of a lease write that lost a SQLite lock race.
+      STORE_RETRY_SEC = 1
 
       def initialize(store:, attempt_id:, claim_io:, ready_io: nil,
                      heartbeat_sec: 5, stale_sec: 30,
@@ -82,15 +84,18 @@ module Hive
           provider_signal: provider_signal
         )
         output_references << diagnostic_reference if diagnostic_reference
-        terminal = @store.terminalize(
-          record, outcome: outcome, exit_status: exit_status,
-          final_checkpoint: record.checkpoint,
-          output_references: output_references,
-          log_reference: log_reference, provider_evidence: provider_evidence,
-          now: @clock.call
-        )
+        terminal = with_store_retry do
+          @store.terminalize(
+            record, outcome: outcome, exit_status: exit_status,
+            final_checkpoint: record.checkpoint,
+            output_references: output_references,
+            log_reference: log_reference, provider_evidence: provider_evidence,
+            now: @clock.call
+          )
+        end
         terminal.receipt.fetch("exit_status")
       rescue CompareAndSwapFailed, RepositoryError => e
+        warn "hive attempt supervisor: #{@attempt_id} lost its lease: #{e.class}: #{e.message}"
         terminate_worker_group
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => e.message)
         Hive::ExitCodes::TEMPFAIL
@@ -173,10 +178,12 @@ module Hive
         stderr_w.close
         worker_identity = process_identity(@worker_pid)
         @worker_pgid = worker_identity.fetch("process_group_id")
-        record = @store.checkpoint(
-          record, checkpoint: record.checkpoint,
-          worker: worker_identity, now: @clock.call
-        )
+        record = with_store_retry do
+          @store.checkpoint(
+            record, checkpoint: record.checkpoint,
+            worker: worker_identity, now: @clock.call
+          )
+        end
         if gate_w
           gate_w.write("1")
           gate_w.close
@@ -184,6 +191,7 @@ module Hive
 
         readers = { stdout_r => :stdout, stderr_r => :stderr }
         next_heartbeat = @monotonic.call + @heartbeat_sec
+        lease_expires_at = @monotonic.call + @stale_sec
         timeout_at = @timeout_sec && (@monotonic.call + @timeout_sec)
         status = nil
         forced_exit = nil
@@ -213,8 +221,15 @@ module Hive
           end
 
           if now_mono >= next_heartbeat
-            record = @store.heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
-            next_heartbeat = now_mono + @heartbeat_sec
+            renewed = renew_lease(record, log, lease_expires_at)
+            now_mono = @monotonic.call
+            if renewed
+              record = renewed
+              lease_expires_at = now_mono + @stale_sec
+              next_heartbeat = now_mono + @heartbeat_sec
+            else
+              next_heartbeat = now_mono + [ STORE_RETRY_SEC, @heartbeat_sec ].min
+            end
           end
 
           if post_exit_started && post_exit_deadline && now_mono >= post_exit_deadline
@@ -426,6 +441,37 @@ module Hive
       def close_readers(readers)
         readers.each_key { |io| io.close unless io.closed? }
         readers.clear
+      end
+
+      # A heartbeat that loses a SQLite lock race rolled back, so the observed
+      # record is still the compare-and-swap base. Defer it while the lease is
+      # unexpired instead of killing a healthy worker; a lost CAS or any other
+      # store failure still ends the attempt.
+      def renew_lease(record, log, lease_expires_at)
+        @store.heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+      rescue CompareAndSwapFailed
+        raise
+      rescue RepositoryError => e
+        raise unless Hive::InternalError.sqlite_busy?(e) && @monotonic.call < lease_expires_at
+
+        log.append(:supervisor, "hive attempt supervisor: heartbeat deferred: #{e.message}\n")
+        nil
+      end
+
+      # Retry a one-shot lease write through SQLite lock contention for at most
+      # one lease window; the transaction rolled back, so retrying is safe.
+      def with_store_retry
+        deadline = @monotonic.call + @stale_sec
+        begin
+          yield
+        rescue CompareAndSwapFailed
+          raise
+        rescue RepositoryError => e
+          raise unless Hive::InternalError.sqlite_busy?(e) && @monotonic.call < deadline
+
+          sleep STORE_RETRY_SEC
+          retry
+        end
       end
 
       def terminate_worker_group

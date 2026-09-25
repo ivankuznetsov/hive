@@ -146,20 +146,20 @@ class HiveStagesPlanTest < Minitest::Test
     end
   end
 
-  def render_plan_prompt(carried: "", source: nil)
+  def render_plan_prompt(carried: "", source: nil, tag: Hive::Stages::Base.user_supplied_tag)
     Hive::Stages::Base.render(
       "plan_prompt.md.erb",
       Hive::Stages::Base::TemplateBindings.new(
         project_name: "demo", task_folder: "/tmp/task", brainstorm_text: "idea",
         carried_decisions_text: carried, source_checkout: source,
-        user_supplied_tag: Hive::Stages::Base.user_supplied_tag, skill_invocation: "/plan"
+        user_supplied_tag: tag, skill_invocation: "/plan"
       )
     )
   end
 
   def test_plan_prompt_wraps_carried_decisions_as_user_supplied_data
     tag = Hive::Stages::Base.user_supplied_tag
-    with_decisions = render_plan_prompt(carried: "- Operator exit (gated_auto, high risk; prf-a)")
+    with_decisions = render_plan_prompt(carried: "- Operator exit (gated_auto, high risk; prf-a)", tag: tag)
     assert_includes with_decisions, "<#{tag} content_type=\"plan_review_decisions\">"
     assert_includes with_decisions, "- Operator exit (gated_auto, high risk; prf-a)"
     refute_includes render_plan_prompt, "plan_review_decisions"
@@ -170,4 +170,3 @@ class HiveStagesPlanTest < Minitest::Test
     refute_includes render_plan_prompt, "Source checkout:"
   end
 end
-

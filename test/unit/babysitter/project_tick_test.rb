@@ -288,6 +288,87 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  # A finalized task only waits for its PR to merge; its red CI must reach the
+  # babysitter. A finalize still in progress keeps its branch protected, and an
+  # unreadable finalize marker fails safe to protected.
+  def test_completed_finalize_releases_its_branch_but_running_finalize_does_not
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 5 })
+      done = write_task_pointer(dir, "8-finalize", "finalized-task", "feature/finalized")
+      File.write(File.join(done, "pr.md"), "# PR\n\n<!-- COMPLETE pr_url=https://example.test/pr/40 -->\n")
+      running = write_task_pointer(dir, "8-finalize", "finalizing-task", "feature/finalizing")
+      File.write(File.join(running, "pr.md"), "# PR\n\n<!-- AGENT_WORKING pid=1 -->\n")
+      write_task_pointer(dir, "8-finalize", "no-state-file", "feature/no-state")
+      prs = %w[feature/finalized feature/finalizing feature/no-state].each_with_index.map do |branch, index|
+        { "number" => 40 + index, "headRefName" => branch, "isDraft" => false, "labels" => [],
+          "updatedAt" => "2026-05-26T10:00:00Z" }
+      end
+      called = []
+      logger = make_logger(dir)
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, _project, _cfg, **_kwargs|
+          called << pr["number"]
+          :success
+        }) do
+          Hive::Babysitter::ProjectTick.run(project, dry_run: true, logger: logger, inflight: Set.new)
+        end
+      end
+
+      assert_equal [ 40 ], called, "only the completed finalize hands its PR to the babysitter"
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_unreadable_finalize_marker_keeps_the_branch_owned
+    with_tmp_dir do |dir|
+      folder = write_task_pointer(dir, "8-finalize", "odd-task", "feature/odd")
+      File.write(File.join(folder, "pr.md"), "<!-- COMPLETE -->\n")
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { raise IOError, "unreadable" }) do
+        assert_includes Hive::Babysitter::ProjectTick.pipeline_owned_branches(project_entry(dir)), "feature/odd"
+      end
+    end
+  end
+
+  # Persistently red PRs must not win every tick: never-attempted PRs go
+  # first, then the least recently attempted, regardless of age or priority.
+  def test_selection_round_robins_by_last_attempt
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      events = File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      FileUtils.mkdir_p(File.dirname(events))
+      File.write(events, [
+        { "ts" => "2026-05-26T12:00:00Z", "pr" => 1, "action" => "agent-fix", "outcome" => "success" },
+        { "ts" => "2026-05-26T09:00:00Z", "pr" => 2, "action" => "rebase", "outcome" => "success" },
+        { "ts" => "2026-05-26T13:00:00Z", "pr" => 3, "action" => "skipped", "outcome" => "draft_pr" }
+      ].map { |record| JSON.generate(record) }.join("\n") + "\nnot json\n")
+      prs = [
+        { "number" => 1, "mergeStateStatus" => "BLOCKED", "updatedAt" => "2026-05-01T00:00:00Z" },
+        { "number" => 2, "mergeStateStatus" => "BLOCKED", "updatedAt" => "2026-05-02T00:00:00Z" },
+        { "number" => 3, "mergeStateStatus" => "BEHIND", "updatedAt" => "2026-05-25T00:00:00Z" }
+      ]
+
+      ordered = Hive::Babysitter::ProjectTick.fair_order(prs, project).map { |pr| pr["number"] }
+
+      assert_equal [ 3, 2, 1 ], ordered, "never attempted, then oldest attempt, then most recent"
+    end
+  end
+
+  def test_missing_or_unreadable_attempt_log_means_no_history
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      assert_equal({}, Hive::Babysitter::ProjectTick.last_attempt_times(project))
+      events = File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      FileUtils.mkdir_p(File.dirname(events))
+      File.write(events, "")
+      with_replaced_singleton_method(File, :open, ->(*) { raise Errno::EACCES, "denied" }) do
+        assert_equal({}, Hive::Babysitter::ProjectTick.last_attempt_times(project))
+      end
+    end
+  end
+
   # A malformed worktree.yml (non-hash) must not crash the scan; that task
   # simply contributes no owned branch and its PR is processed normally.
   def test_malformed_worktree_pointer_does_not_crash_ownership_scan

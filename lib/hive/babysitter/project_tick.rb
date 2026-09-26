@@ -1,7 +1,9 @@
+require "json"
 require "time"
 require "set"
 require "hive/config"
 require "hive/gh"
+require "hive/markers"
 require "hive/stages"
 require "hive/workflows"
 require "hive/worktree"
@@ -160,7 +162,44 @@ module Hive
           next if inflight.include?(inflight_key(project_entry, number))
 
           pr
-        end.sort_by { |pr| [ selection_priority(pr), parse_time(pr["updatedAt"]) ] }.first(limit)
+        end.then { |candidates| fair_order(candidates, project_entry) }.first(limit)
+      end
+
+      # Round-robin across open PRs: never-attempted PRs first, then the least
+      # recently attempted, then merge-state priority and age. Ordering by
+      # priority and age alone let the same persistently red PRs win every
+      # tick (one was "fixed" 13 times in six hours) while newer PRs starved.
+      def fair_order(candidates, project_entry)
+        attempted = last_attempt_times(project_entry)
+        candidates.sort_by do |pr|
+          [ attempted.fetch(pr["number"].to_i, EPOCH), selection_priority(pr), parse_time(pr["updatedAt"]) ]
+        end
+      end
+
+      EPOCH = Time.at(0).utc
+      ATTEMPT_ACTIONS = %w[agent-fix rebase force-push].freeze
+      ATTEMPT_LOG_TAIL_BYTES = 512 * 1024
+
+      # Last fix attempt per PR, from the tail of this project's babysitter
+      # event log. A missing or unreadable log means no history.
+      def last_attempt_times(project_entry)
+        path = File.join(project_entry.fetch("hive_state_path"), "babysitter", "events.jsonl")
+        return {} unless File.file?(path)
+
+        tail = File.open(path, "rb") do |file|
+          file.seek([ file.size - ATTEMPT_LOG_TAIL_BYTES, 0 ].max)
+          file.read
+        end
+        tail.each_line.with_object({}) do |line, times|
+          record = JSON.parse(line)
+          next unless record.is_a?(Hash) && ATTEMPT_ACTIONS.include?(record["action"]) && record["pr"]
+
+          times[record["pr"].to_i] = parse_time(record["ts"])
+        rescue JSON::ParserError
+          next
+        end
+      rescue SystemCallError, IOError
+        {}
       end
 
       # Branches owned by a task still moving through the pipeline — read from
@@ -175,6 +214,8 @@ module Hive
 
         active_stage_dirs.each_with_object(Set.new) do |stage_dir, branches|
           Dir.glob(File.join(hive_state, "stages", stage_dir, "*")).each do |task_folder|
+            next if finalized_awaiting_merge?(stage_dir, task_folder)
+
             branch = task_branch(task_folder)
             branches << branch if branch
           end
@@ -186,6 +227,23 @@ module Hive
       # Derived from the workflow descriptor so a stage renumber can't strand it.
       def active_stage_dirs
         Hive::Stages::DIRS.select { |stage_dir| Hive::Workflows.verb_advancing_from(stage_dir) }
+      end
+
+      # A coding task whose finalize already completed only waits for its PR to
+      # merge: the daemon polls (ready_to_archive) and never pushes again, and
+      # archive handles a merged PR whatever its branch state. Leaving it
+      # "owned" stranded a PR whose CI went red after main moved, since the
+      # pipeline no longer acts and the babysitter deferred to it.
+      FINALIZE_STAGE_DIR = "8-finalize".freeze # coding-scoped: finalized coding PRs await merge only
+      FINALIZE_STATE_FILE = "pr.md".freeze
+
+      def finalized_awaiting_merge?(stage_dir, task_folder)
+        return false unless stage_dir == FINALIZE_STAGE_DIR
+
+        state_file = File.join(task_folder, FINALIZE_STATE_FILE)
+        File.file?(state_file) && Hive::Markers.current(state_file).name == :complete
+      rescue StandardError
+        false
       end
 
       # The branch a task's worktree.yml records, or nil when the task has no

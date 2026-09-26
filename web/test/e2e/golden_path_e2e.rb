@@ -150,9 +150,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # Wait for the durable PR-gate stage rather than its transient action
     # label: after promotion a fast daemon may immediately dispatch open-pr,
     # replacing "Ready to open PR" while the task remains at the same gate.
-    # The task page now leads with a readable current-step summary rather than
-    # a duplicate stage badge.
-    assert_selector "#workspace-summary .workspace-eyebrow", text: /Current step.*Open[- ]pr/i, wait: 90
+    # The task page leads with a readable stage summary rather than a
+    # duplicate stage badge.
+    assert_selector "#workspace-summary .workspace-eyebrow", text: /\AOpen[- ]pr\z/i, wait: 90
 
     # The fake agent must satisfy the same bounded authoring contract as a real
     # open-PR agent. Otherwise the daemon immediately enters authoring recovery

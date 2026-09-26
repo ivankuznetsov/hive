@@ -3,6 +3,170 @@ require "application_system_test_case"
 class StatusStreamSourceTest < ApplicationSystemTestCase
   teardown { StatusBroadcaster.stop! }
 
+  test "hidden tabs stop scanning and refresh immediately when visible again" do
+    StatusBroadcaster.feed = StatusPageFeed.new(interval: 0.05)
+    sign_in!
+    wait_for_live_status
+    feed = StatusBroadcaster.feed
+
+    set_status_page_hidden(true)
+    wait_for_status_subscribers(0)
+    scans_while_hidden = feed.scan_count
+    assert_no_selector "#status-stream-source[connected]", visible: :all
+
+    project = create_hive_project!("hidden-tab")
+    create_task!(project, "Visible again after pausing")
+    sleep 0.2 # More than three normal poll intervals with every tab hidden.
+    assert_equal scans_while_hidden, feed.scan_count
+
+    feed.instance_variable_set(:@interval, 60)
+    set_status_page_hidden(false)
+    assert_selector "#status-stream-source[connected]", visible: :all, wait: 3
+    assert_text "Visible again after pausing", wait: 3
+    wait_for_status_subscribers(1)
+    assert_equal scans_while_hidden + 1, feed.scan_count
+  ensure
+    restore_status_page_visibility
+  end
+
+  test "another visible tab keeps the shared poller and receives updates" do
+    StatusBroadcaster.feed = StatusPageFeed.new(interval: 0.05)
+    sign_in!
+    wait_for_live_status
+    set_status_page_hidden(false)
+    feed = StatusBroadcaster.feed
+    poller = feed.instance_variable_get(:@poller)
+    other_tab = open_new_window
+
+    within_window(other_tab) do
+      visit root_path
+      assert_selector "#status-stream-source[connected]", visible: :all
+      wait_for_status_subscribers(2)
+      set_status_page_hidden(true)
+      wait_for_status_subscribers(1)
+    end
+
+    assert_same poller, feed.instance_variable_get(:@poller)
+    assert poller.alive?
+    project = create_hive_project!("visible-tab")
+    create_task!(project, "Updates reach the visible tab")
+    assert_text "Updates reach the visible tab", wait: 5
+
+    within_window(other_tab) do
+      set_status_page_hidden(false)
+      assert_text "Updates reach the visible tab", wait: 5
+      wait_for_status_subscribers(2)
+    end
+  ensure
+    other_tab&.close
+    restore_status_page_visibility
+  end
+
+  test "brief tab visits share an unfinished refresh instead of restarting it" do
+    feed = StatusPageFeed.new(interval: 60)
+    StatusBroadcaster.feed = feed
+    sign_in!
+    wait_for_live_status
+    original_scan = feed.method(:compute_snapshot)
+    scan_started = Queue.new
+    release_scan = Queue.new
+    feed.define_singleton_method(:compute_snapshot) do |projects|
+      payload = original_scan.call(projects)
+      scan_started << true
+      release_scan.pop
+      payload
+    end
+    previous_scans = feed.scan_count
+
+    set_status_page_hidden(true)
+    wait_for_status_subscribers(0)
+    project = create_hive_project!("unfinished-refresh")
+    create_task!(project, "Finished despite switching tabs")
+
+    set_status_page_hidden(false)
+    Timeout.timeout(5) { scan_started.pop }
+    scan_poller = feed.instance_variable_get(:@poller)
+    set_status_page_hidden(true)
+    wait_for_status_subscribers(0)
+    set_status_page_hidden(false)
+    wait_for_status_subscribers(1)
+    release_scan << true
+
+    assert_text "Finished despite switching tabs", wait: 5
+    assert_equal previous_scans + 1, feed.scan_count,
+                 "returning tabs must share the refresh that already started"
+  ensure
+    StatusBroadcaster.stop!
+    release_scan << true if release_scan
+    assert scan_poller.join(5), "the controlled scan must finish before fixture cleanup" if scan_poller
+    feed&.singleton_class&.remove_method(:compute_snapshot) if original_scan
+    restore_status_page_visibility
+  end
+
+  test "hidden sources stay dormant and discard setup that finishes after hiding" do
+    sign_in!
+    visit repos_path
+    wait_for_status_subscribers(0)
+
+    result = evaluate_script(<<~JS)
+      (async () => {
+        const source = document.createElement("hive-status-stream-source")
+        source.setAttribute("channel", "StatusChannel")
+        source.setAttribute("signed-stream-name", "hidden-source")
+        let factoryCalls = 0
+        let creates = 0
+        let disconnects = 0
+        let resolveConsumer
+        source.createConsumer = () => {
+          factoryCalls += 1
+          return new Promise((resolve) => { resolveConsumer = resolve })
+        }
+        const setHidden = (hidden) => {
+          Object.defineProperty(document, "hidden", { configurable: true, value: hidden })
+          document.dispatchEvent(new Event("visibilitychange"))
+        }
+
+        try {
+          setHidden(true)
+          document.body.appendChild(source)
+          source.setAttribute("signed-stream-name", "changed-while-hidden")
+          const callsWhileHidden = factoryCalls
+          setHidden(false)
+          setHidden(false)
+          const owner = source.statusOwner
+          setHidden(true)
+          resolveConsumer({
+            disconnect() { disconnects += 1 },
+            subscriptions: { create() { creates += 1 } }
+          })
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          source.remove()
+          setHidden(false)
+          return {
+            callsWhileHidden, factoryCalls, creates, disconnects,
+            disconnected: owner.state === "disconnected",
+            ownerCleared: source.statusOwner === null,
+            listenerCleared: source.statusVisibilityDocument === null
+          }
+        } finally {
+          source.remove()
+          delete document.hidden
+          document.dispatchEvent(new Event("visibilitychange"))
+        }
+      })()
+    JS
+
+    assert_equal({
+      "callsWhileHidden" => 0,
+      "factoryCalls" => 1,
+      "creates" => 0,
+      "disconnects" => 1,
+      "disconnected" => true,
+      "ownerCleared" => true,
+      "listenerCleared" => true
+    }, result)
+  end
+
   test "DOM teardown waits for Cable confirmation before server unsubscribe" do
     sign_in!
     visit repos_path
@@ -2899,6 +3063,20 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
   end
 
   private
+
+  def set_status_page_hidden(hidden)
+    execute_script(<<~JS, hidden)
+      Object.defineProperty(document, "hidden", { configurable: true, value: arguments[0] })
+      document.dispatchEvent(new Event("visibilitychange"))
+    JS
+  end
+
+  def restore_status_page_visibility
+    execute_script(<<~JS) if page&.current_url
+      delete document.hidden
+      document.dispatchEvent(new Event("visibilitychange"))
+    JS
+  end
 
   def with_replaced_instance_method(receiver, name, replacement)
     original = receiver.instance_method(name)

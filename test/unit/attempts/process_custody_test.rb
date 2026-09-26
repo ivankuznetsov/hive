@@ -110,6 +110,40 @@ class AttemptsProcessCustodyTest < Minitest::Test
     end
   end
 
+  def test_membership_rejects_a_domain_that_cannot_be_frozen
+    with_tmp_dir do |root|
+      domain = File.join(root, "attempt.scope")
+      FileUtils.mkdir_p(domain)
+      File.write(File.join(root, "cgroup.controllers"), "cpu memory pids\n")
+      File.write(File.join(domain, "cgroup.events"), "populated 1\n")
+
+      custody = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
+        cgroup_root: root, exclusive_domain_path: "/attempt.scope"
+      )
+
+      error = assert_raises(Hive::Error) { custody.members("/attempt.scope") }
+      assert_equal "cgroup custody domain cannot be frozen", error.message
+    end
+  end
+
+  def test_membership_times_out_when_freeze_never_acknowledges
+    with_tmp_dir do |root|
+      domain = File.join(root, "attempt.scope")
+      FileUtils.mkdir_p(domain)
+      File.write(File.join(root, "cgroup.controllers"), "cpu memory pids\n")
+      File.write(File.join(domain, "cgroup.events"), "populated 1\nfrozen 0\n")
+      File.write(File.join(domain, "cgroup.freeze"), "0\n")
+
+      custody = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
+        cgroup_root: root, exclusive_domain_path: "/attempt.scope"
+      )
+
+      error = assert_raises(Hive::Error) { custody.members("/attempt.scope", timeout_sec: 0.001) }
+      assert_equal "cgroup custody freeze timed out", error.message
+      assert_equal "0\n", File.read(File.join(domain, "cgroup.freeze"))
+    end
+  end
+
   def test_linux_adapter_does_not_exempt_a_writable_hierarchy_root
     with_tmp_dir do |root|
       domain = File.join(root, "attempt.scope")

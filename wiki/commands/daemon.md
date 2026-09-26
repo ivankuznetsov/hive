@@ -81,6 +81,9 @@ fails closed and prevents a stop-safe report.
 Before dispatch and draining, the pass settles provably abandoned Architecture
 Patrol discovery claims without reserving new architecture work. If an expired
 claim cannot be resolved safely, the pass returns an error immediately.
+While draining, the pass re-settles abandoned Architecture Patrol discovery
+claims every 5 seconds, so a claim whose owner dies mid-pass cannot keep the
+project guard. The drain window is 4 hours (`Hive::OneShot::Runner::DRAIN_TIMEOUT_SEC`).
 If project liveness remains unsettled through the bounded monotonic drain
 window, including for an orphaned discovery claim or unreadable Architecture
 Patrol store, the command returns `error.code: drain_timeout`, retains completed

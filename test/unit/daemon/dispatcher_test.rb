@@ -948,6 +948,56 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ "p1" ], calls.fetch(0).fetch(:projects)
   end
 
+  # A claim unexpired at entry can lose its owner mid-drain; the pass must keep
+  # settling abandoned claims instead of holding the project guard forever.
+  def test_run_one_shot_resettles_architecture_claims_while_draining
+    monotonic_now = 0.0
+    recoveries = []
+    architecture = Object.new
+    architecture.define_singleton_method(:recover_stale_claims) do |project:, now:|
+      recoveries << [ project, monotonic_now ]
+      { unresolved: [] }
+    end
+    liveness = Object.new
+    liveness.define_singleton_method(:safe_to_stop?) { recoveries.length >= 3 }
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], refactor_patrol_scheduler: architecture,
+      project_liveness: liveness, monotonic_clock: -> { monotonic_now },
+      one_shot_drain_timeout_sec: 60
+    )
+
+    result = dispatcher.run_one_shot(
+      project: "p1", now: T0, sleeper: ->(seconds) { monotonic_now += seconds }
+    )
+
+    assert_equal true, result.fetch(:safe_to_stop)
+    assert_equal 3, recoveries.length, "entry recovery plus two drain re-settlements"
+    gaps = recoveries.each_cons(2).map { |(_, a), (_, b)| b - a }
+    assert gaps.drop(1).all? { |gap| gap >= 5 }, "drain recovery is throttled"
+  end
+
+  def test_run_one_shot_fails_when_a_drain_recovery_stays_unresolved
+    monotonic_now = 0.0
+    calls = 0
+    architecture = Object.new
+    architecture.define_singleton_method(:recover_stale_claims) do |project:, now:|
+      calls += 1
+      { unresolved: calls > 1 ? [ "claim-1" ] : [] }
+    end
+    liveness = Object.new
+    liveness.define_singleton_method(:safe_to_stop?) { false }
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], refactor_patrol_scheduler: architecture,
+      project_liveness: liveness, monotonic_clock: -> { monotonic_now },
+      one_shot_drain_timeout_sec: 60
+    )
+
+    error = assert_raises(Hive::Error) do
+      dispatcher.run_one_shot(project: "p1", now: T0, sleeper: ->(seconds) { monotonic_now += seconds })
+    end
+    assert_includes error.message, "claim-1"
+  end
+
   def test_run_one_shot_drains_supervised_work_and_validates_scope
     dispatcher, supervisor = make_dispatcher(rows: [], scope_projects: [ "p1" ])
     supervisor.in_flight_results = [ true, false ]

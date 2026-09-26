@@ -114,6 +114,10 @@ class OneShotRunnerTest < Minitest::Test
         runtime = dispatcher.instance_variable_get(:@module_runtime)
         assert_equal :idle, runtime.tick(now: NOW, projects: [ "demo" ]).fetch(0).fetch(:status)
 
+        assert_equal Hive::OneShot::Runner::DRAIN_TIMEOUT_SEC,
+                     dispatcher.instance_variable_get(:@one_shot_drain_timeout_sec),
+                     "production one-shot passes must have a bounded drain window"
+
         watcher = dispatcher.instance_variable_get(:@merge_watcher)
         refute_nil watcher.instance_variable_get(:@schedule_state_factory)
         assert_instance_of Hive::Daemon::RefactorPatrolScheduler,

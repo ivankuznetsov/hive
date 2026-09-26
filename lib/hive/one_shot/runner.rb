@@ -35,6 +35,11 @@ module Hive
         def owned_projects = [ @project ]
       end
 
+      # Bounded monotonic drain window for one pass. A worker still unsettled
+      # after it makes the pass return error.code drain_timeout with
+      # safe_to_stop=false instead of looping forever.
+      DRAIN_TIMEOUT_SEC = 4 * 60 * 60
+
       attr_reader :ran
 
       def self.build(entry:, hive_home: Hive::Paths.state_home, dry_run: false,
@@ -118,7 +123,8 @@ module Hive
           dispatch_repository: Hive::RuntimeControlPlane::DispatchRepository.new(
             database: attempt_store.database
           ),
-          dispatch_request_state_home: hive_home, clock: clock
+          dispatch_request_state_home: hive_home, clock: clock,
+          one_shot_drain_timeout_sec: DRAIN_TIMEOUT_SEC
         )
         new(dispatcher: dispatcher, project: project, dry_run: dry_run,
             logger: logger, clock: clock)

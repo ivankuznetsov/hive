@@ -77,6 +77,9 @@ module Hive
       DISPATCH_AGING_STEP_SEC = 30 * 60
       PatrolDiscoveryResult = Data.define(:candidates, :error)
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
+      # How often a one-shot pass re-settles abandoned Architecture Patrol
+      # discovery claims while it drains.
+      ONE_SHOT_CLAIM_RECOVERY_INTERVAL_SEC = 5
       STATE_FILE_PROBE_BATCH_SIZE = 64
       STALE_RECOVERY_BLOCK_REASONS = %w[
         generation_conflict task_identity_conflict
@@ -570,6 +573,9 @@ module Hive
 
         drain_deadline = @one_shot_drain_timeout_sec &&
           (@monotonic_clock.call + @one_shot_drain_timeout_sec)
+        recovers_claims = @refactor_patrol_scheduler.respond_to?(:recover_stale_claims)
+        next_claim_recovery = recovers_claims &&
+          (@monotonic_clock.call + ONE_SHOT_CLAIM_RECOVERY_INTERVAL_SEC)
         loop do
           loop do
             current = @clock ? @clock.call.utc : Time.now.utc
@@ -577,6 +583,13 @@ module Hive
             enforce_child_timeouts(now: current)
             raise Hive::Error, "attempt reconciliation failed while draining" unless
               reconcile_attempts(now: current)
+            # An architecture claim unexpired at entry can lose its owner while
+            # the pass drains; keep settling abandoned claims so its guard
+            # cannot outlive the owner.
+            if recovers_claims && @monotonic_clock.call >= next_claim_recovery
+              recover_one_shot_architecture_claims(project: project, now: current)
+              next_claim_recovery = @monotonic_clock.call + ONE_SHOT_CLAIM_RECOVERY_INTERVAL_SEC
+            end
             break unless project_worker_live?(project)
 
             remaining = drain_deadline && (drain_deadline - @monotonic_clock.call)

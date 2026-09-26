@@ -92,6 +92,16 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal [], sup.reap_all
   end
 
+  def test_process_group_probes_fail_closed_for_invalid_or_inaccessible_groups
+    assert_nil Hive::Daemon::ChildSupervisor.send(:process_group_id, 1)
+    with_replaced_singleton_method(Process, :getpgid, ->(_) { raise Errno::EPERM }) do
+      assert_nil Hive::Daemon::ChildSupervisor.send(:process_group_id, 42)
+    end
+    with_replaced_singleton_method(Process, :kill, ->(*_) { raise Errno::EPERM }) do
+      assert Hive::Daemon::ChildSupervisor.send(:process_group_alive?, 42)
+    end
+  end
+
   def test_reap_all_leaves_background_gh_exit_for_its_capture_owner
     with_paused_gh_capture do |sup|
       pid = sup.spawn(

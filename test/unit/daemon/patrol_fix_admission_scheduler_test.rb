@@ -50,6 +50,18 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
     assert_match(/source_unavailable: Hive::ConfigError/, events.first.reason)
   end
 
+  def test_readiness_preserves_a_future_decision_lease_deadline
+    scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(clock: -> { NOW })
+    item = scheduler.send(
+      :readiness_item,
+      { "status" => "deciding", "occurrence_id" => "occ-1",
+        "decision_reservation" => { "expires_at" => (NOW + 60).iso8601 } }, NOW
+    )
+
+    assert_equal "waiting_external", item.fetch("bucket")
+    assert_equal NOW + 60, item.fetch("next_check_at")
+  end
+
   def test_drains_accepted_source_while_discovery_is_exhausted_without_patrol_budget
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|

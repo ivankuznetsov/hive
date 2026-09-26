@@ -74,6 +74,33 @@ class HiveCommandsDaemonTest < Minitest::Test
     Hive::Commands::Daemon.new(subcommand, **{ hive_home: @home }.merge(kwargs))
   end
 
+  def test_clear_hold_rejects_each_unsupported_or_ambiguous_invocation
+    cases = [
+      [ { all: true, target: "demo" }, /--all is not supported/ ],
+      [ { json: true, target: "demo" }, /--json is not supported/ ],
+      [ { dry_run: true, target: "demo" }, /--dry-run and --detach/ ],
+      [ { target: " " }, /missing PROJECT/ ],
+      [ { target: "missing" }, /unknown project/ ]
+    ]
+
+    cases.each do |kwargs, message|
+      target = kwargs.fetch(:target, nil)
+      options = kwargs.reject { |key, _| key == :target }
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Daemon.new("clear-hold", target, hive_home: @home, **options).call
+      end
+      assert_match message, error.message
+    end
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_) { { "name" => "demo" } }) do
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Daemon.new("clear-hold", "demo", hive_home: @home,
+                                  queue_args: [ "clear-hold", " " ]).call
+      end
+      assert_match(/SLUG must not be empty/, error.message)
+    end
+  end
+
   def write_pid_payload(pid: 4242, process_start_time: "start-time",
                         runtime: Hive::RuntimeIdentity.new.to_h)
     File.write(

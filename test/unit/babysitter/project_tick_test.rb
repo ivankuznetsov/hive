@@ -356,6 +356,23 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_already_green_noops_count_as_a_turn
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      events = File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      FileUtils.mkdir_p(File.dirname(events))
+      File.write(events, JSON.generate(
+        "ts" => "2026-05-26T12:00:00Z", "pr" => 1, "action" => "noop", "outcome" => "already-green"
+      ) + "\n")
+      prs = [
+        { "number" => 1, "mergeStateStatus" => "CLEAN", "updatedAt" => "2026-05-01T00:00:00Z" },
+        { "number" => 2, "mergeStateStatus" => "BLOCKED", "updatedAt" => "2026-05-25T00:00:00Z" }
+      ]
+
+      assert_equal [ 2, 1 ], Hive::Babysitter::ProjectTick.fair_order(prs, project).map { |pr| pr["number"] }
+    end
+  end
+
   def test_missing_or_unreadable_attempt_log_means_no_history
     with_tmp_dir do |dir|
       project = project_entry(dir)

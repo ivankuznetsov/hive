@@ -183,7 +183,7 @@ class HiveDaemonStatusQuiescenceTest < Minitest::Test
     report = Hive::Daemon::StatusReport.new(
       hive_home: "/tmp", environment: {}, database: database
     )
-    payload = report.send(:quiescence_payload)
+    payload = report.send(:quiescence_status)
     assert_equal "database_corrupt", payload.dig("lifecycle", "proof", "reason")
     assert_equal "restore backup", payload.dig("runtime_installation", "next_action")
 

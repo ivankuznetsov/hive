@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb, bin/hive-babysitter-skip-log.rb
 created: 2026-05-26
-updated: 2026-08-27
+updated: 2026-09-26
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -72,6 +72,8 @@ Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhaus
 ## Boundaries
 
 - Separate from `Hive::Daemon`; no shared `ConcurrencyController` and no task-folder dispatch.
+- Persistent runtime admission errors emit `admission_check_failed` and fail
+  closed before project enumeration.
 - Separate PID and log files: `$HIVE_HOME/.babysitter.pid`, `$HIVE_HOME/logs/babysitter.log`. Detached restarts re-exec the stable wrapper resolved by `Hive::InvokedBinary.path` as `hive babysit start --detach` before daemonizing, so the recorded process command is canonical and later restarts do not wait on a child that is still running under the old `restart --detach` argv. Restart aborts when stop leaves a potentially live PID file behind. Stop keeps a long 600-second drain because an active tick can be inside a synchronous PR repair agent with child processes and temporary worktrees; start reservation and successful cleanup take the same bounded sidecar lock and compare the current PID-file payload before removing it so a concurrent replacement start keeps its lock. TERM/INT also close one process-lifetime admission predicate: the dispatcher rechecks it between projects, `ProjectTick` rechecks it between selected PRs, and `PrFixer` rechecks it after blocking status/context reads at the final agent-launch boundary. An already spawned repair may drain, but shutdown cannot admit a later project, PR, rebase, or agent from the same tick.
 - Per-project opt-in only: `babysitter.enabled`.
 - Native setup installs a separate supervised per-user service through

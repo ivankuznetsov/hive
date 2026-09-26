@@ -60,7 +60,9 @@ module Hive
             )
             if candidates.first && !@dry_run && gate == :ok &&
                run_candidate(candidates.first, ran)
-              candidates = candidates.drop(1)
+              candidates = @scheduler.candidates(
+                now: @clock.call, projects: [ project ], include_scheduled: false
+              )
             end
             finished = @clock.call
             items = @scheduler.readiness(

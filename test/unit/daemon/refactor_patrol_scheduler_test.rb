@@ -503,6 +503,49 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_dispatch_recovery_settles_stale_claim_without_reserving_replacement_work
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      dead = store.claim_discovery!(
+        "job-7", owner: "daemon-crashed", analysis_sha: "head",
+        now: T0, lease_sec: 60, owner_pid: 4242,
+        owner_process_start_time: "boot-dead"
+      )
+      store.attach_discovery_process!(
+        dead, pid: 4242, process_start_time: "boot-dead", pgid: 4242,
+        now: T0 + 1, lease_sec: 60
+      )
+      active = scheduler(entry, store, claim_resolver: ->(_claim) { :resolved })
+
+      result = active.recover_stale_claims(project: "demo", now: T0 + 120)
+
+      assert_equal [ "job-7" ], result.fetch(:recovered)
+      assert_empty result.fetch(:unresolved)
+      job = store.read_job("job-7")
+      assert_equal "blocked", job.fetch("state")
+      assert_equal "superseded", job.fetch("attempts").last.fetch("state")
+      assert_equal 1, job.fetch("attempts").length
+    end
+  end
+
+  def test_dispatch_recovery_reports_expired_claim_without_proof_of_owner_death
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      store.claim_discovery!(
+        "job-7", owner: "daemon-crashed", analysis_sha: "head",
+        now: T0, lease_sec: 60, owner_pid: 4242,
+        owner_process_start_time: "boot-unknown"
+      )
+      cautious = scheduler(entry, store, claim_resolver: ->(_claim) { :unresolved })
+
+      result = cautious.recover_stale_claims(project: "demo", now: T0 + 120)
+
+      assert_empty result.fetch(:recovered)
+      assert_equal [ "job-7" ], result.fetch(:unresolved)
+      assert_equal "claimed", store.read_job("job-7").fetch("attempts").last.fetch("state")
+    end
+  end
+
   def test_restart_reclaims_a_dead_discovery_child_before_its_lease_expires
     with_project do |_dir, entry, store|
       enqueue(store)

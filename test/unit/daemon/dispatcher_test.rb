@@ -240,6 +240,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def recovery_blocked?(project:, slug:)
       recovery_blocked == true
     end
+
+    def next_poll_at(now:)
+      now + 300
+    end
   end
 
   class FakePatrolScheduler
@@ -254,7 +258,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @events = []
     end
 
-    def tick(now:)
+    def tick(now:, projects: nil)
       out = @next_dispatches
       @next_dispatches = []
       out
@@ -337,16 +341,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakePatrolArbiter
     attr_accessor :items, :commit_error, :candidate_error
-    attr_reader :committed
+    attr_reader :committed, :candidate_calls
 
     def initialize(items)
       @items = items
       @committed = []
+      @candidate_calls = []
     end
 
-    def candidates(now:)
+    def candidates(**arguments)
       raise candidate_error if candidate_error
 
+      @candidate_calls << arguments
       items
     end
 
@@ -367,11 +373,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @release = Queue.new
     end
 
-    def candidates(now:)
+    def candidates(**arguments)
       @calls += 1
       return [] unless @calls == 1
 
-      @started << now
+      @candidate_calls << arguments
+      @started << arguments.fetch(:now)
       @release.pop
       items
     end
@@ -726,6 +733,22 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ "p1" ], calls.fetch(0).fetch(:mutate_projects)
   end
 
+  def test_patrol_discovery_scopes_candidate_evaluation_to_owned_projects
+    ownership = Object.new
+    ownership.define_singleton_method(:refresh!) { [ "owned" ] }
+    ownership.define_singleton_method(:contentions) { {} }
+    ownership.define_singleton_method(:owned_projects) { [ "owned" ] }
+    ownership.define_singleton_method(:owned?) { |project| project == "owned" }
+    arbiter = FakePatrolArbiter.new([])
+    dispatcher, = make_dispatcher(
+      rows: [], project_ownership: ownership, patrol_arbiter: arbiter
+    )
+
+    dispatcher.send(:discover_patrol_candidates, now: T0)
+
+    assert_equal [ "owned" ], arbiter.candidate_calls.first.fetch(:projects)
+  end
+
   def test_completion_scope_excludes_projects_not_owned_by_daemon
     ownership = Object.new
     ownership.define_singleton_method(:owned?) { |project| project == "p1" }
@@ -1047,17 +1070,45 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   def test_run_one_shot_bounds_an_expired_architecture_claim_and_preserves_evidence
-    architecture_store = Object.new
-    architecture_store.define_singleton_method(:jobs) do
-      [ {
-        "attempts" => [ {
-          "kind" => Hive::RefactorPatrol::JobStore::DISCOVERY_ATTEMPT_KIND,
-          "state" => "claimed", "expires_at" => (T0 - 60).iso8601
-        } ]
-      } ]
+    live = true
+    recovered_project = nil
+    recovered_at = nil
+    liveness = Object.new
+    liveness.define_singleton_method(:safe_to_stop?) { !live }
+    recovery = Object.new
+    recovery.define_singleton_method(:recover_stale_claims) do |project:, now:|
+      recovered_project = project
+      recovered_at = now
+      live = false
+      { recovered: [ "job-1" ], unresolved: [] }
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], project_liveness: liveness,
+      refactor_patrol_scheduler: recovery
+    )
+
+    result = dispatcher.run_one_shot(project: "p1", now: T0)
+
+    assert_equal "p1", recovered_project
+    assert_equal T0, recovered_at
+    assert result.fetch(:safe_to_stop)
+  end
+
+  def test_run_one_shot_fails_boundedly_when_expired_architecture_claim_is_unresolved
+    recovery = Object.new
+    recovery.define_singleton_method(:recover_stale_claims) do |**|
+      { recovered: [], unresolved: [ "job-1" ] }
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ],
+      refactor_patrol_scheduler: recovery
+    )
+
+    error = assert_raises(Hive::Error) do
+      dispatcher.run_one_shot(project: "p1", now: T0)
     end
 
-    assert_bounded_one_shot_liveness_failure(architecture_store)
+    assert_includes error.message, "job-1"
   end
 
   def test_run_one_shot_bounds_an_unreadable_architecture_store_and_preserves_evidence
@@ -1163,7 +1214,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def test_one_shot_row_projection_covers_every_policy_owner
     dispatcher, _supervisor, controller = make_dispatcher(
-      rows: [], scope_projects: [ "p1" ]
+      rows: [], scope_projects: [ "p1" ], with_merge_watcher: true
     )
     decisions = {
       "eligible" => :dispatch, "debounce" => :wait_for_debounce,
@@ -1208,6 +1259,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "project_cap", projected.fetch(2).fetch("reason")
     assert_equal "waiting_operator", projected.fetch(5).fetch("bucket")
     assert_equal 42, projected.fetch(9).dig("condition", "pr")
+    assert_equal T0 + 300, projected.fetch(9).fetch("next_check_at")
     assert_nil dispatcher.send(:time_condition, nil)
 
     actual_dispatcher, = make_dispatcher(rows: [], scope_projects: [ "p1" ])

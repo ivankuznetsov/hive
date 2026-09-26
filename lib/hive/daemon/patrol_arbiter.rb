@@ -27,10 +27,12 @@ module Hive
         @dry_run = dry_run
       end
 
-      def candidates(now: Time.now)
+      def candidates(now: Time.now, projects: nil)
         state = load_state
-        all = Array(@ordinary_scheduler&.candidates(now: now)) +
-              Array(@architecture_scheduler&.candidates(now: now))
+        arguments = { now: now }
+        arguments[:projects] = projects if projects
+        all = Array(@ordinary_scheduler&.candidates(**arguments)) +
+              Array(@architecture_scheduler&.candidates(**arguments))
         all.group_by { |candidate| candidate.fetch(:project) }
            .sort_by(&:first)
            .filter_map do |project, project_candidates|

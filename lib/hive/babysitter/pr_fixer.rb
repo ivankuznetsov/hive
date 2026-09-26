@@ -93,8 +93,8 @@ module Hive
       def observe
         @last_status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
         return :fork_pr if fork_pr?
-        return :already_green if checks_pending?(@last_status["statusCheckRollup"])
         return :eligible if behind?(@last_status) && auto_rebase_enabled?
+        return :already_green if checks_pending?(@last_status["statusCheckRollup"])
         return :already_green if already_green?(@last_status)
 
         :eligible

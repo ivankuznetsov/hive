@@ -563,6 +563,7 @@ module Hive
 
         @one_shot_ran = []
         recover_dispatch_claims(now: now)
+        recover_one_shot_architecture_claims(project: project, now: now)
         tick(now: now)
         raise @one_shot_failure if @one_shot_failure.is_a?(Exception)
         raise Hive::Error, @one_shot_failure if @one_shot_failure
@@ -1051,6 +1052,7 @@ module Hive
                                     "dependency" => row.blocked_by || row.depends_on }.compact)
         when :poll_for_merge
           pending_item("waiting_external", "dispatch:task:#{row.slug}", "pull_request_pending",
+                       next_check_at: @merge_watcher&.next_poll_at(now: now),
                        condition: pr_condition(row))
         when :wait_for_answers, :admission_error, :markerless_stalled, :record_baseline
           pending_item("waiting_operator", "dispatch:task:#{row.slug}", decision.to_s,
@@ -1630,10 +1632,12 @@ module Hive
         candidates = []
         error = nil
         begin
+          arguments = { now: now }
+          arguments[:projects] = @project_ownership.owned_projects if @project_ownership
           candidates = if @patrol_arbiter
-            @patrol_arbiter.candidates(now: now)
+            @patrol_arbiter.candidates(**arguments)
           else
-            @patrol_scheduler&.tick(now: now)
+            @patrol_scheduler&.tick(**arguments)
           end
         rescue StandardError => discovery_error
           error = discovery_error
@@ -4101,6 +4105,19 @@ module Hive
         @logger.event(:fatal,
                       message: "recover_dispatch_claims raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
+      end
+
+      def recover_one_shot_architecture_claims(project:, now:)
+        return unless @refactor_patrol_scheduler&.respond_to?(:recover_stale_claims)
+
+        result = @refactor_patrol_scheduler.recover_stale_claims(
+          project: project, now: now
+        )
+        unresolved = Array(result && result[:unresolved])
+        return if unresolved.empty?
+
+        raise Hive::Error,
+              "architecture claim recovery remains unresolved for #{unresolved.join(', ')}"
       end
 
       def reconcile_attempts(now:)

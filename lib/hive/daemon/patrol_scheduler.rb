@@ -60,8 +60,10 @@ module Hive
         @events = []
       end
 
-      def tick(now: Time.now)
-        candidates(now: now).filter_map { |candidate| reserve(candidate, now: now) }
+      def tick(now: Time.now, projects: nil)
+        candidates(now: now, projects: projects).filter_map do |candidate|
+          reserve(candidate, now: now)
+        end
       end
 
       # Side-effect-free with respect to dispatch ownership: callers may

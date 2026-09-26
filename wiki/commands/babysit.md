@@ -63,7 +63,8 @@ waiting for an operator. PRs beyond the repair capacity are still observed:
 only an actionable repair remains `capacity_deferred`, while green or
 externally waiting PRs retain their observed wait. A GitHub error for any PR
 makes the project result an observation error rather than successful
-readiness. It does not poll until those facts change.
+readiness. A `BEHIND` PR remains runnable when auto-rebase is enabled even if
+its checks are still pending. It does not poll until those facts change.
 
 `--once --all` returns the per-project envelopes plus combined readiness from
 successful projects. A verified live-owner refusal remains visible in

@@ -13,6 +13,7 @@ require "hive/daemon/logger"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_fix_runtime"
 require "hive/daemon/pr_merge_watcher"
+require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/status_consumer"
 require "hive/modules/daemon_runtime"
 require "hive/one_shot/schedule_state"
@@ -94,7 +95,11 @@ module Hive
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: Hive::Daemon::StatusConsumer.new, logger: logger,
           merge_watcher: Hive::Daemon::PrMergeWatcher.new(
-            poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"), dry_run: dry_run
+            poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"), dry_run: dry_run,
+            schedule_state_factory: schedule_state
+          ),
+          refactor_patrol_scheduler: Hive::Daemon::RefactorPatrolScheduler.new(
+            registry: -> { [ entry ] }, dry_run: dry_run
           ),
           patrol_fix_admission_scheduler: patrol_fix_scheduler,
           dry_run: dry_run, attempt_dispatcher: attempts_api,

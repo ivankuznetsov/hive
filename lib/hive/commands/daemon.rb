@@ -182,11 +182,17 @@ module Hive
             )
           end
 
-          controller = hold_recovery_controller(entry)
-          if @hold_slug.nil?
-            controller.clear_project_dropped(project: entry.fetch("name"))
-          else
-            controller.clear_quarantine(project: entry.fetch("name"), slug: slug)
+          guard = Hive::OneShot::ProjectGuard.new(
+            state_root: entry.fetch("hive_state_path"),
+            project: entry.fetch("name"), kind: :one_shot
+          )
+          guard.synchronize do
+            controller = hold_recovery_controller(entry)
+            if @hold_slug.nil?
+              controller.clear_project_dropped(project: entry.fetch("name"))
+            else
+              controller.clear_quarantine(project: entry.fetch("name"), slug: slug)
+            end
           end
         end
         hold = @hold_slug.nil? ? "dropped-project hold" : "quarantine for #{slug}"

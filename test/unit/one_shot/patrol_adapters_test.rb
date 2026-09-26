@@ -109,6 +109,8 @@ class OneShotPatrolAdaptersTest < Minitest::Test
 
     def candidates(**arguments)
       @candidate_calls << arguments
+      return [] if @completed
+
       [ {
         project: "demo", job_id: "job-1", action_phase: :discovery,
         command: "hive refactor-patrol demo --json", dispatch_token: { job_id: "job-1" }
@@ -286,10 +288,36 @@ class OneShotPatrolAdaptersTest < Minitest::Test
       refute_nil scheduler.spawned_call
       assert_equal "recurring_intake",
                    result.to_h.dig("pending", "waiting_external", 0, "reason")
-      assert_equal 1, scheduler.candidate_calls.size
+      assert_equal 2, scheduler.candidate_calls.size
       assert_empty scheduler.readiness_calls.first.fetch(:candidates)
       assert_empty result.to_h.dig("pending", "runnable_now")
       assert_schema(result)
+    end
+  end
+
+  def test_architecture_recomputes_readiness_after_classification_creates_post_merge_work
+    with_tmp_dir do |dir|
+      scheduler = ArchitectureScheduler.new
+      calls = 0
+      scheduler.define_singleton_method(:candidates) do |**arguments|
+        @candidate_calls << arguments
+        calls += 1
+        phase = calls == 1 ? :classification : :post_merge
+        [ {
+          project: "demo", job_id: "job-1", action_phase: phase,
+          command: "hive refactor-patrol demo --json", dispatch_token: { job_id: "job-1" }
+        } ]
+      end
+      result = Hive::OneShot::ArchitecturePatrolAdapter.new(
+        entry: entry(dir), scheduler: scheduler, reconciler: Reconciler.new,
+        executor: Executor.new, guard: Guard.new, liveness: Liveness.new,
+        clock: -> { NOW }, config_loader: ->(*) { enabled_config }
+      ).call
+
+      assert_equal [ "architecture:discovery:job-1" ],
+                   result.to_h.dig("pending", "runnable_now").map { |item| item.fetch("id") }
+      assert_equal :post_merge,
+                   scheduler.readiness_calls.first.fetch(:candidates).first.fetch(:action_phase)
     end
   end
 

@@ -202,6 +202,19 @@ module Hive
         drained
       end
 
+      def recover_stale_claims(project:, now: Time.now)
+        entry = Array(@registry.call).find do |candidate|
+          candidate.fetch("name").to_s == project.to_s
+        end
+        return { recovered: [], unresolved: [] } unless entry
+
+        store_for(entry).recover_stale_discovery_claims!(
+          now: now,
+          claim_resolver: @claim_resolver,
+          claim_liveness_resolver: @claim_liveness_resolver
+        )
+      end
+
       def readiness(project:, now: Time.now, candidates: nil)
         candidates ||= self.candidates(
           now: now, projects: [ project ], include_scheduled: false

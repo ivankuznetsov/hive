@@ -1717,4 +1717,23 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_match(/stop the daemon/, error.message)
     assert_equal [ "bad" ], state.read("dispatch").fetch("quarantined")
   end
+
+  def test_clear_hold_refuses_while_a_one_shot_owns_the_project
+    state_root = File.join(@home, "project", ".hive-state")
+    entry = { "name" => "proj", "path" => File.dirname(state_root),
+              "hive_state_path" => state_root }
+    guard = Hive::OneShot::ProjectGuard.new(
+      state_root: state_root, project: "proj", kind: :one_shot
+    ).acquire!
+    command = Hive::Commands::Daemon.new(
+      "clear-hold", "proj", queue_args: %w[proj bad], hive_home: @home
+    )
+
+    error = with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { entry }) do
+      assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) { command.call }
+    end
+    assert_equal "one_shot_busy", error.code
+  ensure
+    guard&.release!
+  end
 end

@@ -114,6 +114,11 @@ class OneShotRunnerTest < Minitest::Test
         runtime = dispatcher.instance_variable_get(:@module_runtime)
         assert_equal :idle, runtime.tick(now: NOW, projects: [ "demo" ]).fetch(0).fetch(:status)
 
+        watcher = dispatcher.instance_variable_get(:@merge_watcher)
+        refute_nil watcher.instance_variable_get(:@schedule_state_factory)
+        assert_instance_of Hive::Daemon::RefactorPatrolScheduler,
+                           dispatcher.instance_variable_get(:@refactor_patrol_scheduler)
+
       ensure
         runner&.close
       end

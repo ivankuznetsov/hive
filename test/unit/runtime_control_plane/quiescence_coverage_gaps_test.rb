@@ -11,6 +11,7 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
 
   FakeDataset = Struct.new(:row, :updated) do
     def first = row
+    def where(*) = self
     def get(column) = row && row[column]
     def insert(value) = self.row = value
     def delete = true
@@ -127,6 +128,29 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
         end
       end
       assert_equal :quiescence_upgrade_failed, error.code
+    end
+  end
+
+  def test_database_upgrade_rejects_unknown_sources_and_status_reraises_typed_errors
+    with_database do |database|
+      source = {
+        application_id: Hive::RuntimeControlPlane::APPLICATION_ID,
+        schema_version: 999, schema_fingerprint: "unknown", lifecycle: nil
+      }
+      database.define_singleton_method(:quiescence_upgrade_source) { source }
+      error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+        database.upgrade_quiescence!(
+          authority: database.send(:authority_for, :migrator), expected_schema_version: 1,
+          expected_fingerprint: "unknown", preserve_lifecycle: false
+        )
+      end
+      assert_equal :unsupported_quiescence_upgrade_source, error.code
+
+      typed = Hive::RuntimeControlPlane::IntegrityError.new("typed", code: :typed)
+      database.define_singleton_method(:diagnostics_uncoordinated) { raise typed }
+      assert_same typed, assert_raises(Hive::RuntimeControlPlane::IntegrityError) {
+        database.quiescence_status_snapshot
+      }
     end
   end
 
@@ -257,6 +281,31 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
     end
   end
 
+  def test_lifecycle_begin_quiesce_accepts_only_the_winning_quiescing_race
+    states = [
+      lifecycle_state("running"), lifecycle_state("quiescing"),
+      lifecycle_state("running"), lifecycle_state("paused")
+    ]
+    database = Object.new
+    database.define_singleton_method(:read) do |&block|
+      row = states.shift
+      block.call({ runtime_lifecycle: Struct.new(:row) { def first = row }.new(row) })
+    end
+    database.define_singleton_method(:transaction) do |**|
+      raise Hive::RuntimeControlPlane::AdmissionClosed.new("raced")
+    end
+    repository = Hive::RuntimeControlPlane::LifecycleRepository.new(database: database)
+
+    assert_equal "quiescing", repository.begin_quiesce!(
+      deadline_monotonic: 10, boot_id: "boot", shutdown_grace_sec: 1
+    ).phase
+    assert_raises(Hive::RuntimeControlPlane::AdmissionClosed) do
+      repository.begin_quiesce!(
+        deadline_monotonic: 10, boot_id: "boot", shutdown_grace_sec: 1
+      )
+    end
+  end
+
   def test_process_registry_rejects_missing_identities_and_supports_authorized_cleanup
     identity = Object.new
     identity.define_singleton_method(:capture) { |_| nil }
@@ -280,6 +329,36 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
     ensure
       reservation&.release_fence!
     end
+  end
+
+  def test_process_registration_rejects_a_reservation_from_the_prior_generation
+    reservation = FakeDataset.new(
+      { reservation_id: "reservation-1", admission_generation: 0, state: "reserved" }
+    )
+    lifecycle = FakeDataset.new({ generation: 1, phase: "quiescing" })
+    connection = Object.new
+    connection.define_singleton_method(:[]) do |table|
+      { launch_reservations: reservation, runtime_lifecycle: lifecycle }.fetch(table)
+    end
+    database = Object.new
+    database.define_singleton_method(:path) { "/tmp/runtime.sqlite3" }
+    database.define_singleton_method(:transaction) { |&block| block.call(connection) }
+    identity = Object.new
+    identity.define_singleton_method(:capture) do |pid|
+      Hive::Attempts::ProcessSnapshot.new(
+        pid: pid, start_fingerprint: "start", session_id: pid, process_group_id: pid
+      )
+    end
+    custody = Object.new
+    custody.define_singleton_method(:evidence_for) { |_| {} }
+    registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+      database: database, process_identity: identity, custody: custody
+    )
+
+    error = assert_raises(Hive::RuntimeControlPlane::AdmissionClosed) do
+      registry.register!("reservation-1", pid: Process.pid)
+    end
+    assert_equal 1, error.details.fetch(:generation)
   end
 
   def test_quiescence_capability_reports_unregistered_attempt_identity_and_storage_errors
@@ -365,6 +444,16 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
   end
 
   private
+
+  def lifecycle_state(phase)
+    {
+      phase: phase, generation: phase == "running" ? 0 : 1, revision: 0,
+      mutation_sequence: 0, boot_id: nil, deadline_monotonic: nil,
+      shutdown_grace_sec: nil, interrupted_attempt_ids_json: "[]",
+      quiesce_started_at: nil, paused_at: nil, resumed_at: nil,
+      updated_at: Time.now.utc.iso8601(6)
+    }
+  end
 
   def with_fake_sequel_connections(source, target)
     connections = [ source, target ]

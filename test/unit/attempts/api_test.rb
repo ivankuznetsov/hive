@@ -70,6 +70,25 @@ class AttemptsAPITest < Minitest::Test
     assert_equal true, call.last.fetch(:replay_semantic_terminal)
   end
 
+  def test_routing_decision_delegates_read_only_daemon_projection
+    daemon = Object.new
+    call = nil
+    daemon.define_singleton_method(:routing_decision_for_request) do |request, **options|
+      call = [ request, options ]
+      :capacity_saturated
+    end
+    api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
+
+    result = api.routing_decision_for_request(
+      :request, now: Time.at(1).utc, admission_view: :tick
+    )
+
+    assert_equal :capacity_saturated, result
+    assert_equal :request, call.first
+    assert_equal Time.at(1).utc, call.last.fetch(:now)
+    assert_equal :tick, call.last.fetch(:admission_view)
+  end
+
   def test_dispatch_recovery_delegates_independent_admission
     daemon = Object.new
     call = nil

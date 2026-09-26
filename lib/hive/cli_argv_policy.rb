@@ -16,7 +16,11 @@ module Hive
     end
 
     def json_requested?(argv)
-      Hive::CliJsonOptions.requested?(argv)
+      Hive::CliJsonOptions.requested?(argv) || one_shot_requested?(argv)
+    end
+
+    def one_shot_requested?(argv)
+      option_argv(argv).any? { |arg| arg == "--once" || arg.match?(/\A--once=(?:true|t)\z/i) }
     end
 
     def validate_encoding(argv)

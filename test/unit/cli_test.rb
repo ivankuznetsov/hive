@@ -41,6 +41,9 @@ require "hive/commands/digest"
 require "hive/commands/digest_refresh"
 require "hive/commands/digest_send"
 require "hive/commands/digest_prune"
+require "hive/commands/module"
+require "hive/commands/drop"
+require "hive/tui"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
@@ -206,6 +209,28 @@ class HiveCliTest < Minitest::Test
 
     out, _err = capture_io { Hive::CLI.start([ "version" ]) }
     assert_equal "#{Hive::VERSION}\n", out
+  end
+
+  def test_module_drop_and_tui_routes_reach_their_command_boundaries
+    with_command_new_stub(Hive::Commands::Module) do |calls|
+      Hive::CLI.start([ "module", "status", "demo", "--json" ])
+      assert_equal [ "status", "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.dig(:kwargs, :json)
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Drop) do |calls|
+      Hive::CLI.start([ "drop", "demo:task", "--project", "demo" ])
+      assert_equal [ "demo:task" ], calls.first.fetch(:args)
+      assert_equal "demo", calls.first.dig(:kwargs, :project)
+      assert_equal :call, calls.last
+    end
+
+    called = false
+    with_replaced_singleton_method(Hive::Tui, :run, -> { called = true }) do
+      Hive::CLI.start([ "tui" ])
+    end
+    assert called
   end
 
   def test_version_json_identifies_the_active_dogfood_build
@@ -1016,13 +1041,13 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Patrol) do |calls|
       Hive::CLI.start([ "patrol", "proj", "--dry-run", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
-      assert_equal({ json: true, dry_run: true, list: false }, calls.first.fetch(:kwargs))
+      assert_equal({ json: true, dry_run: true, list: false, once: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Patrol) do |calls|
       Hive::CLI.start([ "patrol", "proj", "--list", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
-      assert_equal({ json: true, dry_run: false, list: true }, calls.first.fetch(:kwargs))
+      assert_equal({ json: true, dry_run: false, list: true, once: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::RefactorPatrol) do |calls|
@@ -1092,6 +1117,49 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "metrics", "rollback-rate", "--days", "30", "--project", "proj", "--json" ])
       assert_equal [ "rollback-rate" ], calls.first.fetch(:args)
       assert_equal({ days: 30, project: "proj", json: true }, calls.first.fetch(:kwargs))
+    end
+  end
+
+  def test_one_shot_modes_route_to_all_four_components
+    require "hive/commands/babysit"
+    result = Hive::OneShot::Result.ok(
+      component: :dispatch, project: "demo", started_at: Time.utc(2026, 9, 25),
+      finished_at: Time.utc(2026, 9, 25), ran: [], items: [], safe_to_stop: true
+    )
+
+    with_command_new_stub(Hive::Commands::Patrol, return_value: result) do |calls|
+      Hive::CLI.start(%w[patrol demo --once --dry-run])
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:dry_run)
+    end
+    with_command_new_stub(Hive::Commands::RefactorPatrol, return_value: result) do |calls|
+      Hive::CLI.start(%w[refactor-patrol demo --once --dry-run])
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+    end
+    with_command_new_stub(Hive::Commands::Babysit, return_value: result) do |calls|
+      Hive::CLI.start(%w[babysit demo --once --dry-run])
+      assert_equal [ nil, "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+    end
+    with_command_new_stub(Hive::Commands::Daemon, return_value: result) do |calls|
+      Hive::CLI.start(%w[daemon demo --once --dry-run])
+      assert_equal [ nil, "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+    end
+  end
+
+  def test_one_shot_modes_reject_service_and_manual_selector_options
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[refactor-patrol demo --once --pr 7])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[babysit demo --once --detach])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[daemon demo extra --once])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[daemon demo --once --detach])
     end
   end
 

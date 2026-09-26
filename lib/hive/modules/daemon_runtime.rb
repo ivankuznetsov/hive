@@ -1,4 +1,5 @@
 require "hive/attempts/configured_dispatcher"
+require "digest"
 require "json"
 require "hive/atomic_file"
 require "hive/config"
@@ -29,10 +30,13 @@ module Hive
         @clock = clock
       end
 
-      def tick(now: @clock.call, admission_open: -> { true })
+      def tick(now: @clock.call, admission_open: -> { true }, projects: nil)
         return [] unless admission_open?(admission_open)
 
-        Array(@registry.call).each_with_object([]) do |entry, results|
+        selected_projects = Array(projects).map(&:to_s).to_h { |name| [ name, true ] }
+        entries = Array(@registry.call)
+        entries = entries.select { |entry| selected_projects.key?(entry.fetch("name").to_s) } if projects
+        entries.each_with_object([]) do |entry, results|
           break results unless admission_open?(admission_open)
 
           results << tick_project(
@@ -41,7 +45,190 @@ module Hive
         end
       end
 
+      # Completion-only pass used after a bounded one-shot has drained its
+      # durable attempts. It applies run finalization and bounded retry policy
+      # without advancing setup outboxes, schedules, or event cursors.
+      def reconcile(now: @clock.call, admission_open: -> { true },
+                    retry_admission_open: admission_open, projects: nil)
+        return [] unless admission_open?(admission_open)
+
+        selected_projects = Array(projects).map(&:to_s).to_h { |name| [ name, true ] }
+        entries = Array(@registry.call)
+        entries = entries.select { |entry| selected_projects.key?(entry.fetch("name").to_s) } if projects
+        entries.each_with_object([]) do |entry, results|
+          break results unless admission_open?(admission_open)
+
+          results << reconcile_project(
+            entry, now: now, admission_open: admission_open,
+            retry_admission_open: retry_admission_open
+          )
+        end
+      end
+
+      # Side-effect-free inventory for the dispatch one-shot contract. It
+      # deliberately uses ManagedStore/EventLedger inspection APIs so a
+      # scheduler preview cannot reconcile transactions, create locks, or
+      # advance an event cursor.
+      def readiness(project:, now: @clock.call)
+        entry = Array(@registry.call).find do |candidate|
+          candidate.fetch("name").to_s == project.to_s
+        end
+        return [] unless entry
+
+        store = Hive::ModulePackage::ManagedStore.new(entry.fetch("hive_state_path"))
+        selections = store.inspect_selections(include_tombstones: true)
+        return [] if selections.empty?
+        installed_selections = selections.select { |selection| selection.fetch("installed") }
+
+        runtime_root = File.join(entry.fetch("hive_state_path"), "module-runtime")
+        ledger = EventLedger.new(root: runtime_root, create_directories: false)
+        items = readiness_runs(store, selections, now)
+        items.concat(readiness_setup_outboxes(store, selections))
+        items.concat(readiness_event_backlog(store, installed_selections, ledger, runtime_root))
+        items.concat(readiness_schedules(store, installed_selections, ledger, now))
+        items.uniq { |item| item.fetch("id") }
+      rescue Hive::Error, SystemCallError, IOError, JSON::ParserError, KeyError => error
+        raise Hive::ConfigError, "module readiness is unavailable: #{error.message}"
+      end
+
       private
+
+      def reconcile_project(entry, now:, admission_open:, retry_admission_open: admission_open)
+        return result(entry, :idle, 0, 0) unless admission_open?(admission_open)
+
+        store = Hive::ModulePackage::ManagedStore.new(entry.fetch("hive_state_path"))
+        selections = store.selections(include_tombstones: true)
+        return result(entry, :idle, 0, 0) if selections.empty?
+
+        runtime_root = File.join(entry.fetch("hive_state_path"), "module-runtime")
+        dispatcher = Dispatcher.new(
+          store: store, attempt_store: @attempt_store,
+          attempt_dispatcher: @attempt_dispatcher,
+          project_id: entry.fetch("project_id"), project: entry.fetch("name"),
+          decision_journal: DecisionJournal.new(root: runtime_root), clock: -> { now }
+        )
+        completions = reconcile_runs(
+          store, selections, dispatcher: dispatcher, now: now,
+          admission_open: admission_open, retry_admission_open: retry_admission_open
+        )
+        result(entry, :ok, 0, 0, completions: completions)
+      rescue Hive::Error, SystemCallError, IOError, JSON::ParserError => e
+        result(entry, :blocked, 0, 0, reason: "#{e.class}: #{e.message}")
+      end
+
+      def readiness_runs(store, selections, now)
+        selections.flat_map do |selection|
+          module_name = selection.fetch("name")
+          Dir.glob(File.join(store.runtime_path(module_name), "runs", "*.json")).sort.filter_map do |path|
+            run = JSON.parse(File.binread(path))
+            status = run.fetch("status")
+            next unless %w[admitting running retrying].include?(status)
+
+            id = "dispatch:module:run:#{run.fetch('run_id')}"
+            if status == "retrying"
+              deadline = Time.iso8601(run.fetch("updated_at")) + RETRY_DELAY_SEC
+              if deadline > now
+                readiness_item(
+                  "waiting_external", id, "module_retry_cooldown",
+                  next_check_at: deadline,
+                  condition: { "kind" => "time_due", "deadline" => deadline.utc.iso8601(6),
+                               "resource" => "module_retry" }
+                )
+              else
+                readiness_item("runnable_now", id, "module_retry_due")
+              end
+            else
+              attempt_id = run["attempt_id"]
+              attempt = @attempt_store.fetch(attempt_id) if attempt_id
+              if attempt&.final? && retryable_attempt?(attempt)
+                next readiness_item("runnable_now", id, "module_retry_due")
+              end
+              condition = if attempt_id
+                { "kind" => "attempt_completed", "attempt" => attempt_id }
+              else
+                { "kind" => "task_changed", "task" => run.fetch("run_id") }
+              end
+              readiness_item(
+                "waiting_external", id, "module_attempt_running",
+                condition: condition
+              )
+            end
+          end
+        end
+      end
+
+      def readiness_setup_outboxes(store, selections)
+        selections.filter_map do |selection|
+          intent = store.inspect_setup_outbox(selection.fetch("name"))
+          next unless intent
+
+          readiness_item(
+            "runnable_now",
+            "dispatch:module:setup:#{intent.fetch('idempotency_key')}",
+            "module_setup_pending"
+          )
+        end
+      end
+
+      def readiness_event_backlog(store, selections, ledger, runtime_root)
+        cursor = read_event_cursor(File.join(runtime_root, "daemon-event-cursor.json"))
+        events = ledger.inspect_events_after(cursor).events
+        events.flat_map do |event|
+          selections.flat_map do |selection|
+            module_name = selection.fetch("name")
+            configuration = store.configuration(
+              module_name, selection.dig("active", "configuration_digest")
+            )
+            configuration.contract.fetch("hooks").filter_map do |hook|
+              next unless EventScope.matches?(event: event, selection: selection, hook: hook)
+
+              readiness_item(
+                "runnable_now",
+                "dispatch:module:event:#{event.fetch('event_id')}:#{module_name}:#{hook.fetch('id')}",
+                "module_event_pending"
+              )
+            end
+          end
+        end
+      end
+
+      def readiness_schedules(store, selections, ledger, now)
+        selections.select { |selection| selection.fetch("enabled") }.flat_map do |selection|
+          module_name = selection.fetch("name")
+          configuration = store.configuration(
+            module_name, selection.dig("active", "configuration_digest")
+          )
+          configuration.contract.fetch("hooks").flat_map do |hook|
+            hook.fetch("schedules").map do |schedule|
+              baseline = ledger.inspect_latest_schedule(schedule, target_module: module_name) ||
+                         Time.iso8601(selection.fetch("high_water_at"))
+              due = @planner.due(schedule: schedule, after: baseline, now: now)
+              identity = Digest::SHA256.hexdigest("#{module_name}\0#{schedule}")[0, 24]
+              id = "dispatch:module:schedule:#{identity}"
+              if due
+                readiness_item("runnable_now", id, "module_schedule_due")
+              else
+                deadline = @planner.next_after(schedule: schedule, now: now)
+                readiness_item(
+                  "waiting_external", id, "module_schedule",
+                  next_check_at: deadline,
+                  condition: deadline && {
+                    "kind" => "time_due", "deadline" => deadline.utc.iso8601(6),
+                    "resource" => "module_schedule"
+                  }
+                )
+              end
+            end
+          end
+        end
+      end
+
+      def readiness_item(bucket, id, reason, next_check_at: nil, condition: nil)
+        {
+          "bucket" => bucket, "id" => id, "component" => "dispatch", "reason" => reason,
+          "next_check_at" => next_check_at, "condition" => condition
+        }
+      end
 
       def tick_project(entry, now:, admission_open:)
         return result(entry, :idle, 0, 0) unless admission_open?(admission_open)
@@ -59,32 +246,32 @@ module Hive
           project_id: entry.fetch("project_id"), project: entry.fetch("name"),
           decision_journal: journal, clock: -> { now }
         )
-        reconcile_runs(
+        completions = reconcile_runs(
           store, selections, dispatcher: dispatcher, now: now,
           admission_open: admission_open
         )
-        return result(entry, :idle, 0, 0) unless admission_open?(admission_open)
+        return result(entry, :idle, 0, 0, completions: completions) unless admission_open?(admission_open)
 
         promote_setup_outboxes(
           store, selections, ledger: ledger, entry: entry, now: now,
           admission_open: admission_open
         )
-        return result(entry, :idle, 0, 0) unless admission_open?(admission_open)
+        return result(entry, :idle, 0, 0, completions: completions) unless admission_open?(admission_open)
 
         installed_selections = selections.select { |selection| selection.fetch("installed") }
-        return result(entry, :idle, 0, 0) if installed_selections.empty?
+        return result(entry, :idle, 0, 0, completions: completions) if installed_selections.empty?
 
         schedules = dispatch_schedules(
           installed_selections, store: store, ledger: ledger,
           entry: entry, now: now, admission_open: admission_open
         )
-        return result(entry, :ok, 0, schedules) unless admission_open?(admission_open)
+        return result(entry, :ok, 0, schedules, completions: completions) unless admission_open?(admission_open)
 
         decisions = drain_events(
           installed_selections, store: store, ledger: ledger,
           dispatcher: dispatcher, admission_open: admission_open
         )
-        result(entry, :ok, decisions, schedules)
+        result(entry, :ok, decisions, schedules, completions: completions)
       rescue Hive::Error, SystemCallError, IOError, JSON::ParserError => e
         result(entry, :blocked, 0, 0, reason: "#{e.class}: #{e.message}")
       end
@@ -227,13 +414,15 @@ module Hive
         )
       end
 
-      def reconcile_runs(store, selections, dispatcher:, now:, admission_open:)
+      def reconcile_runs(store, selections, dispatcher:, now:, admission_open:,
+                         retry_admission_open: admission_open)
+        completions = 0
         selections.each do |selection|
-          return unless admission_open?(admission_open)
+          return completions unless admission_open?(admission_open)
 
           module_name = selection.fetch("name")
           Dir.glob(File.join(store.runtime_path(module_name), "runs", "*.json")).sort.each do |path|
-            return unless admission_open?(admission_open)
+            return completions unless admission_open?(admission_open)
 
             run = JSON.parse(File.binread(path))
             next unless %w[admitting running retrying].include?(run["status"])
@@ -245,18 +434,18 @@ module Hive
 
             if attempt.state == "terminal" && attempt.outcome == "succeeded"
               finalize_run(path, run, status: "succeeded", attempt: attempt, now: now)
-            elsif ((attempt.state == "terminal" && attempt.outcome == "failed") ||
-                   attempt.state == "lost") &&
-                  attempt["retry_charge"] < MAX_RETRIES
+            elsif retryable_attempt?(attempt)
               dispatcher.retry(
                 module_name: module_name, hook_attempt: hook_attempt_from(run, selection),
-                previous_attempt: attempt, admission_open: admission_open
+                previous_attempt: attempt, admission_open: retry_admission_open
               )
             else
               finalize_run(path, run, status: "failed", attempt: attempt, now: now)
             end
+            completions += 1
           end
         end
+        completions
       end
 
       def admission_open?(predicate)
@@ -272,6 +461,12 @@ module Hive
         now < updated_at + RETRY_DELAY_SEC
       rescue ArgumentError, TypeError, KeyError
         raise Hive::ConfigError, "module retry timestamp is malformed"
+      end
+
+      def retryable_attempt?(attempt)
+        failed = attempt.state == "lost" ||
+          (attempt.state == "terminal" && attempt.outcome == "failed")
+        failed && attempt["retry_charge"].to_i < MAX_RETRIES
       end
 
       def hook_attempt_from(run, selection)
@@ -302,10 +497,11 @@ module Hive
         )
       end
 
-      def result(entry, status, decisions, schedules, reason: nil)
+      def result(entry, status, decisions, schedules, reason: nil, completions: 0)
         {
           project: entry.fetch("name"), status: status,
-          decisions: decisions, schedules: schedules, reason: reason
+          decisions: decisions, schedules: schedules, completions: completions,
+          reason: reason
         }
       end
     end

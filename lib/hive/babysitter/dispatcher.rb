@@ -4,15 +4,17 @@ require "hive/config"
 require "hive/babysitter/interval"
 require "hive/babysitter/logger"
 require "hive/babysitter/project_tick"
+require "hive/one_shot/project_guard"
 
 module Hive
   module Babysitter
     class Dispatcher
       DEFAULT_INTERVAL_SEC = 600
 
-      attr_reader :logger, :inflight
+      attr_reader :logger, :inflight, :last_reports
 
-      def initialize(logger:, dry_run: false, project_name: nil, max_ticks: nil)
+      def initialize(logger:, dry_run: false, project_name: nil, max_ticks: nil,
+                     guard_factory: nil)
         @logger = logger
         @dry_run = dry_run
         @project_name = project_name
@@ -21,6 +23,13 @@ module Hive
         @reload = false
         @poll_interval_sec = DEFAULT_INTERVAL_SEC
         @inflight = Set.new
+        @last_reports = []
+        @guard_factory = guard_factory || lambda do |entry|
+          Hive::OneShot::ProjectGuard.new(
+            state_root: entry.fetch("hive_state_path"), project: entry.fetch("name"),
+            kind: :babysitter, lock_name: Hive::Babysitter::ProjectTick::EXECUTION_LOCK_NAME
+          )
+        end
       end
 
       def tick(now: Time.now)
@@ -31,24 +40,36 @@ module Hive
         @poll_interval_sec = next_interval(enabled.map { |entry| entry[:cfg] })
 
         processed = 0
+        @last_reports = []
         enabled.each do |entry|
           break unless admission_open?
 
           processed += 1
-          Hive::Babysitter::ProjectTick.run(
+          guard = @guard_factory.call(entry[:project]).acquire!
+          summary = Hive::Babysitter::ProjectTick.run(
             entry[:project],
             dry_run: @dry_run || entry[:cfg].dig("babysitter", "dry_run") == true,
-            logger: @logger,
-            inflight: @inflight,
-            admission_open: -> { admission_open? }
+            logger: @logger, inflight: @inflight,
+            admission_open: -> { admission_open? }, detailed: true
           )
+          @last_reports << { project: entry[:project], summary: summary }
           @logger.event(:project_tick,
                         project: entry[:project]["name"],
                         path: entry[:project]["path"])
+        rescue Hive::OneShot::ProjectGuard::OwnershipError => e
+          @logger.event(
+            :project_skipped, project: entry[:project]["name"], reason: e.code
+          )
         rescue StandardError => e
+          @last_reports << {
+            project: entry[:project],
+            summary: { error: { code: "project_tick_failed", message: e.message } }
+          }
           @logger.event(:fatal,
                         project: entry[:project]["name"],
                         message: "project tick failed: #{e.class}: #{e.message}")
+        ensure
+          guard&.release!
         end
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,

@@ -114,10 +114,13 @@ module Hive
         end
       end
 
-      def candidates(now: Time.now)
+      def candidates(now: Time.now, projects: nil, include_scheduled: true)
         @events.clear
-        scheduled = @scheduled_scheduler ? @scheduled_scheduler.candidates(now: now) : []
+        selected = Array(projects).map(&:to_s) if projects
+        scheduled = include_scheduled && @scheduled_scheduler ?
+          @scheduled_scheduler.candidates(now: now) : []
         managed = managed_entries
+        managed.select! { |entry| selected.include?(entry.fetch("name").to_s) } if selected
         stores_by_project = {}
         block_configuration_errors(now)
         due_by_project = managed.to_h do |entry|
@@ -197,6 +200,56 @@ module Hive
         drained = @events.dup + (@scheduled_scheduler ? @scheduled_scheduler.drain_events : [])
         @events.clear
         drained
+      end
+
+      def recover_stale_claims(project:, now: Time.now)
+        entry = Array(@registry.call).find do |candidate|
+          candidate.fetch("name").to_s == project.to_s
+        end
+        return { recovered: [], unresolved: [] } unless entry
+
+        store_for(entry).recover_stale_discovery_claims!(
+          now: now,
+          claim_resolver: @claim_resolver,
+          claim_liveness_resolver: @claim_liveness_resolver
+        )
+      end
+
+      def readiness(project:, now: Time.now, candidates: nil)
+        candidates ||= self.candidates(
+          now: now, projects: [ project ], include_scheduled: false
+        )
+        entry = managed_entries.find { |item| item.fetch("name").to_s == project.to_s }
+        return [] unless entry
+
+        runnable_ids = candidates.map { |candidate| readiness_candidate_id(candidate) }
+        items = candidates.map do |candidate|
+          {
+            "bucket" => "runnable_now",
+            "id" => readiness_candidate_id(candidate),
+            "component" => "architecture_patrol", "reason" => "eligible",
+            "next_check_at" => nil, "condition" => nil
+          }
+        end
+        store_for(entry).jobs.each do |job|
+          job_id = "architecture:discovery:#{job.fetch('job_id')}"
+          next if job.fetch("complete") || runnable_ids.include?(job_id)
+
+          attempt = Array(job["attempts"]).last || {}
+          deadline = attempt["next_eligible_at"] || attempt["expires_at"]
+          condition = deadline ?
+            { "kind" => "time_due", "task" => job.fetch("job_id"),
+              "deadline" => deadline } :
+            { "kind" => "attempt_completed", "task" => job.fetch("job_id") }
+          items << {
+            "bucket" => "waiting_external",
+            "id" => "architecture:job:#{job.fetch('job_id')}",
+            "component" => "architecture_patrol", "reason" => job.fetch("state"),
+            "next_check_at" => deadline, "condition" => condition
+          }
+        end
+        items.concat(classification_readiness(entry, runnable_ids: runnable_ids, now: now))
+        items
       end
 
       def reserve(candidate, now: Time.now)
@@ -448,6 +501,42 @@ module Hive
 
       private
 
+      def readiness_candidate_id(candidate)
+        identity = candidate[:classification_occurrence_id] || candidate.fetch(:job_id)
+        "architecture:#{candidate.fetch(:action_phase)}:#{identity}"
+      end
+
+      def classification_readiness(entry, runnable_ids:, now:)
+        classifier = classifier_for(entry)
+        return [] unless classifier.respond_to?(:each_record)
+
+        classifier.each_record.filter_map do |record|
+          next if record["materialization"]
+          next unless %w[pending retry_wait feature].include?(record["status"])
+
+          phase = record.fetch("status") == "feature" ? :post_merge : :classification
+          id = "architecture:#{phase}:#{record.fetch('occurrence_id')}"
+          next if runnable_ids.include?(id)
+
+          claim_deadline = record.dig("claim", "expires_at")
+          retry_deadline = record["retry_at"]
+          deadline = [ claim_deadline, retry_deadline ].compact
+            .map { |value| Time.iso8601(value) }
+            .select { |value| value > now }.min
+          condition = if deadline
+            { "kind" => "time_due", "task" => record.fetch("occurrence_id"),
+              "deadline" => deadline.utc.iso8601(6) }
+          else
+            { "kind" => "attempt_completed", "task" => record.fetch("occurrence_id") }
+          end
+          {
+            "bucket" => "waiting_external", "id" => id,
+            "component" => "architecture_patrol", "reason" => record.fetch("status"),
+            "next_check_at" => deadline, "condition" => condition
+          }
+        end
+      end
+
       def claim_discovery!(entry, store, aggregate, analysis_sha:, now:)
         @discovery_transitions.claim(
           entry: entry,
@@ -501,6 +590,7 @@ module Hive
           cfg = @config_loader.call(entry.fetch("path"))
           next unless cfg.dig("daemon", "enabled") == true
           next unless Hive::Workflows.coding_id?(cfg["default_workflow"])
+          next unless cfg.dig("refactor_patrol", "enabled") == true
 
           entry.merge("_refactor_patrol_cfg" => cfg)
         rescue StandardError => e

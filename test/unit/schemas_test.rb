@@ -12,6 +12,8 @@ require "test_helper"
 # reference these constants — a drift between any of those three surfaces
 # fails this test or the schema-drift test in schema_files_test.rb.
 class SchemasTest < Minitest::Test
+  include HiveTestHelper
+
   # The Schemas namespace must be owned by its dedicated file, not by the
   # root entrypoint. lib/hive.rb keeps only the require_relative so the
   # public constant path (Hive::Schemas) stays unchanged for every
@@ -50,6 +52,38 @@ class SchemasTest < Minitest::Test
     assert_equal expected, Hive::Schemas.schema_dir
     assert File.file?(Hive::Schemas.schema_path("hive-status")),
            "schema_path must resolve to a real published schema file"
+  end
+
+  def test_error_envelope_preserves_condition_gate_recovery_fields
+    error = Hive::ConditionGateBlocked.new(
+      "blocked", condition_gate: { "status" => "blocked" },
+      next_action: { "kind" => "edit" }
+    )
+
+    payload = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-run", error: error, error_kind: "wrong_stage"
+    )
+
+    assert_equal({ "status" => "blocked" }, payload.fetch("condition_gate"))
+    assert_equal({ "kind" => "edit" }, payload.fetch("next_action"))
+  end
+
+  def test_envelope_emitter_raise_policy_propagates_json_failure
+    emitter = Class.new do
+      include Hive::Schemas::EnvelopeEmitter
+
+      def envelope_schema = "hive-run"
+      def envelope_error_kind(_error) = "error"
+      def envelope_serialization_failure_policy = :raise
+    end.new
+
+    with_replaced_singleton_method(
+      JSON, :generate, ->(*) { raise JSON::GeneratorError, "forced" }
+    ) do
+      assert_raises(JSON::GeneratorError) do
+        emitter.send(:emit_envelope, Hive::Error.new("boom"))
+      end
+    end
   end
 
   def test_run_error_kind_all_contains_fifteen_values

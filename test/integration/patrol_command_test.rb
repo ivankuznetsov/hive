@@ -33,6 +33,20 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_manual_json_report_remains_schema_valid
+    with_patrol_project do
+      out, _err, status = with_captured_exit do
+        command_for(dry_run: true).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      payload = JSON.parse(out)
+      assert patrol_schemer.valid?(payload),
+             patrol_schemer.validate(payload).map { |failure| failure["error"] }.inspect
+      refute_equal "hive-one-shot", payload.fetch("schema")
+    end
+  end
+
   def test_patrol_records_findings_for_the_workflow_without_local_fix_or_publication
     with_patrol_project do |repo|
       finding = sample_finding

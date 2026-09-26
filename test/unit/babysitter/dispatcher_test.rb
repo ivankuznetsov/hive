@@ -98,7 +98,10 @@ class BabysitterDispatcherTest < Minitest::Test
       logger = Hive::Babysitter::Logger.new(path: File.join(dir, "babysitter.log"))
       dispatcher = Hive::Babysitter::Dispatcher.new(logger: logger)
       entries = %w[one two].map do |name|
-        { project: { "name" => name }, cfg: { "babysitter" => { "interval" => "10m" } } }
+        state_root = File.join(dir, name, ".hive-state")
+        FileUtils.mkdir_p(state_root)
+        { project: { "name" => name, "hive_state_path" => state_root },
+          cfg: { "babysitter" => { "interval" => "10m" } } }
       end
       dispatcher.define_singleton_method(:enabled_projects) { entries }
       calls = []
@@ -171,6 +174,34 @@ class BabysitterDispatcherTest < Minitest::Test
       docs = File.readlines(File.join(root, "babysitter.log")).map { |line| JSON.parse(line) }
       reasons = docs.filter_map { |doc| doc["reason"] if doc["event"] == "project_skipped" }
       assert_equal %w[repository_identity_unresolved repository_local], reasons.sort
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_tick_logs_project_guard_contention_and_continues
+    with_tmp_dir do |root|
+      logger = Hive::Babysitter::Logger.new(path: File.join(root, "babysitter.log"))
+      guard = Object.new
+      guard.define_singleton_method(:acquire!) do
+        raise Hive::OneShot::ProjectGuard::OwnershipError.new(
+          "owned", code: "one_shot_busy", owner: { "kind" => "one_shot" }
+        )
+      end
+      dispatcher = Hive::Babysitter::Dispatcher.new(
+        logger: logger, guard_factory: ->(*) { guard }
+      )
+      dispatcher.define_singleton_method(:enabled_projects) do
+        [ {
+          project: { "name" => "demo" },
+          cfg: { "babysitter" => { "interval" => "10m" } }
+        } ]
+      end
+
+      assert_equal 1, dispatcher.tick
+      event = File.readlines(File.join(root, "babysitter.log")).map { |line| JSON.parse(line) }
+        .find { |row| row["event"] == "project_skipped" }
+      assert_equal "one_shot_busy", event.fetch("reason")
     ensure
       logger&.close
     end

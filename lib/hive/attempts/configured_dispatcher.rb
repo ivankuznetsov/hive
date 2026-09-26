@@ -45,6 +45,15 @@ module Hive
         )
       end
 
+      def routing_decision_for_request(request, now: Time.now.utc, admission_view: nil)
+        task = Hive::TaskResolver.new(
+          request.slug, project_filter: request.project
+        ).resolve
+        dispatcher_for(task, argv: request.argv).routing_decision_for_request(
+          request, now: now, admission_view: admission_view
+        )
+      end
+
       def dispatch_recovery(task:, **attributes)
         dispatcher_for(task, argv: attributes.fetch(:argv)).dispatch_recovery(
           task: task, **attributes

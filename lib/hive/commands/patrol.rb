@@ -21,6 +21,7 @@ module Hive
   module Commands
     class Patrol
       def initialize(project, json: false, dry_run: false, list: false,
+                     once: false, one_shot_factory: nil,
                      mapper_factory: nil, reviewer_factory: nil,
                      project_entry: nil,
                      capability_context: nil,
@@ -29,6 +30,8 @@ module Hive
         @json = json
         @dry_run = dry_run
         @list = list
+        @once = once
+        @one_shot_factory = one_shot_factory
         @mapper_factory = mapper_factory || lambda do |root, cfg, state|
           Hive::Patrol::Mapper.new(root, cfg: cfg, state: state, capabilities: [ :architecture ])
         end
@@ -39,6 +42,7 @@ module Hive
       end
 
       def call
+        return run_once if @once
         return list_findings if @list
 
         # The daemon SIGTERMs this child on shutdown and SIGKILLs it once the
@@ -47,15 +51,28 @@ module Hive
         Hive::Patrol::Shutdown.install_trap!
         emit(run_cycle)
       rescue Hive::Error => e
-        emit_error(e)
+        emit_error(e) unless @once
         raise
       rescue StandardError => e
         wrapped = Hive::InternalError.wrap(e)
-        emit_error(wrapped)
+        emit_error(wrapped) unless @once
         raise wrapped
       end
 
       private
+
+      def run_once
+        require "hive/one_shot/patrol_adapter"
+        entry = @project_entry || Hive::Config.find_project(@project)
+        raise Hive::ConfigError, "hive patrol: unknown project #{@project.inspect}" unless entry
+
+        factory = @one_shot_factory || lambda do |project_entry|
+          Hive::OneShot::PatrolAdapter.new(entry: project_entry, dry_run: @dry_run)
+        end
+        result = factory.call(entry).call
+        puts result.to_json
+        result
+      end
 
       def list_findings
         entry = @project_entry || Hive::Config.find_project(@project)
@@ -444,5 +461,8 @@ end
 # rejections that never reach the handler still ride this command's JSON
 # envelope (see Hive::CliUsageContracts).
 require "hive/cli_usage_contracts"
+require "hive/one_shot/result"
 
-Hive::CliUsageContracts.declare("patrol", { schema: "hive-patrol", error_kind: "error" })
+Hive::OneShot::Result.declare_usage_contract("patrol", component: :patrol) do |_argv, command_index:, option_argv:|
+  { schema: "hive-patrol", error_kind: "error" }
+end

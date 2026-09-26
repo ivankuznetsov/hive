@@ -2,6 +2,7 @@ require "test_helper"
 require "tmpdir"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
+require "hive/one_shot/schedule_state"
 
 # Pin the concurrency controller's caps + backoff + quarantine + daily-
 # rate semantics. Pure unit — no I/O, no Process.spawn. The controller
@@ -344,6 +345,61 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     c.record_project_dropped(project: "p2")
 
     assert_equal %w[p1 p2], c.dropped_projects.sort
+  end
+
+  def test_scheduler_holds_survive_a_fresh_controller
+    Dir.mktmpdir do |root|
+      factory = ->(project) { Hive::OneShot::ScheduleState.new(state_root: File.join(root, project)) }
+      first = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      dispatch(first, 900, "p1", "bad")
+      first.record_completion(
+        pid: 900, exit_code: Hive::ExitCodes::SOFTWARE, completed_at: T0
+      )
+      first.record_project_dropped(project: "p2")
+
+      fresh = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      assert_equal :cooldown, fresh.can_dispatch?(project: "p1", slug: "bad", now: T0 + 1)
+      assert_equal :project_dropped,
+                   fresh.can_dispatch?(project: "p2", slug: "anything", now: T0 + 1)
+      assert_equal :ok, fresh.can_dispatch?(project: "p3", slug: "good", now: T0 + 1)
+    end
+  end
+
+  def test_persisted_quarantine_and_project_drop_have_explicit_clear_controls
+    Dir.mktmpdir do |root|
+      factory = ->(project) { Hive::OneShot::ScheduleState.new(state_root: File.join(root, project)) }
+      first = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      dispatch(first, 901, "p1", "bad")
+      first.record_completion(
+        pid: 901, exit_code: Hive::ExitCodes::USAGE, completed_at: T0
+      )
+      first.record_project_dropped(project: "p2")
+
+      fresh = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      assert fresh.clear_quarantine(project: "p1", slug: "bad")
+      assert fresh.clear_project_dropped(project: "p2")
+      refute fresh.clear_quarantine(project: "p1", slug: "bad")
+      refute fresh.clear_project_dropped(project: "p2")
+
+      restarted = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      assert_equal :ok, restarted.can_dispatch?(project: "p1", slug: "bad", now: T0 + 1)
+      assert_equal :ok, restarted.can_dispatch?(project: "p2", slug: "anything", now: T0 + 1)
+    end
   end
 
   # ── mtime tracking ────────────────────────────────────────────────────
@@ -735,5 +791,152 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal [ {
       "project" => "quarantine-project", "slug" => "quarantine-task"
     } ], snapshot.fetch("quarantined")
+  end
+
+  def test_one_shot_gate_deadlines_and_scoped_persistence_are_explicit
+    writes = []
+    dispatch_state = Object.new
+    dispatch_state.define_singleton_method(:load) { {} }
+    dispatch_state.define_singleton_method(:write) do |value, **options|
+      writes << [ value, options ]
+    end
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50, dispatch_state: dispatch_state,
+      persistence_scope_projects: [ "p1" ]
+    )
+    controller.instance_variable_get(:@cooldown_until)[[ "p1", "task" ]] = T0 + 60
+
+    assert_equal T0 + 60,
+                 controller.next_check_at(project: "p1", slug: "task", gate: :cooldown, now: T0)
+    assert_equal Time.utc(T0.year, T0.month, T0.day) + 86_400,
+                 controller.next_check_at(project: "p1", slug: "task", gate: :daily_cap, now: T0)
+    controller.send(:persist_dispatch_baselines!)
+    assert_equal [ "p1" ], writes.last.fetch(1).fetch(:scope_projects)
+  end
+
+  def test_malformed_dispatch_checkpoint_raises_typed_invalid_state
+    store = Object.new
+    store.define_singleton_method(:read) do |_component|
+      { "cooldowns" => [ { "next_check_at" => (T0 + 60).iso8601(6) } ] }
+    end
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+
+    error = assert_raises(Hive::OneShot::ScheduleState::StateError) do
+      controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+    end
+    assert_equal "checkpoint_invalid", error.code
+  end
+
+  def test_dispatch_checkpoint_shape_quarantine_and_typed_errors_are_restored_strictly
+    state = { "cooldowns" => "invalid" }
+    store = Object.new
+    store.define_singleton_method(:read) { |_component| state }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+    assert_raises(Hive::OneShot::ScheduleState::StateError) do
+      controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+    end
+
+    state = { "cooldowns" => [], "transient_failures" => {},
+              "quarantined" => [ "" ], "dropped" => false }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+    assert_raises(Hive::OneShot::ScheduleState::StateError) do
+      controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+    end
+
+    state = { "cooldowns" => [], "transient_failures" => {},
+              "quarantined" => [ "task" ], "dropped" => false }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+    assert_equal :quarantined,
+                 controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+
+    typed = Hive::OneShot::ScheduleState::StateError.new(
+      "unavailable", code: "checkpoint_unavailable"
+    )
+    store.define_singleton_method(:read) { |_component| raise typed }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+    assert_same typed, assert_raises(Hive::OneShot::ScheduleState::StateError) {
+      controller.can_dispatch?(project: "p1", slug: "task", now: T0)
+    }
+  end
+
+  def test_read_only_gate_does_not_delete_or_persist_an_expired_cooldown
+    updates = 0
+    store = Object.new
+    store.define_singleton_method(:read) do |_component|
+      {
+        "cooldowns" => [ { "slug" => "task", "next_check_at" => (T0 - 1).iso8601(6) } ],
+        "transient_failures" => {}, "quarantined" => [], "dropped" => false
+      }
+    end
+    store.define_singleton_method(:update) do |*, **, &block|
+      updates += 1
+      block.call({})
+    end
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50,
+      schedule_state_factory: ->(_project) { store }
+    )
+
+    assert_equal :ok,
+                 controller.can_dispatch?(project: "p1", slug: "task", now: T0, mutate: false)
+    assert_equal 0, updates
+    assert controller.instance_variable_get(:@cooldown_until).key?([ "p1", "task" ])
+  end
+
+  def test_baseline_persistence_resolves_owned_project_scope_at_each_write
+    writes = []
+    owned = [ "p1" ]
+    dispatch_state = Object.new
+    dispatch_state.define_singleton_method(:load) { {} }
+    dispatch_state.define_singleton_method(:write) { |_value, **options| writes << options }
+    controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 50, dispatch_state: dispatch_state,
+      persistence_scope_projects: -> { owned.dup }
+    )
+
+    controller.observe_state_file_mtime(project: "p1", slug: "one", mtime: T0)
+    owned.replace([ "p2" ])
+    controller.observe_state_file_mtime(project: "p2", slug: "two", mtime: T0)
+
+    assert_equal [ [ "p1" ], [ "p2" ] ], writes.map { |write| write.fetch(:scope_projects) }
+  end
+
+  def test_persisted_schedule_state_includes_quarantined_tasks
+    Dir.mktmpdir do |root|
+      factory = ->(project) { Hive::OneShot::ScheduleState.new(state_root: File.join(root, project)) }
+      controller = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      dispatch(controller, 902, "p1", "bad")
+      controller.record_completion(
+        pid: 902, exit_code: Hive::ExitCodes::USAGE, completed_at: T0
+      )
+
+      assert_equal [ "bad" ], factory.call("p1").read("dispatch").fetch("quarantined")
+    end
   end
 end

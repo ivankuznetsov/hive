@@ -74,6 +74,33 @@ class HiveCommandsDaemonTest < Minitest::Test
     Hive::Commands::Daemon.new(subcommand, **{ hive_home: @home }.merge(kwargs))
   end
 
+  def test_clear_hold_rejects_each_unsupported_or_ambiguous_invocation
+    cases = [
+      [ { all: true, target: "demo" }, /--all is not supported/ ],
+      [ { json: true, target: "demo" }, /--json is not supported/ ],
+      [ { dry_run: true, target: "demo" }, /--dry-run and --detach/ ],
+      [ { target: " " }, /missing PROJECT/ ],
+      [ { target: "missing" }, /unknown project/ ]
+    ]
+
+    cases.each do |kwargs, message|
+      target = kwargs.fetch(:target, nil)
+      options = kwargs.reject { |key, _| key == :target }
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Daemon.new("clear-hold", target, hive_home: @home, **options).call
+      end
+      assert_match message, error.message
+    end
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_) { { "name" => "demo" } }) do
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Daemon.new("clear-hold", "demo", hive_home: @home,
+                                  queue_args: [ "clear-hold", " " ]).call
+      end
+      assert_match(/SLUG must not be empty/, error.message)
+    end
+  end
+
   def write_pid_payload(pid: 4242, process_start_time: "start-time",
                         runtime: Hive::RuntimeIdentity.new.to_h)
     File.write(
@@ -162,6 +189,10 @@ class HiveCommandsDaemonTest < Minitest::Test
     with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ entry ] }) do
       with_replaced_singleton_method(Hive::Config, :load, ->(*) { cfg }) do
         with_replaced_singleton_method(Hive::Patrol::LaunchBudget, :new, ->(*) { budget }) do
+          ownership = captured.fetch(:project_ownership)
+          assert_equal [ "demo" ], ownership.refresh!
+          scope = captured.fetch(:controller).instance_variable_get(:@persistence_scope_projects)
+          assert_equal [ "demo" ], scope.call
           candidate = captured.fetch(:patrol_arbiter).candidates(now: Time.now).find do |item|
             item[:action_phase] == :scheduled
           end
@@ -169,6 +200,8 @@ class HiveCommandsDaemonTest < Minitest::Test
           dispatch = captured.fetch(:refactor_patrol_scheduler).reserve(candidate, now: Time.now)
           assert_includes dispatch.fetch(:command), "refactor-patrol-scheduled"
           assert_equal :architecture_patrol, dispatch.dig(:dispatch_token, :kind)
+        ensure
+          ownership&.release_all!
         end
       end
     end
@@ -1622,5 +1655,112 @@ class HiveCommandsDaemonTest < Minitest::Test
       capture_io { command.send(:send_signal_safely, 123, :TERM) }
     end
     assert_match(/insufficient permissions/, err)
+  end
+
+  def test_once_emits_dispatch_report
+    entry = { "name" => "hive", "path" => "/repo", "hive_state_path" => "/state" }
+    result = Hive::OneShot::Result.ok(
+      component: :dispatch, project: "hive", started_at: Time.utc(2026, 9, 25),
+      finished_at: Time.utc(2026, 9, 25), ran: [], items: [], safe_to_stop: true
+    )
+    adapter = Object.new
+    adapter.define_singleton_method(:call) { result }
+    command = Hive::Commands::Daemon.new(
+      nil, "hive", once: true, hive_home: @home,
+      one_shot_factory: ->(actual) { assert_equal entry, actual; adapter }
+    )
+
+    out = with_replaced_singleton_method(Hive::Config, :find_project, ->(_) { entry }) do
+      capture_io { assert_same result, command.call }.first
+    end
+
+    assert_equal "hive-one-shot", JSON.parse(out).fetch("schema")
+  end
+
+  def test_once_requires_a_project
+    command = Hive::Commands::Daemon.new(nil, nil, once: true, hive_home: @home)
+
+    assert_raises(Hive::InvalidTaskPath) { command.call }
+  end
+
+  def test_clear_hold_removes_only_the_selected_persisted_state
+    state_root = File.join(@home, "project", ".hive-state")
+    entry = { "name" => "proj", "path" => File.dirname(state_root),
+              "hive_state_path" => state_root }
+    state = Hive::OneShot::ScheduleState.new(state_root: state_root)
+    state.update("dispatch") do
+      {
+        "cooldowns" => [ { "slug" => "cool", "next_check_at" => Time.now.utc.iso8601(6) } ],
+        "transient_failures" => { "retry" => 2 },
+        "quarantined" => %w[bad other],
+        "dropped" => true
+      }
+    end
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { entry }) do
+      out, = capture_io do
+        Hive::Commands::Daemon.new(
+          "clear-hold", "proj", queue_args: %w[proj bad], hive_home: @home
+        ).call
+      end
+      assert_includes out, "cleared quarantine for bad"
+      after_slug = state.read("dispatch")
+      assert_equal [ "other" ], after_slug.fetch("quarantined")
+      assert_equal true, after_slug.fetch("dropped")
+      assert_equal({ "retry" => 2 }, after_slug.fetch("transient_failures"))
+      assert_equal [ "cool" ], after_slug.fetch("cooldowns").map { |row| row.fetch("slug") }
+
+      out, = capture_io do
+        Hive::Commands::Daemon.new(
+          "clear-hold", "proj", hive_home: @home
+        ).call
+      end
+      assert_includes out, "cleared dropped-project hold"
+      after_project = state.read("dispatch")
+      assert_equal false, after_project.fetch("dropped")
+      assert_equal [ "other" ], after_project.fetch("quarantined")
+    end
+  end
+
+  def test_clear_hold_refuses_while_a_daemon_pid_file_remains
+    state_root = File.join(@home, "project", ".hive-state")
+    entry = { "name" => "proj", "path" => File.dirname(state_root),
+              "hive_state_path" => state_root }
+    state = Hive::OneShot::ScheduleState.new(state_root: state_root)
+    state.update("dispatch") do
+      {
+        "cooldowns" => [], "transient_failures" => {},
+        "quarantined" => [ "bad" ], "dropped" => false
+      }
+    end
+    File.write(File.join(@home, ".daemon.pid"), "stale")
+    command = Hive::Commands::Daemon.new(
+      "clear-hold", "proj", queue_args: %w[proj bad], hive_home: @home
+    )
+
+    error = with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { entry }) do
+      assert_raises(Hive::ConcurrentRunError) { command.call }
+    end
+    assert_match(/stop the daemon/, error.message)
+    assert_equal [ "bad" ], state.read("dispatch").fetch("quarantined")
+  end
+
+  def test_clear_hold_refuses_while_a_one_shot_owns_the_project
+    state_root = File.join(@home, "project", ".hive-state")
+    entry = { "name" => "proj", "path" => File.dirname(state_root),
+              "hive_state_path" => state_root }
+    guard = Hive::OneShot::ProjectGuard.new(
+      state_root: state_root, project: "proj", kind: :one_shot
+    ).acquire!
+    command = Hive::Commands::Daemon.new(
+      "clear-hold", "proj", queue_args: %w[proj bad], hive_home: @home
+    )
+
+    error = with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { entry }) do
+      assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) { command.call }
+    end
+    assert_equal "one_shot_busy", error.code
+  ensure
+    guard&.release!
   end
 end

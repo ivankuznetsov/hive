@@ -26,7 +26,8 @@ module Hive
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
                      once: false, all: false, force: false,
-                     hive_home: Hive::Paths.state_home, quiet: false)
+                     hive_home: Hive::Paths.state_home, quiet: false, json: false,
+                     one_shot_factory: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -34,7 +35,8 @@ module Hive
         @once = once
         @all = all
         @force = force
-        @json = false
+        @json = json
+        @one_shot_factory = one_shot_factory
         @hive_home = hive_home
         @quiet = quiet
       end
@@ -143,14 +145,69 @@ module Hive
       end
 
       def run_once
-        project_name = resolve_once_project_name
-        if @all && Hive::Config.registered_projects.empty?
-          puts "babysitter: 0 enabled projects, nothing to do"
-          return
+        require "hive/one_shot/babysitter_adapter"
+        resolve_once_project_name
+        entries = if @all
+          Hive::Config.registered_project_entries(preserve_invalid: true)
+        else
+          [ @once_entry ]
+        end
+        started = Time.now.utc
+        reports = entries.each_with_index.map do |entry, index|
+          one_shot_report(entry, index: index)
+        end
+        result = if @all
+          Hive::OneShot::Result.aggregate(
+            component: :babysitter, reports: reports, started_at: started,
+            finished_at: Time.now.utc
+          )
+        else
+          reports.fetch(0)
+        end
+        puts result.to_json
+        result
+      end
+
+      def one_shot_adapter(entry)
+        return @one_shot_factory.call(entry) if @one_shot_factory
+
+        Hive::OneShot::BabysitterAdapter.new(entry: entry, dry_run: @dry_run)
+      end
+
+      def one_shot_report(entry, index:)
+        started = Time.now.utc
+        project = one_shot_project_name(entry, index: index)
+        unless one_shot_registry_entry?(entry)
+          return Hive::OneShot::Result.error(
+            component: :babysitter, project: project,
+            started_at: started, finished_at: Time.now.utc,
+            code: "config",
+            message: "registered project entry #{index + 1} is malformed; expected non-empty string name and path",
+            exit_code: Hive::ExitCodes::CONFIG
+          )
         end
 
-        dispatcher = build_dispatcher(project_name: project_name, max_ticks: 1)
-        dispatcher.run_forever
+        one_shot_adapter(entry).call
+      rescue StandardError => error
+        Hive::OneShot::Result.error(
+          component: :babysitter, project: project,
+          started_at: started, finished_at: Time.now.utc,
+          code: error.respond_to?(:code) ? error.code : "observation_failed",
+          message: error.message,
+          exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
+        )
+      end
+
+      def one_shot_registry_entry?(entry)
+        entry.is_a?(Hash) && entry["name"].is_a?(String) && !entry["name"].empty? &&
+          entry["path"].is_a?(String) && !entry["path"].empty?
+      end
+
+      def one_shot_project_name(entry, index:)
+        name = entry["name"] if entry.is_a?(Hash)
+        return name if name.is_a?(String) && !name.empty?
+
+        "invalid-registry-entry-#{index + 1}"
       end
 
       def resolve_once_project_name
@@ -170,6 +227,7 @@ module Hive
                 "hive babysit --once: unknown project #{@target.inspect} " \
                 "(see `hive status` for the registered set)"
         end
+        @once_entry = entry
         entry["name"]
       end
 
@@ -468,3 +526,8 @@ module Hive
     end
   end
 end
+
+require "hive/cli_usage_contracts"
+require "hive/one_shot/result"
+
+Hive::OneShot::Result.declare_usage_contract("babysit", component: :babysitter)

@@ -372,8 +372,15 @@ module Hive
       end
 
       def recover_claims(now: @clock.call, alive:, attempt_alive: nil,
-                         expiry_sec: CLAIM_EXPIRY_SEC, handler: nil, **)
-        claimed.each.sum do |delivery|
+                         expiry_sec: CLAIM_EXPIRY_SEC, handler: nil, projects: nil, **)
+        selected_projects = Array(projects).map(&:to_s).to_h { |name| [ name, true ] }
+        deliveries = claimed
+        if projects
+          deliveries = deliveries.select do |delivery|
+            selected_projects.key?(delivery.request.project.to_s)
+          end
+        end
+        deliveries.sum do |delivery|
           request = delivery.request
           next 0 if request.recovery&.fetch("phase", nil) == "terminal"
           claim = delivery.claim

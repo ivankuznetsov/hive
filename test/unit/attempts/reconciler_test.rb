@@ -84,6 +84,28 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_project_scope_mutates_only_owned_attempts_but_counts_global_capacity
+    with_store do |store|
+      owned = running_attempt(store, stale_sec: 30)
+      other_launch = create(store, attempt_id: "other", timeout: 30, project: "other")
+      other_claim = store.claim(
+        other_launch, owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW
+      )
+      other = store.first_heartbeat(other_claim, stale_sec: 30, now: NOW + 1)
+
+      snapshot = reconciler(store, :missing).reconcile(
+        now: NOW + 2, mutate_projects: [ "demo" ]
+      )
+
+      assert_equal "lost", store.fetch(owned.attempt_id).state
+      assert_equal "running", store.fetch(other.attempt_id).state
+      assert_equal :unowned,
+                   snapshot.attempts.find { |item| item.attempt.attempt_id == other.attempt_id }.classification
+      assert_equal 1, snapshot.capacity.global_count
+    end
+  end
+
   def test_unverifiable_owner_fails_closed_as_suspect
     with_store do |store|
       running = running_attempt(store, stale_sec: 30)
@@ -410,10 +432,10 @@ class AttemptsReconcilerTest < Minitest::Test
     )
   end
 
-  def create(store, attempt_id: "attempt-1", timeout: 30)
+  def create(store, attempt_id: "attempt-1", timeout: 30, project: "demo")
     store.create_launching(
       attempt_id: attempt_id, request_id: "request-#{attempt_id}",
-      task_id: "42", project: "demo", task_slug: "durable-task",
+      task_id: "42", project: project, task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-#{attempt_id}",
       progress_token: "progress", provider: "codex",
       worker_argv: [ "hive", "run", "durable-task" ],

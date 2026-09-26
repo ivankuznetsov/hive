@@ -1071,14 +1071,22 @@ module Hive
                      desc: "map and review without persisting findings"
     option :list, type: :boolean, default: false,
                   desc: "list bounded recorded finding health without running Patrol"
+    option :once, type: :boolean, default: false,
+                  desc: "run one scheduler pass and emit hive-one-shot.v1"
     def patrol(project)
       require "hive/commands/patrol"
-      Hive::Commands::Patrol.new(
+      if options[:once] && options[:list]
+        raise Hive::InvalidTaskPath, "hive patrol: --once cannot be combined with --list"
+      end
+      result = Hive::Commands::Patrol.new(
         project,
         json: options[:json],
         dry_run: options[:dry_run],
-        list: options[:list]
+        list: options[:list],
+        once: options[:once]
       ).call
+      finish_one_shot(result) if options[:once]
+      result
     end
 
     desc "refactor-patrol PROJECT", "Discover routed refactor theses for a registered project"
@@ -1134,9 +1142,22 @@ module Hive
                     desc: "continue a --list query from an opaque cursor"
     option :full, type: :boolean, default: false,
                   desc: "include complete unbounded histories with --show"
+    option :once, type: :boolean, default: false,
+                  desc: "run one scheduler pass and emit hive-one-shot.v1"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
-      Hive::Commands::RefactorPatrol.new(
+      if options[:once] && [ options[:feature], options[:entrypoint], options[:path],
+                            options[:changed_since], options[:pr], options[:job_manifest],
+                            options[:result_file], options[:show], options[:archive],
+                            options[:limit], options[:cursor] ].any?
+        raise Hive::InvalidTaskPath,
+              "hive refactor-patrol: --once cannot be combined with manual selectors"
+      end
+      if options[:once] && (options[:list] || options[:full])
+        raise Hive::InvalidTaskPath,
+              "hive refactor-patrol: --once cannot be combined with query selectors"
+      end
+      result = Hive::Commands::RefactorPatrol.new(
         project,
         json: options[:json],
         dry_run: options[:dry_run],
@@ -1152,8 +1173,11 @@ module Hive
         archive: options[:archive],
         limit: options[:limit],
         cursor: options[:cursor],
-        full: options[:full]
+        full: options[:full],
+        once: options[:once]
       ).call
+      finish_one_shot(result) if options[:once]
+      result
     end
 
     desc "refactor-patrol-scheduled PROJECT",
@@ -1732,20 +1756,27 @@ module Hive
         raise Hive::InvalidTaskPath,
               "hive babysit install: --dry-run does not apply to service installation"
       end
+      if options[:once] && (options[:detach] || options[:force])
+        raise Hive::InvalidTaskPath,
+              "hive babysit --once: --detach and --force are service-only options"
+      end
 
       target = options[:once] ? (targets.first || subcommand) : targets.first
-      Hive::Commands::Babysit.new(
+      result = Hive::Commands::Babysit.new(
         options[:once] ? nil : subcommand,
         target,
         detach: options[:detach],
         dry_run: options[:dry_run],
         once: options[:once],
         all: options[:all],
-        force: options[:force]
+        force: options[:force],
+        json: options[:json]
       ).call
+      finish_one_shot(result) if options[:once]
+      result
     end
 
-    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable / queue)"
+    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable / queue / clear-hold)"
     long_desc <<~DESC
       Subcommands:
         start [--detach] [--dry-run]      Run the dispatcher loop. Without
@@ -1771,6 +1802,9 @@ module Hive
                                           --all = every registered project;
                                           --json emits hive-daemon-enroll.v1.
         disable PROJECT|--all [--json]    Set daemon.enabled: false there.
+        clear-hold PROJECT [SLUG]         Clear the persisted dropped-project
+                                          hold, or only SLUG's quarantine.
+                                          The daemon must be stopped first.
         queue [list|show <id>|prune]      Inspect the dispatch-request queue
                                           the bot writes and the daemon
                                           consumes. `list` (default) shows
@@ -1816,8 +1850,30 @@ module Hive
                  desc: "for enable/disable: apply to every registered project"
     option :force, type: :boolean, default: false,
                    desc: "for install: overwrite an existing unit (saves <path>.bak)"
+    option :once, type: :boolean, default: false,
+                  desc: "run one project-scoped dispatch pass and emit hive-one-shot.v1"
     def daemon(subcommand = nil, *targets)
       require "hive/commands/daemon"
+      if options[:once]
+        if Hive::Commands::Daemon::VALID_SUBCOMMANDS.include?(subcommand.to_s)
+          raise Hive::InvalidTaskPath,
+                "hive daemon: --once is a mode, not a modifier for #{subcommand.inspect}"
+        end
+        if targets.length > 1 || (subcommand && targets.any?)
+          raise Hive::InvalidTaskPath,
+                "hive daemon --once: expected exactly one PROJECT"
+        end
+        if options[:detach] || options[:all] || options[:force]
+          raise Hive::InvalidTaskPath,
+                "hive daemon --once: --detach, --all, and --force are incompatible"
+        end
+        target = targets.first || subcommand
+        result = Hive::Commands::Daemon.new(
+          nil, target, dry_run: options[:dry_run], json: options[:json], once: true
+        ).call
+        finish_one_shot(result)
+        return result
+      end
       # Argv-shape errors raise BEFORE Hive::Commands::Daemon.new, so
       # call_with_envelope inside the command can't catch them. Emit
       # the hive-daemon-enroll ErrorPayload inline under --json so
@@ -1830,14 +1886,16 @@ module Hive
           error_kind: Hive::Schemas::EnrollErrorKind::MISSING_PROJECT
         )
       end
-      # `queue` takes up to two positionals (ACTION + optional REQUEST_ID,
-      # e.g. `queue show <id>`); every other subcommand takes at most one
-      # (PROJECT or --all).
-      max_targets = subcommand == "queue" ? 2 : 1
+      # `queue` and `clear-hold` take up to two positionals; every other
+      # subcommand takes at most one (PROJECT or --all).
+      max_targets = %w[queue clear-hold].include?(subcommand) ? 2 : 1
       if targets.length > max_targets
         message = if subcommand == "queue"
           "hive daemon queue: too many positional arguments #{targets.inspect}; " \
             "expected `queue [list|show <id>|prune]`"
+        elsif subcommand == "clear-hold"
+          "hive daemon clear-hold: too many positional arguments #{targets.inspect}; " \
+            "expected `clear-hold PROJECT [SLUG]`"
         else
           "hive daemon #{subcommand}: too many positional arguments " \
             "#{targets.inspect}; expected exactly one PROJECT (or --all)"
@@ -1872,6 +1930,12 @@ module Hive
     end
 
     no_commands do
+      def finish_one_shot(result)
+        return result unless result.respond_to?(:exit_code) && result.exit_code != Hive::ExitCodes::SUCCESS
+
+        raise Hive::OneShot::Result::ReportedError, result
+      end
+
       # Emit a hive-daemon-enroll ErrorPayload to stdout when --json is
       # set, then raise so the bin/hive top-level rescue maps to the
       # right exit code. UsageError carries the closed error_kind so

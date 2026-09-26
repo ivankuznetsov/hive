@@ -139,7 +139,7 @@ variable from silently overriding the harness-specific cleanup policy.
 | `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
-| `test/e2e/check_incident_budget.rb` | Report-integrity gate plus below-16s-per-incident and below-30s-aggregate advisory check. |
+| `test/e2e/check_incident_budget.rb` | Report-integrity gate plus below-16s-per-incident and below-36s-aggregate advisory check. |
 | `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
 
 ## Scenario DSL
@@ -274,7 +274,7 @@ On failure, the harness writes a scenario bundle containing:
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
 | `incident_plan_only_dependency_gate` | Rejects a plan-only assertion, holds exact metadata below the gate, then proves one real dispatch after the prerequisite reaches `8-finalize`. |
-| `incident_provider_limit_retry` | Opens one account-scoped circuit from trusted transport evidence and proves one charged fallback successor under daemon recovery ownership. Incident scenarios retain a twelve-second per-scenario ceiling and a thirty-second aggregate ceiling, leaving bounded headroom for normal hosted-runner subprocess variance. |
+| `incident_provider_limit_retry` | Opens one account-scoped circuit from trusted transport evidence and proves one charged fallback successor under daemon recovery ownership. Incident scenarios retain a sixteen-second per-scenario ceiling and a thirty-six-second aggregate ceiling, leaving bounded headroom for normal hosted-runner subprocess variance. |
 | `provider_routing_durable_matrix` | Runs AE2-AE8 through `Attempts::Dispatcher`, durable attempt ownership and receipts, restart reopening, a real `Attempts::Supervisor`, recovery reuse, operator/corruption handling, and the real no-pool subscription `limits_reached` isolation path. |
 | `incident_repository_routing` | Rejects a cross-project dependency whose registered repository identity disagrees with its live origin and preserves the non-target task. |
 
@@ -293,8 +293,8 @@ Routine pull-request CI runs `e2e:lib_test` and `rake e2e` in a separate job,
 retains the run directory even after failure, and feeds that functional job
 into the protected `rake test (Ruby 3.4)` aggregate. A downstream advisory job
 downloads the artifact and reads enabled incident durations from `report.json`.
-Durations include sandbox bootstrap; each enabled incident targets below eleven
-seconds and the group targets below thirty seconds. Timing failures remain
+Durations include sandbox bootstrap; each enabled incident targets below sixteen
+seconds and the group targets below thirty-six seconds. Timing failures remain
 visible without blocking a merge. Missing enabled results, duplicate
 metadata/results, and invalid durations remain functional failures in the E2E
 job. Neither job folds e2e into the local default `rake test` task.

@@ -5,6 +5,27 @@ require "hive/runtime_control_plane"
 class RuntimeControlPlaneProcessGuardTest < Minitest::Test
   include HiveTestHelper
 
+  class ForkResource
+    attr_reader :closed
+
+    def after_fork_child!
+      @closed = true
+    end
+  end
+
+  def test_registered_fork_resources_are_closed_only_in_child_state
+    resource = ForkResource.new
+    guard = Hive::RuntimeControlPlane::ProcessGuard
+    guard.register_fork_resource(resource)
+
+    guard.after_fork_child!
+
+    assert resource.closed
+    refute_includes guard.send(:state).fetch(:fork_resources), resource
+  ensure
+    guard&.unregister_fork_resource(resource) if resource
+  end
+
   def test_connected_database_stays_registered_without_an_external_owner
     with_tmp_dir do |root|
       database = database_at(File.join(root, "unowned.sqlite3"))

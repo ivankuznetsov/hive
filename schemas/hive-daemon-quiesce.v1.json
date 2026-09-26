@@ -22,9 +22,17 @@
         "ok": { "type": "boolean" },
         "result": { "enum": ["paused", "not_paused"] },
         "paused": { "type": "boolean" },
-        "reason": { "type": ["string", "null"] },
+        "reason": {
+          "enum": [
+            null, "controller_busy", "deadline_exhausted", "storage_error",
+            "ownership_unverifiable", "lifecycle_busy", "launch_fence_busy",
+            "writer_drain_timeout", "timeout", "finalization_reserve_exhausted",
+            "work_remaining", "checkpoint_busy", "checkpoint_error",
+            "proof_publication_failed"
+          ]
+        },
         "phase": { "enum": ["running", "quiescing", "paused", "resuming", "unknown"] },
-        "admission_open": { "type": "boolean" },
+        "admission_open": { "type": ["boolean", "null"] },
         "generation": { "type": ["integer", "null"], "minimum": 0 },
         "lifecycle_revision": { "type": ["integer", "null"], "minimum": 0 },
         "interrupted_attempt_ids": {

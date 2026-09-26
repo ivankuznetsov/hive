@@ -454,7 +454,8 @@ module Hive
                     timeout_sec: nil)
         mutate(
           observed, allowed_states: %w[launching running], pending_receipt: {},
-          authority: authority, timeout_sec: timeout_sec
+          authority: authority, cleanup_attempt_id: observed.attempt_id,
+          timeout_sec: timeout_sec
         ) do |data|
           data.merge(
             "state" => "lost", "lease_version" => data.fetch("lease_version") + 1,

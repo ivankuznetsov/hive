@@ -119,6 +119,45 @@ class RuntimeControlPlaneQuiescenceUpgradeTest < Minitest::Test
     end
   end
 
+  def test_failed_publication_preserves_committed_source_wal_rows
+    with_tmp_dir do |root|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
+      seed_attempt_and_payload(database)
+      database.disconnect
+      convert_to_pinned_v1(path)
+
+      source = Sequel.connect(adapter: "sqlite", database: path, max_connections: 1)
+      source.run("PRAGMA journal_mode = WAL")
+      source.run("PRAGMA wal_autocheckpoint = 0")
+      source[:projects].insert(
+        project_id: "project-wal", installation_id: source[:installations].get(:installation_id),
+        registration_id: "registration-wal", name: "wal", observed_path: "/tmp/wal",
+        state_root_path: "/tmp/wal/.hive-state", active: 1, registered_at: NOW
+      )
+      assert_path_exists "#{path}-wal"
+      original_rename = File.method(:rename)
+
+      error = with_replaced_singleton_method(File, :rename, lambda { |from, to|
+        raise Errno::EIO, "injected publish failure" if to == path
+        original_rename.call(from, to)
+      }) do
+        assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+          Hive::RuntimeControlPlane::QuiescenceUpgrade.new(
+            state_home: root, ownership_verifier: -> { true }
+          ).call
+        end
+      end
+      assert_equal :quiescence_upgrade_failed, error.code
+      source.disconnect
+      source = Sequel.connect(adapter: "sqlite", database: path, readonly: true, max_connections: 1)
+      assert_equal "wal", source[:projects].where(project_id: "project-wal").get(:name)
+    ensure
+      source&.disconnect
+      database&.disconnect
+    end
+  end
+
   private
 
   def assert_quiescence_revision_upgrade(root, fingerprint:, custody_columns:, phase:)
@@ -173,13 +212,15 @@ class RuntimeControlPlaneQuiescenceUpgradeTest < Minitest::Test
   end
 
   def seed_closed_lifecycle(database, phase:)
-    database.controller_transaction do |db|
-      db[:runtime_lifecycle].update(
-        phase: phase, generation: 7, revision: 11, mutation_sequence: 23,
-        boot_id: "boot-7", deadline_monotonic: 9876.5, shutdown_grace_sec: 24.25,
-        interrupted_attempt_ids_json: '["attempt-1"]', quiesce_started_at: NOW,
-        paused_at: phase == "paused" ? NOW : nil, updated_at: NOW
-      )
+    database.with_exclusive_writer(role: :controller) do |authority|
+      database.transaction(authority: authority) do |db|
+        db[:runtime_lifecycle].update(
+          phase: phase, generation: 7, revision: 11, mutation_sequence: 23,
+          boot_id: "boot-7", deadline_monotonic: 9876.5, shutdown_grace_sec: 24.25,
+          interrupted_attempt_ids_json: '["attempt-1"]', quiesce_started_at: NOW,
+          paused_at: phase == "paused" ? NOW : nil, updated_at: NOW
+        )
+      end
     end
   end
 

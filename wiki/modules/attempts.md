@@ -80,15 +80,18 @@ an ordinary cancellation. The installation controller aggregates any receipt
 the supervisor already committed for that generation with interruptions it
 finishes after verified wrapper and worker-group absence.
 
-Increment 1 does not treat process-tree polling, a PID/start fingerprint,
-inherited invocation tokens, or the existing transient systemd attempt scope as
-complete descendant custody. Every registered attempt root therefore makes the
-entry capability `ownership_unverifiable` unless the Linux delegated-cgroup
-adapter can prove the root's custody evidence. The increment-1 delivery does
-not claim that Linux success path: its positive result is an idle registry only,
-because no non-attempt launch surface is currently classified child-safe either.
-Darwin and other hosts without usable delegated custody get the same fail-closed
-answer whenever unregistered descendants may exist.
+Process-tree polling, a PID/start fingerprint, inherited invocation tokens, and
+an ambient or transient systemd scope are not complete descendant custody. The
+Linux delegated-cgroup adapter is eligible only for an explicitly established
+installation-exclusive domain when delegation is writable and parent escape is
+blocked. Automatic detection does not adopt the ambient service cgroup; the
+default therefore remains `unverified` until a launch adapter can inject that
+exclusive domain. Membership snapshots freeze the domain and recurse through
+descendant cgroups; unreadable member identities remain unresolved instead of
+disappearing from the inventory. Wrapper exit retains its process registration
+until both root identity and descendant-domain absence are proven, including
+after controller restart. Darwin and hosts without that custody remain fail
+closed whenever unregistered descendants may exist.
 
 `interrupted` remains fully implemented and independently tested at the real
 supervisor/reconciler boundary. Command-level interruption is intentionally not

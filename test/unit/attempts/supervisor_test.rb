@@ -16,7 +16,7 @@ class AttemptsSupervisorTest < Minitest::Test
     calls = []
     registry = Object.new
     registry.define_singleton_method(:register!) { |*args, **kwargs| calls << [ args, kwargs ] }
-    registry.define_singleton_method(:mark_stopped_by_reservation!) do |_id|
+    registry.define_singleton_method(:mark_stopped_by_reservation!) do |_id, **|
       raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
     end
     supervisor = Hive::Attempts::Supervisor.new(
@@ -1131,7 +1131,7 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def test_worker_termination_escalation_and_signal_setup_are_defensive
-    ticks = [ 0.0, 0.0, 0.0, 0.01 ]
+    ticks = [ 0.0, 0.0, 0.01 ]
     supervisor = Hive::Attempts::Supervisor.new(
       store: Object.new, attempt_id: "attempt", claim_io: StringIO.new(CLAIM_CAPABILITY),
       kill_grace_sec: 0.01, monotonic: -> { ticks.shift || 0.01 }

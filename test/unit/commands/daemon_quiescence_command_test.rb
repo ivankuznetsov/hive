@@ -69,6 +69,24 @@ class HiveCommandsDaemonQuiescenceCommandTest < Minitest::Test
     end
   end
 
+  def test_unknown_admission_storage_failure_does_not_invent_a_resume_obligation
+    with_tmp_dir do |root|
+      result = nonpaused_result(admission_open: nil).with(
+        reason: "storage_error", phase: "unknown", generation: nil
+      )
+      command = Hive::Commands::Daemon.new(
+        "quiesce", json: true, hive_home: root,
+        quiescence_factory: ->(timeout_sec:) { fixed_controller(result) }
+      )
+
+      output, _errors = capture_io { assert_raises(Hive::Error) { command.call } }
+      payload = JSON.parse(output)
+      assert_nil payload.fetch("admission_open")
+      refute payload.key?("resume_required")
+      assert_schema("hive-daemon-quiesce", payload)
+    end
+  end
+
   def test_invalid_timeout_emits_usage_without_constructing_a_controller
     with_tmp_dir do |root|
       constructed = false
@@ -265,6 +283,19 @@ class HiveCommandsDaemonQuiescenceCommandTest < Minitest::Test
     end
   end
 
+  def test_quiescence_schemas_reject_unknown_reasons
+    {
+      "hive-daemon-quiesce" => paused_result.to_h,
+      "hive-daemon-resume" => resumed_result.to_h
+    }.each do |name, payload|
+      payload = JSON.parse(JSON.generate(payload))
+      payload["reason"] = "typo_reason"
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+
+      refute_empty schema.validate(payload).to_a, name
+    end
+  end
+
   private
 
   def assert_schema(name, payload)
@@ -289,7 +320,8 @@ class HiveCommandsDaemonQuiescenceCommandTest < Minitest::Test
   def nonpaused_result(admission_open:)
     Hive::Daemon::QuiescenceResult.new(
       status: "not_paused", paused: false, reason: "ownership_unverifiable",
-      phase: admission_open ? "running" : "quiescing", admission_open: admission_open,
+      phase: admission_open.nil? ? "unknown" : (admission_open ? "running" : "quiescing"),
+      admission_open: admission_open,
       generation: admission_open ? nil : 3, lifecycle_revision: 7,
       interrupted_attempt_ids: [], remaining: [ { "role" => "attempt" } ],
       checkpoint: nil, proof: nil,

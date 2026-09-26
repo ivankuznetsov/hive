@@ -95,6 +95,24 @@ module Hive
         end
       end
 
+      def rebind_quiesce_clock!(generation:, expected_revision:, boot_id:, deadline_monotonic:,
+                                shutdown_grace_sec:, now: @clock.call, authority: nil,
+                                timeout_sec: nil)
+        expected = current
+        validate_expected!(expected, generation: generation, revision: expected_revision,
+                           phases: [ "quiescing" ])
+        mutate(
+          expected: expected, from: "quiescing", authority: authority,
+          timeout_sec: timeout_sec
+        ) do
+          {
+            boot_id: boot_id.to_s, deadline_monotonic: Float(deadline_monotonic),
+            shutdown_grace_sec: Float(shutdown_grace_sec),
+            quiesce_started_at: dump_time(now)
+          }
+        end
+      end
+
       def begin_resume!(generation:, now: @clock.call, authority: nil, timeout_sec: nil)
         expected = current
         validate_expected!(expected, generation: generation, phases: %w[quiescing paused resuming])
@@ -133,7 +151,10 @@ module Hive
             installation_id: installation_id(db), phase: from,
             generation: expected.generation, revision: expected.revision
           )
-          updates = yield(row.first).merge(
+          current = row.first
+          raise StaleLifecycle.new unless current
+
+          updates = yield(current).merge(
             revision: Sequel[:revision] + 1, updated_at: dump_time(@clock.call)
           )
           changed = row.update(updates)
@@ -142,9 +163,9 @@ module Hive
         end
 
         if privileged
-          authority ? database.transaction(
-            authority: authority, timeout_sec: timeout_sec, &operation
-          ) : database.controller_transaction(timeout_sec: timeout_sec, &operation)
+          raise ArgumentError, "lifecycle mutation requires fenced controller authority" unless authority
+
+          database.transaction(authority: authority, timeout_sec: timeout_sec, &operation)
         else
           database.transaction(timeout_sec: timeout_sec, &operation)
         end

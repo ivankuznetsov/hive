@@ -10,26 +10,28 @@ module Hive
     class FileFence
       attr_reader :path, :mode
 
-      def initialize(path:, timeout_sec:, monotonic_clock: nil, sleeper: nil)
+      def initialize(path:, timeout_sec:, monotonic_clock: nil, sleeper: nil,
+                     label: "runtime fence")
         @path = File.expand_path(path)
         @timeout_sec = Float(timeout_sec)
         raise ArgumentError, "fence timeout must be non-negative" if @timeout_sec.negative?
 
         @monotonic_clock = monotonic_clock || -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
         @sleeper = sleeper || ->(seconds) { sleep(seconds) }
+        @label = label.to_s
         @handle = nil
         @mode = nil
       end
 
-      def acquire_shared! = acquire!(:shared)
-      def acquire_exclusive! = acquire!(:exclusive)
+      def acquire_shared! = acquire_mode!(:shared)
+      def acquire_exclusive! = acquire_mode!(:exclusive)
       def shared? = mode == :shared
       def exclusive? = mode == :exclusive
       def acquired? = !@handle.nil?
 
       def synchronize(mode = :exclusive)
         acquired_here = !acquired?
-        acquire!(mode) if acquired_here
+        acquire_mode!(mode) if acquired_here
         yield self
       ensure
         release! if acquired_here && acquired?
@@ -45,12 +47,12 @@ module Hive
         handle.close
         true
       rescue SystemCallError, IOError => error
-        raise Hive::ConfigError, "runtime fence could not be released (#{error.class}: #{error.message})"
+        raise Hive::ConfigError, "#{@label} could not be released (#{error.class}: #{error.message})"
       end
 
       private
 
-      def acquire!(requested_mode)
+      def acquire_mode!(requested_mode)
         return self if mode == requested_mode
         raise Hive::ConfigError, "runtime fence is already held in #{mode} mode" if acquired?
 
@@ -66,10 +68,11 @@ module Hive
         until handle.flock(operation | File::LOCK_NB)
           if @monotonic_clock.call >= deadline
             raise Hive::ConcurrentRunError.new(
-              "runtime #{requested_mode} fence remained busy for #{@timeout_sec}s", lock_path: path
+              "#{@label} remained busy for #{@timeout_sec}s", lock_path: path
             )
           end
-          @sleeper.call([ 0.05, deadline - @monotonic_clock.call ].min)
+          remaining = [ deadline - @monotonic_clock.call, 0.0 ].max
+          @sleeper.call([ 0.05, remaining ].min)
         end
         validate_binding!(handle)
         @handle = handle
@@ -80,7 +83,7 @@ module Hive
         raise
       rescue SystemCallError, IOError, ArgumentError, TypeError => error
         handle&.close
-        raise Hive::ConfigError, "runtime fence is unavailable (#{error.class}: #{error.message})"
+        raise Hive::ConfigError, "#{@label} is unavailable (#{error.class}: #{error.message})"
       end
 
       def prepare_parent!
@@ -89,7 +92,7 @@ module Hive
         status = File.lstat(parent)
         valid = status.directory? && !status.symlink? && status.uid == Process.uid &&
           (status.mode & 0o022).zero?
-        raise Hive::ConfigError, "runtime fence directory is unsafe" unless valid
+        raise Hive::ConfigError, "#{@label} directory is unsafe" unless valid
       end
 
       def validate_binding!(handle)
@@ -98,7 +101,7 @@ module Hive
         valid = opened.file? && bound.file? && !bound.symlink? && opened.nlink == 1 &&
           bound.nlink == 1 && opened.uid == Process.uid && bound.uid == Process.uid &&
           opened.dev == bound.dev && opened.ino == bound.ino
-        raise Hive::ConfigError, "runtime fence path is unsafe" unless valid
+        raise Hive::ConfigError, "#{@label} path is unsafe" unless valid
       end
     end
   end

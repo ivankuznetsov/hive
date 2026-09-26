@@ -5,6 +5,15 @@ require "hive/runtime_control_plane/lifecycle_repository"
 class RuntimeControlPlaneCommandRegistrationTest < Minitest::Test
   include HiveTestHelper
 
+  def test_timeout_option_values_do_not_hide_lifecycle_subcommands
+    assert Hive::RuntimeControlPlane::CommandRegistration.exempt?(
+      %w[daemon --timeout 30 quiesce]
+    )
+    assert Hive::RuntimeControlPlane::CommandRegistration.exempt?(
+      %w[daemon --timeout=30 resume]
+    )
+  end
+
   def test_non_control_command_registers_until_finished
     with_runtime do |root, database|
       registration = Hive::RuntimeControlPlane::CommandRegistration.start!(

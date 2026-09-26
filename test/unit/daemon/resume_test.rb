@@ -168,7 +168,7 @@ class HiveDaemonResumeTest < Minitest::Test
       assert_equal "reconciliation_incomplete", result.reason
       assert_equal closed.generation, result.generation
       assert_equal "owned_process_alive", result.remaining.first.fetch("unknown_reason")
-      assert_equal "resuming", lifecycle(database).phase
+      assert_equal "quiescing", lifecycle(database).phase
     end
   end
 
@@ -188,7 +188,7 @@ class HiveDaemonResumeTest < Minitest::Test
       refute result.admission_reopened
       assert_equal "process_identity_probe_failed:Errno::EPERM",
                    result.remaining.first.fetch("unknown_reason")
-      assert_equal "resuming", lifecycle(database).phase
+      assert_equal "quiescing", lifecycle(database).phase
     end
   end
 
@@ -239,9 +239,68 @@ class HiveDaemonResumeTest < Minitest::Test
       ).call
 
       assert result.resumed
-      assert_equal [ "resuming", "resuming" ], observed_phases
+      assert_equal [ "quiescing", "quiescing" ], observed_phases
       assert_equal [ "attempt-1" ], result.reconciled_attempt_ids
       assert_equal "running", repository.current.phase
+    end
+  end
+
+  def test_missing_attempt_during_reconciliation_returns_typed_closed_result
+    with_runtime do |root, database|
+      Hive::RuntimeControlPlane::LifecycleRepository.new(database: database).begin_quiesce!(
+        deadline_monotonic: 200, boot_id: "boot-test", shutdown_grace_sec: 25
+      )
+      attempt = Struct.new(:attempt_id, :state).new("attempt-1", "running")
+      store = Object.new
+      store.define_singleton_method(:active_attempts) { [ attempt ] }
+      outcome = Hive::Attempts::ReconciledAttempt.new(
+        attempt: nil, classification: :unverifiable,
+        owner_status: :not_applicable, evidence: { state: nil }
+      )
+      reconciler = Object.new
+      reconciler.define_singleton_method(:finalize_interruption) { |*, **| outcome }
+      reconciler.define_singleton_method(:reconcile) do |**|
+        Hive::Attempts::ReconciliationSnapshot.new(
+          capacity: nil, attempts: [], lost_attempts: [], newly_lost_attempts: [],
+          terminal_attempts: [], admission_view: nil
+        )
+      end
+
+      result = Hive::Daemon::Resume.new(
+        state_home: root, database: database, timeout_sec: 1,
+        attempt_store: store, reconciler: reconciler
+      ).call
+
+      assert_equal "reconciliation_incomplete", result.reason
+      refute result.admission_reopened
+      assert_nil result.remaining.first.fetch("attempt_id")
+      assert_equal "quiescing", lifecycle(database).phase
+    end
+  end
+
+  def test_resume_cancels_abandoned_preclose_reservations_before_reconciliation
+    with_runtime do |root, database|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root
+      )
+      reservation = registry.reserve!(origin: "direct_cli", role: "command")
+      closed = Hive::RuntimeControlPlane::LifecycleRepository.new(
+        database: database
+      ).begin_quiesce!(
+        deadline_monotonic: 200, boot_id: "boot-test", shutdown_grace_sec: 25
+      )
+      reservation.release_fence!
+
+      result = Hive::Daemon::Resume.new(
+        state_home: root, database: database, timeout_sec: 1, registry: registry
+      ).call
+
+      assert result.resumed
+      assert_equal closed.generation, result.generation
+      assert_equal "cancelled_by_quiesce",
+                   database.read { |db| db[:launch_reservations].get(:state) }
+    ensure
+      reservation&.release_fence!
     end
   end
 

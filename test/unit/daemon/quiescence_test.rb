@@ -266,7 +266,7 @@ class HiveDaemonQuiescenceTest < Minitest::Test
       clock = ManualClock.new
       identity = MappedIdentity.new(42_424 => :missing, 42_425 => :matching)
       custody = Object.new
-      custody.define_singleton_method(:members) { |_path| [ 42_425 ] }
+      custody.define_singleton_method(:members) { |_path, timeout_sec:| [ 42_425 ] }
       signals = []
 
       result = coordinator(
@@ -282,6 +282,8 @@ class HiveDaemonQuiescenceTest < Minitest::Test
       assert_equal [ 42_425 ], result.remaining.first.fetch("descendants").map { |entry| entry.fetch("pid") }
       assert_includes signals, [ "TERM", 42_425 ]
       assert_includes signals, [ "KILL", 42_425 ]
+      refute_includes signals, [ "TERM", 42_424 ]
+      refute_includes signals, [ "KILL", 42_424 ]
     end
   end
 
@@ -301,6 +303,57 @@ class HiveDaemonQuiescenceTest < Minitest::Test
       refute result.paused
       assert_equal "signal_permission_denied",
                    result.remaining.first.fetch("unknown_reason")
+    end
+  end
+
+  def test_unobservable_cgroup_member_remains_in_unresolved_inventory
+    with_runtime do |root, database|
+      insert_owned_process(
+        database, pid: 42_424, custody_mode: "delegated_cgroup_v2",
+        custody_path: "/hive/installation"
+      )
+      clock = ManualClock.new
+      identity = MappedIdentity.new(42_424 => :missing)
+      identity.define_singleton_method(:capture) { |_pid| nil }
+      custody = Object.new
+      custody.define_singleton_method(:members) { |_path, timeout_sec:| [ 42_425 ] }
+
+      result = coordinator(
+        root, database, timeout_sec: 0.1,
+        capability: SequenceCapability.new(eligible, eligible),
+        process_identity: identity, custody: custody,
+        monotonic: clock.method(:call), sleeper: clock.method(:sleep)
+      ).call
+
+      refute result.paused
+      assert_equal "timeout", result.reason
+      descendant = result.remaining.first.fetch("descendants").fetch(0)
+      assert_equal 42_425, descendant.fetch("pid")
+      assert_equal "process_identity_unavailable", descendant.fetch("unknown_reason")
+    end
+  end
+
+  def test_unobservable_cgroup_member_clears_only_after_frozen_inventory_proves_absence
+    with_runtime do |root, database|
+      insert_owned_process(
+        database, pid: 42_424, custody_mode: "delegated_cgroup_v2",
+        custody_path: "/hive/installation"
+      )
+      identity = MappedIdentity.new(42_424 => :missing)
+      identity.define_singleton_method(:capture) { |_pid| nil }
+      custody = Object.new
+      inventories = [ [ 42_425 ], [] ]
+      custody.define_singleton_method(:members) do |_path, timeout_sec:|
+        inventories.shift || []
+      end
+
+      result = coordinator(
+        root, database, capability: SequenceCapability.new(eligible, eligible),
+        process_identity: identity, custody: custody
+      ).call
+
+      assert result.paused
+      assert_empty result.remaining
     end
   end
 
@@ -437,6 +490,91 @@ class HiveDaemonQuiescenceTest < Minitest::Test
       assert second.paused
       assert_equal first.generation, second.generation
       assert_equal 1, second.generation
+    end
+  end
+
+  def test_retry_after_boot_change_rebinds_the_same_closed_generation
+    with_runtime do |root, database|
+      closed = Hive::RuntimeControlPlane::LifecycleRepository.new(
+        database: database
+      ).begin_quiesce!(
+        deadline_monotonic: 50, boot_id: "previous-boot", shutdown_grace_sec: 5
+      )
+
+      result = coordinator(
+        root, database,
+        capability: SequenceCapability.new(eligible, eligible)
+      ).call
+
+      assert result.paused
+      assert_equal closed.generation, result.generation
+      database.open!
+      rebound = lifecycle(database)
+      assert_equal "boot-test", rebound.boot_id
+      assert_equal closed.generation, rebound.generation
+    end
+  end
+
+  def test_retry_cancels_abandoned_preclose_reservation_before_entry_gate
+    with_runtime do |root, database|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root
+      )
+      reservation = registry.reserve!(origin: "direct_cli", role: "command")
+      closed = Hive::RuntimeControlPlane::LifecycleRepository.new(
+        database: database
+      ).begin_quiesce!(
+        deadline_monotonic: 50, boot_id: "boot-test", shutdown_grace_sec: 5
+      )
+      reservation.release_fence!
+
+      result = coordinator(
+        root, database,
+        capability: Hive::RuntimeControlPlane::QuiescenceCapability.new(
+          database: database, state_home: root, legacy_inventory: -> { [] }
+        )
+      ).call
+
+      assert result.paused
+      assert_equal closed.generation, result.generation
+      database.open!
+      assert_equal "cancelled_by_quiesce",
+                   database.read { |db| db[:launch_reservations].get(:state) }
+    ensure
+      reservation&.release_fence!
+    end
+  end
+
+  def test_writer_fence_contention_is_not_reported_as_launch_fence_contention
+    with_runtime do |root, database|
+      database.define_singleton_method(:with_exclusive_writer) do |**|
+        raise Hive::ConcurrentRunError.new("writer busy", lock_path: "/writer")
+      end
+
+      result = coordinator(
+        root, database, capability: SequenceCapability.new(eligible)
+      ).call
+
+      assert_equal "writer_drain_timeout", result.reason
+      refute_equal "launch_fence_busy", result.reason
+      refute result.admission_open
+    end
+  end
+
+  def test_attempt_repository_failure_returns_a_closed_admission_envelope
+    with_runtime do |root, database|
+      controller = coordinator(
+        root, database, capability: SequenceCapability.new(eligible, eligible)
+      )
+      controller.define_singleton_method(:finalize_stopped_processes_and_attempts) do |**|
+        raise Hive::Attempts::RepositoryError, "busy"
+      end
+
+      result = controller.call
+
+      assert_equal "storage_error", result.reason
+      refute result.admission_open
+      assert_equal 1, result.generation
     end
   end
 

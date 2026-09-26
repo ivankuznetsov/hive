@@ -716,6 +716,7 @@ module Hive
       def shutdown_termination_grace
         state = @quiescence_lifecycle&.current
         return @shutdown_grace_sec unless state && state.phase == "quiescing"
+        return @shutdown_grace_sec if state.boot_id.to_s.empty?
         return 0.0 unless state.boot_id.to_s == @boot_id_reader.call.to_s
 
         escalation = Float(state.shutdown_grace_sec || 0)
@@ -4360,8 +4361,11 @@ module Hive
 
       def interruptible_sleep(seconds)
         deadline = Time.now + seconds
-        while Time.now < deadline && !@shutdown && !@reload
-          sleep [ 0.05, deadline - Time.now ].min
+        loop do
+          now = Time.now
+          break if now >= deadline || @shutdown || @reload
+
+          sleep [ 0.05, [ deadline - now, 0.0 ].max ].min
         end
       end
     end

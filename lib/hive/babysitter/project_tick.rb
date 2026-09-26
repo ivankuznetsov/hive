@@ -2,6 +2,7 @@ require "time"
 require "set"
 require "hive/config"
 require "hive/gh"
+require "hive/markers"
 require "hive/stages"
 require "hive/workflows"
 require "hive/worktree"
@@ -175,6 +176,8 @@ module Hive
 
         active_stage_dirs.each_with_object(Set.new) do |stage_dir, branches|
           Dir.glob(File.join(hive_state, "stages", stage_dir, "*")).each do |task_folder|
+            next if finalized_awaiting_merge?(stage_dir, task_folder)
+
             branch = task_branch(task_folder)
             branches << branch if branch
           end
@@ -186,6 +189,23 @@ module Hive
       # Derived from the workflow descriptor so a stage renumber can't strand it.
       def active_stage_dirs
         Hive::Stages::DIRS.select { |stage_dir| Hive::Workflows.verb_advancing_from(stage_dir) }
+      end
+
+      # A coding task whose finalize already completed only waits for its PR to
+      # merge: the daemon polls (ready_to_archive) and never pushes again, and
+      # archive handles a merged PR whatever its branch state. Leaving it
+      # "owned" stranded a PR whose CI went red after main moved, since the
+      # pipeline no longer acts and the babysitter deferred to it.
+      FINALIZE_STAGE_DIR = "8-finalize".freeze # coding-scoped
+      FINALIZE_STATE_FILE = "pr.md".freeze
+
+      def finalized_awaiting_merge?(stage_dir, task_folder)
+        return false unless stage_dir == FINALIZE_STAGE_DIR
+
+        state_file = File.join(task_folder, FINALIZE_STATE_FILE)
+        File.file?(state_file) && Hive::Markers.current(state_file).name == :complete
+      rescue StandardError
+        false
       end
 
       # The branch a task's worktree.yml records, or nil when the task has no

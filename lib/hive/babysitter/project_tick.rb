@@ -177,7 +177,10 @@ module Hive
       end
 
       EPOCH = Time.at(0).utc
-      ATTEMPT_ACTIONS = %w[agent-fix rebase force-push].freeze
+      # Every action PrFixer takes on a selected PR counts as a turn, including
+      # an already-green noop: otherwise green PRs always look never-attempted
+      # and take every slot with instant noops, starving red PRs again.
+      ATTEMPT_ACTIONS = %w[agent-fix rebase force-push noop give-up pr-comment label-apply].freeze
       ATTEMPT_LOG_TAIL_BYTES = 512 * 1024
 
       # Last fix attempt per PR, from the tail of this project's babysitter

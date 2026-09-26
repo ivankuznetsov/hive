@@ -1066,6 +1066,34 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  # Safe fixes can spend the whole revision budget before an operator decides a
+  # gated or manual finding. Those late decisions earn exactly one integration
+  # round past the cap; safe-only residue does not, and the ceiling is fixed.
+  def test_operator_decisions_earn_one_integration_round_past_the_cap
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: FakeAdapter.new { |request| successful_result(request) })
+      max = Hive::PlanReview::Orchestrator::MAX_VERIFICATION_REVISION_ROUNDS
+      extra = Hive::PlanReview::Orchestrator::OPERATOR_DECISION_ROUNDS
+      outcome = Hive::PlanReview::Orchestrator::SUCCESS_OUTCOMES.first
+      record = lambda do |rounds|
+        { "routes" => Array.new(rounds) { { "role" => "planner_revision", "outcome" => outcome } } }
+      end
+      decided = ->(classification, lifecycle) do
+        Hive::PlanReview::Finding.new(finding(classification, "Decided").to_h.merge("lifecycle" => lifecycle))
+      end
+      safe = [ finding("safe_auto", "Safe residue") ]
+      approved = [ decided.call("gated_auto", "approved") ]
+      answered = [ decided.call("manual", "answered") ]
+
+      refute runner.send(:revision_round_limit_reached?, record.call(max - 1), safe)
+      assert runner.send(:revision_round_limit_reached?, record.call(max), safe)
+      refute runner.send(:revision_round_limit_reached?, record.call(max), approved)
+      refute runner.send(:revision_round_limit_reached?, record.call(max), answered)
+      assert runner.send(:revision_round_limit_reached?, record.call(max + extra), approved),
+             "the integration round is bounded"
+    end
+  end
+
   def test_repeated_incorporated_finding_reopens_with_its_prior_decision
     existing = finding("gated_auto", "Still broken")
     accepted = Hive::PlanReview::Finding.new(

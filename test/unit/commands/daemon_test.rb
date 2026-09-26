@@ -258,6 +258,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     dispatcher.define_singleton_method(:run_forever) do
       calls << :run_forever
       clock_reading = captured.fetch(:clock).call
+      test_case.assert captured.fetch(:persistent_admission).call
       captured.fetch(:runtime_ready_callback).call
     end
 

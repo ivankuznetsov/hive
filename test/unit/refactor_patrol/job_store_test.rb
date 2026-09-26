@@ -342,6 +342,28 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_stale_discovery_recovery_wraps_invalid_claim_evidence
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      store.claim_discovery!(
+        "pr-7-stable", owner: "runner", analysis_sha: "c" * 40, now: T0
+      )
+      corrupted = store.read_job("pr-7-stable")
+      corrupted.fetch("attempts").last["expires_at"] = "not-a-timestamp"
+      store.define_singleton_method(:jobs) { [ corrupted ] }
+      store.define_singleton_method(:mutate_job) do |_job_id, &mutation|
+        mutation.call(corrupted, nil)
+      end
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.recover_stale_discovery_claims!(now: T0 + 1)
+      end
+
+      assert_match(/invalid recovery evidence.*not-a-timestamp/, error.message)
+    end
+  end
+
   def test_obsolete_source_terminalizes_all_unpublished_actions_together
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)

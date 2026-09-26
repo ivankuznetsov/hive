@@ -1088,6 +1088,24 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_candidates_skip_discovery_when_runtime_configuration_disables_it
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      disabled_entry = entry.merge(
+        "_refactor_patrol_cfg" => enabled_cfg.merge(
+          "refactor_patrol" => { "enabled" => false }
+        )
+      )
+      scheduler = scheduler(entry, store)
+      scheduler.define_singleton_method(:managed_entries) { [ disabled_entry ] }
+      store.define_singleton_method(:claimable_jobs) do |**|
+        flunk "disabled discovery must not inspect claimable jobs"
+      end
+
+      assert_empty scheduler.candidates(now: T0)
+    end
+  end
+
   def test_dry_run_reports_obsolete_source_without_retiring_the_job
     with_project do |_dir, entry, store|
       enqueue(store)

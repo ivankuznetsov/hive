@@ -120,8 +120,10 @@ class OneShotRunnerTest < Minitest::Test
 
         watcher = dispatcher.instance_variable_get(:@merge_watcher)
         refute_nil watcher.instance_variable_get(:@schedule_state_factory)
-        assert_instance_of Hive::Daemon::RefactorPatrolScheduler,
-                           dispatcher.instance_variable_get(:@refactor_patrol_scheduler)
+        scheduler = dispatcher.instance_variable_get(:@refactor_patrol_scheduler)
+        assert_instance_of Hive::Daemon::RefactorPatrolScheduler, scheduler
+        assert_equal [ entry ], scheduler.instance_variable_get(:@registry).call,
+                     "the one-shot scheduler must stay scoped to its registered project"
 
       ensure
         runner&.close

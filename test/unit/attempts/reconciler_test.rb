@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/reconciler"
+require "hive/runtime_control_plane/lifecycle_repository"
 
 class AttemptsReconcilerTest < Minitest::Test
   include HiveTestHelper
@@ -86,6 +87,23 @@ class AttemptsReconcilerTest < Minitest::Test
         expected = owner_status == :mismatched ? "owner_identity_mismatch" : "owner_gone"
         assert_equal expected, lost["loss"]["reason"]
       end
+    end
+  end
+
+  def test_loss_reconciliation_uses_the_admitted_workers_cleanup_window
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      Hive::RuntimeControlPlane::LifecycleRepository.new(
+        database: store.database
+      ).begin_quiesce!(
+        deadline_monotonic: 700, boot_id: "boot", shutdown_grace_sec: 120
+      )
+
+      snapshot = reconciler(store, :missing).reconcile(now: NOW + 2)
+
+      assert_equal [ running.attempt_id ], snapshot.newly_lost_attempts.map(&:attempt_id)
+      assert_equal "lost", store.fetch(running.attempt_id).state
+      assert_equal 1, store.database.read { |db| db[:quiescence_cleanup_writes].count }
     end
   end
 

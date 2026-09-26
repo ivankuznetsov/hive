@@ -401,6 +401,24 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
+  def test_start_child_preserves_restart_intent_while_admission_is_closed
+    admission_open = false
+    sup = Hive::Web::Supervisor.new(persistent_admission: -> { admission_open })
+
+    refute sup.send(:start_child, "web", [ "this-command-must-not-run" ])
+    child = sup.instance_variable_get(:@children).fetch(0)
+    assert_nil child.pid
+    assert child.desired
+    assert restart_at(sup).key?("web")
+
+    started = []
+    admission_open = true
+    sup.define_singleton_method(:start_child) { |name, _argv| started << name }
+    restart_at(sup)["web"] = Time.now - 1
+    sup.send(:start_due_restarts)
+    assert_equal [ "web" ], started
+  end
+
   def test_start_due_restarts_respawns_only_due_entries_and_not_while_stopping
     with_tmp_global_config do
       sup = build

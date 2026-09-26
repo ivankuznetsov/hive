@@ -675,7 +675,7 @@ module Hive
         if action == "quiesce"
           payload["quiescence_capability"] = payload.delete("capability")
         end
-        if action == "quiesce" && !result.paused && !result.admission_open
+        if action == "quiesce" && !result.paused && result.admission_open == false
           payload["resume_required"] = true
           payload["resume_command"] = "hive daemon resume"
         end

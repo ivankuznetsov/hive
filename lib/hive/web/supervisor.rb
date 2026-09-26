@@ -98,6 +98,19 @@ module Hive
       end
 
       def start_child(name, argv)
+        unless admission_open?
+          existing = child(name)
+          if existing
+            existing.argv = argv
+            existing.desired = true
+          else
+            @children << Child.new(name: name, argv: argv, pid: nil,
+                                   started_at: nil, desired: true)
+          end
+          @restart_at[name] ||= Time.now
+          return false
+        end
+
         pid = Process.spawn(*argv, pgroup: true)
         existing = child(name)
         if existing
@@ -108,6 +121,7 @@ module Hive
           @children << Child.new(name: name, argv: argv, pid: pid,
                                  started_at: Time.now, desired: true)
         end
+        true
       end
 
       # SIGHUP = config changed. Three bot cases:

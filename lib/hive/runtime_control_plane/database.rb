@@ -23,6 +23,7 @@ module Hive
           database_id == database.object_id && owner_pid == Process.pid && permitted_roles.include?(role)
         end
       end
+      private_constant :WriterAuthority
 
       def initialize(path: Hive::Paths.runtime_control_plane_path, migrations_dir: MIGRATIONS_DIR,
                      busy_timeout_ms: BUSY_TIMEOUT_MS, sqlite_version: SQLite3::SQLITE_VERSION,
@@ -38,10 +39,14 @@ module Hive
         @owner_pid = Process.pid
         @connection = nil
         @validated = false
+        @active_writer_authorities = {}
       end
 
-      def open!(revalidate: true)
-        ProcessGuard.checkout { revalidate ? open_uncoordinated! : ensure_open! }
+      def open!(revalidate: true, timeout_sec: nil)
+        ProcessGuard.checkout do
+          revalidate ? open_uncoordinated!(timeout_sec: timeout_sec) :
+            ensure_open!(timeout_sec: timeout_sec)
+        end
         self
       end
 
@@ -91,12 +96,25 @@ module Hive
                       timeout_sec: nil)
         fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
           [ Float(timeout_sec), 0.0 ].max
-        ProcessGuard.checkout { ensure_open! }
-        with_writer_fence(authority: authority, timeout_sec: fence_timeout) do
+        wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        ProcessGuard.checkout { ensure_open!(timeout_sec: fence_timeout) }
+        writer_timeout = if timeout_sec.nil?
+          fence_timeout
+        else
+          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - wait_started
+          [ fence_timeout - elapsed, 0.0 ].max
+        end
+        with_writer_fence(authority: authority, timeout_sec: writer_timeout) do
           ProcessGuard.checkout(transaction: true) do
-            ensure_open!
+            sqlite_timeout = if timeout_sec.nil?
+              fence_timeout
+            else
+              elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - wait_started
+              [ fence_timeout - elapsed, 0.0 ].max
+            end
+            ensure_open!(timeout_sec: sqlite_timeout) if @connection.nil?
             prior = integer_pragma(@connection, "busy_timeout") unless timeout_sec.nil?
-            @connection.run("PRAGMA busy_timeout = #{(fence_timeout * 1000).ceil}") if prior
+            @connection.run("PRAGMA busy_timeout = #{(sqlite_timeout * 1000).floor}") if prior
             begin
               @connection.transaction(mode: mode, rollback: :reraise) do
                 authorize_mutation!(@connection, authority: authority,
@@ -111,31 +129,24 @@ module Hive
         end
       end
 
-      def controller_transaction(mode: :immediate, timeout_sec: nil, &block)
-        transaction(
-          mode: mode, authority: authority_for(:controller), timeout_sec: timeout_sec, &block
-        )
-      end
-
-      def migrator_transaction(mode: :immediate, &block)
-        transaction(mode: mode, authority: authority_for(:migrator), &block)
-      end
-
       def with_exclusive_writer(role:, timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
         unless %i[controller migrator].include?(role)
           raise ArgumentError, "exclusive writer role must be controller or migrator"
         end
         fence = writer_fence(timeout_sec: timeout_sec)
         fence.acquire_exclusive!
-        yield authority_for(role)
+        authority = authority_for(role)
+        @active_writer_authorities[authority.object_id] = authority
+        yield authority
       ensure
+        @active_writer_authorities&.delete(authority&.object_id)
         fence&.release!
       end
 
       def checkpoint!(timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
         timeout_ms = [ (Float(timeout_sec) * 1000).floor, 0 ].max
         ProcessGuard.checkout do
-          ensure_open!
+          ensure_open!(timeout_sec: timeout_sec)
           prior = integer_pragma(@connection, "busy_timeout")
           @connection.run("PRAGMA busy_timeout = #{timeout_ms}")
           row = @connection.fetch("PRAGMA wal_checkpoint(FULL)").first
@@ -204,6 +215,7 @@ module Hive
         copy_quiescence_source!(
           temporary_path, now: now, preserve_lifecycle: preserve_lifecycle
         )
+        checkpoint_upgrade_source!
         replace_with_upgraded_database!(temporary_path)
         open!
         self
@@ -321,7 +333,7 @@ module Hive
         []
       end
 
-      def diagnostics_uncoordinated
+      def diagnostics_uncoordinated(timeout_sec: nil)
         ensure_process_owner!
         return diagnosis(:missing) unless File.exist?(path) || File.symlink?(path)
         begin
@@ -329,7 +341,11 @@ module Hive
         rescue IntegrityError => error
           return diagnosis(:corrupt, error: error)
         end
-        inspect_database do |database|
+        inspect = lambda do |&block|
+          timeout_sec.nil? ? inspect_database(&block) :
+            inspect_database(timeout_sec: timeout_sec, &block)
+        end
+        inspect.call do |database|
           application_id = integer_pragma(database, "application_id")
           version = schema_version_for(database)
           integrity = pragma_rows(database, "quick_check").map(&:to_s)
@@ -371,18 +387,24 @@ module Hive
         ))
       end
 
-      def ensure_open!
+      def ensure_open!(timeout_sec: nil)
         ensure_process_owner!
-        open_uncoordinated! unless @connection && @validated
+        open_uncoordinated!(timeout_sec: timeout_sec) unless @connection && @validated
       end
 
-      def open_uncoordinated!
+      def open_uncoordinated!(timeout_sec: nil)
         ensure_process_owner!
+        deadline = if timeout_sec.nil?
+          nil
+        else
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ Float(timeout_sec), 0.0 ].max
+        end
         validate_migration_set!
         verify_runtime_capabilities!
-        diagnosis = diagnostics_uncoordinated
+        diagnosis = deadline ? diagnostics_uncoordinated(timeout_sec: remaining_timeout(deadline)) :
+          diagnostics_uncoordinated
         raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
-        connect!
+        deadline ? connect!(timeout_sec: remaining_timeout(deadline)) : connect!
         validate_connected_schema!
         @validated = true
       end
@@ -393,11 +415,13 @@ module Hive
         @owner_pid = Process.pid
       end
 
-      def connect!
+      def connect!(timeout_sec: nil)
         return @connection if @connection
         validate_database_custody!
+        timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
+          [ (Float(timeout_sec) * 1000).floor, 0 ].max
         @connection = Sequel.connect(adapter: "sqlite", database: path, max_connections: 1,
-                                     timeout: @busy_timeout_ms, disable_dqs: true)
+                                     timeout: timeout_ms, disable_dqs: true)
         ProcessGuard.register(self)
         journal_mode = pragma_rows(@connection, "journal_mode = WAL").first.to_s.downcase
         unless journal_mode == "wal"
@@ -412,12 +436,18 @@ module Hive
         @connection
       end
 
-      def inspect_database
+      def inspect_database(timeout_sec: nil)
+        timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
+          [ (Float(timeout_sec) * 1000).floor, 0 ].max
         database = Sequel.connect(adapter: "sqlite", database: path, readonly: true,
-                                  max_connections: 1, timeout: @busy_timeout_ms, disable_dqs: true)
+                                  max_connections: 1, timeout: timeout_ms, disable_dqs: true)
         yield database
       ensure
         database&.disconnect
+      end
+
+      def remaining_timeout(deadline)
+        [ deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0.0 ].max
       end
 
       def verify_runtime_capabilities!
@@ -502,7 +532,9 @@ module Hive
       def authority_for(role) = WriterAuthority.new(object_id, Process.pid, role)
 
       def valid_authority?(authority)
-        authority.is_a?(WriterAuthority) && authority.valid_for?(self, %i[controller migrator])
+        authority.is_a?(WriterAuthority) &&
+          @active_writer_authorities[authority.object_id].equal?(authority) &&
+          authority.valid_for?(self, %i[controller migrator])
       end
 
       def authorize_mutation!(connection, authority:, cleanup_attempt_id:)
@@ -512,12 +544,13 @@ module Hive
         return if valid_authority?(authority)
 
         if cleanup_attempt_id && lifecycle.fetch(:phase) == "quiescing"
-          inserted = connection[:quiescence_cleanup_writes].insert_conflict.insert(
+          inserted = connection[:quiescence_cleanup_writes].insert_conflict
+            .returning(:attempt_id).insert(
             installation_id: lifecycle.fetch(:installation_id),
             generation: lifecycle.fetch(:generation), attempt_id: cleanup_attempt_id.to_s,
             created_at: Codec.dump_time(@clock.call)
           )
-          return if inserted
+          return unless Array(inserted).empty?
         end
 
         raise AdmissionClosed.new(
@@ -654,6 +687,29 @@ module Hive
         File.chmod(0o600, temporary_path)
         File.rename(temporary_path, path)
         Hive::AtomicFile.fsync_directory(File.dirname(path))
+      end
+
+      def checkpoint_upgrade_source!
+        source = Sequel.connect(
+          adapter: "sqlite", database: path, max_connections: 1,
+          timeout: @busy_timeout_ms, disable_dqs: true
+        )
+        values = source.fetch("PRAGMA wal_checkpoint(TRUNCATE)").first.values.map do |value|
+          Integer(value)
+        end
+        busy, log_frames, checkpointed_frames = values
+        unless busy.zero? && checkpointed_frames >= log_frames
+          raise IntegrityError.new(
+            "runtime quiescence upgrade could not preserve the source WAL",
+            code: :quiescence_upgrade_source_checkpoint_failed, action: BACKUP_ACTION,
+            details: { busy: busy, log_frames: log_frames,
+                       checkpointed_frames: checkpointed_frames }
+          )
+        end
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
+        true
+      ensure
+        source&.disconnect
       end
 
       def remove_file_if_present(candidate)

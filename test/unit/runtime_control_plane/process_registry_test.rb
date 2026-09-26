@@ -131,12 +131,58 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
+  def test_attempt_wrapper_cleanup_retains_descendant_ownership_across_registry_restart
+    descendant_pid = Process.pid + 100_000
+    members = [ Process.pid, descendant_pid ]
+    custody = Object.new
+    custody.define_singleton_method(:evidence_for) do |_pid|
+      { "eligible" => true, "mode" => "delegated_cgroup_v2", "path" => "/hive/install" }
+    end
+    custody.define_singleton_method(:verifiable?) { |_row| true }
+    custody.define_singleton_method(:members) { |_path, timeout_sec: nil| members }
+
+    with_registry do |database, _registry, root|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root, custody: custody
+      )
+      reservation = registry.reserve!(
+        origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-1"
+      )
+      registry.register!(reservation.id, pid: Process.pid)
+      reservation.release_fence!
+
+      registry.mark_stopped_by_reservation!(
+        reservation.id, require_descendant_absence: true
+      )
+      restarted = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root, custody: custody
+      )
+      retained = restarted.active_rows.fetch(0)
+      assert_equal "running", retained.fetch(:state)
+      assert_equal "descendant_absence_unverified", retained.fetch(:unknown_reason)
+
+      members.clear
+      missing_identity = Object.new
+      missing_identity.define_singleton_method(:status) { |_identity| :missing }
+      stopped_registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root, custody: custody,
+        process_identity: missing_identity
+      )
+      stopped_registry.mark_stopped_by_reservation!(
+        reservation.id, require_descendant_absence: true
+      )
+      assert_empty stopped_registry.active_rows
+    ensure
+      reservation&.release_fence!
+    end
+  end
+
   def test_unreadable_legacy_process_identity_cannot_look_like_an_idle_registry
     identity = Object.new
     identity.define_singleton_method(:capture) { |_pid| nil }
     identity.define_singleton_method(:status) { |_value| :absent }
     with_registry(process_identity: identity) do |database, _registry, root|
-      File.write(File.join(root, ".daemon.pid"), { "pid" => 99_999 }.to_yaml)
+      File.write(File.join(root, ".daemon.pid"), { "pid" => Process.pid }.to_yaml)
 
       verdict = Hive::RuntimeControlPlane::QuiescenceCapability.new(
         database: database, state_home: root, process_identity: identity,
@@ -145,8 +191,26 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
 
       refute verdict.eligible?
       assert_equal "legacy_process_unregistered", verdict.reason
-      assert_equal "process_identity_unavailable",
+      assert_equal "pid_ownership_unverified",
                    verdict.disqualifying_inventory.first.fetch("unknown_reason")
+    end
+  end
+
+  def test_stale_and_reused_legacy_pid_receipts_do_not_block_quiescence
+    with_registry do |database, _registry, root|
+      File.write(File.join(root, ".daemon.pid"), {
+        "pid" => 999_999_999, "process_start_time" => "dead"
+      }.to_yaml)
+      File.write(File.join(root, ".bot.pid"), {
+        "pid" => Process.pid, "process_start_time" => "not-this-process"
+      }.to_yaml)
+
+      verdict = Hive::RuntimeControlPlane::QuiescenceCapability.new(
+        database: database, state_home: root,
+        custody: Hive::Attempts::ProcessCustody.unsupported("test")
+      ).call
+
+      assert verdict.eligible?, verdict.to_h.inspect
     end
   end
 

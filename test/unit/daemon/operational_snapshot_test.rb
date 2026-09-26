@@ -378,7 +378,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       }
 
       assembler.begin_tick(now: T0)
-      database.controller_transaction do |db|
+      database.transaction do |db|
         db.run <<~SQL
           CREATE TRIGGER reject_status_projection
           BEFORE UPDATE ON daemon_runtime

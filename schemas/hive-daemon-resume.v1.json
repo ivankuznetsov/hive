@@ -20,7 +20,13 @@
         "ok": { "type": "boolean" },
         "result": { "enum": ["resumed", "partially_resumed", "not_resumed"] },
         "resumed": { "type": "boolean" },
-        "reason": { "type": ["string", "null"] },
+        "reason": {
+          "enum": [
+            null, "controller_busy", "storage_error", "lifecycle_busy",
+            "deadline_exhausted", "launch_fence_busy", "writer_drain_timeout",
+            "reconciliation_incomplete", "service_restore_failed"
+          ]
+        },
         "phase": { "enum": ["running", "quiescing", "paused", "resuming", "unknown"] },
         "admission_open": { "type": "boolean" },
         "admission_reopened": { "type": "boolean" },

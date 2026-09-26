@@ -744,6 +744,20 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, clamps.length
   end
 
+  def test_quiescence_upgrade_without_boot_identity_keeps_configured_shutdown_grace
+    state = Hive::RuntimeControlPlane::Lifecycle.new(
+      phase: "quiescing", generation: 1, revision: 1, mutation_sequence: 2,
+      boot_id: nil, deadline_monotonic: nil, shutdown_grace_sec: nil,
+      interrupted_attempt_ids: [], quiesce_started_at: nil,
+      paused_at: nil, resumed_at: nil, updated_at: nil
+    )
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) { state }
+    dispatcher, = make_dispatcher(quiescence_lifecycle: lifecycle)
+
+    assert_equal 60, dispatcher.send(:shutdown_termination_grace)
+  end
+
   def test_async_patrol_discovery_keeps_authoritative_ticks_responsive
     candidate = {
       project: "p1", patrol_kind: :ordinary, slug: "patrol", stage: "patrol",

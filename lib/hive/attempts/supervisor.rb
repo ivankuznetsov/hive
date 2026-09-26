@@ -178,7 +178,9 @@ module Hive
       def release_wrapper_registration
         return unless @reservation_id && @process_registry && @wrapper_registered
 
-        @process_registry.mark_stopped_by_reservation!(@reservation_id)
+        @process_registry.mark_stopped_by_reservation!(
+          @reservation_id, require_descendant_absence: true
+        )
       rescue RuntimeControlPlane::Error, Sequel::Error
         nil
       end
@@ -558,9 +560,10 @@ module Hive
         loop do
           waited = Process.wait2(@worker_pid, Process::WNOHANG)
           return waited.last if waited
-          break if @monotonic.call >= deadline
+          now = @monotonic.call
+          break if now >= deadline
 
-          sleep [ 0.01, deadline - @monotonic.call ].min
+          sleep [ 0.01, [ deadline - now, 0.0 ].max ].min
         end
         signal_worker_group("KILL")
         Process.wait2(@worker_pid).last

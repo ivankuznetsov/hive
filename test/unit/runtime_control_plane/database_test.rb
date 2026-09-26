@@ -63,6 +63,54 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_transaction_sqlite_wait_uses_only_time_remaining_after_open_and_writer_fence
+    with_database do |database|
+      ensure_open = database.method(:ensure_open!)
+      database.disconnect
+      database.define_singleton_method(:ensure_open!) do |**options|
+        sleep 0.03 if @connection.nil?
+        ensure_open.call(**options)
+      end
+      database.define_singleton_method(:with_writer_fence) do |**_options, &block|
+        sleep 0.03
+        block.call
+      end
+      observed = database.transaction(timeout_sec: 0.1) do |connection|
+        connection.fetch("PRAGMA busy_timeout").first.values.first
+      end
+
+      assert_operator observed, :<, 60
+      assert_operator observed, :>=, 0
+    end
+  end
+
+  def test_open_uses_one_timeout_across_inspection_and_live_connection
+    database = Hive::RuntimeControlPlane::Database.new(path: "/tmp/runtime-timeout.sqlite3")
+    observed = nil
+    diagnosis = Hive::RuntimeControlPlane::Diagnosis.new(
+      status: :ok, path: database.path, application_id: nil, schema_version: nil,
+      sqlite_version: nil, integrity: [], error: nil
+    )
+    database.define_singleton_method(:validate_migration_set!) { true }
+    database.define_singleton_method(:verify_runtime_capabilities!) { true }
+    database.define_singleton_method(:validate_connected_schema!) { true }
+    database.define_singleton_method(:diagnostics_uncoordinated) do |timeout_sec:|
+      sleep 0.03
+      diagnosis
+    end
+    database.define_singleton_method(:connect!) do |timeout_sec:|
+      observed = timeout_sec
+      @connection = Struct.new(:disconnect).new(true)
+    end
+
+    database.open!(timeout_sec: 0.1)
+
+    assert_operator observed, :<, 0.08
+    assert_operator observed, :>=, 0.0
+  ensure
+    database&.disconnect
+  end
+
   def test_database_is_the_only_runtime_control_plane_connection_owner
     root = File.expand_path("../../../lib/hive/runtime_control_plane", __dir__)
     offenders = Dir.glob(File.join(root, "**/*.rb")).reject do |path|

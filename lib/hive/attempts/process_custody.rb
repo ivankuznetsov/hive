@@ -10,6 +10,10 @@ module Hive
       module_function
 
       def detect
+        # Automatic detection must not adopt the caller's ambient service
+        # cgroup: it can contain unrelated processes and no launch boundary
+        # proves that Hive owns it exclusively. A future launcher integration
+        # may inject an explicitly established LinuxCgroupV2 domain.
         adapter = LinuxCgroupV2.new
         return adapter if adapter.available?
 
@@ -30,7 +34,7 @@ module Hive
         def current_evidence = { "eligible" => false, "mode" => mode, "reason" => reason }
         def evidence_for(_pid) = current_evidence
         def verifiable?(_row) = false
-        def members(_path) = []
+        def members(_path, timeout_sec: nil) = []
       end
 
       class LinuxCgroupV2
@@ -39,9 +43,15 @@ module Hive
 
         attr_reader :reason
 
-        def initialize(cgroup_root: "/sys/fs/cgroup", current_path_reader: nil)
+        def initialize(cgroup_root: "/sys/fs/cgroup", current_path_reader: nil,
+                       exclusive_domain_path: nil,
+                       monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                       sleeper: ->(seconds) { sleep(seconds) })
           @cgroup_root = File.expand_path(cgroup_root)
           @current_path_reader = current_path_reader || -> { path_for_pid("self") }
+          @exclusive_domain_path = exclusive_domain_path && normalized_path(exclusive_domain_path)
+          @monotonic = monotonic
+          @sleeper = sleeper
           @reason = nil
         end
 
@@ -71,8 +81,22 @@ module Hive
           false
         end
 
-        def members(path)
+        def members(path, timeout_sec: 1.0)
           domain = resolve_domain(path)
+          freeze_path = File.join(domain, "cgroup.freeze")
+          events_path = File.join(domain, "cgroup.events")
+          unless File.file?(freeze_path) && File.writable?(freeze_path) && File.file?(events_path)
+            raise Hive::Error, "cgroup custody domain cannot be frozen"
+          end
+
+          deadline = @monotonic.call + [ Float(timeout_sec), 0.0 ].max
+          File.write(freeze_path, "1\n")
+          until File.read(events_path).match?(/^frozen 1$/)
+            raise Hive::Error, "cgroup custody freeze timed out" if @monotonic.call >= deadline
+            remaining = [ deadline - @monotonic.call, 0.0 ].max
+            @sleeper.call([ 0.01, remaining ].min)
+          end
+
           files = Dir.glob(File.join(domain, "**", "cgroup.procs"), File::FNM_DOTMATCH)
           raise Hive::Error, "cgroup custody inventory exceeds its bound" if files.length > MAX_CGROUP_FILES
 
@@ -80,6 +104,8 @@ module Hive
             .filter_map { |value| Integer(value, exception: false) }.uniq.sort
           raise Hive::Error, "cgroup custody membership exceeds its bound" if pids.length > MAX_MEMBERS
           pids
+        ensure
+          File.write(freeze_path, "0\n") if freeze_path && File.file?(freeze_path) && File.writable?(freeze_path)
         end
 
         private
@@ -90,6 +116,9 @@ module Hive
           end
           domain = resolve_domain(path)
           parent = File.dirname(domain)
+          unless exclusive_domain?(path)
+            return failure("exclusive_domain_unproven")
+          end
           unless File.file?(File.join(domain, "cgroup.procs")) &&
                  File.writable?(File.join(domain, "cgroup.procs")) &&
                  File.file?(File.join(domain, "cgroup.subtree_control")) &&
@@ -129,6 +158,13 @@ module Hive
           clean = File.expand_path(value, "/")
           raise ArgumentError, "invalid cgroup path" if clean == "/"
           clean
+        end
+
+        def exclusive_domain?(path)
+          return false unless @exclusive_domain_path
+
+          candidate = normalized_path(path)
+          candidate == @exclusive_domain_path || candidate.start_with?("#{@exclusive_domain_path}/")
         end
 
         def resolve_domain(path)

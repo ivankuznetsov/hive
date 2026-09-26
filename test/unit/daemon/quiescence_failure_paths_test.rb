@@ -5,7 +5,7 @@ require "hive/commands/web/service_installer"
 require "hive/commands/bot/service_installer"
 require "hive/commands/babysit/service_installer"
 
-class HiveDaemonQuiescenceCoverageGapsTest < Minitest::Test
+class HiveDaemonQuiescenceFailurePathsTest < Minitest::Test
   include HiveTestHelper
 
   ManualClock = Struct.new(:now) do
@@ -54,7 +54,7 @@ class HiveDaemonQuiescenceCoverageGapsTest < Minitest::Test
     end
 
     def disconnected? = false
-    def open! = self
+    def open!(**) = self
     def disconnect = true
   end
 
@@ -93,7 +93,7 @@ class HiveDaemonQuiescenceCoverageGapsTest < Minitest::Test
 
     migration = Hive::RuntimeControlPlane::MigrationRequired.new("upgrade", code: :upgrade)
     database = Object.new
-    database.define_singleton_method(:open!) { raise migration }
+    database.define_singleton_method(:open!) { |**| raise migration }
     database.define_singleton_method(:disconnect) { true }
 
     assert_same migration, assert_raises(Hive::RuntimeControlPlane::MigrationRequired) {
@@ -110,7 +110,9 @@ class HiveDaemonQuiescenceCoverageGapsTest < Minitest::Test
       closed = lifecycle.begin_quiesce!(
         deadline_monotonic: 200, boot_id: "boot-test", shutdown_grace_sec: 1
       )
-      lifecycle.begin_resume!(generation: closed.generation)
+      database.with_exclusive_writer(role: :controller) do |authority|
+        lifecycle.begin_resume!(generation: closed.generation, authority: authority)
+      end
       result = coordinator(root, database).call
       assert_equal "lifecycle_busy", result.reason
     end
@@ -253,7 +255,7 @@ class HiveDaemonQuiescenceCoverageGapsTest < Minitest::Test
     assert_equal [ 42 ], controller.send(:signal_processes, "TERM", live).map { |row| row.fetch("pid") }
 
     custody = Object.new
-    custody.define_singleton_method(:members) { |_| raise IOError, "offline" }
+    custody.define_singleton_method(:members) { |_, timeout_sec:| raise IOError, "offline" }
     controller = quiescence_shell(process_identity: identity, custody: custody)
     row = {
       process_id: "process-1", pid: 42, custody_mode: "delegated_cgroup_v2",

@@ -6,7 +6,7 @@ require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/runtime_control_plane/process_registry"
 require "hive/runtime_control_plane/quiescence_upgrade"
 
-class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
+class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
   include HiveTestHelper
 
   FakeDataset = Struct.new(:row, :updated) do
@@ -83,7 +83,11 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
 
   def test_database_writer_authority_and_status_error_contracts
     with_database do |database|
-      assert_equal 1, database.migrator_transaction { |db| db[:installations].count }
+      refute database.public_methods.include?(:controller_transaction)
+      refute database.public_methods.include?(:migrator_transaction)
+      assert_raises(NameError) do
+        Hive::RuntimeControlPlane::Database::WriterAuthority
+      end
       assert_raises(ArgumentError) { database.with_exclusive_writer(role: :worker) { } }
       assert_raises(ArgumentError) do
         database.upgrade_quiescence!(
@@ -96,10 +100,12 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
         raise Hive::RuntimeControlPlane::MigrationRequired.new("typed", code: :typed)
       end
       assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
-        database.upgrade_quiescence!(
-          authority: database.send(:authority_for, :migrator), expected_schema_version: 1,
-          expected_fingerprint: "old", preserve_lifecycle: false
-        )
+        database.with_exclusive_writer(role: :migrator) do |authority|
+          database.upgrade_quiescence!(
+            authority: authority, expected_schema_version: 1,
+            expected_fingerprint: "old", preserve_lifecycle: false
+          )
+        end
       end
 
       database.define_singleton_method(:diagnostics_uncoordinated) { raise IOError, "broken" }
@@ -121,10 +127,12 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
         database, :disconnect, -> { raise IOError, "cannot close" }
       ) do
         assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
-          database.upgrade_quiescence!(
-            authority: database.send(:authority_for, :migrator), expected_schema_version: 1,
-            expected_fingerprint: "old", preserve_lifecycle: false
-          )
+          database.with_exclusive_writer(role: :migrator) do |authority|
+            database.upgrade_quiescence!(
+              authority: authority, expected_schema_version: 1,
+              expected_fingerprint: "old", preserve_lifecycle: false
+            )
+          end
         end
       end
       assert_equal :quiescence_upgrade_failed, error.code
@@ -139,10 +147,12 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
       }
       database.define_singleton_method(:quiescence_upgrade_source) { source }
       error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
-        database.upgrade_quiescence!(
-          authority: database.send(:authority_for, :migrator), expected_schema_version: 1,
-          expected_fingerprint: "unknown", preserve_lifecycle: false
-        )
+        database.with_exclusive_writer(role: :migrator) do |authority|
+          database.upgrade_quiescence!(
+            authority: authority, expected_schema_version: 1,
+            expected_fingerprint: "unknown", preserve_lifecycle: false
+          )
+        end
       end
       assert_equal :unsupported_quiescence_upgrade_source, error.code
 
@@ -272,7 +282,9 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
         database.read { |db| repository.ensure_admission_open_in!(db) }
       end
       assert_equal state.generation, error.details.fetch(:generation)
-      repository.begin_resume!(generation: state.generation)
+      database.with_exclusive_writer(role: :controller) do |authority|
+        repository.begin_resume!(generation: state.generation, authority: authority)
+      end
       assert_raises(Hive::RuntimeControlPlane::StaleLifecycle) do
         repository.begin_quiesce!(
           deadline_monotonic: 10, boot_id: "boot", shutdown_grace_sec: 1
@@ -281,7 +293,7 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
     end
   end
 
-  def test_lifecycle_begin_quiesce_accepts_only_the_winning_quiescing_race
+  def test_lifecycle_begin_quiesce_accepts_only_a_scripted_winning_cas
     states = [
       lifecycle_state("running"), lifecycle_state("quiescing"),
       lifecycle_state("running"), lifecycle_state("paused")

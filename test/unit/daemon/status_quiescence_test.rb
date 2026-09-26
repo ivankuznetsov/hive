@@ -240,7 +240,13 @@ class HiveDaemonStatusQuiescenceTest < Minitest::Test
       )
       stub_non_service_fields(report)
 
-      payload = report.payload
+      payload = with_replaced_singleton_method(
+        Hive::PidFile, :alive?, ->(_pid, **) { true }
+      ) do
+        with_replaced_singleton_method(
+          Hive::PidFile, :ownership, ->(_receipt, _pid) { :verified }
+        ) { report.payload }
+      end
 
       assert_equal "quiescing", payload.dig("lifecycle", "phase")
       assert_equal "legacy_process_unregistered", payload.dig("quiescence_capability", "reason")

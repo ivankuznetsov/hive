@@ -1,4 +1,5 @@
 require "hive/paths"
+require "hive/runtime_control_plane/activation_gate"
 require "hive/runtime_control_plane/database"
 require "hive/runtime_control_plane/process_registry"
 
@@ -51,8 +52,9 @@ module Hive
           return true if words == [ "--version" ] || words == [ "-v" ]
           return true if %w[__attempt-supervise __module-hook].include?(route)
 
-          tail = route && words.drop(words.index(route) + 1)
-          subcommand = command(tail || [])
+          subcommand = route && ActivationGate.subcommand_after(
+            words, route, value_options: route == "daemon" ? %w[--timeout] : []
+          )
           return true if route == "runtime" && [ nil, "status" ].include?(subcommand)
 
           route == "daemon" && %w[status quiesce resume].include?(subcommand)

@@ -4,6 +4,7 @@ require "yaml"
 require "hive/attempts/process_custody"
 require "hive/attempts/process_identity"
 require "hive/paths"
+require "hive/pid_file"
 require "hive/runtime_control_plane/codec"
 require "hive/runtime_control_plane/launch_fence"
 require "hive/runtime_control_plane/launch_coverage"
@@ -148,10 +149,17 @@ module Hive
         build_registration(row)
       end
 
-      def mark_stopped_by_reservation!(reservation_id, authority: nil, reason: nil)
+      def mark_stopped_by_reservation!(reservation_id, authority: nil, reason: nil,
+                                       require_descendant_absence: false)
         operation = lambda do |db|
           process = db[:owned_processes].where(reservation_id: reservation_id).first
           timestamp = now
+          if require_descendant_absence && process && !descendant_absence_verified?(process)
+            db[:owned_processes].where(reservation_id: reservation_id).update(
+              unknown_reason: "descendant_absence_unverified", updated_at: timestamp
+            )
+            next process
+          end
           db[:owned_processes].where(reservation_id: reservation_id).update(
             state: "stopped", unknown_reason: reason, stopped_at: timestamp, updated_at: timestamp
           )
@@ -206,9 +214,27 @@ module Hive
         end
       end
 
+      def descendant_absence_verified?(process)
+        return false unless @custody.verifiable?(process)
+        return false unless %i[missing mismatched].include?(
+          @process_identity.status(identity_hash(process))
+        )
+
+        @custody.members(process.fetch(:custody_path)).empty?
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError, TypeError
+        false
+      end
+
       private
 
       def now = Codec.dump_time(@clock.call)
+
+      def identity_hash(row)
+        {
+          "pid" => row[:pid], "start_fingerprint" => row[:start_fingerprint],
+          "session_id" => row[:session_id], "process_group_id" => row[:process_group_id]
+        }
+      end
 
       def build_registration(row)
         ProcessRegistration.new(
@@ -242,6 +268,7 @@ module Hive
             attempts: db[:attempts].where(state: %w[launching running]).all
           }
         end
+        rows = rows.merge(processes: rows[:processes].reject { |row| safely_absent?(row) })
         return refusal("unresolved_launch_reservation", rows[:reservations]) unless rows[:reservations].empty?
 
         registered_attempt_ids = rows[:processes].filter_map { |row| row[:attempt_id] }.uniq
@@ -303,11 +330,23 @@ module Hive
         }
       end
 
+      def safely_absent?(row)
+        return false if row[:custody_path].to_s.empty?
+        return false unless @custody.verifiable?(row)
+        return false unless %i[missing mismatched].include?(
+          @process_identity.status(identity_hash(row))
+        )
+
+        @custody.members(row[:custody_path]).empty?
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError, TypeError
+        false
+      end
+
       def known_legacy_processes
         paths = %w[.daemon.pid .bot.pid .babysitter.pid].map { |name| File.join(@state_home, name) }
         entries = paths.filter_map do |path|
           next unless File.file?(path) && !File.symlink?(path)
-          payload = YAML.safe_load(File.read(path), permitted_classes: [ Time ], aliases: false)
+          payload = Hive::PidFile.parse_payload(File.read(path))
           pid = Integer(payload["pid"], exception: false) if payload.is_a?(Hash)
           unless pid
             next({
@@ -315,10 +354,15 @@ module Hive
               "unknown_reason" => "pid_receipt_unreadable"
             })
           end
+          next unless Hive::PidFile.alive?(pid)
+          ownership = Hive::PidFile.ownership(payload, pid)
+          next if ownership == :reused
+
           identity = @process_identity.capture(pid)
           identity ? identity.to_h.merge("service_identity" => File.basename(path)) : {
             "service_identity" => File.basename(path), "pid" => pid,
-            "unknown_reason" => "process_identity_unavailable"
+            "unknown_reason" => ownership == :unverified ?
+              "pid_ownership_unverified" : "process_identity_unavailable"
           }
         rescue Psych::Exception, SystemCallError, IOError
           { "service_identity" => File.basename(path), "pid" => nil, "unknown_reason" => "pid_receipt_unreadable" }

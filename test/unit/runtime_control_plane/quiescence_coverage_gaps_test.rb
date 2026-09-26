@@ -83,7 +83,7 @@ class RuntimeControlPlaneQuiescenceCoverageGapsTest < Minitest::Test
   def test_database_writer_authority_and_status_error_contracts
     with_database do |database|
       assert_equal 1, database.migrator_transaction { |db| db[:installations].count }
-      assert_raises(ArgumentError) { database.with_exclusive_writer(role: :worker) {} }
+      assert_raises(ArgumentError) { database.with_exclusive_writer(role: :worker) { } }
       assert_raises(ArgumentError) do
         database.upgrade_quiescence!(
           authority: Object.new, expected_schema_version: 1,

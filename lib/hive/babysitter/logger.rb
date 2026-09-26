@@ -14,6 +14,7 @@ module Hive
         tick_begin
         tick_end
         config_reloaded
+        admission_check_failed
         project_skipped
         project_tick
         fatal

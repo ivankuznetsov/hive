@@ -20,11 +20,17 @@ module Hive
       READ_CHUNK = 16 * 1024
       # Pause between retries of a lease write that lost a SQLite lock race.
       STORE_RETRY_SEC = 1
+      # How long lock contention may defer lease writes. A stale owner whose
+      # process still matches is only ever a reconciler "suspect", never lost,
+      # so this may exceed the lease window; a swapping host can hold the
+      # runtime database's write lock far longer than `stale_sec`.
+      BUSY_TOLERANCE_SEC = 600
 
       def initialize(store:, attempt_id:, claim_io:, ready_io: nil,
                      heartbeat_sec: 5, stale_sec: 30,
                      first_heartbeat_timeout_sec: 30, timeout_sec: nil,
-                     kill_grace_sec: 1, clock: -> { Time.now.utc },
+                     kill_grace_sec: 1, busy_tolerance_sec: BUSY_TOLERANCE_SEC,
+                     clock: -> { Time.now.utc },
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      install_signal_handlers: false)
         @store = store
@@ -36,6 +42,7 @@ module Hive
         @first_heartbeat_timeout_sec = first_heartbeat_timeout_sec
         @timeout_sec = timeout_sec&.positive? ? timeout_sec : nil
         @kill_grace_sec = kill_grace_sec
+        @busy_tolerance_sec = [ busy_tolerance_sec, stale_sec ].max
         @clock = clock
         @monotonic = monotonic
         @install_signal_handlers = install_signal_handlers
@@ -191,7 +198,7 @@ module Hive
 
         readers = { stdout_r => :stdout, stderr_r => :stderr }
         next_heartbeat = @monotonic.call + @heartbeat_sec
-        lease_expires_at = @monotonic.call + @stale_sec
+        busy_deadline = @monotonic.call + @busy_tolerance_sec
         timeout_at = @timeout_sec && (@monotonic.call + @timeout_sec)
         status = nil
         forced_exit = nil
@@ -221,11 +228,11 @@ module Hive
           end
 
           if now_mono >= next_heartbeat
-            renewed = renew_lease(record, log, lease_expires_at)
+            renewed = renew_lease(record, log, busy_deadline)
             now_mono = @monotonic.call
             if renewed
               record = renewed
-              lease_expires_at = now_mono + @stale_sec
+              busy_deadline = now_mono + @busy_tolerance_sec
               next_heartbeat = now_mono + @heartbeat_sec
             else
               next_heartbeat = now_mono + [ STORE_RETRY_SEC, @heartbeat_sec ].min
@@ -444,24 +451,24 @@ module Hive
       end
 
       # A heartbeat that loses a SQLite lock race rolled back, so the observed
-      # record is still the compare-and-swap base. Defer it while the lease is
-      # unexpired instead of killing a healthy worker; a lost CAS or any other
-      # store failure still ends the attempt.
-      def renew_lease(record, log, lease_expires_at)
+      # record is still the compare-and-swap base. Defer it for up to the busy
+      # tolerance instead of killing a healthy worker; a lost CAS (another
+      # owner took the lease) or any other store failure still ends the attempt.
+      def renew_lease(record, log, busy_deadline)
         @store.heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
       rescue CompareAndSwapFailed
         raise
       rescue RepositoryError => e
-        raise unless Hive::InternalError.sqlite_busy?(e) && @monotonic.call < lease_expires_at
+        raise unless Hive::InternalError.sqlite_busy?(e) && @monotonic.call < busy_deadline
 
         log.append(:supervisor, "hive attempt supervisor: heartbeat deferred: #{e.message}\n")
         nil
       end
 
       # Retry a one-shot lease write through SQLite lock contention for at most
-      # one lease window; the transaction rolled back, so retrying is safe.
+      # the busy tolerance; the transaction rolled back, so retrying is safe.
       def with_store_retry
-        deadline = @monotonic.call + @stale_sec
+        deadline = @monotonic.call + @busy_tolerance_sec
         begin
           yield
         rescue CompareAndSwapFailed

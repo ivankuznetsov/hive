@@ -104,13 +104,14 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
-  def test_heartbeats_busy_past_the_lease_end_the_attempt
+  def test_heartbeats_busy_past_the_busy_tolerance_end_the_attempt
     with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 30" ]) do |store, attempt|
       fail_store_calls(store, :heartbeat, times: Float::INFINITY)
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
         claim_io: StringIO.new(CLAIM_CAPABILITY),
-        heartbeat_sec: 0.01, stale_sec: 0.3, first_heartbeat_timeout_sec: 5
+        heartbeat_sec: 0.01, stale_sec: 0.3, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 0.3
       )
 
       _, err = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
@@ -149,17 +150,35 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
-  def test_busy_retries_stop_at_the_lease_window
+  def test_busy_retries_stop_at_the_busy_tolerance
     with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
       fail_store_calls(store, :terminalize, times: Float::INFINITY)
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
         claim_io: StringIO.new(CLAIM_CAPABILITY),
-        heartbeat_sec: 0.01, stale_sec: 0.2, first_heartbeat_timeout_sec: 5
+        heartbeat_sec: 0.01, stale_sec: 0.2, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 0.2
       )
       supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
 
       capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+    end
+  end
+
+  # A swapping host can hold the write lock past the lease window; a live
+  # owner is only a reconciler suspect then, so busy heartbeats keep deferring.
+  def test_busy_heartbeats_outlast_the_lease_window
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.6; exit 0" ]) do |store, attempt|
+      fail_store_calls(store, :heartbeat, times: 40)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 0.1, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 5
+      )
+
+      assert_equal 0, supervisor.run
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
     end
   end
 

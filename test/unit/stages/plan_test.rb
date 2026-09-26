@@ -169,4 +169,47 @@ class HiveStagesPlanTest < Minitest::Test
     assert_includes render_plan_prompt(source: "/tmp/base-checkout"), "Source checkout: /tmp/base-checkout"
     refute_includes render_plan_prompt, "Source checkout:"
   end
+
+  def with_cleared_plan_state(marker:, allowed:, freshness:, load_error: nil)
+    record = Object.new
+    record.define_singleton_method(:execution_allowed?) { allowed }
+    projection = Struct.new(:record).new(record)
+    load = load_error ? ->(task_folder:) { raise load_error } : ->(task_folder:) { projection }
+    with_replaced_singleton_method(Hive::Markers, :current, ->(*) { Struct.new(:name).new(marker) }) do
+      with_replaced_singleton_method(Hive::PlanReview::Projection, :load, load) do
+        with_replaced_singleton_method(Hive::PlanReview::TransitionGuard, :freshness,
+                                       ->(**) { { "status" => freshness, "reason" => nil } }) do
+          yield Struct.new(:folder, :slug, :state_file, keyword_init: true)
+            .new(folder: "/tmp/task", slug: "task", state_file: "/tmp/task/plan.md")
+        end
+      end
+    end
+  end
+
+  # Re-running a cleared, current plan must not respawn the planner: that edited
+  # plan.md, staled the cleared review, and restarted the review cycle.
+  def test_run_leaves_a_cleared_current_plan_untouched
+    with_cleared_plan_state(marker: :complete, allowed: true, freshness: "current") do |task|
+      planned = false
+      with_replaced_singleton_method(Hive::Stages::Plan, :with_source_checkout, ->(*) { planned = true }) do
+        result = Hive::Stages::Plan.run!(task, {})
+        assert_equal :complete, result.fetch(:status)
+        assert_equal "complete", result.fetch(:commit)
+      end
+      refute planned, "a cleared plan must not respawn the planner"
+    end
+  end
+
+  def test_run_replans_when_the_cleared_review_is_not_current_or_readable
+    [
+      { marker: :complete, allowed: true, freshness: "stale" },
+      { marker: :complete, allowed: false, freshness: "current" },
+      { marker: :waiting, allowed: true, freshness: "current" },
+      { marker: :complete, allowed: true, freshness: "current", load_error: Hive::PlanReview::InvalidRecord.new("none") }
+    ].each do |state|
+      with_cleared_plan_state(**state) do |task|
+        refute Hive::Stages::Plan.cleared_plan_ready?(task, {}), state.inspect
+      end
+    end
+  end
 end

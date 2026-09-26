@@ -323,7 +323,13 @@ when the accepted findings include an operator decision (an approved
 `gated_auto` or answered `manual` finding). Safe fixes can spend the three
 rounds before the operator decides, and without this round every late decision
 forced a new linked plan whose fresh review restarted the cycle. The ceiling
-stays fixed at four, and safe-only residue still blocks at three. A verified candidate
+stays fixed at four, and safe-only residue still blocks at three.
+
+Re-running the plan stage on a plan that is already COMPLETE, and whose review
+has cleared and is still current (`TransitionGuard.freshness`), is a no-op
+that returns `complete`. It does not respawn the planner. `hive develop` is
+the move forward from there. Previously the re-run edited `plan.md`, which
+staled the cleared review and opened a fresh review cycle. A verified candidate
 is atomically promoted to canonical `plan.md` under the task mutation lock
 immediately before its matching terminal resolution is published under that
 same lock.

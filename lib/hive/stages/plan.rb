@@ -2,6 +2,8 @@ require "hive/stages/base"
 require "hive/claude_launcher"
 require "hive/plan_review/marker_sync"
 require "hive/plan_review/orchestrator"
+require "hive/plan_review/projection"
+require "hive/plan_review/transition_guard"
 require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/planner_identity"
 require "hive/plan_frontmatter"
@@ -41,7 +43,28 @@ module Hive
       module_function
 
       def run!(task, cfg)
+        if cleared_plan_ready?(task, cfg)
+          return { commit: action_for(:complete), status: :complete, plan_review: nil }
+        end
+
         with_source_checkout(task) { |source| run_with_source!(task, cfg, source) }
+      end
+
+      # A complete plan whose review cleared and is still current is ready to
+      # develop. Re-running the planner here edited plan.md, staled the cleared
+      # review and opened a fresh review cycle, discarding the convergence the
+      # operator had just reached. Leave it untouched; `hive develop` moves it on.
+      def cleared_plan_ready?(task, cfg)
+        return false unless Hive::Markers.current(task.state_file).name == :complete
+
+        projection = Hive::PlanReview::Projection.load(task_folder: task.folder)
+        return false unless projection.record.execution_allowed?
+
+        Hive::PlanReview::TransitionGuard.freshness(
+          task: task, projection: projection, config: cfg
+        ).fetch("status") == "current"
+      rescue Hive::PlanReview::InvalidRecord, Hive::PlanReview::InvalidPlan, SystemCallError, IOError
+        false
       end
 
       # The planner must inspect the revision execution will start from.

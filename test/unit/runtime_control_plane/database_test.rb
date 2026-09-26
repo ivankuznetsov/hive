@@ -98,6 +98,22 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_custody_validation_allows_a_wal_sidecar_to_disappear_during_inspection
+    with_database do |database, path|
+      wal = "#{path}-wal"
+      File.binwrite(wal, "transient sqlite sidecar")
+      File.chmod(0o600, wal)
+      original = File.method(:lstat)
+      with_replaced_singleton_method(File, :lstat, lambda { |candidate|
+        raise Errno::ENOENT, candidate if candidate == wal
+
+        original.call(candidate)
+      }) do
+        assert database.send(:validate_database_custody!)
+      end
+    end
+  end
+
   def test_exact_schema_rejects_column_constraint_and_unexpected_index_drift
     with_database do |database, path|
       database.disconnect

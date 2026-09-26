@@ -1608,3 +1608,9 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
   outside merged PRs are not counted. The Web label makes that scope explicit.
 
 - Direct Git workflow imports support initial authored installation. Automatic upstream update/merge and companion service installation are not implemented; those remain explicit owner operations.
+
+## Hidden Web tabs (2026-09-24)
+
+- Browser regressions simulate document visibility and exercise real Cable
+  subscriptions and feed scans. CPU and memory savings in the installed local
+  service have not yet been measured for this change.

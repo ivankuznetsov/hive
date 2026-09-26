@@ -1,0 +1,181 @@
+      run_stage_action("archive", target)
+    end
+
+    desc "drop TARGET", "Hard-delete a task: kill agent, remove folder(s)/worktree/branch, close draft PR"
+    long_desc <<~DESC
+      TARGET is a task folder path or a bare slug. A bare slug is resolved
+      across registered projects; pass --project to disambiguate cross-project
+      collisions and --from to assert the source stage on retry.
+
+      Drop is irreversible: there is no archive/dropped bucket, no undo, no
+      reason prompt. Cleanup is idempotent — re-running drop after an interrupt
+      completes the remaining steps.
+
+      Tasks already at 9-done are refused with exit code 64 and
+      error_kind: already_archived.
+
+      Exit codes:
+        0  — dropped successfully
+        1  — generic / uncategorised failure (error_kind: error)
+        4  — --from did not match the task's current stage (wrong_stage)
+        64 — unknown slug, ambiguous slug, or already archived
+              (invalid_task_path / ambiguous_slug / already_archived)
+        70 — internal, git, or worktree failure during cleanup
+              (internal / git / worktree)
+        75 — hive/state commit-lock contention (retryable; error_kind: error)
+        78 — malformed project or global config (config)
+    DESC
+    option :from, type: :string,
+                  desc: "expected current stage; raises WRONG_STAGE on mismatch (#{STAGE_VOCABULARY})"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def drop(target)
+      require "hive/commands/drop"
+      Hive::Commands::Drop.new(
+        target,
+        project: options[:project],
+        from: options[:from],
+        json: options[:json]
+      ).call
+    end
+
+    desc "patrol PROJECT", "Run a patrol cycle or list recorded findings"
+    long_desc <<~DESC
+      Maps the registered project's repository into language-neutral
+      component slices under <project>/.hive-state/patrol/, asks the
+      configured patrol agent for bounded, source-verified production defects
+      across a persisted rotating feature batch,
+      globally ranks semantic root causes above the alpha gate, requires
+      an independently observed fail-before/pass-after proof on a fresh base,
+      validates configured commands, and opens ready
+      (non-draft) PRs for validated fixes (set patrol.draft_prs: true for
+      draft PRs). By default, each opened patrol PR is also handed to the
+      standard 6-review flow as a visible "Patrol: ..." task; set
+      patrol.review_prs: false to keep PR-only output.
+
+      Use --list for a bounded, read-only finding summary shared with Hive Web.
+      Accepted findings are recorded for the shared patrol-fix workflow;
+      this command never edits code, pushes branches, or opens PRs. Use
+      --dry-run to map and review without persisting findings. With --json, a
+      cycle emits hive-patrol.v3; --list emits hive-patrol-findings.v1.
+    DESC
+    option :dry_run, type: :boolean, default: false,
+                     desc: "map and review without persisting findings"
+    option :list, type: :boolean, default: false,
+                  desc: "list bounded recorded finding health without running Patrol"
+    option :once, type: :boolean, default: false,
+                  desc: "run one scheduler pass and emit hive-one-shot.v1"
+    def patrol(project)
+      require "hive/commands/patrol"
+      if options[:once] && options[:list]
+        raise Hive::InvalidTaskPath, "hive patrol: --once cannot be combined with --list"
+      end
+      result = Hive::Commands::Patrol.new(
+        project,
+        json: options[:json],
+        dry_run: options[:dry_run],
+        list: options[:list],
+        once: options[:once]
+      ).call
+      finish_one_shot(result) if options[:once]
+      result
+    end
+
+    desc "refactor-patrol PROJECT", "Discover routed refactor theses for a registered project"
+    long_desc <<~DESC
+      Maps the registered project's repository into feature slices, asks the
+      configured refactor-patrol agent for evidence-backed architecture
+      theses, verifies their evidence and risks, and emits explicit
+      fix/discuss/dismiss routes. On-demand reporting does not edit worktrees,
+      open PRs, or enqueue review tasks.
+
+      Scope hints use precedence --feature, then --entrypoint, then --path.
+      --changed-since is only a filter paired with --feature, --entrypoint, or
+      --path; it cannot be used on its own. With --json, emits
+      hive-refactor-patrol.v4.
+
+      Use --pr with a merged PR number or URL to analyze only its immutable
+      changed-path manifest from a clean registered default-branch checkout.
+      PR mode requires --json, cannot be combined with legacy scope hints, and
+      emits hive-refactor-patrol.v4 through an enforceable read-only agent.
+
+      Use --list or --show JOB_ID to inspect the authoritative durable job
+      ledger without enqueueing, claiming, replaying, or resuming work. With
+      --json these operations emit hive-refactor-patrol-jobs.v2. List output is
+      paginated with --limit/--cursor. Show output bounds retry/publication
+      histories by --limit unless --full explicitly requests every entry.
+
+      Use --archive JOB_ID only for historical action-era jobs already fenced
+      by authority revocation after their findings entered Patrol Fix. Archive
+      preserves dispositions and audit evidence while making pending legacy
+      actions terminal.
+    DESC
+    option :dry_run, type: :boolean, default: false,
+                     desc: "preview without persisting refactor-patrol state"
+    option :feature, type: :string, desc: "only review matching mapped feature id"
+    option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
+    option :path, type: :string, desc: "only review features with owned files under this path"
+    option :changed_since, type: :string,
+                           desc: "git ref filter paired with --feature/--entrypoint/--path"
+    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v4 read-only contract"
+    option :job_manifest, type: :string,
+                          desc: "analyze one immutable merge-intake manifest (daemon/internal)"
+    option :result_file, type: :string,
+                         desc: "write daemon completion envelope to a fenced result file (internal)"
+    option :list, type: :boolean, default: false,
+                  desc: "list durable architecture-patrol jobs without changing state"
+    option :show, type: :string,
+                  desc: "show one durable architecture-patrol job without changing state"
+    option :archive, type: :string,
+                     desc: "archive one authority-revoked legacy action job"
+    option :limit, type: :numeric,
+                   desc: "query page/history limit (1-100; default: 100)"
+    option :cursor, type: :string,
+                    desc: "continue a --list query from an opaque cursor"
+    option :full, type: :boolean, default: false,
+                  desc: "include complete unbounded histories with --show"
+    option :once, type: :boolean, default: false,
+                  desc: "run one scheduler pass and emit hive-one-shot.v1"
+    def refactor_patrol(project)
+      require "hive/commands/refactor_patrol"
+      if options[:once] && [ options[:feature], options[:entrypoint], options[:path],
+                            options[:changed_since], options[:pr], options[:job_manifest],
+                            options[:result_file], options[:show], options[:archive],
+                            options[:limit], options[:cursor] ].any?
+        raise Hive::InvalidTaskPath,
+              "hive refactor-patrol: --once cannot be combined with manual selectors"
+      end
+      if options[:once] && (options[:list] || options[:full])
+        raise Hive::InvalidTaskPath,
+              "hive refactor-patrol: --once cannot be combined with query selectors"
+      end
+      result = Hive::Commands::RefactorPatrol.new(
+        project,
+        json: options[:json],
+        dry_run: options[:dry_run],
+        feature: options[:feature],
+        entrypoint: options[:entrypoint],
+        path: options[:path],
+        changed_since: options[:changed_since],
+        pr: options[:pr],
+        job_manifest: options[:job_manifest],
+        result_file: options[:result_file],
+        list: options[:list],
+        show: options[:show],
+        archive: options[:archive],
+        limit: options[:limit],
+        cursor: options[:cursor],
+        full: options[:full],
+        once: options[:once]
+      ).call
+      finish_one_shot(result) if options[:once]
+      result
+    end
+
+    desc "refactor-patrol-scheduled PROJECT",
+         "Review one periodic current-main architecture slice (daemon/internal)", hide: true
+    option :result_file, type: :string, required: true
+    def refactor_patrol_scheduled(project)
+      require "hive/commands/refactor_patrol_scheduled"
+      result = Hive::Commands::RefactorPatrolScheduled.new(
+        project, result_file: options[:result_file]
+      ).call

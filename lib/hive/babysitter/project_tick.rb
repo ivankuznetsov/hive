@@ -196,7 +196,7 @@ module Hive
       # archive handles a merged PR whatever its branch state. Leaving it
       # "owned" stranded a PR whose CI went red after main moved, since the
       # pipeline no longer acts and the babysitter deferred to it.
-      FINALIZE_STAGE_DIR = "8-finalize".freeze # coding-scoped
+      FINALIZE_STAGE_DIR = "8-finalize".freeze # coding-scoped: finalized coding PRs await merge only
       FINALIZE_STATE_FILE = "pr.md".freeze
 
       def finalized_awaiting_merge?(stage_dir, task_folder)

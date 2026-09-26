@@ -55,6 +55,28 @@ class DaemonLifecycleCommandIntegrationTest < Minitest::Test
     end
   end
 
+  def test_lifecycle_argv_errors_use_action_specific_text_and_json_envelopes
+    with_runtime_home do |_root, env|
+      _output, errors, process = run_hive(env, "daemon", "quiesce", "project")
+      assert_equal Hive::ExitCodes::USAGE, process.exitstatus
+      assert_includes errors, "takes no PROJECT"
+
+      output, _errors, process = run_hive(
+        env, "daemon", "resume", "project", "--json"
+      )
+      assert_equal Hive::ExitCodes::USAGE, process.exitstatus
+      payload = JSON.parse(output)
+      assert_equal "hive-daemon-resume", payload.fetch("schema")
+      assert_equal "usage", payload.fetch("error_kind")
+
+      _output, errors, process = run_hive(
+        env, "daemon", "status", "--timeout", "2"
+      )
+      assert_equal Hive::ExitCodes::USAGE, process.exitstatus
+      assert_includes errors, "--timeout only applies"
+    end
+  end
+
   def test_skewed_status_is_read_only_and_resume_preserves_the_closed_proof
     with_runtime_home do |root, env|
       output, errors, process = run_hive(env, "daemon", "quiesce", "--timeout", "2", "--json")

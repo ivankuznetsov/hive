@@ -234,6 +234,34 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_nonterminal_compare_and_swap_winner_is_retried_by_the_caller
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      writer = store.log_archive.open_writer(running.attempt_id)
+      writer.close
+      store.define_singleton_method(:interrupt) do |*|
+        raise Hive::Attempts::CompareAndSwapFailed, "lost race"
+      end
+
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        Hive::Attempts::Reconciler.new(
+          store: store,
+          process_identity: InterruptionIdentity.new(:missing, :absent)
+        ).finalize_interruption(running, pause_generation: 2, now: NOW + 3)
+      end
+    end
+  end
+
+  def test_interruption_log_resolution_errors_remain_unverifiable
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      store.log_archive.define_singleton_method(:resolve) { |_| raise IOError, "offline" }
+      reconciler = Hive::Attempts::Reconciler.new(store: store)
+
+      assert_nil reconciler.send(:interruption_log_reference, running)
+    end
+  end
+
   def test_commits_alone_never_infer_success_and_matching_marker_only_records_evidence
     with_tmp_git_repo do |project_root|
       task_folder = File.join(project_root, ".hive-state", "stages", "4-execute", "durable-task")

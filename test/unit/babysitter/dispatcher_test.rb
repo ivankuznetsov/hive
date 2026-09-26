@@ -159,6 +159,21 @@ class BabysitterDispatcherTest < Minitest::Test
     end
   end
 
+  def test_persistent_admission_errors_are_logged_and_fail_closed
+    with_tmp_dir do |dir|
+      logger = Hive::Babysitter::Logger.new(path: File.join(dir, "babysitter.log"))
+      dispatcher = Hive::Babysitter::Dispatcher.new(
+        logger: logger, persistent_admission: -> { raise IOError, "offline" }
+      )
+
+      assert_equal 0, dispatcher.tick
+      events = File.readlines(File.join(dir, "babysitter.log")).map { |line| JSON.parse(line) }
+      assert events.any? { |event| event["event"] == "admission_check_failed" }
+    ensure
+      logger&.close
+    end
+  end
+
   def test_tick_skips_local_and_unresolved_repositories_before_github_calls
     with_tmp_dir do |root|
       local = File.join(root, "local")

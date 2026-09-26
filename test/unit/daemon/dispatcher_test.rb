@@ -697,6 +697,53 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute dispatcher.send(:admission_open?)
   end
 
+  def test_persistent_admission_and_quiescence_probe_errors_fail_closed
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      persistent_admission: -> { raise IOError, "offline" }
+    )
+    refute dispatcher.send(:admission_open?)
+    assert events_include?(logger, :admission_check_failed)
+
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) do
+      raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+    end
+    dispatcher, = make_dispatcher(quiescence_lifecycle: lifecycle)
+    assert_equal 0.0, dispatcher.send(:shutdown_termination_grace)
+    refute dispatcher.send(:quiescing_shutdown?)
+  end
+
+  def test_default_monotonic_clock_and_quiescence_shutdown_clamp_are_used
+    state = Hive::RuntimeControlPlane::Lifecycle.new(
+      phase: "quiescing", generation: 1, revision: 1, mutation_sequence: 2,
+      boot_id: "boot", deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+      shutdown_grace_sec: 1, interrupted_attempt_ids: [], quiesce_started_at: nil,
+      paused_at: nil, resumed_at: nil, updated_at: nil
+    )
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) { state }
+    dispatcher, supervisor = make_dispatcher(
+      quiescence_lifecycle: lifecycle, monotonic: nil, boot_id_reader: -> { "boot" }
+    )
+    dispatcher = Hive::Daemon::Dispatcher.new(
+      config: { "daemon" => { "poll_interval_sec" => 1, "shutdown_grace_sec" => 1 } },
+      controller: dispatcher.instance_variable_get(:@controller), supervisor: supervisor,
+      status_consumer: dispatcher.instance_variable_get(:@status_consumer),
+      logger: dispatcher.instance_variable_get(:@logger), quiescence_lifecycle: lifecycle,
+      boot_id_reader: -> { "boot" }
+    )
+    clamps = []
+    supervisor.define_singleton_method(:clamp_quiescence_shutdown!) do |remaining_sec:|
+      clamps << remaining_sec
+    end
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+    dispatcher.define_singleton_method(:tick) { |now: Time.now| request_shutdown! }
+
+    dispatcher.run_forever
+    assert_equal 1, clamps.length
+  end
+
   def test_async_patrol_discovery_keeps_authoritative_ticks_responsive
     candidate = {
       project: "p1", patrol_kind: :ordinary, slug: "patrol", stage: "patrol",

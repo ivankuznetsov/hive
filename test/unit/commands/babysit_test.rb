@@ -63,6 +63,7 @@ class HiveCommandsBabysitTest < Minitest::Test
 
     assert_equal [ :run_forever ], dispatcher.calls
     assert_equal true, captured.fetch(:dry_run)
+    assert captured.fetch(:persistent_admission).call
     refute File.exist?(command.pid_file)
   end
 

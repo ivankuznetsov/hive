@@ -225,6 +225,14 @@ class AttemptsRecordTest < Minitest::Test
         attempt_id: "attempt-1", task_generation: "generation-1"
       )
     end
+
+    error = assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        receipt("receipt_version" => 2, "pause_generation" => 7),
+        attempt_id: "attempt-1", task_generation: "generation-1"
+      )
+    end
+    assert_includes error.message, "requires interrupted outcome"
   end
 
   def test_terminal_receipt_accepts_only_compatible_sanitized_provider_evidence

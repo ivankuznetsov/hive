@@ -12,6 +12,58 @@ class AttemptsSupervisorTest < Minitest::Test
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
   CLAIM_CAPABILITY = "c" * 64
 
+  def test_wrapper_registration_is_released_and_cleanup_errors_are_bounded
+    calls = []
+    registry = Object.new
+    registry.define_singleton_method(:register!) { |*args, **kwargs| calls << [ args, kwargs ] }
+    registry.define_singleton_method(:mark_stopped_by_reservation!) do |_id|
+      raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+    end
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new,
+      process_registry: registry, reservation_id: "reservation-1"
+    )
+
+    supervisor.send(:register_wrapper!)
+    assert supervisor.instance_variable_get(:@wrapper_registered)
+    assert_equal "reservation-1", calls.first.first.first
+    assert_nil supervisor.send(:release_wrapper_registration)
+  end
+
+  def test_quiescence_lifecycle_probe_errors_fail_closed_without_crashing_worker
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) do
+      raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+    end
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new
+    )
+    supervisor.define_singleton_method(:lifecycle) { lifecycle }
+
+    refute supervisor.send(:admission_closed?)
+    assert_nil supervisor.send(:capture_quiescence_context, 1.0)
+  end
+
+  def test_failed_initial_signal_is_retried_before_forcing_worker_exit
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.1; exit 0" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      signals = 0
+      original = supervisor.method(:signal_worker_group)
+      supervisor.define_singleton_method(:signal_worker_group) do |signal|
+        signals += 1
+        signals == 1 ? false : original.call(signal)
+      end
+      supervisor.instance_variable_set(:@cancel_reason, :timeout)
+
+      assert_equal 124, supervisor.run
+      assert_operator signals, :>=, 2
+    end
+  end
+
   def test_quiescing_handshake_denial_exits_before_worker_and_leaves_reservation_for_controller
     with_attempt(worker_argv: [ "/bin/sh", "-c", "touch should-not-run" ]) do |store, attempt|
       releases = []

@@ -91,4 +91,42 @@ class AttemptsProcessCustodyTest < Minitest::Test
       assert_equal "parent_cgroup_writable", custody.reason
     end
   end
+
+  def test_linux_adapter_failures_are_explicit_and_fail_closed
+    custody = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
+      current_path_reader: -> { raise IOError, "unreadable" }
+    )
+    refute custody.current_evidence.fetch("eligible")
+    assert_equal "cgroup_unavailable", custody.reason
+
+    refute custody.evidence_for("not-a-pid").fetch("eligible")
+    refute custody.verifiable?(
+      "custody_mode" => custody.mode, "custody_path" => "/scope",
+      "custody_evidence_json" => "{invalid"
+    )
+
+    unsupported = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
+      current_path_reader: -> { "/scope" }
+    )
+    unsupported.define_singleton_method(:linux?) { false }
+    refute unsupported.current_evidence.fetch("eligible")
+    assert_equal "platform_unsupported", unsupported.reason
+
+    with_tmp_dir do |root|
+      File.write(File.join(root, "cgroup.controllers"), "cpu\n")
+      domain = File.join(root, "scope")
+      FileUtils.mkdir_p(domain)
+      undelegated = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
+        cgroup_root: root, current_path_reader: -> { "/scope" }
+      )
+      refute undelegated.current_evidence.fetch("eligible")
+      assert_equal "domain_not_delegated", undelegated.reason
+
+      unavailable = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
+        cgroup_root: root, current_path_reader: -> { "/missing" }
+      )
+      refute unavailable.current_evidence.fetch("eligible")
+      assert_equal "cgroup_unavailable", unavailable.reason
+    end
+  end
 end

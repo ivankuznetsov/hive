@@ -200,6 +200,47 @@ class HiveCommandsDaemonQuiescenceCommandTest < Minitest::Test
     end
   end
 
+  def test_resume_storage_failure_preserves_software_exit_convention
+    with_tmp_dir do |root|
+      result = resumed_result.with(
+        status: "not_resumed", resumed: false, reason: "storage_error",
+        admission_open: false, admission_reopened: false, phase: "resuming"
+      )
+      command = Hive::Commands::Daemon.new(
+        "resume", json: true, hive_home: root,
+        resume_factory: ->(timeout_sec:) { fixed_controller(result) }
+      )
+
+      output, _errors = capture_io do
+        error = assert_raises(Hive::Error) { command.call }
+        assert_equal Hive::ExitCodes::SOFTWARE, error.exit_code
+      end
+      assert_equal "storage_error", JSON.parse(output).fetch("reason")
+    end
+  end
+
+  def test_text_lifecycle_results_report_success_failure_and_resume_obligation
+    with_tmp_dir do |root|
+      success = Hive::Commands::Daemon.new(
+        "quiesce", hive_home: root,
+        quiescence_factory: ->(timeout_sec:) { fixed_controller(paused_result) }
+      )
+      output, errors = capture_io { assert_equal 0, success.call }
+      assert_includes output, "paused (generation 3)"
+      assert_empty errors
+
+      failure = Hive::Commands::Daemon.new(
+        "quiesce", hive_home: root,
+        quiescence_factory: ->(timeout_sec:) {
+          fixed_controller(nonpaused_result(admission_open: false))
+        }
+      )
+      _output, errors = capture_io { assert_raises(Hive::Error) { failure.call } }
+      assert_includes errors, "not_paused (ownership_unverifiable)"
+      assert_includes errors, "run hive daemon resume"
+    end
+  end
+
   def test_migration_race_still_emits_the_action_specific_error_envelope
     with_tmp_dir do |root|
       error = Hive::RuntimeControlPlane::MigrationRequired.new(

@@ -53,6 +53,15 @@ class WebSupervisorTest < Minitest::Test
            "resume must retain the restart intent suppressed while admission is closed"
   end
 
+  def test_persistent_admission_errors_warn_and_fail_closed
+    sup = Hive::Web::Supervisor.new(
+      persistent_admission: -> { raise IOError, "offline" }
+    )
+
+    _output, errors = capture_io { refute sup.send(:admission_open?) }
+    assert_includes errors, "persistent admission check failed"
+  end
+
   def test_reap_schedules_restart_for_every_crashed_child
     with_tmp_global_config do
       sup = build

@@ -173,6 +173,45 @@ class HiveDaemonStatusQuiescenceTest < Minitest::Test
     end
   end
 
+  def test_status_storage_proof_and_liveness_failures_remain_structured
+    database = Object.new
+    database.define_singleton_method(:quiescence_status_snapshot) do
+      raise Hive::RuntimeControlPlane::IntegrityError.new(
+        "broken", code: :database_corrupt, action: "restore backup"
+      )
+    end
+    report = Hive::Daemon::StatusReport.new(
+      hive_home: "/tmp", environment: {}, database: database
+    )
+    payload = report.send(:quiescence_payload)
+    assert_equal "database_corrupt", payload.dig("lifecycle", "proof", "reason")
+    assert_equal "restore backup", payload.dig("runtime_installation", "next_action")
+
+    lifecycle = Struct.new(:phase).new("paused")
+    verifier = Object.new
+    verifier.define_singleton_method(:verify) { |**| raise IOError, "bad proof" }
+    verdict = with_replaced_singleton_method(
+      Hive::Daemon::FinalizationProof, :new, ->(**) { verifier }
+    ) do
+      report.send(:proof_verdict, lifecycle, installation_id: "install-1")
+    end
+    assert_equal "proof_probe_failed:IOError", verdict.fetch("reason")
+
+    slow_identity = Object.new
+    slow_identity.define_singleton_method(:status) { |_| sleep 0.1 }
+    timed = Hive::Daemon::StatusReport.new(
+      hive_home: "/tmp", environment: {}, process_identity: slow_identity,
+      liveness_timeout_sec: 0.01
+    )
+    snapshot = {
+      lifecycle: { phase: "paused" },
+      processes: [ { pid: 1, start_fingerprint: "start" } ]
+    }
+    result = timed.send(:liveness_verdict, snapshot, { "payload" => nil })
+    assert_equal "probe_deadline", result.dig("remaining", 0, "unknown_reason")
+    assert_equal({ "pid" => 1 }, timed.send(:stringify, pid: 1))
+  end
+
   def test_post_proof_daemon_respawn_downgrades_without_a_database_write
     with_tmp_dir do |root|
       database = Hive::RuntimeControlPlane::Database.new(

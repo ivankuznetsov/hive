@@ -1,3 +1,4 @@
+require "json"
 require "time"
 require "set"
 require "hive/config"
@@ -161,7 +162,44 @@ module Hive
           next if inflight.include?(inflight_key(project_entry, number))
 
           pr
-        end.sort_by { |pr| [ selection_priority(pr), parse_time(pr["updatedAt"]) ] }.first(limit)
+        end.then { |candidates| fair_order(candidates, project_entry) }.first(limit)
+      end
+
+      # Round-robin across open PRs: never-attempted PRs first, then the least
+      # recently attempted, then merge-state priority and age. Ordering by
+      # priority and age alone let the same persistently red PRs win every
+      # tick (one was "fixed" 13 times in six hours) while newer PRs starved.
+      def fair_order(candidates, project_entry)
+        attempted = last_attempt_times(project_entry)
+        candidates.sort_by do |pr|
+          [ attempted.fetch(pr["number"].to_i, EPOCH), selection_priority(pr), parse_time(pr["updatedAt"]) ]
+        end
+      end
+
+      EPOCH = Time.at(0).utc
+      ATTEMPT_ACTIONS = %w[agent-fix rebase force-push].freeze
+      ATTEMPT_LOG_TAIL_BYTES = 512 * 1024
+
+      # Last fix attempt per PR, from the tail of this project's babysitter
+      # event log. A missing or unreadable log means no history.
+      def last_attempt_times(project_entry)
+        path = File.join(project_entry.fetch("hive_state_path"), "babysitter", "events.jsonl")
+        return {} unless File.file?(path)
+
+        tail = File.open(path, "rb") do |file|
+          file.seek([ file.size - ATTEMPT_LOG_TAIL_BYTES, 0 ].max)
+          file.read
+        end
+        tail.each_line.with_object({}) do |line, times|
+          record = JSON.parse(line)
+          next unless record.is_a?(Hash) && ATTEMPT_ACTIONS.include?(record["action"]) && record["pr"]
+
+          times[record["pr"].to_i] = parse_time(record["ts"])
+        rescue JSON::ParserError
+          next
+        end
+      rescue SystemCallError, IOError
+        {}
       end
 
       # Branches owned by a task still moving through the pipeline — read from

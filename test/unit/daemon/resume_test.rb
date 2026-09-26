@@ -304,6 +304,66 @@ class HiveDaemonResumeTest < Minitest::Test
     end
   end
 
+  def test_launch_fence_contention_keeps_the_closed_generation
+    with_runtime do |root, database|
+      closed = Hive::RuntimeControlPlane::LifecycleRepository.new(
+        database: database
+      ).begin_quiesce!(deadline_monotonic: 200, boot_id: "boot-test", shutdown_grace_sec: 25)
+      fence = Object.new
+      fence.define_singleton_method(:acquire_exclusive!) do
+        raise Hive::ConcurrentRunError.new("busy", lock_path: "/launch")
+      end
+
+      result = Hive::Daemon::Resume.new(
+        state_home: root, database: database, timeout_sec: 1,
+        launch_fence_factory: ->(_timeout) { fence }
+      ).call
+
+      assert_equal "launch_fence_busy", result.reason
+      refute result.admission_reopened
+      assert_equal closed.generation, result.generation
+      assert_equal "quiescing", lifecycle(database).phase
+    end
+  end
+
+  def test_writer_fence_contention_keeps_the_closed_generation
+    with_runtime do |root, database|
+      closed = Hive::RuntimeControlPlane::LifecycleRepository.new(
+        database: database
+      ).begin_quiesce!(deadline_monotonic: 200, boot_id: "boot-test", shutdown_grace_sec: 25)
+      database.define_singleton_method(:with_exclusive_writer) do |**|
+        raise Hive::ConcurrentRunError.new("busy", lock_path: "/writer")
+      end
+
+      result = Hive::Daemon::Resume.new(
+        state_home: root, database: database, timeout_sec: 1
+      ).call
+
+      assert_equal "writer_drain_timeout", result.reason
+      refute result.admission_reopened
+      assert_equal closed.generation, result.generation
+      assert_equal "quiescing", lifecycle(database).phase
+    end
+  end
+
+  def test_missing_attempt_root_without_descendant_absence_proof_stays_unresolved
+    with_runtime do |root, database|
+      insert_active_process(database, attempt_id: "attempt-1")
+      Hive::RuntimeControlPlane::LifecycleRepository.new(database: database).begin_quiesce!(
+        deadline_monotonic: 200, boot_id: "boot-test", shutdown_grace_sec: 25
+      )
+
+      result = Hive::Daemon::Resume.new(
+        state_home: root, database: database, timeout_sec: 1,
+        process_identity: FixedProcessIdentity.new(:missing)
+      ).call
+
+      assert_equal "reconciliation_incomplete", result.reason
+      refute result.admission_reopened
+      assert_equal "descendant_absence_unverified", result.remaining.first.fetch("unknown_reason")
+    end
+  end
+
   private
 
   def insert_quiesced_service(database, identity)
@@ -319,12 +379,12 @@ class HiveDaemonResumeTest < Minitest::Test
     end
   end
 
-  def insert_active_process(database)
+  def insert_active_process(database, attempt_id: nil)
     now = Time.now.utc.iso8601(6)
     database.transaction do |db|
       installation_id = db[:installations].get(:installation_id)
       db[:owned_processes].insert(
-        process_id: "active-process", installation_id: installation_id,
+        process_id: "active-process", installation_id: installation_id, attempt_id: attempt_id,
         origin: "safe_fixture", role: "service", pid: 123_456,
         start_fingerprint: "fixture-start", state: "running",
         proven_child_safe: 1, custody_mode: "unverified",

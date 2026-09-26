@@ -396,11 +396,13 @@ components:
           - lib/hive/artifacts/outcome_evidence/store.rb
           - lib/hive/implementation_identity/store.rb
           - lib/hive/modules/inspector.rb
+          - lib/hive/daemon/quiescence.rb
+          - lib/hive/daemon/quiescence_process_evidence.rb
           - lib/hive/daemon/recovery_coordinator.rb
           - lib/hive/task_activity.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_workspace/builder.rb
-        reason: "Existing Hive composition, read-only consumers, execution-boundary checks, and closure verification share the canonical runtime-control-plane repository; they are not alternate admission producers."
+        reason: "Existing Hive composition, quiescence process evidence, read-only consumers, execution-boundary checks, and closure verification share the canonical runtime-control-plane repository; they are not alternate admission producers."
       - constant: Hive::Attempts::Supervisor
         files:
           - lib/hive/commands/attempt_supervise.rb
@@ -408,11 +410,16 @@ components:
       - constant: Hive::Attempts::Reconciler
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root injects reconciliation into its scheduler without exposing lifecycle operations through the admission facade."
+          - lib/hive/daemon/quiescence.rb
+          - lib/hive/daemon/quiescence_finalizer.rb
+        reason: "The daemon composition root and quiescence controller/finalizer reconcile attempts without exposing lifecycle operations through the admission facade."
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root uses the process-identity verifier to classify live workers safely."
+          - lib/hive/daemon/quiescence.rb
+          - lib/hive/daemon/status_report.rb
+          - lib/hive/runtime_control_plane/process_registry.rb
+        reason: "The daemon composition root, quiescence controller, read-only paused-status probe, and installation-owned process registry use the process-identity verifier to classify live workers safely."
       - constant: Hive::Attempts::LostOutcomeTransition
         files:
           - lib/hive/commands/daemon.rb

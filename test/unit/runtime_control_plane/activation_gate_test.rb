@@ -14,6 +14,15 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
     end
   end
 
+  def test_observation_words_inside_another_command_do_not_bypass_activation
+    refute Hive::RuntimeControlPlane::ActivationGate.strict_no_write_route?(
+      %w[new project workflow validate]
+    )
+    refute Hive::RuntimeControlPlane::ActivationGate.strict_no_write_route?(
+      %w[new project init --preview]
+    )
+  end
+
   def test_existing_invalid_database_blocks_startup_but_allows_diagnosis
     with_tmp_dir do |root|
       path = Hive::Paths.runtime_control_plane_path(root)
@@ -28,6 +37,12 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
       [
         %w[runtime], %w[runtime --json], %w[runtime status],
         %w[runtime status --json], %w[runtime --json status], %w[--json runtime status],
+        %w[daemon status], %w[daemon quiesce], %w[daemon resume],
+        %w[daemon --timeout 2 quiesce],
+        %w[daemon quiesce --json], %w[--json daemon resume],
+        %w[init --new-workflow editorial --preview --json],
+        %w[init --new-workflow workflow --preview=true --json],
+        %w[workflow validate coding --json], %w[workflow --json validate coding],
         %w[doctor], %w[setup], %w[--version]
       ].each do |argv|
         assert Hive::RuntimeControlPlane::ActivationGate.check!(argv: argv, state_home: root)
@@ -75,5 +90,14 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
     gate = source.index("ActivationGate.check!")
     assert gate < source.index('require "hive/llm_wiki_bootstrap"')
     assert gate < source.index("Scheduler.reconcile_existing!")
+  end
+
+  def test_lifecycle_observation_and_control_skip_startup_housekeeping
+    source = File.binread(File.expand_path("../../../bin/hive", __dir__))
+
+    assert_includes source, "ActivationGate.strict_no_write_route?(ARGV)"
+    assert_includes source, "unless strict_no_write_route"
+    assert_operator source.index("ActivationGate.strict_no_write_route?(ARGV)"), :<,
+                    source.index("Scheduler.reconcile_existing!")
   end
 end

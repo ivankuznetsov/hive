@@ -198,6 +198,43 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
+  def test_interrupted_receipt_requires_v2_pause_generation_provenance
+    interrupted = receipt(
+      "receipt_version" => 2,
+      "outcome" => "interrupted",
+      "exit_status" => Hive::ExitCodes::TEMPFAIL,
+      "pause_generation" => 7
+    )
+
+    assert Hive::Attempts::Record.validate_receipt!(
+      interrupted, attempt_id: "attempt-1", task_generation: "generation-1"
+    )
+    [ interrupted.except("pause_generation"),
+      interrupted.merge("pause_generation" => nil),
+      interrupted.merge("pause_generation" => -1) ].each do |candidate|
+      assert_raises(Hive::Attempts::InvalidReceipt) do
+        Hive::Attempts::Record.validate_receipt!(
+          candidate, attempt_id: "attempt-1", task_generation: "generation-1"
+        )
+      end
+    end
+
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        receipt.merge("outcome" => "interrupted"),
+        attempt_id: "attempt-1", task_generation: "generation-1"
+      )
+    end
+
+    error = assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        receipt("receipt_version" => 2, "pause_generation" => 7),
+        attempt_id: "attempt-1", task_generation: "generation-1"
+      )
+    end
+    assert_includes error.message, "requires interrupted outcome"
+  end
+
   def test_terminal_receipt_accepts_only_compatible_sanitized_provider_evidence
     routing = explicit_routing
     evidence = provider_evidence(routing: routing)
@@ -519,6 +556,9 @@ class AttemptsRecordTest < Minitest::Test
         "path" => "logs/attempt-1.frames", "size" => 4, "sha256" => "1" * 64
       },
       "provider_evidence" => nil
-    }.merge(overrides)
+    }.merge(overrides).tap do |value|
+      value["pause_generation"] = nil if value["receipt_version"] == 2 &&
+        !overrides.key?("pause_generation")
+    end
   end
 end

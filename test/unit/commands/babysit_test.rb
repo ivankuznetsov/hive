@@ -44,6 +44,7 @@ class HiveCommandsBabysitTest < Minitest::Test
   end
 
   def test_start_writes_pid_runs_dispatcher_and_cleans_pid
+    activate_test_control_plane(@home)
     command = babysit("start", dry_run: true)
     dispatcher = FakeDispatcher.new([])
     captured = nil
@@ -62,6 +63,7 @@ class HiveCommandsBabysitTest < Minitest::Test
 
     assert_equal [ :run_forever ], dispatcher.calls
     assert_equal true, captured.fetch(:dry_run)
+    assert captured.fetch(:persistent_admission).call
     refute File.exist?(command.pid_file)
   end
 
@@ -217,7 +219,7 @@ class HiveCommandsBabysitTest < Minitest::Test
             captured = kwargs
             dispatcher
           }) do
-            Hive::Commands::Babysit.new(nil, "proj", once: true, hive_home: @home).call
+            Hive::Commands::Babysit.new(nil, "proj", once: true, hive_home: home).call
           end
         end
 

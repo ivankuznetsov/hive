@@ -28,6 +28,7 @@ module Hive
         tick_end
         status_failure
         status_warning
+        admission_check_failed
         operational_snapshot_publish_failed
         dispatched
         completed

@@ -1745,7 +1745,7 @@ module Hive
       ).call
     end
 
-    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable / queue)"
+    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / quiesce / resume / reload / tail / install / enable / disable / queue)"
     long_desc <<~DESC
       Subcommands:
         start [--detach] [--dry-run]      Run the dispatcher loop. Without
@@ -1753,6 +1753,12 @@ module Hive
         stop [--json]                     Send SIGTERM to the running daemon.
                                           --json emits hive-daemon-stop.v1.
         status [--json]                   Show running / not-running.
+        quiesce [--timeout SECONDS]       Close admission, drain owned work,
+                                          flush SQLite, and acknowledge only
+                                          a verified paused generation.
+        resume [--timeout SECONDS]        Reconcile the closed generation,
+                                          reopen admission, then restore
+                                          previously running managed services.
         reload [--json]                   Send SIGHUP to reload config.
                                           --json emits hive-daemon-reload.v1.
         tail                              Stream daemon.log.
@@ -1816,6 +1822,8 @@ module Hive
                  desc: "for enable/disable: apply to every registered project"
     option :force, type: :boolean, default: false,
                    desc: "for install: overwrite an existing unit (saves <path>.bak)"
+    option :timeout, type: :numeric,
+                     desc: "for quiesce/resume: finite positive overall deadline (default 600s)"
     def daemon(subcommand = nil, *targets)
       require "hive/commands/daemon"
       # Argv-shape errors raise BEFORE Hive::Commands::Daemon.new, so
@@ -1833,17 +1841,28 @@ module Hive
       # `queue` takes up to two positionals (ACTION + optional REQUEST_ID,
       # e.g. `queue show <id>`); every other subcommand takes at most one
       # (PROJECT or --all).
-      max_targets = subcommand == "queue" ? 2 : 1
+      max_targets = if subcommand == "queue"
+        2
+      elsif %w[quiesce resume].include?(subcommand)
+        0
+      else
+        1
+      end
       if targets.length > max_targets
         message = if subcommand == "queue"
           "hive daemon queue: too many positional arguments #{targets.inspect}; " \
             "expected `queue [list|show <id>|prune]`"
+        elsif %w[quiesce resume].include?(subcommand)
+          "hive daemon #{subcommand}: unexpected positional arguments " \
+            "#{targets.inspect}; this command takes no PROJECT"
         else
           "hive daemon #{subcommand}: too many positional arguments " \
             "#{targets.inspect}; expected exactly one PROJECT (or --all)"
         end
         if subcommand == "queue"
           emit_daemon_queue_argv_error(action: targets.first, message: message)
+        elsif %w[quiesce resume].include?(subcommand)
+          emit_daemon_lifecycle_argv_error(action: subcommand, message: message)
         else
           emit_daemon_argv_error(
             subcommand: subcommand,
@@ -1860,6 +1879,13 @@ module Hive
           error_kind: Hive::Schemas::EnrollErrorKind::WRONG_SUBCOMMAND_FLAG
         )
       end
+      if options[:timeout] && !%w[quiesce resume].include?(subcommand)
+        emit_daemon_argv_error(
+          subcommand: subcommand,
+          message: "hive daemon #{subcommand}: --timeout only applies to `quiesce` or `resume`",
+          error_kind: Hive::Schemas::EnrollErrorKind::WRONG_SUBCOMMAND_FLAG
+        )
+      end
       Hive::Commands::Daemon.new(
         subcommand, targets.first,
         detach: options[:detach],
@@ -1867,6 +1893,7 @@ module Hive
         all: options[:all],
         json: options[:json],
         force: options[:force],
+        timeout: options[:timeout],
         queue_args: targets
       ).call
     end
@@ -1892,6 +1919,23 @@ module Hive
             # caller went away or payload not serialisable — fall
             # through to the bare-text rescue path below.
           end
+        else
+          warn message
+        end
+        raise error
+      end
+
+      def emit_daemon_lifecycle_argv_error(action:, message:)
+        require "hive/commands/daemon"
+        error = Hive::UsageError.new(message)
+        if options[:json]
+          puts JSON.generate(Hive::Schemas::ErrorEnvelope.build(
+            schema: "hive-daemon-#{action}", error: error, error_kind: "usage",
+            extras: {
+              "action" => action, "runtime_code" => "usage",
+              "next_action" => nil, "details" => {}
+            }
+          ))
         else
           warn message
         end

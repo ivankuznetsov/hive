@@ -3,9 +3,17 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-23
+updated: 2026-09-26
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Incident timing calibration (2026-09-26)
+
+The 32-second aggregate advisory cap covers the observed 30.577-second hosted
+run while preserving the 16-second per-scenario ceiling. It does not yet
+establish a long-run percentile or separate budgets for each runner class.
+Revisit the aggregate cap after a representative nightly timing history exists;
+timing remains non-blocking and does not replace functional E2E coverage.
 
 ## Operator cancellation awaits live validation (2026-09-09)
 
@@ -1565,6 +1573,38 @@ external backups; exact conversion coverage depends on the inventoried source.
 Markers still serve current stages outside execute; `legacy_baseline` remains a
 current ad-hoc task initialization event, and provider routing's `legacy` mode
 still denotes current default routing. Their names do not imply removable code.
+
+## Increment-1 quiescence cannot create its own idle window (2026-09-25)
+
+The first daemon-quiescence increment can safely acknowledge only an already-
+idle registry. Its audited launch table has no surface classified as unable to
+spawn unregistered descendants, and any agent attempt root remains
+`ownership_unverifiable` without the later delegated-cgroup custody proof.
+Operators must stop direct submissions and managed ingress with existing
+service controls, let attempts finish, and retry. A pre-drain refusal leaves
+admission open, so another submission can race that preparation. Do not close
+this gap by weakening the ownership predicate; it needs either a first-class
+idle-window coordinator or the separately verified custody increment.
+
+## Increment-2 Linux custody is not qualified on the execution host (2026-09-25)
+
+The execution host uses unified cgroup v2, and a real transient
+`systemd-run --user --scope --property=Delegate=yes` scope reports delegation.
+That is not a containment proof. Both the attempt scope and its `app.slice`
+parent are owned by the same unprivileged user; the parent's directory and
+`cgroup.procs` are writable. A real workload moved its own PID from the
+delegated attempt scope into a sibling cgroup and `/proc/self/cgroup` confirmed
+the escape. The capability adapter therefore reports
+`parent_cgroup_writable`, and the arbitrary-descendant U2b/U6b success path is
+not qualified here. Increment 1 remains the delivered fail-closed behavior;
+this host must not advertise Linux backup readiness for active attempt roots.
+
+Qualifying increment 2 still needs an installation custody parent that the
+workload identity cannot write or create siblings beneath, plus real-process
+proof across fork, reparenting, `setsid`, controller restart, attempted escape,
+permission loss, and legacy work outside custody. A transient user scope alone
+continues to provide OOM isolation, not the required adversarial ownership
+boundary.
 
 - 2026-09-11: Three blocked adversarial reviews recorded Haiku for an Opus
   request. The mixed-model attribution defect is reproduced and fixed in code;

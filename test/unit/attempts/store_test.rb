@@ -131,6 +131,34 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_verified_interruption_is_terminal_non_success_with_pause_provenance
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+
+      interrupted = repository.interrupt(
+        running, pause_generation: 3, exit_status: Hive::ExitCodes::TEMPFAIL,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: log_reference, now: NOW + 3
+      )
+
+      assert_equal "terminal", interrupted.state
+      assert_equal "interrupted", interrupted.outcome
+      assert_equal 3, interrupted.receipt.fetch("pause_generation")
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        repository.terminalize(
+          running, outcome: "succeeded", exit_status: 0,
+          final_checkpoint: checkpoint, output_references: [],
+          log_reference: log_reference, now: NOW + 4
+        )
+      end
+    end
+  end
+
   def test_unique_index_allows_only_one_live_attempt_for_a_subject_generation
     with_repository do |repository|
       gate = Queue.new

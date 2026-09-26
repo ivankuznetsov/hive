@@ -92,9 +92,10 @@ module Hive
           state = orphan_group_status(wrapper: wrapper, worker: worker)
           return :terminated if state == :absent
           return :identity_changed unless state == :matching
-          break if @monotonic.call >= deadline
+          now = @monotonic.call
+          break if now >= deadline
 
-          @sleeper.call([ 0.05, deadline - @monotonic.call ].min)
+          @sleeper.call([ 0.05, [ deadline - now, 0.0 ].max ].min)
         end
 
         return :identity_changed unless orphan_group_status(wrapper: wrapper, worker: worker) == :matching

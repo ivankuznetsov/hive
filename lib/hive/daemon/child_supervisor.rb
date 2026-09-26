@@ -5,6 +5,7 @@ require "time"
 require "tmpdir"
 require "hive/lock"
 require "hive/process_kill"
+require "hive/runtime_control_plane/command_registration"
 
 module Hive
   module Daemon
@@ -43,7 +44,8 @@ module Hive
                      default_timeout_sec: 0,
                      verb_timeouts: {},
                      stage_timeouts: {},
-                     kill_grace_sec: DEFAULT_KILL_GRACE_SEC)
+                     kill_grace_sec: DEFAULT_KILL_GRACE_SEC,
+                     monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
         @hive_bin = hive_bin
         @dry_run = dry_run
         # Optional injection point: tests pass a lambda taking (project, slug)
@@ -66,6 +68,7 @@ module Hive
           acc[stage.to_s] = secs.to_i
         end
         @kill_grace_sec = kill_grace_sec.to_i
+        @monotonic = monotonic
         # pid → { project, slug, stage, command, started_at, log_path, pgid,
         #         timeout_sec, terminating_at, killed }
         @running = {}
@@ -147,8 +150,9 @@ module Hive
         log_io.puts("[hive-daemon] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
 
-        pid = Process.spawn(
-          *argv, pgroup: true, out: log_io, err: log_io, close_others: true
+        pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
+          *argv, role: argv[1] || "daemon-child",
+          pgroup: true, out: log_io, err: log_io, close_others: true
         )
         log_io.close
 
@@ -266,11 +270,12 @@ module Hive
         signal_shutdown_targets(:TERM, targets)
         merge_shutdown_targets!(targets, capture_shutdown_targets)
 
+        overall_deadline = @quiescence_shutdown_deadline
         drain_shutdown(
           targets: targets,
           pending: pending,
           completed: completed,
-          deadline: Time.now + grace_sec
+          deadline: [ @monotonic.call + grace_sec, overall_deadline ].compact.min
         )
         if shutdown_drained?(pending)
           record_shutdown_proof(targets, drained: true)
@@ -282,11 +287,18 @@ module Hive
           targets: targets,
           pending: pending,
           completed: completed,
-          deadline: Time.now + Hive::ProcessKill::KILL_GRACE_SECONDS
+          deadline: overall_deadline ||
+            (@monotonic.call + Hive::ProcessKill::KILL_GRACE_SECONDS)
         )
 
         record_shutdown_proof(targets, drained: shutdown_drained?(pending))
         completed
+      ensure
+        @quiescence_shutdown_deadline = nil
+      end
+
+      def clamp_quiescence_shutdown!(remaining_sec:)
+        @quiescence_shutdown_deadline = @monotonic.call + [ Float(remaining_sec), 0.0 ].max
       end
 
       def in_flight_pids
@@ -457,7 +469,7 @@ module Hive
           completed.concat(releasable)
           pending.replace(held)
 
-          break if shutdown_drained?(pending) || Time.now >= deadline
+          break if shutdown_drained?(pending) || @monotonic.call >= deadline
 
           sleep 0.1
         end

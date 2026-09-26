@@ -6,16 +6,24 @@ require "sequel"
 require "sequel/extensions/migration"
 require "sqlite3"
 require "hive/atomic_file"
+require "hive/runtime_control_plane/file_fence"
 
 module Hive
   module RuntimeControlPlane
-    EXPECTED_SCHEMA_SHA256 = "f237684b17dfd8f7ded175a5e3c7a1b0445c4a7bee109fca4f2f51e498ead0a7".freeze
+    EXPECTED_SCHEMA_SHA256 = "92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0".freeze
 
     class Database
       MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze
       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
       MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
       attr_reader :path, :owner_pid
+
+      WriterAuthority = Data.define(:database_id, :owner_pid, :role) do
+        def valid_for?(database, permitted_roles)
+          database_id == database.object_id && owner_pid == Process.pid && permitted_roles.include?(role)
+        end
+      end
+      private_constant :WriterAuthority
 
       def initialize(path: Hive::Paths.runtime_control_plane_path, migrations_dir: MIGRATIONS_DIR,
                      busy_timeout_ms: BUSY_TIMEOUT_MS, sqlite_version: SQLite3::SQLITE_VERSION,
@@ -31,10 +39,14 @@ module Hive
         @owner_pid = Process.pid
         @connection = nil
         @validated = false
+        @active_writer_authorities = {}
       end
 
-      def open!(revalidate: true)
-        ProcessGuard.checkout { revalidate ? open_uncoordinated! : ensure_open! }
+      def open!(revalidate: true, timeout_sec: nil)
+        ProcessGuard.checkout do
+          revalidate ? open_uncoordinated!(timeout_sec: timeout_sec) :
+            ensure_open!(timeout_sec: timeout_sec)
+        end
         self
       end
 
@@ -54,6 +66,7 @@ module Hive
           connect!
           Sequel::IntegerMigrator.new(@connection, @migrations_dir, table: :schema_info,
                                       column: :version, use_transactions: true).run
+          @connection[:schema_info].update(version: SCHEMA_VERSION)
           ensure_installation_identity!
           validate_connected_schema!
           @validated = true
@@ -70,14 +83,154 @@ module Hive
       end
 
       def read
-        ProcessGuard.checkout { ensure_open!; yield @connection }
+        ProcessGuard.checkout do
+          ensure_open!
+          @connection.run("PRAGMA query_only = ON")
+          yield @connection
+        ensure
+          @connection&.run("PRAGMA query_only = OFF")
+        end
       end
 
-      def transaction(mode: :immediate)
-        ProcessGuard.checkout(transaction: true) do
-          ensure_open!
-          @connection.transaction(mode: mode, rollback: :reraise) { yield @connection }
+      def transaction(mode: :immediate, authority: nil, cleanup_attempt_id: nil,
+                      timeout_sec: nil)
+        fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
+          [ Float(timeout_sec), 0.0 ].max
+        wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        ProcessGuard.checkout { ensure_open!(timeout_sec: fence_timeout) }
+        writer_timeout = if timeout_sec.nil?
+          fence_timeout
+        else
+          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - wait_started
+          [ fence_timeout - elapsed, 0.0 ].max
         end
+        with_writer_fence(authority: authority, timeout_sec: writer_timeout) do
+          ProcessGuard.checkout(transaction: true) do
+            sqlite_timeout = if timeout_sec.nil?
+              fence_timeout
+            else
+              elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - wait_started
+              [ fence_timeout - elapsed, 0.0 ].max
+            end
+            ensure_open!(timeout_sec: sqlite_timeout) if @connection.nil?
+            prior = integer_pragma(@connection, "busy_timeout") unless timeout_sec.nil?
+            @connection.run("PRAGMA busy_timeout = #{(sqlite_timeout * 1000).floor}") if prior
+            begin
+              @connection.transaction(mode: mode, rollback: :reraise) do
+                authorize_mutation!(@connection, authority: authority,
+                                    cleanup_attempt_id: cleanup_attempt_id)
+                increment_mutation_sequence!(@connection)
+                yield @connection
+              end
+            ensure
+              @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+            end
+          end
+        end
+      end
+
+      def with_exclusive_writer(role:, timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
+        unless %i[controller migrator].include?(role)
+          raise ArgumentError, "exclusive writer role must be controller or migrator"
+        end
+        fence = writer_fence(timeout_sec: timeout_sec)
+        fence.acquire_exclusive!
+        authority = authority_for(role)
+        @active_writer_authorities[authority.object_id] = authority
+        yield authority
+      ensure
+        @active_writer_authorities&.delete(authority&.object_id)
+        fence&.release!
+      end
+
+      def checkpoint!(timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
+        timeout_ms = [ (Float(timeout_sec) * 1000).floor, 0 ].max
+        ProcessGuard.checkout do
+          ensure_open!(timeout_sec: timeout_sec)
+          prior = integer_pragma(@connection, "busy_timeout")
+          @connection.run("PRAGMA busy_timeout = #{timeout_ms}")
+          row = @connection.fetch("PRAGMA wal_checkpoint(FULL)").first
+          values = row.values.map { |value| Integer(value) }
+          busy, log_frames, checkpointed_frames = values
+          {
+            complete: busy.zero?, busy: busy, log_frames: log_frames,
+            checkpointed_frames: checkpointed_frames
+          }
+        ensure
+          @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+        end
+      end
+
+      def quiescence_upgrade_source
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          return { status: :missing } unless File.exist?(path)
+          validate_database_custody!
+          inspect_database do |database|
+            {
+              status: :present,
+              application_id: integer_pragma(database, "application_id"),
+              schema_version: schema_version_for(database),
+              schema_fingerprint: schema_fingerprint(database),
+              lifecycle: first_row(database, :runtime_lifecycle)
+            }
+          end
+        end
+      end
+
+      # Database-owned preserving conversion used only by QuiescenceUpgrade
+      # while it holds operation ownership and the exclusive writer fence.
+      def upgrade_quiescence!(authority:, expected_schema_version:, expected_fingerprint:,
+                              preserve_lifecycle:, now: @clock.call)
+        unless valid_authority?(authority) && authority.role == :migrator
+          raise ArgumentError, "quiescence upgrade requires migrator authority"
+        end
+
+        source = quiescence_upgrade_source
+        supported = source[:application_id] == APPLICATION_ID &&
+          source[:schema_version] == Integer(expected_schema_version) &&
+          source[:schema_fingerprint] == expected_fingerprint
+        if preserve_lifecycle
+          supported &&= %w[quiescing paused].include?(source.dig(:lifecycle, :phase))
+        end
+        unless supported
+          raise MigrationRequired.new(
+            "runtime control-plane format is not a supported quiescence upgrade source",
+            code: :unsupported_quiescence_upgrade_source, action: MIGRATE_ACTION,
+            details: source
+          )
+        end
+
+        disconnect
+        temporary_path = File.join(
+          File.dirname(path), ".runtime-quiescence-upgrade-#{@uuid_generator.call}.sqlite3"
+        )
+        target = self.class.new(
+          path: temporary_path, migrations_dir: @migrations_dir,
+          busy_timeout_ms: @busy_timeout_ms, sqlite_version: @sqlite_version,
+          feature_probe: @feature_probe, clock: @clock, uuid_generator: @uuid_generator
+        ).migrate!
+        target.disconnect
+
+        copy_quiescence_source!(
+          temporary_path, now: now, preserve_lifecycle: preserve_lifecycle
+        )
+        checkpoint_upgrade_source!
+        replace_with_upgraded_database!(temporary_path)
+        open!
+        self
+      rescue Error
+        raise
+      rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        raise IntegrityError.new(
+          "runtime quiescence upgrade failed: #{error.message}", code: :quiescence_upgrade_failed,
+          action: BACKUP_ACTION, details: { error_class: error.class.name }
+        )
+      ensure
+        target&.disconnect
+        remove_file_if_present(temporary_path) if temporary_path && temporary_path != path
+        remove_file_if_present("#{temporary_path}-wal") if temporary_path
+        remove_file_if_present("#{temporary_path}-shm") if temporary_path
       end
 
       def installation_identity
@@ -86,6 +239,40 @@ module Hive
           raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
           inspect_database { |database| database[:installations].first }
         end
+      end
+
+      # Bounded status-only view of the lifecycle and ownership rows. Unlike
+      # #open!/#read this always uses SQLite's readonly mode, does not request
+      # WAL, run migrations, perform housekeeping, or require the source
+      # schema to match this binary. That makes daemon status useful during a
+      # paused version-skew recovery without letting observation mutate the
+      # storage it is meant to diagnose.
+      def quiescence_status_snapshot
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          diagnosis = diagnostics_uncoordinated
+          return empty_quiescence_snapshot(diagnosis) if diagnosis.status == :missing
+
+          validate_database_custody!
+          inspect_database do |database|
+            {
+              diagnosis: diagnosis,
+              installation_id: first_value(database, :installations, :installation_id),
+              lifecycle: first_row(database, :runtime_lifecycle),
+              reservations: rows_with_states(database, :launch_reservations, %w[reserved]),
+              processes: rows_except_state(database, :owned_processes, "stopped"),
+              attempts: rows_with_states(database, :attempts, %w[launching running])
+            }
+          end
+        end
+      rescue Error
+        raise
+      rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        raise IntegrityError.new(
+          "runtime lifecycle status is unreadable: #{error.message}",
+          code: :database_corrupt, action: BACKUP_ACTION,
+          details: { error_class: error.class.name }
+        )
       end
 
       def diagnostics = ProcessGuard.checkout { diagnostics_uncoordinated }
@@ -102,7 +289,51 @@ module Hive
 
       private
 
-      def diagnostics_uncoordinated
+      def empty_quiescence_snapshot(diagnosis)
+        {
+          diagnosis: diagnosis, installation_id: nil, lifecycle: nil,
+          reservations: [], processes: [], attempts: []
+        }
+      end
+
+      def table_has_columns?(database, table, *columns)
+        database.table_exists?(table) &&
+          columns.all? { |column| database.schema(table).any? { |entry| entry.first == column } }
+      rescue Sequel::Error
+        false
+      end
+
+      def first_value(database, table, column)
+        return unless table_has_columns?(database, table, column)
+
+        database[table].get(column)
+      end
+
+      def first_row(database, table)
+        return unless database.table_exists?(table)
+
+        database[table].first
+      rescue Sequel::Error
+        nil
+      end
+
+      def rows_with_states(database, table, states)
+        return [] unless table_has_columns?(database, table, :state)
+
+        database[table].where(state: states).all
+      rescue Sequel::Error
+        []
+      end
+
+      def rows_except_state(database, table, state)
+        return [] unless table_has_columns?(database, table, :state)
+
+        database[table].exclude(state: state).all
+      rescue Sequel::Error
+        []
+      end
+
+      def diagnostics_uncoordinated(timeout_sec: nil)
         ensure_process_owner!
         return diagnosis(:missing) unless File.exist?(path) || File.symlink?(path)
         begin
@@ -110,7 +341,11 @@ module Hive
         rescue IntegrityError => error
           return diagnosis(:corrupt, error: error)
         end
-        inspect_database do |database|
+        inspect = lambda do |&block|
+          timeout_sec.nil? ? inspect_database(&block) :
+            inspect_database(timeout_sec: timeout_sec, &block)
+        end
+        inspect.call do |database|
           application_id = integer_pragma(database, "application_id")
           version = schema_version_for(database)
           integrity = pragma_rows(database, "quick_check").map(&:to_s)
@@ -152,18 +387,24 @@ module Hive
         ))
       end
 
-      def ensure_open!
+      def ensure_open!(timeout_sec: nil)
         ensure_process_owner!
-        open_uncoordinated! unless @connection && @validated
+        open_uncoordinated!(timeout_sec: timeout_sec) unless @connection && @validated
       end
 
-      def open_uncoordinated!
+      def open_uncoordinated!(timeout_sec: nil)
         ensure_process_owner!
+        deadline = if timeout_sec.nil?
+          nil
+        else
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ Float(timeout_sec), 0.0 ].max
+        end
         validate_migration_set!
         verify_runtime_capabilities!
-        diagnosis = diagnostics_uncoordinated
+        diagnosis = deadline ? diagnostics_uncoordinated(timeout_sec: remaining_timeout(deadline)) :
+          diagnostics_uncoordinated
         raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
-        connect!
+        deadline ? connect!(timeout_sec: remaining_timeout(deadline)) : connect!
         validate_connected_schema!
         @validated = true
       end
@@ -174,11 +415,13 @@ module Hive
         @owner_pid = Process.pid
       end
 
-      def connect!
+      def connect!(timeout_sec: nil)
         return @connection if @connection
         validate_database_custody!
+        timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
+          [ (Float(timeout_sec) * 1000).floor, 0 ].max
         @connection = Sequel.connect(adapter: "sqlite", database: path, max_connections: 1,
-                                     timeout: @busy_timeout_ms, disable_dqs: true)
+                                     timeout: timeout_ms, disable_dqs: true)
         ProcessGuard.register(self)
         journal_mode = pragma_rows(@connection, "journal_mode = WAL").first.to_s.downcase
         unless journal_mode == "wal"
@@ -193,12 +436,18 @@ module Hive
         @connection
       end
 
-      def inspect_database
+      def inspect_database(timeout_sec: nil)
+        timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
+          [ (Float(timeout_sec) * 1000).floor, 0 ].max
         database = Sequel.connect(adapter: "sqlite", database: path, readonly: true,
-                                  max_connections: 1, timeout: @busy_timeout_ms, disable_dqs: true)
+                                  max_connections: 1, timeout: timeout_ms, disable_dqs: true)
         yield database
       ensure
         database&.disconnect
+      end
+
+      def remaining_timeout(deadline)
+        [ deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0.0 ].max
       end
 
       def verify_runtime_capabilities!
@@ -250,11 +499,71 @@ module Hive
       end
 
       def ensure_installation_identity!
-        return unless @connection[:installations].empty?
-        identity = @uuid_generator.call
-        @connection[:installations].insert(installation_id: identity,
-                                           activation_epoch: 0,
-                                           created_at: Codec.dump_time(@clock.call))
+        now = Codec.dump_time(@clock.call)
+        if @connection[:installations].empty?
+          identity = @uuid_generator.call
+          @connection[:installations].insert(installation_id: identity,
+                                             activation_epoch: 0,
+                                             created_at: now)
+        end
+        identity = @connection[:installations].get(:installation_id)
+        @connection[:runtime_lifecycle].insert_conflict.insert(
+          installation_id: identity, phase: "running", generation: 0, revision: 0,
+          mutation_sequence: 0, interrupted_attempt_ids_json: "[]", updated_at: now
+        )
+      end
+
+      def with_writer_fence(authority:, timeout_sec:)
+        if valid_authority?(authority)
+          yield
+        else
+          fence = writer_fence(timeout_sec: timeout_sec)
+          fence.synchronize(:shared) { yield }
+        end
+      end
+
+      def writer_fence(timeout_sec:)
+        FileFence.new(
+          path: Hive::Paths.runtime_writer_fence_path(File.dirname(path)),
+          timeout_sec: timeout_sec
+        )
+      end
+
+      def authority_for(role) = WriterAuthority.new(object_id, Process.pid, role)
+
+      def valid_authority?(authority)
+        authority.is_a?(WriterAuthority) &&
+          @active_writer_authorities[authority.object_id].equal?(authority) &&
+          authority.valid_for?(self, %i[controller migrator])
+      end
+
+      def authorize_mutation!(connection, authority:, cleanup_attempt_id:)
+        lifecycle = connection[:runtime_lifecycle].first
+        return unless lifecycle
+        return if lifecycle.fetch(:phase) == "running"
+        return if valid_authority?(authority)
+
+        if cleanup_attempt_id && lifecycle.fetch(:phase) == "quiescing"
+          inserted = connection[:quiescence_cleanup_writes].insert_conflict
+            .returning(:attempt_id).insert(
+            installation_id: lifecycle.fetch(:installation_id),
+            generation: lifecycle.fetch(:generation), attempt_id: cleanup_attempt_id.to_s,
+            created_at: Codec.dump_time(@clock.call)
+          )
+          return unless Array(inserted).empty?
+        end
+
+        raise AdmissionClosed.new(
+          "runtime admission is closed while lifecycle is #{lifecycle.fetch(:phase)}",
+          details: { phase: lifecycle.fetch(:phase), generation: lifecycle.fetch(:generation) }
+        )
+      end
+
+      def increment_mutation_sequence!(connection)
+        connection[:runtime_lifecycle].update(
+          mutation_sequence: Sequel[:mutation_sequence] + 1,
+          updated_at: Codec.dump_time(@clock.call)
+        )
       end
 
       def validate_connected_schema!
@@ -265,12 +574,147 @@ module Hive
       end
 
       def exact_schema?(database, expected: EXPECTED_SCHEMA_SHA256)
+        schema_fingerprint(database) == expected
+      rescue Sequel::Error
+        false
+      end
+
+
+      def schema_fingerprint(database)
         rows = database[:sqlite_master].where(type: %w[table index])
           .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
           .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
-        Digest::SHA256.hexdigest(Codec.dump_json(rows)) == expected
-      rescue Sequel::Error
-        false
+        Digest::SHA256.hexdigest(Codec.dump_json(rows))
+      end
+
+      def copy_quiescence_source!(temporary_path, now:, preserve_lifecycle:)
+        source = Sequel.connect(
+          adapter: "sqlite", database: path, readonly: true, max_connections: 1,
+          timeout: @busy_timeout_ms, disable_dqs: true
+        )
+        target = Sequel.connect(
+          adapter: "sqlite", database: temporary_path, max_connections: 1,
+          timeout: @busy_timeout_ms, disable_dqs: true
+        )
+        target.run("PRAGMA foreign_keys = OFF")
+        retained = %i[
+          installations runtime_lifecycle launch_reservations owned_processes
+          quiescence_cleanup_writes projects task_subjects dispatch_requests attempts
+          task_leases token_usage daemon_runtime payload_references
+        ]
+        target.transaction(mode: :immediate, rollback: :reraise) do
+          target.tables.reject { |table| table == :schema_info }.reverse_each do |table|
+            target[table].delete
+          end
+          retained.each do |table|
+            next unless source.table_exists?(table)
+
+            source_columns = source.schema(table).map(&:first)
+            target_columns = target.schema(table).map(&:first)
+            columns = source_columns & target_columns
+            source[table].select(*columns).each_slice(250) do |rows|
+              target[table].multi_insert(rows) unless rows.empty?
+            end
+          end
+          preserve_lifecycle ? preserve_closed_lifecycle!(target, now: now) :
+            establish_closed_lifecycle!(target, now: now)
+          target[:schema_info].update(version: SCHEMA_VERSION)
+        end
+        violations = target.fetch("PRAGMA foreign_key_check").all
+        unless violations.empty?
+          raise IntegrityError.new(
+            "runtime quiescence upgrade produced foreign-key violations",
+            code: :quiescence_upgrade_foreign_key_failed, action: BACKUP_ACTION,
+            details: { count: violations.length }
+          )
+        end
+        target.run("PRAGMA foreign_keys = ON")
+        unless integer_pragma(target, "foreign_keys") == 1
+          raise IntegrityError.new(
+            "runtime quiescence upgrade could not restore foreign-key enforcement",
+            code: :quiescence_upgrade_foreign_keys_disabled, action: BACKUP_ACTION
+          )
+        end
+        unless schema_fingerprint(target) == EXPECTED_SCHEMA_SHA256
+          raise IntegrityError.new(
+            "runtime quiescence upgrade did not render the current schema",
+            code: :quiescence_upgrade_schema_mismatch, action: BACKUP_ACTION
+          )
+        end
+        target.fetch("PRAGMA wal_checkpoint(TRUNCATE)").all
+      ensure
+        source&.disconnect
+        target&.disconnect
+      end
+
+      def establish_closed_lifecycle!(target, now:)
+        identity = target[:installations].get(:installation_id)
+        target[:runtime_lifecycle].insert(
+          installation_id: identity, phase: "quiescing", generation: 1, revision: 0,
+          mutation_sequence: 1, interrupted_attempt_ids_json: "[]",
+          quiesce_started_at: Codec.dump_time(now), updated_at: Codec.dump_time(now)
+        )
+      end
+
+      def preserve_closed_lifecycle!(target, now:)
+        lifecycle = target[:runtime_lifecycle].first
+        unless lifecycle && %w[quiescing paused].include?(lifecycle.fetch(:phase))
+          raise IntegrityError.new(
+            "quiescence upgrade source no longer has closed admission",
+            code: :quiescence_upgrade_requires_closed_lifecycle, action: MIGRATE_ACTION
+          )
+        end
+
+        changed = target[:runtime_lifecycle].where(
+          installation_id: lifecycle.fetch(:installation_id)
+        ).update(
+          phase: "quiescing", revision: lifecycle.fetch(:revision) + 1,
+          mutation_sequence: lifecycle.fetch(:mutation_sequence) + 1,
+          paused_at: nil, updated_at: Codec.dump_time(now)
+        )
+        unless changed == 1
+          raise IntegrityError.new(
+            "quiescence upgrade could not preserve the lifecycle row",
+            code: :quiescence_upgrade_lifecycle_failed, action: BACKUP_ACTION
+          )
+        end
+      end
+
+      def replace_with_upgraded_database!(temporary_path)
+        disconnect
+        remove_file_if_present("#{path}-wal")
+        remove_file_if_present("#{path}-shm")
+        File.chmod(0o600, temporary_path)
+        File.rename(temporary_path, path)
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
+      end
+
+      def checkpoint_upgrade_source!
+        source = Sequel.connect(
+          adapter: "sqlite", database: path, max_connections: 1,
+          timeout: @busy_timeout_ms, disable_dqs: true
+        )
+        values = source.fetch("PRAGMA wal_checkpoint(TRUNCATE)").first.values.map do |value|
+          Integer(value)
+        end
+        busy, log_frames, checkpointed_frames = values
+        unless busy.zero? && checkpointed_frames >= log_frames
+          raise IntegrityError.new(
+            "runtime quiescence upgrade could not preserve the source WAL",
+            code: :quiescence_upgrade_source_checkpoint_failed, action: BACKUP_ACTION,
+            details: { busy: busy, log_frames: log_frames,
+                       checkpointed_frames: checkpointed_frames }
+          )
+        end
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
+        true
+      ensure
+        source&.disconnect
+      end
+
+      def remove_file_if_present(candidate)
+        return unless candidate && (File.exist?(candidate) || File.symlink?(candidate))
+        File.delete(candidate)
       end
 
       def prepare_storage!

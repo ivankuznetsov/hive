@@ -25,6 +25,7 @@ module HiveChangedCoverage
     "lib/hive/errors.rb" => [],
     "lib/hive/commands/migrate.rb" => [ "test/integration/migrate_test.rb" ],
     "lib/hive/commands/setup.rb" => [ "test/unit/commands/setup/orchestrator_test.rb" ],
+    "lib/hive/execute_waiting_action.rb" => [ "test/unit/task_action_test.rb" ],
     "lib/hive/user_service.rb" => [ "test/unit/user_service/user_service_test.rb" ],
     "lib/hive/user_service/plan.rb" => [ "test/unit/user_service/user_service_test.rb" ],
     "lib/hive/stages/review.rb" => [

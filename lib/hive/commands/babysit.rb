@@ -9,6 +9,8 @@ require "hive/pid_file"
 require "hive/babysitter/dispatcher"
 require "hive/babysitter/logger"
 require "hive/commands/service_installer/result_presenter"
+require "hive/runtime_control_plane/database"
+require "hive/runtime_control_plane/lifecycle_repository"
 
 module Hive
   module Commands
@@ -184,11 +186,18 @@ module Hive
           max_bytes: daemon_cfg.fetch("log_max_bytes"),
           max_files: daemon_cfg.fetch("log_max_files")
         )
+        runtime_database = Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(@hive_home)
+        ).open!
+        lifecycle_repository = Hive::RuntimeControlPlane::LifecycleRepository.new(
+          database: runtime_database
+        )
         Hive::Babysitter::Dispatcher.new(
           logger: logger,
           dry_run: @dry_run,
           project_name: project_name,
-          max_ticks: max_ticks
+          max_ticks: max_ticks,
+          persistent_admission: -> { lifecycle_repository.current.admission_open? }
         )
       end
 

@@ -18,6 +18,7 @@ require "hive/daemon/operational_snapshot"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recovery_coordinator"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/runtime_control_plane/boot_identity"
 
 require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
@@ -104,12 +105,20 @@ module Hive
                      module_runtime: nil,
                      runtime_ready_callback: nil,
                      clock: nil,
-                     patrol_discovery_async: false)
+                     patrol_discovery_async: false,
+                     persistent_admission: nil,
+                     quiescence_lifecycle: nil,
+                     monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                     boot_id_reader: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
         @status_consumer = status_consumer
         @logger = logger
+        @persistent_admission = persistent_admission
+        @quiescence_lifecycle = quiescence_lifecycle
+        @monotonic = monotonic
+        @boot_id_reader = boot_id_reader || Hive::RuntimeControlPlane::BootIdentity.method(:current)
         @merge_watcher = merge_watcher
         @refactor_patrol_merge_reconciler = refactor_patrol_merge_reconciler
         @patrol_scheduler = patrol_scheduler
@@ -614,11 +623,18 @@ module Hive
           interruptible_sleep(@fast_poll_sec)
         end
 
-        patrol_discovery_drained = join_patrol_discovery
+        initial_shutdown_grace = shutdown_termination_grace
+        patrol_discovery_drained = join_patrol_discovery(
+          timeout_sec: [ 0.5, initial_shutdown_grace ].min
+        )
+        shutdown_grace = shutdown_termination_grace
         @logger.event(:dispatcher_stopping, in_flight: @controller.in_flight_count,
-                                            grace_sec: @shutdown_grace_sec,
+                                            grace_sec: shutdown_grace,
                                             reexec_requested: @reexec_requested)
-        shutdown_entries = @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
+        if quiescing_shutdown? && @supervisor.respond_to?(:clamp_quiescence_shutdown!)
+          @supervisor.clamp_quiescence_shutdown!(remaining_sec: shutdown_grace)
+        end
+        shutdown_entries = @supervisor.terminate_all(grace_sec: shutdown_grace)
         record_completed(Array(shutdown_entries), now: Time.now)
         # One final reap to catch any last completions
         reap_completed(now: Time.now)
@@ -683,7 +699,40 @@ module Hive
       # recheck this predicate after blocking work, between candidates, and at
       # the final launch boundary.
       def admission_open?
-        @shutdown != true
+        @shutdown != true &&
+          (@persistent_admission.nil? || @persistent_admission.call == true)
+      rescue StandardError => e
+        @logger&.event(:admission_check_failed,
+                       message: "persistent admission check failed: #{e.class}: #{e.message}")
+        false
+      end
+
+      # Ordinary daemon stop retains the configured grace. During durable
+      # quiescence, however, the persisted generation owns one deadline and a
+      # 15% finalization reserve. shutdown_grace_sec stores the generation's
+      # 25% escalation slice, so 15/25 of it reconstructs the reserve without
+      # inventing a second timeout. A stale boot identity fails closed with no
+      # further graceful wait.
+      def shutdown_termination_grace
+        state = @quiescence_lifecycle&.current
+        return @shutdown_grace_sec unless state && state.phase == "quiescing"
+        return @shutdown_grace_sec if state.boot_id.to_s.empty?
+        return 0.0 unless state.boot_id.to_s == @boot_id_reader.call.to_s
+
+        escalation = Float(state.shutdown_grace_sec || 0)
+        finalization_reserve = escalation * (15.0 / 25.0)
+        escalation_cutoff = Float(state.deadline_monotonic) - finalization_reserve
+        [ Float(@shutdown_grace_sec), escalation, escalation_cutoff - @monotonic.call ]
+          .min.clamp(0.0, Float::INFINITY)
+      rescue Hive::RuntimeControlPlane::Error, ArgumentError, TypeError,
+             SystemCallError, IOError
+        0.0
+      end
+
+      def quiescing_shutdown?
+        @quiescence_lifecycle&.current&.phase == "quiescing"
+      rescue Hive::RuntimeControlPlane::Error, Sequel::Error
+        false
       end
 
       # Throttled (~daily) probe of the latest published release. On the
@@ -1154,10 +1203,10 @@ module Hive
         end
       end
 
-      def join_patrol_discovery
+      def join_patrol_discovery(timeout_sec: 0.5)
         thread = @patrol_discovery_thread
         return true unless thread
-        return true if thread.join(0.5)
+        return true if thread.join([ Float(timeout_sec), 0.0 ].max)
 
         @logger.event(
           :fatal,
@@ -1965,7 +2014,7 @@ module Hive
           Policy.advance?(row.action) &&
           result.is_a?(Hive::Attempts::DispatchResult) &&
           result.status == :terminal_replay &&
-          %w[failed cancelled].include?(result.attempt&.outcome)
+          %w[failed cancelled interrupted].include?(result.attempt&.outcome)
       end
 
       def record_markerless_stall(row, attempt: nil)
@@ -4312,8 +4361,11 @@ module Hive
 
       def interruptible_sleep(seconds)
         deadline = Time.now + seconds
-        while Time.now < deadline && !@shutdown && !@reload
-          sleep 0.5
+        loop do
+          now = Time.now
+          break if now >= deadline || @shutdown || @reload
+
+          sleep [ 0.05, [ deadline - now, 0.0 ].max ].min
         end
       end
     end

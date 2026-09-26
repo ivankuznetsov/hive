@@ -81,7 +81,7 @@ module Hive
         end
         return nil unless row && row[:admission_workflow] == "patrol_fix" &&
                           row[:admission_runtime_digest] == runtime_digest
-        return nil unless row[:state] == "lost" || %w[failed cancelled].include?(row[:outcome])
+        return nil unless row[:state] == "lost" || %w[failed cancelled interrupted].include?(row[:outcome])
 
         retry_at = Time.iso8601(row.fetch(:ended_at)) + Hive::AgentLimit.retry_cooldown_sec
         retry_at if now < retry_at

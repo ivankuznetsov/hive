@@ -249,7 +249,7 @@ module Hive
             task_generation: generation.task_generation,
             subject: subject || task_subject(generation)
           )
-          if previous && %w[failed cancelled].include?(previous.outcome)
+          if previous && %w[failed cancelled interrupted].include?(previous.outcome)
             retry_at = Time.iso8601(previous.receipt.fetch("ended_at")) +
               Hive::Recovery::RetryPolicy.delay_sec(previous["retry_charge"])
             return deferred_result("transition_retry", attempt: previous, receipt: previous.receipt) if now.utc < retry_at

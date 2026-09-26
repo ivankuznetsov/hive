@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-09-04
+updated: 2026-09-25
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -56,10 +56,49 @@ These are fixed one-to-one facts. Hive does not maintain separate accounting,
 capacity-reservation, lost-outcome, failure-event, publication-obligation, or
 attempt-relationship tables. `payload_references` remains separate because it
 is genuinely one-to-many. Patrol retry pacing reads the latest final attempt
-for the same task, generation, stage and runtime. A failed, cancelled or lost
+for the same task, generation, stage and runtime. A failed, cancelled, interrupted or lost
 attempt delays automatic retry by `AgentLimit.retry_cooldown_sec`; success or
 changed inputs/runtime clears that delay. Explicit retry bypasses pacing, not
 live capacity or unresolved-loss recovery. There are no cohort counters or probes.
+
+An interrupted attempt is terminal non-success, not a successful checkpoint
+and not an inferred loss. Its version-2 terminal receipt binds the pause
+generation and retains the last durable checkpoint, output references, and log
+reference. The supervisor publishes interruption only after its worker and
+recorded process group have stopped; a natural completion that wins first keeps
+its genuine success receipt. A restarted controller may finalize the same
+outcome only after identity checks prove both the wrapper and worker group are
+absent, and the attempt lease compare-and-swap prevents a later interruption
+from replacing an already committed terminal result.
+
+During quiescing, an already admitted supervisor stops ordinary heartbeat
+writes and may use its single bounded cleanup-write window to publish the
+terminal receipt. A quiesce signal uses the lifecycle generation and clamps
+worker termination to the persisted escalation slice without consuming the
+generation's finalization reserve. The same signal outside quiescing remains
+an ordinary cancellation. The installation controller aggregates any receipt
+the supervisor already committed for that generation with interruptions it
+finishes after verified wrapper and worker-group absence.
+
+Process-tree polling, a PID/start fingerprint, inherited invocation tokens, and
+an ambient or transient systemd scope are not complete descendant custody. The
+Linux delegated-cgroup adapter is eligible only for an explicitly established
+installation-exclusive domain when delegation is writable and parent escape is
+blocked. Automatic detection does not adopt the ambient service cgroup; the
+default therefore remains `unverified` until a launch adapter can inject that
+exclusive domain. Membership snapshots freeze the domain and recurse through
+descendant cgroups; unreadable member identities remain unresolved instead of
+disappearing from the inventory. Wrapper exit retains its process registration
+until both root identity and descendant-domain absence are proven, including
+after controller restart. Darwin and hosts without that custody remain fail
+closed whenever unregistered descendants may exist.
+
+`interrupted` remains fully implemented and independently tested at the real
+supervisor/reconciler boundary. Command-level interruption is intentionally not
+claimed by increment 1, because its pre-drain gate refuses an agent root before
+drain or signals. That end-to-end path belongs to the later custody increment;
+the idle success contract does not manufacture an interruption receipt merely
+to exercise it.
 
 `request_id` is immutable provenance, not a foreign key to the disposable
 dispatch queue. Completing or pruning a request must not change an attempt

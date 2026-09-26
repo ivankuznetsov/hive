@@ -1072,7 +1072,8 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Daemon) do |calls|
       Hive::CLI.start([ "daemon", "start", "--detach", "--dry-run", "--json" ])
       assert_equal [ "start", nil ], calls.first.fetch(:args)
-      assert_equal({ detach: true, dry_run: true, all: false, json: true, force: false, queue_args: [] },
+      assert_equal({ detach: true, dry_run: true, all: false, json: true, force: false,
+                     timeout: nil, queue_args: [] },
                    calls.first.fetch(:kwargs))
     end
 

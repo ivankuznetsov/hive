@@ -28,6 +28,9 @@
         "installed_binary_version",
         "cli_version",
         "binary_drift",
+        "runtime_installation",
+        "lifecycle",
+        "quiescence_capability",
         "current_version",
         "update_nudge"
       ],
@@ -89,6 +92,9 @@
           "enum": ["none", "path", "version", "unparseable", "unreadable", "not_applicable"],
           "description": "Whether the installed unit's binary diverges from the current one: none (matches), path (different binary path), version (same path, older version), unparseable (unit present but its binary could not be read), not_applicable (no unit installed / probe could not run)."
         },
+        "runtime_installation": { "$ref": "#/$defs/RuntimeInstallation" },
+        "lifecycle": { "$ref": "#/$defs/Lifecycle" },
+        "quiescence_capability": { "$ref": "#/$defs/Capability" },
         "current_version": {
           "type": "string",
           "description": "The running hive version, so a caller can compare against update_nudge.latest itself."
@@ -103,6 +109,69 @@
             "channel": { "type": "string", "description": "Detected install channel (brew/aur/bash)." },
             "command": { "type": "string", "description": "Exact command to update on this channel." }
           }
+        }
+      }
+    },
+    "RuntimeInstallation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "installation_id", "database_status", "next_action"],
+      "properties": {
+        "phase": { "enum": ["absent", "active"] },
+        "installation_id": { "type": ["string", "null"] },
+        "database_status": { "type": "string" },
+        "next_action": { "type": ["string", "null"] }
+      }
+    },
+    "Lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase", "durable_phase", "generation", "revision", "mutation_sequence",
+        "admission_open", "interrupted_attempt_ids", "proof", "liveness"
+      ],
+      "properties": {
+        "phase": { "enum": ["running", "quiescing", "paused", "resuming", "unknown"] },
+        "durable_phase": { "enum": ["running", "quiescing", "paused", "resuming", "unknown"] },
+        "generation": { "type": ["integer", "null"], "minimum": 0 },
+        "revision": { "type": ["integer", "null"], "minimum": 0 },
+        "mutation_sequence": { "type": ["integer", "null"], "minimum": 0 },
+        "admission_open": { "type": ["boolean", "null"] },
+        "interrupted_attempt_ids": {
+          "type": "array", "items": { "type": "string" }, "uniqueItems": true
+        },
+        "proof": { "$ref": "#/$defs/ProofVerdict" },
+        "liveness": { "$ref": "#/$defs/LivenessVerdict" }
+      }
+    },
+    "ProofVerdict": {
+      "type": "object", "additionalProperties": false,
+      "required": ["valid", "reason"],
+      "properties": {
+        "valid": { "type": ["boolean", "null"] },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "LivenessVerdict": {
+      "type": "object", "additionalProperties": false,
+      "required": ["clear", "reason", "remaining"],
+      "properties": {
+        "clear": { "type": ["boolean", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "remaining": {
+          "type": "array", "items": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "Capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eligible", "reason", "ownership_mode", "disqualifying_inventory"],
+      "properties": {
+        "eligible": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "ownership_mode": { "type": "string" },
+        "disqualifying_inventory": {
+          "type": "array", "items": { "type": "object", "additionalProperties": true }
         }
       }
     },

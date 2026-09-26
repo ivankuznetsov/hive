@@ -142,6 +142,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @identity = { process_start_time: "start", pgid: 100 }
       @terminate_result = true
       @shutdown_proof = { drained: true, child_inventory: [] }
+      @termination_graces = []
     end
 
     def spawn(command_string:, project:, slug:, stage:,
@@ -171,8 +172,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     def terminate_all(grace_sec: 600)
+      @termination_graces << grace_sec
       @shutdown_exits
     end
+
+    attr_reader :termination_graces
 
     def update_timeouts(default_timeout_sec:, verb_timeouts:, stage_timeouts:, kill_grace_sec:)
       @timeouts = { default_timeout_sec: default_timeout_sec,
@@ -599,7 +603,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       recovery_coordinator: nil,
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil,
-                      dispatch_repository: nil, patrol_discovery_async: false)
+                      dispatch_repository: nil, patrol_discovery_async: false,
+                      persistent_admission: nil, quiescence_lifecycle: nil,
+                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                      boot_id_reader: nil)
     dispatch_request_state_home ||= Dir.mktmpdir("hive-dispatch-test")
     config = {
       "daemon" => {
@@ -665,7 +672,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
       plan_approval: plan_approval,
       runtime_ready_callback: runtime_ready_callback,
       clock: clock,
-      patrol_discovery_async: patrol_discovery_async
+      patrol_discovery_async: patrol_discovery_async,
+      persistent_admission: persistent_admission,
+      quiescence_lifecycle: quiescence_lifecycle,
+      monotonic: monotonic,
+      boot_id_reader: boot_id_reader
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # Bypass the Hive::Config.find_project / Config.load lookup chain
@@ -675,6 +686,76 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       answer_digest_scheduler, daily_digest_close_scheduler, daily_digest_delivery_scheduler
     ]
+  end
+
+  def test_persistent_admission_closure_blocks_dispatch_before_status_work
+    dispatcher, = make_dispatcher(persistent_admission: -> { false })
+    dispatcher.define_singleton_method(:perform_tick) do |**|
+      flunk "closed durable admission must prevent a daemon tick from dispatching"
+    end
+
+    refute dispatcher.send(:admission_open?)
+  end
+
+  def test_persistent_admission_and_quiescence_probe_errors_fail_closed
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      persistent_admission: -> { raise IOError, "offline" }
+    )
+    refute dispatcher.send(:admission_open?)
+    assert events_include?(logger, :admission_check_failed)
+
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) do
+      raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+    end
+    dispatcher, = make_dispatcher(quiescence_lifecycle: lifecycle)
+    assert_equal 0.0, dispatcher.send(:shutdown_termination_grace)
+    refute dispatcher.send(:quiescing_shutdown?)
+  end
+
+  def test_default_monotonic_clock_and_quiescence_shutdown_clamp_are_used
+    state = Hive::RuntimeControlPlane::Lifecycle.new(
+      phase: "quiescing", generation: 1, revision: 1, mutation_sequence: 2,
+      boot_id: "boot", deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+      shutdown_grace_sec: 1, interrupted_attempt_ids: [], quiesce_started_at: nil,
+      paused_at: nil, resumed_at: nil, updated_at: nil
+    )
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) { state }
+    dispatcher, supervisor = make_dispatcher(
+      quiescence_lifecycle: lifecycle, monotonic: nil, boot_id_reader: -> { "boot" }
+    )
+    dispatcher = Hive::Daemon::Dispatcher.new(
+      config: { "daemon" => { "poll_interval_sec" => 1, "shutdown_grace_sec" => 1 } },
+      controller: dispatcher.instance_variable_get(:@controller), supervisor: supervisor,
+      status_consumer: dispatcher.instance_variable_get(:@status_consumer),
+      logger: dispatcher.instance_variable_get(:@logger), quiescence_lifecycle: lifecycle,
+      boot_id_reader: -> { "boot" }
+    )
+    clamps = []
+    supervisor.define_singleton_method(:clamp_quiescence_shutdown!) do |remaining_sec:|
+      clamps << remaining_sec
+    end
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+    dispatcher.define_singleton_method(:tick) { |now: Time.now| request_shutdown! }
+
+    dispatcher.run_forever
+    assert_equal 1, clamps.length
+  end
+
+  def test_quiescence_upgrade_without_boot_identity_keeps_configured_shutdown_grace
+    state = Hive::RuntimeControlPlane::Lifecycle.new(
+      phase: "quiescing", generation: 1, revision: 1, mutation_sequence: 2,
+      boot_id: nil, deadline_monotonic: nil, shutdown_grace_sec: nil,
+      interrupted_attempt_ids: [], quiesce_started_at: nil,
+      paused_at: nil, resumed_at: nil, updated_at: nil
+    )
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) { state }
+    dispatcher, = make_dispatcher(quiescence_lifecycle: lifecycle)
+
+    assert_equal 60, dispatcher.send(:shutdown_termination_grace)
   end
 
   def test_async_patrol_discovery_keeps_authoritative_ticks_responsive
@@ -2784,6 +2865,22 @@ class HiveDaemonDispatcherTest < Minitest::Test
       assert_equal [ true, true ], replay_modes
       assert_equal 1, logger.events.count { |name, _attributes| name == :dispatched }
     end
+  end
+
+  def test_interrupted_automatic_advance_replay_enters_markerless_recovery
+    observed = row(
+      stage: "6-review", marker: "none", action: "ready_for_review",
+      command: "hive review s1 --from 6-review"
+    )
+    attempt = Struct.new(:outcome).new("interrupted")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :terminal_replay, attempt: attempt,
+      receipt: { "outcome" => "interrupted", "exit_status" => Hive::ExitCodes::TEMPFAIL },
+      attach_descriptor: nil, reason: nil
+    )
+    dispatcher, = make_dispatcher(rows: [])
+
+    assert dispatcher.send(:failed_automatic_advance_replay?, observed, "advance", result)
   end
 
   def test_marked_advance_keeps_fresh_retry_semantics
@@ -5189,6 +5286,31 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   assert_equal 0, supervisor.spawned.size
 end
 
+def test_quiescing_shutdown_clamps_configured_grace_before_finalization_reserve
+  state = Hive::RuntimeControlPlane::Lifecycle.new(
+    phase: "quiescing", generation: 1, revision: 1, mutation_sequence: 3,
+    boot_id: "boot-test", deadline_monotonic: 110.0, shutdown_grace_sec: 2.5,
+    interrupted_attempt_ids: [], quiesce_started_at: nil, paused_at: nil,
+    resumed_at: nil, updated_at: nil
+  )
+  lifecycle = Object.new
+  lifecycle.define_singleton_method(:current) { state }
+  dispatcher, supervisor = make_dispatcher(
+    quiescence_lifecycle: lifecycle, monotonic: -> { 106.0 },
+    boot_id_reader: -> { "boot-test" }
+  )
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+  dispatcher.define_singleton_method(:tick) { |now: Time.now| request_shutdown! }
+
+  dispatcher.run_forever
+
+  # The configured ordinary-stop grace is 60 seconds. This generation's
+  # entire timeout is 10 seconds (2.5s escalation + 1.5s reserve), so the
+  # daemon must hand the supervisor only the remaining escalation slice.
+  assert_equal [ 2.5 ], supervisor.termination_graces
+end
+
 def test_run_forever_publishes_runtime_readiness_before_releasing_activation
   snapshot = FakeOperationalSnapshot.new
   callback_observation = nil
@@ -6678,7 +6800,7 @@ def test_interruptible_sleep_stops_after_shutdown_request
 
   dispatcher.send(:interruptible_sleep, 30)
 
-  assert_equal [ 0.5 ], sleeps
+  assert_equal [ 0.05 ], sleeps
 end
 
   # ── dispatch-baseline persistence across restart ───────────────────────

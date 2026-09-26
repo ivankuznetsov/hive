@@ -9,6 +9,12 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 
 ## Operator cancellation awaits live validation (2026-09-09)
 
+The daemon's missing-task-identity admission guard (2026-09-21) prevents a
+partially created task from crashing all dispatch. It does not repair incomplete
+task creation or backfill null IDs; those tasks retain their original evidence
+and require separate recovery. Live supervised restart is a deployment check,
+not established by the dispatcher regression tests.
+
 `archive --reason cancelled` is covered locally for cancellation without GitHub
 evidence, live-owner refusal, preserved worktrees, missing prerequisites,
 dependency rejection, and Web preview. Deploy a compatible runtime before

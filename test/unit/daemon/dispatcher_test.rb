@@ -8071,7 +8071,8 @@ end
       [ :existing_live, nil ],
       [ :terminal_replay, nil ],
       [ :deferred, "capacity" ],
-      [ :deferred, "patrol_retry_delay" ]
+      [ :deferred, "patrol_retry_delay" ],
+      [ :deferred, "missing_task_identity" ]
     ]
     calls = []
     attempt_dispatcher = Object.new
@@ -8086,7 +8087,7 @@ end
     dispatcher, supervisor, _controller, logger = make_dispatcher(
       rows: [], attempt_dispatcher: attempt_dispatcher
     )
-    results = 5.times.map do |index|
+    results = 6.times.map do |index|
       dispatcher.send(
         :dispatch_command, "hive run demo-task", project: "p1", slug: "demo-task",
         stage: "4-execute", state_file_mtime: nil, state_file_path: nil,
@@ -8094,14 +8095,14 @@ end
       )
     end
 
-    assert_equal %i[accepted existing_live terminal_replay deferred deferred],
+    assert_equal %i[accepted existing_live terminal_replay deferred deferred deferred],
                  results.map(&:status)
-    assert_equal 5, calls.size
+    assert_equal 6, calls.size
     assert_empty supervisor.spawned
     assert_equal 1, dispatcher.instance_variable_get(:@dispatched_today)
     assert_equal %i[
       attempt_accepted attempt_duplicate attempt_terminal_replay
-      attempt_capacity_deferred attempt_patrol_retry_deferred
+      attempt_capacity_deferred attempt_patrol_retry_deferred attempt_identity_deferred
     ],
                  logger.events.map(&:first).grep(/attempt_/)
     dispatched = logger.events.select { |name, _attrs| name == :dispatched }

@@ -3,9 +3,17 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-23
+updated: 2026-09-26
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Incident timing calibration (2026-09-26)
+
+The 32-second aggregate advisory cap covers the observed 30.577-second hosted
+run while preserving the 16-second per-scenario ceiling. It does not yet
+establish a long-run percentile or separate budgets for each runner class.
+Revisit the aggregate cap after a representative nightly timing history exists;
+timing remains non-blocking and does not replace functional E2E coverage.
 
 ## Operator cancellation awaits live validation (2026-09-09)
 

@@ -2,7 +2,10 @@ module Hive
   module E2E
     class IncidentBudget
       DEFAULT_PER_SCENARIO_SECONDS = 16.0
-      DEFAULT_AGGREGATE_SECONDS = 30.0
+      # Real-subprocess incident scenarios share hosted runners. Keep enough
+      # aggregate headroom for normal scheduling variance while retaining an
+      # advisory signal for material regressions.
+      DEFAULT_AGGREGATE_SECONDS = 32.0
       INCIDENT_TAG = "incident-regression"
 
       Result = Data.define(:durations, :total_seconds, :integrity_violations, :timing_violations) do

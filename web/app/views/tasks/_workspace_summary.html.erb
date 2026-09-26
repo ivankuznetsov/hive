@@ -2,7 +2,7 @@
 <section id="workspace-summary" class="workspace-summary task-summary task-state-<%= display.state %>"
          aria-labelledby="workspace-summary-heading" data-task-workspace-target="summary">
   <div>
-    <p class="workspace-eyebrow">Current step · <%= @task["stage"].to_s.sub(/\A\d+-/, "").humanize %></p>
+    <p class="workspace-eyebrow"><%= @task["stage"].to_s.sub(/\A\d+-/, "").humanize %></p>
     <h2 id="workspace-summary-heading"><%= display.label %></h2>
     <% if display.detail.present? %><p><%= display.detail %></p><% end %>
   </div>

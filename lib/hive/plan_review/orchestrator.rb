@@ -29,6 +29,12 @@ module Hive
       SUCCESS_OUTCOMES = Adapters::Base::SUCCESS_OUTCOMES
       TERMINAL_OUTCOMES = (Adapters::Base::OUTCOMES - TRANSIENT_OUTCOMES).freeze
       MAX_VERIFICATION_REVISION_ROUNDS = 3
+      # One extra planner round reserved for integrating operator decisions.
+      # Safe fixes can spend the whole budget before an operator approves a
+      # gated finding or answers a manual one; without this round every late
+      # decision forced a new linked plan whose fresh review restarted the
+      # cycle. The ceiling stays fixed, so the loop remains bounded.
+      OPERATOR_DECISION_ROUNDS = 1
       CAPABILITY_STABLE_PROBE_LIMIT = 3
       CAPABILITY_RETRY_COOLDOWN_SEC = 5 * 60
       TRANSIENT_SERIES_RETRY_BASE_SEC = 5 * 60
@@ -184,7 +190,7 @@ module Hive
           # automatic continuation below. A capped terminal record otherwise
           # retained enough accepted evidence to launch revision N+1 on every
           # later advance! call.
-          if verification_revision_rounds(record) >= MAX_VERIFICATION_REVISION_ROUNDS
+          if revision_round_limit_reached?(record, accepted)
             return Projection.new(record) if record.state == "blocked"
 
             return terminal(
@@ -1011,8 +1017,9 @@ module Hive
 
         record = consume_approval_policies(record)
         findings = record["findings"]
-        return [ record, findings, nil ] if accepted_findings(record).empty?
-        if verification_revision_rounds(record) >= MAX_VERIFICATION_REVISION_ROUNDS
+        accepted = accepted_findings(record)
+        return [ record, findings, nil ] if accepted.empty?
+        if revision_round_limit_reached?(record, accepted)
           blocked = terminal(
             record, state: "blocked", outcome: "blocked", findings:,
             blockers: [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
@@ -1048,6 +1055,19 @@ module Hive
           "lifecycle" => lifecycle,
           "verified_at" => nil
         )
+      end
+
+      def revision_round_limit_reached?(record, accepted)
+        rounds = verification_revision_rounds(record)
+        return false if rounds < MAX_VERIFICATION_REVISION_ROUNDS
+        return true if rounds >= MAX_VERIFICATION_REVISION_ROUNDS + OPERATOR_DECISION_ROUNDS
+
+        accepted.none? { |finding| operator_decision?(finding) }
+      end
+
+      def operator_decision?(finding)
+        %w[gated_auto manual].include?(finding.classification) &&
+          %w[approved answered].include?(finding.lifecycle)
       end
 
       def verification_revision_rounds(record)

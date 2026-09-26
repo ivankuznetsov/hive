@@ -318,7 +318,12 @@ candidate as its input rather than discarding earlier incorporated work. Hive
 permits at most three successful planner-revision rounds; the cap is enforced
 again at every orchestration entry, so an external `advance!` call cannot
 restart a capped verification loop. A repeatedly unresolved defect then blocks
-instead of looping forever. A verified candidate
+instead of looping forever. One extra round (`OPERATOR_DECISION_ROUNDS`) is available only
+when the accepted findings include an operator decision (an approved
+`gated_auto` or answered `manual` finding). Safe fixes can spend the three
+rounds before the operator decides, and without this round every late decision
+forced a new linked plan whose fresh review restarted the cycle. The ceiling
+stays fixed at four, and safe-only residue still blocks at three. A verified candidate
 is atomically promoted to canonical `plan.md` under the task mutation lock
 immediately before its matching terminal resolution is published under that
 same lock.

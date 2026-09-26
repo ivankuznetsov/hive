@@ -97,6 +97,21 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  def test_malformed_checkpoint_refuses_before_repair_or_dry_run_observation
+    with_tmp_dir do |dir|
+      scheduler = File.join(dir, ".hive-state", "scheduler")
+      FileUtils.mkdir_p(scheduler)
+      File.write(File.join(scheduler, "checkpoint.json"), "not-json")
+      tick = Tick.new(summary(pr(9, :eligible)))
+
+      result = adapter(dir, tick: tick, dry_run: true).call
+
+      assert_equal "error", result.to_h.fetch("status")
+      assert_equal "checkpoint_corrupt", result.to_h.dig("error", "code")
+      assert_nil tick.arguments
+    end
+  end
+
   def test_dry_run_withholds_stop_safety_for_a_live_project_worker
     with_tmp_dir do |dir|
       result = adapter(

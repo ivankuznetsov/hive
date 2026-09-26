@@ -51,6 +51,31 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_reconcile_settles_existing_work_without_admitting_retry_when_closed
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      first = runtime.fetch(:attempt_store).active_attempts.first
+      terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
+
+      result = runtime.fetch(:daemon_runtime).reconcile(
+        now: NOW + 3, admission_open: -> { true },
+        retry_admission_open: -> { false }, projects: [ "demo" ]
+      ).fetch(0)
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal 1, result.fetch(:completions)
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size,
+                   "a drain pass must leave retry admission for the next scheduler pass"
+      assert_equal "running", current_run(runtime).fetch("status")
+      retry_item = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + 3
+      ).find { |item| item.fetch("reason") == "module_retry_due" }
+      assert_equal "runnable_now", retry_item.fetch("bucket")
+    end
+  end
+
   def test_disable_closes_pending_retry_without_replay
     with_runtime do |runtime|
       runtime.fetch(:module_dispatcher).dispatch(

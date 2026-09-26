@@ -2,6 +2,7 @@ require "set"
 require "hive/babysitter/interval"
 require "hive/babysitter/project_tick"
 require "hive/config"
+require "hive/one_shot/adapter_harness"
 require "hive/one_shot/project_guard"
 require "hive/one_shot/project_liveness"
 require "hive/one_shot/result"
@@ -34,57 +35,42 @@ module Hive
       end
 
       def call
-        started = @clock.call
         summary = nil
         effective_dry_run = @dry_run
-        @main_guard.synchronize do
-          @babysitter_guard.synchronize do
-            cfg = @config_loader.call(@entry.fetch("path"))
-            unless eligible?(cfg)
-              return Result.ok(
+        ran = -> { summary ? ran_items(summary, dry_run: effective_dry_run) : [] }
+        AdapterHarness.call(
+          component: :babysitter, project: project, clock: @clock, ran: ran
+        ) do |started|
+          @main_guard.synchronize do
+            @babysitter_guard.synchronize do
+              cfg = @config_loader.call(@entry.fetch("path"))
+              unless eligible?(cfg)
+                return Result.ok(
+                  component: :babysitter, project: project, started_at: started,
+                  finished_at: @clock.call, ran: [], items: [],
+                  safe_to_stop: @liveness.safe_to_stop?
+                )
+              end
+              @schedule_state.read("babysitter")
+              effective_dry_run ||= cfg.dig("babysitter", "dry_run") == true
+              summary = @tick.run(
+                @entry, dry_run: effective_dry_run, logger: @logger, inflight: Set.new,
+                observe_only: effective_dry_run, detailed: true
+              )
+              return failed_result(started, summary, dry_run: effective_dry_run) if summary[:error]
+
+              finished = @clock.call
+              deadline = finished + Hive::Babysitter::Interval.parse(cfg.dig("babysitter", "interval"))
+              persist_deadline(deadline, finished) unless effective_dry_run
+              Result.ok(
                 component: :babysitter, project: project, started_at: started,
-                finished_at: @clock.call, ran: [], items: [],
-                safe_to_stop: @liveness.safe_to_stop?
+                finished_at: finished, ran: ran.call,
+                items: pending_items(summary, deadline),
+                safe_to_stop: summary[:interrupted] != true && @liveness.safe_to_stop?
               )
             end
-            effective_dry_run ||= cfg.dig("babysitter", "dry_run") == true
-            summary = @tick.run(
-              @entry, dry_run: effective_dry_run, logger: @logger, inflight: Set.new,
-              observe_only: effective_dry_run, detailed: true
-            )
-            return failed_result(started, summary, dry_run: effective_dry_run) if summary[:error]
-
-            finished = @clock.call
-            deadline = finished + Hive::Babysitter::Interval.parse(cfg.dig("babysitter", "interval"))
-            persist_deadline(deadline, finished) unless effective_dry_run
-            return Result.ok(
-              component: :babysitter, project: project, started_at: started,
-              finished_at: finished, ran: ran_items(summary, dry_run: effective_dry_run),
-              items: pending_items(summary, deadline),
-              safe_to_stop: summary[:interrupted] != true && @liveness.safe_to_stop?
-            )
           end
         end
-      rescue ProjectGuard::OwnershipError => error
-        Result.refused(
-          component: :babysitter, project: project, started_at: started,
-          finished_at: @clock.call, code: error.code, message: error.message,
-          owner: error.owner
-        )
-      rescue Interrupt, SignalException => error
-        Result.interrupted(
-          component: :babysitter, project: project, started_at: started,
-          finished_at: @clock.call, message: error.message,
-          ran: summary ? ran_items(summary, dry_run: effective_dry_run) : []
-        )
-      rescue StandardError => error
-        Result.error(
-          component: :babysitter, project: project, started_at: started,
-          finished_at: @clock.call, code: error.respond_to?(:code) ? error.code : "observation_failed",
-          message: error.message,
-          ran: summary ? ran_items(summary, dry_run: effective_dry_run) : [],
-          exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
-        )
       end
 
       private

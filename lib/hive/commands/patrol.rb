@@ -463,10 +463,6 @@ end
 require "hive/cli_usage_contracts"
 require "hive/one_shot/result"
 
-Hive::CliUsageContracts.declare("patrol") do |argv, command_index:, option_argv:|
-  if Hive::OneShot::Result.requested?(option_argv)
-    project = Hive::CliUsageContracts.positionals(argv, command_index).first
-    next Hive::OneShot::Result.usage_contract(component: :patrol, project: project)
-  end
+Hive::OneShot::Result.declare_usage_contract("patrol", component: :patrol) do |_argv, command_index:, option_argv:|
   { schema: "hive-patrol", error_kind: "error" }
 end

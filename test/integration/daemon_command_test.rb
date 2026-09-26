@@ -309,6 +309,61 @@ class HiveDaemonCommandTest < Minitest::Test
     end
   end
 
+  def test_clear_hold_targets_one_quarantine_then_the_project_drop
+    with_registered_project do |env, _cfg_path, project_root|
+      state = Hive::OneShot::ScheduleState.new(
+        state_root: File.join(project_root, ".hive-state")
+      )
+      deadline = (Time.now.utc + 300).iso8601(6)
+      state.update("dispatch") do
+        {
+          "cooldowns" => [ { "slug" => "cool", "next_check_at" => deadline } ],
+          "transient_failures" => { "retry" => 2 },
+          "quarantined" => %w[bad other],
+          "dropped" => true
+        }
+      end
+
+      out, err, status = Open3.capture3(
+        env, "ruby", "-Ilib", HIVE_BIN, "daemon", "clear-hold", "proj", "bad"
+      )
+      assert_equal 0, status.exitstatus, err
+      assert_includes out, "cleared quarantine for bad"
+      after_slug = state.read("dispatch")
+      assert_equal [ "other" ], after_slug.fetch("quarantined")
+      assert_equal true, after_slug.fetch("dropped")
+      assert_equal({ "retry" => 2 }, after_slug.fetch("transient_failures"))
+      assert_equal deadline, after_slug.fetch("cooldowns").first.fetch("next_check_at")
+
+      out, err, status = Open3.capture3(
+        env, "ruby", "-Ilib", HIVE_BIN, "daemon", "clear-hold", "proj"
+      )
+      assert_equal 0, status.exitstatus, err
+      assert_includes out, "cleared dropped-project hold"
+      after_project = state.read("dispatch")
+      assert_equal false, after_project.fetch("dropped")
+      assert_equal [ "other" ], after_project.fetch("quarantined")
+    end
+  end
+
+  def test_clear_hold_validates_scope_and_requires_a_stopped_daemon
+    with_registered_project do |env, _cfg_path, _project_root|
+      _out, err, status = Open3.capture3(
+        env, "ruby", "-Ilib", HIVE_BIN, "daemon", "clear-hold", "proj", "bad", "extra"
+      )
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_match(/too many positional arguments/, err)
+
+      home = env.fetch("HIVE_HOME")
+      File.write(File.join(home, ".daemon.pid"), "stale")
+      _out, err, status = Open3.capture3(
+        env, "ruby", "-Ilib", HIVE_BIN, "daemon", "clear-hold", "proj", "bad"
+      )
+      assert_equal Hive::ExitCodes::TEMPFAIL, status.exitstatus
+      assert_match(/stop the daemon/, err)
+    end
+  end
+
   def test_enable_sets_daemon_enabled_true_in_project_yaml
     with_registered_project do |env, cfg_path, _root|
       out, _err, status = Open3.capture3(env, "ruby", "-Ilib", HIVE_BIN, "daemon", "enable", "proj")

@@ -189,7 +189,12 @@ module Hive
         # channel is nudge-only. U7 will read it when it lands.
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
-        @one_shot_drain_timeout_sec = one_shot_drain_timeout_sec || @shutdown_grace_sec
+        # A one-shot drain must not replace each worker's configured execution
+        # timeout with the (usually much shorter) daemon shutdown grace. An
+        # explicit value remains available to callers/tests that need a hard
+        # parent bound; otherwise the supervisor and durable attempt leases own
+        # their normal timeout policy.
+        @one_shot_drain_timeout_sec = one_shot_drain_timeout_sec
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
         @fast_poll_sec = @daemon_cfg.fetch("fast_poll_sec", 1)
         # Grace window for AGENT_WORKING markers with no PID attribute
@@ -444,6 +449,7 @@ module Hive
           @module_runtime&.tick(**module_options)&.each do |module_result|
             next if module_result.fetch(:status) == :idle
             @logger.event(:module_runtime, **module_result)
+            record_one_shot_module_result(module_result) if scoped_execution?
           end
         rescue StandardError => e
           @one_shot_failure ||= "module runtime failed: #{e.message}" if scoped_execution?
@@ -561,7 +567,8 @@ module Hive
         raise @one_shot_failure if @one_shot_failure.is_a?(Exception)
         raise Hive::Error, @one_shot_failure if @one_shot_failure
 
-        drain_deadline = @monotonic_clock.call + @one_shot_drain_timeout_sec
+        drain_deadline = @one_shot_drain_timeout_sec &&
+          (@monotonic_clock.call + @one_shot_drain_timeout_sec)
         loop do
           loop do
             current = @clock ? @clock.call.utc : Time.now.utc
@@ -571,9 +578,11 @@ module Hive
               reconcile_attempts(now: current)
             break unless project_worker_live?(project)
 
-            remaining = drain_deadline - @monotonic_clock.call
-            fail_one_shot_drain!(project: project) unless remaining.positive?
-            sleeper.call([ @fast_poll_sec.to_f, 0.25, remaining ].min)
+            remaining = drain_deadline && (drain_deadline - @monotonic_clock.call)
+            fail_one_shot_drain!(project: project) if remaining && !remaining.positive?
+            sleep_for = [ @fast_poll_sec.to_f, 0.25 ].min
+            sleep_for = [ sleep_for, remaining ].min if remaining
+            sleeper.call(sleep_for)
           end
 
           reconcile_one_shot_module_runs(project: project)
@@ -815,7 +824,8 @@ module Hive
 
         current = @clock ? @clock.call.utc : Time.now.utc
         results = @module_runtime.reconcile(
-          now: current, admission_open: -> { admission_open? }, projects: [ project ]
+          now: current, admission_open: -> { admission_open? },
+          retry_admission_open: -> { false }, projects: [ project ]
         )
         Array(results).each do |module_result|
           @logger.event(:module_runtime, **module_result)
@@ -861,7 +871,28 @@ module Hive
         if @module_runtime&.respond_to?(:readiness)
           items.concat(@module_runtime.readiness(project: project, now: now))
         end
+        if @patrol_fix_admission_scheduler&.respond_to?(:readiness)
+          items.concat(@patrol_fix_admission_scheduler.readiness(project: project, now: now))
+        end
         items.uniq { |item| item.fetch("id") }
+      end
+
+      def record_one_shot_module_result(result)
+        decisions = result.fetch(:decisions, 0).to_i
+        schedules = result.fetch(:schedules, 0).to_i
+        completions = result.fetch(:completions, 0).to_i
+        return unless result.fetch(:status) == :ok &&
+                      [ decisions, schedules, completions ].any?(&:positive?)
+
+        @one_shot_ran << {
+          "id" => "dispatch:module:#{result.fetch(:project)}",
+          "action" => "module runtime",
+          "outcome" => "completed",
+          "details" => {
+            "decisions" => decisions, "schedules" => schedules,
+            "completions" => completions
+          }
+        }
       end
 
       def active_attempts_for(project)
@@ -1079,8 +1110,13 @@ module Hive
                             eligible_reason: "eligible")
         return pending_item("runnable_now", id, eligible_reason,
                             condition: nil) if gate == :ok
-        if %i[global_cap project_cap cooldown daily_cap].include?(gate)
-          due = if %i[global_cap project_cap].include?(gate)
+        # Project-local selection limits do not require an external event. A
+        # fresh scheduler pass can select this work immediately, whereas only
+        # host-wide capacity contention needs a bounded polling wake.
+        return pending_item("runnable_now", id, gate.to_s,
+                            condition: nil) if gate == :project_cap
+        if %i[global_cap cooldown daily_cap].include?(gate)
+          due = if gate == :global_cap
             now + @poll_interval_sec
           else
             @controller.next_check_at(project: row.project, slug: row.slug, gate: gate, now: now)
@@ -4042,6 +4078,11 @@ module Hive
           recorded.to_s == live_start.to_s
         end
 
+        recovery_projects = if scoped_execution?
+          @scope_projects.keys
+        elsif @project_ownership
+          @project_ownership.owned_projects
+        end
         dispatch_repository.recover_claims(
           state_home: dispatch_request_state_home, now: now, alive: alive,
           attempt_alive: lambda { |attempt_id, task_generation|
@@ -4050,8 +4091,7 @@ module Hive
             attempt = @attempt_reconciler.fetch(attempt_id)
             attempt && attempt.task_generation == task_generation
           },
-          expiry_sec: claim_expiry_sec,
-          projects: scoped_execution? ? @scope_projects.keys : nil,
+          expiry_sec: claim_expiry_sec, projects: recovery_projects,
           handler: ->(request_id:, reason:) {
             @logger.event(:dispatch_request_recovered,
                           request_id: request_id, reason: reason)

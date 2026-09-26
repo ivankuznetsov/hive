@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-09-25
+updated: 2026-09-26
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -39,6 +39,7 @@ hive daemon tail
 hive daemon install [--force]
 hive daemon enable  PROJECT | --all  [--json]
 hive daemon disable PROJECT | --all  [--json]
+hive daemon clear-hold PROJECT [SLUG]
 hive daemon queue   [list | show <id> | prune]  [--json]
 hive daemon --once PROJECT [--json] [--dry-run]
 ```
@@ -53,6 +54,7 @@ hive daemon --once PROJECT [--json] [--dry-run]
 | `install`  | Installs and starts the platform-native daemon service. The adapter owns template rendering, stable wrapper resolution, the 900-second restart warning, command wording, and the `hive-daemon-install.v1` JSON envelope. It preserves operator drift unless `--force` is supplied; exit `64` means unauthorized drift and exit `70` means no safe endpoint was proven. A conclusively absent manager retains the compatible filesystem-only `unsupported` success. Setup installs this global infrastructure independently of project enrollment. Shared locking, backup, replay, and recovery behavior is owned by [[modules/user_service]]. |
 | `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
 | `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
+| `clear-hold` | Clears one restart-safe dispatch hold after the underlying configuration or task problem is fixed. With only `PROJECT`, it clears that project's dropped-project hold. With `PROJECT SLUG`, it clears only that task quarantine; cooldowns, transient-failure counters, other quarantines, and other projects remain unchanged. Stop the daemon first so its in-memory controller cannot restore stale hold state; the command refuses while any daemon PID file remains, including a stale file that `hive daemon stop` has not cleaned. The activation lock serializes the check and checkpoint update against a concurrent daemon start. Repeating a clear with no matching hold is a successful no-op. This surface is text-only and rejects `--all`, `--json`, `--dry-run`, and `--detach`. |
 | `queue`    | Read-only inspection of the dispatch-request rows all adapters write and the daemon consumes. Runtime SQL uses only `hive-dispatch-request.v5`; the irreversible fleet cutover discards pending legacy file queues rather than upgrading them. V5 binds recovery to canonical task/stage/marker/generation identity, carries markerless provider-admission observations, and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. `list`/`show`/`prune` JSON uses the `hive-daemon-queue.v1` success or error arm; failures distinguish `unknown_action`, `missing_request_id`, and `internal`. |
 
 ## External scheduler one-shot
@@ -406,6 +408,9 @@ original typed failure.
 | `enable` / `disable` | 64 | Missing, unknown, conflicting, or uninitialised project selection (USAGE) |
 | `enable` / `disable` | 70 | Unexpected internal failure (SOFTWARE) |
 | `enable` / `disable` | 78 | Malformed project/global configuration (CONFIG) |
+| `clear-hold` | 0 | Named hold cleared, or no matching hold existed |
+| `clear-hold` | 64 | Missing/unknown project, too many arguments, or an unsupported mode flag (USAGE) |
+| `clear-hold` | 75 | A daemon PID file still exists; stop/clean it before clearing persisted state (TEMPFAIL) |
 | `queue list` / `queue prune` | 0 | Always (lists / prunes; empty is still success) |
 | `queue show <id>` | 0 | Request found |
 | `queue show <id>` | 1 | Request not found (GENERIC) |

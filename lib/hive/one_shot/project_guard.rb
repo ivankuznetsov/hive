@@ -35,6 +35,16 @@ module Hive
 
       attr_reader :path, :owner_path, :project, :kind
 
+      def self.canonical_state_root(state_root)
+        path = File.expand_path(state_root)
+        suffix = []
+        until File.exist?(path)
+          suffix.unshift(File.basename(path))
+          path = File.dirname(path)
+        end
+        File.join(File.realpath(path), *suffix)
+      end
+
       class Collection
         attr_reader :contentions
 
@@ -129,13 +139,7 @@ module Hive
         private
 
         def canonical_identity(entry)
-          path = File.expand_path(entry.fetch("hive_state_path"))
-          suffix = []
-          until File.exist?(path)
-            suffix.unshift(File.basename(path))
-            path = File.dirname(path)
-          end
-          File.join(File.realpath(path), *suffix)
+          ProjectGuard.canonical_state_root(entry.fetch("hive_state_path"))
         end
 
         def release_drained_associations(enabled_associations)
@@ -323,7 +327,8 @@ module Hive
         end
 
         entry = Hive::Config.find_project(project)
-        return unless entry && File.expand_path(entry.fetch("hive_state_path")) == @state_root
+        return unless entry &&
+          self.class.canonical_state_root(entry.fetch("hive_state_path")) == @state_root
         return unless Hive::Config.load(entry.fetch("path")).dig("daemon", "enabled") == true
 
         {

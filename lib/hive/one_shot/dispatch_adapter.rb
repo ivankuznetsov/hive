@@ -1,5 +1,4 @@
-require "hive/one_shot/project_guard"
-require "hive/one_shot/result"
+require "hive/one_shot/adapter_harness"
 require "hive/one_shot/runner"
 
 module Hive
@@ -20,39 +19,23 @@ module Hive
       end
 
       def call
-        started = @clock.call
         runner = nil
-        @guard.synchronize do
-          runner = @runner_factory.call
-          pass = runner.call
-          return Result.ok(
-            component: :dispatch, project: project, started_at: started,
-            finished_at: @clock.call, ran: pass.fetch(:ran), items: pass.fetch(:items),
-            safe_to_stop: pass.fetch(:safe_to_stop)
-          )
-        ensure
-          runner&.close
+        AdapterHarness.call(
+          component: :dispatch, project: project, clock: @clock,
+          ran: -> { runner&.ran || [] }, error_code: "dispatch_failed"
+        ) do |started|
+          @guard.synchronize do
+            runner = @runner_factory.call
+            pass = runner.call
+            Result.ok(
+              component: :dispatch, project: project, started_at: started,
+              finished_at: @clock.call, ran: pass.fetch(:ran), items: pass.fetch(:items),
+              safe_to_stop: pass.fetch(:safe_to_stop)
+            )
+          ensure
+            runner&.close
+          end
         end
-      rescue ProjectGuard::OwnershipError => error
-        Result.refused(
-          component: :dispatch, project: project, started_at: started,
-          finished_at: @clock.call, code: error.code, message: error.message,
-          owner: error.owner
-        )
-      rescue Interrupt, SignalException => error
-        Result.interrupted(
-          component: :dispatch, project: project, started_at: started,
-          finished_at: @clock.call, message: error.message,
-          ran: runner&.ran || []
-        )
-      rescue StandardError => error
-        Result.error(
-          component: :dispatch, project: project, started_at: started,
-          finished_at: @clock.call,
-          code: error.respond_to?(:code) ? error.code : "dispatch_failed",
-          message: error.message, ran: runner&.ran || [],
-          exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
-        )
       end
 
       private

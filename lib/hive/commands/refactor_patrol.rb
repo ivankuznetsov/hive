@@ -1375,11 +1375,7 @@ end
 require "hive/cli_usage_contracts"
 require "hive/one_shot/result"
 
-Hive::CliUsageContracts.declare("refactor-patrol") do |argv, command_index:, option_argv:|
-  if Hive::OneShot::Result.requested?(option_argv)
-    project = Hive::CliUsageContracts.positionals(argv, command_index).first
-    next Hive::OneShot::Result.usage_contract(component: :architecture_patrol, project: project)
-  end
+Hive::OneShot::Result.declare_usage_contract("refactor-patrol", component: :architecture_patrol) do |_argv, command_index:, option_argv:|
   jobs = Hive::Commands::RefactorPatrol.usage_jobs_argv(option_argv)
   if jobs
     next {

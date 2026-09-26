@@ -99,6 +99,37 @@ class OneShotReadinessTest < Minitest::Test
     assert_equal "value", Hive::OneShot::Readiness.stringify("value")
   end
 
+  def test_group_by_condition_prefixes_and_deduplicates_affected_ids
+    condition = { "kind" => "task_changed", "task" => "task-1" }
+    grouped = Hive::OneShot::Readiness.group_by_condition(
+      [
+        { "id" => "b", "condition" => condition },
+        { "id" => "a", "condition" => condition },
+        { "id" => "a", "condition" => condition }
+      ],
+      id_prefix: "demo"
+    )
+
+    assert_equal [ "demo:a", "demo:b" ], grouped.first.fetch("affected_pending_ids")
+  end
+
+  def test_group_by_condition_preserves_project_when_grouping_direct_wakes
+    grouped = Hive::OneShot::Readiness.group_by_condition([
+      {
+        "kind" => "time_due", "project" => "app",
+        "deadline" => "2026-09-23T12:05:00.000000Z",
+        "affected_pending_ids" => [ "patrol:scan" ]
+      },
+      {
+        "kind" => "time_due", "project" => "api",
+        "deadline" => "2026-09-23T12:05:00.000000Z",
+        "affected_pending_ids" => [ "patrol:scan" ]
+      }
+    ])
+
+    assert_equal %w[api app], grouped.map { |wake| wake.fetch("project") }.sort
+  end
+
   private
 
   def item(id, bucket, reason, next_check_at: nil, condition: nil)

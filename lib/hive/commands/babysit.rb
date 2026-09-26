@@ -147,14 +147,14 @@ module Hive
       def run_once
         require "hive/one_shot/babysitter_adapter"
         resolve_once_project_name
-        entries = @all ? Hive::Config.registered_projects : [ @once_entry ]
+        entries = if @all
+          Hive::Config.registered_project_entries(preserve_invalid: true)
+        else
+          [ @once_entry ]
+        end
         started = Time.now.utc
-        reports = entries.map do |entry|
-          if @all
-            one_shot_report(entry)
-          else
-            one_shot_adapter(entry).call
-          end
+        reports = entries.each_with_index.map do |entry, index|
+          one_shot_report(entry, index: index)
         end
         result = if @all
           Hive::OneShot::Result.aggregate(
@@ -174,17 +174,40 @@ module Hive
         Hive::OneShot::BabysitterAdapter.new(entry: entry, dry_run: @dry_run)
       end
 
-      def one_shot_report(entry)
+      def one_shot_report(entry, index:)
         started = Time.now.utc
+        project = one_shot_project_name(entry, index: index)
+        unless one_shot_registry_entry?(entry)
+          return Hive::OneShot::Result.error(
+            component: :babysitter, project: project,
+            started_at: started, finished_at: Time.now.utc,
+            code: "config",
+            message: "registered project entry #{index + 1} is malformed; expected non-empty string name and path",
+            exit_code: Hive::ExitCodes::CONFIG
+          )
+        end
+
         one_shot_adapter(entry).call
       rescue StandardError => error
         Hive::OneShot::Result.error(
-          component: :babysitter, project: entry.fetch("name"),
+          component: :babysitter, project: project,
           started_at: started, finished_at: Time.now.utc,
           code: error.respond_to?(:code) ? error.code : "observation_failed",
           message: error.message,
           exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
         )
+      end
+
+      def one_shot_registry_entry?(entry)
+        entry.is_a?(Hash) && entry["name"].is_a?(String) && !entry["name"].empty? &&
+          entry["path"].is_a?(String) && !entry["path"].empty?
+      end
+
+      def one_shot_project_name(entry, index:)
+        name = entry["name"] if entry.is_a?(Hash)
+        return name if name.is_a?(String) && !name.empty?
+
+        "invalid-registry-entry-#{index + 1}"
       end
 
       def resolve_once_project_name
@@ -507,9 +530,4 @@ end
 require "hive/cli_usage_contracts"
 require "hive/one_shot/result"
 
-Hive::CliUsageContracts.declare("babysit") do |argv, command_index:, option_argv:|
-  next unless Hive::OneShot::Result.requested?(option_argv)
-
-  project = Hive::CliUsageContracts.positionals(argv, command_index).first
-  Hive::OneShot::Result.usage_contract(component: :babysitter, project: project)
-end
+Hive::OneShot::Result.declare_usage_contract("babysit", component: :babysitter)

@@ -915,16 +915,25 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def test_disabled_discovery_is_not_a_candidate_and_reservation_fails_closed
     with_project do |_dir, entry, store|
       enqueue(store)
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(
+          entry.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"
+        ),
+        decision_provider: ->(*) { raise "disabled classification must not run" }
+      )
+      classifier.hydrate(classification_snapshot, now: T0)
       cfg = enabled_cfg
       cfg.fetch("refactor_patrol")["enabled"] = false
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
         registry: -> { [ entry ] }, config_loader: ->(_path) { cfg },
         job_store_factory: ->(_path) { store },
+        classifier_factory: ->(*) { classifier },
         repository_resolver: ->(_entry, _cfg) { repository_identity },
         checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a"
       )
 
       assert_empty scheduler.candidates(now: T0)
+      assert_empty scheduler.readiness(project: "demo", now: T0, candidates: [])
       aggregate = store.read_job("job-7")
       candidate = scheduler.send(:candidate_for, entry, aggregate, phase: :discovery)
       error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do

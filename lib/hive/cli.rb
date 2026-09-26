@@ -1776,7 +1776,7 @@ module Hive
       result
     end
 
-    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable / queue)"
+    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable / queue / clear-hold)"
     long_desc <<~DESC
       Subcommands:
         start [--detach] [--dry-run]      Run the dispatcher loop. Without
@@ -1802,6 +1802,9 @@ module Hive
                                           --all = every registered project;
                                           --json emits hive-daemon-enroll.v1.
         disable PROJECT|--all [--json]    Set daemon.enabled: false there.
+        clear-hold PROJECT [SLUG]         Clear the persisted dropped-project
+                                          hold, or only SLUG's quarantine.
+                                          The daemon must be stopped first.
         queue [list|show <id>|prune]      Inspect the dispatch-request queue
                                           the bot writes and the daemon
                                           consumes. `list` (default) shows
@@ -1883,14 +1886,16 @@ module Hive
           error_kind: Hive::Schemas::EnrollErrorKind::MISSING_PROJECT
         )
       end
-      # `queue` takes up to two positionals (ACTION + optional REQUEST_ID,
-      # e.g. `queue show <id>`); every other subcommand takes at most one
-      # (PROJECT or --all).
-      max_targets = subcommand == "queue" ? 2 : 1
+      # `queue` and `clear-hold` take up to two positionals; every other
+      # subcommand takes at most one (PROJECT or --all).
+      max_targets = %w[queue clear-hold].include?(subcommand) ? 2 : 1
       if targets.length > max_targets
         message = if subcommand == "queue"
           "hive daemon queue: too many positional arguments #{targets.inspect}; " \
             "expected `queue [list|show <id>|prune]`"
+        elsif subcommand == "clear-hold"
+          "hive daemon clear-hold: too many positional arguments #{targets.inspect}; " \
+            "expected `clear-hold PROJECT [SLUG]`"
         else
           "hive daemon #{subcommand}: too many positional arguments " \
             "#{targets.inspect}; expected exactly one PROJECT (or --all)"

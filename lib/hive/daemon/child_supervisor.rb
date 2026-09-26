@@ -36,6 +36,105 @@ module Hive
       # when the daemon config doesn't supply one. A wedged child gets
       # SIGTERM, then SIGKILL `kill_grace_sec` later if it ignored TERM.
       DEFAULT_KILL_GRACE_SEC = 30
+      WAIT_POLL_SEC = 0.02
+      TERMINATE_KILL_REAP_SEC = 1
+
+      class << self
+        # Wait for one exact child without ever consuming another process's
+        # status. The caller owns the monotonic deadline and sleep strategy so
+        # synchronous command surfaces can share this lifecycle primitive
+        # without sharing ChildSupervisor's output capture.
+        def wait_for_pid(pid:, deadline:, monotonic_clock:, sleeper:)
+          loop do
+            waited_pid, status = Process.wait2(pid, Process::WNOHANG)
+            return status if waited_pid
+
+            remaining = deadline - monotonic_clock.call
+            return nil unless remaining.positive?
+
+            sleeper.call([ WAIT_POLL_SEC, remaining ].min)
+          end
+        rescue Errno::ECHILD
+          nil
+        end
+
+        # TERM one process group, wait for the supplied grace, then KILL and
+        # make one final bounded drain attempt. A reaped direct child is not
+        # enough: descendants can outlive it in the same process group, so the
+        # method returns only after that original group is also gone.
+        def terminate_pid(pid:, grace_sec:, monotonic_clock:, sleeper:, pgid: nil)
+          pgid ||= process_group_id(pid)
+          signal_process_group(:TERM, pgid)
+          status, drained = wait_for_pid_and_group(
+            pid: pid, pgid: pgid,
+            deadline: monotonic_clock.call + grace_sec.to_f,
+            monotonic_clock: monotonic_clock, sleeper: sleeper
+          )
+          return status if drained && status
+
+          signal_process_group(:KILL, pgid)
+          final_status, final_drained = wait_for_pid_and_group(
+            pid: pid, pgid: pgid,
+            deadline: monotonic_clock.call + TERMINATE_KILL_REAP_SEC,
+            monotonic_clock: monotonic_clock, sleeper: sleeper
+          )
+          return nil unless final_drained
+
+          final_status || status
+        end
+
+        private
+
+        def process_group_id(pid)
+          return unless pid.is_a?(Integer) && pid > 1
+
+          Process.getpgid(pid)
+        rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
+
+        def signal_process_group(signal, pgid)
+          Process.kill(signal, -pgid) if pgid && pgid > 1
+        rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
+
+        def process_group_alive?(pgid)
+          return false unless pgid && pgid > 1
+
+          Process.kill(0, -pgid)
+          true
+        rescue Errno::ESRCH
+          false
+        rescue Errno::EPERM
+          true
+        end
+
+        def wait_for_pid_and_group(pid:, pgid:, deadline:, monotonic_clock:, sleeper:)
+          status = nil
+          loop do
+            unless status
+              waited_pid, observed = Process.wait2(pid, Process::WNOHANG)
+              status = observed if waited_pid
+            end
+            drained = !process_group_alive?(pgid)
+            return [ status, true ] if status && drained
+
+            remaining = deadline - monotonic_clock.call
+            return [ status, drained ] unless remaining.positive?
+
+            sleeper.call([ WAIT_POLL_SEC, remaining ].min)
+          rescue Errno::ECHILD
+            drained = !process_group_alive?(pgid)
+            return [ status, drained ] if drained
+
+            remaining = deadline - monotonic_clock.call
+            return [ status, false ] unless remaining.positive?
+
+            sleeper.call([ WAIT_POLL_SEC, remaining ].min)
+          end
+        end
+      end
 
       def initialize(hive_bin: ENV.fetch("HIVE_BIN", "hive"),
                      log_dir_for_task: nil,
@@ -312,14 +411,11 @@ module Hive
         entry = @running[pid]
         return false unless entry && !entry[:dry_run]
 
-        pgid = pgid_for(pid)
-        safe_kill(:TERM, -pgid) if pgid
-        status = wait_for_child(pid, grace_sec)
-        unless status
-          pgid = pgid_for(pid)
-          safe_kill(:KILL, -pgid) if pgid
-          status = wait_for_child(pid, 1)
-        end
+        status = self.class.terminate_pid(
+          pid: pid, grace_sec: grace_sec,
+          monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+          sleeper: ->(seconds) { sleep(seconds) }, pgid: entry[:pgid]
+        )
         return false unless status
 
         @running.delete(pid)
@@ -344,16 +440,11 @@ module Hive
       private
 
       def wait_for_child(pid, seconds)
-        deadline = Time.now + seconds
-        loop do
-          waited_pid, status = Process.wait2(pid, Process::WNOHANG)
-          return status if waited_pid
-          return nil if Time.now >= deadline
-
-          sleep 0.02
-        end
-      rescue Errno::ECHILD
-        nil
+        clock = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+        self.class.wait_for_pid(
+          pid: pid, deadline: clock.call + seconds.to_f,
+          monotonic_clock: clock, sleeper: ->(duration) { sleep(duration) }
+        )
       end
 
       def child_exit(pid, status, entry, now)

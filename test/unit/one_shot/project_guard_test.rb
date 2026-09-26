@@ -375,6 +375,37 @@ class OneShotProjectGuardTest < Minitest::Test
     end
   end
 
+  def test_pre_guard_daemon_probe_canonicalizes_registered_state_root_alias
+    with_tmp_global_config do |home|
+      with_tmp_dir do |root|
+        project = File.join(root, "project")
+        project_alias = File.join(root, "project-alias")
+        state = File.join(project, ".hive-state")
+        FileUtils.mkdir_p(state)
+        File.symlink(project, project_alias)
+        File.write(
+          File.join(state, "config.yml"),
+          Hive::Config.deep_merge(
+            Hive::Config.deep_dup(Hive::Config::DEFAULTS), "daemon" => { "enabled" => true }
+          ).to_yaml
+        )
+        Hive::Config.register_project(
+          name: "app", path: project_alias, repository_identity: "local:test"
+        )
+        identity = Hive::Lock.process_start_time(Process.pid)
+        File.write(
+          File.join(home, ".daemon.pid"),
+          { "pid" => Process.pid, "process_start_time" => identity }.to_yaml
+        )
+
+        error = assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) do
+          guard(state, kind: "one_shot").acquire!
+        end
+        assert_equal "daemon_owned", error.code
+      end
+    end
+  end
+
   def test_live_pre_guard_daemon_with_missing_identity_fails_closed
     with_tmp_global_config do |home|
       with_tmp_dir do |root|

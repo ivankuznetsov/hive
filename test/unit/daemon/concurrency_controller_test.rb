@@ -371,6 +371,37 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     end
   end
 
+  def test_persisted_quarantine_and_project_drop_have_explicit_clear_controls
+    Dir.mktmpdir do |root|
+      factory = ->(project) { Hive::OneShot::ScheduleState.new(state_root: File.join(root, project)) }
+      first = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      dispatch(first, 901, "p1", "bad")
+      first.record_completion(
+        pid: 901, exit_code: Hive::ExitCodes::USAGE, completed_at: T0
+      )
+      first.record_project_dropped(project: "p2")
+
+      fresh = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      assert fresh.clear_quarantine(project: "p1", slug: "bad")
+      assert fresh.clear_project_dropped(project: "p2")
+      refute fresh.clear_quarantine(project: "p1", slug: "bad")
+      refute fresh.clear_project_dropped(project: "p2")
+
+      restarted = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, schedule_state_factory: factory
+      )
+      assert_equal :ok, restarted.can_dispatch?(project: "p1", slug: "bad", now: T0 + 1)
+      assert_equal :ok, restarted.can_dispatch?(project: "p2", slug: "anything", now: T0 + 1)
+    end
+  end
+
   # ── mtime tracking ────────────────────────────────────────────────────
 
   def test_record_dispatch_records_state_file_mtime

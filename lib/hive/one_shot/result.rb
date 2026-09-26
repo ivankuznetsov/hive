@@ -1,5 +1,6 @@
 require "json"
 require "json_schemer"
+require "hive/cli_usage_contracts"
 require "hive/errors"
 require "hive/one_shot/readiness"
 require "hive/schemas"
@@ -79,9 +80,35 @@ module Hive
         }
       end
 
+      def self.declare_usage_contract(name, component:, &fallback)
+        Hive::CliUsageContracts.declare(name) do |argv, command_index:, option_argv:|
+          if requested?(option_argv)
+            project = Hive::CliUsageContracts.positionals(argv, command_index).first
+            usage_contract(component: component, project: project)
+          else
+            fallback&.call(
+              argv, command_index: command_index, option_argv: option_argv
+            )
+          end
+        end
+      end
+
       def self.aggregate(component:, reports:, started_at:, finished_at:)
         reports = Array(reports)
-        documents = reports.filter_map { |report| document_for(report) }
+        documents = []
+        rejected = []
+        reports.each_with_index do |report, index|
+          document = raw_document(report)
+          if authoritative_document?(document)
+            documents << document
+          else
+            identity = { "index" => index }
+            identity["project"] = document["project"] if
+              document.is_a?(Hash) && document["project"].is_a?(String) &&
+                !document["project"].empty?
+            rejected << identity
+          end
+        end
         valid_count = documents.size == reports.size
         routine_refusals = documents.select { |doc| routine_refusal?(doc) }
         invalid = documents.any? do |doc|
@@ -97,7 +124,12 @@ module Hive
           document = base(component, nil, started_at, finished_at).merge(
             "status" => "error", "ran" => aggregate_ran(successful), "pending" => nil,
             "next_due_at" => nil, "wake_conditions" => [], "safe_to_stop" => false,
-            "owner" => nil, "error" => error_hash("partial_failure", "one or more projects did not report authoritative readiness"),
+            "owner" => nil,
+            "error" => error_hash(
+              "partial_failure",
+              "one or more projects did not report authoritative readiness",
+              details: rejected.empty? ? nil : { "rejected_reports" => rejected }
+            ),
             "projects" => documents, "owning_projects" => owning, "host_stop_allowed" => false
           )
           return new(document, exit_code: Hive::ExitCodes::TEMPFAIL)
@@ -159,8 +191,10 @@ module Hive
           }
         end
 
-        def error_hash(code, message)
-          { "code" => code.to_s, "message" => message.to_s }
+        def error_hash(code, message, details: nil)
+          { "code" => code.to_s, "message" => message.to_s }.tap do |error|
+            error["details"] = details if details
+          end
         end
 
         def owner_hash(owner)
@@ -169,10 +203,7 @@ module Hive
           owner.slice("kind", "pid", "process_identity", "state_root", "started_at")
         end
 
-        def document_for(report)
-          document = report.respond_to?(:to_h) ? report.to_h : report
-          document if authoritative_document?(document)
-        end
+        def raw_document(report) = report.respond_to?(:to_h) ? report.to_h : report
 
         def authoritative_document?(document)
           document.is_a?(Hash) &&
@@ -214,22 +245,18 @@ module Hive
         end
 
         def aggregate_wakes(documents)
-          grouped = {}
-          documents.each do |document|
-            Array(document["wake_conditions"]).each do |raw|
-              wake = raw.dup
-              affected = Array(wake.delete("affected_pending_ids")).map do |id|
-                "#{document.fetch("project")}:#{id}"
+          items = documents.flat_map do |document|
+            Array(document["wake_conditions"]).flat_map do |wake|
+              condition = wake.reject { |key, _value| key == "affected_pending_ids" }
+              Array(wake["affected_pending_ids"]).map do |id|
+                {
+                  "id" => "#{document.fetch("project")}:#{id}",
+                  "condition" => condition
+                }
               end
-              key = JSON.generate(wake.sort.to_h)
-              grouped[key] ||= wake.merge("affected_pending_ids" => [])
-              grouped[key]["affected_pending_ids"].concat(affected)
             end
           end
-          grouped.values.each do |wake|
-            wake["affected_pending_ids"].uniq!
-            wake["affected_pending_ids"].sort!
-          end
+          Readiness.group_by_condition(items)
         end
       end
     end

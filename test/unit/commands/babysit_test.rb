@@ -233,6 +233,70 @@ class HiveCommandsBabysitTest < Minitest::Test
     end
   end
 
+  def test_once_converts_adapter_construction_and_call_failures_to_one_document
+    entry = { "name" => "proj", "path" => "/tmp/proj" }
+    factories = [
+      ->(_entry) { raise Errno::EACCES, "cannot construct adapter" },
+      lambda do |_entry|
+        Object.new.tap do |adapter|
+          adapter.define_singleton_method(:call) { raise Errno::ENOENT, "cannot run adapter" }
+        end
+      end
+    ]
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { entry }) do
+      factories.each do |factory|
+        out, = capture_io do
+          result = Hive::Commands::Babysit.new(
+            nil, "proj", once: true, one_shot_factory: factory
+          ).call
+          assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_code
+        end
+        lines = out.lines.reject { |line| line.strip.empty? }
+        assert_equal 1, lines.length
+        document = JSON.parse(lines.fetch(0))
+        assert_equal "hive-one-shot", document.fetch("schema")
+        assert_equal "babysitter", document.fetch("component")
+        assert_equal "proj", document.fetch("project")
+        assert_equal "error", document.fetch("status")
+        assert_equal "observation_failed", document.dig("error", "code")
+      end
+    end
+  end
+
+  def test_once_all_retains_malformed_registry_rows_as_project_errors
+    entries = [
+      nil,
+      { "name" => "broken", "path" => 42 },
+      { "path" => "/tmp/missing-name" }
+    ]
+    factory_called = false
+    requested_preservation = nil
+    loader = lambda do |preserve_invalid:|
+      requested_preservation = preserve_invalid
+      entries
+    end
+
+    with_replaced_singleton_method(Hive::Config, :registered_project_entries, loader) do
+      out, = capture_io do
+        result = Hive::Commands::Babysit.new(
+          nil, nil, once: true, all: true,
+          one_shot_factory: ->(_entry) { factory_called = true }
+        ).call
+        assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_code
+      end
+      document = JSON.parse(out)
+      assert_equal true, requested_preservation
+      refute factory_called
+      assert_equal "partial_failure", document.dig("error", "code")
+      assert_equal [ "invalid-registry-entry-1", "broken", "invalid-registry-entry-3" ],
+                   document.fetch("projects").map { |row| row.fetch("project") }
+      assert document.fetch("projects").all? { |row| row.dig("error", "code") == "config" }
+      refute document.fetch("safe_to_stop")
+      refute document.fetch("host_stop_allowed")
+    end
+  end
+
   def test_once_all_retains_routine_refusal_and_vetoes_host_stop
     with_tmp_global_config do
       entries = %w[one two].map { |name| { "name" => name, "path" => "/tmp/#{name}" } }
@@ -250,7 +314,8 @@ class HiveCommandsBabysitTest < Minitest::Test
       }
       factory = ->(entry) { Struct.new(:report) { def call = report }.new(reports.fetch(entry["name"])) }
 
-      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { entries }) do
+      loader = ->(preserve_invalid:) { preserve_invalid ? entries : [] }
+      with_replaced_singleton_method(Hive::Config, :registered_project_entries, loader) do
         out, = capture_io do
           result = Hive::Commands::Babysit.new(
             nil, nil, once: true, all: true, one_shot_factory: factory

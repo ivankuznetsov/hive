@@ -86,7 +86,7 @@ class OneShotProcessExecutorTest < Minitest::Test
       daemon_config_loader: -> { { "child_kill_grace_sec" => 12 } }
     )
 
-    assert_equal 7200.0, executor.instance_variable_get(:@timeout_sec)
+    assert_equal 7260.0, executor.instance_variable_get(:@timeout_sec)
     assert_equal 12.0, executor.instance_variable_get(:@kill_grace_sec)
   end
 
@@ -117,20 +117,23 @@ class OneShotProcessExecutorTest < Minitest::Test
     end
   end
 
-  def test_terminate_escalates_a_surviving_process_group
+  def test_terminate_delegates_process_group_lifecycle_to_child_supervisor
     executor = Hive::OneShot::ProcessExecutor.new(
       monotonic_clock: -> { 0.0 }, sleeper: ->(*) { }
     )
-    signals = []
-    waits = [ nil, :killed ]
-    alive = [ true, true ]
-    executor.define_singleton_method(:signal_group) { |signal, _pid| signals << signal }
-    executor.define_singleton_method(:wait_for_exit) { |_pid, _deadline| waits.shift }
-    executor.define_singleton_method(:process_group_alive?) { |_pid| alive.shift }
-    executor.define_singleton_method(:wait_for_group_exit) { |_pid, _deadline| nil }
+    arguments = nil
+    replacement = lambda do |**keywords|
+      arguments = keywords
+      :killed
+    end
 
-    assert_equal :killed, executor.send(:terminate, 123)
-    assert_equal %w[TERM KILL], signals
+    with_replaced_singleton_method(
+      Hive::Daemon::ChildSupervisor, :terminate_pid, replacement
+    ) do
+      assert_equal :killed, executor.send(:terminate, 123)
+    end
+    assert_equal 123, arguments.fetch(:pid)
+    assert_equal 123, arguments.fetch(:pgid)
   end
 
   def test_reader_timeout_terminates_before_raising
@@ -147,21 +150,21 @@ class OneShotProcessExecutorTest < Minitest::Test
     assert_equal [ 123 ], terminated
   end
 
-  def test_process_group_probe_and_wait_handle_permission_and_exit
+  def test_output_drain_gets_a_fresh_deadline_after_child_exit
+    times = [ 100.0, 100.0 ]
     executor = Hive::OneShot::ProcessExecutor.new(
-      monotonic_clock: -> { 0.0 }, sleeper: ->(*) { }
+      timeout_sec: 100, monotonic_clock: -> { times.shift || 100.0 }
     )
-    with_replaced_singleton_method(Process, :kill, ->(*) { true }) do
-      assert executor.send(:process_group_alive?, 123)
-    end
-    with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::EPERM }) do
-      assert executor.send(:process_group_alive?, 123)
-    end
+    status = Struct.new(:exitstatus).new(0)
+    reader = Object.new
+    joins = []
+    reader.define_singleton_method(:join) { |timeout| joins << timeout; true }
+    reader.define_singleton_method(:value) { "" }
+    executor.define_singleton_method(:wait_for_exit) { |_pid, _deadline| status }
 
-    probes = [ true, false ]
-    executor.define_singleton_method(:process_group_alive?) { |_pid| probes.shift }
-    executor.send(:wait_for_group_exit, 123, 1.0)
-    assert_empty probes
+    executor.send(:reader_value, reader, executor.send(:output_drain_deadline), 123)
+
+    assert_equal [ Hive::OneShot::ProcessExecutor::OUTPUT_DRAIN_TIMEOUT_SEC ], joins
   end
 
   def test_terminate_tolerates_an_already_gone_process

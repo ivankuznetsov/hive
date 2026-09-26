@@ -379,6 +379,23 @@ module Hive
         persist_schedule_state(project)
       end
 
+      # Explicit recovery controls for restart-safe scheduling holds. These
+      # remove only the named hold and preserve unrelated cooldown/failure
+      # state for the project.
+      def clear_quarantine(project:, slug:)
+        restore_schedule_state(project)
+        removed = @quarantine.delete?([ project, slug ])
+        persist_schedule_state(project) if removed
+        !!removed
+      end
+
+      def clear_project_dropped(project:)
+        restore_schedule_state(project)
+        removed = @dropped_projects.delete?(project)
+        persist_schedule_state(project) if removed
+        !!removed
+      end
+
       def running_task?(project:, slug:)
         @running.any? do |_pid, entry|
           entry[:project] == project && entry[:slug] == slug

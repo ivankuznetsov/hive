@@ -4,12 +4,12 @@ require "json"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/lock"
+require "hive/one_shot/adapter_harness"
 require "hive/one_shot/process_executor"
 require "hive/one_shot/patrol_admission"
 require "hive/one_shot/project_guard"
 require "hive/one_shot/project_liveness"
 require "hive/one_shot/result"
-require "hive/one_shot/schedule_state"
 
 module Hive
   module OneShot
@@ -42,57 +42,43 @@ module Hive
         @reconciler = reconciler || Hive::Daemon::RefactorPatrolMergeReconciler.new(
           registry: registry, dry_run: dry_run, poll_interval_sec: @poll_interval_sec
         )
-        @schedule_state = ScheduleState.new(state_root: entry.fetch("hive_state_path"))
       end
 
       def call
-        started = @clock.call
         ran = []
-        @guard.synchronize do
-          gate = @admission.gate(now: started)
-          intake = run_intake(started, ran)
-          return observation_error(started, ran, intake) if intake_error?(intake)
+        AdapterHarness.call(
+          component: :architecture_patrol, project: project, clock: @clock,
+          ran: -> { ran }
+        ) do |started|
+          @guard.synchronize do
+            gate = @admission.gate(now: started)
+            intake = run_intake(started, ran)
+            return observation_error(started, ran, intake) if intake_error?(intake)
 
-          candidates = @scheduler.candidates(
-            now: @clock.call, projects: [ project ], include_scheduled: false
-          )
-          run_candidate(candidates.first, ran) if candidates.first && !@dry_run && gate == :ok
-          finished = @clock.call
-          items = @scheduler.readiness(project: project, now: finished)
-          items.concat(intake_items(intake, finished)) if enabled?
-          events = @scheduler.drain_events
-          return event_observation_error(started, ran, events) if observation_failure?(events)
+            candidates = @scheduler.candidates(
+              now: @clock.call, projects: [ project ], include_scheduled: false
+            )
+            if candidates.first && !@dry_run && gate == :ok &&
+               run_candidate(candidates.first, ran)
+              candidates = candidates.drop(1)
+            end
+            finished = @clock.call
+            items = @scheduler.readiness(
+              project: project, now: finished, candidates: candidates
+            )
+            items.concat(intake_items(intake, finished)) if enabled?
+            events = @scheduler.drain_events
+            return event_observation_error(started, ran, events) if observation_failure?(events)
 
-          items.concat(event_items(events))
-          items = @admission.apply(items, gate: gate, now: finished)
-          persist_intake_deadline(intake_deadline(intake, finished), finished) unless
-            @dry_run || !enabled?
-          return Result.ok(
-            component: :architecture_patrol, project: project,
-            started_at: started, finished_at: finished, ran: ran,
-            items: items, safe_to_stop: @liveness.safe_to_stop?
-          )
+            items.concat(event_items(events))
+            items = @admission.apply(items, gate: gate, now: finished)
+            Result.ok(
+              component: :architecture_patrol, project: project,
+              started_at: started, finished_at: finished, ran: ran,
+              items: items, safe_to_stop: @liveness.safe_to_stop?
+            )
+          end
         end
-      rescue ProjectGuard::OwnershipError => error
-        Result.refused(
-          component: :architecture_patrol, project: project,
-          started_at: started, finished_at: @clock.call, code: error.code,
-          message: error.message, owner: error.owner
-        )
-      rescue Interrupt, SignalException => error
-        Result.interrupted(
-          component: :architecture_patrol, project: project,
-          started_at: started, finished_at: @clock.call, ran: ran,
-          message: error.message
-        )
-      rescue StandardError => error
-        Result.error(
-          component: :architecture_patrol, project: project,
-          started_at: started, finished_at: @clock.call,
-          code: error.respond_to?(:code) ? error.code : "observation_failed",
-          message: error.message, ran: ran,
-          exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
-        )
       end
 
       private
@@ -117,12 +103,6 @@ module Hive
           }
         end
         result
-      end
-
-      def persist_intake_deadline(deadline, now)
-        @schedule_state.update("architecture_patrol", now: now) do |state|
-          state.merge("intake_next_check_at" => deadline.utc.iso8601(6))
-        end
       end
 
       def intake_error?(result) = result && result[:status] == :blocked
@@ -176,7 +156,8 @@ module Hive
           "action" => candidate.fetch(:action_phase).to_s,
           "outcome" => completion.fetch(:status).to_s
         }
-      rescue StandardError
+        true
+      rescue StandardError, Interrupt, SignalException
         @scheduler.cancel(reserved, reason: "one_shot_error", now: @clock.call) if reserved
         raise
       end

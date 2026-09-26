@@ -1,4 +1,5 @@
 require "hive/daemon/patrol_scheduler"
+require "hive/one_shot/adapter_harness"
 require "hive/one_shot/process_executor"
 require "hive/one_shot/patrol_admission"
 require "hive/one_shot/project_guard"
@@ -27,43 +28,30 @@ module Hive
       end
 
       def call
-        started = @clock.call
         ran = []
-        @guard.synchronize do
-          gate = @admission.gate(now: started)
-          unless @dry_run
-            candidate = @scheduler.candidates(
-              now: started, projects: [ project ],
-              bypass_observation_throttle: true, strict: true
-            ).first
-            run_candidate(candidate, ran) if candidate && gate == :ok
+        AdapterHarness.call(
+          component: :patrol, project: project, clock: @clock, ran: -> { ran },
+          error_code: method(:error_code)
+        ) do |started|
+          @guard.synchronize do
+            gate = @admission.gate(now: started)
+            unless @dry_run
+              candidate = @scheduler.candidates(
+                now: started, projects: [ project ],
+                bypass_observation_throttle: true, strict: true
+              ).first
+              run_candidate(candidate, ran) if candidate && gate == :ok
+            end
+            finished = @clock.call
+            items = @scheduler.readiness(project: project, now: finished, persist: !@dry_run)
+            items = @admission.apply(items, gate: gate, now: finished)
+            Result.ok(
+              component: :patrol, project: project, started_at: started,
+              finished_at: finished, ran: ran, items: items,
+              safe_to_stop: @liveness.safe_to_stop?
+            )
           end
-          finished = @clock.call
-          items = @scheduler.readiness(project: project, now: finished, persist: !@dry_run)
-          items = @admission.apply(items, gate: gate, now: finished)
-          return Result.ok(
-            component: :patrol, project: project, started_at: started,
-            finished_at: finished, ran: ran, items: items,
-            safe_to_stop: @liveness.safe_to_stop?
-          )
         end
-      rescue ProjectGuard::OwnershipError => error
-        Result.refused(
-          component: :patrol, project: project, started_at: started,
-          finished_at: @clock.call, code: error.code, message: error.message,
-          owner: error.owner
-        )
-      rescue Interrupt, SignalException => error
-        Result.interrupted(
-          component: :patrol, project: project, started_at: started,
-          finished_at: @clock.call, message: error.message, ran: ran
-        )
-      rescue StandardError => error
-        Result.error(
-          component: :patrol, project: project, started_at: started,
-          finished_at: @clock.call, code: error_code(error),
-          message: error.message, ran: ran, exit_code: hive_exit_code(error)
-        )
       end
 
       private
@@ -83,7 +71,7 @@ module Hive
           "id" => "patrol:scan", "action" => "scan",
           "outcome" => execution.exit_code.zero? ? "completed" : "failed"
         }
-      rescue StandardError
+      rescue StandardError, Interrupt, SignalException
         @scheduler.complete(project: project, exit_code: 1, now: @clock.call) if reserved
         raise
       end
@@ -91,10 +79,6 @@ module Hive
       def error_code(error)
         error.respond_to?(:code) ? error.code : error.class.name.split("::").last
           .gsub(/([a-z])([A-Z])/, '\\1_\\2').downcase
-      end
-
-      def hive_exit_code(error)
-        error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
       end
     end
   end

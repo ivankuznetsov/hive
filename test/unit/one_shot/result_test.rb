@@ -76,6 +76,26 @@ class OneShotResultTest < Minitest::Test
     refute payload.fetch("host_stop_allowed")
   end
 
+  def test_declare_usage_contract_selects_once_and_delegates_other_variants
+    name = "unit-one-shot-result-#{object_id}"
+    fallback_calls = []
+    Hive::OneShot::Result.declare_usage_contract(name, component: :patrol) do |argv, **options|
+      fallback_calls << [ argv, options ]
+      { schema: "fallback", error_kind: "usage" }
+    end
+
+    once = Hive::CliUsageContracts.contract([ name, "app", "--once" ])
+    fallback = Hive::CliUsageContracts.contract([ name, "app" ])
+
+    payload = once.fetch(:payload).call(Hive::InvalidTaskPath.new("bad argv"))
+    assert_equal "app", payload.fetch("project")
+    assert_equal :patrol, payload.fetch("component").to_sym
+    assert_equal({ schema: "fallback", error_kind: "usage" }, fallback)
+    assert_equal 1, fallback_calls.size
+  ensure
+    Hive::CliUsageContracts.instance_variable_get(:@contracts)&.delete(name)
+  end
+
   def test_aggregate_combines_successful_projects_and_vetoes_host_stop_for_owner
     success = Hive::OneShot::Result.ok(
       component: "babysitter", project: "app", started_at: STARTED, finished_at: FINISHED,
@@ -154,6 +174,8 @@ class OneShotResultTest < Minitest::Test
     assert_nil aggregate.to_h.fetch("pending")
     refute aggregate.to_h.fetch("host_stop_allowed")
     assert_equal Hive::ExitCodes::TEMPFAIL, aggregate.exit_code
+    assert_equal [ { "index" => 0, "project" => "demo" } ],
+                 aggregate.to_h.dig("error", "details", "rejected_reports")
   end
 
   def test_unverifiable_refusal_is_partial_failure

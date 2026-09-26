@@ -1,6 +1,7 @@
 require "json"
 require "shellwords"
 require "hive/config"
+require "hive/daemon/child_supervisor"
 require "hive/errors"
 require "hive/runtime_control_plane/process_guard"
 
@@ -10,8 +11,8 @@ module Hive
       Execution = Data.define(:exit_code, :envelope)
       DEFAULT_TIMEOUT_SEC = 3600
       DEFAULT_KILL_GRACE_SEC = 30
-      POLL_SEC = 0.01
-      POST_KILL_REAP_SEC = 1
+      PARENT_HEADROOM_SEC = 60
+      OUTPUT_DRAIN_TIMEOUT_SEC = 5
 
       def self.for_entry(entry, config_loader: ->(path) { Hive::Config.load(path) },
                          daemon_config_loader: -> { Hive::Config.load_global_daemon })
@@ -26,12 +27,16 @@ module Hive
           nil
         end
         daemon_cfg = daemon_config_loader.call
-        new(
-          timeout_sec: timeouts.max || DEFAULT_TIMEOUT_SEC,
-          kill_grace_sec: daemon_cfg.fetch(
-            "child_kill_grace_sec", DEFAULT_KILL_GRACE_SEC
-          )
+        kill_grace_sec = daemon_cfg.fetch(
+          "child_kill_grace_sec", DEFAULT_KILL_GRACE_SEC
         )
+        worker_timeout = timeouts.max
+        parent_timeout = if worker_timeout
+          worker_timeout + [ PARENT_HEADROOM_SEC, Float(kill_grace_sec) ].max
+        else
+          DEFAULT_TIMEOUT_SEC
+        end
+        new(timeout_sec: parent_timeout, kill_grace_sec: kill_grace_sec)
       end
 
       def initialize(timeout_sec: DEFAULT_TIMEOUT_SEC,
@@ -80,8 +85,9 @@ module Hive
           raise Hive::InternalError,
                 "one-shot child timed out after #{@timeout_sec} seconds"
         end
-        stdout = reader_value(stdout_reader, deadline, pid)
-        stderr = reader_value(stderr_reader, deadline, pid)
+        drain_deadline = output_drain_deadline
+        stdout = reader_value(stdout_reader, drain_deadline, pid)
+        stderr = reader_value(stderr_reader, drain_deadline, pid)
         settled = true
         $stderr.write(stderr) unless stderr.empty?
         envelope = JSON.parse(stdout) unless stdout.strip.empty?
@@ -105,17 +111,10 @@ module Hive
       private
 
       def terminate(pid)
-        signal_group("TERM", pid)
-        deadline = monotonic_now + @kill_grace_sec
-        status = wait_for_exit(pid, deadline)
-        wait_for_group_exit(pid, deadline) if process_group_alive?(pid)
-        return status unless process_group_alive?(pid)
-
-        signal_group("KILL", pid)
-        kill_deadline = monotonic_now + POST_KILL_REAP_SEC
-        status ||= wait_for_exit(pid, kill_deadline)
-        wait_for_group_exit(pid, kill_deadline)
-        status
+        Hive::Daemon::ChildSupervisor.terminate_pid(
+          pid: pid, pgid: pid, grace_sec: @kill_grace_sec,
+          monotonic_clock: @monotonic_clock, sleeper: @sleeper
+        )
       end
 
       def reader_value(reader, deadline, pid)
@@ -127,37 +126,13 @@ module Hive
       end
 
       def wait_for_exit(pid, deadline)
-        loop do
-          waited = Process.wait2(pid, Process::WNOHANG)
-          return waited.last if waited
-          return nil if monotonic_now >= deadline
-
-          @sleeper.call([ POLL_SEC, deadline - monotonic_now ].min)
-        end
-      rescue Errno::ECHILD
-        nil
+        Hive::Daemon::ChildSupervisor.wait_for_pid(
+          pid: pid, deadline: deadline,
+          monotonic_clock: @monotonic_clock, sleeper: @sleeper
+        )
       end
 
-      def signal_group(signal, pid)
-        Process.kill(signal, -pid)
-      rescue Errno::ESRCH
-        nil
-      end
-
-      def process_group_alive?(pid)
-        Process.kill(0, -pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
-      end
-
-      def wait_for_group_exit(pid, deadline)
-        while process_group_alive?(pid) && monotonic_now < deadline
-          @sleeper.call([ POLL_SEC, deadline - monotonic_now ].min)
-        end
-      end
+      def output_drain_deadline = monotonic_now + OUTPUT_DRAIN_TIMEOUT_SEC
 
       def monotonic_now = @monotonic_clock.call
     end

@@ -224,6 +224,7 @@ module Hive
       def cancel(project:)
         pending = @pending.delete(project)
         @next_check_at.delete(project)
+        @post_reserve_at.delete(project)
         entry = pending && pending[:entry]
         persist_gates(entry, now: Time.now) if entry
       end

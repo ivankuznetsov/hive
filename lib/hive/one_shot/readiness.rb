@@ -61,16 +61,30 @@ module Hive
       end
 
       def wake_conditions(items)
+        group_by_condition(items)
+      end
+
+      def group_by_condition(items, id_prefix: nil)
         grouped = {}
         items.each do |item|
-          condition = item["condition"]
+          condition = item["condition"] || item.reject do |key, _value|
+            key == "affected_pending_ids"
+          end
           next unless condition
 
           key = JSON.generate(condition.sort.to_h)
           grouped[key] ||= condition.merge("affected_pending_ids" => [])
-          grouped[key]["affected_pending_ids"] << item.fetch("id")
+          ids = item.key?("affected_pending_ids") ?
+            Array(item.fetch("affected_pending_ids")) : [ item.fetch("id") ]
+          ids.each do |id|
+            grouped[key]["affected_pending_ids"] <<
+              (id_prefix ? "#{id_prefix}:#{id}" : id)
+          end
         end
-        grouped.values.each { |condition| condition["affected_pending_ids"].sort! }
+        grouped.values.each do |condition|
+          condition["affected_pending_ids"].uniq!
+          condition["affected_pending_ids"].sort!
+        end
       end
 
       def stringify(value)

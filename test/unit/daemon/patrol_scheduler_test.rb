@@ -469,6 +469,26 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     Hive::UsageDb.database = old_database
   end
 
+  def test_two_fresh_process_one_shots_inside_poll_interval_launch_only_one_scan
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg("patrol" => { "enabled" => true, "poll_interval_sec" => 600 })
+      write_state(dir, "last_scanned_sha" => "old")
+
+      first = scheduler(entry, cfg)
+      candidate = first.candidates(
+        now: T0, projects: [ "p1" ], bypass_observation_throttle: true
+      ).fetch(0)
+      refute_nil first.reserve(candidate, now: T0)
+      first.complete(project: "p1", exit_code: 0, now: T0 + 1)
+
+      fresh = scheduler(entry, cfg)
+      assert_empty fresh.candidates(
+        now: T0 + 2, projects: [ "p1" ], bypass_observation_throttle: true
+      ), "post-reserve cadence must survive a fresh process and fresh observation"
+    end
+  end
+
   # Finding U2/poll_interval_sec: the new_commits trigger must run its
   # `git rev-parse` due-check on the slow patrol cadence, not every
   # daemon tick. Without the throttle the scheduler shelled out to git on
@@ -528,9 +548,11 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     sched = Hive::Daemon::PatrolScheduler.new(registry: -> { [] })
     sched.instance_variable_set(:@pending, "p1" => { started_at: T0 })
     sched.instance_variable_set(:@next_check_at, "p1" => T0 + 600)
+    sched.instance_variable_set(:@post_reserve_at, "p1" => T0 + 600)
     sched.cancel(project: "p1")
     refute sched.pending?("p1")
     assert_empty sched.instance_variable_get(:@next_check_at)
+    assert_empty sched.instance_variable_get(:@post_reserve_at)
 
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => {

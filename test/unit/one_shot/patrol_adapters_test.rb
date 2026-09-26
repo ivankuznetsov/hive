@@ -52,10 +52,19 @@ class OneShotPatrolAdaptersTest < Minitest::Test
     def call(*) = raise("execution failed")
   end
 
-  class PatrolScheduler
-    attr_reader :completed
+  class InterruptingExecutor
+    def call(*) = raise Interrupt, "stopping"
+  end
 
-    def candidates(**)
+  class PatrolScheduler
+    attr_reader :completed, :candidate_calls
+
+    def initialize
+      @candidate_calls = []
+    end
+
+    def candidates(**arguments)
+      @candidate_calls << arguments
       [ { project: "demo", entry: {}, command: "hive patrol demo --json" } ]
     end
 
@@ -89,14 +98,17 @@ class OneShotPatrolAdaptersTest < Minitest::Test
   end
 
   class ArchitectureScheduler
-    attr_reader :completed, :cancelled, :spawned_call
+    attr_reader :completed, :cancelled, :spawned_call, :candidate_calls, :readiness_calls
     attr_accessor :events
 
     def initialize
       @events = []
+      @candidate_calls = []
+      @readiness_calls = []
     end
 
-    def candidates(**)
+    def candidates(**arguments)
+      @candidate_calls << arguments
       [ {
         project: "demo", job_id: "job-1", action_phase: :discovery,
         command: "hive refactor-patrol demo --json", dispatch_token: { job_id: "job-1" }
@@ -113,12 +125,32 @@ class OneShotPatrolAdaptersTest < Minitest::Test
       { status: :classified }
     end
 
-    def readiness(**) = []
+    def readiness(**arguments)
+      @readiness_calls << arguments
+      Array(arguments[:candidates]).map do |candidate|
+        {
+          "bucket" => "runnable_now",
+          "id" => "architecture:discovery:#{candidate.fetch(:job_id)}",
+          "component" => "architecture_patrol", "reason" => "eligible",
+          "next_check_at" => nil, "condition" => nil
+        }
+      end
+    end
     def drain_events = events
   end
 
   class IdleArchitectureScheduler < ArchitectureScheduler
-    def candidates(**) = []
+    def candidates(**arguments)
+      @candidate_calls << arguments
+      []
+    end
+  end
+
+  class EventClearingArchitectureScheduler < IdleArchitectureScheduler
+    def readiness(candidates: nil, **arguments)
+      events.clear if candidates.nil?
+      super(candidates: candidates, **arguments)
+    end
   end
 
   class Reconciler
@@ -254,6 +286,9 @@ class OneShotPatrolAdaptersTest < Minitest::Test
       refute_nil scheduler.spawned_call
       assert_equal "recurring_intake",
                    result.to_h.dig("pending", "waiting_external", 0, "reason")
+      assert_equal 1, scheduler.candidate_calls.size
+      assert_empty scheduler.readiness_calls.first.fetch(:candidates)
+      assert_empty result.to_h.dig("pending", "runnable_now")
       assert_schema(result)
     end
   end
@@ -261,10 +296,13 @@ class OneShotPatrolAdaptersTest < Minitest::Test
   def test_patrol_reports_ownership_and_execution_failures
     with_tmp_dir do |dir|
       refused = Hive::OneShot::PatrolAdapter.new(
-        entry: entry(dir), scheduler: PatrolScheduler.new, guard: RefusingGuard.new,
+        entry: entry(dir), scheduler: (refused_scheduler = PatrolScheduler.new),
+        executor: (refused_executor = Executor.new), guard: RefusingGuard.new,
         clock: -> { NOW }
       ).call
       assert_equal "daemon_owned", refused.to_h.dig("error", "code")
+      assert_empty refused_scheduler.candidate_calls
+      assert_empty refused_executor.commands
 
       scheduler = PatrolScheduler.new
       failed = Hive::OneShot::PatrolAdapter.new(
@@ -297,9 +335,30 @@ class OneShotPatrolAdaptersTest < Minitest::Test
     end
   end
 
+  def test_interrupting_reserved_scans_are_settled_before_reporting_interruption
+    with_tmp_dir do |dir|
+      patrol_scheduler = PatrolScheduler.new
+      patrol = Hive::OneShot::PatrolAdapter.new(
+        entry: entry(dir), scheduler: patrol_scheduler, executor: InterruptingExecutor.new,
+        guard: Guard.new, liveness: Liveness.new, clock: -> { NOW }
+      ).call
+      architecture_scheduler = ArchitectureScheduler.new
+      architecture = Hive::OneShot::ArchitecturePatrolAdapter.new(
+        entry: entry(dir), scheduler: architecture_scheduler, reconciler: Reconciler.new,
+        executor: InterruptingExecutor.new, guard: Guard.new, liveness: Liveness.new,
+        clock: -> { NOW }, config_loader: ->(*) { enabled_config }
+      ).call
+
+      assert_equal "interrupted", patrol.to_h.dig("error", "code")
+      assert_equal 1, patrol_scheduler.completed.fetch(:exit_code)
+      assert_equal "interrupted", architecture.to_h.dig("error", "code")
+      refute_nil architecture_scheduler.cancelled
+    end
+  end
+
   def test_architecture_projects_intake_states_events_and_failures
     with_tmp_dir do |dir|
-      scheduler = ArchitectureScheduler.new
+      scheduler = IdleArchitectureScheduler.new
       scheduler.events = [ { job_id: "blocked", reason: "operator_needed" } ]
       partial = Hive::OneShot::ArchitecturePatrolAdapter.new(
         entry: entry(dir), scheduler: scheduler,
@@ -352,7 +411,7 @@ class OneShotPatrolAdaptersTest < Minitest::Test
 
   def test_architecture_treats_blocked_scheduler_events_as_observation_failure
     with_tmp_dir do |dir|
-      scheduler = IdleArchitectureScheduler.new
+      scheduler = EventClearingArchitectureScheduler.new
       scheduler.events = [
         { status: :blocked, reason: "recovery_state_unavailable", error: "offline" }
       ]
@@ -367,6 +426,8 @@ class OneShotPatrolAdaptersTest < Minitest::Test
       assert_nil result.to_h.fetch("pending")
       refute result.safe_to_stop?
       assert_schema(result)
+      assert_equal 1, scheduler.candidate_calls.size
+      assert_equal [], scheduler.readiness_calls.first.fetch(:candidates)
     end
   end
 
@@ -390,7 +451,7 @@ class OneShotPatrolAdaptersTest < Minitest::Test
     end
   end
 
-  def test_architecture_uses_configured_interval_for_report_and_checkpoint
+  def test_architecture_uses_configured_interval_without_persisting_advisory_intake_deadline
     with_tmp_dir do |dir|
       times = [ NOW, NOW + 2, NOW + 7 ]
       result = Hive::OneShot::ArchitecturePatrolAdapter.new(
@@ -402,11 +463,26 @@ class OneShotPatrolAdaptersTest < Minitest::Test
 
       deadline = (NOW + 907).iso8601(6)
       assert_equal deadline, result.to_h.dig("pending", "waiting_external", 0, "next_check_at")
-      checkpoint = JSON.parse(
-        File.read(File.join(dir, ".hive-state", "scheduler", "checkpoint.json"))
-      )
-      assert_equal deadline,
-                   checkpoint.dig("components", "architecture_patrol", "intake_next_check_at")
+      refute File.exist?(File.join(dir, ".hive-state", "scheduler", "checkpoint.json"))
+    end
+  end
+
+
+  def test_architecture_ownership_refuses_before_intake_or_scheduler_work
+    with_tmp_dir do |dir|
+      scheduler = ArchitectureScheduler.new
+      executor = Executor.new
+      reconciler = Object.new
+      reconciler.define_singleton_method(:tick) { |**| raise "must not run" }
+      result = Hive::OneShot::ArchitecturePatrolAdapter.new(
+        entry: entry(dir), scheduler: scheduler, reconciler: reconciler,
+        executor: executor, guard: RefusingGuard.new, clock: -> { NOW },
+        config_loader: ->(*) { enabled_config }
+      ).call
+
+      assert_equal "daemon_owned", result.to_h.dig("error", "code")
+      assert_empty scheduler.candidate_calls
+      assert_empty executor.commands
     end
   end
 

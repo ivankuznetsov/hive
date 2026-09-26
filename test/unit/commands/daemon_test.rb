@@ -1655,4 +1655,66 @@ class HiveCommandsDaemonTest < Minitest::Test
 
     assert_raises(Hive::InvalidTaskPath) { command.call }
   end
+
+  def test_clear_hold_removes_only_the_selected_persisted_state
+    state_root = File.join(@home, "project", ".hive-state")
+    entry = { "name" => "proj", "path" => File.dirname(state_root),
+              "hive_state_path" => state_root }
+    state = Hive::OneShot::ScheduleState.new(state_root: state_root)
+    state.update("dispatch") do
+      {
+        "cooldowns" => [ { "slug" => "cool", "next_check_at" => Time.now.utc.iso8601(6) } ],
+        "transient_failures" => { "retry" => 2 },
+        "quarantined" => %w[bad other],
+        "dropped" => true
+      }
+    end
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { entry }) do
+      out, = capture_io do
+        Hive::Commands::Daemon.new(
+          "clear-hold", "proj", queue_args: %w[proj bad], hive_home: @home
+        ).call
+      end
+      assert_includes out, "cleared quarantine for bad"
+      after_slug = state.read("dispatch")
+      assert_equal [ "other" ], after_slug.fetch("quarantined")
+      assert_equal true, after_slug.fetch("dropped")
+      assert_equal({ "retry" => 2 }, after_slug.fetch("transient_failures"))
+      assert_equal [ "cool" ], after_slug.fetch("cooldowns").map { |row| row.fetch("slug") }
+
+      out, = capture_io do
+        Hive::Commands::Daemon.new(
+          "clear-hold", "proj", hive_home: @home
+        ).call
+      end
+      assert_includes out, "cleared dropped-project hold"
+      after_project = state.read("dispatch")
+      assert_equal false, after_project.fetch("dropped")
+      assert_equal [ "other" ], after_project.fetch("quarantined")
+    end
+  end
+
+  def test_clear_hold_refuses_while_a_daemon_pid_file_remains
+    state_root = File.join(@home, "project", ".hive-state")
+    entry = { "name" => "proj", "path" => File.dirname(state_root),
+              "hive_state_path" => state_root }
+    state = Hive::OneShot::ScheduleState.new(state_root: state_root)
+    state.update("dispatch") do
+      {
+        "cooldowns" => [], "transient_failures" => {},
+        "quarantined" => [ "bad" ], "dropped" => false
+      }
+    end
+    File.write(File.join(@home, ".daemon.pid"), "stale")
+    command = Hive::Commands::Daemon.new(
+      "clear-hold", "proj", queue_args: %w[proj bad], hive_home: @home
+    )
+
+    error = with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { entry }) do
+      assert_raises(Hive::ConcurrentRunError) { command.call }
+    end
+    assert_match(/stop the daemon/, error.message)
+    assert_equal [ "bad" ], state.read("dispatch").fetch("quarantined")
+  end
 end

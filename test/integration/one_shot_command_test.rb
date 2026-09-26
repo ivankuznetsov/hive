@@ -195,7 +195,8 @@ class OneShotCommandTest < Minitest::Test
       Struct.new(:result) { def call = result }.new(success)
     end
 
-    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { entries }) do
+    loader = ->(preserve_invalid:) { preserve_invalid ? entries : [] }
+    with_replaced_singleton_method(Hive::Config, :registered_project_entries, loader) do
       out, = capture_io do
         result = Hive::Commands::Babysit.new(
           nil, nil, once: true, all: true, one_shot_factory: factory
@@ -207,6 +208,32 @@ class OneShotCommandTest < Minitest::Test
       assert_equal [ "one", "two" ], document.fetch("projects").map { |row| row.fetch("project") }
       assert_equal "ok", document.fetch("projects").fetch(0).fetch("status")
       assert_equal "error", document.fetch("projects").fetch(1).fetch("status")
+    end
+  end
+
+  def test_multi_project_babysitter_reports_every_malformed_registry_row
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => [
+            nil,
+            { "name" => "broken", "path" => 42 },
+            { "path" => "/tmp/missing-name" }
+          ]
+        }.to_yaml
+      )
+
+      out, _err, status = run_hive(home, "babysit", "--once", "--all")
+
+      assert_equal Hive::ExitCodes::TEMPFAIL, status.exitstatus
+      document = one_document(out)
+      assert_equal "partial_failure", document.dig("error", "code")
+      assert_equal [ "invalid-registry-entry-1", "broken", "invalid-registry-entry-3" ],
+                   document.fetch("projects").map { |row| row.fetch("project") }
+      assert document.fetch("projects").all? { |row| row.dig("error", "code") == "config" }
+      refute document.fetch("safe_to_stop")
+      refute document.fetch("host_stop_allowed")
     end
   end
 

@@ -108,6 +108,31 @@ class OneShotProjectLivenessTest < Minitest::Test
     end
   end
 
+  def test_unexpected_architecture_claim_error_propagates
+    with_tmp_dir do |root|
+      store = Object.new
+      store.define_singleton_method(:jobs) { raise RuntimeError, "bug" }
+
+      error = assert_raises(RuntimeError) do
+        liveness(root, architecture_store: store).safe_to_stop?
+      end
+      assert_equal "bug", error.message
+    end
+  end
+
+  def test_corrupt_architecture_claim_error_propagates
+    with_tmp_dir do |root|
+      store = Object.new
+      store.define_singleton_method(:jobs) do
+        raise Hive::RefactorPatrol::JobStore::CorruptRecord, "corrupt"
+      end
+
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        liveness(root, architecture_store: store).safe_to_stop?
+      end
+    end
+  end
+
   def test_runner_reports_stop_safe_only_after_controlled_worker_exits
     with_tmp_dir do |root|
       ready_r, ready_w = IO.pipe

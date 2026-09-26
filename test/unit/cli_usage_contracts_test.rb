@@ -312,8 +312,8 @@ class CliUsageContractsTest < Minitest::Test
       source = File.read(File.join(ROOT, boundary))
       # Whitespace-tolerant so declaration formatting (line wrapping) does not
       # matter; only the boundary declaring its own contract does.
-      assert_match(/Hive::CliUsageContracts\.declare\(\s*"#{Regexp.escape(command)}"/,
-                   source,
+      declaration = /(?:Hive::CliUsageContracts\.declare|Hive::OneShot::Result\.declare_usage_contract)\(\s*"#{Regexp.escape(command)}"/
+      assert_match(declaration, source,
                    "#{command}'s usage contract must be declared by its own boundary file #{boundary}")
     end
 

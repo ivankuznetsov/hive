@@ -66,7 +66,7 @@ module Hive
               Hive::RefactorPatrol::JobStore::ACTIVE_CLAIM_STATES.include?(attempt["state"])
           end
         end
-      rescue StandardError
+      rescue SystemCallError, IOError
         true
       end
 

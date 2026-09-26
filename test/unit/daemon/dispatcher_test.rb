@@ -766,6 +766,31 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, digest.next_dispatches.length
   end
 
+  def test_scoped_tick_does_not_launch_patrol_or_global_jobs
+    patrol = FakePatrolScheduler.new
+    patrol.define_singleton_method(:tick) { |**| raise "ordinary Patrol must stay disabled" }
+    architecture = FakeRefactorPatrolScheduler.new
+    architecture.define_singleton_method(:candidates) do |**|
+      raise "architecture Patrol must stay disabled"
+    end
+    arbiter = FakePatrolArbiter.new([])
+    arbiter.define_singleton_method(:candidates) { |**| raise "Patrol arbiter must stay disabled" }
+    digest = FakeAnswerDigestScheduler.new
+    digest.define_singleton_method(:tick) { |**| raise "global digest must stay disabled" }
+    intake = Object.new
+    intake.define_singleton_method(:tick) { |**| raise "global intake must stay disabled" }
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ],
+      refactor_patrol_scheduler: architecture,
+      refactor_patrol_merge_reconciler: intake,
+      patrol_arbiter: arbiter, with_answer_digest_scheduler: true
+    )
+    dispatcher.instance_variable_set(:@patrol_scheduler, patrol)
+    dispatcher.instance_variable_set(:@answer_digest_scheduler, digest)
+
+    dispatcher.tick(now: T0)
+  end
+
   def test_scoped_tick_counts_unrelated_legacy_workers_against_global_capacity
     target = row(project: "p1", slug: "target", command: "hive brainstorm target")
     unrelated = row(
@@ -916,22 +941,74 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def test_run_one_shot_reconciles_module_runs_after_attempts_drain
     reconciliations = []
+    reconciled = false
     runtime = Object.new
     runtime.define_singleton_method(:tick) { |**| [] }
     runtime.define_singleton_method(:reconcile) do |**options|
       reconciliations << options
       options.fetch(:admission_open).call
+      reconciled = true
       [ { project: "p1", status: :ok, decisions: 0, schedules: 0, reason: nil } ]
     end
-    runtime.define_singleton_method(:readiness) { |**| [] }
+    runtime.define_singleton_method(:readiness) do |**|
+      next [] unless reconciled
+
+      [ {
+        "bucket" => "runnable_now", "id" => "dispatch:module:run:retry-1",
+        "component" => "dispatch", "reason" => "module_retry_due",
+        "next_check_at" => nil, "condition" => nil
+      } ]
+    end
     dispatcher, _supervisor, _controller, logger = make_dispatcher(
       rows: [], scope_projects: [ "p1" ], module_runtime: runtime
     )
 
-    dispatcher.run_one_shot(project: "p1", now: T0)
+    result = dispatcher.run_one_shot(project: "p1", now: T0)
 
     assert_equal [ "p1" ], reconciliations.fetch(0).fetch(:projects)
+    refute reconciliations.fetch(0).fetch(:retry_admission_open).call,
+           "drain reconciliation must defer module retry admission"
+    assert_equal [ "dispatch:module:run:retry-1" ],
+                 result.fetch(:items).map { |item| item.fetch("id") }
     assert logger.events.any? { |name, _attributes| name == :module_runtime }
+  end
+
+  def test_run_one_shot_reports_completed_module_work_in_ran
+    runtime = Object.new
+    runtime.define_singleton_method(:tick) do |**|
+      [ { project: "p1", status: :ok, decisions: 0, schedules: 0,
+          completions: 1, reason: nil } ]
+    end
+    runtime.define_singleton_method(:reconcile) { |**| [] }
+    runtime.define_singleton_method(:readiness) { |**| [] }
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ], module_runtime: runtime
+    )
+
+    result = dispatcher.run_one_shot(project: "p1", now: T0)
+
+    module_run = result.fetch(:ran).fetch(0)
+    assert_equal "dispatch:module:p1", module_run.fetch("id")
+    assert_equal "completed", module_run.fetch("outcome")
+    assert_equal(
+      { "decisions" => 0, "schedules" => 0, "completions" => 1 },
+      module_run.fetch("details")
+    )
+  end
+
+  def test_run_one_shot_without_explicit_drain_bound_preserves_worker_timeout
+    monotonic_calls = 0
+    dispatcher, supervisor = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ],
+      monotonic_clock: -> { monotonic_calls += 1; monotonic_calls * 1_000 }
+    )
+    supervisor.in_flight_results = [ true, false ]
+
+    result = dispatcher.run_one_shot(project: "p1", now: T0, sleeper: ->(*) { })
+
+    assert result.fetch(:safe_to_stop)
+    assert_equal 0, monotonic_calls,
+                 "the parent must not replace normal worker timeouts with shutdown grace"
   end
 
   def test_run_one_shot_fails_when_module_reconciliation_is_blocked
@@ -1064,6 +1141,26 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_includes items.map { |item| item.fetch("id") }, "dispatch:module:schedule:1"
   end
 
+  def test_one_shot_readiness_includes_pending_patrol_fix_continuations
+    scheduler = Object.new
+    scheduler.define_singleton_method(:tick) { |**| [] }
+    scheduler.define_singleton_method(:readiness) do |project:, now:|
+      [ {
+        "bucket" => "runnable_now", "id" => "dispatch:patrol-fix:occurrence-1",
+        "component" => "dispatch", "reason" => "patrol_fix_admission",
+        "next_check_at" => nil, "condition" => nil
+      } ]
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], scope_projects: [ "p1" ],
+      patrol_fix_admission_scheduler: scheduler
+    )
+
+    items = dispatcher.observe_one_shot(project: "p1", now: T0).fetch(:items)
+
+    assert_equal [ "dispatch:patrol-fix:occurrence-1" ], items.map { |item| item.fetch("id") }
+  end
+
   def test_one_shot_row_projection_covers_every_policy_owner
     dispatcher, _supervisor, controller = make_dispatcher(
       rows: [], scope_projects: [ "p1" ]
@@ -1076,7 +1173,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     }
     gates = {
       "eligible" => :ok, "global" => :global_cap, "cooldown" => :cooldown,
-      "daily" => :daily_cap, "quarantine" => :quarantined
+      "project" => :project_cap, "daily" => :daily_cap, "quarantine" => :quarantined
     }
     dispatcher.define_singleton_method(:one_shot_policy_decision) do |item, **|
       decisions.fetch(item.slug, :dispatch)
@@ -1093,7 +1190,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_nil dispatcher.send(:row_pending_item, row(slug: "none", action: nil), now: T0)
 
     rows = [
-      row(slug: "eligible"), row(slug: "global"), row(slug: "cooldown"),
+      row(slug: "eligible"), row(slug: "global"), row(slug: "project"), row(slug: "cooldown"),
       row(slug: "daily"), row(slug: "quarantine"), row(slug: "debounce"),
       row(slug: "dependency", blocked_by: "parent"),
       row(slug: "operator-dependency", depends_on: [ "parent" ]),
@@ -1106,10 +1203,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
     projected = rows.map { |item| dispatcher.send(:row_pending_item, item, now: T0) }
 
     assert_equal "runnable_now", projected.fetch(0).fetch("bucket")
-    assert_equal %w[waiting_external waiting_external waiting_external],
-                 projected.slice(1, 3).map { |item| item.fetch("bucket") }
-    assert_equal "waiting_operator", projected.fetch(4).fetch("bucket")
-    assert_equal 42, projected.fetch(8).dig("condition", "pr")
+    assert_equal [ "waiting_external", "runnable_now", "waiting_external", "waiting_external" ],
+                 projected.slice(1, 4).map { |item| item.fetch("bucket") }
+    assert_equal "project_cap", projected.fetch(2).fetch("reason")
+    assert_equal "waiting_operator", projected.fetch(5).fetch("bucket")
+    assert_equal 42, projected.fetch(9).dig("condition", "pr")
     assert_nil dispatcher.send(:time_condition, nil)
 
     actual_dispatcher, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
@@ -9464,6 +9562,25 @@ end
     # the failing method name, like the other *_swallows_errors tests.
     assert(logger.events.any? { |(n, a)| n == :fatal && a[:message].to_s.include?("recover_dispatch_claims") },
            "the swallowed error must surface as a :fatal log event")
+  end
+
+  def test_recover_dispatch_claims_mutates_only_projects_with_acquired_guards
+    observed = nil
+    repository = Object.new
+    repository.define_singleton_method(:recover_claims) do |**options|
+      observed = options
+      []
+    end
+    ownership = Object.new
+    ownership.define_singleton_method(:owned_projects) { [ "owned" ] }
+    dispatcher, = make_dispatcher(
+      rows: [], dispatch_repository: repository,
+      project_ownership: ownership
+    )
+
+    dispatcher.send(:recover_dispatch_claims, now: T0)
+
+    assert_equal [ "owned" ], observed.fetch(:projects)
   end
 
   def test_preclaim_dispatch_request_raises_on_claim_failure

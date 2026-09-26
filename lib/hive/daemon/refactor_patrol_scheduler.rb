@@ -577,6 +577,7 @@ module Hive
           cfg = @config_loader.call(entry.fetch("path"))
           next unless cfg.dig("daemon", "enabled") == true
           next unless Hive::Workflows.coding_id?(cfg["default_workflow"])
+          next unless cfg.dig("refactor_patrol", "enabled") == true
 
           entry.merge("_refactor_patrol_cfg" => cfg)
         rescue StandardError => e

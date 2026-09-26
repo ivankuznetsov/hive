@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, lib/hive/babysitter/git_policy.rb, lib/hive/babysitter/gh_policy.rb, lib/hive/babysitter/passthrough_runner.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb
 created: 2026-05-26
-updated: 2026-09-25
+updated: 2026-09-26
 tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
@@ -70,10 +70,13 @@ successful projects. A verified live-owner refusal remains visible in
 `projects` and `owning_projects`, but is not an aggregate failure; it always
 forces `safe_to_stop` and `host_stop_allowed` false. Observation failures make
 the aggregate `partial_failure`, return exit 75, and null its combined
-readiness. A daemon-owned standalone project refuses with `daemon_owned` and
-exit 75; stop the daemon or unenroll that project before scheduling its
-babysitter one-shot. The normal long-lived daemon and babysitter services may
-still coexist because their service loops retain separate execution guards.
+readiness. Malformed registry rows are retained as synthetic per-project
+configuration errors, so an incomplete project inventory cannot claim that the
+host is safe to stop. A daemon-owned standalone project refuses with
+`daemon_owned` and exit 75; stop the daemon or unenroll that project before
+scheduling its babysitter one-shot. The normal long-lived daemon and
+babysitter services may still coexist because their service loops retain
+separate execution guards.
 
 `--once --dry-run` performs the real read-only observation but starts no repair
 and reports no `ran` entries. It does not append babysitter event or status
@@ -172,12 +175,12 @@ warning, but the permissive file is left untouched and receives no new argv.
 
 ## Output, errors, serialization, and exit codes
 
-`hive babysit` is text-only: it has no JSON schema, so JSON serialization and a
-serialization fallback are not applicable. Lifecycle, configuration, PID-file,
-Git, GitHub, worktree, and agent failures are reported as command errors rather
-than structured documents. Successful lifecycle and one-shot operations exit
-`0`; ordinary operational failures exit `1`, invalid command shapes exit `64`,
-and software failures exit `70`.
+Service lifecycle subcommands remain human-readable. Every `--once` operation
+emits exactly one `hive-one-shot.v1` JSON document, including usage,
+configuration, ownership, observation, and adapter-construction failures.
+Successful lifecycle and one-shot operations exit `0`; failed one-shot reports
+use their typed exit code, ordinary lifecycle failures exit `1`, invalid
+command shapes exit `64`, and software failures exit `70`.
 
 ## Tests
 

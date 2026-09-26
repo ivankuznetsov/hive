@@ -752,18 +752,76 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       pid => {
         project: "p1", slug: "architecture", stage: "refactor-patrol",
         command: "hive refactor-patrol p1", started_at: Time.utc(2026, 7, 10),
-        log_path: nil, dry_run: false, dispatch_token: { kind: :architecture_patrol }
+        log_path: nil, dry_run: false, pgid: 4321,
+        dispatch_token: { kind: :architecture_patrol }
       }
     })
-    statuses = [ nil, Struct.new(:exitstatus).new(nil) ]
-    kills = []
-    sup.define_singleton_method(:pgid_for) { |_child_pid| 4321 }
-    sup.define_singleton_method(:safe_kill) { |signal, target| kills << [ signal, target ] }
-    sup.define_singleton_method(:wait_for_child) { |_child_pid, _seconds| statuses.shift }
-
-    assert sup.terminate_child(pid, grace_sec: 0)
-    assert_equal [ [ :TERM, -4321 ], [ :KILL, -4321 ] ], kills
+    status = Struct.new(:exitstatus).new(nil)
+    arguments = nil
+    with_replaced_singleton_method(
+      Hive::Daemon::ChildSupervisor, :terminate_pid,
+      lambda { |**options| arguments = options; status }
+    ) do
+      assert sup.terminate_child(pid, grace_sec: 0)
+    end
+    assert_equal 4321, arguments.fetch(:pgid)
     assert_equal pid, sup.reap_all.first.pid
+  end
+
+  def test_wait_for_pid_uses_exact_nonblocking_wait_until_monotonic_deadline
+    now = 0.0
+    waits = []
+    with_replaced_singleton_method(
+      Process, :wait2, lambda { |pid, flags| waits << [ pid, flags ]; [ nil, nil ] }
+    ) do
+      status = Hive::Daemon::ChildSupervisor.wait_for_pid(
+        pid: 321, deadline: 0.03, monotonic_clock: -> { now },
+        sleeper: ->(seconds) { now += seconds }
+      )
+      assert_nil status
+    end
+    assert waits.all? { |pid, flags| pid == 321 && flags == Process::WNOHANG }
+    assert_operator waits.length, :>=, 2
+  end
+
+  def test_terminate_pid_kills_descendants_after_direct_child_is_reaped
+    pid = 4321
+    pgid = 9876
+    status = Struct.new(:exitstatus).new(nil)
+    waited = false
+    killed = false
+    group_probes_after_kill = 0
+    now = 0.0
+    kills = []
+    wait_stub = lambda do |_pid, _flags|
+      raise Errno::ECHILD if waited
+
+      waited = true
+      [ pid, status ]
+    end
+    kill_stub = lambda do |signal, target|
+      if signal == 0
+        if killed
+          group_probes_after_kill += 1
+          raise Errno::ESRCH if group_probes_after_kill > 1
+        end
+        1
+      else
+        kills << [ signal, target ]
+        killed = true if signal == :KILL
+        1
+      end
+    end
+    with_replaced_singleton_method(Process, :wait2, wait_stub) do
+      with_replaced_singleton_method(Process, :kill, kill_stub) do
+        observed = Hive::Daemon::ChildSupervisor.terminate_pid(
+          pid: pid, pgid: pgid, grace_sec: 0.03,
+          monotonic_clock: -> { now }, sleeper: ->(seconds) { now += seconds }
+        )
+        assert_same status, observed
+      end
+    end
+    assert_equal [ [ :TERM, -pgid ], [ :KILL, -pgid ] ], kills
   end
 
   def test_process_identity_requires_verified_start_time_and_process_group

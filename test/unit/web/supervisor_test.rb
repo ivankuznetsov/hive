@@ -426,6 +426,29 @@ class WebSupervisorTest < Minitest::Test
     assert_equal [ "web" ], started
   end
 
+  def test_start_child_updates_an_existing_child_while_admission_is_closed
+    supervisor = Hive::Web::Supervisor.new(persistent_admission: -> { false })
+    existing = Child.new(name: "web", argv: %w[old], pid: nil, started_at: nil, desired: false)
+    supervisor.instance_variable_get(:@children) << existing
+
+    refute supervisor.send(:start_child, "web", %w[new command])
+    assert_equal %w[new command], existing.argv
+    assert existing.desired
+  end
+
+  def test_supervisor_identity_failures_refuse_start_and_leave_cleanup_best_effort
+    supervisor = build
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { nil }) do
+      error = assert_raises(Hive::Error) { supervisor.send(:publish_supervisor_identity!) }
+      assert_match(/cannot persist process identity/, error.message)
+    end
+
+    supervisor.instance_variable_set(:@supervisor_identity, { "pid" => Process.pid })
+    supervisor.define_singleton_method(:pid_file) { raise IOError, "read-only state" }
+    _out, errors = capture_io { supervisor.send(:clear_supervisor_identity!) }
+    assert_includes errors, "identity receipt cleanup failed"
+  end
+
   def test_start_due_restarts_respawns_only_due_entries_and_not_while_stopping
     with_tmp_global_config do
       sup = build

@@ -113,6 +113,41 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
+  def test_adopt_rejects_unavailable_or_mismatched_child_identity
+    unavailable = Object.new
+    unavailable.define_singleton_method(:capture) { |_pid| nil }
+    with_registry(process_identity: unavailable) do |_database, registry, _root|
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        registry.adopt!("missing-reservation", pid: Process.pid)
+      end
+      assert_equal :process_identity_unavailable, error.code
+    end
+
+    identities = [
+      Hive::Attempts::ProcessSnapshot.new(
+        pid: 100, start_fingerprint: "owner", session_id: 100, process_group_id: 100
+      ),
+      Hive::Attempts::ProcessSnapshot.new(
+        pid: 101, start_fingerprint: "registered", session_id: 101, process_group_id: 101
+      ),
+      Hive::Attempts::ProcessSnapshot.new(
+        pid: 102, start_fingerprint: "adopting", session_id: 102, process_group_id: 102
+      )
+    ]
+    process_identity = Object.new
+    process_identity.define_singleton_method(:capture) { |_pid| identities.shift }
+    with_registry(process_identity: process_identity) do |_database, registry, _root|
+      reservation = registry.reserve!(origin: "daemon_child", role: "command", owner_pid: 100)
+      registry.register!(reservation.id, pid: 101)
+
+      assert_raises(Hive::RuntimeControlPlane::StaleLifecycle) do
+        registry.adopt!(reservation.id, pid: 102)
+      end
+    ensure
+      reservation&.release_fence!
+    end
+  end
+
   def test_agent_attempt_root_is_unverifiable_without_delegated_custody
     with_registry do |database, registry, root|
       reservation = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "a-1")
@@ -233,6 +268,51 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
       assert_equal "hivebox_supervisor",
                    verdict.disqualifying_inventory.first.fetch("service_identity")
       assert_equal Process.pid, verdict.disqualifying_inventory.first.fetch("pid")
+    end
+  end
+
+  def test_absence_checks_fail_closed_when_custody_or_legacy_receipts_cannot_be_read
+    custody = Object.new
+    custody.define_singleton_method(:verifiable?) { |_row| true }
+    custody.define_singleton_method(:members) { |_path| raise IOError, "unavailable" }
+    missing_identity = Object.new
+    missing_identity.define_singleton_method(:status) { |_row| :missing }
+    with_registry(process_identity: missing_identity) do |database, registry, root|
+      row = { pid: Process.pid, start_fingerprint: "old", session_id: Process.pid,
+              process_group_id: Process.pid, custody_path: "/hive/test" }
+      guarded_registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root, process_identity: missing_identity, custody: custody
+      )
+      refute guarded_registry.descendant_absence_verified?(row)
+
+      capability = Hive::RuntimeControlPlane::QuiescenceCapability.new(
+        database: database, state_home: root, process_identity: missing_identity, custody: custody
+      )
+      refute capability.send(:safely_absent?, row)
+
+      File.write(File.join(root, ".daemon.pid"), "---\n: [\n")
+      legacy = capability.send(:known_legacy_processes)
+      assert_equal "pid_receipt_unreadable", legacy.first.fetch("unknown_reason")
+    end
+  end
+
+  def test_capability_records_an_inherited_supervisor_when_its_identity_is_available
+    identity = Hive::Attempts::ProcessSnapshot.new(
+      pid: 123, start_fingerprint: "supervisor", session_id: 123, process_group_id: 123
+    )
+    process_identity = Object.new
+    process_identity.define_singleton_method(:capture) { |_pid| identity }
+    with_registry(process_identity: process_identity) do |database, _registry, root|
+      capability = Hive::RuntimeControlPlane::QuiescenceCapability.new(
+        database: database, state_home: root, process_identity: process_identity,
+        custody: Hive::Attempts::ProcessCustody.unsupported("test")
+      )
+
+      legacy = with_env("HIVEBOX_SUPERVISOR_PID" => "123") do
+        capability.send(:known_legacy_processes)
+      end
+
+      assert_equal [ "hivebox_supervisor" ], legacy.map { |entry| entry.fetch("service_identity") }
     end
   end
 

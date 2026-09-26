@@ -364,6 +364,25 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_quiescence_upgrade_refuses_to_replace_a_database_with_an_uncheckpointed_source_wal
+    with_database do |database|
+      source = Object.new
+      source.define_singleton_method(:fetch) do |_sql|
+        [ Struct.new(:values).new([ 1, 3, 2 ]) ]
+      end
+      source.define_singleton_method(:disconnect) { true }
+
+      error = with_replaced_singleton_method(Sequel, :connect, ->(**) { source }) do
+        assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+          database.send(:checkpoint_upgrade_source!)
+        end
+      end
+
+      assert_equal :quiescence_upgrade_source_checkpoint_failed, error.code
+      assert_equal({ busy: 1, log_frames: 3, checkpointed_frames: 2 }, error.details)
+    end
+  end
+
   def test_migration_and_feature_probe_failures_are_typed
     with_tmp_dir do |root|
       database = Hive::RuntimeControlPlane::Database.new(path: File.join(root, "runtime.sqlite3"))

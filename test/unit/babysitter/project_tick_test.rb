@@ -332,6 +332,43 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  # Persistently red PRs must not win every tick: never-attempted PRs go
+  # first, then the least recently attempted, regardless of age or priority.
+  def test_selection_round_robins_by_last_attempt
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      events = File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      FileUtils.mkdir_p(File.dirname(events))
+      File.write(events, [
+        { "ts" => "2026-05-26T12:00:00Z", "pr" => 1, "action" => "agent-fix", "outcome" => "success" },
+        { "ts" => "2026-05-26T09:00:00Z", "pr" => 2, "action" => "rebase", "outcome" => "success" },
+        { "ts" => "2026-05-26T13:00:00Z", "pr" => 3, "action" => "skipped", "outcome" => "draft_pr" }
+      ].map { |record| JSON.generate(record) }.join("\n") + "\nnot json\n")
+      prs = [
+        { "number" => 1, "mergeStateStatus" => "BLOCKED", "updatedAt" => "2026-05-01T00:00:00Z" },
+        { "number" => 2, "mergeStateStatus" => "BLOCKED", "updatedAt" => "2026-05-02T00:00:00Z" },
+        { "number" => 3, "mergeStateStatus" => "BEHIND", "updatedAt" => "2026-05-25T00:00:00Z" }
+      ]
+
+      ordered = Hive::Babysitter::ProjectTick.fair_order(prs, project).map { |pr| pr["number"] }
+
+      assert_equal [ 3, 2, 1 ], ordered, "never attempted, then oldest attempt, then most recent"
+    end
+  end
+
+  def test_missing_or_unreadable_attempt_log_means_no_history
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      assert_equal({}, Hive::Babysitter::ProjectTick.last_attempt_times(project))
+      events = File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      FileUtils.mkdir_p(File.dirname(events))
+      File.write(events, "")
+      with_replaced_singleton_method(File, :open, ->(*) { raise Errno::EACCES, "denied" }) do
+        assert_equal({}, Hive::Babysitter::ProjectTick.last_attempt_times(project))
+      end
+    end
+  end
+
   # A malformed worktree.yml (non-hash) must not crash the scan; that task
   # simply contributes no owned branch and its PR is processed normally.
   def test_malformed_worktree_pointer_does_not_crash_ownership_scan

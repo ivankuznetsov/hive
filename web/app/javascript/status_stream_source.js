@@ -503,6 +503,32 @@ class HiveStatusStreamSourceElement extends HTMLElement {
 
   connectedCallback() {
     if (!this.isConnected) return
+
+    this.statusVisibilityDocument?.removeEventListener("visibilitychange", this.statusVisibilityChanged)
+    this.statusVisibilityDocument = this.ownerDocument
+    this.statusVisibilityDocument.addEventListener("visibilitychange", this.statusVisibilityChanged)
+    this.statusVisibilityChanged()
+  }
+
+  disconnectedCallback() {
+    this.statusVisibilityDocument?.removeEventListener("visibilitychange", this.statusVisibilityChanged)
+    this.statusVisibilityDocument = null
+    this.disconnectStatusStream()
+  }
+
+  statusVisibilityChanged = () => {
+    if (!this.isConnected) return
+
+    if (this.ownerDocument.hidden) {
+      this.clearCatchUpRefresh()
+      this.disconnectStatusStream()
+    } else {
+      this.connectStatusStream()
+    }
+  }
+
+  connectStatusStream() {
+    if (!this.isConnected || this.ownerDocument.hidden) return
     if (this.statusOwner && this.statusOwner.state !== "disconnected") return
 
     if (this.catchUpRefresh?.location !== undefined
@@ -519,7 +545,7 @@ class HiveStatusStreamSourceElement extends HTMLElement {
     }
   }
 
-  disconnectedCallback() {
+  disconnectStatusStream() {
     const owner = this.statusOwner
     this.statusOwner = null
     const cleanup = new CleanupCollector()

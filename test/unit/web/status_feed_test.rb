@@ -50,7 +50,7 @@ class StatusFeedTest < Minitest::Test
         ensure
           subscriber&.kill
           subscriber&.join
-          feed.stop
+          stop_controlled_feed(feed, producer)
         end
       end
     end
@@ -670,7 +670,7 @@ class StatusFeedTest < Minitest::Test
     ensure
       threads&.each(&:kill)
       threads&.each { |thread| thread.join(2) }
-      feed&.stop
+      stop_controlled_feed(feed, status)
     end
   end
 
@@ -852,21 +852,22 @@ class StatusFeedTest < Minitest::Test
         interval: 5.0,
         status_command: CountingStatus.new([ { "projects" => [] } ])
       )
+      feed.prime({ "projects" => [] })
       feed.each_snapshot { break }
       poller = feed.instance_variable_get(:@poller)
-      kill_requested = Queue.new
-      release_kill = Queue.new
-      original_kill = poller.method(:kill)
-      poller.define_singleton_method(:kill) do
-        kill_requested << true
-        release_kill.pop
-        original_kill.call
+      join_requested = Queue.new
+      release_join = Queue.new
+      original_join = poller.method(:join)
+      poller.define_singleton_method(:join) do
+        join_requested << true
+        release_join.pop
+        original_join.call
       end
 
       stopper = Thread.new { feed.stop }
-      Timeout.timeout(2) { kill_requested.pop }
+      Timeout.timeout(2) { join_requested.pop }
       claimed_token = feed.prime({ "projects" => [ { "name" => "new lifecycle" } ] })
-      release_kill << true
+      release_join << true
       stopper.join(2)
 
       refute stopper.alive?
@@ -876,7 +877,7 @@ class StatusFeedTest < Minitest::Test
       refute feed.current_version?(competing_token),
              "a competing render must not replace that preserved claim"
     ensure
-      release_kill << true if release_kill&.empty?
+      release_join << true if release_join&.empty?
       stopper&.join(2)
       feed&.stop
     end
@@ -1126,6 +1127,210 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_restarting_after_stop_refreshes_immediately_without_blocking_the_saved_state
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 60, status_command: producer)
+      feed.prime(previous)
+      first = Thread.new { feed.each_state { |state| break state } }
+      assert_equal previous, Timeout.timeout(2) { first.value }.payload
+      feed.stop
+
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal previous, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      assert_equal previous, feed.current_state.payload, "returning pages can read the saved frame while refreshing"
+      producer.release(updated)
+      assert_equal updated, Timeout.timeout(2) { states.pop }.payload
+
+      another = Thread.new { feed.each_state { |state| break state } }
+      assert_equal updated, Timeout.timeout(2) { another.value }.payload
+      assert_equal 1, producer.calls, "additional visible subscribers share the resumed refresh"
+      assert_equal 1, producer.max_active
+    ensure
+      [ first, subscriber, another ].compact.each do |thread|
+        thread.kill
+        thread.join
+      end
+      stop_controlled_feed(feed, producer)
+    end
+  end
+
+  def test_repeated_stop_and_resume_share_the_in_flight_refresh_which_can_publish_while_paused
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 60, status_command: producer)
+      feed.prime(previous)
+      feed.each_state { break }
+      feed.stop
+
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal previous, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      poller = feed.instance_variable_get(:@poller)
+
+      3.times do
+        subscriber.kill
+        subscriber.join
+        Timeout.timeout(2) { feed.stop }
+        assert poller.alive?, "hiding the last page must let its active refresh finish"
+
+        subscriber = Thread.new { feed.each_state { |state| states << state } }
+        assert_equal previous, Timeout.timeout(2) { states.pop }.payload,
+                     "returning pages receive retained data while sharing the unfinished scan"
+        assert_equal 1, feed.scan_count
+      end
+
+      subscriber.kill
+      subscriber.join
+      Timeout.timeout(2) { feed.stop }
+      producer.release(updated)
+      poller.join(2)
+
+      refute poller.alive?, "a paused feed must stop after publishing its active scan"
+      assert_equal updated, feed.current_state.payload
+      assert_equal 1, producer.calls
+      assert_equal 1, producer.max_active
+      assert_equal 1, feed.scan_count, "stopping must prevent another recurring scan"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+    end
+  end
+
+  def test_cold_refresh_survives_losing_its_subscriber_and_finishes_while_paused
+    with_tmp_global_config do
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 60, status_command: producer)
+      subscriber = Thread.new { feed.each_state { break } }
+      producer.wait_until_started
+      poller = feed.instance_variable_get(:@poller)
+
+      subscriber.kill
+      subscriber.join
+      Timeout.timeout(2) { feed.stop }
+      producer.release(updated)
+      poller&.join(2)
+
+      refute_nil feed.current_state, "the first scan must outlive the broadcaster that requested it"
+      assert_equal updated, feed.current_state.payload
+      assert_equal 1, producer.calls
+      assert_equal 1, producer.max_active
+      assert_equal 1, feed.scan_count
+      refute poller.alive?, "finishing the initial scan must not start hidden-page polling"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+    end
+  end
+
+  def test_resuming_during_poller_retirement_preserves_a_new_prime_and_starts_refreshing
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      primed = { "projects" => [ { "name" => "new lifecycle" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 60, status_command: producer)
+      feed.prime(previous)
+      feed.each_state { break }
+      feed.stop
+      feed.each_state { break }
+      producer.wait_until_started
+      retiring = feed.instance_variable_get(:@poller)
+      feed.stop
+
+      retired = Queue.new
+      release_retirement = Queue.new
+      original_wait = feed.method(:wait_for_next_poll)
+      feed.define_singleton_method(:wait_for_next_poll) do
+        keep_polling = original_wait.call
+        if Thread.current.equal?(retiring) && !keep_polling
+          retired << true
+          release_retirement.pop
+        end
+        keep_polling
+      end
+      producer.release(previous)
+      Timeout.timeout(2) { retired.pop }
+
+      claimed_token = feed.prime(primed)
+      assert feed.current_version?(claimed_token),
+             "a finishing poller must release its ownership before leaving the monitor"
+      release_retirement << true
+      retiring.join(2)
+      refute retiring.alive?
+      competing_token = feed.prime({ "projects" => [] })
+      refute feed.current_version?(competing_token), "retirement must not clear the new page's claim"
+
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal primed, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      producer.release(updated)
+      assert_equal updated, Timeout.timeout(2) { states.pop }.payload
+      assert_equal 2, producer.calls
+      assert_equal 1, producer.max_active
+    ensure
+      release_retirement << true if release_retirement&.empty?
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+      retiring&.join(2)
+      retiring&.kill
+      retiring&.join
+    end
+  end
+
+  def test_unexpected_poller_exit_releases_its_page_claim_and_allows_a_replacement_subscription
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      primed = { "projects" => [ { "name" => "replacement page" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 0.01, status_command: producer)
+      feed.prime(previous)
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal previous, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+
+      lost_poller = feed.instance_variable_get(:@poller)
+      lost_poller.kill
+      lost_poller.join
+      subscriber.kill
+      subscriber.join
+      assert_equal previous, feed.current_state.payload, "worker loss must retain the latest complete snapshot"
+      assert_equal 0, producer.calls, "the interrupted producer did not publish a result"
+      page_token = feed.prime(primed)
+      assert feed.current_version?(page_token), "the failed lifecycle must release its page's baseline claim"
+
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal primed, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      feed.stop
+      producer.release(updated)
+      assert_equal updated, Timeout.timeout(2) { states.pop }.payload
+      assert_equal 1, producer.calls
+      assert_equal 1, producer.max_active
+      assert_equal 2, feed.scan_count, "one replacement scan must recover from the aborted scan"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+      lost_poller&.kill
+      lost_poller&.join
+    end
+  end
+
   def test_state_serializes_every_public_field
     state = Hive::Web::StatusFeed::State.new(
       payload: { "projects" => [] },
@@ -1183,6 +1388,19 @@ class StatusFeedTest < Minitest::Test
   end
 
   private
+
+  # Production stop lets an in-flight scan finish. Test producers can block
+  # indefinitely, so release their barrier and drain the worker before the
+  # temporary Hive home is removed, including when an assertion fails.
+  def stop_controlled_feed(feed, producer)
+    poller = feed&.instance_variable_get(:@poller)
+    feed&.stop
+    producer&.release({ "projects" => [] })
+    poller&.join(2)
+  ensure
+    poller&.kill
+    poller&.join
+  end
 
   def status_token_in_fresh_process(payload)
     lib = File.expand_path("../../../lib", __dir__)

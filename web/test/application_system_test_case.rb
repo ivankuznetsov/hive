@@ -65,6 +65,14 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
   # made every later status refresh scan dozens of unrelated fixture tasks.
   def reset_system_test_projects!
     StatusBroadcaster.stop!
+    # Hidden pages let an in-flight scan finish. Drain it before replacing the
+    # fixture registry so the previous example cannot publish into this one.
+    poller = StatusBroadcaster.instance_variable_get(:@feed)&.instance_variable_get(:@poller)
+    if poller && !poller.join(5)
+      poller.kill
+      poller.join
+      raise "status scan did not finish before system fixture reset"
+    end
     StatusBroadcaster.feed = nil
 
     sandbox = File.expand_path(ENV.fetch("HIVE_TEST_HOME_ROOT"))

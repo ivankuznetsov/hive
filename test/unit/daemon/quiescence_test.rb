@@ -561,6 +561,25 @@ class HiveDaemonQuiescenceTest < Minitest::Test
     end
   end
 
+  def test_rebinding_a_stale_quiescing_clock_reports_writer_fence_contention
+    with_runtime do |root, database|
+      Hive::RuntimeControlPlane::LifecycleRepository.new(database: database).begin_quiesce!(
+        deadline_monotonic: 200, boot_id: "old-boot", shutdown_grace_sec: 25
+      )
+      database.define_singleton_method(:with_exclusive_writer) do |**|
+        raise Hive::ConcurrentRunError.new("writer busy", lock_path: "/writer")
+      end
+
+      result = coordinator(
+        root, database, capability: SequenceCapability.new(eligible)
+      ).call
+
+      assert_equal "writer_drain_timeout", result.reason
+      refute result.admission_open
+      assert_equal "quiescing", lifecycle(database).phase
+    end
+  end
+
   def test_attempt_repository_failure_returns_a_closed_admission_envelope
     with_runtime do |root, database|
       controller = coordinator(

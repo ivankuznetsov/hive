@@ -776,7 +776,7 @@ class AttemptsSupervisorTest < Minitest::Test
   def test_timeout_and_heartbeat_continue_while_descendant_holds_output_pipe
     worker_argv = [
       "/bin/sh", "-c",
-      "(trap '' TERM; exec sleep 10) & printf 'leader-exited\\n'; exit 0"
+      "trap '' TERM; (exec sleep 10) & printf 'leader-exited\\n'; exit 0"
     ]
     with_attempt(worker_argv: worker_argv) do |store, attempt|
       heartbeat_count = 0

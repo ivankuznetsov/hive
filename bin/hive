@@ -81,32 +81,7 @@ require "hive/llm_wiki_bootstrap"
 # The workflow creator owns two strict observation routes. They must stay
 # byte-for-byte no-write even when an upgraded binary would otherwise repair
 # scheduler units during process startup.
-init_index = ARGV.index("init")
-workflow_index = ARGV.index("workflow")
-strict_no_write_route =
-  if Hive::RuntimeControlPlane::ActivationGate.command(ARGV) == "daemon"
-    %w[status quiesce resume].include?(
-      Hive::RuntimeControlPlane::ActivationGate.subcommand_after(
-        ARGV, "daemon", value_options: %w[--timeout]
-      )
-    )
-  elsif Hive::RuntimeControlPlane::ActivationGate.command(ARGV) == "runtime"
-    [ nil, "status" ].include?(
-      Hive::RuntimeControlPlane::ActivationGate.subcommand_after(ARGV, "runtime")
-    )
-  elsif init_index && (!workflow_index || init_index < workflow_index)
-    ARGV.drop(init_index + 1).any? do |arg|
-      arg == "--preview" || arg.match?(/\A--preview=true\z/i)
-    end
-  elsif workflow_index
-    workflow_subcommands = %w[new validate commit install list update remove publish].freeze
-    workflow_subcommand = ARGV.drop(workflow_index + 1).find do |arg|
-      workflow_subcommands.include?(arg)
-    end
-    workflow_subcommand == "validate"
-  else
-    false
-  end
+strict_no_write_route = Hive::RuntimeControlPlane::ActivationGate.strict_no_write_route?(ARGV)
 
 # Repair legacy path-keyed LLM-wiki timers as soon as an upgraded Hive binary
 # is invoked, including `hive --version`. The reconciliation is idempotent and

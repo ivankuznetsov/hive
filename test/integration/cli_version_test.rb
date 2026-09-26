@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "rbconfig"
 require "hive/commands/init"
+require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/task_meta"
 
 class CliVersionTest < Minitest::Test
@@ -84,6 +85,32 @@ class CliVersionTest < Minitest::Test
       end
 
       assert_startup_reconcile(Dir.pwd, home, [ "--version" ], expected: true)
+    end
+  end
+
+  def test_strict_no_write_routes_remain_available_while_admission_is_closed
+    with_tmp_global_config do |home|
+      with_tmp_git_repo do |project_root|
+        capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
+        database = Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(home)
+        ).open!
+        Hive::RuntimeControlPlane::LifecycleRepository.new(database: database).begin_quiesce!(
+          deadline_monotonic: 20, boot_id: "test", shutdown_grace_sec: 5
+        )
+        database.disconnect
+
+        assert_startup_reconcile(
+          project_root, home, %w[workflow validate coding --json], expected: false
+        )
+      end
+      with_tmp_git_repo do |project_root|
+        assert_startup_reconcile(
+          project_root, home,
+          [ "init", "--new-workflow", "editorial", "--minimal", "--preview", "--json" ],
+          expected: false
+        )
+      end
     end
   end
 
@@ -281,11 +308,19 @@ class CliVersionTest < Minitest::Test
       }
       bin = File.expand_path("../../bin/hive", __dir__)
       lib = File.expand_path("../../lib", __dir__)
+      runtime_before = runtime_storage_snapshot(home)
       out, err, status = Open3.capture3(env, RbConfig.ruby, "-I#{lib}", bin, *args, chdir: chdir)
 
       assert status.success?, "#{args.join(' ')} failed: #{out}\n#{err}"
       assert_equal expected, File.exist?(probe)
+      assert_equal runtime_before, runtime_storage_snapshot(home),
+                   "#{args.join(' ')} must not mutate runtime control-plane storage" unless expected
     end
+  end
+
+  def runtime_storage_snapshot(home)
+    path = Hive::Paths.runtime_control_plane_path(home)
+    Dir.glob("#{path}*").sort.to_h { |candidate| [ File.basename(candidate), File.binread(candidate) ] }
   end
 
   def assert_new_idea_includes(dir, text)

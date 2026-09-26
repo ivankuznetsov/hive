@@ -319,12 +319,14 @@ class WebSupervisorTest < Minitest::Test
   def test_run_starts_children_traps_signals_and_terminates_on_stop
     with_env("HIVEBOX_SUPERVISOR_PID" => "outer") do
       published_pids = []
+      published_receipts = []
       with_tmp_global_config do
         sup = build
         started = []
         sup.define_singleton_method(:start_child) do |name, argv|
           started << [ name, argv ]
           published_pids << ENV["HIVEBOX_SUPERVISOR_PID"]
+          published_receipts << Hive::PidFile.read(Hive::Paths.hivebox_supervisor_pid_path)
         end
         # Make the loop exit on its first iteration and turn terminate_all into a
         # no-op (no real children were spawned).
@@ -342,9 +344,14 @@ class WebSupervisorTest < Minitest::Test
                      "container web child must opt into public bind; owner gate still protects UI"
         assert_equal [ Process.pid.to_s, Process.pid.to_s ], published_pids,
                      "run must publish its pid before children are spawned"
+        assert published_receipts.all? { |payload| payload.fetch("pid") == Process.pid }
+        assert published_receipts.all? { |payload| payload.fetch("process_start_time") },
+               "run must persist supervisor identity before children are spawned"
         assert sup.instance_variable_get(:@terminated), "run must terminate_all on exit"
         assert_equal "outer", ENV["HIVEBOX_SUPERVISOR_PID"],
                      "run must restore the caller's supervisor pid when it exits"
+        refute_path_exists Hive::Paths.hivebox_supervisor_pid_path,
+                           "normal supervisor exit must remove its own identity receipt"
       end
     end
   end

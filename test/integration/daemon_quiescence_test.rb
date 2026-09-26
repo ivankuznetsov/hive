@@ -151,9 +151,10 @@ class DaemonQuiescenceIntegrationTest < Minitest::Test
       database_bytes = File.binread(database.path)
 
       with_trapped_process(root, "hivebox-supervisor") do |pid, signal_path|
-        payload = with_env("HIVEBOX_SUPERVISOR_PID" => pid.to_s) do
-          status_payload(root)
-        end
+        File.write(Hive::Paths.hivebox_supervisor_pid_path(root), {
+          "pid" => pid, "process_start_time" => Hive::Lock.process_start_time(pid)
+        }.to_yaml)
+        payload = with_env("HIVEBOX_SUPERVISOR_PID" => nil) { status_payload(root) }
 
         assert_equal "paused", payload.dig("lifecycle", "durable_phase")
         assert_equal "quiescing", payload.dig("lifecycle", "phase")

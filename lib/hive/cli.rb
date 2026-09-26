@@ -848,10 +848,13 @@ module Hive
     desc "plan-review TARGET ACTION", "Apply a freshness-bound plan critique action"
     long_desc <<~DESC
       Applies one typed action to the current plan critique. Copy the review,
-      generation, policy, target, and observation identities from `hive status
-      --json`; stale or conflicting actions are rejected without mutation.
+      generation, policy, target, and observation identities from
+      `hive plan-review TARGET show --json` (read live from the task; `hive
+      status` may serve a daemon-cached snapshot); stale or conflicting actions
+      are rejected without mutation. Each successful action returns the next
+      observation digest.
 
-      Actions: approve-finding, answer-finding, waive-coverage,
+      Actions: show (read-only), approve-finding, answer-finding, waive-coverage,
       downgrade-level, raise-level, retry, request-review.
     DESC
     option :review_id, type: :string, desc: "current logical review id"
@@ -868,6 +871,13 @@ module Hive
     option :reason, type: :string, desc: "required reason for waiver or downgrade"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def plan_review(target, action)
+      if action.to_s == "show"
+        require "hive/commands/plan_review_show"
+        return Hive::Commands::PlanReviewShow.new(
+          target, project: options[:project], json: options[:json]
+        ).call
+      end
+
       require "hive/commands/plan_review"
       Hive::Commands::PlanReview.new(
         target, action, review_id: options[:review_id],

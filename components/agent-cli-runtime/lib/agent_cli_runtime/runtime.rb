@@ -328,7 +328,8 @@ module AgentCliRuntime
     # human-readable wording, which differs per provider and changes freely.
     def status_code_from(text)
       value = text[/\A\s*(\d{3})\s*:/, 1] ||
-              text[/"(?:code|http_status)"\s*:\s*(\d{3})\b/, 1]
+              text[/"(?:code|http_status)"\s*:\s*(\d{3})\b/, 1] ||
+              text[/\Aunexpected status (\d{3})\b/, 1]
       code = value.to_i
       code.between?(100, 599) ? code : nil
     end

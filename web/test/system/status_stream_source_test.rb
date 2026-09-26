@@ -2626,7 +2626,13 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
               pageToken: host.dataset.statusVersion
             }
           } finally {
-            host.remove()
+            // Keep a connected source attached until Ruby observes its
+            // catch-up; removing it here can cancel the in-flight request.
+            if (source.hasAttribute("connected")) {
+              window.__hiveCatchUpHost = host
+            } else {
+              host.remove()
+            }
             sourceClass.retryDelay = originalDelay
           }
         })()
@@ -2637,6 +2643,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       catch_up = wait_for_status_catch_up(catch_ups, result.fetch("pageToken"))
       assert_equal result.fetch("pageToken"), catch_up.fetch("status_version")
     end
+  ensure
+    remove_catch_up_host
   end
 
   test "a partial Action Cable registration retires and recovers through a real catch-up" do
@@ -2696,7 +2704,13 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
               pageToken: host.dataset.statusVersion
             }
           } finally {
-            host.remove()
+            // Keep a connected source attached until Ruby observes its
+            // catch-up; removing it here can cancel the in-flight request.
+            if (source.hasAttribute("connected")) {
+              window.__hiveCatchUpHost = host
+            } else {
+              host.remove()
+            }
             sourceClass.retryDelay = originalDelay
           }
         })()
@@ -2711,6 +2725,8 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
       catch_up = wait_for_status_catch_up(catch_ups, result.fetch("pageToken"))
       assert_equal result.fetch("pageToken"), catch_up.fetch("status_version")
     end
+  ensure
+    remove_catch_up_host
   end
 
   test "a server startup rejection retries the live source" do
@@ -2918,6 +2934,13 @@ class StatusStreamSourceTest < ApplicationSystemTestCase
     yield completed
   ensure
     StatusChannel.define_method(:catch_up, original) if original
+  end
+
+  def remove_catch_up_host
+    execute_script(<<~JS) if page&.current_url
+      window.__hiveCatchUpHost?.remove()
+      delete window.__hiveCatchUpHost
+    JS
   end
 
   def wait_for_status_catch_up(catch_ups, token)

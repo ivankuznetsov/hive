@@ -9,6 +9,7 @@ require_relative "../test/support/test_partition"
 module HiveTestParallel
   # One host-wide lease bounds aggregate work across simultaneous agent checkouts.
   # The lock lives outside HOME/TMPDIR, which the test helper intentionally changes.
+  REAPED_GROUP_KILL_DELAY = 1.0
   LOCK_PATH = "/tmp/hive-test-parallel-#{Process.uid}.lock"
 
   def self.run(files:, root:, workers: ENV.fetch("HIVE_TEST_WORKERS", "2"), component_files: [],
@@ -40,6 +41,7 @@ module HiveTestParallel
     heartbeat = started
     active = {}
     groups = []
+    reaped_groups = {}
     temporary_roots = []
     success = true
     runs = 0
@@ -75,6 +77,14 @@ module HiveTestParallel
           next unless result
 
           log, file_count, receipt = active.delete(pid)
+          # A live grandchild pins the group id, so signalling the group is
+          # safe now and for a moment after. Once the group empties its id is
+          # free and can be reused as another program's process group (for
+          # example a concurrent Hive agent), so a reaped worker's group gets
+          # TERM now, KILL one second later, and is never signalled again.
+          signal_group("TERM", pid)
+          groups.delete(pid)
+          reaped_groups[pid] = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           status = result.last
           worker_success = status.success?
           begin
@@ -103,6 +113,12 @@ module HiveTestParallel
           output.flush
         end
         now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        reaped_groups.delete_if do |pid, reaped_at|
+          next false if now - reaped_at < REAPED_GROUP_KILL_DELAY
+
+          signal_group("KILL", pid)
+          true
+        end
         if now - heartbeat >= 30
           output.puts format("test:parallel: running %.0fs; %d active workers, %d queued jobs", now - started, active.length, jobs.length)
           output.flush
@@ -125,6 +141,7 @@ module HiveTestParallel
         sleep 0.05 unless active.empty?
       end
       groups.each { |pid| signal_group("KILL", pid) }
+      reaped_groups.each_key { |pid| signal_group("KILL", pid) }
       active.each_key { |pid| Process.waitpid(pid) }
       temporary_roots.each { |path| FileUtils.remove_entry(path) if File.exist?(path) }
       previous.each { |signal, handler| Signal.trap(signal, handler) }

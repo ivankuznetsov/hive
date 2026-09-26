@@ -936,6 +936,7 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       run!("git", "-C", root, "init", "--quiet")
       run!("git", "-C", root, "config", "user.name", "Hive Test")
       run!("git", "-C", root, "config", "user.email", "hive@example.test")
+      disable_git_auto_maintenance!(root)
       run!("git", "-C", root, "add", "input-plan.md")
       run!("git", "-C", root, "commit", "-m", "plan review fixture", "--quiet")
       request = Hive::PlanReview::Adapters::Base::Request.new(

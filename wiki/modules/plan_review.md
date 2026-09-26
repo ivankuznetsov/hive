@@ -411,6 +411,16 @@ left alone; for an already-waiting row, daemon `PlanApproval` owns the guarded
 required review that has not completed cannot leave the plan artifact claiming
 terminal completion, including on legacy capability-recovery re-entry.
 
+When a review ends `blocked` and a new linked plan runs, the planner receives
+every operator approval and answer from that review as a `plan_review_decisions`
+data block, so accepted decisions that only reached unpromoted candidate plans are
+not lost and are not re-asked.
+
+Plan-review agents, planner revisions, and the planner itself inspect a disposable
+detached checkout of the execution base (`origin/<default>` after a fetch, else
+the local default branch), never the project checkout's `HEAD`, which may be an
+unrelated or stale branch with local edits.
+
 Authority-bearing actions use:
 
 ```text
@@ -422,6 +432,15 @@ hive plan-review TARGET ACTION \
   [--target-fingerprint FINGERPRINT] [--answer TEXT] \
   [--coverage NAME] [--level LEVEL] [--reason TEXT]
 ```
+
+Read the current identities first with the lock-free, read-only
+`hive plan-review TARGET show [--json]` (`hive-plan-review-show.v1`). It reads
+the task's plan-review projection directly, reports the `TransitionGuard`
+freshness verdict decisions must pass, and lists open findings with their
+fingerprints; operational status can be a daemon-cached snapshot that lags each
+decision, which made chained decisions fail as stale. Each successful action's
+JSON also returns the next `observation_digest`, so several decisions can be
+chained without re-reading.
 
 Actions are `approve-finding`, `answer-finding`, `waive-coverage`,
 `downgrade-level`, `raise-level`, `retry`, and `request-review`. Every action is

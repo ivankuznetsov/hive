@@ -42,6 +42,18 @@ the same dispatcher; attempt-loss healing creates one deterministic recovery
 request and an independent replacement attempt. A daemon is optional after acceptance. Every surface attaches to
 or observes the durable attempt instead of owning agent lifetime.
 
+The supervisor ends an attempt (terminating the worker group, exit 75) only
+when it genuinely loses the lease: a lost compare-and-swap, a non-transient
+store failure, or SQLite lock contention that outlasts the busy tolerance
+(`busy_tolerance_sec`, default 600s and never below `stale_sec`). A heartbeat
+that loses a lock race is deferred and retried at the heartbeat cadence, and
+the worker checkpoint and terminal receipt writes retry through lock
+contention for the same tolerance; each failed write rolled back, so the
+observed record stays the CAS base. The tolerance may exceed the lease window
+because the reconciler only ever classifies a stale owner whose process still
+matches as a capacity-reserving suspect, never as lost. A supervisor that
+gives up prints the store error to stderr.
+
 ```text
 CLI ───────────────────────────────┐
 bot/web → request rows → daemon ───┼→ Attempts::Dispatcher

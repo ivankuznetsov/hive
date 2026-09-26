@@ -36,6 +36,7 @@ module Hive
       "hive-decide" => 1,
       "hive-plan-review" => 1,
       "hive-plan-review-action" => 1,
+      "hive-plan-review-show" => 1,
       "hive-plan-review-level" => 1,
       "hive-plan-review-adoption" => 1,
       "hive-findings" => 1,
@@ -374,7 +375,7 @@ module Hive
         emit_envelope(e) if envelope_enabled? && !@stdout_written
         raise
       rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        wrapped = Hive::InternalError.wrap(e)
         emit_envelope(wrapped) if envelope_enabled? && !@stdout_written
         raise wrapped
       end

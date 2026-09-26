@@ -185,6 +185,27 @@ module Hive
     def exit_code
       ExitCodes::SOFTWARE
     end
+
+    # Wrap an unexpected exception for a CLI boundary. SQLite lock contention
+    # that outlasted the busy timeout is transient, so it becomes the
+    # retryable ConcurrentRunError (exit 75) rather than an internal error.
+    def self.wrap(error)
+      return ConcurrentRunError.new("runtime database busy: #{error.message}") if sqlite_busy?(error)
+
+      new("internal error: #{error.class}: #{error.message}")
+    end
+
+    def self.sqlite_busy?(error)
+      seen = 0
+      while error && seen < 5
+        return true if error.class.name == "SQLite3::BusyException"
+        return true if error.message.to_s.include?("database is locked")
+
+        error = error.cause
+        seen += 1
+      end
+      false
+    end
   end
 
   # A detached durable worker reached a non-zero terminal outcome without

@@ -72,6 +72,136 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  BUSY = "attempt transition failed: SQLite3::BusyException: database is locked".freeze
+
+  def fail_store_calls(store, name, times:, message: BUSY)
+    calls = 0
+    original = store.method(name)
+    store.define_singleton_method(name) do |*args, **kwargs|
+      calls += 1
+      raise Hive::Attempts::RepositoryError, message if calls <= times
+
+      original.call(*args, **kwargs)
+    end
+    -> { calls }
+  end
+
+  def test_busy_heartbeats_are_deferred_while_the_lease_is_unexpired
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.3; exit 0" ]) do |store, attempt|
+      heartbeats = fail_store_calls(store, :heartbeat, times: 3)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+
+      assert_equal 0, supervisor.run
+      assert_operator heartbeats.call, :>, 3, "heartbeats resume after the busy ones"
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "succeeded", terminal.outcome
+      frames = Hive::Attempts::StreamLog.read(File.join(store.root, terminal.receipt.dig("log_reference", "path")))
+      assert frames.any? { |frame| frame.bytes.include?("heartbeat deferred") }
+    end
+  end
+
+  def test_heartbeats_busy_past_the_busy_tolerance_end_the_attempt
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 30" ]) do |store, attempt|
+      fail_store_calls(store, :heartbeat, times: Float::INFINITY)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 0.3, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 0.3
+      )
+
+      _, err = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+      assert_includes err, "lost its lease"
+      assert_includes err, "database is locked"
+    end
+  end
+
+  def test_non_busy_heartbeat_failures_end_the_attempt_immediately
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 30" ]) do |store, attempt|
+      heartbeats = fail_store_calls(store, :heartbeat, times: 1, message: "attempt transition failed: disk I/O error")
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+
+      capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+      assert_equal 1, heartbeats.call
+    end
+  end
+
+  def test_busy_terminal_receipt_is_retried
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 3" ]) do |store, attempt|
+      terminalizations = fail_store_calls(store, :terminalize, times: 2)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      assert_equal 3, supervisor.run
+      assert_equal 3, terminalizations.call
+      assert_equal "terminal", store.fetch(attempt.attempt_id).state
+    end
+  end
+
+  def test_busy_retries_stop_at_the_busy_tolerance
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      fail_store_calls(store, :terminalize, times: Float::INFINITY)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 0.2, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 0.2
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+    end
+  end
+
+  # A swapping host can hold the write lock past the lease window; a live
+  # owner is only a reconciler suspect then, so busy heartbeats keep deferring.
+  def test_busy_heartbeats_outlast_the_lease_window
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.6; exit 0" ]) do |store, attempt|
+      fail_store_calls(store, :heartbeat, times: 40)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 0.1, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 5
+      )
+
+      assert_equal 0, supervisor.run
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
+  def test_lost_compare_and_swap_is_never_retried
+    { heartbeat: "sleep 30", terminalize: "exit 0" }.each do |name, script|
+      with_attempt(worker_argv: [ "/bin/sh", "-c", script ]) do |store, attempt|
+        calls = 0
+        store.define_singleton_method(name) do |*|
+          calls += 1
+          raise Hive::Attempts::CompareAndSwapFailed, "attempt lease compare-and-swap lost"
+        end
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY),
+          heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+        )
+
+        capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+        assert_equal 1, calls, "#{name} must not retry a lost lease"
+      end
+    end
+  end
+
   def test_supervisor_does_not_busy_spin_after_output_pipes_close
     worker_argv = [ "/bin/sh", "-c", "exec 1>&- 2>&-; sleep 1" ]
     with_attempt(worker_argv: worker_argv) do |store, attempt|

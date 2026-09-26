@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-09-25
+updated: 2026-09-26
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -68,6 +68,17 @@ therefore requires no agent attempt roots, no unresolved launch reservation,
 no active registered process, and no discoverable legacy Hive service. Setting
 a registration's `proven_child_safe` bit cannot widen this rule: its origin must
 also be qualified by the fixed `LaunchCoverage` table, and currently none is.
+
+Detached Hive CLI commands created by `hive new`, the TUI, the bot, or the
+daemon are reserved by their parent before `Process.spawn`, remain blocked at
+`bin/hive`'s launch gate until the parent registers their process identity, and
+then adopt that exact durable row for exit cleanup. A parent crash during the
+handoff leaves unresolved ownership in the registry rather than an invisible
+child. Hivebox similarly publishes `.hivebox-supervisor.pid` with PID-reuse
+identity before starting any children and removes only its own receipt on
+normal exit. Independent controllers such as
+`docker exec ... hive daemon status` therefore discover a live supervisor
+without relying on its process-local environment.
 
 For the narrow backup-safe result, the two observations are inseparable:
 

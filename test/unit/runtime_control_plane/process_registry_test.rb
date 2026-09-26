@@ -214,6 +214,28 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
+  def test_persisted_hivebox_supervisor_identity_is_visible_without_inherited_environment
+    with_registry do |database, _registry, root|
+      File.write(Hive::Paths.hivebox_supervisor_pid_path(root), {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid)
+      }.to_yaml)
+
+      verdict = with_env("HIVEBOX_SUPERVISOR_PID" => nil) do
+        Hive::RuntimeControlPlane::QuiescenceCapability.new(
+          database: database, state_home: root,
+          custody: Hive::Attempts::ProcessCustody.unsupported("test")
+        ).call
+      end
+
+      refute verdict.eligible?
+      assert_equal "legacy_process_unregistered", verdict.reason
+      assert_equal "hivebox_supervisor",
+                   verdict.disqualifying_inventory.first.fetch("service_identity")
+      assert_equal Process.pid, verdict.disqualifying_inventory.first.fetch("pid")
+    end
+  end
+
   private
 
   def with_registry(process_identity: Hive::Attempts::ProcessIdentity.new)

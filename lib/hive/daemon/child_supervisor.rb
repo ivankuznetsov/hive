@@ -5,6 +5,7 @@ require "time"
 require "tmpdir"
 require "hive/lock"
 require "hive/process_kill"
+require "hive/runtime_control_plane/command_registration"
 
 module Hive
   module Daemon
@@ -149,8 +150,9 @@ module Hive
         log_io.puts("[hive-daemon] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
 
-        pid = Process.spawn(
-          *argv, pgroup: true, out: log_io, err: log_io, close_others: true
+        pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
+          *argv, role: argv[1] || "daemon-child",
+          pgroup: true, out: log_io, err: log_io, close_others: true
         )
         log_io.close
 

@@ -3,11 +3,15 @@
 # resolve even when this file is required directly as the container entrypoint
 # does (`ruby -rhive/web/supervisor`), before any `require "hive"`.
 require "hive"
+require "hive/atomic_file"
 require "hive/config"
+require "hive/pid_file"
 
 module Hive
   module Web
     class Supervisor
+      include Hive::PidFile
+
       # `desired` records whether the supervisor wants this child running.
       # A supervisor-initiated stop (reload disabling the bot) flips it to
       # false BEFORE the TERM so the subsequent signal-death reap cannot be
@@ -44,6 +48,7 @@ module Hive
         # Children inherit this so a child (the web tier handling "enable
         # Telegram") can ask the supervisor to (re)start the bot via SIGHUP.
         ENV["HIVEBOX_SUPERVISOR_PID"] = Process.pid.to_s
+        publish_supervisor_identity!
         previous_signal_handlers = trap_signals
         start_child("daemon", %w[hive daemon start])
         start_child("web", WEB_CHILD_ARGV)
@@ -59,6 +64,7 @@ module Hive
         begin
           terminate_all
         ensure
+          clear_supervisor_identity!
           if had_supervisor_pid
             ENV["HIVEBOX_SUPERVISOR_PID"] = previous_supervisor_pid
           else
@@ -69,6 +75,32 @@ module Hive
       end
 
       private
+
+      def pid_file
+        Hive::Paths.hivebox_supervisor_pid_path
+      end
+
+      def publish_supervisor_identity!
+        start_time = Hive::Lock.process_start_time(Process.pid)
+        unless start_time
+          raise Hive::Error,
+                "hivebox supervisor: cannot persist process identity; refusing to start children"
+        end
+
+        @supervisor_identity = pid_file_payload(Process.pid, start_time)
+        Hive::AtomicFile.write(pid_file, @supervisor_identity.to_yaml, mode: 0o600)
+      end
+
+      def clear_supervisor_identity!
+        return unless @supervisor_identity
+
+        payload = Hive::PidFile.parse_payload(File.read(pid_file))
+        File.delete(pid_file) if payload == @supervisor_identity
+      rescue Errno::ENOENT
+        nil
+      rescue SystemCallError, IOError => e
+        warn "hivebox supervisor: identity receipt cleanup failed (#{e.message})"
+      end
 
       def trap_signals
         previous = {}

@@ -34,6 +34,10 @@ module Hive
       File.join(root, ".runtime-quiescence-operation.lock")
     end
 
+    def hivebox_supervisor_pid_path(root = state_home)
+      File.join(root, ".hivebox-supervisor.pid")
+    end
+
     def runtime_payload_root(root = state_home)
       File.join(root, "runtime-payloads")
     end

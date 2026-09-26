@@ -149,6 +149,31 @@ module Hive
         build_registration(row)
       end
 
+      # A parent may reserve and identity-register a bin/hive child before
+      # releasing its launch gate. The child adopts that exact durable row so
+      # its at_exit cleanup cannot leave a duplicate parent-owned registration
+      # behind or create an unfenced registration gap.
+      def adopt!(reservation_id, pid:)
+        identity = @process_identity.capture(pid)
+        unless identity
+          raise Unavailable.new(
+            "owned process identity is unavailable during launch handoff",
+            code: :process_identity_unavailable, action: "stop the process and retry"
+          )
+        end
+        row = @database.read do |db|
+          db[:owned_processes].where(
+            reservation_id: reservation_id.to_s, state: "running"
+          ).first
+        end
+        unless row && row.fetch(:pid) == identity.pid &&
+            row.fetch(:start_fingerprint) == identity.start_fingerprint
+          raise StaleLifecycle.new("launch handoff does not match this process")
+        end
+
+        build_registration(row)
+      end
+
       def mark_stopped_by_reservation!(reservation_id, authority: nil, reason: nil,
                                        require_descendant_absence: false)
         operation = lambda do |db|
@@ -343,14 +368,17 @@ module Hive
       end
 
       def known_legacy_processes
-        paths = %w[.daemon.pid .bot.pid .babysitter.pid].map { |name| File.join(@state_home, name) }
-        entries = paths.filter_map do |path|
+        paths = %w[.daemon.pid .bot.pid .babysitter.pid].map do |name|
+          [ File.join(@state_home, name), name ]
+        end
+        paths << [ Hive::Paths.hivebox_supervisor_pid_path(@state_home), "hivebox_supervisor" ]
+        entries = paths.filter_map do |path, service_identity|
           next unless File.file?(path) && !File.symlink?(path)
           payload = Hive::PidFile.parse_payload(File.read(path))
           pid = Integer(payload["pid"], exception: false) if payload.is_a?(Hash)
           unless pid
             next({
-              "service_identity" => File.basename(path), "pid" => nil,
+              "service_identity" => service_identity, "pid" => nil,
               "unknown_reason" => "pid_receipt_unreadable"
             })
           end
@@ -359,19 +387,22 @@ module Hive
           next if ownership == :reused
 
           identity = @process_identity.capture(pid)
-          identity ? identity.to_h.merge("service_identity" => File.basename(path)) : {
-            "service_identity" => File.basename(path), "pid" => pid,
+          identity ? identity.to_h.merge("service_identity" => service_identity) : {
+            "service_identity" => service_identity, "pid" => pid,
             "unknown_reason" => ownership == :unverified ?
               "pid_ownership_unverified" : "process_identity_unavailable"
           }
         rescue Psych::Exception, SystemCallError, IOError
-          { "service_identity" => File.basename(path), "pid" => nil, "unknown_reason" => "pid_receipt_unreadable" }
+          { "service_identity" => service_identity, "pid" => nil, "unknown_reason" => "pid_receipt_unreadable" }
         end
         supervisor_pid = Integer(ENV["HIVEBOX_SUPERVISOR_PID"], exception: false)
         supervisor = supervisor_pid && @process_identity.capture(supervisor_pid)
-        if supervisor
+        supervisor_recorded = entries.any? do |entry|
+          entry["service_identity"] == "hivebox_supervisor"
+        end
+        if supervisor && !supervisor_recorded
           entries << supervisor.to_h.merge("service_identity" => "hivebox_supervisor")
-        elsif supervisor_pid
+        elsif supervisor_pid && !supervisor_recorded
           entries << {
             "service_identity" => "hivebox_supervisor", "pid" => supervisor_pid,
             "unknown_reason" => "process_identity_unavailable"

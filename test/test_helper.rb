@@ -623,11 +623,20 @@ module HiveTestHelper
       run!("git", "-C", dir, "config", "user.email", "test@example.com")
       run!("git", "-C", dir, "config", "user.name", "Test")
       run!("git", "-C", dir, "config", "commit.gpgsign", "false")
+      disable_git_auto_maintenance!(dir)
       File.write(File.join(dir, "README.md"), "test\n")
       run!("git", "-C", dir, "add", ".")
       run!("git", "-C", dir, "commit", "-m", "initial", "--quiet")
       yield(dir)
     end
+  end
+
+  # Git may fork a detached `git maintenance run --auto` after a commit or
+  # fetch. It writes .git/objects/maintenance.lock while the test's tmpdir is
+  # being removed, so cleanup fails with ENOENT. Fixture repos never need it.
+  def disable_git_auto_maintenance!(dir)
+    run!("git", "-C", dir, "config", "maintenance.auto", "false")
+    run!("git", "-C", dir, "config", "gc.auto", "0")
   end
 
   def run!(*cmd)

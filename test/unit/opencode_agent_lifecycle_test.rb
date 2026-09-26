@@ -166,6 +166,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   end
 
   def test_oversized_sanitized_export_is_rejected_with_a_bounded_diagnostic
+    export_capture_bytes = Hive::AgentSupport::OpenCode::Execution::EXPORT_CAPTURE_BYTES
+
     with_fixture(mode: :oversized_export) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "inspection-oversized-260822-aaaa")
       result = with_runtime_constant(
@@ -185,6 +187,9 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       assert_match(/sanitized export inspection stdout exceeded 4095 bytes/,
                    result.fetch(:inspection_diagnostic))
     end
+
+    assert_equal export_capture_bytes,
+                 Hive::AgentSupport::OpenCode::Execution::EXPORT_CAPTURE_BYTES
   end
 
   def test_implementation_sized_prompt_is_piped_without_crossing_exec_argument_limit

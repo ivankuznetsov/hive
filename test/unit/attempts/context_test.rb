@@ -133,6 +133,29 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_command_context_rejects_a_mismatched_source_identity
+    row = {
+      receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
+      principal_source: "local_cli", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint", source_identity: "different-request",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    }
+    contexts = Object.new
+    contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
+    connection = Object.new
+    connection.define_singleton_method(:table_exists?) { |_name| true }
+    connection.define_singleton_method(:[]) { |_name| contexts }
+    database = Object.new
+    database.define_singleton_method(:read) { |&block| block.call(connection) }
+    repository = Struct.new(:database).new(database)
+    record = { "request_id" => "request-1" }
+
+    error = assert_raises(Hive::Attempts::RepositoryError) do
+      Hive::Attempts::Context.send(:load_command_context, repository, record)
+    end
+    assert_includes error.message, "source identity mismatch"
+  end
+
   def test_environment_context_publishes_opaque_ownership_generation
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(

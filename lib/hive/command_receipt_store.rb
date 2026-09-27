@@ -813,9 +813,6 @@ module Hive
       expected_namespace = namespace_id || database.read { |connection|
         connection[:command_receipts][receipt_id: receipt_id]&.fetch(:namespace_id, nil)
       }
-      project_root ||= database.read do |connection|
-        connection[:command_namespaces][namespace_id: expected_namespace]&.fetch(:root_realpath, nil)
-      end
       raise Hive::ConfigError, "fresh keyed admission has no canonical project root" if project_root.to_s.empty?
       policy = Hive::CommandReceiptCapacity.load(project_root)
       identity = Hive::ProjectIdentity.resolve(

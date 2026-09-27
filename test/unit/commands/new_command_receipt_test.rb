@@ -55,4 +55,26 @@ class NewCommandReceiptTest < Minitest::Test
     assert_equal "created", command.call!
     refute command.instance_variable_get(:@inside_command_operation)
   end
+
+  def test_idempotent_existing_task_text_includes_the_next_action
+    task = Struct.new(:slug, :stage_index, :stage_name, :folder, :state_file).new(
+      "task", 1, "inbox", "/tmp/task", "/tmp/task/task.md"
+    )
+    action = Struct.new(:key, :command, :allowed_outcomes).new(
+      "run", "hive brainstorm task", [ "complete" ]
+    )
+    workflow = Struct.new(:id).new(:coding)
+    command = Hive::Commands::New.new("demo", "idea", idempotency_key: "stable")
+
+    with_replaced_singleton_method(Hive::Task, :new, ->(_folder) { task }) do
+      with_replaced_singleton_method(Hive::TaskAction, :for, ->(*_args) { action }) do
+        output, = capture_io do
+          command.send(:emit_task_result, task.folder, workflow, created: false)
+        end
+
+        assert_includes output, "idempotent task already exists at /tmp/task"
+        assert_includes output, "next: hive brainstorm task"
+      end
+    end
+  end
 end

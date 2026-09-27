@@ -445,6 +445,32 @@ class CommandReceiptStoreTest < Minitest::Test
     end
   end
 
+  def test_pin_fails_closed_when_the_receipt_disappears_during_admission
+    with_store do |project, database, store|
+      claim = store.reserve(
+        project_root: project, key: "pin-race", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      transaction = database.method(:transaction)
+      database.define_singleton_method(:transaction) do |**kwargs, &block|
+        transaction.call(**kwargs) do |connection|
+          connection[:command_receipts].where(receipt_id: claim.receipt_id).delete
+          block.call(connection)
+        end
+      end
+
+      error = assert_raises(Hive::CommandUnresolved) do
+        store.acquire_pin(
+          receipt_id: claim.receipt_id, principal: "owner", intent_id: "intent",
+          intent_generation: 1,
+          retry_horizon_expires_at: (Time.now.utc + 3600).iso8601,
+          project_root: project
+        )
+      end
+      assert_equal "command_pin_horizon_elapsed", error.reason
+    end
+  end
+
   def test_bounded_lookup_detects_conflicts_ambiguity_and_absence
     with_store do |project, _database, store|
       first = store.reserve(
@@ -591,7 +617,9 @@ class CommandReceiptStoreTest < Minitest::Test
     store = Hive::CommandReceiptStore.new(database: database)
     row = {
       receipt_id: "receipt", namespace_id: "namespace", generation: 1,
-      state: "executing", principal: "owner", request_fingerprint: "fingerprint"
+      state: "executing", principal: "owner", request_fingerprint: "fingerprint",
+      owner_host: Socket.gethostname, owner_pid: Process.pid,
+      owner_process_start: Hive::Lock.process_start_time(Process.pid)
     }
     effect = { state: "unknown", evidence_json: "{" }
     database.define_singleton_method(:read) do |&block|
@@ -612,11 +640,52 @@ class CommandReceiptStoreTest < Minitest::Test
       raise Hive::CommandConflict, "race"
     end
     store.define_singleton_method(:receipt) { |_receipt_id| unresolved }
-    assert_raises(Hive::CommandInProgress) do
+    assert_raises(Hive::CommandUnresolved) do
       store.send(
         :classify_existing!, row, principal: "owner",
         request_fingerprint: "fingerprint", project_root: "/project"
       )
+    end
+
+    store.define_singleton_method(:process_start) { |_pid| raise IOError, "unavailable" }
+    refute store.send(:current_process_owner?, row)
+  end
+
+  def test_reclamation_cursor_wraps_and_fresh_admission_requires_the_canonical_root
+    with_store do |project, database, store|
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      live = store.reserve(
+        project_root: project, key: "live-owner", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      live = store.mark_executing(live)
+      database.transaction do |connection|
+        row = connection[:command_receipts][receipt_id: live.receipt_id]
+        connection[:command_namespaces].where(namespace_id: live.namespace_id).update(
+          reclamation_cursor_updated_at: row.fetch(:updated_at),
+          reclamation_cursor_receipt_id: row.fetch(:receipt_id)
+        )
+      end
+
+      authority = Hive::CommandMaintenanceAuthority.new(
+        principal: "owner", principal_source: "test", installation_owner: true
+      )
+      reclaiming = Hive::CommandReceiptStore.new(
+        database: database, maintenance_authority: authority
+      )
+      assert_equal 0, reclaiming.send(
+        :reclaim_dead_executing_owners, live, scope: "namespace"
+      )
+      assert_raises(Hive::ConfigError) do
+        store.send(:admission_policy!, nil, namespace_id: identity.namespace_id)
+      end
+      policy = store.send(:admission_policy!, project, namespace_id: identity.namespace_id)
+      assert policy.keyed_intake_enabled
+      assert_raises(Hive::CommandConflict) do
+        store.send(:admission_policy!, project, namespace_id: "changed-namespace")
+      end
     end
   end
 

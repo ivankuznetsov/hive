@@ -162,7 +162,9 @@ future horizon; it may not repeat an unknown effect.
 Fresh pins and failed-receipt successor allocations read the live namespace
 policy, obey the intake gate, and reserve byte headroom atomically. Reacquiring
 an existing pin remains available while intake is disabled so already-admitted
-work can recover.
+work can recover. Fresh admission requires the caller lifecycle's current
+canonical project root and verifies that it still resolves to the receipt
+namespace; the namespace schema does not persist or infer a project path.
 
 CLI and scheduler principals use the installation-scoped local uid. GitHub
 principals use the numeric account id. Cross-principal web maintenance requires

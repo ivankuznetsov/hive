@@ -214,6 +214,25 @@ class CommandsActTest < Minitest::Test
     end
   end
 
+  def test_keyed_target_must_be_an_exact_project_slug_and_match_the_project_filter
+    invalid = Hive::Commands::Act.new(
+      "workflow.advance", "task", observation: "a" * 64, idempotency_key: "key"
+    )
+    error = assert_raises(Hive::OperationalActionUsageError) do
+      invalid.send(:qualified_target)
+    end
+    assert_includes error.message, "exact project:slug"
+
+    mismatched = Hive::Commands::Act.new(
+      "workflow.advance", "demo:task", observation: "a" * 64,
+      project: "other", idempotency_key: "key"
+    )
+    error = assert_raises(Hive::OperationalActionUsageError) do
+      mismatched.send(:qualified_target)
+    end
+    assert_includes error.message, "--project must match"
+  end
+
   def test_error_kinds_cover_the_closed_operational_failure_vocabulary
     command = Hive::Commands::Act.new("workflow.advance", "demo:task", observation: "a" * 64)
     errors = {

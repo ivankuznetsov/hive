@@ -136,6 +136,21 @@ class ProjectIdentityTest < Minitest::Test
     end
   end
 
+  def test_explicit_enrollment_requires_installation_owner_authority
+    nonowner = Hive::CommandMaintenanceAuthority.new(
+      principal: "caller", principal_source: "test"
+    )
+
+    assert_raises(Hive::ConfigError) do
+      Hive::ProjectIdentity.send(:authorize_enrollment!, nil)
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::ProjectIdentity.send(:authorize_enrollment!, nonowner)
+    end
+    assert_equal "installation_owner",
+                 Hive::ProjectIdentity.send(:authorize_enrollment!, owner_authority)
+  end
+
   def test_enrollment_retries_a_concurrent_reservation_and_fences_confirmation_state
     with_store do |project, database|
       transaction = database.method(:transaction)

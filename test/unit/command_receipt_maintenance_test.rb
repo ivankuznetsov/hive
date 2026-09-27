@@ -15,6 +15,24 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "e" * 64
   }.freeze
 
+  def test_namespace_selection_requires_the_installation_owner
+    owner = Hive::CommandMaintenanceAuthority.new(
+      principal: "owner", principal_source: "test", installation_owner: true
+    )
+    nonowner = Hive::CommandMaintenanceAuthority.new(
+      principal: "caller", principal_source: "test"
+    )
+
+    assert_equal "namespace", Hive::CommandReceiptMaintenance.new(
+      database: Object.new, authority: owner
+    ).authorize_namespace_selection!("namespace")
+    assert_raises(Hive::ConfigError) do
+      Hive::CommandReceiptMaintenance.new(
+        database: Object.new, authority: nonowner
+      ).authorize_namespace_selection!("namespace")
+    end
+  end
+
   def test_preview_and_confirm_prune_only_old_unpinned_terminals
     with_receipts do |project, database, store, authority|
       old = terminal_receipt(store, project, "old")
@@ -368,6 +386,19 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
     assert_equal "command_prune_busy", error.reason
 
+    wrapped_busy = Object.new
+    wrapped_busy.define_singleton_method(:read_only) do
+      begin
+        raise SQLite3::BusyException, "busy"
+      rescue SQLite3::BusyException
+        raise Sequel::DatabaseError, "wrapped busy"
+      end
+    end
+    error = assert_raises(Hive::CommandCapacityError) do
+      Hive::CommandReceiptPruner.new(database: wrapped_busy, authority: authority).preview
+    end
+    assert_equal "command_prune_busy", error.reason
+
     locked = Object.new
     locked.define_singleton_method(:transaction) { raise Sequel::DatabaseLockTimeout, "locked" }
     pruner = Hive::CommandReceiptPruner.new(database: locked, authority: authority)
@@ -481,6 +512,65 @@ class CommandReceiptMaintenanceTest < Minitest::Test
         db[:command_capacity][namespace_id: identity.namespace_id].fetch(:logical_bytes)
       end
       assert_equal baseline, after
+    end
+  end
+
+  def test_maintenance_negative_logical_bytes_are_clamped
+    with_receipts do |project, database, _store, authority|
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority
+      )
+
+      database.transaction do |connection|
+        maintenance.send(:add_logical_bytes!, connection, identity.namespace_id, -1)
+      end
+
+      logical_bytes = database.read do |connection|
+        connection[:command_capacity][namespace_id: identity.namespace_id].fetch(:logical_bytes)
+      end
+      assert_equal 0, logical_bytes
+    end
+  end
+
+  def test_pruner_derives_local_authority_from_runtime_installation_identity
+    installation = Object.new
+    installation.define_singleton_method(:first) { { installation_id: "installation-1" } }
+    connection = Object.new
+    connection.define_singleton_method(:[]) { |_name| installation }
+    derived = Hive::CommandMaintenanceAuthority.new(
+      principal: "derived", principal_source: "test", installation_owner: true
+    )
+    principals = []
+    test_case = self
+
+    with_replaced_singleton_method(
+      Hive::CommandMaintenanceAuthority, :local,
+      lambda { |principal:| principals << principal; derived }
+    ) do
+      pruner = Hive::CommandReceiptPruner.new(database: Object.new)
+      assert_same derived, pruner.send(:authority, connection)
+
+      database = Object.new
+      with_replaced_singleton_method(
+        Hive::CommandOperation, :local_principal,
+        ->(value) { test_case.assert_same database, value; "fallback" }
+      ) do
+        assert_same derived, Hive::CommandReceiptPruner.new(database: database).send(:authority)
+      end
+    end
+
+    assert_equal [
+      "installation:installation-1:uid:#{Process.uid}", "fallback"
+    ], principals
+
+    missing = Object.new
+    missing.define_singleton_method(:first) { nil }
+    connection.define_singleton_method(:[]) { |_name| missing }
+    assert_raises(Hive::ConfigError) do
+      Hive::CommandReceiptPruner.new(database: Object.new).send(:authority, connection)
     end
   end
 

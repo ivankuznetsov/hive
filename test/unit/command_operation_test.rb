@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "hive/attempts/context"
 require "hive/command_operation"
 require "hive/runtime_control_plane/command_schema_installation"
 
@@ -10,6 +11,38 @@ class CommandOperationTest < Minitest::Test
   TEST_PACKAGE = {
     version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "d" * 64
   }.freeze
+
+  def test_worker_context_records_effect_evidence_without_an_outer_operation
+    context = Hive::CommandOperation::Context.new(
+      receipt_id: "receipt", effect_id: "effect", principal: "owner",
+      principal_source: "test", ordinal: 0, receipt_generation: 3,
+      request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'a' * 64}",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    )
+    installed = Struct.new(:command_context).new(context)
+    submissions = []
+    observations = []
+    store = Object.new
+    store.define_singleton_method(:record_effect_submission) { |**attributes| submissions << attributes }
+    store.define_singleton_method(:record_effect_observation) { |**attributes| observations << attributes }
+
+    with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { installed }) do
+      with_replaced_singleton_method(Hive::CommandReceiptStore, :new, -> { store }) do
+        Hive::CommandOperation.record_effect_submission(
+          kind: "attempt_dispatch", identity: { "request_id" => "request-1" }
+        )
+        Hive::CommandOperation.record_effect_observation(
+          source: "attempt_dispatch", correlation_id: "request-1",
+          evidence: { "state" => "queued" }
+        )
+      end
+    end
+
+    assert_equal "receipt", submissions.first.fetch(:receipt_id)
+    assert_equal 3, submissions.first.fetch(:generation)
+    assert_equal "request-1", observations.first.fetch(:correlation_id)
+  end
 
   def test_success_is_durable_before_output_and_identical_retry_does_not_execute
     with_operation do |operation, store|
@@ -255,6 +288,14 @@ class CommandOperationTest < Minitest::Test
       )
       assert_equal row.fetch(:receipt_id), successor.fetch("predecessor_receipt_id")
       assert_equal 1, successor.fetch("successor_ordinal")
+
+      output, = capture_io do
+        replay_exit = assert_raises(SystemExit) do
+          structured.call { flunk "failed receipt replay must not execute" }
+        end
+        assert_equal Hive::ExitCodes::USAGE, replay_exit.status
+      end
+      assert_equal false, JSON.parse(output).fetch("ok")
     end
   end
 
@@ -533,6 +574,18 @@ class CommandOperationTest < Minitest::Test
     claim = Struct.new(:receipt_id).new("receipt")
     operation.send(:persist_uncertainty, claim, { effect_id: "effect" })
     assert_equal [ "receipt" ], unresolved
+
+    store.define_singleton_method(:abort_before_effect) do |*_args, **_kwargs|
+      raise Hive::CommandConflict, "abort raced"
+    end
+    operation.send(:persist_uncertainty, claim, nil)
+    assert_equal [ "receipt", "receipt" ], unresolved
+
+    operation.send(
+      :persist_failure, claim, { effect_id: "effect" },
+      Hive::UsageError.new("invalid transition")
+    )
+    assert_equal [ "receipt", "receipt", "receipt" ], unresolved
     assert_equal({ "format" => "text", "text" => "invalid\n" },
                  operation.send(:stored_failure, Hive::UsageError.new("invalid")))
 
@@ -546,6 +599,8 @@ class CommandOperationTest < Minitest::Test
         "encoding" => "base64url-json", "template_version" => 1, "sha256" => "wrong"
       } }
     }
+    assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }
+    conflicting["slot"]["binding"]["$command_response_field_order"] = [ "project", "project" ]
     assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }
     conflicting["slot"]["binding"]["encoding"] = "unknown"
     assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }

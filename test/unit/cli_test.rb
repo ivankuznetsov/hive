@@ -815,6 +815,43 @@ class HiveCliTest < Minitest::Test
     assert_includes error.message, "confirmed archive closure"
   end
 
+  def test_keyed_archive_closure_looks_up_receipts_across_registered_project_roots
+    operation = Object.new
+    operation.define_singleton_method(:call) do |&_block|
+      { "reason" => "already_delivered", "receipt_digest" => "a" * 64 }
+    end
+    roots = nil
+    constructor = lambda do |**options|
+      roots = options.fetch(:project_roots).call
+      operation
+    end
+    projects = [ { "name" => "demo", "path" => "/tmp/demo" } ]
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+      with_replaced_singleton_method(Hive::CommandOperation, :new, constructor) do
+        capture_io do
+          Hive::CLI.start([
+            "archive", "task", "--reason", "already_delivered",
+            "--evidence", "acme/app#42", "--idempotency-key", "closure-1"
+          ])
+        end
+      end
+    end
+
+    assert_equal [ "/tmp/demo" ], roots
+  end
+
+  def test_archive_closure_retry_horizon_requires_an_idempotency_key
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([
+        "archive", "task", "--reason", "already_delivered",
+        "--retry-horizon-expires-at", "2030-01-01T00:00:00Z"
+      ])
+    end
+
+    assert_includes error.message, "requires --idempotency-key"
+  end
+
   def test_archive_closure_rejects_noninteractive_confirmation
     noninteractive_error = assert_raises(Hive::TaskClosure::Unauthorized) do
       Hive::CLI.start([
@@ -955,6 +992,16 @@ class HiveCliTest < Minitest::Test
       ])
     end
     assert_match(/retry-horizon-expires-at requires an archive TARGET/, error.message)
+  end
+
+  def test_plan_retry_horizon_requires_an_idempotency_key
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([
+        "plan", "task", "--retry-horizon-expires-at", "2030-01-01T00:00:00Z"
+      ])
+    end
+
+    assert_includes error.message, "requires --idempotency-key"
   end
 
   def test_status_approve_findings_and_finding_toggles_pass_options

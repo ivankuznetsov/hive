@@ -46,6 +46,16 @@ class CommandsStageActionTest < Minitest::Test
     assert_match(/internal error: ArgumentError: bad argument/, @error.message)
   end
 
+  def test_retry_horizon_requires_an_idempotency_key_before_dispatch
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    )
+
+    error = assert_raises(Hive::UsageError) { command.call }
+
+    assert_includes error.message, "requires --idempotency-key"
+  end
+
   def test_wrong_stage_reports_actual_stage_when_current_stage_is_not_source_or_target
     task = Struct.new(:slug, :folder).new("some-slug", "/tmp/some-slug")
     command = Hive::Commands::StageAction.new("plan", "some-slug")

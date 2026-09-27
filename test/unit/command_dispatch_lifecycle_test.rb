@@ -31,6 +31,46 @@ class CommandDispatchLifecycleTest < Minitest::Test
     end
   end
 
+  def test_attempts_successor_allocation_delegates_the_frozen_identity
+    calls = []
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:allocate_successor!) { |**attributes| calls << attributes; "allocated" }
+    caller = AttemptsCaller.new(lifecycle)
+
+    result = caller.allocate(
+      predecessor_request_id: "request-1", intent_id: "intent-1",
+      intent_version: 2, delivery_cycle_id: "cycle-1"
+    )
+
+    assert_equal "allocated", result
+    assert_equal({
+      predecessor_request_id: "request-1", intent_id: "intent-1",
+      intent_version: 2, delivery_cycle_id: "cycle-1"
+    }, calls.first)
+  end
+
+  def test_dispatch_project_root_fails_closed_without_a_registered_or_observed_path
+    repository = Object.new
+    repository.define_singleton_method(:fetch) do |_request_id|
+      Struct.new(:project).new("missing")
+    end
+    projects = Object.new
+    projects.define_singleton_method(:[]) { |**_query| nil }
+    connection = Object.new
+    connection.define_singleton_method(:[]) { |_name| projects }
+    database = Object.new
+    database.define_singleton_method(:read) { |&block| block.call(connection) }
+    store = Struct.new(:database).new(database)
+    lifecycle = Hive::CommandDispatchLifecycle.new(repository: repository, store: store)
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { nil }) do
+      error = assert_raises(Hive::ConfigError) do
+        lifecycle.send(:project_root_for, "request-1")
+      end
+      assert_includes error.message, "project identity is unavailable"
+    end
+  end
+
   def test_restart_reacquires_one_pin_and_same_cycle_successor_is_stable
     with_lifecycle do |project, database, repository, store, lifecycle, request_id, claim|
       first_pin = lifecycle.protect_request!(request_id)

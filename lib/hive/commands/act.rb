@@ -73,6 +73,11 @@ module Hive
             "observation" => @observation,
             "project" => @project_filter
           },
+          project_roots: lambda {
+            Hive::CommandOperation.registered_project_roots(
+              target: @target, project: @project_filter
+            )
+          },
           project_root: lambda {
             Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve.project_root
           },

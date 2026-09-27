@@ -174,6 +174,11 @@ module Hive
             "binding_sha256" => ::Digest::SHA256.hexdigest(@binding_token),
             "answer_sha256" => answer_fingerprint(answer_text)
           },
+          project_roots: lambda {
+            Hive::CommandOperation.registered_project_roots(
+              target: @target, project: binding.fetch("project")
+            )
+          },
           project_root: -> { resolve_task(@target, binding.fetch("project")).project_root },
           json: true,
           structured: true,

@@ -86,6 +86,11 @@ module Hive
           mode: @verb,
           target: @target,
           request: { "verb" => @verb, "from" => @from, "project" => @project_filter },
+          project_roots: lambda {
+            Hive::CommandOperation.registered_project_roots(
+              target: @target, project: @project_filter
+            )
+          },
           # Receipt lookup must not evaluate the mutable --from assertion. A
           # successful first call has already moved the task by the time an
           # identical lost-response retry arrives.

@@ -67,6 +67,65 @@ module Hive
       )
     end
 
+    # Look up a caller receipt across a bounded set of already-authorized
+    # project roots. This is intentionally a replay-only path: it never enrolls
+    # a project and never chooses a namespace for a fresh reservation. Command
+    # adapters use it before resolving a mutable task folder so a moved or
+    # deleted original selector cannot hide its durable result.
+    def lookup_existing_in_projects(project_roots:, key:, command:, target:, request:, principal:)
+      require_extension!
+      roots = Array(project_roots).compact.map { |root| File.expand_path(root.to_s) }.uniq
+      return nil if roots.empty?
+
+      key_digest = Digest::SHA256.hexdigest(Hive::CommandMutations.normalize_key(key))
+      matches = []
+      conflicting = []
+      roots.each do |root|
+        identity = Hive::ProjectIdentity.resolve(
+          project_root: root, database: database, create: false
+        )
+        next unless identity
+
+        row = database.read do |connection|
+          connection[:command_receipts][
+            namespace_id: identity.namespace_id, key_digest: key_digest
+          ]
+        end
+        next unless row
+
+        expected = Hive::CommandMutations.fingerprint(
+          command: command, namespace_id: identity.namespace_id, target: target,
+          principal: principal, options: request, display: {}
+        )
+        if row.fetch(:principal) == principal.to_s &&
+           row.fetch(:request_fingerprint) == expected
+          matches << [ row, root ]
+        else
+          conflicting << [ row, root, expected ]
+        end
+      end
+
+      if matches.length > 1
+        raise Hive::CommandConflict,
+              "idempotency key matches more than one registered project; pass --project"
+      end
+      if matches.one?
+        row, root = matches.first
+        return classify_existing!(
+          row, principal: principal, request_fingerprint: row.fetch(:request_fingerprint),
+          project_root: root
+        )
+      end
+      if roots.one? && conflicting.one?
+        row, root, expected = conflicting.first
+        return classify_existing!(
+          row, principal: principal, request_fingerprint: expected, project_root: root
+        )
+      end
+
+      nil
+    end
+
     def reserve(project_root:, key:, command:, target:, request:, principal:, mode: nil,
                 principal_source: "injected", execute: false,
                 maintenance: false,

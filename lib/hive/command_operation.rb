@@ -7,6 +7,7 @@ require "stringio"
 require "thread"
 require "securerandom"
 require "hive/command_receipt_store"
+require "hive/config"
 require "hive/lock"
 
 module Hive
@@ -68,7 +69,34 @@ module Hive
       "installation:#{installation}:uid:#{Process.uid}"
     end
 
-    def initialize(key:, command:, target:, request:, project_root:, principal: nil,
+    # Return only roots the caller can already address through the registered
+    # project configuration. The task folder itself is deliberately not
+    # resolved here: a committed receipt must remain discoverable after that
+    # folder moves or is deleted.
+    def self.registered_project_roots(target:, project: nil)
+      projects = Hive::Config.registered_projects
+      if project
+        row = projects.find { |entry| entry["name"] == project.to_s }
+        return row ? [ row.fetch("path") ] : []
+      end
+
+      source = target.to_s
+      return projects.map { |entry| entry.fetch("path") } unless
+        source.include?("/") || source.start_with?("~", ".")
+
+      expanded = File.expand_path(source)
+      projects.filter_map do |entry|
+        roots = [ entry["path"], entry["hive_state_path"] ].compact.map {
+          |value| File.expand_path(value)
+        }
+        entry.fetch("path") if roots.any? {
+          |root| expanded == root || expanded.start_with?("#{root}#{File::SEPARATOR}")
+        }
+      end
+    end
+
+    def initialize(key:, command:, target:, request:, project_root:, project_roots: nil,
+                   principal: nil,
                    principal_source: "local_cli", mode: nil, json: false,
                    structured: false, maintenance: false,
                    failure_payload: nil,
@@ -80,6 +108,7 @@ module Hive
       @target = target.to_s
       @request = request
       @project_root = project_root
+      @project_roots = project_roots
       @store = store
       @principal = principal || self.class.local_principal(store.database)
       @principal_source = principal_source
@@ -97,14 +126,25 @@ module Hive
 
     def call
       return yield if @key.nil?
-      root = @project_root.respond_to?(:call) ? @project_root.call : @project_root
-      if (existing = @store.lookup_existing(
-        project_root: root,
+      if @project_roots && (existing = @store.lookup_existing_in_projects(
+        project_roots: resolved_project_roots,
         key: @key, command: @command, target: @target,
         request: @request, principal: @principal
       ))
         return replay(existing) unless existing.disposition == :resume
         claim = existing
+      end
+
+      root = claim&.project_root || resolved_project_root
+      unless claim
+        if (existing = @store.lookup_existing(
+          project_root: root,
+          key: @key, command: @command, target: @target,
+          request: @request, principal: @principal
+        ))
+          return replay(existing) unless existing.disposition == :resume
+          claim = existing
+        end
       end
 
       claim ||= @store.reserve(
@@ -158,6 +198,15 @@ module Hive
     end
 
     private
+
+    def resolved_project_roots
+      value = @project_roots.respond_to?(:call) ? @project_roots.call : @project_roots
+      Array(value)
+    end
+
+    def resolved_project_root
+      @project_root.respond_to?(:call) ? @project_root.call : @project_root
+    end
 
     def operation_context(claim, effect)
       ordinal = effect.fetch(:ordinal)

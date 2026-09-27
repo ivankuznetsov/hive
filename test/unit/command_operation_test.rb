@@ -208,6 +208,38 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_registered_project_receipt_replays_before_mutable_target_resolution
+    with_operation(key: "moved-target") do |_operation, store, project|
+      original = File.join(project, ".hive-state", "stages", "3-plan", "task")
+      moved = File.join(project, ".hive-state", "stages", "4-execute", "task")
+      FileUtils.mkdir_p(original)
+      first = Hive::CommandOperation.new(
+        key: "moved-target", command: "approve", target: original,
+        request: { from: "3-plan", project: "demo" }, project_root: project,
+        principal: "owner", json: true, structured: true, store: store
+      )
+      expected = first.call { { "schema" => "hive-approve", "ok" => true, "slug" => "task" } }
+      FileUtils.mkdir_p(File.dirname(moved))
+      FileUtils.mv(original, moved)
+      resolutions = 0
+      replay = Hive::CommandOperation.new(
+        key: "moved-target", command: "approve", target: original,
+        request: { from: "3-plan", project: "demo" },
+        project_roots: -> { [ project ] },
+        project_root: lambda {
+          resolutions += 1
+          raise Hive::InvalidTaskPath, "the original folder was moved or deleted"
+        },
+        principal: "owner", json: true, structured: true, store: store
+      )
+
+      assert_equal expected, replay.call { flunk "replay must not execute the command body" }
+      FileUtils.rm_rf(moved)
+      assert_equal expected, replay.call { flunk "deleted-task replay must not execute the command body" }
+      assert_equal 0, resolutions
+    end
+  end
+
   private
 
   def with_operation(key: "stable")

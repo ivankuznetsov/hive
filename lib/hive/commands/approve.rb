@@ -131,6 +131,11 @@ module Hive
             "to" => @to, "from" => @from, "project" => @project_filter,
             "force" => @force
           },
+          project_roots: lambda {
+            Hive::CommandOperation.registered_project_roots(
+              target: @target, project: @project_filter
+            )
+          },
           project_root: -> { resolve_task.project_root },
           json: @json,
           failure_payload: ->(error) { envelope_payload_for(error) },

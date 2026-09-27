@@ -405,6 +405,8 @@ class TmuxRunnerTest < Minitest::Test
     assert_operator paste_index, :<, send_index
     assert_operator send_index, :<, delete_index
     assert_equal buffer_name, option_value(lines.fetch(paste_index), "-b")
+    assert_includes lines.fetch(paste_index).split, "-p",
+                    "prompts must be pasted as one bracketed paste, not unbracketed chunks"
     assert_equal buffer_name, option_value(lines.fetch(delete_index), "-b")
   end
 

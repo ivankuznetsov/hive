@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "shellwords"
 require "hive/attempts/context"
 require "hive/command_operation"
 require "hive/runtime_control_plane/command_schema_installation"
@@ -77,7 +78,7 @@ class CommandOperationTest < Minitest::Test
         operation.call { flunk "replay must not execute the command body" }
       end.first
 
-      assert_equal payload, JSON.parse(second)
+      assert_equal first, second
       assert_equal 1, effects
     end
   end
@@ -126,6 +127,15 @@ class CommandOperationTest < Minitest::Test
         db[:command_receipts].first(key_digest: Digest::SHA256.hexdigest("lost-finalization"))
       end
       assert_equal "executing", row.fetch(:state)
+      store.database.transaction do |db|
+        db[:command_receipts].where(receipt_id: row.fetch(:receipt_id)).update(
+          state: "unresolved", generation: row.fetch(:generation) + 1,
+          typed_reason: "command_orphaned_owner"
+        )
+        db[:command_capacity].where(namespace_id: row.fetch(:namespace_id)).update(
+          executing_count: Sequel[:executing_count] - 1
+        )
+      end
 
       replayed = operation.call { flunk "authoritative-result recovery must not repeat the effect" }
       assert_equal "task", replayed.fetch("slug")
@@ -136,7 +146,14 @@ class CommandOperationTest < Minitest::Test
 
   def test_interrupted_reconcilable_provider_effect_resumes_without_resubmitting_applied_push
     with_operation(key: "provider-reconcile") do |_operation, store, project|
-      provider_applied = false
+      remote = File.join(File.dirname(project), "remote.git")
+      system("git", "init", "--bare", "--quiet", remote, exception: true)
+      File.write(File.join(project, "result.txt"), "published\n")
+      system("git", "-C", project, "add", "result.txt", exception: true)
+      system("git", "-C", project, "-c", "user.name=Hive Test", "-c",
+             "user.email=hive@example.invalid", "commit", "--quiet", "-m", "publish",
+             exception: true)
+      head_oid = `git -C #{Shellwords.escape(project)} rev-parse HEAD`.strip
       push_calls = 0
       attempts = 0
       operation = Hive::CommandOperation.new(
@@ -147,20 +164,22 @@ class CommandOperationTest < Minitest::Test
       body = lambda do
         attempts += 1
         Hive::CommandOperation.record_effect_submission(
-          kind: "github_push", identity: { "publication_id" => "publication-1", "head_oid" => "a" * 40 }
+          kind: "github_push", identity: { "publication_id" => "publication-1", "head_oid" => head_oid }
         )
-        unless provider_applied
+        observed = `git ls-remote #{Shellwords.escape(remote)} refs/heads/main`.split.first
+        unless observed == head_oid
           push_calls += 1
-          provider_applied = true
+          system("git", "-C", project, "push", "--quiet", remote, "HEAD:refs/heads/main",
+                 exception: true)
           Hive::CommandOperation.record_effect_observation(
             source: "github_push", correlation_id: "publication-1",
-            evidence: { "after_oid" => "a" * 40 }
+            evidence: { "after_oid" => head_oid }
           )
           raise Hive::Error, "provider acknowledgement was lost"
         end
         Hive::CommandOperation.record_effect_observation(
           source: "github_push", correlation_id: "publication-1",
-          evidence: { "after_oid" => "a" * 40 }
+          evidence: { "after_oid" => observed }
         )
         { "schema" => "hive-stage-action", "ok" => true, "phase" => "published" }
       end
@@ -265,6 +284,59 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_invalid_task_path_after_effect_preparation_is_not_retry_eligible
+    with_operation(key: "applied-path-error") do |_operation, store, project|
+      operation = Hive::CommandOperation.new(
+        key: "applied-path-error", command: "stage_action", mode: "develop",
+        target: "task", request: {}, project_root: project, principal: "owner",
+        json: true, structured: true, store: store
+      )
+      assert_raises(Hive::InvalidTaskPath) do
+        operation.call { raise Hive::InvalidTaskPath, "task moved after mutation" }
+      end
+      row = store.database.read do |db|
+        db[:command_receipts].first(
+          key_digest: Digest::SHA256.hexdigest("applied-path-error")
+        )
+      end
+      assert_equal "unresolved", row.fetch(:state)
+      assert_equal 0, row.fetch(:retry_eligible)
+    end
+  end
+
+  def test_retryable_contention_before_submission_reacquires_the_same_key
+    with_operation(key: "busy-retry") do |_operation, store, project|
+      operation = Hive::CommandOperation.new(
+        key: "busy-retry", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true, store: store
+      )
+      assert_raises(Hive::ConcurrentRunError) do
+        operation.call { raise Hive::ConcurrentRunError, "task lock held" }
+      end
+      row = store.database.read do |database|
+        database[:command_receipts].first(key_digest: Digest::SHA256.hexdigest("busy-retry"))
+      end
+      assert_equal "aborted", row.fetch(:state)
+
+      result = operation.call { { "schema" => "hive-approve", "ok" => true } }
+      assert_equal true, result.fetch("ok")
+      assert_equal "succeeded", store.receipt(row.fetch(:receipt_id)).fetch(:state)
+    end
+  end
+
+  def test_quiet_json_uses_the_returned_payload_instead_of_empty_stdout
+    with_operation(key: "quiet-json") do |_operation, store, project|
+      operation = Hive::CommandOperation.new(
+        key: "quiet-json", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, store: store
+      )
+      output, = capture_io do
+        operation.call { { "schema" => "hive-approve", "ok" => true, "slug" => "task" } }
+      end
+      assert_equal "task", JSON.parse(output).fetch("slug")
+    end
+  end
+
   def test_usage_error_before_effect_submission_is_failed_and_retry_eligible
     with_operation do |_operation, store, project|
       structured = Hive::CommandOperation.new(
@@ -296,6 +368,31 @@ class CommandOperationTest < Minitest::Test
         assert_equal Hive::ExitCodes::USAGE, replay_exit.status
       end
       assert_equal false, JSON.parse(output).fetch("ok")
+    end
+  end
+
+  def test_text_mode_structured_failure_replay_does_not_emit_a_json_envelope
+    with_operation do |_operation, store, project|
+      json_operation = Hive::CommandOperation.new(
+        key: "failed-text", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true, store: store
+      )
+      assert_raises(Hive::UsageError) do
+        json_operation.call { raise Hive::UsageError, "invalid transition" }
+      end
+      text_operation = Hive::CommandOperation.new(
+        key: "failed-text", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true,
+        display_json: false, store: store
+      )
+
+      output, = capture_io do
+        error = assert_raises(Hive::CommandReplayFailure) do
+          text_operation.call { flunk "failed receipt replay must not execute" }
+        end
+        assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      end
+      assert_empty output
     end
   end
 
@@ -606,6 +703,9 @@ class CommandOperationTest < Minitest::Test
     assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }
 
     assert_equal "config", operation.send(:failure_error_kind, Hive::ConfigError.new("bad"))
+    assert_equal "usage", operation.send(
+      :failure_error_kind, Hive::OperationalActionUsageError.new("bad")
+    )
     assert_equal "internal", operation.send(:failure_error_kind, Hive::Error.new("bad"))
   end
 

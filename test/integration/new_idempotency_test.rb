@@ -34,19 +34,22 @@ class NewIdempotencyTest < Minitest::Test
 
   def test_retry_returns_original_task_after_it_moves
     with_initialized_project do |project_root, project|
-      first = create_json(
+      first_bytes = create_json_bytes(
         project, "draft launch post", key: "workflow-creator:editorial:v1", slug: "editorial-task"
       )
+      first = JSON.parse(first_bytes)
       assert_equal true, first.fetch("created")
       folder = File.join(project_root, ".hive-state", "stages", "1-inbox", "editorial-task")
       Hive::Commands::Approve.new(
         folder, to: "2-brainstorm", from: "1-inbox", force: true, quiet: true
       ).call
 
-      retry_payload = create_json(
+      retry_bytes = create_json_bytes(
         project, "draft launch post", key: "workflow-creator:editorial:v1", slug: "editorial-task"
       )
+      retry_payload = JSON.parse(retry_bytes)
 
+      assert_equal first_bytes, retry_bytes
       assert_equal first, retry_payload
       assert_equal true, retry_payload.fetch("created")
       assert_equal "editorial-task", retry_payload.fetch("slug")
@@ -612,6 +615,12 @@ class NewIdempotencyTest < Minitest::Test
   end
 
   def create_json_with(project, text, key:, slug:, attachments: [], workflow: nil)
+    JSON.parse(create_json_bytes(
+      project, text, key: key, slug: slug, attachments: attachments, workflow: workflow
+    ))
+  end
+
+  def create_json_bytes(project, text, key:, slug:, attachments: [], workflow: nil)
     out, err = capture_io do
       Hive::Commands::New.new(
         project, text, slug_override: slug, idempotency_key: key, json: true,
@@ -619,7 +628,7 @@ class NewIdempotencyTest < Minitest::Test
       ).call!
     end
     assert_empty err
-    JSON.parse(out)
+    out
   end
 
   def create_authored_workflow(project_root, id)

@@ -292,11 +292,13 @@ class CommandDispatchLifecycleTest < Minitest::Test
   def test_attempt_dispatch_binds_context_and_reports_buffered_failure
     lifecycle = Object.new
     protected = []
-    lifecycle.define_singleton_method(:protect_context!) { |context| protected << context }
+    lifecycle.define_singleton_method(:protect_context!) do |context, project_root:|
+      protected << [ context, project_root ]
+    end
     caller = AttemptsCaller.new(lifecycle)
     caller.instance_variable_set(:@target, "task")
     caller.instance_variable_set(:@json, true)
-    caller.define_singleton_method(:resolve_task) { :task }
+    caller.define_singleton_method(:resolve_task) { Struct.new(:project_root).new("/known/project") }
     caller.define_singleton_method(:durable_intended_stage) { |_task| "4-execute" }
     caller.define_singleton_method(:durable_worker_argv) { |_task| %w[hive run task] }
     api = Object.new
@@ -319,7 +321,7 @@ class CommandDispatchLifecycleTest < Minitest::Test
     )
     Thread.current[:hive_command_operation_context] = context
     assert_equal result, caller.dispatch
-    assert_equal [ context ], protected
+    assert_equal [ [ context, "/known/project" ] ], protected
     assert_equal context.transport_request_id, dispatched.first.fetch(:request_id)
   ensure
     Thread.current[:hive_command_operation_context] = nil
@@ -436,14 +438,6 @@ class CommandDispatchLifecycleTest < Minitest::Test
       effect = store.prepare_effect(
         claim, ordinal: 0, kind: "approve:default", identity: { "target" => "task" }
       )
-      store.update_effect(
-        claim, effect_id: effect.fetch(:effect_id), from: "prepared", to: "not_applied",
-        evidence: { "whole_effect_non_application" => true }
-      )
-      claim = store.fail_non_application(
-        claim, result: { "format" => "text", "text" => "not applied\n" },
-        status: 1, reason: "not_applied", whole_effect_non_application: true
-      )
       repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
       request_id = "command-dispatch:v1:#{'b' * 64}"
       context = Hive::CommandOperation::Context.new(
@@ -456,6 +450,14 @@ class CommandDispatchLifecycleTest < Minitest::Test
       repository.write_request!(
         project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
         request_id: request_id, command_context: context
+      )
+      store.update_effect(
+        claim, effect_id: effect.fetch(:effect_id), from: "prepared", to: "not_applied",
+        evidence: { "whole_effect_non_application" => true }
+      )
+      claim = store.fail_non_application(
+        claim, result: { "format" => "text", "text" => "not applied\n" },
+        status: 1, reason: "not_applied", whole_effect_non_application: true
       )
       lifecycle = Hive::CommandDispatchLifecycle.new(repository: repository, store: store)
 

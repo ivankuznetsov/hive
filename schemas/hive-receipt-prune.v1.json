@@ -20,26 +20,152 @@
         "preview": { "type": "boolean" },
         "confirmed": { "type": "boolean" },
         "namespace_id": { "type": ["string", "null"] },
+        "keyed_intake_enabled": { "type": "boolean" },
         "cutoff": { "type": "string", "format": "date-time" },
         "candidate_count": { "type": "integer", "minimum": 0 },
-        "candidates": { "type": "array" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/Candidate" } },
         "warning_band_percent": { "const": 70 },
         "action_band_percent": { "const": 85 },
         "project_enrollment": { "type": "string" },
-        "namespace_utilization": { "type": "object" },
-        "installation_utilization": { "type": "object" },
-        "installation_pressure": { "type": "string" },
-        "namespaces": { "type": "array" },
+        "namespace_utilization": { "$ref": "#/$defs/Utilization" },
+        "installation_utilization": { "$ref": "#/$defs/InstallationUtilization" },
+        "installation_pressure": { "const": "ask_installation_owner" },
+        "namespaces": { "type": "array", "items": { "$ref": "#/$defs/NamespacePreview" } },
         "next_cursor": { "type": ["string", "null"] },
         "batch_id": { "type": "string" },
-        "outcomes": { "type": "array" },
+        "outcomes": { "type": "array", "items": { "$ref": "#/$defs/Outcome" } },
         "command_receipt": { "$ref": "#/$defs/CommandReceipt" }
-        ,"nonterminal_receipts": { "type": "array" }
-        ,"active_pins": { "type": "array" }
-        ,"unfinished_batches": { "type": "array" }
+        ,"nonterminal_receipts": { "type": "array", "items": { "$ref": "#/$defs/ReceiptIdentity" } }
+        ,"active_pins": { "type": "array", "items": { "$ref": "#/$defs/ActivePin" } }
+        ,"unfinished_batches": { "type": "array", "items": { "$ref": "#/$defs/BatchIdentity" } }
         ,"maintenance_next_cursor": { "type": ["string", "null"] }
       },
       "additionalProperties": false
+    },
+    "Candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["receipt_id", "generation"],
+      "properties": {
+        "receipt_id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "Outcome": {
+      "type": "object", "additionalProperties": false,
+      "required": ["receipt_id", "generation", "outcome"],
+      "properties": {
+        "receipt_id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "outcome": { "type": "string", "enum": ["deleted", "skipped"] }
+      }
+    },
+    "ReceiptIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["receipt_id", "generation"],
+      "properties": {
+        "receipt_id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "BatchIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["batch_id", "generation"],
+      "properties": {
+        "batch_id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "Limits": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "nonterminal_count": { "type": ["integer", "null"], "minimum": 0 },
+        "executing_count": { "type": ["integer", "null"], "minimum": 0 },
+        "logical_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "occupied_bytes": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "Percent": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "nonterminal_count": { "type": "number", "minimum": 0 },
+        "executing_count": { "type": "number", "minimum": 0 },
+        "logical_bytes": { "type": "number", "minimum": 0 },
+        "occupied_bytes": { "type": "number", "minimum": 0 }
+      }
+    },
+    "Utilization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["nonterminal_count", "executing_count", "logical_bytes", "limits", "percent", "pressure_band"],
+      "properties": {
+        "nonterminal_count": { "type": "integer", "minimum": 0 },
+        "executing_count": { "type": "integer", "minimum": 0 },
+        "logical_bytes": { "type": "integer", "minimum": 0 },
+        "occupied_bytes": { "type": "integer", "minimum": 0 },
+        "limits": { "$ref": "#/$defs/Limits" },
+        "percent": { "$ref": "#/$defs/Percent" },
+        "pressure_band": { "type": "string", "enum": ["normal", "warning", "action"] }
+      }
+    },
+    "InstallationUtilization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["nonterminal_count", "executing_count", "logical_bytes", "limits", "percent", "pressure_band", "page_size", "page_count", "freelist_count", "occupied_main_bytes", "wal_bytes", "occupied_bytes"],
+      "properties": {
+        "nonterminal_count": { "type": "integer", "minimum": 0 },
+        "executing_count": { "type": "integer", "minimum": 0 },
+        "logical_bytes": { "type": "integer", "minimum": 0 },
+        "limits": { "$ref": "#/$defs/Limits" },
+        "percent": { "$ref": "#/$defs/Percent" },
+        "pressure_band": { "type": "string", "enum": ["normal", "warning", "action"] },
+        "page_size": { "type": "integer", "minimum": 0 },
+        "page_count": { "type": "integer", "minimum": 0 },
+        "freelist_count": { "type": "integer", "minimum": 0 },
+        "occupied_main_bytes": { "type": "integer", "minimum": 0 },
+        "wal_bytes": { "type": "integer", "minimum": 0 },
+        "occupied_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "OwnerLiveness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "proof"],
+      "properties": {
+        "status": { "type": "string", "enum": ["dead", "live_remote_or_unverifiable", "unverifiable"] },
+        "proof": { "type": ["object", "null"] }
+      }
+    },
+    "ActivePin": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pin_id", "generation", "observed_at", "owner_liveness"],
+      "properties": {
+        "pin_id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "retry_horizon_expires_at": { "type": ["string", "null"] },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "horizon_elapsed": { "type": "boolean" },
+        "elapsed_seconds": { "type": "number", "minimum": 0 },
+        "horizon_evidence": { "type": "string" },
+        "owner_liveness": { "$ref": "#/$defs/OwnerLiveness" }
+      }
+    },
+    "NamespacePreview": {
+      "type": "object", "additionalProperties": false,
+      "required": ["namespace_id", "generation", "keyed_intake_enabled", "configured_limits", "nonterminal_count", "executing_count", "logical_bytes", "limits", "percent", "pressure_band", "nonterminal_receipts", "active_pins", "unfinished_batches", "maintenance_next_cursor"],
+      "properties": {
+        "namespace_id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 0 },
+        "keyed_intake_enabled": { "type": "boolean" },
+        "configured_limits": { "$ref": "#/$defs/Limits" },
+        "nonterminal_count": { "type": "integer", "minimum": 0 },
+        "executing_count": { "type": "integer", "minimum": 0 },
+        "logical_bytes": { "type": "integer", "minimum": 0 },
+        "occupied_bytes": { "type": "integer", "minimum": 0 },
+        "limits": { "$ref": "#/$defs/Limits" },
+        "percent": { "$ref": "#/$defs/Percent" },
+        "pressure_band": { "type": "string", "enum": ["normal", "warning", "action"] },
+        "nonterminal_receipts": { "type": "array", "items": { "$ref": "#/$defs/ReceiptIdentity" } },
+        "active_pins": { "type": "array", "items": { "$ref": "#/$defs/ActivePin" } },
+        "unfinished_batches": { "type": "array", "items": { "$ref": "#/$defs/BatchIdentity" } },
+        "maintenance_next_cursor": { "type": ["string", "null"] }
+      }
     },
     "ErrorPayload": {
       "type": "object",

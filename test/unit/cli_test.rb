@@ -204,6 +204,23 @@ class HiveCliTest < Minitest::Test
     assert_includes help, "published rollback package"
   end
 
+  def test_receipt_help_documents_destructive_subcommands_and_parser_examples
+    help = capture_io { Hive::CLI.start(%w[help receipt]) }.first
+    assert_includes help, "orphaned-owner"
+    assert_includes help, "release-pin"
+    assert_includes help, "abandon-batch"
+    assert_includes help, "--expected-generation"
+    assert_includes help, "hive receipt prune --project demo --json"
+    assert_equal "hive-receipt-prune",
+                 Hive::CliUsageContracts.contract(
+                   %w[receipt prune --project demo --json]
+                 ).fetch(:schema)
+    assert_equal "hive-command-receipt",
+                 Hive::CliUsageContracts.contract(
+                   %w[receipt release-pin PIN --expected-generation 1 --confirm]
+                 ).fetch(:schema)
+  end
+
   def test_patrol_help_distinguishes_cycle_and_findings_json_contracts
     out, _err = capture_io { Hive::CLI.start([ "help", "patrol" ]) }
 

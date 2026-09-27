@@ -571,6 +571,26 @@ class HiveCommandsAnswerTest < Minitest::Test
     end
   end
 
+  def test_post_write_read_failure_does_not_report_the_applied_answer_as_stale
+    with_project do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      command = Hive::Commands::Answer.new(
+        SLUG, project: "demo", binding: token,
+        input: StringIO.new("applied answer"), output: StringIO.new
+      )
+      original = command.method(:read_brainstorm!)
+      reads = 0
+      command.define_singleton_method(:read_brainstorm!) do |task|
+        reads += 1
+        raise Hive::InvalidTaskPath, "post-write read failed" if reads > 1
+        original.call(task)
+      end
+
+      assert_raises(Hive::InvalidTaskPath) { command.call }
+      assert_equal "applied answer", Hive::BrainstormParser.parse(path).first.answer
+    end
+  end
+
   def test_writer_closed_outcomes_are_preserved
     content = "## Round 1\n### Q1. Race?\n### A1.\n<!-- WAITING -->\n"
     with_project(content) do |_project, _folder, path|

@@ -124,6 +124,9 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
       )
 
       assert_equal "principal-1", repository.command_context(request_id).fetch("principal")
+      assert_equal 512, repository.database.read {
+        |db| db[:command_capacity][namespace_id: "namespace-1"].fetch(:logical_bytes)
+      }
       assert_equal request_id, repository.write_request!(
         project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
         request_id: request_id, task_generation: "generation-1", now: NOW,
@@ -134,6 +137,38 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
           project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
           request_id: request_id, task_generation: "generation-1", now: NOW,
           command_context: context.merge(principal: "forged")
+        )
+      end
+
+
+      repository.database.transaction do |db|
+        db[:command_receipt_pins].insert(
+          pin_id: "pin-1", receipt_id: "receipt-1", principal: "principal-1",
+          intent_id: request_id, intent_generation: 0, generation: 1,
+          owner_host: Socket.gethostname, owner_pid: Process.pid,
+          owner_process_start: "start", lifecycle_status: "active",
+          retry_horizon_expires_at: (NOW + 3600).iso8601(6),
+          created_at: NOW.iso8601(6), updated_at: NOW.iso8601(6)
+        )
+      end
+      repository.write_result!(
+        chat_id: 42, project: "hive", slug: "sqlite-cutover",
+        request_id: request_id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW
+      )
+      assert_equal 1, repository.acknowledge_results([ request_id ], now: NOW + 1)
+      assert_equal "closed", repository.database.read {
+        |db| db[:command_receipt_pins][pin_id: "pin-1"].fetch(:lifecycle_status)
+      }
+
+      repository.database.transaction do |db|
+        db[:command_receipts].where(receipt_id: "receipt-1").update(generation: 2)
+      end
+      stale_request = "command-dispatch:v1:#{'f' * 64}"
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_request!(
+          project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: stale_request, task_generation: "generation-1", now: NOW,
+          command_context: context.merge(transport_request_id: stale_request)
         )
       end
     end

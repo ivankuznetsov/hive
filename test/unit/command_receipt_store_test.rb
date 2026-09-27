@@ -169,6 +169,66 @@ class CommandReceiptStoreTest < Minitest::Test
     end
   end
 
+  def test_pin_and_successor_races_with_prune_return_typed_outcomes
+    with_store do |project, database, store|
+      receipt = store.reserve(
+        project_root: project, key: "pin-race", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      receipt = store.succeed(receipt, result: { "ok" => true }, status: 0)
+      original = database.method(:transaction)
+      raced = false
+      database.define_singleton_method(:transaction) do |**options, &block|
+        unless raced
+          raced = true
+          original.call do |db|
+            db[:command_receipts].where(receipt_id: receipt.receipt_id).delete
+          end
+        end
+        original.call(**options, &block)
+      end
+      error = assert_raises(Hive::CommandUnresolved) do
+        store.acquire_pin(
+          receipt_id: receipt.receipt_id, principal: "owner", intent_id: "intent",
+          intent_generation: 1, retry_horizon_expires_at: (Time.now.utc + 3600).iso8601,
+          project_root: project
+        )
+      end
+      assert_equal "command_pin_horizon_elapsed", error.reason
+    end
+
+    with_store do |project, database, store|
+      predecessor = store.reserve(
+        project_root: project, key: "successor-race", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      predecessor = store.mark_executing(predecessor)
+      predecessor = store.fail_non_application(
+        predecessor, result: { "format" => "text", "text" => "failed\n" },
+        status: 1, reason: "failed", whole_effect_non_application: true
+      )
+      original = database.method(:transaction)
+      raced = false
+      database.define_singleton_method(:transaction) do |**options, &block|
+        unless raced
+          raced = true
+          original.call do |db|
+            db[:command_receipts].where(receipt_id: predecessor.receipt_id).delete
+          end
+        end
+        original.call(**options, &block)
+      end
+      assert_raises(Hive::CommandUnresolved) do
+        store.allocate_successor(
+          namespace_id: predecessor.namespace_id, principal: "owner",
+          intent_id: "intent", intent_version: 1,
+          predecessor_receipt_id: predecessor.receipt_id, delivery_cycle_id: "cycle",
+          request_fingerprint: predecessor.request_fingerprint, project_root: project
+        )
+      end
+    end
+  end
+
   def test_live_namespace_nonterminal_limit_applies_on_the_next_admission
     with_store do |project, _database, store|
       write_receipt_config(project, nonterminal_limit: 1)
@@ -480,6 +540,7 @@ class CommandReceiptStoreTest < Minitest::Test
       store.succeed(first, result: { "ok" => true }, status: 0)
       stale = File.join(File.dirname(project), "stale-registration")
       FileUtils.mkdir_p(stale)
+      system("git", "init", "--quiet", stale, exception: true)
       replay = store.lookup_existing_in_projects(
         project_roots: [ stale, project ], key: "shared", command: "approve",
         target: "task", request: {}, principal: "owner"
@@ -509,6 +570,20 @@ class CommandReceiptStoreTest < Minitest::Test
       assert_raises(Hive::CommandConflict) do
         store.lookup_existing_in_projects(
           project_roots: [ project, missing ], key: "shared", command: "approve",
+          target: "task", request: {}, principal: "owner"
+        )
+      end
+    end
+  end
+
+  def test_cross_project_lookup_propagates_identity_custody_failures
+    with_store do |project, _database, store|
+      Hive::ProjectIdentity.resolve(project_root: project, database: store.database, create: true)
+      File.chmod(0o644, Hive::ProjectIdentity.marker_path(project))
+
+      assert_raises(Hive::ConfigError) do
+        store.lookup_existing_in_projects(
+          project_roots: [ project ], key: "shared", command: "approve",
           target: "task", request: {}, principal: "owner"
         )
       end

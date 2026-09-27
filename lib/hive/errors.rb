@@ -94,6 +94,15 @@ module Hive
     def exit_code = ExitCodes::TEMPFAIL
   end
 
+  class CommandReplayFailure < Error
+    def initialize(message, exit_code:)
+      super(message)
+      @replay_exit_code = Integer(exit_code)
+    end
+
+    def exit_code = @replay_exit_code
+  end
+
   # Process exit-code contract for the `hive` CLI.
   #
   # Codes are stable; agent callers can branch on them to decide retry vs

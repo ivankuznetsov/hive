@@ -502,12 +502,16 @@ module Hive
         return 0 if ids.empty?
 
         database.transaction do |db|
-          db[:dispatch_requests].where(
+          pending = db[:dispatch_requests].where(
             request_id: ids, result_state: "pending"
-          ).update(
+          )
+          acknowledged = pending.select_map(:request_id)
+          count = pending.update(
             result_state: "delivered", result_delivered_at: now.utc.iso8601(6),
             updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
           )
+          close_acknowledged_command_pins!(db, acknowledged, now: now) unless acknowledged.empty?
+          count
         end
       end
 
@@ -520,6 +524,24 @@ module Hive
       end
 
       private
+
+      def close_acknowledged_command_pins!(db, request_ids, now:)
+        return unless db.table_exists?(:command_dispatch_contexts) &&
+          db.table_exists?(:command_receipt_pins)
+
+        db[:command_dispatch_contexts].where(request_id: request_ids).all.each do |context|
+          db[:command_receipt_pins].where(
+            receipt_id: context.fetch(:receipt_id),
+            principal: context.fetch(:principal),
+            intent_id: context.fetch(:source_identity),
+            intent_generation: context.fetch(:ordinal),
+            lifecycle_status: "active"
+          ).update(
+            lifecycle_status: "closed", generation: Sequel[:generation] + 1,
+            released_at: now.utc.iso8601(6), updated_at: now.utc.iso8601(6)
+          )
+        end
+      end
 
       def bind_command_context!(db, request_id, context)
         tagged = request_id.to_s.start_with?("command-dispatch:v1:")
@@ -551,7 +573,28 @@ module Hive
           end
           return
         end
+        receipt = db[:command_receipts][receipt_id: values.fetch(:receipt_id)]
+        unless receipt && receipt.fetch(:state) == "executing" &&
+               receipt.fetch(:generation) == values.fetch(:receipt_generation) &&
+               receipt.fetch(:principal) == values.fetch(:principal) &&
+               receipt.fetch(:request_fingerprint) == values.fetch(:request_fingerprint)
+          raise IntegrityError.new(
+            "command dispatch context receipt ownership changed",
+            code: :dispatch_context_conflict
+          )
+        end
         db[:command_dispatch_contexts].insert(values)
+        changed = db[:command_capacity].where(namespace_id: receipt.fetch(:namespace_id)).update(
+          logical_bytes: Sequel[:logical_bytes] + 512,
+          revision: Sequel[:revision] + 1,
+          updated_at: values.fetch(:created_at)
+        )
+        unless changed == 1
+          raise IntegrityError.new(
+            "command dispatch context capacity is unavailable",
+            code: :dispatch_context_conflict
+          )
+        end
       end
 
       def normalize_command_context(context)

@@ -75,23 +75,39 @@ class CommandReceiptCapacityQualificationTest < Minitest::Test
       authority = Hive::CommandMaintenanceAuthority.new(
         principal: "owner", principal_source: "test", installation_owner: true
       )
-      failed_once = true
+      administrative = store.reserve(
+        project_root: project, key: "prune-administration", command: "receipt",
+        mode: "prune", target: "project", request: { "confirm" => true },
+        principal: "owner", maintenance: true, execute: true,
+        owner_process_start: "test-owner"
+      )
+      context = Hive::CommandOperation::Context.new(
+        receipt_id: administrative.receipt_id, effect_id: "effect", principal: "owner",
+        principal_source: "test", ordinal: 0,
+        receipt_generation: administrative.generation,
+        request_fingerprint: administrative.request_fingerprint,
+        transport_request_id: "command-dispatch:v1:#{'a' * 64}",
+        retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+      )
+      transaction_calls = 0
       unavailable = Object.new
       unavailable.define_singleton_method(:path) { database.path }
       unavailable.define_singleton_method(:read) { |&block| database.read(&block) }
       unavailable.define_singleton_method(:transaction) do |**options, &block|
-        if failed_once
-          failed_once = false
+        transaction_calls += 1
+        if transaction_calls == 2
           raise Errno::ENOSPC, "qualification full"
         end
         database.transaction(**options, &block)
       end
+      Thread.current[:hive_command_operation_context] = context
       error = assert_raises(Hive::CommandCapacityError) do
-        Hive::CommandReceiptPruner.new(
-          database: unavailable, authority: authority
-        ).prune(namespace_id: terminal.namespace_id)
+        Hive::CommandReceiptPruner.new(database: unavailable, authority: authority)
+          .prune(namespace_id: terminal.namespace_id)
       end
       assert_equal "command_prune_storage_unavailable", error.reason
+      batch = database.read { |db| db[:command_maintenance_batches].first }
+      assert_equal "executing", batch.fetch(:state)
       assert store.receipt(terminal.receipt_id)
       assert_equal "unresolved", store.receipt(unresolved.receipt_id).fetch(:state)
 
@@ -101,6 +117,8 @@ class CommandReceiptCapacityQualificationTest < Minitest::Test
       assert_equal "deleted", result.fetch("outcomes").first.fetch("outcome")
       assert_nil store.receipt(terminal.receipt_id)
       assert_equal "unresolved", store.receipt(unresolved.receipt_id).fetch(:state)
+    ensure
+      Thread.current[:hive_command_operation_context] = nil
     end
   end
 

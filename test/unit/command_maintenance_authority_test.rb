@@ -10,14 +10,43 @@ class CommandMaintenanceAuthorityTest < Minitest::Test
     with_tmp_dir do |root|
       state = File.join(root, "state")
       Dir.mkdir(state, 0o700)
-      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state }) do
-        authority = Hive::CommandMaintenanceAuthority.local(principal: "owner")
+      current = state
+      local_principal = "local-owner:uid:#{Process.euid}"
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { current }) do
+        authority = Hive::CommandMaintenanceAuthority.local(principal: local_principal)
         assert authority.installation_owner?
         assert_equal Process.euid, authority.custody_uid
 
         File.chmod(0o755, state)
         assert_raises(Hive::ConfigError) do
-          Hive::CommandMaintenanceAuthority.local(principal: "owner")
+          Hive::CommandMaintenanceAuthority.local(principal: local_principal)
+        end
+
+        target = File.join(root, "target")
+        Dir.mkdir(target, 0o700)
+        current = File.join(root, "state-link")
+        File.symlink(target, current)
+        assert_raises(Hive::ConfigError) do
+          Hive::CommandMaintenanceAuthority.local(principal: local_principal)
+        end
+
+        current = File.join(root, "state-file")
+        File.write(current, "not a directory")
+        File.chmod(0o600, current)
+        assert_raises(Hive::ConfigError) do
+          Hive::CommandMaintenanceAuthority.local(principal: local_principal)
+        end
+      end
+    end
+  end
+
+  def test_local_authority_rejects_nonlocal_principals_even_with_state_home_custody
+    with_tmp_dir do |root|
+      state = File.join(root, "state")
+      Dir.mkdir(state, 0o700)
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state }) do
+        assert_raises(Hive::ConfigError) do
+          Hive::CommandMaintenanceAuthority.local(principal: "github:42")
         end
       end
     end

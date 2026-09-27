@@ -572,6 +572,21 @@ class SetupOrchestratorTest < Minitest::Test
     refute_includes phases.map { |phase| phase.fetch("name") }, "daemon_service"
   end
 
+  def test_receipt_installation_precondition_refusal_returns_config_status
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true,
+      rollback_package: nil, output: output
+    )
+
+    assert_equal Hive::ExitCodes::CONFIG, setup.call
+    payload = JSON.parse(output.string)
+    phase = payload.fetch("phases").find {
+      |entry| entry.fetch("name") == "command_receipts_preconditions"
+    }
+    assert_equal false, phase.fetch("ok")
+  end
+
   # ── --service: web service installed ─────────────────────────────────
 
   def test_default_installs_web_service_phase

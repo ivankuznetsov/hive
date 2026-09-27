@@ -256,6 +256,24 @@ module Hive
     end
 
     desc "receipt SUBCOMMAND [IDENTIFIER]", "Preview or perform durable command-receipt maintenance"
+    long_desc <<~DESC
+      Inspects or maintains durable idempotency receipts. Public prune previews
+      are read-only; destructive actions require --confirm plus the operation's
+      generation, evidence, force, or reason guard.
+
+      Subcommands: prune, retire, orphaned-owner, release-pin, abandon-batch,
+      enroll, and show. Receipt failures use exit 20 for conflicts, 21 for work
+      still in progress, 22 for unresolved outcomes, 75 for transient prune
+      contention or storage pressure, and 78 for configuration failures.
+
+      Examples:
+
+        hive receipt prune --project demo --json
+        hive receipt prune --namespace-id UUID --confirm --reason "capacity cleanup"
+        hive receipt retire RECEIPT --expected-generation 3 --settle-without-result --confirm --reason "operator reconciliation"
+        hive receipt release-pin PIN --expected-generation 1 --force --confirm --reason "caller intent closed"
+        hive receipt enroll --project demo --new-identity --previous-identity UUID --expected-generation 4 --confirm
+    DESC
     Hive::CLIReceiptOptions.apply(self)
     def receipt(subcommand, identifier = nil)
       require "hive/commands/receipt"

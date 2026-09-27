@@ -125,6 +125,7 @@ module Hive
                    principal: nil,
                    principal_source: "local_cli", mode: nil, json: false,
                    structured: false, maintenance: false,
+                   display_json: json,
                    failure_payload: nil,
                    text_renderer: nil,
                    retry_horizon_expires_at: nil,
@@ -136,11 +137,13 @@ module Hive
       @project_root = project_root
       @project_roots = project_roots
       @store = store
+      verify_receipt_extension! if @key
       @principal = principal || self.class.local_principal(store.database)
       @principal_source = principal_source
       @mode = mode
       @json = json
       @structured = structured
+      @display_json = display_json
       @maintenance = maintenance
       @failure_payload = failure_payload
       @text_renderer = text_renderer
@@ -209,21 +212,31 @@ module Hive
         status: Hive::ExitCodes::SUCCESS
       )
       @store.succeed(claim, result: stored, status: Hive::ExitCodes::SUCCESS)
-      @store.close_pin(
-        receipt_id: claim.receipt_id, principal: claim.principal,
-        intent_id: context.transport_request_id, intent_generation: context.ordinal
-      ) if context.retry_horizon_expires_at
       emit_or_return(emitted)
     rescue Exception => error # rubocop:disable Lint/RescueException -- preserve Interrupt/SystemExit ambiguity
       if claim && effect && deterministic_non_application?(error)
         persist_failure(claim, effect, error)
       elsif claim
-        persist_uncertainty(claim, effect)
+        persist_uncertainty(claim, effect, error)
       end
       raise
     end
 
     private
+
+    def verify_receipt_extension!
+      return @store.verify_extension! if @store.respond_to?(:verify_extension!)
+      return unless @store.respond_to?(:database) && @store.database.respond_to?(:read)
+      return if Hive::RuntimeControlPlane::CommandSchema.installed?(@store.database)
+
+      raise Hive::ConfigError,
+            "command receipts are not installed; run `hive setup --install-command-receipts`"
+    rescue Hive::ConfigError
+      raise
+    rescue Hive::Error, Sequel::Error => error
+      raise Hive::ConfigError,
+            "cannot verify command receipt storage: #{error.message}"
+    end
 
     def resolved_project_roots
       value = @project_roots.respond_to?(:call) ? @project_roots.call : @project_roots
@@ -302,10 +315,17 @@ module Hive
       end
     end
 
-    def persist_uncertainty(claim, effect)
+    def persist_uncertainty(claim, effect, error = nil)
       return if effect && @store.authoritative_result_recorded?(
         receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id)
       )
+
+      if effect && retryable_pre_submission_contention?(error)
+        @store.abort_pre_submission(
+          claim, effect_id: effect.fetch(:effect_id), reason: "command_retryable_contention"
+        )
+        return
+      end
 
       begin
         @store.update_effect(
@@ -352,13 +372,15 @@ module Hive
           "error_kind" => failure_error_kind(error),
           "exit_code" => error.exit_code, "message" => error.message
         }
-        {
+        stored = {
           "format" => "dual", "payload" => payload,
           "text" => "#{error.message}\n",
           "expanded_sha256" => Digest::SHA256.hexdigest(
             Hive::RuntimeControlPlane::Codec.dump_json(payload)
           )
         }
+        stored["json_bytes"] = "#{JSON.generate(payload)}\n" if template_payload(payload) == payload
+        stored
       else
         { "format" => "text", "text" => "#{error.message}\n" }
       end
@@ -367,6 +389,7 @@ module Hive
     def response_payload(result, captured)
       return result if @structured
       return captured unless @json
+      return result if result.is_a?(Hash)
 
       parsed = JSON.parse(captured.to_s)
       raise Hive::InternalError, "keyed command emitted a non-object JSON result" unless parsed.is_a?(Hash)
@@ -390,18 +413,21 @@ module Hive
             Hive::RuntimeControlPlane::Codec.dump_json(canonical)
           )
         }
+        stored["json_bytes"] = "#{JSON.generate(canonical)}\n" if template == canonical
         stored["text"] = text unless answer_binding?(canonical)
         return stored
       end
       if @json || @structured
         template = template_payload(payload)
-        {
+        stored = {
           "format" => "json",
           "payload" => template,
           "expanded_sha256" => Digest::SHA256.hexdigest(
             Hive::RuntimeControlPlane::Codec.dump_json(payload)
           )
         }
+        stored["json_bytes"] = "#{JSON.generate(payload)}\n" if template == payload
+        stored
       else
         { "format" => "text", "text" => payload.to_s }
       end
@@ -470,17 +496,31 @@ module Hive
         raise Hive::CommandConflict,
               "retry inputs cannot reconstruct the original command response"
       end
+      exact_payload = exact_json_payload(stored, payload)
       if !@json && !@structured
         text = stored.fetch("format") == "dual" ? stored["text"] : nil
         $stdout.write(text || render_text(payload))
         exit(Integer(claim.status)) if claim.state == "failed"
         return nil
       end
+      if claim.state == "failed" && @structured && !@display_json
+        raise Hive::CommandReplayFailure.new(
+          payload.fetch("message", "the original keyed command failed"),
+          exit_code: claim.status
+        )
+      end
       if claim.state == "failed" && @structured
-        $stdout.puts(JSON.generate(payload))
+        $stdout.write(stored["json_bytes"] || "#{JSON.generate(payload)}\n")
         exit(Integer(claim.status))
       end
-      emitted = emit_or_return(payload)
+      emitted = if @structured
+        exact_payload || payload
+      elsif @json && stored["json_bytes"]
+        $stdout.write(stored.fetch("json_bytes"))
+        nil
+      else
+        emit_or_return(payload)
+      end
       exit(Integer(claim.status)) if claim.state == "failed" && !@structured
       emitted
     end
@@ -529,6 +569,7 @@ module Hive
       return error.reason if error.is_a?(Hive::CommandOutcomeError) ||
         error.is_a?(Hive::CommandCapacityError) || error.is_a?(Hive::CommandIntakeDisabled)
       return "usage" if error.is_a?(Hive::UsageError) || error.is_a?(Hive::InvalidTaskPath) ||
+        error.is_a?(Hive::OperationalActionUsageError) ||
         error.is_a?(Hive::WrongStage)
       return "config" if error.is_a?(Hive::ConfigError)
 
@@ -536,8 +577,44 @@ module Hive
     end
 
     def deterministic_non_application?(error)
-      error.is_a?(Hive::UsageError) || error.is_a?(Hive::InvalidTaskPath) ||
+      error.is_a?(Hive::UsageError) ||
         error.is_a?(Hive::OperationalActionUsageError) || error.is_a?(Hive::WrongStage)
+    end
+
+    def retryable_pre_submission_contention?(error)
+      return false unless error
+      return true if error.is_a?(Hive::ConcurrentRunError)
+      return true if error.is_a?(Hive::CommandCapacityError) &&
+        error.reason == "command_prune_busy"
+
+      current = error
+      5.times do
+        return true if current.is_a?(Sequel::DatabaseLockTimeout) ||
+          current.class.name == "SQLite3::BusyException"
+        current = current.cause
+        break unless current
+      end
+      false
+    end
+
+    def exact_json_payload(stored, payload)
+      bytes = stored["json_bytes"]
+      return unless bytes.is_a?(String) && bytes.end_with?("\n")
+      parsed = JSON.parse(bytes)
+      unless parsed == payload
+        raise Hive::RuntimeControlPlane::IntegrityError.new(
+          "command receipt exact replay bytes do not match the saved result",
+          code: :command_result_invalid,
+          action: Hive::RuntimeControlPlane::Database::BACKUP_ACTION
+        )
+      end
+      parsed
+    rescue JSON::ParserError
+      raise Hive::RuntimeControlPlane::IntegrityError.new(
+        "command receipt exact replay bytes are invalid",
+        code: :command_result_invalid,
+        action: Hive::RuntimeControlPlane::Database::BACKUP_ACTION
+      )
     end
 
     def emit_or_return(payload)

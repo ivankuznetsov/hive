@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "hive/command_maintenance_authority"
 require "hive/project_identity"
 require "hive/runtime_control_plane/command_schema_installation"
+require "json_schemer"
 
 class ProjectIdentityTest < Minitest::Test
   include HiveTestHelper
@@ -98,6 +100,10 @@ class ProjectIdentityTest < Minitest::Test
         expected_generation: 0, confirm: false, authority: owner_authority
       )
       assert_equal false, preview.fetch("confirmed")
+      receipt_schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-command-receipt")))
+      )
+      assert_empty receipt_schema.validate(preview).to_a
       assert_empty database.read { |db| db[:command_namespaces].all }
 
       result = Hive::ProjectIdentity.enroll_new_identity(
@@ -105,6 +111,7 @@ class ProjectIdentityTest < Minitest::Test
         expected_generation: 0, confirm: true, authority: owner_authority
       )
       assert_equal true, result.fetch("confirmed")
+      assert_empty receipt_schema.validate(result).to_a
       assert_equal 1, result.fetch("generation")
       assert_equal "active", database.read {
         |db| db[:command_namespaces][namespace_id: result.fetch("namespace_id")].fetch(:enrollment_state)
@@ -149,6 +156,45 @@ class ProjectIdentityTest < Minitest::Test
     end
     assert_equal "installation_owner",
                  Hive::ProjectIdentity.send(:authorize_enrollment!, owner_authority)
+  end
+
+  def test_relocation_crash_recovery_activates_with_persisted_audit_context
+    with_store do |project, database|
+      active = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      digest = active.git_common_dir_digest
+      row = database.read { |db| db[:command_namespaces][namespace_id: active.namespace_id] }
+      audit = Hive::ProjectIdentity.send(
+        :enrollment_audit_context, authority: owner_authority,
+        previous_identity: active.namespace_id,
+        expected_generation: active.enrollment_generation
+      )
+      pending = Hive::ProjectIdentity.send(
+        :replace_active_identity!, database: database, row: row,
+        installation_id: active.installation_id, digest: digest, project_root: project,
+        expected_generation: active.enrollment_generation,
+        authority: owner_authority, audit_context: audit
+      )
+      identity = Hive::ProjectIdentity::Identity.new(
+        namespace_id: pending.fetch(:namespace_id), installation_id: active.installation_id,
+        git_common_dir_digest: digest,
+        enrollment_generation: active.enrollment_generation,
+        marker_path: active.marker_path
+      )
+      Hive::ProjectIdentity.send(:write_marker, identity)
+
+      recovered = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      audit_row = database.read do |db|
+        db[:command_maintenance_audit][namespace_id: recovered.namespace_id]
+      end
+      assert_equal "project_new_identity_enrollment", audit_row.fetch(:action)
+      assert_equal "owner", audit_row.fetch(:acting_principal)
+      evidence = Hive::RuntimeControlPlane::Codec.load_json(audit_row.fetch(:evidence_json))
+      assert_equal active.namespace_id, evidence.fetch("previous_identity")
+    end
   end
 
   def test_enrollment_retries_a_concurrent_reservation_and_fences_confirmation_state

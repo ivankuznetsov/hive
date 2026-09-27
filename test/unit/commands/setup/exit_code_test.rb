@@ -59,7 +59,7 @@ class SetupExitCodeTest < Minitest::Test
       rollback_package: { version: nil, location: nil, sha256: nil }
     )
 
-    assert_equal 1, setup.call
+    assert_equal Hive::ExitCodes::CONFIG, setup.call
     envelope = JSON.parse(output.string)
     assert_equal false, envelope.fetch("ok")
     phase = envelope.fetch("phases").find do |row|

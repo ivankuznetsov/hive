@@ -7,14 +7,19 @@ require "hive/command_mutations"
 require "hive/command_maintenance_authority"
 require "hive/command_owner_proof"
 require "hive/command_receipt_capacity"
+require "hive/command_receipt_ledger"
 require "hive/pid_file"
 require "hive/lock"
 require "hive/project_identity"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/command_schema"
+require "hive/command_receipt_store/pins"
+require "hive/command_receipt_store/reclamation"
 
 module Hive
   class CommandReceiptStore
+    include Hive::CommandReceiptStorePins
+    include Hive::CommandReceiptStoreReclamation
     MAX_RESULT_BYTES = 256 * 1024
     MAX_RECLAMATION_PROBES_PER_ADMISSION = 4
     TERMINAL_STATES = %w[succeeded failed settled].freeze
@@ -43,6 +48,15 @@ module Hive
     end
 
     attr_reader :database
+
+    def verify_extension!
+      require_extension!
+    rescue Hive::ConfigError
+      raise
+    rescue Hive::Error, Sequel::Error => error
+      raise Hive::ConfigError,
+            "cannot verify command receipt storage: #{error.message}"
+    end
 
     def lookup_existing(project_root:, key:, command:, target:, request:, principal:)
       require_extension!
@@ -81,15 +95,9 @@ module Hive
       matches = []
       conflicting = []
       roots.each do |root|
-        identity = begin
-          Hive::ProjectIdentity.resolve(
-            project_root: root, database: database, create: false
-          )
-        rescue Hive::ConfigError
-          # Registered projects are independent replay candidates. A deleted,
-          # non-Git, or otherwise stale sibling must not hide a valid receipt.
-          next
-        end
+        identity = Hive::ProjectIdentity.resolve(
+          project_root: root, database: database, create: false
+        )
         next unless identity
 
         row = database.read do |connection|
@@ -292,13 +300,14 @@ module Hive
       counted = capacity_counted?(row)
       policy = Hive::CommandReceiptCapacity.load(claim.project_root) if counted
       transition!(
-        claim, from: "unresolved", to: "executing",
+        claim, from: %w[unresolved aborted], to: "executing",
         updates: {
           owner_host: owner_host, owner_pid: owner_pid,
           owner_process_start: owner_process_start, owner_token: SecureRandom.hex(16)
         },
         executing_delta: counted ? 1 : 0,
-        execution_policy: policy
+        execution_policy: policy,
+        reset_aborted_effects: true
       )
     end
 
@@ -350,6 +359,55 @@ module Hive
       raise Hive::CommandConflict, "command receipt ownership changed" unless changed == 1
 
       claim_from(receipt(claim.receipt_id), claim.disposition, project_root: claim.project_root)
+    end
+
+    def abort_pre_submission(claim, effect_id:, reason:)
+      now = timestamp
+      changed = database.transaction do |connection|
+        row = connection[:command_receipts][receipt_id: claim.receipt_id]
+        effect = connection[:command_effects][
+          receipt_id: claim.receipt_id, effect_id: effect_id.to_s
+        ]
+        next 0 unless row && row.fetch(:generation) == claim.generation &&
+                      row.fetch(:state) == "executing" && effect &&
+                      effect.fetch(:state) == "prepared"
+        evidence = effect[:evidence_json] ?
+          Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json)) : {}
+        next 0 unless Array(evidence["submissions"]).empty?
+
+        encoded = Hive::RuntimeControlPlane::Codec.dump_json(
+          evidence.merge(
+            "whole_effect_non_application" => true,
+            "retryable_contention" => true,
+            "owner_released" => true
+          )
+        )
+        effect_changed = connection[:command_effects].where(
+          effect_id: effect_id.to_s, receipt_id: claim.receipt_id,
+          state: "prepared", updated_at: effect.fetch(:updated_at)
+        ).update(state: "not_applied", evidence_json: encoded, updated_at: now)
+        next 0 unless effect_changed == 1
+
+        count = connection[:command_receipts].where(
+          receipt_id: claim.receipt_id, generation: claim.generation, state: "executing"
+        ).update(
+          state: "aborted", generation: claim.generation + 1,
+          typed_reason: reason.to_s, owner_token: nil, updated_at: now
+        )
+        if count == 1 && capacity_counted?(row)
+          connection[:command_capacity].where(namespace_id: claim.namespace_id).update(
+            executing_count: Sequel[:executing_count] - 1,
+            logical_bytes: Sequel[:logical_bytes] + encoded.bytesize - effect[:evidence_json].to_s.bytesize,
+            revision: Sequel[:revision] + 1, updated_at: now
+          )
+        end
+        count
+      end
+      raise Hive::CommandConflict, "command contention outcome changed" unless changed == 1
+
+      claim_from(receipt(claim.receipt_id), :resume, project_root: claim.project_root)
+    rescue Hive::RuntimeControlPlane::CodecError
+      raise Hive::CommandConflict, "command contention evidence changed"
     end
 
     def receipt(receipt_id)
@@ -530,109 +588,6 @@ module Hive
       true
     end
 
-    def acquire_pin(receipt_id:, principal:, intent_id:, intent_generation:,
-                    retry_horizon_expires_at:, owner_host: Socket.gethostname,
-                    owner_pid: Process.pid, owner_process_start: nil, project_root: nil)
-      owner_process_start ||= process_start(owner_pid)
-      horizon = parse_retry_horizon!(retry_horizon_expires_at)
-      intent_generation = Integer(intent_generation)
-      raise Hive::UsageError, "intent generation must be nonnegative" if intent_generation.negative?
-      now_time = @clock.call.utc
-      now = Hive::RuntimeControlPlane::Codec.dump_time(now_time)
-      receipt_snapshot, existing = database.read do |connection|
-        [
-          connection[:command_receipts][receipt_id: receipt_id],
-          connection[:command_receipt_pins][
-            receipt_id: receipt_id, principal: principal.to_s,
-            intent_id: intent_id.to_s, intent_generation: intent_generation
-          ]
-        ]
-      end
-      unless receipt_snapshot
-        raise Hive::CommandUnresolved.new(
-          reason: "command_pin_horizon_elapsed",
-          message: "receipt replay protection is no longer available; close the intent and " \
-                   "begin a new acquisition identity with a fresh future horizon"
-        )
-      end
-      if !existing && horizon <= now_time
-        raise Hive::UsageError, "a new receipt pin requires a future retry horizon"
-      end
-      policy = existing ? nil : admission_policy!(project_root, receipt_id: receipt_id)
-      persist_namespace_policy!(receipt_snapshot.fetch(:namespace_id), policy) if
-        policy && !policy.keyed_intake_enabled
-      row = database.transaction do |connection|
-        receipt = connection[:command_receipts][receipt_id: receipt_id]
-        unless receipt
-          raise Hive::CommandUnresolved.new(
-            reason: "command_pin_horizon_elapsed",
-            message: "receipt replay protection is no longer available; close the intent and " \
-                     "begin a new acquisition identity with a fresh future horizon"
-          )
-        end
-        raise Hive::CommandConflict unless receipt.fetch(:principal) == principal.to_s
-        existing = connection[:command_receipt_pins][
-          receipt_id: receipt_id, principal: principal.to_s,
-          intent_id: intent_id.to_s, intent_generation: intent_generation
-        ]
-        if existing
-          unless existing[:retry_horizon_expires_at] == Hive::RuntimeControlPlane::Codec.dump_time(horizon)
-            raise Hive::CommandConflict, "pin retry horizon cannot be changed for an acquisition identity"
-          end
-          if existing.fetch(:lifecycle_status) != "active"
-            raise Hive::CommandUnresolved.new(
-              reason: "command_pin_horizon_elapsed",
-              message: "receipt pin was already released; close the intent and begin a new " \
-                       "acquisition identity with a fresh future horizon"
-            )
-          end
-          next existing
-        end
-        intake_disabled! unless policy.keyed_intake_enabled
-        capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policy)
-        capacity.admit_bytes!(
-          connection, namespace_id: receipt.fetch(:namespace_id), request_bytes: 512,
-          occupied_installation_bytes: capacity.occupied_installation_bytes(connection: connection)
-        )
-        sync_namespace_policy!(connection, receipt.fetch(:namespace_id), policy, now)
-        pin_id = SecureRandom.uuid
-        connection[:command_receipt_pins].insert(
-          pin_id: pin_id, receipt_id: receipt_id, principal: principal.to_s,
-          intent_id: intent_id.to_s, intent_generation: intent_generation,
-          generation: 1, owner_host: owner_host, owner_pid: owner_pid,
-          owner_process_start: owner_process_start, lifecycle_status: "active",
-          retry_horizon_expires_at: Hive::RuntimeControlPlane::Codec.dump_time(horizon),
-          created_at: now, updated_at: now
-        )
-        add_logical_bytes!(connection, receipt.fetch(:namespace_id), 512)
-        connection[:command_receipt_pins][pin_id: pin_id]
-      end
-      pin_from(row)
-    rescue ArgumentError, TypeError
-      raise Hive::UsageError, "intent generation must be nonnegative"
-    end
-
-    def close_pin(receipt_id:, principal:, intent_id:, intent_generation:)
-      intent_generation = Integer(intent_generation)
-      now = timestamp
-      database.transaction do |connection|
-        pin = connection[:command_receipt_pins][
-          receipt_id: receipt_id, principal: principal.to_s,
-          intent_id: intent_id.to_s, intent_generation: intent_generation
-        ]
-        next false unless pin && pin.fetch(:lifecycle_status) == "active"
-        connection[:command_receipt_pins].where(
-          pin_id: pin.fetch(:pin_id), generation: pin.fetch(:generation),
-          lifecycle_status: "active"
-        ).update(
-          lifecycle_status: "closed", generation: pin.fetch(:generation) + 1,
-          released_at: now, updated_at: now
-        ) == 1
-      end
-    rescue ArgumentError, TypeError
-      false
-    end
-
     def allocate_successor(namespace_id:, principal:, intent_id:, intent_version:,
                            predecessor_receipt_id:, delivery_cycle_id:, request_fingerprint:,
                            project_root: nil)
@@ -658,12 +613,13 @@ module Hive
           end
           next successor_payload(existing)
         end
-        intake_disabled! unless policy.keyed_intake_enabled
         predecessor = connection[:command_receipts][receipt_id: predecessor_receipt_id]
         valid = predecessor && predecessor.fetch(:namespace_id) == namespace_id &&
           predecessor.fetch(:principal) == principal.to_s && predecessor.fetch(:state) == "failed" &&
           predecessor.fetch(:retry_eligible) == 1
         raise Hive::CommandUnresolved.new(message: "predecessor is not eligible for a successor") unless valid
+        raise Hive::CommandConflict, "successor allocation admission changed" unless policy
+        intake_disabled! unless policy.keyed_intake_enabled
         latest = connection[:command_successor_allocations]
           .where(namespace_id: namespace_id, principal: principal.to_s, intent_id: intent_id.to_s,
                  intent_version: intent_version)
@@ -700,103 +656,6 @@ module Hive
     end
 
     private
-
-    def reclaim_dead_executing_owners(trigger_claim, scope:)
-      authority = @maintenance_authority || Hive::CommandMaintenanceAuthority.local(
-        principal: trigger_claim.principal
-      )
-      candidates = database.transaction do |connection|
-        namespace = connection[:command_namespaces][namespace_id: trigger_claim.namespace_id]
-        cursor = if namespace[:reclamation_cursor_updated_at] &&
-                    namespace[:reclamation_cursor_receipt_id]
-          [ namespace.fetch(:reclamation_cursor_updated_at),
-            namespace.fetch(:reclamation_cursor_receipt_id) ]
-        end
-        dataset = connection[:command_receipts].where(state: "executing")
-        dataset = dataset.where(namespace_id: trigger_claim.namespace_id) if scope == "namespace"
-        if cursor
-          updated_at, receipt_id = cursor
-          dataset = dataset.where {
-            (Sequel[:updated_at] > updated_at) |
-              ((Sequel[:updated_at] == updated_at) & (Sequel[:receipt_id] > receipt_id))
-          }
-        end
-        rows = dataset.order(:updated_at, :receipt_id)
-          .limit(MAX_RECLAMATION_PROBES_PER_ADMISSION).all
-        if rows.empty? && cursor
-          dataset = connection[:command_receipts].where(state: "executing")
-          dataset = dataset.where(namespace_id: trigger_claim.namespace_id) if scope == "namespace"
-          rows = dataset.order(:updated_at, :receipt_id)
-            .limit(MAX_RECLAMATION_PROBES_PER_ADMISSION).all
-        end
-        last = rows.last
-        connection[:command_namespaces].where(namespace_id: trigger_claim.namespace_id).update(
-          reclamation_cursor_updated_at: last&.fetch(:updated_at),
-          reclamation_cursor_receipt_id: last&.fetch(:receipt_id)
-        )
-        rows
-      end
-      proofs = candidates.filter_map do |row|
-        begin
-          authority.authorize!(row.fetch(:principal))
-          Hive::CommandOwnerProof.dead(
-            row, host: @host, alive: @alive, ownership: @ownership, clock: @clock
-          )
-        rescue Hive::Error, SystemCallError, IOError
-          nil
-        end
-      end
-      proofs.count { |row, proof| commit_automatic_reclamation(row, proof, authority, trigger_claim) }
-    rescue Hive::ConfigError
-      0
-    end
-
-    def commit_automatic_reclamation(row, proof, authority, trigger_claim)
-      now = timestamp
-      database.transaction do |connection|
-        current = connection[:command_receipts][receipt_id: row.fetch(:receipt_id)]
-        next false unless current && current.fetch(:state) == "executing" &&
-                          current.fetch(:generation) == row.fetch(:generation) &&
-                          %i[owner_host owner_pid owner_process_start].all? {
-                            |key| current[key] == row[key]
-                          }
-        authority.authorize!(current.fetch(:principal))
-        changed = connection[:command_receipts].where(
-          receipt_id: row.fetch(:receipt_id), state: "executing",
-          generation: row.fetch(:generation), owner_host: row.fetch(:owner_host),
-          owner_pid: row.fetch(:owner_pid), owner_process_start: row.fetch(:owner_process_start)
-        ).update(
-          state: "unresolved", generation: row.fetch(:generation) + 1,
-          typed_reason: "command_orphaned_owner", owner_token: nil, updated_at: now
-        )
-        next false unless changed == 1
-
-        if capacity_counted?(row)
-          connection[:command_capacity].where(namespace_id: row.fetch(:namespace_id)).update(
-            executing_count: Sequel[:executing_count] - 1,
-            revision: Sequel[:revision] + 1, updated_at: now
-          )
-        end
-        connection[:command_maintenance_audit].insert(
-          audit_id: SecureRandom.uuid, receipt_id: row.fetch(:receipt_id),
-          namespace_id: row.fetch(:namespace_id),
-          acting_principal: authority.principal,
-          principal_source: authority.principal_source,
-          authority_basis: authority.authority_basis,
-          peer_address: authority.peer_address,
-          action: "automatic_admission_orphan_reclassification",
-          affected_principal: row.fetch(:principal),
-          reason: "capacity admission for #{trigger_claim.receipt_id}",
-          evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(proof),
-          created_at: now
-        )
-        add_logical_bytes!(
-          connection, row.fetch(:namespace_id),
-          Hive::RuntimeControlPlane::Codec.dump_json(proof).bytesize + 512
-        )
-        true
-      end
-    end
 
     def parse_retry_horizon!(value)
       raise Hive::UsageError, "retry_horizon_expires_at is required" if value.nil?
@@ -878,9 +737,9 @@ module Hive
         raise Hive::CommandConflict
       end
 
-      if row.fetch(:state) == "executing" &&
+      if %w[executing unresolved].include?(row.fetch(:state)) &&
          (authoritative = authoritative_result_for_receipt(row))
-        unless current_process_owner?(row)
+        if row.fetch(:state) == "executing" && !current_process_owner?(row)
           proof = Hive::CommandOwnerProof.dead(
             row, host: @host, alive: @alive, ownership: @ownership, clock: @clock
           )
@@ -905,7 +764,7 @@ module Hive
       when "prepared", "executing"
         raise Hive::CommandInProgress.new(command_receipt: public_receipt)
       when "unresolved", "aborted"
-        if resumable_prune?(row) || reconcilable_effect?(row)
+        if resumable_prune?(row) || reconcilable_effect?(row) || orderly_aborted?(row)
           return claim_from(row, :resume, project_root: project_root)
         end
         raise Hive::CommandUnresolved.new(command_receipt: public_receipt)
@@ -944,7 +803,8 @@ module Hive
       }
     end
 
-    def transition!(claim, from:, to:, updates: {}, executing_delta: 0, execution_policy: nil)
+    def transition!(claim, from:, to:, updates: {}, executing_delta: 0, execution_policy: nil,
+                    reset_aborted_effects: false)
       now = timestamp
       changed = database.transaction do |connection|
         row = connection[:command_receipts][receipt_id: claim.receipt_id]
@@ -961,6 +821,15 @@ module Hive
         count = connection[:command_receipts]
           .where(receipt_id: claim.receipt_id, generation: claim.generation, state: expected)
           .update({ state: to, generation: claim.generation + 1, updated_at: now }.merge(updates))
+        if count == 1 && reset_aborted_effects && row.fetch(:state) == "aborted"
+          effects = connection[:command_effects].where(receipt_id: claim.receipt_id).all
+          unless effects.all? { |effect| safely_not_applied_effect?(effect) }
+            raise Hive::CommandConflict, "aborted command no longer has non-application proof"
+          end
+          connection[:command_effects].where(
+            receipt_id: claim.receipt_id, state: "not_applied"
+          ).update(state: "prepared", updated_at: now)
+        end
         if count == 1 && !executing_delta.zero? && capacity_counted?(row)
           connection[:command_capacity].where(namespace_id: claim.namespace_id).update(
             executing_count: Sequel[:executing_count] + executing_delta,
@@ -1031,17 +900,11 @@ module Hive
       Hive::RuntimeControlPlane::Codec.dump_json(safe_request(request)).bytesize + 1024
     end
 
-    def capacity_counted?(row) = Hive::CommandReceiptCapacity.counts_receipt?(row)
+    def capacity_counted?(row) = Hive::CommandReceiptLedger.capacity_counted?(row)
 
     def add_logical_bytes!(connection, namespace_id, delta)
-      return if delta.zero?
-      expression = if delta.positive?
-        Sequel[:logical_bytes] + delta
-      else
-        Sequel.function(:max, Sequel[:logical_bytes] + delta, 0)
-      end
-      connection[:command_capacity].where(namespace_id: namespace_id).update(
-        logical_bytes: expression, revision: Sequel[:revision] + 1, updated_at: timestamp
+      Hive::CommandReceiptLedger.add_logical_bytes!(
+        connection, namespace_id, delta, now: timestamp
       )
     end
 
@@ -1072,6 +935,22 @@ module Hive
         entry.is_a?(Hash) && RECONCILABLE_EFFECT_KINDS.include?(entry["kind"]) &&
           authoritative_submission_observed?(entry, observations)
       end
+    rescue Hive::RuntimeControlPlane::CodecError
+      false
+    end
+
+    def orderly_aborted?(row)
+      return false unless row.fetch(:state) == "aborted"
+      effects = database.read do |connection|
+        connection[:command_effects].where(receipt_id: row.fetch(:receipt_id)).all
+      end
+      effects.empty? || effects.all? { |effect| safely_not_applied_effect?(effect) }
+    end
+
+    def safely_not_applied_effect?(effect)
+      return false unless effect.fetch(:state) == "not_applied" && effect[:evidence_json]
+      evidence = Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json))
+      evidence["whole_effect_non_application"] == true && Array(evidence["submissions"]).empty?
     rescue Hive::RuntimeControlPlane::CodecError
       false
     end

@@ -6,6 +6,7 @@ require "open3"
 require "securerandom"
 require "hive/atomic_file"
 require "hive/errors"
+require "hive/command_receipt_ledger"
 require "hive/runtime_control_plane/codec"
 
 module Hive
@@ -124,7 +125,11 @@ module Hive
       end
 
       preview = {
+        "schema" => "hive-command-receipt",
+        "schema_version" => 1,
+        "ok" => true,
         "operation" => "enroll",
+        "preview" => true,
         "confirmed" => false,
         "previous_identity" => previous_identity,
         "expected_generation" => generation,
@@ -132,6 +137,11 @@ module Hive
         "warning" => "old idempotency keys cannot be retried in the new identity"
       }
       return preview unless confirm
+
+      audit_context = enrollment_audit_context(
+        authority: authority, previous_identity: previous_identity,
+        expected_generation: generation
+      )
 
       if row && row.fetch(:enrollment_state) == "active"
         unless row.fetch(:namespace_id) == previous_identity
@@ -141,7 +151,7 @@ module Hive
         row = replace_active_identity!(
           database: database, row: row, installation_id: installation_id,
           digest: digest, project_root: project_root, expected_generation: generation,
-          authority: authority
+          authority: authority, audit_context: audit_context
         )
       else
         row ||= reserve_pending_with_retry!(
@@ -153,21 +163,18 @@ module Hive
              row.fetch(:enrollment_generation) == generation
         raise Hive::CommandConflict, "project enrollment changed before confirmation"
       end
+      persist_pending_audit_context!(
+        database: database, row: row, authority: authority,
+        audit_context: audit_context
+      )
       identity = identity_from(row, marker)
       write_marker(identity)
       activate!(
         database: database, identity: identity,
-        authority: authority,
-        audit: {
-          reason: "previous_identity=#{previous_identity}",
-          evidence: {
-            "previous_identity" => previous_identity,
-            "expected_generation" => generation,
-            "new_state" => "active"
-          }
-        }
+        authority: authority
       )
       preview.merge(
+        "preview" => false,
         "confirmed" => true,
         "namespace_id" => identity.namespace_id,
         "generation" => identity.enrollment_generation + 1
@@ -251,7 +258,7 @@ module Hive
     private_class_method :reserve_pending_with_retry!
 
     def replace_active_identity!(database:, row:, installation_id:, digest:, project_root:,
-                                 expected_generation:, authority:)
+                                 expected_generation:, authority:, audit_context: {})
       namespace_id = SecureRandom.uuid
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
       database.transaction do |connection|
@@ -278,7 +285,9 @@ module Hive
         connection[:command_project_enrollments].insert(
           git_common_dir_digest: digest, namespace_id: namespace_id,
           installation_id: installation_id, generation: expected_generation, state: "pending",
-          previous_identity: current.fetch(:namespace_id), created_at: now, updated_at: now
+          previous_identity: current.fetch(:namespace_id),
+          audit_context_json: Hive::RuntimeControlPlane::Codec.dump_json(audit_context),
+          created_at: now, updated_at: now
         )
         connection[:command_capacity].insert(
           namespace_id: namespace_id, nonterminal_count: 0, executing_count: 0,
@@ -351,6 +360,12 @@ module Hive
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
       changed = database.transaction do |connection|
         authorize_enrollment!(authority) if authority
+        enrollment = if connection.respond_to?(:[])
+          enrollments = connection[:command_project_enrollments]
+          enrollments[namespace_id: identity.namespace_id] if enrollments.respond_to?(:[])
+        end
+        persisted_audit = enrollment && enrollment[:audit_context_json] &&
+          Hive::RuntimeControlPlane::Codec.load_json(enrollment.fetch(:audit_context_json))
         count = connection[:command_namespaces]
           .where(namespace_id: identity.namespace_id, enrollment_state: "pending",
                  enrollment_generation: identity.enrollment_generation)
@@ -361,17 +376,24 @@ module Hive
                  generation: identity.enrollment_generation)
           .update(state: "active", updated_at: now,
                   generation: identity.enrollment_generation + 1)
-        if count == 1 && audit
-          connection[:command_maintenance_audit].insert(
+        audit_context = persisted_audit || audit
+        if count == 1 && audit_context
+          encoded_evidence = Hive::RuntimeControlPlane::Codec.dump_json(
+            audit_context.fetch("evidence")
+          )
+          Hive::CommandReceiptLedger.insert_audit!(connection,
             audit_id: SecureRandom.uuid, namespace_id: identity.namespace_id,
-            acting_principal: authority.principal,
-            principal_source: authority.principal_source,
-            authority_basis: authority.authority_basis,
-            peer_address: authority.peer_address,
+            acting_principal: audit_context.fetch("acting_principal"),
+            principal_source: audit_context.fetch("principal_source"),
+            authority_basis: audit_context.fetch("authority_basis"),
+            peer_address: audit_context["peer_address"],
             action: "project_new_identity_enrollment", affected_principal: nil,
-            reason: audit.fetch(:reason),
-            evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(audit.fetch(:evidence)),
+            reason: audit_context.fetch("reason"),
+            evidence_json: encoded_evidence,
             created_at: now
+          )
+          Hive::CommandReceiptLedger.add_logical_bytes!(
+            connection, identity.namespace_id, encoded_evidence.bytesize + 512, now: now
           )
         end
         count
@@ -386,6 +408,43 @@ module Hive
       raise Hive::ConfigError, "project receipt identity enrollment changed concurrently"
     end
     private_class_method :activate!
+
+    def enrollment_audit_context(authority:, previous_identity:, expected_generation:)
+      {
+        "acting_principal" => authority.principal,
+        "principal_source" => authority.principal_source,
+        "authority_basis" => authority.authority_basis,
+        "peer_address" => authority.peer_address,
+        "reason" => "previous_identity=#{previous_identity}",
+        "evidence" => {
+          "previous_identity" => previous_identity,
+          "expected_generation" => expected_generation,
+          "new_state" => "active"
+        }
+      }
+    end
+    private_class_method :enrollment_audit_context
+
+    def persist_pending_audit_context!(database:, row:, authority:, audit_context:)
+      encoded = Hive::RuntimeControlPlane::Codec.dump_json(audit_context)
+      database.transaction do |connection|
+        authorize_enrollment!(authority)
+        enrollment = connection[:command_project_enrollments][namespace_id: row.fetch(:namespace_id)]
+        unless enrollment && enrollment.fetch(:state) == "pending" &&
+               enrollment.fetch(:generation) == row.fetch(:enrollment_generation)
+          raise Hive::CommandConflict, "project enrollment changed before audit binding"
+        end
+        prior = enrollment[:audit_context_json]
+        if prior && prior != encoded
+          raise Hive::CommandConflict, "project enrollment audit context changed"
+        end
+        connection[:command_project_enrollments].where(
+          namespace_id: row.fetch(:namespace_id), state: "pending",
+          generation: row.fetch(:enrollment_generation)
+        ).update(audit_context_json: encoded, updated_at: Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc))
+      end
+    end
+    private_class_method :persist_pending_audit_context!
 
     def authorize_enrollment!(authority)
       unless authority&.installation_owner?

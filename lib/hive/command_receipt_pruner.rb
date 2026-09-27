@@ -3,6 +3,7 @@
 require "securerandom"
 require "socket"
 require "hive/command_maintenance_authority"
+require "hive/command_owner_proof"
 require "hive/command_operation"
 require "hive/command_receipt_capacity"
 require "hive/project_identity"
@@ -19,10 +20,14 @@ module Hive
     ACTION_BAND_PERCENT = 85
 
     def initialize(database: Hive::RuntimeControlPlane.database, authority: nil,
-                   clock: -> { Time.now.utc })
+                   clock: -> { Time.now.utc }, alive: Hive::PidFile.method(:alive?),
+                   ownership: Hive::PidFile.method(:ownership), host: Socket.gethostname)
       @database = database
       @authority = authority
       @clock = clock
+      @alive = alive
+      @ownership = ownership
+      @host = host
     end
 
     def preview(project_root: nil, namespace_id: nil, limit: DEFAULT_LIMIT, cursor: nil)
@@ -154,13 +159,14 @@ module Hive
     rescue Sequel::DatabaseLockTimeout, SQLite3::BusyException => error
       maintenance_failure!(:command_prune_busy,
                            "resolve database contention, then rerun; free disk if storage is exhausted", error)
-    rescue Sequel::DatabaseError, SQLite3::Exception, Errno::ENOSPC, Errno::EDQUOT,
-           SystemCallError, IOError => error
+    rescue Errno::ENOSPC, Errno::EDQUOT => error
+      maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
+    rescue Sequel::DatabaseError, SQLite3::Exception => error
       if sqlite_busy_error?(error)
         maintenance_failure!(:command_prune_busy,
                              "resolve database contention, then rerun; free disk if storage is exhausted", error)
       else
-        maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
+        raise
       end
     end
 
@@ -211,7 +217,10 @@ module Hive
         .exclude(receipt_id: connection[:command_receipt_pins]
           .where(lifecycle_status: "active").select(:receipt_id))
         .order(:terminal_at, :receipt_id).limit(limit).all
-        .select { |row| valid_terminal_time?(row[:terminal_at], cutoff) }
+        .select { |row|
+          valid_terminal_time?(row[:terminal_at], cutoff) &&
+            !active_successor_binding?(connection, row.fetch(:receipt_id))
+        }
     end
 
     def valid_terminal_time?(value, before)
@@ -248,7 +257,8 @@ module Hive
                Hive::CommandReceiptStore::TERMINAL_STATES.include?(row.fetch(:state)) &&
                valid_terminal_time?(row[:terminal_at], fixed_cutoff) &&
                !connection[:command_receipt_pins]
-                 .where(receipt_id: row.fetch(:receipt_id), lifecycle_status: "active").any?
+                 .where(receipt_id: row.fetch(:receipt_id), lifecycle_status: "active").any? &&
+               !active_successor_binding?(connection, row.fetch(:receipt_id))
               authority.authorize!(row.fetch(:principal))
               receipt_id = row.fetch(:receipt_id)
               logical_bytes = receipt_storage_bytes(connection, row)
@@ -465,7 +475,9 @@ module Hive
       end
       total += connection[:command_dispatch_contexts].where(receipt_id: receipt_id).count * 512
       total += connection[:command_successor_allocations]
-        .where(predecessor_receipt_id: receipt_id).count * 512
+        .where(Sequel.|(
+          { predecessor_receipt_id: receipt_id }, { successor_receipt_id: receipt_id }
+        )).count * 512
       total
     end
 
@@ -518,9 +530,9 @@ module Hive
         "nonterminal_receipts" => Array(grouped["receipt"]).map {
           |_kind, id, generation| { "receipt_id" => id, "generation" => generation }
         },
-        "active_pins" => Array(grouped["pin"]).map {
-          |_kind, id, generation| { "pin_id" => id, "generation" => generation }
-        },
+        "active_pins" => Array(grouped["pin"]).map do |_kind, id, _generation|
+          active_pin_identity(connection[:command_receipt_pins][pin_id: id])
+        end,
         "unfinished_batches" => Array(grouped["batch"]).map {
           |_kind, id, generation| { "batch_id" => id, "generation" => generation }
         },
@@ -539,6 +551,48 @@ module Hive
     def require_installation_owner!
       return if authority.installation_owner?
       raise Hive::ConfigError, "installation-wide receipt preview requires the installation owner"
+    end
+
+    def active_successor_binding?(connection, receipt_id)
+      connection[:command_successor_allocations]
+        .where(successor_receipt_id: receipt_id).all.any? do |allocation|
+          connection[:command_receipt_pins].where(
+            receipt_id: allocation.fetch(:predecessor_receipt_id),
+            principal: allocation.fetch(:principal),
+            intent_id: allocation.fetch(:intent_id),
+            intent_generation: allocation.fetch(:intent_version),
+            lifecycle_status: "active"
+          ).any?
+        end
+    end
+
+    def active_pin_identity(pin)
+      observed = @clock.call.utc
+      horizon = pin[:retry_horizon_expires_at]
+      evidence = {
+        "pin_id" => pin.fetch(:pin_id), "generation" => pin.fetch(:generation),
+        "retry_horizon_expires_at" => horizon,
+        "observed_at" => timestamp(observed)
+      }
+      if horizon
+        expires_at = Hive::RuntimeControlPlane::Codec.load_time(horizon)
+        evidence["horizon_elapsed"] = observed >= expires_at
+        evidence["elapsed_seconds"] = [ observed - expires_at, 0 ].max.round(6)
+      else
+        evidence["horizon_evidence"] = "unavailable"
+      end
+      proof = Hive::CommandOwnerProof.dead(
+        pin, host: @host, alive: @alive, ownership: @ownership, clock: @clock
+      )
+      evidence["owner_liveness"] = proof ?
+        { "status" => "dead", "proof" => proof.last } :
+        { "status" => "live_remote_or_unverifiable", "proof" => nil }
+      evidence
+    rescue Hive::RuntimeControlPlane::CodecError, Hive::Error, SystemCallError, IOError
+      evidence.merge(
+        "horizon_evidence" => "invalid_or_unavailable",
+        "owner_liveness" => { "status" => "unverifiable", "proof" => nil }
+      )
     end
 
     def authority(connection = nil)

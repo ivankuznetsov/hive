@@ -38,7 +38,7 @@ module Hive
         if command_context
           (command_lifecycle || Hive::CommandDispatchLifecycle.new(
             repository: repository, state_home: state_home
-          )).protect_context!(command_context)
+          )).protect_context!(command_context, project: project)
         end
         if command_context && defined?(Hive::CommandOperation)
           Hive::CommandOperation.record_effect_submission(

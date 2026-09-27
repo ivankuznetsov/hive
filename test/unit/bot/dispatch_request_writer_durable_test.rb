@@ -49,9 +49,10 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
     )
     order = []
     lifecycle = Object.new
-    lifecycle.define_singleton_method(:protect_context!) do |received|
+    lifecycle.define_singleton_method(:protect_context!) do |received, project:|
       order << :pin
       raise "wrong context" unless received == context
+      raise "wrong project" unless project == "demo"
     end
     repository = Object.new
     repository.define_singleton_method(:write_request!) { |**| order << :enqueue }

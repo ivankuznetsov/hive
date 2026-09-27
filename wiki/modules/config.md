@@ -171,6 +171,29 @@ incompatible conventional trees receive the precise unsupported-provider
 diagnostic until they opt in. Retained v1 capture manifests remain readable;
 new successful capture emits the provider-neutral v2 manifest.
 
+## Installation command-receipt capacity
+
+The global `hive_config.yml` may bound durable keyed-command storage and
+concurrency across all registered projects. These installation limits are
+independent of the project-level `command_receipts` policy:
+
+```yaml
+command_receipts:
+  installation_nonterminal_limit: 140000
+  installation_concurrency_limit: 3200
+  installation_byte_admission_limit: 6710886400
+  staffing:
+    operator_count: 1
+    response_business_days: 1
+    minutes_per_namespace_per_day:
+```
+
+All three installation limits are positive integers. The optional `staffing`
+block describes the operator capacity used by maintenance diagnostics;
+`minutes_per_namespace_per_day` may be left unset when no daily settlement
+allocation is promised. A project can choose stricter local limits but cannot
+raise these installation-wide ceilings.
+
 ## Plan-review policy and routes
 
 `plan_review` is a closed, production-enabled configuration subtree for the

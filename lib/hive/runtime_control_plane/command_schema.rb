@@ -7,7 +7,7 @@ module Hive
   module RuntimeControlPlane
     module CommandSchema
       VERSION = 2
-      EXPECTED_SCHEMA_SHA256 = "cd35003e8cf5f0a720b28ce9af301a95a14c52987a97bbbdd058f2bf04ec9fb5".freeze
+      EXPECTED_SCHEMA_SHA256 = "a108a7018f7e4b0d9e83674bda6457ac0d2c875539c1a7ecd8a95277546b4a3d".freeze
       TABLE_NAMES = %w[
         command_capacity
         command_dispatch_contexts
@@ -25,10 +25,14 @@ module Hive
         command_effects_ordinal_uidx
         command_dispatch_contexts_receipt_ordinal_uidx
         command_maintenance_audit_receipt_idx
+        command_maintenance_audit_batch_idx
+        command_maintenance_batches_completed_idx
+        command_maintenance_batches_receipt_idx
         command_maintenance_batches_unfinished_uidx
         command_receipt_pins_active_idx
         command_receipt_pins_intent_uidx
         command_receipts_key_uidx
+        command_receipts_owner_reclamation_idx
         command_receipts_terminal_idx
         command_namespaces_git_common_uidx
         command_successor_allocations_cycle_uidx
@@ -62,9 +66,16 @@ module Hive
       def exact?(database)
         rows = object_rows(database)
         rows.map { |row| row[1].to_s }.sort == OBJECT_NAMES.sort &&
-          checksum(database) == EXPECTED_SCHEMA_SHA256
+          checksum(database) == EXPECTED_SCHEMA_SHA256 &&
+          version_ledger_exact?(database)
       rescue Sequel::Error
         false
+      end
+
+      def version_ledger_exact?(database)
+        rows = database[:command_schema_versions].order(:version).all
+        rows.length == 1 && rows.first.fetch(:version) == VERSION &&
+          rows.first.fetch(:schema_sha256) == EXPECTED_SCHEMA_SHA256
       end
 
       def installed?(database)

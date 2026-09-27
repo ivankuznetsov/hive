@@ -15,7 +15,7 @@ module Hive
       @store = store
     end
 
-    def protect_context!(context)
+    def protect_context!(context, project_root: nil, project: nil)
       values = normalize_context(context)
       receipt = bound_receipt!(values)
       horizon = values.fetch("retry_horizon_expires_at").to_s
@@ -28,7 +28,8 @@ module Hive
         intent_id: values.fetch("source_identity"),
         intent_generation: Integer(values.fetch("ordinal")),
         retry_horizon_expires_at: horizon,
-        project_root: project_root_for(values.fetch("source_identity"))
+        project_root: project_root || project_root_for_project(project) ||
+          project_root_for(values.fetch("source_identity"))
       )
     end
 
@@ -105,6 +106,19 @@ module Hive
       row = project_name && store.database.read do |connection|
         connection[:projects][name: project_name]
       end
+      path = row && row[:observed_path]
+      if path.to_s.empty? || path == "__global__"
+        raise Hive::ConfigError, "keyed dispatch project identity is unavailable"
+      end
+      path
+    end
+
+    def project_root_for_project(project_name)
+      return if project_name.to_s.empty?
+      configured = Hive::Config.find_project(project_name.to_s)
+      return configured.fetch("path") if configured
+
+      row = store.database.read { |connection| connection[:projects][name: project_name.to_s] }
       path = row && row[:observed_path]
       if path.to_s.empty? || path == "__global__"
         raise Hive::ConfigError, "keyed dispatch project identity is unavailable"

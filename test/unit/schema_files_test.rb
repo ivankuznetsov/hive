@@ -578,6 +578,27 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  def test_each_keyed_command_validates_emitted_conflict_progress_and_unresolved_errors
+    commands = %w[hive-act hive-approve hive-new hive-answer hive-stage-action]
+    errors = [ Hive::CommandConflict.new, Hive::CommandInProgress.new,
+              Hive::CommandUnresolved.new ]
+    commands.each do |name|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+      extras = case name
+      when "hive-act" then { "action_id" => "workflow.advance", "target" => "demo:task" }
+      when "hive-stage-action" then { "verb" => "develop" }
+      else {}
+      end
+      errors.each do |error|
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: name, error: error, error_kind: error.reason, extras: extras
+        )
+        assert_empty schemer.validate(payload).to_a,
+                     "#{name} must accept emitted exit #{error.exit_code}"
+      end
+    end
+  end
+
   def test_hive_approve_next_action_kinds_match_closed_enum
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
     schema_kinds = doc.dig("$defs", "NextAction", "properties", "kind", "enum").sort

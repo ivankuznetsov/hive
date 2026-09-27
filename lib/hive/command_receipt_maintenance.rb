@@ -8,8 +8,10 @@ require "hive/command_maintenance_authority"
 require "hive/command_operation"
 require "hive/command_owner_proof"
 require "hive/command_receipt_capacity"
+require "hive/command_receipt_ledger"
 require "hive/pid_file"
 require "hive/runtime_control_plane"
+require "hive/schemas"
 
 module Hive
   class CommandReceiptMaintenance
@@ -150,11 +152,13 @@ module Hive
       validate_generation!(pin, expected_generation)
       raise Hive::UsageError, "pin is not active" unless pin.fetch(:lifecycle_status) == "active"
       horizon = horizon_evidence(pin)
+      liveness = owner_liveness_evidence(pin)
       payload = {
         "schema" => "hive-command-receipt", "schema_version" => 1, "ok" => true,
         "operation" => "release_pin", "preview" => !confirm, "confirmed" => confirm,
         "pin_id" => pin.fetch(:pin_id), "generation" => pin.fetch(:generation),
-        "warning" => "force release can let a later eligible prune remove replay/conflict protection and duplicate an effect"
+        "warning" => "force release can let a later eligible prune remove replay/conflict protection and duplicate an effect",
+        "evidence" => { "horizon" => horizon, "owner_liveness" => liveness }
       }.merge(horizon)
       return payload unless confirm
       raise Hive::UsageError, "confirmed pin release requires --force" unless force
@@ -171,7 +175,8 @@ module Hive
         ).update(lifecycle_status: "force_released", generation: pin.fetch(:generation) + 1,
                  released_at: now, updated_at: now)
         audit!(connection, row, action: "force_release_pin", reason: reason,
-               evidence: horizon, pin_id: pin.fetch(:pin_id)) if count == 1
+               evidence: { "horizon" => horizon, "owner_liveness" => liveness },
+               pin_id: pin.fetch(:pin_id)) if count == 1
         count
       end
       raise Hive::CommandConflict, "pin changed during release" unless changed == 1
@@ -231,6 +236,7 @@ module Hive
       return if receipt_id.to_s.empty?
 
       receipt = connection[:command_receipts][receipt_id: receipt_id]
+      @authority.authorize!(receipt.fetch(:principal)) if receipt
       unless receipt && receipt[:namespace_id] == batch[:namespace_id] &&
              receipt[:command] == "receipt" && receipt[:mode] == "prune" &&
              %w[prepared executing unresolved aborted].include?(receipt[:state])
@@ -347,7 +353,7 @@ module Hive
       if data["outcome"] == "succeeded"
         authoritative = validate_successful_reconciliation!(effect_rows, data)
         result = authoritative.fetch("result")
-        validate_replay_envelope!(result)
+          validate_replay_envelope!(result, row: row)
         return {
           "state" => "succeeded", "status" => authoritative.fetch("status"),
           "typed_reason" => nil, "result" => result, "retry_eligible" => false
@@ -412,7 +418,7 @@ module Hive
 
     def terminalize!(row, state:, result:, status:, typed_reason:, reason:, evidence: {},
                      retry_eligible: false)
-      validate_replay_envelope!(result)
+      validate_replay_envelope!(result, row: row)
       result_json = Hive::RuntimeControlPlane::Codec.dump_json(result)
       now = timestamp
       concurrency_limits = retirement_concurrency_limits(row)
@@ -506,7 +512,8 @@ module Hive
       end
     end
 
-    def validate_replay_envelope!(result)
+    def validate_replay_envelope!(result = nil, row: nil, **result_keywords)
+      result = result_keywords if result.nil? && !result_keywords.empty?
       unless result.is_a?(Hash) && %w[dual json text].include?(result["format"])
         raise Hive::UsageError, "retirement result must be a durable dual, json, or text replay envelope"
       end
@@ -518,9 +525,36 @@ module Hive
         )
           raise Hive::UsageError, "retirement JSON result has an invalid replay digest"
         end
+        validate_closed_error_enums!(payload, row) if payload["ok"] == false && row
       elsif !result["text"].is_a?(String)
         raise Hive::UsageError, "retirement text result must contain text"
       end
+    end
+
+    def validate_closed_error_enums!(payload, row)
+      schema_name = case row.fetch(:command)
+      when "new" then "hive-new"
+      when "approve" then "hive-approve"
+      when "answer" then "hive-answer"
+      when "act" then "hive-act"
+      when "stage_action" then "hive-stage-action"
+      when "receipt"
+        row[:mode] == "prune" ? "hive-receipt-prune" : "hive-command-receipt"
+      end
+      return unless schema_name
+
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(schema_name)))
+      properties = document.dig("$defs", "ErrorPayload", "properties") || {}
+      kinds = properties.dig("error_kind", "enum")
+      codes = properties.dig("exit_code", "enum")
+      if kinds && !kinds.include?(payload["error_kind"])
+        raise Hive::UsageError, "retirement error_kind is outside the command schema"
+      end
+      if codes && !codes.include?(payload["exit_code"])
+        raise Hive::UsageError, "retirement exit_code is outside the command schema"
+      end
+    rescue Errno::ENOENT, JSON::ParserError => error
+      raise Hive::ConfigError, "cannot validate command retirement schema: #{error.message}"
     end
 
     def horizon_evidence(pin)
@@ -539,6 +573,17 @@ module Hive
         "horizon_evidence" => "invalid" }
     end
 
+    def owner_liveness_evidence(pin)
+      proof = Hive::CommandOwnerProof.dead(
+        pin, host: Socket.gethostname, alive: @alive, ownership: @ownership, clock: @clock
+      )
+      return { "status" => "dead", "proof" => proof.last } if proof
+
+      { "status" => "live_remote_or_unverifiable", "proof" => nil }
+    rescue Hive::Error, SystemCallError, IOError => error
+      { "status" => "unverifiable", "proof" => nil, "error_class" => error.class.name }
+    end
+
     def maintenance_payload(operation, row, preview:, outcome:, warning: nil)
       payload = {
         "schema" => "hive-command-receipt", "schema_version" => 1, "ok" => true,
@@ -552,7 +597,7 @@ module Hive
 
     def audit!(connection, row, action:, reason:, evidence:, pin_id: nil, batch_id: nil)
       encoded_evidence = Hive::RuntimeControlPlane::Codec.dump_json(evidence || {})
-      connection[:command_maintenance_audit].insert(
+      Hive::CommandReceiptLedger.insert_audit!(connection,
         audit_id: SecureRandom.uuid, receipt_id: row[:receipt_id], batch_id: batch_id,
         pin_id: pin_id, namespace_id: row[:namespace_id],
         acting_principal: @authority.principal,
@@ -575,14 +620,11 @@ module Hive
       %i[owner_host owner_pid owner_process_start].all? { |key| left[key] == right[key] }
     end
 
-    def capacity_counted?(row) = Hive::CommandReceiptCapacity.counts_receipt?(row)
+    def capacity_counted?(row) = Hive::CommandReceiptLedger.capacity_counted?(row)
 
     def add_logical_bytes!(connection, namespace_id, delta)
-      return if delta.zero?
-      expression = delta.positive? ? Sequel[:logical_bytes] + delta :
-        Sequel.function(:max, Sequel[:logical_bytes] + delta, 0)
-      connection[:command_capacity].where(namespace_id: namespace_id).update(
-        logical_bytes: expression, revision: Sequel[:revision] + 1, updated_at: timestamp
+      Hive::CommandReceiptLedger.add_logical_bytes!(
+        connection, namespace_id, delta, now: timestamp
       )
     end
 

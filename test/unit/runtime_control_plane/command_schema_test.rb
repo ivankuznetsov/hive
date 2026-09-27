@@ -72,6 +72,27 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
     end
   end
 
+  def test_extension_version_ledger_is_part_of_exact_schema_validation
+    assert_equal Hive::RuntimeControlPlane::CommandSchema::VERSION,
+                 Hive::RuntimeControlPlane::CommandMigrations::AddCommandReceipts002::VERSION
+    Dir.mktmpdir do |dir|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime.sqlite3")
+      ).migrate!
+      Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+        database: database, package_coordinates: TEST_PACKAGE
+      )
+      database.transaction do |db|
+        db[:command_schema_versions].update(version: 99)
+      end
+
+      refute database.read { |db| Hive::RuntimeControlPlane::CommandSchema.exact?(db) }
+      refute Hive::RuntimeControlPlane::CommandSchema.installed?(database)
+    ensure
+      database&.disconnect
+    end
+  end
+
   def test_partial_or_unknown_extension_objects_fail_closed
     Dir.mktmpdir do |dir|
       database = Hive::RuntimeControlPlane::Database.new(

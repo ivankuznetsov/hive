@@ -86,6 +86,8 @@ module Hive
                              unique: true, name: :command_receipts_key_uidx)
           database.add_index(:command_receipts, [ :namespace_id, :state, :terminal_at, :receipt_id ],
                              name: :command_receipts_terminal_idx)
+          database.add_index(:command_receipts, [ :state, :updated_at, :receipt_id ],
+                             name: :command_receipts_owner_reclamation_idx)
 
           database.create_table(:command_effects) do
             String :effect_id, primary_key: true, null: false
@@ -156,6 +158,10 @@ module Hive
           database.add_index(:command_maintenance_batches, [ :kind ],
                              unique: true, where: Sequel.lit("state IN ('prepared','executing')"),
                              name: :command_maintenance_batches_unfinished_uidx)
+          database.add_index(:command_maintenance_batches, :administrative_receipt_id,
+                             name: :command_maintenance_batches_receipt_idx)
+          database.add_index(:command_maintenance_batches, [ :state, :completed_at, :batch_id ],
+                             name: :command_maintenance_batches_completed_idx)
 
           database.create_table(:command_maintenance_audit) do
             String :audit_id, primary_key: true, null: false
@@ -178,6 +184,8 @@ module Hive
           end
           database.add_index(:command_maintenance_audit, [ :receipt_id, :created_at ],
                              name: :command_maintenance_audit_receipt_idx)
+          database.add_index(:command_maintenance_audit, [ :batch_id, :created_at ],
+                             name: :command_maintenance_audit_batch_idx)
 
           database.create_table(:command_capacity) do
             foreign_key :namespace_id, :command_namespaces, type: String,
@@ -255,6 +263,7 @@ module Hive
             Integer :generation, null: false, default: 0
             String :state, null: false
             String :previous_identity
+            String :audit_context_json, text: true
             String :created_at, null: false
             String :updated_at, null: false
             check Sequel.lit("generation >= 0")

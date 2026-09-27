@@ -100,11 +100,18 @@ module Hive
         def load_command_context(repository, record)
           request_id = record["request_id"].to_s
           return nil if request_id.empty?
+          tagged = request_id.start_with?("command-dispatch:v1:")
           row = repository.respond_to?(:database) && repository.database.read do |db|
-            next nil unless db.table_exists?(:command_dispatch_contexts)
+            unless db.table_exists?(:command_dispatch_contexts)
+              raise RepositoryError, "tagged command dispatch context schema is unavailable" if tagged
+              next nil
+            end
             db[:command_dispatch_contexts][request_id: request_id]
           end
-          return nil unless row
+          unless row
+            raise RepositoryError, "tagged command dispatch is missing authenticated context" if tagged
+            return nil
+          end
           unless row.fetch(:source_identity) == request_id
             raise RepositoryError, "command dispatch context source identity mismatch"
           end

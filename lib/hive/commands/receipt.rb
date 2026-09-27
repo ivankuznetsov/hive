@@ -182,6 +182,7 @@ module Hive
             "confirm" => @confirm, "limit" => @limit
           },
           project_root: project_root, json: true, structured: true,
+          display_json: @json,
           maintenance: true,
           failure_payload: ->(error) { envelope_payload_for(error) },
           store: receipt_store
@@ -241,14 +242,28 @@ module Hive
 
       def authority
         @authority ||= Hive::CommandMaintenanceAuthority.local(
-          principal: Hive::CommandOperation.local_principal(receipt_store.database)
+          principal: Hive::CommandOperation.local_principal(receipt_database)
         )
       end
-      def pruner = @pruner ||= Hive::CommandReceiptPruner.new(authority: authority)
-      def maintenance = @maintenance ||= Hive::CommandReceiptMaintenance.new(authority: authority)
+      def pruner
+        return @pruner if @pruner
+        @pruner = if !@confirm
+          Hive::CommandReceiptPruner.new(database: receipt_database)
+        else
+          Hive::CommandReceiptPruner.new(database: receipt_database, authority: authority)
+        end
+      end
+      def maintenance
+        @maintenance ||= Hive::CommandReceiptMaintenance.new(
+          database: receipt_database, authority: authority
+        )
+      end
+      def receipt_database
+        @receipt_database ||= @command_receipt_store&.database || Hive::RuntimeControlPlane.database
+      end
       def receipt_store
         @command_receipt_store ||= Hive::CommandReceiptStore.new(
-          maintenance_authority: @authority
+          database: receipt_database, maintenance_authority: authority
         )
       end
 

@@ -104,7 +104,8 @@ class CommandReceiptContractTest < Minitest::Test
     assert_equal({ "route" => "prune" }, JSON.parse(out))
     pretty = Hive::Commands::Receipt.new("prune", pruner: pruner)
     out, = capture_io { pretty.call }
-    assert_includes out, "\n"
+    assert_equal JSON.pretty_generate("route" => "prune") + "\n", out
+    assert_includes out, "  \"route\""
   end
 
   def test_receipt_command_validates_keys_projects_namespaces_enrollment_and_evidence
@@ -198,6 +199,42 @@ class CommandReceiptContractTest < Minitest::Test
     ].each do |command|
       assert_raises(Hive::UsageError) { command.call }
     end
+  end
+
+  def test_public_prune_preview_defers_authority_resolution_to_read_only_guard
+    database = Object.new
+    store = Struct.new(:database).new(database)
+    command = Hive::Commands::Receipt.new(
+      "prune", command_receipt_store: store,
+      authority: -> { flunk "preview must not resolve write-capable authority before read_only" }
+    )
+    received = nil
+    pruner = Object.new
+    with_replaced_singleton_method(Hive::CommandReceiptPruner, :new, lambda { |**kwargs|
+      received = kwargs
+      pruner
+    }) do
+      assert_same pruner, command.send(:pruner)
+    end
+    assert_equal({ database: database }, received)
+  end
+
+  def test_receipt_store_is_constructed_after_injected_authority_is_resolved
+    database = Object.new
+    authority = Hive::CommandMaintenanceAuthority.new(
+      principal: "owner", principal_source: "test", installation_owner: true
+    )
+    received = nil
+    built = Struct.new(:database).new(database)
+    command = Hive::Commands::Receipt.new("retire", authority: authority)
+    command.instance_variable_set(:@receipt_database, database)
+    with_replaced_singleton_method(Hive::CommandReceiptStore, :new, lambda { |**kwargs|
+      received = kwargs
+      built
+    }) do
+      assert_same built, command.send(:receipt_store)
+    end
+    assert_same authority, received.fetch(:maintenance_authority)
   end
 
   def test_receipt_public_boundary_authorizes_namespace_selection_before_lookup
@@ -931,9 +968,22 @@ class CommandReceiptContractTest < Minitest::Test
     table = Object.new
     table.define_singleton_method(:[]) { |query| rows[query.fetch(:request_id)] }
     table.define_singleton_method(:insert) { |payload| rows[payload.fetch(:request_id)] = payload }
+    receipt = {
+      receipt_id: "receipt", namespace_id: "namespace", state: "executing", generation: 1,
+      principal: "owner", request_fingerprint: "fingerprint"
+    }
+    receipts = Object.new
+    receipts.define_singleton_method(:[]) { |query| query[:receipt_id] == "receipt" ? receipt : nil }
+    capacity_update = Object.new
+    capacity_update.define_singleton_method(:update) { |**| 1 }
+    capacity = Object.new
+    capacity.define_singleton_method(:where) { |**| capacity_update }
     db = Object.new
     db.define_singleton_method(:table_exists?) { |name| name == :command_dispatch_contexts }
-    db.define_singleton_method(:[]) { |_name| table }
+    db.define_singleton_method(:[]) do |name|
+      { command_dispatch_contexts: table, command_receipts: receipts,
+        command_capacity: capacity }.fetch(name)
+    end
     request_id = "command-dispatch:v1:#{'a' * 64}"
     assert_raises(Hive::Attempts::RepositoryError) do
       transition.send(:bind_command_context!, db, request_id, nil)
@@ -1298,6 +1348,24 @@ class CommandReceiptContractTest < Minitest::Test
     assert_raises(Hive::ConfigError) do
       transition.send(:bind_command_context!, db, context.transport_request_id, context)
     end
+  end
+
+  def test_dead_owner_proof_independently_requires_local_host_pid_and_start_time
+    base = {
+      owner_host: Socket.gethostname, owner_pid: 42,
+      owner_process_start: "recorded-start"
+    }
+    options = { host: Socket.gethostname, alive: ->(*) { false },
+                ownership: ->(*) { :reused }, clock: -> { Time.utc(2030) } }
+
+    assert_nil Hive::CommandOwnerProof.dead(base.merge(owner_host: "remote-host"), **options)
+    assert_nil Hive::CommandOwnerProof.dead(base.merge(owner_pid: 0), **options)
+    assert_nil Hive::CommandOwnerProof.dead(base.merge(owner_process_start: nil), **options)
+    assert_nil Hive::CommandOwnerProof.dead(
+      base, **options.merge(alive: ->(*) { true }, ownership: ->(*) { :verified })
+    )
+    proof = Hive::CommandOwnerProof.dead(base, **options)
+    assert_equal "dead", proof.last.fetch("ownership")
   end
 
   def test_receipt_command_defensive_option_and_failure_callbacks

@@ -1,6 +1,7 @@
 require "test_helper"
 require "tmpdir"
 require "open3"
+require "hive/command_operation"
 require "hive/github_publication"
 
 class GithubPublicationTest < Minitest::Test

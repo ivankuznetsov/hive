@@ -196,7 +196,21 @@ module Hive
           end
           return
         end
+        receipt = db[:command_receipts][receipt_id: context.receipt_id.to_s]
+        unless receipt && receipt.fetch(:state) == "executing" &&
+               receipt.fetch(:generation) == Integer(context.receipt_generation) &&
+               receipt.fetch(:principal) == context.principal.to_s &&
+               receipt.fetch(:request_fingerprint) == context.request_fingerprint.to_s
+          raise Attempts::RepositoryError,
+                "command dispatch context receipt ownership changed"
+        end
         db[:command_dispatch_contexts].insert(payload)
+        changed = db[:command_capacity].where(namespace_id: receipt.fetch(:namespace_id)).update(
+          logical_bytes: Sequel[:logical_bytes] + 512,
+          revision: Sequel[:revision] + 1,
+          updated_at: payload.fetch(:created_at)
+        )
+        raise Attempts::RepositoryError, "command dispatch context capacity is unavailable" unless changed == 1
       end
 
       def admission_request_payload(record, recovery_source_attempt_id:)

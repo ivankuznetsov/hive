@@ -15,8 +15,15 @@ module Hive
 
     def self.local(principal: nil)
       custody = validate_state_home_custody!
+      default_principal = "local-owner:uid:#{custody.uid}"
+      principal ||= default_principal
+      unless principal == default_principal ||
+             principal.match?(/\Ainstallation:[^:]+:uid:#{Regexp.escape(custody.uid.to_s)}\z/)
+        raise Hive::ConfigError,
+              "local installation-owner authority requires a verified local-owner principal"
+      end
       new(
-        principal: principal || "local-owner:uid:#{custody.uid}",
+        principal: principal,
         principal_source: "local_cli",
         installation_owner: true,
         custody_uid: custody.uid

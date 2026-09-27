@@ -26,7 +26,7 @@ module Hive
             raise Hive::UsageError,
                   "keyed durable dispatch requires an absolute --retry-horizon-expires-at"
           end
-          command_dispatch_lifecycle.protect_context!(context)
+          command_dispatch_lifecycle.protect_context!(context, project_root: task.project_root)
           attributes[:request_id] = context.transport_request_id
           Hive::CommandOperation.record_effect_submission(
             kind: "attempt_dispatch",

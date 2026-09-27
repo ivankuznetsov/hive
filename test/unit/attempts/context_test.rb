@@ -156,6 +156,25 @@ class AttemptsContextTest < Minitest::Test
     assert_includes error.message, "source identity mismatch"
   end
 
+  def test_tagged_command_context_fails_closed_when_schema_or_row_is_missing
+    request_id = "command-dispatch:v1:#{'f' * 64}"
+    record = { "request_id" => request_id }
+    [ false, true ].each do |table_exists|
+      contexts = Object.new
+      contexts.define_singleton_method(:[]) { |**| nil }
+      connection = Object.new
+      connection.define_singleton_method(:table_exists?) { |_name| table_exists }
+      connection.define_singleton_method(:[]) { |_name| contexts }
+      database = Object.new
+      database.define_singleton_method(:read) { |&block| block.call(connection) }
+      repository = Struct.new(:database).new(database)
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Context.send(:load_command_context, repository, record)
+      end
+    end
+  end
+
   def test_environment_context_publishes_opaque_ownership_generation
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(

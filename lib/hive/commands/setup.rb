@@ -72,15 +72,18 @@ module Hive
 
       def call
         if @install_command_receipts && !@no_bootstrap
-          precondition = phase("command_receipts_preconditions") do
+          begin
             validate_receipt_installation_preconditions!
-            [ true, { "status" => "ready" } ]
-          end
-          unless precondition["ok"]
+            add_phase("command_receipts_preconditions", true, "status" => "ready")
+          rescue Hive::ConfigError => error
+            add_phase(
+              "command_receipts_preconditions", false,
+              "message" => "#{error.class}: #{error.message}"
+            )
             diagnostics = Hive::Setup::Diagnostics::Aggregate.new(results: [])
             add_web_phase
             emit(diagnostics)
-            return 1
+            return error.exit_code
           end
         end
         Hive::Web::Environment.emit_warnings(

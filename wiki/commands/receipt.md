@@ -1,7 +1,7 @@
 ---
 title: hive receipt
 type: command
-source: lib/hive/commands/receipt.rb, lib/hive/command_receipt_{store,pruner,maintenance,capacity}.rb
+source: lib/hive/commands/receipt.rb, lib/hive/command_receipt_{store,pruner,maintenance,capacity,ledger}.rb
 created: 2026-09-27
 updated: 2026-09-27
 tags: [command, idempotency, receipts, sqlite, maintenance]
@@ -60,10 +60,17 @@ claim business success.
 
 A deterministic rejection before effect submission is stored as `failed` with
 validated whole-effect non-application and can feed the shared successor
-allocator. Lock contention remains temporary and never becomes a durable
-success. Every effect submission and observation is fenced by the receipt's
-ownership generation, so a reclaimed owner cannot append evidence to its
+allocator. Lock contention before submission records an orderly `aborted`
+generation that the identical request can reacquire; it never becomes a
+durable result or permanently burns the key. Every effect submission,
+dispatch-context bind, and observation is fenced by the receipt's ownership
+generation and principal, so a reclaimed owner cannot append evidence to its
 successor's execution.
+
+Untemplated JSON success and failure envelopes retain the exact emitted line
+for byte-identical replay. Display mode remains a caller choice: a text caller
+never receives a stored JSON failure merely because the original invocation
+used JSON internally.
 
 ## Maintenance
 
@@ -148,7 +155,10 @@ hive receipt enroll --project PROJECT --new-identity \
 Enrollment uses the same installation-owner authority predicate as destructive
 receipt maintenance and repeats that authorization inside each identity write
 transaction. Its audit records the authenticated principal, source, authority
-basis, and peer address rather than synthesizing a local uid claim.
+basis, and peer address rather than synthesizing a local uid claim. The pending
+enrollment row also retains that audit context before the marker is written, so
+crash recovery cannot activate a replacement identity without the original
+operator record.
 
 ## Pins and trust
 
@@ -165,6 +175,11 @@ an existing pin remains available while intake is disabled so already-admitted
 work can recover. Fresh admission requires the caller lifecycle's current
 canonical project root and verifies that it still resolves to the receipt
 namespace; the namespace schema does not persist or infer a project path.
+Durable dispatch pins remain active after command success and close only when
+the owning dispatch result is acknowledged. Active predecessor intents also
+retain their successor allocation and referenced successor receipt during
+prune. Pin previews and force-release audits report both retry-horizon and
+local owner-liveness evidence; elapsed time alone never releases protection.
 
 CLI and scheduler principals use the installation-scoped local uid. GitHub
 principals use the numeric account id. Cross-principal web maintenance requires
@@ -195,6 +210,11 @@ rows. SQLite pages become reusable; file shrinking is not promised. A storage
 or lock failure returns a typed error and no success claim. Once a receipt is
 actually pruned, Hive retains no tombstone and cannot promise replay/conflict
 protection for a later retry.
+
+The additive extension is accepted only when both its closed SQLite manifest
+checksum and its single `command_schema_versions` ledger row match the runtime
+version. Owner reclamation and maintenance lookup paths have dedicated indexes;
+the bounded owner scan occurs outside the immediate write transaction.
 
 ## Backlinks
 

@@ -35,11 +35,11 @@ Code-complete rollback handoff status for this checkout:
 
 - pinned prior revision: `882b8e9ead2f9cf5321b158fe47648e6a01a2fca`
 - extension manifest SHA-256:
-  `cd35003e8cf5f0a720b28ce9af301a95a14c52987a97bbbdd058f2bf04ec9fb5`
+  `a108a7018f7e4b0d9e83674bda6457ac0d2c875539c1a7ecd8a95277546b4a3d`
 - compatibility patch diff:
   `docs/implementation/command-receipt-compatibility.patch`
 - compatibility patch SHA-256:
-  `b29a7fd0cb9082aaf34d026c4bb0832177942262ebe76f43d86a1f7ef46a2730`
+  `fdfd638d7b092f09583960dfcc0ae505037f3499e34f60a99ef8bd3e7d289c2e`
 - externally retained candidate output (not committed):
   `hive-cli-command-receipt-compat-candidate.gem`
 - candidate SHA-256:

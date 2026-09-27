@@ -23,6 +23,7 @@ require "hive/agent_skills/inspector"
 require "hive/agent_skills/provisioner"
 require "hive/patrol/reviewer"
 require "hive/commands/setup_agents"
+require "hive/one_shot/result"
 require "hive/tui/snapshot"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/attempts/record"
@@ -35,6 +36,44 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_one_shot_schema_is_registered_closed_and_accepts_all_report_arms
+    path = Hive::Schemas.schema_path("hive-one-shot")
+    document = JSON.parse(File.read(path))
+    schemer = JSONSchemer.schema(document)
+    started = Time.utc(2026, 9, 23, 11, 59, 59)
+    finished = Time.utc(2026, 9, 23, 12)
+
+    reports = [
+      Hive::OneShot::Result.ok(
+        component: "dispatch", project: "app", started_at: started, finished_at: finished,
+        ran: [], items: [ {
+          "id" => "task:1", "component" => "dispatch", "bucket" => "waiting_external",
+          "reason" => "capacity", "next_check_at" => finished + 30,
+          "condition" => { "kind" => "time_due", "resource" => "global_cap" }
+        } ], safe_to_stop: true
+      ),
+      Hive::OneShot::Result.refused(
+        component: "patrol", project: "app", started_at: started, finished_at: finished,
+        code: "daemon_owned", message: "owned",
+        owner: { "kind" => "daemon", "pid" => 12, "process_identity" => "boot:12" }
+      ),
+      Hive::OneShot::Result.error(
+        component: "architecture_patrol", project: "app", started_at: started,
+        finished_at: finished, code: "observation_failed", message: "failed"
+      )
+    ]
+    aggregate = Hive::OneShot::Result.aggregate(
+      component: "babysitter", reports: [], started_at: started, finished_at: finished
+    )
+
+    assert_equal false, document.fetch("additionalProperties")
+    assert_equal "hive-one-shot.v1.json", document.fetch("$id")
+    (reports + [ aggregate ]).each do |report|
+      assert_empty schemer.validate(report.to_h).to_a
+    end
+    refute_empty schemer.validate(reports.first.to_h.merge("unknown" => true)).to_a
+  end
+
   def test_status_projection_enum_matches_the_runtime_contract
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
 

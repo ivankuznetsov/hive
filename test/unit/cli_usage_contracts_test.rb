@@ -3,6 +3,8 @@
 require "test_helper"
 require "json"
 require "hive/cli_usage_contracts"
+require "hive/commands/patrol"
+require "hive/commands/refactor_patrol"
 require "open3"
 require "rbconfig"
 
@@ -64,6 +66,13 @@ class CliUsageContractsTest < Minitest::Test
     assert_equal(
       { schema: "hive-running-status", error_kind: "error" },
       Hive::CliUsageContracts.contract(%w[status extra])
+    )
+  end
+
+  def test_patrol_manual_mode_keeps_its_legacy_error_envelope
+    assert_equal(
+      { schema: "hive-patrol", error_kind: "error" },
+      Hive::CliUsageContracts.contract(%w[patrol demo --json])
     )
   end
 
@@ -303,8 +312,8 @@ class CliUsageContractsTest < Minitest::Test
       source = File.read(File.join(ROOT, boundary))
       # Whitespace-tolerant so declaration formatting (line wrapping) does not
       # matter; only the boundary declaring its own contract does.
-      assert_match(/Hive::CliUsageContracts\.declare\(\s*"#{Regexp.escape(command)}"/,
-                   source,
+      declaration = /(?:Hive::CliUsageContracts\.declare|Hive::OneShot::Result\.declare_usage_contract)\(\s*"#{Regexp.escape(command)}"/
+      assert_match(declaration, source,
                    "#{command}'s usage contract must be declared by its own boundary file #{boundary}")
     end
 

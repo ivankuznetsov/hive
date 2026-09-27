@@ -542,6 +542,21 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_observe_keeps_pending_checks_runnable_when_auto_rebase_can_fix_behind_head
+    with_tmp_dir do |dir|
+      status = green_behind_status.merge(
+        "statusCheckRollup" => [ { "name" => "ci", "status" => "IN_PROGRESS" } ]
+      )
+      outcome = with_replaced_singleton_method(
+        Hive::Gh, :pr_status_rollup, ->(*) { status }
+      ) do
+        Hive::Babysitter::PrFixer.observe(pr, project_entry(dir), cfg).first
+      end
+
+      assert_equal :eligible, outcome
+    end
+  end
+
   def test_green_but_behind_falls_back_to_pr_head_oid_when_rollup_lacks_it
     with_tmp_dir do |dir|
       project = project_entry(dir)

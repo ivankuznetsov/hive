@@ -47,11 +47,19 @@ class DaemonDispatchBaselinesTest < Minitest::Test
     assert_empty store.load
   end
 
-  def test_single_daemon_writer_does_not_create_a_second_lock
+  def test_project_scoped_writes_use_a_stable_lock
     store.write({ %w[p s] => Time.utc(2026, 5, 27) })
 
-    refute_path_exists "#{@path}.lock"
+    assert_path_exists "#{@path}.lock"
     assert_equal [ %w[p s] ], store.load.keys
+  end
+
+  def test_project_scoped_write_preserves_unrelated_projects
+    store.write({ %w[p1 one] => Time.utc(2026, 5, 27), %w[p2 two] => Time.utc(2026, 5, 28) })
+
+    store.write({ %w[p1 new] => Time.utc(2026, 5, 29) }, scope_projects: [ "p1" ])
+
+    assert_equal [ %w[p1 new], %w[p2 two] ], store.load.keys.sort
   end
 
   def test_failed_replacement_preserves_the_restart_baseline

@@ -36,6 +36,12 @@ module Hive
         )
       end
 
+      def routing_decision_for_request(request, now: Time.now.utc, admission_view: nil)
+        daemon.routing_decision_for_request(
+          request, now: now, admission_view: admission_view
+        )
+      end
+
       def dispatch_recovery(source_attempt:, task:, project:, argv:, request_id:,
                             provider:, inherited_outputs: nil, retry_charge: nil,
                             interactive: false, now: Time.now.utc,

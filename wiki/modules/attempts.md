@@ -26,6 +26,9 @@ and module-hook paths use the same dispatcher. A successful admission starts a
 detached supervisor; callers may attach or observe but do not own the worker's
 lifetime.
 The API does not own or reap child processes after handoff.
+It also exposes the dispatcher's read-only provider-route decision for daemon
+readiness. That projection uses the tick's existing admission view and never
+persists an attempt or starts a worker.
 
 Supervisor self-reentry preserves canonical directories from the running Ruby
 interpreter's resolved load path. This includes dependencies loaded without

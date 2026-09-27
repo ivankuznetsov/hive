@@ -2,8 +2,11 @@
 
 require "test_helper"
 require "hive/runtime_control_plane/command_schema_installation"
+require "hive/runtime_control_plane/installation"
 
 class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
+  include HiveTestHelper
+
   TEST_PACKAGE = {
     version: "0.0.0-test",
     location: "https://example.invalid/hive-compat-0.0.0-test.gem",
@@ -75,6 +78,47 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
       assert_includes error.message, "no published rollback package"
       assert_includes error.message, "without --install-command-receipts"
       refute File.exist?(Hive::Paths.runtime_control_plane_path(dir))
+    end
+  end
+
+  def test_install_rejects_partial_and_mismatched_extension_shapes
+    diagnosis = Object.new
+    diagnosis.define_singleton_method(:ok?) { true }
+    partial = Object.new
+    partial.define_singleton_method(:diagnostics) { diagnosis }
+    partial.define_singleton_method(:read) { |&block| block.call(Object.new) }
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::CommandSchema, :installed?, ->(*) { false }
+    ) do
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::CommandSchema, :absent?, ->(*) { false }
+      ) do
+        error = assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+          Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+            database: partial, package_coordinates: TEST_PACKAGE
+          )
+        end
+        assert_equal :partial_command_schema, error.code
+      end
+    end
+
+    Dir.mktmpdir do |dir|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime.sqlite3")
+      ).migrate!
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::CommandSchema, :exact?, ->(*) { false }
+      ) do
+        error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+          Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+            database: database, package_coordinates: TEST_PACKAGE
+          )
+        end
+        assert_equal :command_schema_mismatch, error.code
+      end
+      assert database.read { |connection| Hive::RuntimeControlPlane::CommandSchema.absent?(connection) }
+    ensure
+      database&.disconnect
     end
   end
 

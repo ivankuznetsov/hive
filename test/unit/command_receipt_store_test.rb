@@ -168,6 +168,80 @@ class CommandReceiptStoreTest < Minitest::Test
     end
   end
 
+  def test_concurrent_insert_retries_and_stale_successor_predecessor_is_rejected
+    with_store do |project, database, _store|
+      Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
+      transaction = database.method(:transaction)
+      attempts = 0
+      database.define_singleton_method(:transaction) do |**kwargs, &block|
+        attempts += 1
+        raise Sequel::UniqueConstraintViolation, "simulated race" if attempts == 1
+
+        transaction.call(**kwargs, &block)
+      end
+      store = Hive::CommandReceiptStore.new(database: database)
+      claim = store.reserve(
+        project_root: project, key: "raced", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      assert_equal :new, claim.disposition
+      assert_equal 2, attempts
+
+      first = store.mark_executing(claim)
+      first = store.fail_non_application(
+        first, result: { "ok" => false }, status: 1, reason: "not_applied"
+      )
+      store.allocate_successor(
+        namespace_id: first.namespace_id, principal: first.principal,
+        intent_id: "intent", intent_version: 1, predecessor_receipt_id: first.receipt_id,
+        delivery_cycle_id: "cycle-1", request_fingerprint: "first"
+      )
+      second = store.reserve(
+        project_root: project, key: "second", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      second = store.mark_executing(second)
+      second = store.fail_non_application(
+        second, result: { "ok" => false }, status: 1, reason: "not_applied"
+      )
+      error = assert_raises(Hive::CommandConflict) do
+        store.allocate_successor(
+          namespace_id: second.namespace_id, principal: second.principal,
+          intent_id: "intent", intent_version: 1, predecessor_receipt_id: second.receipt_id,
+          delivery_cycle_id: "cycle-2", request_fingerprint: "second"
+        )
+      end
+      assert_equal "successor predecessor is stale", error.message
+    end
+  end
+
+  def test_automatic_reclamation_ignores_unauthorized_and_unavailable_candidates
+    with_store do |project, database, store|
+      claim = store.reserve(
+        project_root: project, key: "executing", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      claim = store.mark_executing(
+        claim, owner_host: "test-host", owner_pid: 41_001, owner_process_start: "start"
+      )
+      denying = Object.new
+      denying.define_singleton_method(:authorize!) { |_| raise Hive::CommandConflict, "denied" }
+      guarded = Hive::CommandReceiptStore.new(
+        database: database, maintenance_authority: denying, host: "test-host"
+      )
+      assert_equal 0, guarded.send(:reclaim_dead_executing_owners, claim, scope: "namespace")
+    end
+
+    unavailable = Object.new
+    unavailable.define_singleton_method(:read) { raise Hive::ConfigError, "unavailable" }
+    authority = Object.new
+    store = Hive::CommandReceiptStore.new(
+      database: unavailable, maintenance_authority: authority
+    )
+    claim = Struct.new(:principal, :namespace_id).new("owner", "namespace")
+    assert_equal 0, store.send(:reclaim_dead_executing_owners, claim, scope: "namespace")
+  end
+
   private
 
   def with_store

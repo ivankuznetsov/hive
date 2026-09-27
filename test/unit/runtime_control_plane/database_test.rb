@@ -122,6 +122,19 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     assert_empty offenders
   end
 
+  def test_read_only_preview_refuses_an_unpaired_recovery_sidecar
+    with_database do |database, path|
+      database.disconnect
+      File.binwrite("#{path}-wal", "recovering")
+      File.chmod(0o600, "#{path}-wal")
+
+      error = assert_raises(Hive::CommandCapacityError) do
+        database.read_only { flunk "an unpaired WAL must not be opened" }
+      end
+      assert_equal "command_prune_preview_unavailable", error.reason
+    end
+  end
+
   def test_migration_creates_owner_private_database_and_sidecars_under_permissive_umask
     with_tmp_dir do |root|
       path = File.join(root, "state", "runtime.sqlite3")

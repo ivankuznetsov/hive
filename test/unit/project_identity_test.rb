@@ -76,6 +76,34 @@ class ProjectIdentityTest < Minitest::Test
     end
   end
 
+  def test_enrollment_retries_a_concurrent_reservation_and_fences_confirmation_state
+    with_store do |project, database|
+      transaction = database.method(:transaction)
+      attempts = 0
+      database.define_singleton_method(:transaction) do |**kwargs, &block|
+        attempts += 1
+        raise Sequel::UniqueConstraintViolation, "simulated race" if attempts == 1
+
+        transaction.call(**kwargs, &block)
+      end
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      assert_equal 1, identity.enrollment_generation
+      assert_equal 3, attempts
+
+      File.delete(identity.marker_path)
+      error = assert_raises(Hive::CommandConflict) do
+        Hive::ProjectIdentity.enroll_new_identity(
+          project_root: project, database: database,
+          previous_identity: "11111111-1111-4111-8111-111111111111",
+          expected_generation: 1, confirm: true
+        )
+      end
+      assert_equal "project enrollment changed before confirmation", error.message
+    end
+  end
+
   private
 
   def with_store

@@ -180,6 +180,55 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_prune_contention_and_unfinished_batches_return_recoverable_failures
+    authority = Hive::CommandMaintenanceAuthority.new(
+      principal: "owner", principal_source: "test", installation_owner: true
+    )
+    locked = Object.new
+    locked.define_singleton_method(:read_only) { raise Sequel::DatabaseLockTimeout, "locked" }
+    error = assert_raises(Hive::CommandCapacityError) do
+      Hive::CommandReceiptPruner.new(database: locked, authority: authority).preview
+    end
+    assert_equal "command_prune_busy", error.reason
+
+    locked = Object.new
+    locked.define_singleton_method(:transaction) { raise Sequel::DatabaseLockTimeout, "locked" }
+    pruner = Hive::CommandReceiptPruner.new(database: locked, authority: authority)
+    pruner.define_singleton_method(:resolve_namespace) { |**| "namespace" }
+    error = assert_raises(Hive::CommandCapacityError) { pruner.prune(project_root: "/project") }
+    assert_equal "command_prune_busy", error.reason
+
+    with_receipts do |project, database, store, owner|
+      claim = terminal_receipt(store, project, "busy")
+      now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+      database.transaction do |connection|
+        connection[:command_maintenance_batches].insert(
+          batch_id: "unfinished", namespace_id: claim.namespace_id, principal: "foreign",
+          principal_scope: "own", kind: "prune", state: "executing", generation: 3,
+          owner_host: "host", owner_pid: 1, fixed_cutoff: now,
+          candidates_json: "[]", outcomes_json: "[]", created_at: now, updated_at: now
+        )
+      end
+
+      error = assert_raises(Hive::CommandCapacityError) do
+        Hive::CommandReceiptPruner.new(database: database, authority: owner)
+          .prune(namespace_id: claim.namespace_id)
+      end
+      assert_includes error.message, "unfinished"
+      assert_includes error.message, "generation 3"
+
+      own = Hive::CommandMaintenanceAuthority.new(
+        principal: "owner", principal_source: "test", installation_owner: false
+      )
+      error = assert_raises(Hive::CommandCapacityError) do
+        Hive::CommandReceiptPruner.new(database: database, authority: own)
+          .prune(project_root: project)
+      end
+      assert_equal "another prune batch is unfinished; ask the installation owner to recover it",
+                   error.message
+    end
+  end
+
   private
 
   def terminal_receipt(store, project, key)

@@ -651,6 +651,35 @@ class CommandReceiptStoreTest < Minitest::Test
     refute store.send(:current_process_owner?, row)
   end
 
+  # An executing receipt owned by another process may be replayed from its
+  # authoritative effect only when that owner is proven dead; a live or
+  # unprovable owner keeps the command in progress.
+  def test_foreign_executing_owner_replays_only_with_proof_of_death
+    store = Hive::CommandReceiptStore.new(database: Object.new)
+    row = {
+      receipt_id: "receipt", namespace_id: "namespace", generation: 1,
+      state: "executing", principal: "owner", request_fingerprint: "fingerprint",
+      owner_host: "other-host", owner_pid: 1, owner_process_start: "start"
+    }
+    store.define_singleton_method(:authoritative_result_for_receipt) do |_row|
+      [ { "format" => "text", "text" => "ok\n" }, 0 ]
+    end
+    store.define_singleton_method(:public_receipt) { |receipt| { "receipt_id" => receipt.fetch(:receipt_id) } }
+    store.define_singleton_method(:claim_from) { |*_args, **_kwargs| :claim }
+    store.define_singleton_method(:finalize!) { |claim, **kwargs| [ claim, kwargs.fetch(:state) ] }
+    classify = lambda do
+      store.send(:classify_existing!, row, principal: "owner",
+                 request_fingerprint: "fingerprint", project_root: "/project")
+    end
+
+    with_replaced_singleton_method(Hive::CommandOwnerProof, :dead, ->(*_args, **_kwargs) { nil }) do
+      assert_raises(Hive::CommandInProgress) { classify.call }
+    end
+    with_replaced_singleton_method(Hive::CommandOwnerProof, :dead, ->(*_args, **_kwargs) { :proof }) do
+      assert_equal [ :claim, "succeeded" ], classify.call
+    end
+  end
+
   def test_reclamation_cursor_wraps_and_fresh_admission_requires_the_canonical_root
     with_store do |project, database, store|
       identity = Hive::ProjectIdentity.resolve(

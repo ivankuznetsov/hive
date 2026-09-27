@@ -38,6 +38,30 @@ class WebSupervisorTest < Minitest::Test
     end
   end
 
+  def test_persistent_admission_closure_preserves_due_restart_intent
+    sup = Hive::Web::Supervisor.new(persistent_admission: -> { false })
+    child = Child.new(name: "web", argv: %w[x], pid: nil,
+                      started_at: Time.now - 3600, desired: true)
+    sup.instance_variable_get(:@children) << child
+    restart_at(sup)["web"] = Time.now - 1
+    started = stub_start_child(sup)
+
+    sup.send(:start_due_restarts)
+
+    assert_empty started
+    assert restart_at(sup).key?("web"),
+           "resume must retain the restart intent suppressed while admission is closed"
+  end
+
+  def test_persistent_admission_errors_warn_and_fail_closed
+    sup = Hive::Web::Supervisor.new(
+      persistent_admission: -> { raise IOError, "offline" }
+    )
+
+    _output, errors = capture_io { refute sup.send(:admission_open?) }
+    assert_includes errors, "persistent admission check failed"
+  end
+
   def test_reap_schedules_restart_for_every_crashed_child
     with_tmp_global_config do
       sup = build
@@ -295,12 +319,14 @@ class WebSupervisorTest < Minitest::Test
   def test_run_starts_children_traps_signals_and_terminates_on_stop
     with_env("HIVEBOX_SUPERVISOR_PID" => "outer") do
       published_pids = []
+      published_receipts = []
       with_tmp_global_config do
         sup = build
         started = []
         sup.define_singleton_method(:start_child) do |name, argv|
           started << [ name, argv ]
           published_pids << ENV["HIVEBOX_SUPERVISOR_PID"]
+          published_receipts << Hive::PidFile.read(Hive::Paths.hivebox_supervisor_pid_path)
         end
         # Make the loop exit on its first iteration and turn terminate_all into a
         # no-op (no real children were spawned).
@@ -318,9 +344,14 @@ class WebSupervisorTest < Minitest::Test
                      "container web child must opt into public bind; owner gate still protects UI"
         assert_equal [ Process.pid.to_s, Process.pid.to_s ], published_pids,
                      "run must publish its pid before children are spawned"
+        assert published_receipts.all? { |payload| payload.fetch("pid") == Process.pid }
+        assert published_receipts.all? { |payload| payload.fetch("process_start_time") },
+               "run must persist supervisor identity before children are spawned"
         assert sup.instance_variable_get(:@terminated), "run must terminate_all on exit"
         assert_equal "outer", ENV["HIVEBOX_SUPERVISOR_PID"],
                      "run must restore the caller's supervisor pid when it exits"
+        refute_path_exists Hive::Paths.hivebox_supervisor_pid_path,
+                           "normal supervisor exit must remove its own identity receipt"
       end
     end
   end
@@ -375,6 +406,55 @@ class WebSupervisorTest < Minitest::Test
       children = sup.instance_variable_get(:@children)
       children.each { |c| Process.kill("KILL", -c.pid) rescue nil; Process.waitpid(c.pid) rescue nil }
     end
+  end
+
+  def test_start_child_preserves_restart_intent_while_admission_is_closed
+    admission_open = false
+    sup = Hive::Web::Supervisor.new(persistent_admission: -> { admission_open })
+
+    refute sup.send(:start_child, "web", [ "this-command-must-not-run" ])
+    child = sup.instance_variable_get(:@children).fetch(0)
+    assert_nil child.pid
+    assert child.desired
+    assert restart_at(sup).key?("web")
+
+    started = []
+    admission_open = true
+    sup.define_singleton_method(:start_child) { |name, _argv| started << name }
+    restart_at(sup)["web"] = Time.now - 1
+    sup.send(:start_due_restarts)
+    assert_equal [ "web" ], started
+  end
+
+  def test_start_child_updates_an_existing_child_while_admission_is_closed
+    supervisor = Hive::Web::Supervisor.new(persistent_admission: -> { false })
+    existing = Child.new(name: "web", argv: %w[old], pid: nil, started_at: nil, desired: false)
+    supervisor.instance_variable_get(:@children) << existing
+
+    refute supervisor.send(:start_child, "web", %w[new command])
+    assert_equal %w[new command], existing.argv
+    assert existing.desired
+  end
+
+  def test_supervisor_identity_failures_refuse_start_and_leave_cleanup_best_effort
+    supervisor = build
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { nil }) do
+      error = assert_raises(Hive::Error) { supervisor.send(:publish_supervisor_identity!) }
+      assert_match(/cannot persist process identity/, error.message)
+    end
+
+    supervisor.instance_variable_set(:@supervisor_identity, { "pid" => Process.pid })
+    supervisor.define_singleton_method(:pid_file) { raise IOError, "read-only state" }
+    _out, errors = capture_io { supervisor.send(:clear_supervisor_identity!) }
+    assert_includes errors, "identity receipt cleanup failed"
+  end
+
+  def test_clear_supervisor_identity_tolerates_a_receipt_removed_before_cleanup
+    supervisor = build
+    supervisor.instance_variable_set(:@supervisor_identity, { "pid" => Process.pid })
+    supervisor.define_singleton_method(:pid_file) { File.join(Dir.tmpdir, "missing-supervisor.pid") }
+
+    assert_nil supervisor.send(:clear_supervisor_identity!)
   end
 
   def test_start_due_restarts_respawns_only_due_entries_and_not_while_stopping

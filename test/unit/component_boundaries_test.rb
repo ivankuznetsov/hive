@@ -87,10 +87,17 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/commands/daemon.rb", "lib/hive/one_shot/runner.rb"
         ],
         "Hive::Attempts::ProcessIdentity" => [
-          "lib/hive/commands/daemon.rb", "lib/hive/one_shot/runner.rb"
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/daemon/quiescence.rb",
+          "lib/hive/daemon/status_report.rb",
+          "lib/hive/one_shot/runner.rb",
+          "lib/hive/runtime_control_plane/process_registry.rb"
         ],
         "Hive::Attempts::Reconciler" => [
-          "lib/hive/commands/daemon.rb", "lib/hive/one_shot/runner.rb"
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/daemon/quiescence.rb",
+          "lib/hive/daemon/quiescence_finalizer.rb",
+          "lib/hive/one_shot/runner.rb"
         ],
         "Hive::Attempts::Repository" => [
           "lib/hive/commands/attempt_supervise.rb",
@@ -104,6 +111,8 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/artifacts/outcome_evidence/store.rb",
           "lib/hive/implementation_identity/store.rb",
           "lib/hive/modules/inspector.rb",
+          "lib/hive/daemon/quiescence.rb",
+          "lib/hive/daemon/quiescence_process_evidence.rb",
           "lib/hive/daemon/recovery_coordinator.rb",
           "lib/hive/task_activity.rb",
           "lib/hive/task_closure.rb",

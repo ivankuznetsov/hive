@@ -19,8 +19,9 @@ module Hive
                      config_loader: ->(path) { Hive::Config.load(path) },
                      tick: Hive::Babysitter::ProjectTick, main_guard: nil,
                      babysitter_guard: nil, liveness: nil,
-                     clock: -> { Time.now.utc })
+                     clock: -> { Time.now.utc }, admission_open: -> { true })
         @entry = entry
+        @admission_open = admission_open
         @dry_run = dry_run
         @logger = logger
         @config_loader = config_loader
@@ -55,7 +56,7 @@ module Hive
               effective_dry_run ||= cfg.dig("babysitter", "dry_run") == true
               summary = @tick.run(
                 @entry, dry_run: effective_dry_run, logger: @logger, inflight: Set.new,
-                observe_only: effective_dry_run, detailed: true
+                admission_open: @admission_open, observe_only: effective_dry_run, detailed: true
               )
               return failed_result(started, summary, dry_run: effective_dry_run) if summary[:error]
 

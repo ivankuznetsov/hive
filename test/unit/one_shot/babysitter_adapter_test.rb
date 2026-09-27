@@ -68,6 +68,17 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  def test_persistent_admission_probe_reaches_the_project_tick
+    with_tmp_dir do |dir|
+      tick = Tick.new(summary)
+      probe = -> { false }
+      adapter(dir, tick: tick, admission_open: probe).call
+
+      assert_same probe, tick.arguments.fetch(1).fetch(:admission_open),
+                  "installation quiescence must gate one-shot babysitter repairs"
+    end
+  end
+
   def test_dry_run_only_observes_and_leaves_eligible_pr_runnable
     with_tmp_dir do |dir|
       tick = Tick.new(summary(pr(9, :eligible)))
@@ -242,7 +253,7 @@ class OneShotBabysitterAdapterTest < Minitest::Test
   private
 
   def adapter(dir, tick:, dry_run: false, main_guard: Guard.new, config: nil,
-              liveness: Liveness.new)
+              liveness: Liveness.new, admission_open: -> { true })
     state = File.join(dir, ".hive-state")
     FileUtils.mkdir_p(state)
     Hive::OneShot::BabysitterAdapter.new(
@@ -252,6 +263,7 @@ class OneShotBabysitterAdapterTest < Minitest::Test
       },
       dry_run: dry_run, tick: tick, main_guard: main_guard,
       babysitter_guard: Guard.new, liveness: liveness, clock: -> { NOW },
+      admission_open: admission_open,
       config_loader: ->(*) {
         config || Hive::Config.deep_merge(
           Hive::Config.deep_dup(Hive::Config::DEFAULTS),

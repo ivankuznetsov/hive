@@ -3,12 +3,37 @@ require "hive/attempts/lost_outcome"
 require "hive/attempts/repository"
 require "hive/provider_routing"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/runtime_control_plane/lifecycle_repository"
 
 class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 8, 29, 12)
   CLAIM_DIGEST = Hive::Attempts::Capability.digest("c" * 64)
+
+  def test_admission_is_rejected_after_quiescence_closes_the_shared_transaction_boundary
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: attempts.database)
+      lifecycle.begin_quiesce!(
+        deadline_monotonic: 700.0, boot_id: "boot-a", shutdown_grace_sec: 120.0,
+        now: NOW
+      )
+
+      error = assert_raises(Hive::RuntimeControlPlane::AdmissionClosed) do
+        attempts.create_launching(
+          attempt_id: "attempt-1", request_id: "request-1", task_id: "task-1",
+          project: "demo", task_slug: "task-1", intended_stage: "4-execute",
+          task_generation: "generation-1", ownership_generation: "owner-1",
+          task_input_epoch: 1, progress_token: "source-1", provider: "codex",
+          worker_argv: %w[hive run task-1], claim_capability_digest: CLAIM_DIGEST,
+          starting_revision: "a" * 40, retry_charge: 0, inherited_outputs: [],
+          launch_timeout_sec: 30, now: NOW
+        )
+      end
+      assert_equal :admission_closed, error.code
+      assert_equal 0, attempts.database.read { |db| db[:attempts].count }
+    end
+  end
 
   def test_concurrent_lost_healers_admit_at_most_one_independent_replacement
     with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|

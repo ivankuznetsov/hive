@@ -9,6 +9,8 @@ require "hive/pid_file"
 require "hive/babysitter/dispatcher"
 require "hive/babysitter/logger"
 require "hive/commands/service_installer/result_presenter"
+require "hive/runtime_control_plane/database"
+require "hive/runtime_control_plane/lifecycle_repository"
 
 module Hive
   module Commands
@@ -171,7 +173,9 @@ module Hive
       def one_shot_adapter(entry)
         return @one_shot_factory.call(entry) if @one_shot_factory
 
-        Hive::OneShot::BabysitterAdapter.new(entry: entry, dry_run: @dry_run)
+        Hive::OneShot::BabysitterAdapter.new(
+          entry: entry, dry_run: @dry_run, admission_open: persistent_admission_probe
+        )
       end
 
       def one_shot_report(entry, index:)
@@ -246,8 +250,28 @@ module Hive
           logger: logger,
           dry_run: @dry_run,
           project_name: project_name,
-          max_ticks: max_ticks
+          max_ticks: max_ticks,
+          persistent_admission: persistent_admission_probe(runtime_lifecycle_repository)
         )
+      end
+
+      def runtime_lifecycle_repository
+        Hive::RuntimeControlPlane::LifecycleRepository.new(
+          database: Hive::RuntimeControlPlane::Database.new(
+            path: Hive::Paths.runtime_control_plane_path(@hive_home)
+          ).open!
+        )
+      end
+
+      # Durable installation admission (closed by `hive daemon quiesce`),
+      # shared by the resident dispatcher and the `--once` adapter. Without a
+      # repository the runtime database opens lazily on first probe; callers
+      # treat any probe failure as closed admission.
+      def persistent_admission_probe(lifecycle_repository = nil)
+        lambda do
+          lifecycle_repository ||= runtime_lifecycle_repository
+          lifecycle_repository.current.admission_open?
+        end
       end
 
       def stop_daemon

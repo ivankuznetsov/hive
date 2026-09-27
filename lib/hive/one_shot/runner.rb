@@ -18,6 +18,7 @@ require "hive/daemon/status_consumer"
 require "hive/modules/daemon_runtime"
 require "hive/one_shot/schedule_state"
 require "hive/one_shot/project_liveness"
+require "hive/runtime_control_plane/lifecycle_repository"
 
 module Hive
   module OneShot
@@ -85,6 +86,11 @@ module Hive
           condition_observer: observer, finalization_maintenance: maintenance, logger: logger
         )
         lost_store = Hive::Attempts::LostOutcomeTransition.new(store: attempt_store)
+        # Installation quiescence closes admission durably; a one-shot pass
+        # must honor the same gate as the resident daemon.
+        lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(
+          database: attempt_store.database
+        )
         patrol_fix = Hive::Daemon::PatrolFixRuntime.new(registry: -> { [ entry ] })
         patrol_fix_scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
           sources: -> { patrol_fix.sources },
@@ -124,7 +130,8 @@ module Hive
             database: attempt_store.database
           ),
           dispatch_request_state_home: hive_home, clock: clock,
-          one_shot_drain_timeout_sec: DRAIN_TIMEOUT_SEC
+          one_shot_drain_timeout_sec: DRAIN_TIMEOUT_SEC,
+          persistent_admission: -> { lifecycle.current.admission_open? }
         )
         new(dispatcher: dispatcher, project: project, dry_run: dry_run,
             logger: logger, clock: clock)

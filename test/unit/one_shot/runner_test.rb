@@ -117,6 +117,13 @@ class OneShotRunnerTest < Minitest::Test
         assert_equal Hive::OneShot::Runner::DRAIN_TIMEOUT_SEC,
                      dispatcher.instance_variable_get(:@one_shot_drain_timeout_sec),
                      "production one-shot passes must have a bounded drain window"
+        assert dispatcher.send(:admission_open?),
+               "a running installation lifecycle must leave one-shot admission open"
+        Hive::RuntimeControlPlane::LifecycleRepository.new(
+          database: dispatcher.instance_variable_get(:@attempt_reconciler).store.database
+        ).begin_quiesce!(deadline_monotonic: 700, boot_id: "boot", shutdown_grace_sec: 120)
+        refute dispatcher.send(:admission_open?),
+               "installation quiescence must close one-shot dispatch admission"
 
         watcher = dispatcher.instance_variable_get(:@merge_watcher)
         refute_nil watcher.instance_variable_get(:@schedule_state_factory)

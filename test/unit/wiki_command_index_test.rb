@@ -675,7 +675,7 @@ class WikiCommandIndexTest < Minitest::Test
 
   def test_daemon_documents_every_public_json_schema_as_v1
     daemon = page("commands/daemon.md")
-    %w[status stop reload install enroll queue].each do |suffix|
+    %w[status quiesce resume stop reload install enroll queue].each do |suffix|
       assert_includes daemon, "`hive-daemon-#{suffix}.v1`", suffix
     end
   end
@@ -684,7 +684,8 @@ class WikiCommandIndexTest < Minitest::Test
     daemon = page("commands/daemon.md")
     expected = [
       [ "`start`", "0" ], [ "`start`", "75" ], [ "`stop`", "0" ],
-      [ "`status`", "0" ], [ "`status`", "1" ], [ "`reload`", "0" ],
+      [ "`status`", "0" ], [ "`status`", "1" ], [ "`quiesce`", "0" ],
+      [ "`quiesce`", "75" ], [ "`resume`", "0" ], [ "`resume`", "75" ], [ "`reload`", "0" ],
       [ "`reload`", "1" ], [ "`tail`", "0" ], [ "`tail`", "1" ],
       [ "`install`", "0" ], [ "`install`", "64" ], [ "`install`", "70" ],
       [ "`enable` / `disable`", "0" ], [ "`enable` / `disable`", "64" ],

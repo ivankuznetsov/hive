@@ -48,6 +48,8 @@ module Hive
       "hive-prune" => 1,
       "hive-worktree" => 1,
       "hive-daemon-status" => 1,
+      "hive-daemon-quiesce" => 1,
+      "hive-daemon-resume" => 1,
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,
       "hive-daemon-reload" => 1,

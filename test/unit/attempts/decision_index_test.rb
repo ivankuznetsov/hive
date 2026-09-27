@@ -72,6 +72,19 @@ class AttemptsCoordinationTest < Minitest::Test
     end
   end
 
+  def test_interrupted_patrol_attempt_waits_until_retry_deadline
+    with_repository do |repository|
+      attempt = create(repository, attempt_id: "interrupted", task_slug: "task")
+      terminalize(repository, attempt, exit_status: 75, outcome: "interrupted")
+      args = { task_generation: attempt.task_generation, subject: attempt.subject,
+               runtime_digest: "a" * 64, now: NOW + 4 }
+      deadline = NOW + 3 + Hive::AgentLimit.retry_cooldown_sec
+
+      assert_equal deadline, repository.patrol_retry_at(**args)
+      assert_nil repository.patrol_retry_at(**args.merge(now: deadline))
+    end
+  end
+
   def test_failure_without_patrol_admission_does_not_delay_patrol
     with_repository do |repository|
       attempt = create(repository, attempt_id: "ordinary", task_slug: "task", admission: nil)
@@ -140,7 +153,7 @@ class AttemptsCoordinationTest < Minitest::Test
       running, outcome: outcome, exit_status: exit_status,
       final_checkpoint: { "revision" => "a" * 40 }, output_references: [],
       log_reference: { "path" => "open/log", "size" => 0, "sha256" => "0" * 64 },
-      now: NOW + 3
+      pause_generation: outcome == "interrupted" ? 2 : nil, now: NOW + 3
     )
   end
 end

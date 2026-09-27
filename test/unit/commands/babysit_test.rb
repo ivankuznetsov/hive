@@ -45,6 +45,7 @@ class HiveCommandsBabysitTest < Minitest::Test
   end
 
   def test_start_writes_pid_runs_dispatcher_and_cleans_pid
+    activate_test_control_plane(@home)
     command = babysit("start", dry_run: true)
     dispatcher = FakeDispatcher.new([])
     captured = nil
@@ -63,7 +64,23 @@ class HiveCommandsBabysitTest < Minitest::Test
 
     assert_equal [ :run_forever ], dispatcher.calls
     assert_equal true, captured.fetch(:dry_run)
+    assert captured.fetch(:persistent_admission).call
     refute File.exist?(command.pid_file)
+  end
+
+  def test_once_default_adapter_honors_persistent_installation_admission
+    activate_test_control_plane(@home)
+    entry = { "name" => "proj", "path" => "/tmp/proj", "hive_state_path" => "/tmp/proj/.hive-state" }
+    adapter = babysit(nil, once: true).send(:one_shot_adapter, entry)
+    probe = adapter.instance_variable_get(:@admission_open)
+
+    assert probe.call
+    Hive::RuntimeControlPlane::LifecycleRepository.new(
+      database: Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(@home)
+      ).open!
+    ).begin_quiesce!(deadline_monotonic: 700, boot_id: "boot", shutdown_grace_sec: 120)
+    refute probe.call
   end
 
   def test_start_refuses_when_pid_file_points_to_live_babysitter

@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-09-02
+updated: 2026-09-26
 tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
@@ -321,8 +321,10 @@ edits only returned new paths, validates here, commits the populated descriptor
 and instruction directory with `hive workflow commit ID`, reports all defaults, and creates no
 task unless the original request explicitly asks for one. The populated-graph
 commit is required because `workflow new` commits only the initial scaffold.
-Both `workflow validate` and minimal-init preview bypass startup scheduler
-reconciliation, preserving their strict no-write contract. Scaffold collision
+Both `workflow validate` and minimal-init preview bypass activation admission,
+top-level command registration, and startup scheduler reconciliation. They
+therefore preserve their byte-for-byte strict no-write contract and remain
+available while runtime admission is paused. Scaffold collision
 checks treat dangling descriptor or instruction symlinks as occupied paths.
 Creation claims the instruction directory and descriptor with exclusive
 filesystem operations; rollback removes only paths claimed by that invocation,

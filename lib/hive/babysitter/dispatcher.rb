@@ -14,7 +14,7 @@ module Hive
       attr_reader :logger, :inflight, :last_reports
 
       def initialize(logger:, dry_run: false, project_name: nil, max_ticks: nil,
-                     guard_factory: nil)
+                     persistent_admission: nil, guard_factory: nil)
         @logger = logger
         @dry_run = dry_run
         @project_name = project_name
@@ -23,6 +23,7 @@ module Hive
         @reload = false
         @poll_interval_sec = DEFAULT_INTERVAL_SEC
         @inflight = Set.new
+        @persistent_admission = persistent_admission
         @last_reports = []
         @guard_factory = guard_factory || lambda do |entry|
           Hive::OneShot::ProjectGuard.new(
@@ -114,7 +115,12 @@ module Hive
       private
 
       def admission_open?
-        @shutdown == false
+        @shutdown == false &&
+          (@persistent_admission.nil? || @persistent_admission.call == true)
+      rescue StandardError => e
+        @logger.event(:admission_check_failed,
+                      message: "persistent admission check failed: #{e.class}: #{e.message}")
+        false
       end
 
       def enabled_projects

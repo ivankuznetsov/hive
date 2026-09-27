@@ -17,7 +17,8 @@ module Hive
     class Record
       SCHEMA = "hive-attempt"
       SCHEMA_VERSION = 4
-      RECEIPT_VERSION = 1
+      RECEIPT_VERSION = 2
+      LEGACY_RECEIPT_VERSION = 1
       MAX_IDENTIFIER_BYTES = 128
       MAX_DETAIL_BYTES = 240
       MAX_EVIDENCE_REFERENCE_PATH = 512
@@ -34,11 +35,12 @@ module Hive
         claude_stream_json_transport codex_jsonl_transport
         grok_streaming_json_transport pi_json_transport provider_diagnostic
       ].freeze
-      RECEIPT_KEYS = %w[
+      LEGACY_RECEIPT_KEYS = %w[
         receipt_version terminal_lease_version attempt_id task_generation
         ownership_generation task_input_epoch outcome exit_status started_at ended_at
         final_checkpoint output_references log_reference provider_evidence
       ].freeze
+      RECEIPT_KEYS = (LEGACY_RECEIPT_KEYS + %w[pause_generation]).freeze
       EXPLICIT_ROUTING_KEYS = %w[mode route].freeze
       ROUTE_KEYS = %w[
         route_id provider_account_id adapter launch_binding_id model effort
@@ -53,7 +55,7 @@ module Hive
       ].freeze
       SUBJECT_KINDS = %w[task_stage module_hook].freeze
       STATES = %w[launching running terminal lost].freeze
-      TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
+      TERMINAL_OUTCOMES = %w[succeeded failed cancelled interrupted].freeze
       FINAL_STATES = %w[terminal lost].freeze
       IMMUTABLE_KEYS = %w[
         schema schema_version attempt_id request_id
@@ -175,10 +177,12 @@ module Hive
         unless receipt.is_a?(Hash)
           raise InvalidReceipt, "terminal receipt must be an object"
         end
-        validate_exact_keys!(receipt, RECEIPT_KEYS, "terminal receipt", InvalidReceipt)
-        unless receipt["receipt_version"] == RECEIPT_VERSION
+        receipt_version = receipt["receipt_version"]
+        unless [ LEGACY_RECEIPT_VERSION, RECEIPT_VERSION ].include?(receipt_version)
           raise InvalidReceipt, "terminal receipt has unsupported receipt_version"
         end
+        expected_keys = receipt_version == LEGACY_RECEIPT_VERSION ? LEGACY_RECEIPT_KEYS : RECEIPT_KEYS
+        validate_exact_keys!(receipt, expected_keys, "terminal receipt", InvalidReceipt)
         validate_nonnegative_integer!(
           receipt["terminal_lease_version"], "terminal receipt lease version", InvalidReceipt
         )
@@ -206,8 +210,18 @@ module Hive
         if !ownership_generation.nil? && receipt["ownership_generation"] != ownership_generation
           raise InvalidReceipt, "terminal receipt ownership generation mismatch"
         end
-        unless TERMINAL_OUTCOMES.include?(receipt["outcome"])
+        allowed_outcomes = receipt_version == LEGACY_RECEIPT_VERSION ?
+          TERMINAL_OUTCOMES - [ "interrupted" ] : TERMINAL_OUTCOMES
+        unless allowed_outcomes.include?(receipt["outcome"])
           raise InvalidReceipt, "terminal receipt has invalid outcome"
+        end
+        pause_generation = receipt["pause_generation"] if receipt_version == RECEIPT_VERSION
+        if receipt["outcome"] == "interrupted"
+          validate_nonnegative_integer!(
+            pause_generation, "terminal receipt pause generation", InvalidReceipt
+          )
+        elsif receipt_version == RECEIPT_VERSION && !pause_generation.nil?
+          raise InvalidReceipt, "terminal receipt pause generation requires interrupted outcome"
         end
         unless receipt["exit_status"].is_a?(Integer)
           raise InvalidReceipt, "terminal receipt exit_status must be an integer"

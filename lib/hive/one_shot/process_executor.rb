@@ -3,6 +3,7 @@ require "shellwords"
 require "hive/config"
 require "hive/daemon/child_supervisor"
 require "hive/errors"
+require "hive/runtime_control_plane/command_registration"
 require "hive/runtime_control_plane/process_guard"
 
 module Hive
@@ -67,9 +68,11 @@ module Hive
         hive_bin = ENV.fetch("HIVE_BIN", "hive")
         argv[0] = hive_bin if argv.first == "hive" || argv.first&.end_with?("/hive") ||
           argv.first == File.basename(hive_bin)
-        pid = Process.spawn(
-          *argv, in: File::NULL, out: out_write,
-          err: err_write, pgroup: true
+        # Register the child in the installation process registry (when this
+        # invocation has one) so quiescence can account for it.
+        pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
+          *argv, role: argv[1] || "one-shot-child",
+          in: File::NULL, out: out_write, err: err_write, pgroup: true
         )
         Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!
         out_write.close

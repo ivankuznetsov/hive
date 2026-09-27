@@ -465,7 +465,7 @@ module Hive
 
       def retryable_attempt?(attempt)
         failed = attempt.state == "lost" ||
-          (attempt.state == "terminal" && attempt.outcome == "failed")
+          (attempt.state == "terminal" && %w[failed interrupted].include?(attempt.outcome))
         failed && attempt["retry_charge"].to_i < MAX_RETRIES
       end
 

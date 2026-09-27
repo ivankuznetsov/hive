@@ -18,6 +18,26 @@ module Hive
       File.join(root, "runtime-control-plane.sqlite3")
     end
 
+    def runtime_quiescence_proof_path(root = state_home)
+      File.join(root, "runtime-quiescence-proof.json")
+    end
+
+    def runtime_launch_fence_path(root = state_home)
+      File.join(root, ".runtime-launch.lock")
+    end
+
+    def runtime_writer_fence_path(root = state_home)
+      File.join(root, ".runtime-writer.lock")
+    end
+
+    def runtime_quiescence_operation_lock_path(root = state_home)
+      File.join(root, ".runtime-quiescence-operation.lock")
+    end
+
+    def hivebox_supervisor_pid_path(root = state_home)
+      File.join(root, ".hivebox-supervisor.pid")
+    end
+
     def runtime_payload_root(root = state_home)
       File.join(root, "runtime-payloads")
     end

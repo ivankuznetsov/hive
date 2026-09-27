@@ -50,7 +50,8 @@ module Hive
 
     Context = Data.define(
       :receipt_id, :effect_id, :principal, :principal_source, :ordinal,
-      :request_fingerprint, :transport_request_id, :retry_horizon_expires_at
+      :receipt_generation, :request_fingerprint, :transport_request_id,
+      :retry_horizon_expires_at
     )
 
     def self.current_context
@@ -66,7 +67,7 @@ module Hive
       Hive::CommandReceiptStore.new.record_effect_submission(
         receipt_id: context.receipt_id, effect_id: context.effect_id,
         principal: context.principal, request_fingerprint: context.request_fingerprint,
-        kind: kind, identity: identity
+        generation: context.receipt_generation, kind: kind, identity: identity
       )
     end
 
@@ -80,7 +81,8 @@ module Hive
       Hive::CommandReceiptStore.new.record_effect_observation(
         receipt_id: context.receipt_id, effect_id: context.effect_id,
         principal: context.principal, request_fingerprint: context.request_fingerprint,
-        source: source, correlation_id: correlation_id, evidence: evidence
+        generation: context.receipt_generation, source: source,
+        correlation_id: correlation_id, evidence: evidence
       )
     end
 
@@ -213,7 +215,11 @@ module Hive
       ) if context.retry_horizon_expires_at
       emit_or_return(emitted)
     rescue Exception => error # rubocop:disable Lint/RescueException -- preserve Interrupt/SystemExit ambiguity
-      persist_uncertainty(claim, effect) if claim
+      if claim && effect && deterministic_non_application?(error)
+        persist_failure(claim, effect, error)
+      elsif claim
+        persist_uncertainty(claim, effect)
+      end
       raise
     end
 
@@ -236,7 +242,8 @@ module Hive
       Context.new(
         receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id),
         principal: claim.principal, principal_source: @principal_source,
-        ordinal: ordinal, request_fingerprint: claim.request_fingerprint,
+        ordinal: ordinal, receipt_generation: claim.generation,
+        request_fingerprint: claim.request_fingerprint,
         transport_request_id: transport,
         retry_horizon_expires_at: @retry_horizon_expires_at
       )
@@ -260,7 +267,7 @@ module Hive
       @store.record_effect_submission(
         receipt_id: context.receipt_id, effect_id: context.effect_id,
         principal: context.principal, request_fingerprint: context.request_fingerprint,
-        kind: kind, identity: identity
+        generation: context.receipt_generation, kind: kind, identity: identity
       )
     end
 
@@ -271,7 +278,8 @@ module Hive
       @store.record_effect_observation(
         receipt_id: context.receipt_id, effect_id: context.effect_id,
         principal: context.principal, request_fingerprint: context.request_fingerprint,
-        source: source, correlation_id: correlation_id, evidence: evidence
+        generation: context.receipt_generation, source: source,
+        correlation_id: correlation_id, evidence: evidence
       )
     end
 
@@ -308,9 +316,31 @@ module Hive
         # An effect may already be applied (for example finalization failed).
         # Receipt uncertainty still has to be persisted independently.
       end
-      @store.mark_unresolved(claim, reason: "command_execution_interrupted")
+      if effect
+        @store.mark_unresolved(claim, reason: "command_execution_interrupted")
+      else
+        @store.abort_before_effect(claim, reason: "command_cancelled_before_effect")
+      end
     rescue StandardError
-      # The original exception remains authoritative and no buffered success is emitted.
+      begin
+        @store.mark_unresolved(claim, reason: "command_execution_interrupted")
+      rescue StandardError
+        # The original exception remains authoritative and no buffered success is emitted.
+      end
+    end
+
+    def persist_failure(claim, effect, error)
+      @store.update_effect(
+        claim, effect_id: effect.fetch(:effect_id), from: "prepared", to: "not_applied",
+        evidence: { "whole_effect_non_application" => true,
+                    "failure_class" => error.class.name }
+      )
+      @store.fail_non_application(
+        claim, result: stored_failure(error), status: error.exit_code,
+        reason: failure_error_kind(error), whole_effect_non_application: true
+      )
+    rescue StandardError
+      persist_uncertainty(claim, effect)
     end
 
     def stored_failure(error)
@@ -440,8 +470,9 @@ module Hive
         raise Hive::CommandConflict,
               "retry inputs cannot reconstruct the original command response"
       end
-      if stored.fetch("format") == "dual" && !@json && !@structured
-        $stdout.write(stored["text"] || render_text(payload))
+      if !@json && !@structured
+        text = stored.fetch("format") == "dual" ? stored["text"] : nil
+        $stdout.write(text || render_text(payload))
         exit(Integer(claim.status)) if claim.state == "failed"
         return nil
       end
@@ -502,6 +533,11 @@ module Hive
       return "config" if error.is_a?(Hive::ConfigError)
 
       "internal"
+    end
+
+    def deterministic_non_application?(error)
+      error.is_a?(Hive::UsageError) || error.is_a?(Hive::InvalidTaskPath) ||
+        error.is_a?(Hive::OperationalActionUsageError) || error.is_a?(Hive::WrongStage)
     end
 
     def emit_or_return(payload)

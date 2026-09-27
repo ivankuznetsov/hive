@@ -19,7 +19,7 @@ module Hive
                      orphaned_owner: false, evidence: nil, force: false, reason: nil,
                      new_identity: false, previous_identity: nil,
                      json: false, pruner: nil, maintenance: nil,
-                     command_receipt_store: nil)
+                     command_receipt_store: nil, authority: nil)
         @subcommand = subcommand.to_s
         @identifier = identifier
         @project = project
@@ -40,6 +40,7 @@ module Hive
         @pruner = pruner
         @maintenance = maintenance
         @command_receipt_store = command_receipt_store
+        @authority = authority
       end
 
       def call
@@ -168,7 +169,7 @@ module Hive
           project_root: project_root, database: receipt_store.database,
           previous_identity: @previous_identity,
           expected_generation: @expected_generation,
-          confirm: @confirm
+          confirm: @confirm, authority: authority
         )
       end
 
@@ -238,9 +239,18 @@ module Hive
         raise Hive::UsageError, "cannot read receipt evidence: #{error.message}"
       end
 
-      def pruner = @pruner ||= Hive::CommandReceiptPruner.new
-      def maintenance = @maintenance ||= Hive::CommandReceiptMaintenance.new
-      def receipt_store = @command_receipt_store ||= Hive::CommandReceiptStore.new
+      def authority
+        @authority ||= Hive::CommandMaintenanceAuthority.local(
+          principal: Hive::CommandOperation.local_principal(receipt_store.database)
+        )
+      end
+      def pruner = @pruner ||= Hive::CommandReceiptPruner.new(authority: authority)
+      def maintenance = @maintenance ||= Hive::CommandReceiptMaintenance.new(authority: authority)
+      def receipt_store
+        @command_receipt_store ||= Hive::CommandReceiptStore.new(
+          maintenance_authority: @authority
+        )
+      end
 
       def emit(payload)
         if @json

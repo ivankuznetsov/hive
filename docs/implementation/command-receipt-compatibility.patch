@@ -2,13 +2,13 @@ diff --git a/lib/hive/runtime_control_plane/database.rb b/lib/hive/runtime_contr
 index be44fa474e..1c15bab8f1 100644
 --- a/lib/hive/runtime_control_plane/database.rb
 +++ b/lib/hive/runtime_control_plane/database.rb
-@@ -11,6 +11,33 @@ module Hive
+@@ -11,6 +11,34 @@ module Hive
    module RuntimeControlPlane
      EXPECTED_SCHEMA_SHA256 = "f237684b17dfd8f7ded175a5e3c7a1b0445c4a7bee109fca4f2f51e498ead0a7".freeze
 -
 +
 +    COMMAND_RECEIPT_SCHEMA_SHA256 =
-+      "c96c7247e175fefe50960a38980e83fec328c4698f084a7195bcca771b747ef8".freeze
++      "cd35003e8cf5f0a720b28ce9af301a95a14c52987a97bbbdd058f2bf04ec9fb5".freeze
 +    COMMAND_RECEIPT_OBJECT_NAMES = %w[
 +      command_capacity
 +      command_dispatch_contexts
@@ -27,17 +27,18 @@ index be44fa474e..1c15bab8f1 100644
 +      command_receipt_pins_intent_uidx
 +      command_receipts
 +      command_receipts_key_uidx
-+      command_receipts_owner_idx
 +      command_receipts_terminal_idx
 +      command_schema_versions
 +      command_successor_allocations
 +      command_successor_allocations_cycle_uidx
++      command_successor_allocations_predecessor_idx
++      command_successor_allocations_successor_idx
 +    ].freeze
 +
      class Database
        MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze
        BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
-@@ -268,7 +294,14 @@ module Hive
+@@ -268,7 +295,14 @@ module Hive
          rows = database[:sqlite_master].where(type: %w[table index])
            .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
            .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])

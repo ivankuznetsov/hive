@@ -61,7 +61,8 @@ module Hive
         "installation" => {
           "nonterminal" => installation_nonterminal,
           "concurrency" => installation_concurrency,
-          "bytes" => installation_bytes
+          "bytes" => installation_bytes,
+          "staffing" => global.fetch("staffing", project.fetch("staffing"))
         }
       }
       Policy.new(
@@ -73,7 +74,7 @@ module Hive
         installation_concurrency_limit: installation_concurrency,
         installation_byte_admission_limit: installation_bytes,
         revision: Digest::SHA256.hexdigest(Hive::RuntimeControlPlane::Codec.dump_json(canonical)),
-        staffing: project.fetch("staffing")
+        staffing: global.fetch("staffing", project.fetch("staffing"))
       )
     end
 
@@ -151,6 +152,15 @@ module Hive
       if totals.fetch(:nonterminal).to_i >= policy.installation_nonterminal_limit
         capacity_error!(:command_nonterminal_limit, :installation, nonterminal_remedy(:installation))
       end
+      admit_bytes!(
+        connection, namespace_id: namespace_id, request_bytes: request_bytes,
+        occupied_installation_bytes: occupied_installation_bytes
+      )
+      true
+    end
+
+    def admit_bytes!(connection, namespace_id:, request_bytes:, occupied_installation_bytes:)
+      namespace = connection[:command_capacity][namespace_id: namespace_id]
       allowance = request_bytes + NEXT_OPERATION_ALLOWANCE
       if namespace.fetch(:logical_bytes) + allowance > policy.byte_admission_limit
         capacity_error!(:command_capacity_exhausted, :namespace, byte_remedy(:namespace))

@@ -81,11 +81,24 @@ module Hive
       context = Hive::CommandOperation.current_context
       batch_id = SecureRandom.uuid
       candidates = []
+      recovered_outcomes = nil
       owner_process_start = Hive::Lock.process_start_time(Process.pid) ||
         raise(Hive::ConfigError, "cannot record prune owner process start time")
 
       @database.transaction do |connection|
         prune_completed_batches!(connection)
+        owned_batch = if context
+          connection[:command_maintenance_batches][administrative_receipt_id: context.receipt_id]
+        end
+        if owned_batch&.fetch(:state) == "completed"
+          authority.authorize!(owned_batch.fetch(:principal))
+          batch_id = owned_batch.fetch(:batch_id)
+          selected = owned_batch.fetch(:namespace_id)
+          fixed_cutoff = Hive::RuntimeControlPlane::Codec.load_time(owned_batch.fetch(:fixed_cutoff))
+          candidates = JSON.parse(owned_batch.fetch(:candidates_json), symbolize_names: true)
+          recovered_outcomes = JSON.parse(owned_batch.fetch(:outcomes_json))
+          next
+        end
         busy = connection[:command_maintenance_batches]
           .where(state: %w[prepared executing]).first
         if busy && context && busy[:administrative_receipt_id] == context.receipt_id
@@ -120,6 +133,15 @@ module Hive
           candidates_json: codec(candidates.map { |row| candidate_identity(row) }),
           outcomes_json: "[]", created_at: now, updated_at: now
         )
+      end
+
+      if recovered_outcomes
+        return @database.read do |connection|
+          preview_payload(
+            connection, selected, candidates, confirmed: true, outcomes: recovered_outcomes,
+            batch_id: batch_id, fixed_cutoff: fixed_cutoff
+          )
+        end
       end
 
       outcomes = delete_candidates(batch_id, selected, candidates, fixed_cutoff)
@@ -279,7 +301,11 @@ module Hive
     def preview_payload(connection, namespace_id, rows, confirmed:, fixed_cutoff:,
                         outcomes: nil, batch_id: nil, identity_cursor: nil,
                         identity_limit: DEFAULT_LIMIT)
-      namespace_capacity = connection[:command_capacity][namespace_id: namespace_id]
+      namespace_capacity = if authority.installation_owner?
+        connection[:command_capacity][namespace_id: namespace_id]
+      else
+        principal_utilization(connection, namespace_id, authority.principal)
+      end
       installation = connection[:command_capacity].select do
         [ sum(:nonterminal_count).as(:n), sum(:executing_count).as(:a), sum(:logical_bytes).as(:bytes) ]
       end.first
@@ -288,6 +314,7 @@ module Hive
         "schema" => "hive-receipt-prune", "schema_version" => 1, "ok" => true,
         "preview" => !confirmed, "confirmed" => confirmed,
         "namespace_id" => namespace_id, "cutoff" => timestamp(fixed_cutoff),
+        "keyed_intake_enabled" => namespace&.fetch(:keyed_intake_enabled, 0) == 1,
         "candidate_count" => rows.length,
         "candidates" => rows.map { |row| candidate_identity(row) },
         "namespace_utilization" => utilization(
@@ -326,12 +353,12 @@ module Hive
             )
           }
         ).merge(physical)
-        payload.merge!(maintenance_identities(
-          connection, namespace_id, limit: identity_limit, cursor: identity_cursor
-        ))
       else
         payload["installation_pressure"] = "ask_installation_owner"
       end
+      payload.merge!(maintenance_identities(
+        connection, namespace_id, limit: identity_limit, cursor: identity_cursor
+      ))
       payload["batch_id"] = batch_id if batch_id
       payload["outcomes"] = outcomes if outcomes
       payload
@@ -442,16 +469,37 @@ module Hive
       total
     end
 
+    def principal_utilization(connection, namespace_id, principal)
+      rows = connection[:command_receipts].where(
+        namespace_id: namespace_id, principal: principal
+      ).all
+      {
+        nonterminal_count: rows.count { |row|
+          Hive::CommandReceiptCapacity.counts_receipt?(row) &&
+            Hive::CommandReceiptStore::NONTERMINAL_STATES.include?(row.fetch(:state))
+        },
+        executing_count: rows.count { |row|
+          Hive::CommandReceiptCapacity.counts_receipt?(row) && row.fetch(:state) == "executing"
+        },
+        logical_bytes: rows.sum { |row| receipt_storage_bytes(connection, row) }
+      }
+    end
+
     def maintenance_identities(connection, namespace_id, limit:, cursor: nil)
-      receipt_ids = connection[:command_receipts].where(namespace_id: namespace_id).select(:receipt_id)
+      receipts = connection[:command_receipts].where(namespace_id: namespace_id)
+      receipts = receipts.where(principal: authority.principal) unless authority.installation_owner?
+      receipt_ids = receipts.select(:receipt_id)
       cursor_kind, cursor_id = cursor.to_s.split(":", 2) if cursor
       sources = [
         [ "batch", :batch_id, connection[:command_maintenance_batches]
-          .where(namespace_id: namespace_id, state: %w[prepared executing]) ],
+          .where(namespace_id: namespace_id, state: %w[prepared executing])
+          .then { |dataset|
+            authority.installation_owner? ? dataset : dataset.where(principal: authority.principal)
+          } ],
         [ "pin", :pin_id, connection[:command_receipt_pins]
           .where(receipt_id: receipt_ids, lifecycle_status: "active") ],
-        [ "receipt", :receipt_id, connection[:command_receipts]
-          .where(namespace_id: namespace_id, state: Hive::CommandReceiptStore::NONTERMINAL_STATES) ]
+        [ "receipt", :receipt_id, receipts
+          .where(state: Hive::CommandReceiptStore::NONTERMINAL_STATES) ]
       ]
       identities = sources.each_with_object([]) do |(kind, id_column, dataset), rows|
         next if cursor_kind && kind < cursor_kind
@@ -510,7 +558,16 @@ module Hive
       threshold = timestamp(@clock.call.utc - ADMINISTRATIVE_RETENTION_SECONDS)
       batches = connection[:command_maintenance_batches]
         .where(state: %w[completed abandoned]).where { completed_at < threshold }.all
+      batches.select! { |batch|
+        receipt_id = batch[:administrative_receipt_id]
+        receipt = receipt_id && connection[:command_receipts][receipt_id: receipt_id]
+        receipt.nil? || Hive::CommandReceiptStore::TERMINAL_STATES.include?(receipt[:state])
+      }
+      batches.select! { |batch|
+        authority.installation_owner? || batch.fetch(:principal) == authority.principal
+      }
       batches.each do |batch|
+        authority.authorize!(batch.fetch(:principal))
         audits = connection[:command_maintenance_audit].where(batch_id: batch.fetch(:batch_id)).all
         connection[:command_maintenance_audit].where(batch_id: batch.fetch(:batch_id)).delete
         connection[:command_maintenance_batches].where(batch_id: batch.fetch(:batch_id)).delete

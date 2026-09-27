@@ -861,6 +861,7 @@ module Hive
     option :retry_horizon_expires_at, type: :string,
                                       desc: "absolute UTC retry horizon for keyed durable dispatch"
     def plan(target)
+      validate_retry_horizon_key!
       if options[:review_level] && options[:idempotency_key]
         raise Hive::UsageError,
               "--review-level is a separate policy mutation and cannot be combined with --idempotency-key"
@@ -972,6 +973,9 @@ module Hive
         emit_review_usage_error(
           "hive review: --idempotency-key is not valid with --pr; key the resulting task stage action"
         ) if options[:idempotency_key]
+        emit_review_usage_error(
+          "hive review: --retry-horizon-expires-at is not valid with --pr"
+        ) if options[:retry_horizon_expires_at]
 
         require "hive/commands/adhoc_review"
         require "hive/commands/stage_action"
@@ -1063,7 +1067,12 @@ module Hive
         return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
       end
 
-      return close_task_interactively(target) if closure_options?
+      if closure_options?
+        if options[:retry_horizon_expires_at] && !options[:idempotency_key]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+        end
+        return close_task_interactively(target)
+      end
 
       run_stage_action("archive", target)
     end
@@ -2458,7 +2467,8 @@ module Hive
               )
             },
             project_root: -> { resolve_closure_task(target).project_root },
-            json: true, structured: true
+            json: true, structured: true,
+            retry_horizon_expires_at: options[:retry_horizon_expires_at]
           ).call { close_task_interactively_unwrapped(target, emit_success: false) }
           emit_closure_success(result)
           return result
@@ -2549,6 +2559,12 @@ module Hive
           **kwargs,
           durable: true
         ).call
+      end
+
+      def validate_retry_horizon_key!
+        if options[:retry_horizon_expires_at] && !options[:idempotency_key]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+        end
       end
     end
   end

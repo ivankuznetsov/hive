@@ -155,6 +155,8 @@ module Hive
             mutate_under_lock(binding, answer_text, task)
           end
         rescue Hive::ConcurrentRunError
+          raise if @idempotency_key
+
           write_outcome(binding, outcome: "lock_busy", reason: "task_lock_busy")
         rescue Errno::ENOENT
           write_outcome(binding, outcome: "stale", reason: "task_moved")

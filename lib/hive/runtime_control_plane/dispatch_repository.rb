@@ -558,7 +558,7 @@ module Hive
         source = context.respond_to?(:to_h) ? context.to_h : context
         source = source.transform_keys(&:to_sym)
         required = %i[
-          receipt_id effect_id principal principal_source ordinal
+          receipt_id effect_id principal principal_source ordinal receipt_generation
           request_fingerprint transport_request_id
         ]
         missing = required.reject { |key| source.key?(key) }
@@ -569,6 +569,7 @@ module Hive
           principal: source.fetch(:principal).to_s,
           principal_source: source.fetch(:principal_source).to_s,
           ordinal: Integer(source.fetch(:ordinal)),
+          receipt_generation: Integer(source.fetch(:receipt_generation)),
           request_fingerprint: source.fetch(:request_fingerprint).to_s,
           source_identity: (source[:source_identity] || source.fetch(:transport_request_id)).to_s,
           retry_horizon_expires_at: source[:retry_horizon_expires_at]&.to_s,

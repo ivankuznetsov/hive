@@ -58,6 +58,9 @@ module Hive
 
       def call
         call_with_envelope do
+          if @retry_horizon_expires_at && !@idempotency_key
+            raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+          end
           invoke = -> { @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call }
           @idempotency_key ? command_operation.call(&invoke) : invoke.call
         end
@@ -266,8 +269,10 @@ module Hive
       end
 
       def stage_action_text(payload)
-        return "" unless payload.fetch("noop")
-        "hive: noop — #{payload.fetch('slug')} is already at #{payload.fetch('to_stage_dir')}\n"
+        if payload.fetch("noop")
+          return "hive: noop — #{payload.fetch('slug')} is already at #{payload.fetch('to_stage_dir')}\n"
+        end
+        "hive: #{@verb} #{payload.fetch('slug')} — #{payload.fetch('phase').tr('_', ' ')}\n"
       end
 
       def success_payload(task, phase, noop: false, reason: nil, marker: nil)

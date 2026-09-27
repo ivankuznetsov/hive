@@ -162,6 +162,8 @@ module Hive
       receipt_id = SecureRandom.uuid
       inserted = false
       capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policy)
+      persist_namespace_policy!(identity.namespace_id, policy) if
+        !maintenance && !policy.keyed_intake_enabled
       owner_process_start ||= process_start(owner_pid) if execute
       attempts = 0
       begin
@@ -188,7 +190,7 @@ module Hive
           byte_admission_limit: policy.byte_admission_limit,
           updated_at: now
         }
-        namespace_updates[:keyed_intake_enabled] = 1 unless maintenance
+        namespace_updates[:keyed_intake_enabled] = policy.keyed_intake_enabled ? 1 : 0 unless maintenance
         connection[:command_namespaces].where(namespace_id: identity.namespace_id).update(
           namespace_updates
         )
@@ -324,6 +326,32 @@ module Hive
       )
     end
 
+    def abort_before_effect(claim, reason:)
+      now = timestamp
+      changed = database.transaction do |connection|
+        row = connection[:command_receipts][receipt_id: claim.receipt_id]
+        next 0 unless row && row.fetch(:generation) == claim.generation &&
+                      %w[prepared executing].include?(row.fetch(:state)) &&
+                      !connection[:command_effects].where(receipt_id: claim.receipt_id).any?
+        count = connection[:command_receipts].where(
+          receipt_id: claim.receipt_id, generation: claim.generation, state: row.fetch(:state)
+        ).update(
+          state: "aborted", generation: claim.generation + 1,
+          typed_reason: reason.to_s, owner_token: nil, updated_at: now
+        )
+        if count == 1 && row.fetch(:state) == "executing" && capacity_counted?(row)
+          connection[:command_capacity].where(namespace_id: claim.namespace_id).update(
+            executing_count: Sequel[:executing_count] - 1,
+            revision: Sequel[:revision] + 1, updated_at: now
+          )
+        end
+        count
+      end
+      raise Hive::CommandConflict, "command receipt ownership changed" unless changed == 1
+
+      claim_from(receipt(claim.receipt_id), claim.disposition, project_root: claim.project_root)
+    end
+
     def receipt(receipt_id)
       database.read { |connection| connection[:command_receipts][receipt_id: receipt_id] }
     end
@@ -401,7 +429,7 @@ module Hive
       record_effect_observation(
         receipt_id: claim.receipt_id, effect_id: effect_id,
         principal: claim.principal, request_fingerprint: claim.request_fingerprint,
-        source: "command_boundary", correlation_id: effect_id,
+        generation: claim.generation, source: "command_boundary", correlation_id: effect_id,
         evidence: { "result_sha256" => digest }
       )
       update_effect(
@@ -423,7 +451,7 @@ module Hive
     end
 
     def record_effect_submission(receipt_id:, effect_id:, principal:, request_fingerprint:,
-                                 kind:, identity:)
+                                 generation:, kind:, identity:)
       correlation = {
         "kind" => kind.to_s,
         "identity" => Hive::RuntimeControlPlane::Codec.normalize(identity)
@@ -432,6 +460,7 @@ module Hive
       changed = database.transaction do |connection|
         receipt = connection[:command_receipts][receipt_id: receipt_id.to_s]
         next 0 unless receipt && receipt.fetch(:state) == "executing" &&
+                      receipt.fetch(:generation) == Integer(generation) &&
                       receipt.fetch(:principal) == principal.to_s &&
                       receipt.fetch(:request_fingerprint) == request_fingerprint.to_s
         effect = connection[:command_effects][
@@ -461,7 +490,7 @@ module Hive
     end
 
     def record_effect_observation(receipt_id:, effect_id:, principal:, request_fingerprint:,
-                                  source:, correlation_id:, evidence: {})
+                                  generation:, source:, correlation_id:, evidence: {})
       observation = {
         "source" => source.to_s, "correlation_id" => correlation_id.to_s,
         "evidence" => Hive::RuntimeControlPlane::Codec.normalize(evidence)
@@ -473,6 +502,7 @@ module Hive
       changed = database.transaction do |connection|
         receipt = connection[:command_receipts][receipt_id: receipt_id.to_s]
         next 0 unless receipt && receipt.fetch(:state) == "executing" &&
+                      receipt.fetch(:generation) == Integer(generation) &&
                       receipt.fetch(:principal) == principal.to_s &&
                       receipt.fetch(:request_fingerprint) == request_fingerprint.to_s
         effect = connection[:command_effects][effect_id: effect_id.to_s, receipt_id: receipt_id.to_s]
@@ -502,16 +532,44 @@ module Hive
 
     def acquire_pin(receipt_id:, principal:, intent_id:, intent_generation:,
                     retry_horizon_expires_at:, owner_host: Socket.gethostname,
-                    owner_pid: Process.pid, owner_process_start: nil)
+                    owner_pid: Process.pid, owner_process_start: nil, project_root: nil)
       owner_process_start ||= process_start(owner_pid)
       horizon = parse_retry_horizon!(retry_horizon_expires_at)
       intent_generation = Integer(intent_generation)
       raise Hive::UsageError, "intent generation must be nonnegative" if intent_generation.negative?
       now_time = @clock.call.utc
       now = Hive::RuntimeControlPlane::Codec.dump_time(now_time)
+      receipt_snapshot, existing = database.read do |connection|
+        [
+          connection[:command_receipts][receipt_id: receipt_id],
+          connection[:command_receipt_pins][
+            receipt_id: receipt_id, principal: principal.to_s,
+            intent_id: intent_id.to_s, intent_generation: intent_generation
+          ]
+        ]
+      end
+      unless receipt_snapshot
+        raise Hive::CommandUnresolved.new(
+          reason: "command_pin_horizon_elapsed",
+          message: "receipt replay protection is no longer available; close the intent and " \
+                   "begin a new acquisition identity with a fresh future horizon"
+        )
+      end
+      if !existing && horizon <= now_time
+        raise Hive::UsageError, "a new receipt pin requires a future retry horizon"
+      end
+      policy = existing ? nil : admission_policy!(project_root, receipt_id: receipt_id)
+      persist_namespace_policy!(receipt_snapshot.fetch(:namespace_id), policy) if
+        policy && !policy.keyed_intake_enabled
       row = database.transaction do |connection|
         receipt = connection[:command_receipts][receipt_id: receipt_id]
-        raise Hive::UsageError, "unknown command receipt #{receipt_id}" unless receipt
+        unless receipt
+          raise Hive::CommandUnresolved.new(
+            reason: "command_pin_horizon_elapsed",
+            message: "receipt replay protection is no longer available; close the intent and " \
+                     "begin a new acquisition identity with a fresh future horizon"
+          )
+        end
         raise Hive::CommandConflict unless receipt.fetch(:principal) == principal.to_s
         existing = connection[:command_receipt_pins][
           receipt_id: receipt_id, principal: principal.to_s,
@@ -530,9 +588,13 @@ module Hive
           end
           next existing
         end
-        unless horizon > now_time
-          raise Hive::UsageError, "a new receipt pin requires a future retry horizon"
-        end
+        intake_disabled! unless policy.keyed_intake_enabled
+        capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policy)
+        capacity.admit_bytes!(
+          connection, namespace_id: receipt.fetch(:namespace_id), request_bytes: 512,
+          occupied_installation_bytes: capacity.occupied_installation_bytes(connection: connection)
+        )
+        sync_namespace_policy!(connection, receipt.fetch(:namespace_id), policy, now)
         pin_id = SecureRandom.uuid
         connection[:command_receipt_pins].insert(
           pin_id: pin_id, receipt_id: receipt_id, principal: principal.to_s,
@@ -572,8 +634,18 @@ module Hive
     end
 
     def allocate_successor(namespace_id:, principal:, intent_id:, intent_version:,
-                           predecessor_receipt_id:, delivery_cycle_id:, request_fingerprint:)
+                           predecessor_receipt_id:, delivery_cycle_id:, request_fingerprint:,
+                           project_root: nil)
       intent_version, now = Integer(intent_version), timestamp
+      existing = database.read do |connection|
+        connection[:command_successor_allocations][
+          namespace_id: namespace_id, principal: principal.to_s,
+          intent_id: intent_id.to_s, intent_version: intent_version,
+          delivery_cycle_id: delivery_cycle_id.to_s
+        ]
+      end
+      policy = existing ? nil : admission_policy!(project_root, namespace_id: namespace_id)
+      persist_namespace_policy!(namespace_id, policy) if policy && !policy.keyed_intake_enabled
       database.transaction do |connection|
         existing = connection[:command_successor_allocations][
           namespace_id: namespace_id, principal: principal.to_s,
@@ -586,6 +658,7 @@ module Hive
           end
           next successor_payload(existing)
         end
+        intake_disabled! unless policy.keyed_intake_enabled
         predecessor = connection[:command_receipts][receipt_id: predecessor_receipt_id]
         valid = predecessor && predecessor.fetch(:namespace_id) == namespace_id &&
           predecessor.fetch(:principal) == principal.to_s && predecessor.fetch(:state) == "failed" &&
@@ -604,6 +677,12 @@ module Hive
           [ namespace_id, principal, intent_id, intent_version, delivery_cycle_id, ordinal ].join("\0")
         )
         allocation_id = SecureRandom.uuid
+        capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policy)
+        capacity.admit_bytes!(
+          connection, namespace_id: namespace_id, request_bytes: 512,
+          occupied_installation_bytes: capacity.occupied_installation_bytes(connection: connection)
+        )
+        sync_namespace_policy!(connection, namespace_id, policy, now)
         connection[:command_successor_allocations].insert(
           allocation_id: allocation_id, namespace_id: namespace_id, principal: principal.to_s,
           intent_id: intent_id.to_s, intent_version: intent_version,
@@ -623,13 +702,39 @@ module Hive
     private
 
     def reclaim_dead_executing_owners(trigger_claim, scope:)
-      authority = @maintenance_authority
-      return 0 unless authority
-      candidates = database.read do |connection|
+      authority = @maintenance_authority || Hive::CommandMaintenanceAuthority.local(
+        principal: trigger_claim.principal
+      )
+      candidates = database.transaction do |connection|
+        namespace = connection[:command_namespaces][namespace_id: trigger_claim.namespace_id]
+        cursor = if namespace[:reclamation_cursor_updated_at] &&
+                    namespace[:reclamation_cursor_receipt_id]
+          [ namespace.fetch(:reclamation_cursor_updated_at),
+            namespace.fetch(:reclamation_cursor_receipt_id) ]
+        end
         dataset = connection[:command_receipts].where(state: "executing")
         dataset = dataset.where(namespace_id: trigger_claim.namespace_id) if scope == "namespace"
-        dataset.order(:updated_at, :receipt_id)
+        if cursor
+          updated_at, receipt_id = cursor
+          dataset = dataset.where {
+            (Sequel[:updated_at] > updated_at) |
+              ((Sequel[:updated_at] == updated_at) & (Sequel[:receipt_id] > receipt_id))
+          }
+        end
+        rows = dataset.order(:updated_at, :receipt_id)
           .limit(MAX_RECLAMATION_PROBES_PER_ADMISSION).all
+        if rows.empty? && cursor
+          dataset = connection[:command_receipts].where(state: "executing")
+          dataset = dataset.where(namespace_id: trigger_claim.namespace_id) if scope == "namespace"
+          rows = dataset.order(:updated_at, :receipt_id)
+            .limit(MAX_RECLAMATION_PROBES_PER_ADMISSION).all
+        end
+        last = rows.last
+        connection[:command_namespaces].where(namespace_id: trigger_claim.namespace_id).update(
+          reclamation_cursor_updated_at: last&.fetch(:updated_at),
+          reclamation_cursor_receipt_id: last&.fetch(:receipt_id)
+        )
+        rows
       end
       proofs = candidates.filter_map do |row|
         begin
@@ -702,6 +807,44 @@ module Hive
       Time.iso8601(source).utc
     rescue ArgumentError
       raise Hive::UsageError, "retry_horizon_expires_at must be an absolute canonical UTC timestamp"
+    end
+
+    def admission_policy!(project_root, namespace_id: nil, receipt_id: nil)
+      expected_namespace = namespace_id || database.read { |connection|
+        connection[:command_receipts][receipt_id: receipt_id]&.fetch(:namespace_id, nil)
+      }
+      project_root ||= database.read do |connection|
+        connection[:command_namespaces][namespace_id: expected_namespace]&.fetch(:root_realpath, nil)
+      end
+      raise Hive::ConfigError, "fresh keyed admission has no canonical project root" if project_root.to_s.empty?
+      policy = Hive::CommandReceiptCapacity.load(project_root)
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project_root, database: database, create: false
+      )
+      unless identity && identity.namespace_id == expected_namespace
+        raise Hive::CommandConflict, "keyed admission namespace changed"
+      end
+      policy
+    end
+
+    def sync_namespace_policy!(connection, namespace_id, policy, now)
+      connection[:command_namespaces].where(namespace_id: namespace_id).update(
+        keyed_intake_enabled: policy.keyed_intake_enabled ? 1 : 0,
+        policy_revision: policy.revision[0, 15].to_i(16),
+        nonterminal_limit: policy.nonterminal_limit,
+        concurrency_limit: policy.concurrency_limit,
+        byte_admission_limit: policy.byte_admission_limit,
+        updated_at: now
+      )
+    end
+
+    def persist_namespace_policy!(namespace_id, policy)
+      raise Hive::CommandConflict, "keyed admission namespace changed" unless namespace_id
+
+      database.transaction do |connection|
+        changed = sync_namespace_policy!(connection, namespace_id, policy, timestamp)
+        raise Hive::CommandConflict, "keyed admission namespace changed" unless changed == 1
+      end
     end
 
     def pin_from(row)
@@ -909,7 +1052,7 @@ module Hive
       return false unless row[:command] == "receipt" && row[:mode] == "prune" && row[:state] == "unresolved"
       database.read do |connection|
         connection[:command_maintenance_batches].where(
-          administrative_receipt_id: row.fetch(:receipt_id), state: %w[prepared executing]
+          administrative_receipt_id: row.fetch(:receipt_id), state: %w[prepared executing completed]
         ).any?
       end
     end

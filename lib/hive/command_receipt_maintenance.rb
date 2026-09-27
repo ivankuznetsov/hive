@@ -91,7 +91,8 @@ module Hive
       terminalize!(
         row, state: outcome.fetch("state"), result: outcome.fetch("result"),
         status: outcome.fetch("status"), typed_reason: outcome.fetch("typed_reason"),
-        reason: reason, evidence: evidence
+        reason: reason, evidence: evidence,
+        retry_eligible: outcome.fetch("retry_eligible")
       )
       payload.merge(
         "preview" => false, "confirmed" => true, "state" => outcome.fetch("state"),
@@ -409,7 +410,8 @@ module Hive
       )
     end
 
-    def terminalize!(row, state:, result:, status:, typed_reason:, reason:, evidence: {})
+    def terminalize!(row, state:, result:, status:, typed_reason:, reason:, evidence: {},
+                     retry_eligible: false)
       validate_replay_envelope!(result)
       result_json = Hive::RuntimeControlPlane::Codec.dump_json(result)
       now = timestamp
@@ -426,7 +428,7 @@ module Hive
           state: state, generation: row.fetch(:generation) + 1,
           result_json: result_json, result_digest: Digest::SHA256.hexdigest(result_json),
           result_status: status, typed_reason: typed_reason,
-          retry_eligible: evidence["whole_effect_non_application"] == true ? 1 : 0,
+          retry_eligible: retry_eligible ? 1 : 0,
           terminal_at: now, updated_at: now, owner_token: nil
         )
         if count == 1
@@ -515,9 +517,6 @@ module Hive
           Hive::RuntimeControlPlane::Codec.dump_json(payload)
         )
           raise Hive::UsageError, "retirement JSON result has an invalid replay digest"
-        end
-        if result["format"] == "dual" && !result["text"].is_a?(String)
-          raise Hive::UsageError, "retirement dual result must contain text"
         end
       elsif !result["text"].is_a?(String)
         raise Hive::UsageError, "retirement text result must contain text"

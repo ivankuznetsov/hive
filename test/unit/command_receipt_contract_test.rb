@@ -164,7 +164,10 @@ class CommandReceiptContractTest < Minitest::Test
     command = Hive::Commands::Receipt.new(
       "enroll", project: "demo", new_identity: true,
       previous_identity: "12345678-1234-1234-1234-123456789abc",
-      command_receipt_store: store
+      command_receipt_store: store,
+      authority: Hive::CommandMaintenanceAuthority.new(
+        principal: "owner", principal_source: "test", installation_owner: true
+      )
     )
     command.instance_variable_set(:@project_root, "/project")
     test_case = self
@@ -599,7 +602,7 @@ class CommandReceiptContractTest < Minitest::Test
         namespace_id: failed.namespace_id, principal: failed.principal,
         intent_id: "intent", intent_version: 1,
         predecessor_receipt_id: failed.receipt_id, delivery_cycle_id: "cycle",
-        request_fingerprint: "fingerprint"
+        request_fingerprint: "fingerprint", project_root: project
       )
       assert_equal 1, allocation.fetch("successor_ordinal")
       assert_equal allocation, store.allocate_successor(
@@ -621,7 +624,7 @@ class CommandReceiptContractTest < Minitest::Test
           namespace_id: failed.namespace_id, principal: failed.principal,
           intent_id: "new", intent_version: 1,
           predecessor_receipt_id: "missing", delivery_cycle_id: "cycle",
-          request_fingerprint: "fingerprint"
+          request_fingerprint: "fingerprint", project_root: project
         )
       end
       assert_raises(Hive::UsageError) do
@@ -779,6 +782,17 @@ class CommandReceiptContractTest < Minitest::Test
     end
   end
 
+  def test_installation_staffing_overrides_project_staffing
+    with_receipts do |project, _database, _store, _authority|
+      staffing = { "operator_count" => 9, "minutes_per_namespace_per_day" => 45 }
+      with_replaced_singleton_method(
+        Hive::CommandReceiptCapacity, :global_receipts, -> { { "staffing" => staffing } }
+      ) do
+        assert_equal staffing, Hive::CommandReceiptCapacity.load(project).staffing
+      end
+    end
+  end
+
   def test_command_adapters_build_operations_and_classify_receipt_failures
     database = Struct.new(:installation_identity).new({ installation_id: "installation" })
     store = Struct.new(:database).new(database)
@@ -926,7 +940,8 @@ class CommandReceiptContractTest < Minitest::Test
     end
     context = Hive::CommandOperation::Context.new(
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
-      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
       transport_request_id: request_id,
       retry_horizon_expires_at: "2030-01-01T00:00:00.000000Z"
     )
@@ -1021,6 +1036,11 @@ class CommandReceiptContractTest < Minitest::Test
         version: "1", location: "https://[", sha256: "a" * 64
       )
     end
+    assert_raises(Hive::ConfigError) do
+      Hive::RuntimeControlPlane::CommandSchemaInstallation.validate_coordinates!(
+        version: "1", location: "https://", sha256: "a" * 64
+      )
+    end
 
     fake_installer = Object.new
     fake_installer.define_singleton_method(:service_lifecycle_state) { { "service_running" => true } }
@@ -1089,7 +1109,7 @@ class CommandReceiptContractTest < Minitest::Test
     resolver = Struct.new(:resolved) { def resolve = resolved }.new(task)
     with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
       act = Hive::Commands::Act.new(
-        "run", "task", observation: "token", project: "demo", json: true,
+        "run", "demo:task", observation: "token", project: "demo", json: true,
         idempotency_key: "key", command_receipt_store: store
       )
       operation = act.send(:command_operation)
@@ -1270,7 +1290,8 @@ class CommandReceiptContractTest < Minitest::Test
     db.define_singleton_method(:table_exists?) { |_name| false }
     context = Hive::CommandOperation::Context.new(
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
-      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
       transport_request_id: "command-dispatch:v1:#{'a' * 64}",
       retry_horizon_expires_at: "2030-01-01T00:00:00Z"
     )
@@ -1314,7 +1335,8 @@ class CommandReceiptContractTest < Minitest::Test
     }
     options = {
       idempotency_key: "key", json: false, from: "8-finalize", project: "demo",
-      reason: "complete", evidence: [ "proof" ], successor: nil, attestation: "signed"
+      reason: "complete", evidence: [ "proof" ], successor: nil, attestation: "signed",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
     }
     operation = Object.new
     operation.define_singleton_method(:call) { |&block| block.call }
@@ -1334,6 +1356,7 @@ class CommandReceiptContractTest < Minitest::Test
     with_replaced_singleton_method(cli, :resolve_closure_task, ->(*) { task }) do
       assert_equal "/project", operation_args.fetch(:project_root).call
     end
+    assert_equal "2030-01-01T00:00:00Z", operation_args.fetch(:retry_horizon_expires_at)
   end
 
   def test_remaining_validation_and_fault_translation_paths
@@ -1443,7 +1466,8 @@ class CommandReceiptContractTest < Minitest::Test
     db.define_singleton_method(:table_exists?) { |_name| false }
     context = {
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
-      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
       transport_request_id: "command-dispatch:v1:#{'a' * 64}"
     }
     assert_raises(Hive::ConfigError) do

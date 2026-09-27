@@ -112,7 +112,8 @@ module Hive
           Hive::CommandOperation::Context.new(
             receipt_id: row.fetch(:receipt_id), effect_id: row.fetch(:effect_id),
             principal: row.fetch(:principal), principal_source: row.fetch(:principal_source),
-            ordinal: row.fetch(:ordinal), request_fingerprint: row.fetch(:request_fingerprint),
+            ordinal: row.fetch(:ordinal), receipt_generation: row.fetch(:receipt_generation),
+            request_fingerprint: row.fetch(:request_fingerprint),
             transport_request_id: row.fetch(:source_identity),
             retry_horizon_expires_at: row[:retry_horizon_expires_at]
           )

@@ -4,6 +4,15 @@ require "hive/commands/stage_action"
 class CommandsStageActionTest < Minitest::Test
   include HiveTestHelper
 
+  def test_success_text_renderer_emits_a_usable_non_noop_replay
+    command = Hive::Commands::StageAction.new("develop", "some-slug")
+    text = command.send(
+      :stage_action_text,
+      "noop" => false, "slug" => "some-slug", "phase" => "awaiting_delivery"
+    )
+    assert_equal "hive: develop some-slug — awaiting delivery\n", text
+  end
+
   def test_call_wraps_unexpected_errors_and_emits_json_error_envelope
     command = Hive::Commands::StageAction.new("plan", "some-slug", json: true)
     command.define_singleton_method(:do_call) do

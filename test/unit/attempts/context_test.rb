@@ -98,7 +98,8 @@ class AttemptsContextTest < Minitest::Test
       )
       row = {
         receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
-        principal_source: "local_cli", ordinal: 3, request_fingerprint: "fingerprint",
+        principal_source: "local_cli", ordinal: 3, receipt_generation: 4,
+        request_fingerprint: "fingerprint",
         source_identity: "request-1", retry_horizon_expires_at: "2030-01-01T00:00:00Z"
       }
       command_contexts = Object.new

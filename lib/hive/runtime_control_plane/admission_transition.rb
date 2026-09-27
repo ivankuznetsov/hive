@@ -183,6 +183,7 @@ module Hive
           request_id: request_id.to_s, receipt_id: context.receipt_id,
           effect_id: context.effect_id, principal: context.principal,
           principal_source: context.principal_source, ordinal: context.ordinal,
+          receipt_generation: context.receipt_generation,
           request_fingerprint: context.request_fingerprint,
           source_identity: context.transport_request_id,
           retry_horizon_expires_at: context.retry_horizon_expires_at&.to_s,

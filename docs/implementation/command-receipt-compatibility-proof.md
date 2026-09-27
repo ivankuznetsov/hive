@@ -4,10 +4,10 @@ Proof date: 2026-09-27.
 
 - Source baseline: `882b8e9ead2f9cf5321b158fe47648e6a01a2fca`
 - Narrow source patch: `docs/implementation/command-receipt-compatibility.patch`
-- Compatibility patch SHA-256: `26ff4f4ba4ae25acafa2ab15ce20b8f67b6beed7fb69c886ea6262cff71a2339`
+- Compatibility patch SHA-256: `b29a7fd0cb9082aaf34d026c4bb0832177942262ebe76f43d86a1f7ef46a2730`
 - Candidate build output: `hive-cli-command-receipt-compat-candidate.gem` (retained outside Git)
-- Candidate SHA-256: `84163c17613771f85e6acfcd6c90a31bc21307d971b602f16ab0b29954745102`
-- Extension schema SHA-256: `c96c7247e175fefe50960a38980e83fec328c4698f084a7195bcca771b747ef8`
+- Candidate SHA-256: `cf7eae51b26bdace854d4a40ab681c53ff67aebb1670fc939310ff7fce3ba712`
+- Extension schema SHA-256: `cd35003e8cf5f0a720b28ce9af301a95a14c52987a97bbbdd058f2bf04ec9fb5`
 
 The candidate is a local rollback proof artifact, not a release or a version
 decision, and its binary is deliberately not committed. Its only source change
@@ -34,7 +34,7 @@ Reproduce in an isolated directory after verifying the candidate checksum:
 ```sh
 candidate=${HIVE_COMPAT_CANDIDATE_GEM:?set to the retained candidate path}
 printf '%s  %s\n' \
-  84163c17613771f85e6acfcd6c90a31bc21307d971b602f16ab0b29954745102 \
+  cf7eae51b26bdace854d4a40ab681c53ff67aebb1670fc939310ff7fce3ba712 \
   "$candidate" | sha256sum --check --strict &&
 gem install --local --ignore-dependencies --no-document \
   --install-dir "$PWD/tmp/compat-prefix" "$candidate"

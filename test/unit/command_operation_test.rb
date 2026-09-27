@@ -232,7 +232,7 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
-  def test_usage_error_after_effect_intent_is_unresolved_without_non_application_proof
+  def test_usage_error_before_effect_submission_is_failed_and_retry_eligible
     with_operation do |_operation, store, project|
       structured = Hive::CommandOperation.new(
         key: "failed", command: "approve", target: "task", request: { from: "3-plan" },
@@ -242,9 +242,19 @@ class CommandOperationTest < Minitest::Test
         structured.call { raise Hive::UsageError, "invalid transition" }
       end
 
-      assert_raises(Hive::CommandUnresolved) do
-        structured.call { flunk "unproven failure replay executed" }
+      row = store.database.read do |database|
+        database[:command_receipts].first(key_digest: Digest::SHA256.hexdigest("failed"))
       end
+      assert_equal "failed", row.fetch(:state)
+      assert_equal 1, row.fetch(:retry_eligible)
+      successor = store.allocate_successor(
+        namespace_id: row.fetch(:namespace_id), principal: "owner",
+        intent_id: "test-intent", intent_version: 1,
+        predecessor_receipt_id: row.fetch(:receipt_id), delivery_cycle_id: "cycle-1",
+        request_fingerprint: row.fetch(:request_fingerprint), project_root: project
+      )
+      assert_equal row.fetch(:receipt_id), successor.fetch("predecessor_receipt_id")
+      assert_equal 1, successor.fetch("successor_ordinal")
     end
   end
 
@@ -300,6 +310,51 @@ class CommandOperationTest < Minitest::Test
 
       assert_equal "approved task\n", output
       assert_equal 1, effects
+    end
+  end
+
+  def test_json_only_replay_renders_text_without_reexecuting_the_effect
+    with_operation do |_operation, store, project|
+      effects = 0
+      json_operation = Hive::CommandOperation.new(
+        key: "json-display", command: "stage_action", mode: "develop", target: "task",
+        request: {}, project_root: project, principal: "owner", json: true, store: store,
+        text_renderer: ->(payload) { "developed #{payload.fetch('slug')}\n" }
+      )
+      capture_io do
+        json_operation.call do
+          effects += 1
+          puts JSON.generate("schema" => "hive-stage-action", "ok" => true, "slug" => "task")
+        end
+      end
+      text_operation = Hive::CommandOperation.new(
+        key: "json-display", command: "stage_action", mode: "develop", target: "task",
+        request: {}, project_root: project, principal: "owner", json: false, store: store,
+        text_renderer: ->(payload) { "developed #{payload.fetch('slug')}\n" }
+      )
+
+      output, = capture_io { text_operation.call { flunk "JSON replay executed" } }
+      assert_equal "developed task\n", output
+      assert_equal 1, effects
+    end
+  end
+
+  def test_observation_token_template_reconstructs_byte_identical_success
+    with_operation do |_operation, store, project|
+      token = "a" * 64
+      operation = Hive::CommandOperation.new(
+        key: "token-template", command: "act", target: "demo:task",
+        request: { observation: token }, project_root: project,
+        principal: "owner", json: true, structured: true, store: store
+      )
+      expected = operation.call do
+        { "schema" => "hive-act", "ok" => true, "observation_token" => token }
+      end
+
+      replayed = operation.call { flunk "token replay executed" }
+      assert_equal expected, replayed
+      assert_equal Hive::RuntimeControlPlane::Codec.dump_json(expected),
+                   Hive::RuntimeControlPlane::Codec.dump_json(replayed)
     end
   end
 

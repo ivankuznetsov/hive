@@ -133,6 +133,14 @@ and confirmed orphan-owner reclassification when PID/start-time evidence proves
 death. See [[commands/receipt]] for the trust, pin, audit, and confirmation
 boundaries.
 
+The loopback web boundary trusts access to the local socket after state-home
+custody validation; it does not authenticate the calling process with peer
+credentials. Any local process that can reach that socket receives the
+installation-owner maintenance authority. Receipt maintenance audit rows are
+write-only in this increment and ordinary eligible prune deletes them with
+their owning receipt, so they are not an independent post-hoc accountability
+record.
+
 For a removed project, use the installation-owner preview first:
 `hive receipt prune --json`, then select the orphan with
 `hive receipt prune --namespace-id UUID --json`. The bounded namespace result

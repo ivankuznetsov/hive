@@ -27,7 +27,8 @@ module Hive
         receipt_id: receipt.fetch(:receipt_id), principal: values.fetch("principal"),
         intent_id: values.fetch("source_identity"),
         intent_generation: Integer(values.fetch("ordinal")),
-        retry_horizon_expires_at: horizon
+        retry_horizon_expires_at: horizon,
+        project_root: project_root_for(values.fetch("source_identity"))
       )
     end
 
@@ -46,7 +47,8 @@ module Hive
         intent_version: intent_version,
         predecessor_receipt_id: receipt.fetch(:receipt_id),
         delivery_cycle_id: delivery_cycle_id,
-        request_fingerprint: context.fetch("request_fingerprint")
+        request_fingerprint: context.fetch("request_fingerprint"),
+        project_root: project_root_for(predecessor_request_id)
       )
     end
 
@@ -82,8 +84,8 @@ module Hive
       values = source.transform_keys(&:to_s)
       values["source_identity"] ||= values["transport_request_id"]
       required = %w[
-        receipt_id effect_id principal principal_source ordinal request_fingerprint source_identity
-        retry_horizon_expires_at
+        receipt_id effect_id principal principal_source ordinal receipt_generation
+        request_fingerprint source_identity retry_horizon_expires_at
       ]
       missing = required.select { |key| values[key].nil? || values[key].to_s.empty? }
       unless missing.empty?
@@ -92,6 +94,22 @@ module Hive
         )
       end
       values
+    end
+
+    def project_root_for(request_id)
+      request = repository.fetch(request_id)
+      project_name = request&.project
+      configured = project_name && Hive::Config.find_project(project_name)
+      return configured.fetch("path") if configured
+
+      row = project_name && store.database.read do |connection|
+        connection[:projects][name: project_name]
+      end
+      path = row && row[:observed_path]
+      if path.to_s.empty? || path == "__global__"
+        raise Hive::ConfigError, "keyed dispatch project identity is unavailable"
+      end
+      path
     end
 
     def repository

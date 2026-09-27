@@ -5,6 +5,8 @@ require "hive/command_receipt_store"
 require "hive/runtime_control_plane/command_schema_installation"
 
 class CommandReceiptStoreTest < Minitest::Test
+  include HiveTestHelper
+
   TEST_PACKAGE = {
     version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "c" * 64
   }.freeze
@@ -112,6 +114,20 @@ class CommandReceiptStoreTest < Minitest::Test
         request: { from: "3-plan" }, principal: "owner"
       )
       stored = store.succeed(claim, result: { "ok" => true }, status: 0)
+      pin_horizon = (Time.now.utc + 3600).iso8601
+      pin = store.acquire_pin(
+        receipt_id: stored.receipt_id, principal: "owner", intent_id: "existing-intent",
+        intent_generation: 1, retry_horizon_expires_at: pin_horizon, project_root: project
+      )
+      retryable = store.reserve(
+        project_root: project, key: "retryable", command: "approve", target: "retryable",
+        request: {}, principal: "owner"
+      )
+      retryable = store.mark_executing(retryable)
+      retryable = store.fail_non_application(
+        retryable, result: { "format" => "text", "text" => "rejected\n" },
+        status: 1, reason: "rejected", whole_effect_non_application: true
+      )
       write_receipt_config(project, keyed_intake_enabled: false)
 
       replay = store.reserve(
@@ -126,6 +142,30 @@ class CommandReceiptStoreTest < Minitest::Test
         )
       end
       assert_includes error.message, "keyed_intake_enabled"
+      assert_equal 0, store.database.read { |connection|
+        connection[:command_namespaces][namespace_id: stored.namespace_id]
+          .fetch(:keyed_intake_enabled)
+      }
+
+      repeated_pin = store.acquire_pin(
+        receipt_id: stored.receipt_id, principal: "owner", intent_id: "existing-intent",
+        intent_generation: 1, retry_horizon_expires_at: pin_horizon
+      )
+      assert_equal pin.pin_id, repeated_pin.pin_id
+      assert_raises(Hive::CommandIntakeDisabled) do
+        store.acquire_pin(
+          receipt_id: stored.receipt_id, principal: "owner", intent_id: "new-intent",
+          intent_generation: 1, retry_horizon_expires_at: pin_horizon, project_root: project
+        )
+      end
+      assert_raises(Hive::CommandIntakeDisabled) do
+        store.allocate_successor(
+          namespace_id: retryable.namespace_id, principal: retryable.principal,
+          intent_id: "intent", intent_version: 1,
+          predecessor_receipt_id: retryable.receipt_id, delivery_cycle_id: "cycle",
+          request_fingerprint: retryable.request_fingerprint, project_root: project
+        )
+      end
     end
   end
 
@@ -162,7 +202,7 @@ class CommandReceiptStoreTest < Minitest::Test
         installation_owner: true
       )
       store = Hive::CommandReceiptStore.new(
-        database: database, maintenance_authority: authority,
+        database: database,
         alive: ->(*) { true }, ownership: ->(*) { :reused },
         host: "test-host"
       )
@@ -179,10 +219,14 @@ class CommandReceiptStoreTest < Minitest::Test
         request: { from: "3-plan" }, principal: "installation-owner"
       )
 
-      admitted = store.mark_executing(
-        incoming, owner_host: "test-host", owner_pid: 41_002,
-        owner_process_start: "new-start"
-      )
+      admitted = with_replaced_singleton_method(
+        Hive::CommandMaintenanceAuthority, :local, ->(**) { authority }
+      ) do
+        store.mark_executing(
+          incoming, owner_host: "test-host", owner_pid: 41_002,
+          owner_process_start: "new-start"
+        )
+      end
 
       assert_equal "executing", admitted.state
       assert_equal "unresolved", store.receipt(abandoned.receipt_id).fetch(:state)
@@ -222,7 +266,7 @@ class CommandReceiptStoreTest < Minitest::Test
       store.allocate_successor(
         namespace_id: first.namespace_id, principal: first.principal,
         intent_id: "intent", intent_version: 1, predecessor_receipt_id: first.receipt_id,
-        delivery_cycle_id: "cycle-1", request_fingerprint: "first"
+        delivery_cycle_id: "cycle-1", request_fingerprint: "first", project_root: project
       )
       second = store.reserve(
         project_root: project, key: "second", command: "approve", target: "task",
@@ -237,7 +281,7 @@ class CommandReceiptStoreTest < Minitest::Test
         store.allocate_successor(
           namespace_id: second.namespace_id, principal: second.principal,
           intent_id: "intent", intent_version: 1, predecessor_receipt_id: second.receipt_id,
-          delivery_cycle_id: "cycle-2", request_fingerprint: "second"
+          delivery_cycle_id: "cycle-2", request_fingerprint: "second", project_root: project
         )
       end
       assert_equal "successor predecessor is stale", error.message
@@ -268,6 +312,7 @@ class CommandReceiptStoreTest < Minitest::Test
 
     unavailable = Object.new
     unavailable.define_singleton_method(:read) { raise Hive::ConfigError, "unavailable" }
+    unavailable.define_singleton_method(:transaction) { |**| raise Hive::ConfigError, "unavailable" }
     authority = Object.new
     store = Hive::CommandReceiptStore.new(
       database: unavailable, maintenance_authority: authority
@@ -283,13 +328,120 @@ class CommandReceiptStoreTest < Minitest::Test
         request: {}, principal: "owner"
       )
       executing = store.mark_executing(prepared)
+      effect = store.prepare_effect(
+        executing, ordinal: 0, kind: "approve:default", identity: { "target" => "task" }
+      )
+
+      store.database.transaction do |connection|
+        connection[:command_receipts].where(receipt_id: executing.receipt_id).update(
+          generation: executing.generation + 1
+        )
+      end
+      assert_raises(Hive::CommandConflict) do
+        store.record_effect_submission(
+          receipt_id: executing.receipt_id, effect_id: effect.fetch(:effect_id),
+          principal: executing.principal, request_fingerprint: executing.request_fingerprint,
+          generation: executing.generation, kind: "task_activity", identity: { "id" => "late" }
+        )
+      end
+      evidence = store.database.read do |connection|
+        connection[:command_effects][effect_id: effect.fetch(:effect_id)].fetch(:evidence_json)
+      end
+      assert_nil evidence
 
       assert_raises(Hive::CommandConflict) do
         store.succeed(prepared, result: { "ok" => true }, status: 0)
       end
       assert_equal "executing", store.receipt(executing.receipt_id).fetch(:state)
-      store.succeed(executing, result: { "ok" => true }, status: 0)
-      assert_equal "succeeded", store.receipt(executing.receipt_id).fetch(:state)
+    end
+  end
+
+  def test_orderly_pre_effect_cancellation_transitions_to_aborted
+    with_store do |project, database, store|
+      claim = store.reserve(
+        project_root: project, key: "cancelled", command: "approve", target: "task",
+        request: {}, principal: "owner", execute: true
+      )
+
+      aborted = store.abort_before_effect(claim, reason: "operator_cancelled")
+
+      assert_equal "aborted", aborted.state
+      row = store.receipt(claim.receipt_id)
+      assert_equal "operator_cancelled", row.fetch(:typed_reason)
+      assert_equal 0, database.read { |connection|
+        connection[:command_capacity][namespace_id: claim.namespace_id].fetch(:executing_count)
+      }
+    end
+  end
+
+  def test_reclamation_cursor_progresses_past_four_live_owners_across_store_instances
+    with_store do |project, database, _store|
+      write_receipt_config(project, concurrency_limit: 5)
+      authority = Hive::CommandMaintenanceAuthority.new(
+        principal: "installation-owner", principal_source: "test", installation_owner: true
+      )
+      base = Time.utc(2026, 9, 27)
+      claims = 5.times.map do |index|
+        store = Hive::CommandReceiptStore.new(
+          database: database, maintenance_authority: authority, host: "test-host",
+          alive: ->(*) { true },
+          ownership: ->(_payload, pid) { pid == 41_005 ? :reused : :verified }
+        )
+        claim = store.reserve(
+          project_root: project, key: "owner-#{index}", command: "approve", target: "task-#{index}",
+          request: {}, principal: "owner-#{index}"
+        )
+        executing = store.mark_executing(
+          claim, owner_host: "test-host", owner_pid: 41_001 + index,
+          owner_process_start: "start-#{index}"
+        )
+        database.transaction do |connection|
+          connection[:command_receipts].where(receipt_id: executing.receipt_id).update(
+            updated_at: Hive::RuntimeControlPlane::Codec.dump_time(base + index)
+          )
+        end
+        executing
+      end
+      incoming = Hive::CommandReceiptStore.new(database: database).reserve(
+        project_root: project, key: "incoming", command: "approve", target: "incoming",
+        request: {}, principal: "installation-owner"
+      )
+
+      first = Hive::CommandReceiptStore.new(
+        database: database, maintenance_authority: authority, host: "test-host",
+        alive: ->(*) { true },
+        ownership: ->(_payload, pid) { pid == 41_005 ? :reused : :verified }
+      )
+      assert_raises(Hive::CommandCapacityError) do
+        first.mark_executing(incoming, owner_host: "test-host", owner_pid: 42_000,
+                             owner_process_start: "incoming")
+      end
+      second = Hive::CommandReceiptStore.new(
+        database: database, maintenance_authority: authority, host: "test-host",
+        alive: ->(*) { true },
+        ownership: ->(_payload, pid) { pid == 41_005 ? :reused : :verified }
+      )
+      admitted = second.mark_executing(
+        incoming, owner_host: "test-host", owner_pid: 42_000,
+        owner_process_start: "incoming"
+      )
+
+      assert_equal "executing", admitted.state
+      assert_equal "unresolved", second.receipt(claims.last.receipt_id).fetch(:state)
+    end
+  end
+
+  def test_missing_pruned_receipt_pin_reports_elapsed_horizon
+    with_store do |project, _database, store|
+      error = assert_raises(Hive::CommandUnresolved) do
+        store.acquire_pin(
+          receipt_id: "pruned", principal: "owner", intent_id: "intent",
+          intent_generation: 1, retry_horizon_expires_at: (Time.now.utc + 3600).iso8601,
+          project_root: project
+        )
+      end
+      assert_equal "command_pin_horizon_elapsed", error.reason
+      assert_includes error.message, "new acquisition identity"
     end
   end
 
@@ -409,6 +561,7 @@ class CommandReceiptStoreTest < Minitest::Test
           receipt_id: executing.receipt_id, effect_id: effect.fetch(:effect_id),
           principal: executing.principal,
           request_fingerprint: executing.request_fingerprint,
+          generation: executing.generation,
           source: "", correlation_id: "", evidence: {}
         )
       end
@@ -420,7 +573,7 @@ class CommandReceiptStoreTest < Minitest::Test
         receipt_id: executing.receipt_id, principal: executing.principal,
         intent_id: "active", intent_generation: 1,
         retry_horizon_expires_at: (Time.now.utc + 3600).iso8601,
-        owner_process_start: "start"
+        owner_process_start: "start", project_root: project
       )
       assert store.close_pin(
         receipt_id: executing.receipt_id, principal: executing.principal,

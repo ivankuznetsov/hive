@@ -7,7 +7,7 @@ module Hive
   module RuntimeControlPlane
     module CommandSchema
       VERSION = 2
-      EXPECTED_SCHEMA_SHA256 = "c96c7247e175fefe50960a38980e83fec328c4698f084a7195bcca771b747ef8".freeze
+      EXPECTED_SCHEMA_SHA256 = "cd35003e8cf5f0a720b28ce9af301a95a14c52987a97bbbdd058f2bf04ec9fb5".freeze
       TABLE_NAMES = %w[
         command_capacity
         command_dispatch_contexts
@@ -29,7 +29,6 @@ module Hive
         command_receipt_pins_active_idx
         command_receipt_pins_intent_uidx
         command_receipts_key_uidx
-        command_receipts_owner_idx
         command_receipts_terminal_idx
         command_namespaces_git_common_uidx
         command_successor_allocations_cycle_uidx

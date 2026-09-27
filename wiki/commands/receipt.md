@@ -58,6 +58,13 @@ inspect `state` plus the typed reason. A settled receipt reports
 `command_original_result_unavailable`, is never retry-eligible, and does not
 claim business success.
 
+A deterministic rejection before effect submission is stored as `failed` with
+validated whole-effect non-application and can feed the shared successor
+allocator. Lock contention remains temporary and never becomes a durable
+success. Every effect submission and observation is fenced by the receipt's
+ownership generation, so a reclaimed owner cannot append evidence to its
+successor's execution.
+
 ## Maintenance
 
 All destructive commands preview by default. Repeat with `--confirm` only
@@ -100,6 +107,12 @@ effective namespace and installation limits, calculated utilization, physical
 page/freelist/WAL occupancy, and the 70/85 percent pressure band used by
 admission diagnostics.
 
+Non-owner project previews include only that principal's utilization and its
+own active pins, unfinished batches, and non-terminal receipt identities. The
+namespace intake gate is reported separately. Admission-time dead-owner probes
+use a durable bounded cursor so live owners at the front of the ordering cannot
+permanently hide a later dead owner.
+
 ```sh
 hive receipt prune --json --limit 100
 hive receipt prune --namespace-id UUID --json
@@ -132,6 +145,11 @@ hive receipt enroll --project PROJECT --new-identity \
   --previous-identity UUID --expected-generation 0 --confirm --json
 ```
 
+Enrollment uses the same installation-owner authority predicate as destructive
+receipt maintenance and repeats that authorization inside each identity write
+transaction. Its audit records the authenticated principal, source, authority
+basis, and peer address rather than synthesizing a local uid claim.
+
 ## Pins and trust
 
 Automated callers acquire a pin with a caller-declared absolute
@@ -140,6 +158,11 @@ never expires or releases the pin. An identical acquisition may replay after
 the horizon. If the pin is gone and its persisted horizon has elapsed, the
 caller must close the intent and begin a new acquisition identity with a new
 future horizon; it may not repeat an unknown effect.
+
+Fresh pins and failed-receipt successor allocations read the live namespace
+policy, obey the intake gate, and reserve byte headroom atomically. Reacquiring
+an existing pin remains available while intake is disabled so already-admitted
+work can recover.
 
 CLI and scheduler principals use the installation-scoped local uid. GitHub
 principals use the numeric account id. Cross-principal web maintenance requires

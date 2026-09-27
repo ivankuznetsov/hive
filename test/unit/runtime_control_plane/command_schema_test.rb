@@ -111,7 +111,7 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
     [ proof, guide ].each do |document|
       assert_includes document, schema_sha256
       assert_includes document, patch_sha256
-      assert_match(/84163c17613771f85e6acfcd6c90a31bc21307d971b602f16ab0b29954745102/, document)
+      assert_match(/cf7eae51b26bdace854d4a40ab681c53ff67aebb1670fc939310ff7fce3ba712/, document)
       assert_match(/sha256sum --check --strict &&\s*gem install/m, document)
     end
     refute_includes proof, "docs/artifacts/"

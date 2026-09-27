@@ -74,12 +74,14 @@ module Hive
             "project" => @project_filter
           },
           project_roots: lambda {
+            project_name, = qualified_target
             Hive::CommandOperation.registered_project_roots(
-              target: @target, project: @project_filter
+              target: @target, project: project_name
             )
           },
           project_root: lambda {
-            Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve.project_root
+            project_name, slug = qualified_target
+            Hive::TaskResolver.new(slug, project_filter: project_name).resolve.project_root
           },
           json: @json,
           failure_payload: ->(error) { envelope_payload_for(error) },
@@ -110,11 +112,24 @@ module Hive
         }
         if @json
           puts JSON.generate(payload)
-          @stdout_written = true
+          @stdout_written = true unless @idempotency_key
         else
           print text_success(result)
         end
         payload
+      end
+
+      def qualified_target
+        project, slug = @target.to_s.split(":", 2)
+        if project.to_s.empty? || slug.to_s.empty? || slug.include?(File::SEPARATOR)
+          raise Hive::OperationalActionUsageError,
+                "TARGET must be the exact project:slug emitted by operational status"
+        end
+        if @project_filter && @project_filter.to_s != project
+          raise Hive::OperationalActionUsageError,
+                "--project must match the project in TARGET"
+        end
+        [ project, slug ]
       end
 
       def text_success(result)

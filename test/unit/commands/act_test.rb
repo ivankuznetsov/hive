@@ -44,6 +44,15 @@ class CommandsActTest < Minitest::Test
     assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
   end
 
+  def test_keyed_json_success_is_not_marked_emitted_before_receipt_finalization
+    command = Hive::Commands::Act.new(
+      "workflow.advance", "demo:task", observation: "a" * 64, json: true,
+      idempotency_key: "key", executor: FakeExecutor.new
+    )
+    capture_io { command.send(:emit_success, FakeExecutor.new.execute) }
+    refute command.instance_variable_get(:@stdout_written)
+  end
+
   def test_human_success_is_concise
     stdout, = capture_io do
       Hive::Commands::Act.new(

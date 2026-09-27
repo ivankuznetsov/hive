@@ -22,7 +22,8 @@ module Hive
         sha256 = coordinates && (coordinates[:sha256] || coordinates["sha256"])
         uri = URI.parse(location.to_s)
         valid = !version.to_s.empty? && version.to_s !~ /pending|placeholder/i &&
-          uri.is_a?(URI::HTTPS) && sha256.to_s.match?(/\A[0-9a-f]{64}\z/i)
+          uri.is_a?(URI::HTTPS) && !uri.host.to_s.empty? &&
+          sha256.to_s.match?(/\A[0-9a-f]{64}\z/i)
         return coordinates if valid
 
         raise Hive::ConfigError,

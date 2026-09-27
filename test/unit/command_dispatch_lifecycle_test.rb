@@ -215,7 +215,8 @@ class CommandDispatchLifecycleTest < Minitest::Test
 
     context = {
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
-      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
       transport_request_id: "command-dispatch:v1:#{'a' * 64}",
       retry_horizon_expires_at: "2030-01-01T00:00:00Z"
     }
@@ -271,7 +272,8 @@ class CommandDispatchLifecycleTest < Minitest::Test
     caller.instance_variable_set(:@attempts_api, api)
     context = Hive::CommandOperation::Context.new(
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
-      principal_source: "test", ordinal: 2, request_fingerprint: "fingerprint",
+      principal_source: "test", ordinal: 2, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
       transport_request_id: "command-dispatch:v1:#{'b' * 64}",
       retry_horizon_expires_at: "2030-01-01T00:00:00Z"
     )
@@ -296,7 +298,8 @@ class CommandDispatchLifecycleTest < Minitest::Test
     caller.define_singleton_method(:durable_worker_argv) { |_task| %w[hive run task] }
     context = Hive::CommandOperation::Context.new(
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
-      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
       transport_request_id: "command-dispatch:v1:#{'c' * 64}", retry_horizon_expires_at: nil
     )
     Thread.current[:hive_command_operation_context] = context
@@ -343,6 +346,7 @@ class CommandDispatchLifecycleTest < Minitest::Test
       store.record_effect_submission(
         receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id),
         principal: claim.principal, request_fingerprint: claim.request_fingerprint,
+        generation: claim.generation,
         kind: "github_push", identity: { "publication_id" => "publication-#{checkpoint}" }
       )
     end
@@ -404,7 +408,7 @@ class CommandDispatchLifecycleTest < Minitest::Test
       request_id = "command-dispatch:v1:#{'b' * 64}"
       context = Hive::CommandOperation::Context.new(
         receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id), principal: claim.principal,
-        principal_source: "test", ordinal: 0,
+        principal_source: "test", ordinal: 0, receipt_generation: claim.generation,
         request_fingerprint: claim.request_fingerprint,
         transport_request_id: request_id,
         retry_horizon_expires_at: (Time.now.utc + 3600).iso8601(6)

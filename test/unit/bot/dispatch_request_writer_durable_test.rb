@@ -42,7 +42,8 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
   def test_keyed_bot_write_acquires_pin_before_enqueue
     context = Hive::CommandOperation::Context.new(
       receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
-      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
       transport_request_id: "command-dispatch:v1:#{'c' * 64}",
       retry_horizon_expires_at: (Time.now.utc + 3600).iso8601
     )

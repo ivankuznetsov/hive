@@ -95,14 +95,14 @@ class ProjectIdentityTest < Minitest::Test
       previous = "11111111-1111-4111-8111-111111111111"
       preview = Hive::ProjectIdentity.enroll_new_identity(
         project_root: project, database: database, previous_identity: previous,
-        expected_generation: 0, confirm: false
+        expected_generation: 0, confirm: false, authority: owner_authority
       )
       assert_equal false, preview.fetch("confirmed")
       assert_empty database.read { |db| db[:command_namespaces].all }
 
       result = Hive::ProjectIdentity.enroll_new_identity(
         project_root: project, database: database, previous_identity: previous,
-        expected_generation: 0, confirm: true
+        expected_generation: 0, confirm: true, authority: owner_authority
       )
       assert_equal true, result.fetch("confirmed")
       assert_equal 1, result.fetch("generation")
@@ -113,10 +113,13 @@ class ProjectIdentityTest < Minitest::Test
         db[:command_maintenance_audit][namespace_id: result.fetch("namespace_id")]
       end
       assert_equal "project_new_identity_enrollment", first_audit.fetch(:action)
+      assert_equal "owner", first_audit.fetch(:acting_principal)
+      assert_equal "test", first_audit.fetch(:principal_source)
+      assert_equal "installation_owner", first_audit.fetch(:authority_basis)
       replacement = Hive::ProjectIdentity.enroll_new_identity(
         project_root: project, database: database,
         previous_identity: result.fetch("namespace_id"),
-        expected_generation: 1, confirm: true
+        expected_generation: 1, confirm: true, authority: owner_authority
       )
       refute_equal result.fetch("namespace_id"), replacement.fetch("namespace_id")
       assert_equal 2, replacement.fetch("generation")
@@ -127,7 +130,7 @@ class ProjectIdentityTest < Minitest::Test
       assert_raises(Hive::CommandConflict) do
         Hive::ProjectIdentity.enroll_new_identity(
           project_root: project, database: database, previous_identity: previous,
-          expected_generation: 0, confirm: true
+          expected_generation: 0, confirm: true, authority: owner_authority
         )
       end
     end
@@ -154,7 +157,7 @@ class ProjectIdentityTest < Minitest::Test
         Hive::ProjectIdentity.enroll_new_identity(
           project_root: project, database: database,
           previous_identity: "11111111-1111-4111-8111-111111111111",
-          expected_generation: 1, confirm: true
+          expected_generation: 1, confirm: true, authority: owner_authority
         )
       end
       assert_equal "--previous-identity does not match the active project identity", error.message
@@ -235,7 +238,7 @@ class ProjectIdentityTest < Minitest::Test
           Hive::ProjectIdentity.enroll_new_identity(
             project_root: project, database: database,
             previous_identity: "11111111-1111-4111-8111-111111111111",
-            expected_generation: 0, confirm: true
+            expected_generation: 0, confirm: true, authority: owner_authority
           )
         end
       end
@@ -255,7 +258,7 @@ class ProjectIdentityTest < Minitest::Test
         Hive::ProjectIdentity.enroll_new_identity(
           project_root: project, database: database,
           previous_identity: "11111111-1111-4111-8111-111111111111",
-          expected_generation: 0, confirm: true
+          expected_generation: 0, confirm: true, authority: owner_authority
         )
       end
     end
@@ -275,13 +278,20 @@ class ProjectIdentityTest < Minitest::Test
           :replace_active_identity!, database: database,
           row: { namespace_id: "missing" },
           installation_id: database.installation_identity.fetch(:installation_id),
-          digest: "digest", project_root: project, expected_generation: 1
+          digest: "digest", project_root: project, expected_generation: 1,
+          authority: owner_authority
         )
       end
     end
   end
 
   private
+
+  def owner_authority
+    @owner_authority ||= Hive::CommandMaintenanceAuthority.new(
+      principal: "owner", principal_source: "test", installation_owner: true
+    )
+  end
 
   def with_store
     Dir.mktmpdir do |dir|

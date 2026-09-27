@@ -93,7 +93,7 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
       request_id = "command-dispatch:v1:#{'b' * 64}"
       context = {
         receipt_id: "receipt-1", effect_id: "effect-1", principal: "principal-1",
-        principal_source: "local_cli", ordinal: 0,
+        principal_source: "local_cli", ordinal: 0, receipt_generation: 1,
         request_fingerprint: "c" * 64, transport_request_id: request_id
       }
       installation_id = repository.database.installation_identity.fetch(:installation_id)

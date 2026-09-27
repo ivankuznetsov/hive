@@ -100,13 +100,13 @@ module Hive
     end
 
     def enroll_new_identity(project_root:, database:, previous_identity:,
-                            expected_generation:, confirm:)
+                            expected_generation:, confirm:, authority: nil)
       previous_identity = previous_identity.to_s
       unless previous_identity.match?(/\A[0-9a-f]{8}-[0-9a-f-]{27,}\z/i)
         raise Hive::UsageError, "--previous-identity must be a UUID"
       end
-      generation = Integer(expected_generation)
-      raise Hive::UsageError, "--expected-generation must be nonnegative" if generation.negative?
+      generation = enrollment_generation!(expected_generation)
+      authorize_enrollment!(authority)
 
       common_dir = git_common_dir(project_root)
       digest = Digest::SHA256.hexdigest(common_dir)
@@ -140,12 +140,13 @@ module Hive
         end
         row = replace_active_identity!(
           database: database, row: row, installation_id: installation_id,
-          digest: digest, project_root: project_root, expected_generation: generation
+          digest: digest, project_root: project_root, expected_generation: generation,
+          authority: authority
         )
       else
         row ||= reserve_pending_with_retry!(
           database: database, installation_id: installation_id,
-          digest: digest, project_root: project_root
+          digest: digest, project_root: project_root, authority: authority
         )
       end
       unless row.fetch(:enrollment_state) == "pending" &&
@@ -156,8 +157,8 @@ module Hive
       write_marker(identity)
       activate!(
         database: database, identity: identity,
+        authority: authority,
         audit: {
-          acting_principal: "installation:#{installation_id}:uid:#{Process.uid}",
           reason: "previous_identity=#{previous_identity}",
           evidence: {
             "previous_identity" => previous_identity,
@@ -171,9 +172,16 @@ module Hive
         "namespace_id" => identity.namespace_id,
         "generation" => identity.enrollment_generation + 1
       )
+    end
+
+    def enrollment_generation!(value)
+      generation = Integer(value)
+      raise Hive::UsageError, "--expected-generation must be nonnegative" if generation.negative?
+      generation
     rescue ArgumentError, TypeError
       raise Hive::UsageError, "--expected-generation must be a nonnegative integer"
     end
+    private_class_method :enrollment_generation!
 
     def git_common_dir(project_root)
       out, err, status = Open3.capture3(
@@ -243,10 +251,11 @@ module Hive
     private_class_method :reserve_pending_with_retry!
 
     def replace_active_identity!(database:, row:, installation_id:, digest:, project_root:,
-                                 expected_generation:)
+                                 expected_generation:, authority:)
       namespace_id = SecureRandom.uuid
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
       database.transaction do |connection|
+        authorize_enrollment!(authority)
         current = connection[:command_namespaces][namespace_id: row.fetch(:namespace_id)]
         unless current && current.fetch(:enrollment_state) == "active" &&
                current.fetch(:enrollment_generation) == expected_generation &&
@@ -280,10 +289,11 @@ module Hive
     end
     private_class_method :replace_active_identity!
 
-    def reserve_pending!(database:, installation_id:, digest:, project_root:)
+    def reserve_pending!(database:, installation_id:, digest:, project_root:, authority: nil)
       namespace_id = SecureRandom.uuid
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
       database.transaction do |connection|
+        authorize_enrollment!(authority) if authority
         existing = connection[:command_namespaces][
           installation_id: installation_id, git_common_dir_digest: digest
         ]
@@ -337,9 +347,10 @@ module Hive
     end
     private_class_method :write_marker
 
-    def activate!(database:, identity:, audit: nil)
+    def activate!(database:, identity:, audit: nil, authority: nil)
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
       changed = database.transaction do |connection|
+        authorize_enrollment!(authority) if authority
         count = connection[:command_namespaces]
           .where(namespace_id: identity.namespace_id, enrollment_state: "pending",
                  enrollment_generation: identity.enrollment_generation)
@@ -353,8 +364,10 @@ module Hive
         if count == 1 && audit
           connection[:command_maintenance_audit].insert(
             audit_id: SecureRandom.uuid, namespace_id: identity.namespace_id,
-            acting_principal: audit.fetch(:acting_principal), principal_source: "local_cli",
-            authority_basis: "state_home_owner", peer_address: nil,
+            acting_principal: authority.principal,
+            principal_source: authority.principal_source,
+            authority_basis: authority.authority_basis,
+            peer_address: authority.peer_address,
             action: "project_new_identity_enrollment", affected_principal: nil,
             reason: audit.fetch(:reason),
             evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(audit.fetch(:evidence)),
@@ -373,6 +386,14 @@ module Hive
       raise Hive::ConfigError, "project receipt identity enrollment changed concurrently"
     end
     private_class_method :activate!
+
+    def authorize_enrollment!(authority)
+      unless authority&.installation_owner?
+        raise Hive::ConfigError, "project receipt enrollment requires the installation owner"
+      end
+      authority.authority_basis
+    end
+    private_class_method :authorize_enrollment!
 
     def identity_from(row, marker)
       Identity.new(

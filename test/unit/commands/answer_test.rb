@@ -356,6 +356,12 @@ class HiveCommandsAnswerTest < Minitest::Test
         assert_equal "task_lock_busy", rejected.fetch("reason")
         assert_nil Hive::BrainstormParser.parse(path).first.answer
         assert_schema(rejected)
+        keyed = Hive::Commands::Answer.new(
+          SLUG, project: "demo", binding: token, idempotency_key: "key"
+        )
+        assert_raises(Hive::ConcurrentRunError) do
+          keyed.send(:mutation_payload, answer_text: "still blocked")
+        end
       ensure
         Hive::Lock.release_task_lock(folder, lock_id: held.fetch("lock_id"))
       end

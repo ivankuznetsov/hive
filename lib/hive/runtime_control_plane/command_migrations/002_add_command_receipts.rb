@@ -34,6 +34,8 @@ module Hive
             Integer :nonterminal_limit, null: false, default: 1_000
             Integer :concurrency_limit, null: false, default: 32
             Integer :byte_admission_limit, null: false, default: 67_108_864
+            String :reclamation_cursor_updated_at
+            String :reclamation_cursor_receipt_id
             String :created_at, null: false
             String :activated_at
             String :updated_at, null: false
@@ -84,8 +86,6 @@ module Hive
                              unique: true, name: :command_receipts_key_uidx)
           database.add_index(:command_receipts, [ :namespace_id, :state, :terminal_at, :receipt_id ],
                              name: :command_receipts_terminal_idx)
-          database.add_index(:command_receipts, [ :state, :owner_host, :owner_pid, :receipt_id ],
-                             name: :command_receipts_owner_idx)
 
           database.create_table(:command_effects) do
             String :effect_id, primary_key: true, null: false
@@ -237,11 +237,12 @@ module Hive
             String :principal, null: false
             String :principal_source, null: false
             Integer :ordinal, null: false
+            Integer :receipt_generation, null: false
             String :request_fingerprint, null: false
             String :source_identity
             String :retry_horizon_expires_at
             String :created_at, null: false
-            check Sequel.lit("ordinal >= 0")
+            check Sequel.lit("ordinal >= 0 AND receipt_generation > 0")
           end
           database.add_index(:command_dispatch_contexts, [ :receipt_id, :ordinal ],
                              unique: true, name: :command_dispatch_contexts_receipt_ordinal_uidx)

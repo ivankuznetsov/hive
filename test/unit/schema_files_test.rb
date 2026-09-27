@@ -543,6 +543,41 @@ class SchemaFilesTest < Minitest::Test
                  "schema/producer error_kind enum drift"
   end
 
+  def test_all_bounded_command_error_kind_enums_match_their_producers
+    receipt_kinds = %w[
+      command_conflict command_in_progress command_unresolved_pending
+      command_pin_horizon_elapsed command_capacity_exhausted command_nonterminal_limit
+      command_concurrency_limit command_prune_busy command_prune_storage_unavailable
+      command_prune_preview_unavailable command_orphaned_pin
+      command_original_result_unavailable command_intake_disabled
+    ]
+    producer_kinds = {
+      "hive-act" => %w[
+        usage stale_observation ambiguous_target concurrent_run dependency_wait
+        admission_error config internal error
+      ] + receipt_kinds,
+      "hive-approve" => %w[
+        ambiguous_slug destination_collision final_stage plan_review_blocked wrong_stage
+        rollback_failed invalid_task_path dependency_wait admission_error error
+      ] + receipt_kinds,
+      "hive-new" => %w[usage config concurrent_run internal error] + receipt_kinds,
+      "hive-answer" => %w[
+        invalid_binding invalid_answer wrong_stage stale ambiguous_slug invalid_task_path
+        config usage internal
+      ] + receipt_kinds,
+      "hive-stage-action" => %w[
+        ambiguous_slug destination_collision final_stage plan_review_blocked wrong_stage
+        rollback_failed invalid_task_path dependency_wait admission_error error
+      ] + receipt_kinds
+    }
+
+    producer_kinds.each do |schema, kinds|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(schema)))
+      actual = document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum")
+      assert_equal kinds.sort, actual.sort, "schema/producer error_kind drift in #{schema}"
+    end
+  end
+
   def test_hive_approve_next_action_kinds_match_closed_enum
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
     schema_kinds = doc.dig("$defs", "NextAction", "properties", "kind", "enum").sort

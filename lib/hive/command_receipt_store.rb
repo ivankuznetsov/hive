@@ -81,9 +81,15 @@ module Hive
       matches = []
       conflicting = []
       roots.each do |root|
-        identity = Hive::ProjectIdentity.resolve(
-          project_root: root, database: database, create: false
-        )
+        identity = begin
+          Hive::ProjectIdentity.resolve(
+            project_root: root, database: database, create: false
+          )
+        rescue Hive::ConfigError
+          # Registered projects are independent replay candidates. A deleted,
+          # non-Git, or otherwise stale sibling must not hide a valid receipt.
+          next
+        end
         next unless identity
 
         row = database.read do |connection|
@@ -617,7 +623,8 @@ module Hive
     private
 
     def reclaim_dead_executing_owners(trigger_claim, scope:)
-      authority = @maintenance_authority || Hive::CommandMaintenanceAuthority.local
+      authority = @maintenance_authority
+      return 0 unless authority
       candidates = database.read do |connection|
         dataset = connection[:command_receipts].where(state: "executing")
         dataset = dataset.where(namespace_id: trigger_claim.namespace_id) if scope == "namespace"
@@ -733,6 +740,12 @@ module Hive
 
       if row.fetch(:state) == "executing" &&
          (authoritative = authoritative_result_for_receipt(row))
+        unless current_process_owner?(row)
+          proof = Hive::CommandOwnerProof.dead(
+            row, host: @host, alive: @alive, ownership: @ownership, clock: @clock
+          )
+          raise Hive::CommandInProgress.new(command_receipt: public_receipt(row)) unless proof
+        end
         begin
           result, status = authoritative
           claim = claim_from(row, :replay, project_root: project_root)
@@ -878,9 +891,7 @@ module Hive
       Hive::RuntimeControlPlane::Codec.dump_json(safe_request(request)).bytesize + 1024
     end
 
-    def capacity_counted?(row)
-      !(row[:command] == "receipt" && row[:mode] == "prune")
-    end
+    def capacity_counted?(row) = Hive::CommandReceiptCapacity.counts_receipt?(row)
 
     def add_logical_bytes!(connection, namespace_id, delta)
       return if delta.zero?
@@ -904,7 +915,7 @@ module Hive
     end
 
     RECONCILABLE_EFFECT_KINDS = %w[
-      task_activity github_push github_pull_request attempt_dispatch
+      github_push github_pull_request attempt_dispatch dispatch_request
     ].freeze
 
     def reconcilable_effect?(row)
@@ -916,10 +927,38 @@ module Hive
       evidence = effect[:evidence_json] ?
         Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json)) : {}
       submissions = Array(evidence["submissions"])
+      observations = Array(evidence["observations"])
       evidence["owner_released"] == true && !submissions.empty? && submissions.all? do |entry|
-        entry.is_a?(Hash) && RECONCILABLE_EFFECT_KINDS.include?(entry["kind"])
+        entry.is_a?(Hash) && RECONCILABLE_EFFECT_KINDS.include?(entry["kind"]) &&
+          authoritative_submission_observed?(entry, observations)
       end
     rescue Hive::RuntimeControlPlane::CodecError
+      false
+    end
+
+    def authoritative_submission_observed?(submission, observations)
+      kind = submission["kind"]
+      identity = submission["identity"]
+      return false unless identity.is_a?(Hash)
+
+      correlation = identity["publication_id"] || identity["request_id"]
+      return false if correlation.to_s.empty?
+      return true if observations.any? do |observation|
+        observation.is_a?(Hash) && observation["source"] == kind &&
+          observation["correlation_id"] == correlation.to_s
+      end
+
+      return false unless %w[attempt_dispatch dispatch_request].include?(kind)
+      database.read do |connection|
+        request = connection[:dispatch_requests][request_id: correlation.to_s]
+        request && %w[queued claimed admitted running completed].include?(request[:state].to_s)
+      end
+    end
+
+    def current_process_owner?(row)
+      row[:owner_host] == @host && row[:owner_pid] == Process.pid &&
+        row[:owner_process_start] == process_start(Process.pid)
+    rescue Hive::Error, SystemCallError, IOError
       false
     end
 

@@ -49,6 +49,19 @@ require "hive/commands/receipt"
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
 
+  def test_act_parser_consumes_the_idempotency_key_value_before_positionals
+    with_command_new_stub(Hive::Commands::Act) do |calls|
+      Hive::CLI.start([
+        "act", "--idempotency-key", "stable", "workflow.advance", "demo:task",
+        "--observation", "a" * 64
+      ])
+
+      assert_equal [ "workflow.advance", "demo:task" ], calls.first.fetch(:args)
+      assert_equal "stable", calls.first.dig(:kwargs, :idempotency_key)
+      assert_equal :call, calls.last
+    end
+  end
+
   def test_receipt_routes_generation_fenced_enrollment_and_prune_key
     with_command_new_stub(Hive::Commands::Receipt) do |calls|
       Hive::CLI.start([

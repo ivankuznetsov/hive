@@ -136,12 +136,15 @@ module Hive
           "--orphaned-owner" => @orphaned_owner,
           "--evidence" => !@evidence_path.nil?,
           "--force" => @force,
+          "--limit" => !@limit.nil?,
+          "--cursor" => !@cursor.nil?,
           "--new-identity" => @new_identity,
           "--previous-identity" => !@previous_identity.nil?
         }.select { |_flag, present| present }.keys
         allowed = case @subcommand
         when "retire" then %w[--settle-without-result --orphaned-owner --evidence]
         when "release-pin" then %w[--force]
+        when "prune" then @confirm ? %w[--limit] : %w[--limit --cursor]
         when "enroll" then %w[--new-identity --previous-identity]
         else []
         end
@@ -213,7 +216,7 @@ module Hive
         if @project && @namespace_id
           raise Hive::UsageError, "--project and --namespace-id are mutually exclusive"
         end
-        return @namespace_id if @namespace_id
+        return maintenance.authorize_namespace_selection!(@namespace_id) if @namespace_id
         return unless project_root
         identity = Hive::ProjectIdentity.resolve(
           project_root: project_root,

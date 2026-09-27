@@ -2,7 +2,6 @@
 /vendor/bundle/
 /tmp/
 *.gem
-!/docs/artifacts/hive-cli-0.7.4-command-receipt-compat-candidate.gem
 # Operator-local secrets (HIVE_TELEGRAM_BOT_TOKEN, etc). The bot loads
 # ~/.config/hive/.env at startup; a repo-root .env is a common operator
 # habit that must not leak into source.

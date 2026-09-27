@@ -82,6 +82,10 @@ module Hive
           installation_id: installation_id, git_common_dir_digest: digest
         ]
       end
+      if persisted && !row
+        raise Hive::ConfigError,
+              "project receipt identity marker names a missing command namespace"
+      end
       return nil unless row
       if !persisted && row.fetch(:enrollment_state) == "active"
         raise Hive::ConfigError,
@@ -150,27 +154,18 @@ module Hive
       end
       identity = identity_from(row, marker)
       write_marker(identity)
-      activate!(database: database, identity: identity)
-      now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
-      database.transaction do |connection|
-        connection[:command_maintenance_audit].insert(
-          audit_id: SecureRandom.uuid,
-          namespace_id: identity.namespace_id,
+      activate!(
+        database: database, identity: identity,
+        audit: {
           acting_principal: "installation:#{installation_id}:uid:#{Process.uid}",
-          principal_source: "local_cli",
-          authority_basis: "state_home_owner",
-          peer_address: nil,
-          action: "project_new_identity_enrollment",
-          affected_principal: nil,
           reason: "previous_identity=#{previous_identity}",
-          evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(
+          evidence: {
             "previous_identity" => previous_identity,
             "expected_generation" => generation,
             "new_state" => "active"
-          ),
-          created_at: now
-        )
-      end
+          }
+        }
+      )
       preview.merge(
         "confirmed" => true,
         "namespace_id" => identity.namespace_id,
@@ -342,7 +337,7 @@ module Hive
     end
     private_class_method :write_marker
 
-    def activate!(database:, identity:)
+    def activate!(database:, identity:, audit: nil)
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
       changed = database.transaction do |connection|
         count = connection[:command_namespaces]
@@ -355,6 +350,17 @@ module Hive
                  generation: identity.enrollment_generation)
           .update(state: "active", updated_at: now,
                   generation: identity.enrollment_generation + 1)
+        if count == 1 && audit
+          connection[:command_maintenance_audit].insert(
+            audit_id: SecureRandom.uuid, namespace_id: identity.namespace_id,
+            acting_principal: audit.fetch(:acting_principal), principal_source: "local_cli",
+            authority_basis: "state_home_owner", peer_address: nil,
+            action: "project_new_identity_enrollment", affected_principal: nil,
+            reason: audit.fetch(:reason),
+            evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(audit.fetch(:evidence)),
+            created_at: now
+          )
+        end
         count
       end
       return if changed == 1

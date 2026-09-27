@@ -50,4 +50,22 @@ class SetupExitCodeTest < Minitest::Test
     setup = setup_with_phases([ "web_bundle", true ])
     assert setup.send(:successful?, diag(ok_row, bootstrappable))
   end
+
+  def test_receipt_opt_in_precondition_failure_still_emits_a_json_envelope
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true,
+      output: output, error: StringIO.new,
+      rollback_package: { version: nil, location: nil, sha256: nil }
+    )
+
+    assert_equal 1, setup.call
+    envelope = JSON.parse(output.string)
+    assert_equal false, envelope.fetch("ok")
+    phase = envelope.fetch("phases").find do |row|
+      row.fetch("name") == "command_receipts_preconditions"
+    end
+    assert_equal false, phase.fetch("ok")
+    assert_includes phase.fetch("message"), "no published rollback package"
+  end
 end

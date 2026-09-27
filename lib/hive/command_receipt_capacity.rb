@@ -8,7 +8,13 @@ require "hive/runtime_control_plane/codec"
 
 module Hive
   class CommandReceiptCapacity
-    DEFAULT_INSTALLATION_NONTERMINAL_LIMIT = 100_000
+    # The measured maximum request is 32 KiB. Reserve the 512 KiB
+    # next-operation allowance for every one of the 3,200 executing commands,
+    # then divide the remaining 4.6875 GiB of the 6.25 GiB byte envelope by a
+    # charged 33 KiB nonterminal request. The measured ceiling is about 145k;
+    # 140k is the rounded-down installation backstop. This is deliberately not
+    # the per-namespace limit multiplied by a workspace count.
+    DEFAULT_INSTALLATION_NONTERMINAL_LIMIT = 140_000
     DEFAULT_INSTALLATION_CONCURRENCY_LIMIT = 3_200
     DEFAULT_INSTALLATION_BYTE_LIMIT = 6_710_886_400
     # Measured maximum-payload finalization grew the main file by 225,280
@@ -114,6 +120,16 @@ module Hive
       }
     rescue ArgumentError, TypeError
       raise Hive::ConfigError, "settlement capacity inputs must be numeric"
+    end
+
+    def self.counts_receipt?(row)
+      !(row[:command] == "receipt" && row[:mode] == "prune")
+    end
+
+    def self.receipt_logical_bytes(row)
+      return 0 unless counts_receipt?(row)
+
+      row.fetch(:frozen_request_json).bytesize + row[:result_json].to_s.bytesize + 1024
     end
 
     def initialize(database:, policy:)

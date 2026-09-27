@@ -140,7 +140,7 @@ require "hive/cli_usage_contracts"
 
 Hive::CliUsageContracts.declare("act") do |argv, command_index:, option_argv:|
   action_id, target = Hive::CliUsageContracts.positionals(
-    argv, command_index, value_options: %w[--observation]
+    argv, command_index, value_options: %w[--observation --idempotency-key]
   ).first(2)
   {
     schema: "hive-act",

@@ -109,6 +109,10 @@ class ProjectIdentityTest < Minitest::Test
       assert_equal "active", database.read {
         |db| db[:command_namespaces][namespace_id: result.fetch("namespace_id")].fetch(:enrollment_state)
       }
+      first_audit = database.read do |db|
+        db[:command_maintenance_audit][namespace_id: result.fetch("namespace_id")]
+      end
+      assert_equal "project_new_identity_enrollment", first_audit.fetch(:action)
       replacement = Hive::ProjectIdentity.enroll_new_identity(
         project_root: project, database: database,
         previous_identity: result.fetch("namespace_id"),
@@ -116,6 +120,10 @@ class ProjectIdentityTest < Minitest::Test
       )
       refute_equal result.fetch("namespace_id"), replacement.fetch("namespace_id")
       assert_equal 2, replacement.fetch("generation")
+      replacement_audit = database.read do |db|
+        db[:command_maintenance_audit][namespace_id: replacement.fetch("namespace_id")]
+      end
+      assert_equal "project_new_identity_enrollment", replacement_audit.fetch(:action)
       assert_raises(Hive::CommandConflict) do
         Hive::ProjectIdentity.enroll_new_identity(
           project_root: project, database: database, previous_identity: previous,
@@ -154,6 +162,22 @@ class ProjectIdentityTest < Minitest::Test
   end
 
   def test_read_only_resolution_rejects_marker_and_database_identity_drift
+    with_store do |project, database|
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      database.transaction do |connection|
+        connection[:command_project_enrollments].where(namespace_id: identity.namespace_id).delete
+        connection[:command_capacity].where(namespace_id: identity.namespace_id).delete
+        connection[:command_namespaces].where(namespace_id: identity.namespace_id).delete
+      end
+      assert_raises(Hive::ConfigError) do
+        database.read do |connection|
+          Hive::ProjectIdentity.resolve_read_only(project_root: project, connection: connection)
+        end
+      end
+    end
+
     with_store do |project, database|
       identity = Hive::ProjectIdentity.resolve(
         project_root: project, database: database, create: true

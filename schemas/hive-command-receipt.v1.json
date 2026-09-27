@@ -29,7 +29,7 @@
         "warning": { "type": "string" },
         "evidence": { "type": "object" },
         "prior_progress": { "type": "array" },
-        "command_receipt": { "type": "object" },
+        "command_receipt": { "$ref": "#/$defs/CommandReceipt" },
         "retry_horizon_expires_at": { "type": ["string", "null"] },
         "observed_at": { "type": "string" },
         "horizon_evidence": { "type": "string" },
@@ -67,7 +67,20 @@
         "reason": { "type": "string" },
         "state": { "type": "string" },
         "scope": { "type": "string" },
-        "command_receipt": { "type": "object" }
+        "command_receipt": { "$ref": "#/$defs/CommandReceipt" }
+      }
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "generation", "state"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "state": {
+          "type": "string",
+          "enum": ["prepared", "executing", "unresolved", "succeeded", "failed", "settled", "aborted"]
+        }
       }
     }
   }

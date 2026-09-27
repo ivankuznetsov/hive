@@ -89,29 +89,122 @@ class CommandDispatchLifecycleTest < Minitest::Test
     end
   end
 
-  def test_attempts_same_cycle_concurrency_and_failed_successor_redelivery_use_shared_lifecycle
-    calls = []
-    mutex = Mutex.new
-    lifecycle = Object.new
-    lifecycle.define_singleton_method(:allocate_successor!) do |**attributes|
-      mutex.synchronize { calls << attributes }
-      { "allocation_id" => "stable-cycle" }
-    end
-    caller = AttemptsCaller.new(lifecycle)
-    attributes = {
-      predecessor_request_id: "request-1", intent_id: "intent-1",
-      intent_version: 2, delivery_cycle_id: "cycle-1"
-    }
-    concurrent = 4.times.map { Thread.new { caller.allocate(**attributes) } }.map(&:value)
-    # The shared allocator remains authoritative when the same delivery is
-    # observed again after its allocated successor reports failure.
-    repeated = caller.allocate(
-      **attributes
-    )
+  def test_attempts_same_cycle_concurrency_uses_the_shared_cross_process_allocator
+    skip "fork is unavailable" unless Process.respond_to?(:fork)
 
-    assert_equal 1, (concurrent + [ repeated ]).uniq.length
-    assert_equal 5, calls.length
-    assert calls.all? { |call| call.fetch(:predecessor_request_id) == "request-1" }
+    with_lifecycle do |_project, database, _repository, _store, _lifecycle, request_id, _claim|
+      path = database.path
+      database.disconnect
+      readers = 4.times.map do
+        reader, writer = IO.pipe
+        pid = fork do
+          reader.close
+          child_database = Hive::RuntimeControlPlane::Database.new(path: path).open!
+          child_repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: child_database)
+          child_store = Hive::CommandReceiptStore.new(database: child_database)
+          allocation = Hive::CommandDispatchLifecycle.new(
+            repository: child_repository, store: child_store
+          ).allocate_successor!(
+            predecessor_request_id: request_id, intent_id: "intent-1",
+            intent_version: 2, delivery_cycle_id: "cycle-1"
+          )
+          writer.write(JSON.generate(allocation))
+          child_database.disconnect
+          writer.close
+          exit! 0
+        rescue StandardError => error
+          writer.write(JSON.generate("error" => "#{error.class}: #{error.message}")) rescue nil
+          exit! 1
+        end
+        writer.close
+        [ pid, reader ]
+      end
+
+      allocations = readers.map do |pid, reader|
+        payload = JSON.parse(reader.read)
+        reader.close
+        _waited, status = Process.wait2(pid)
+        assert status.success?, payload["error"]
+        payload
+      end
+      assert_equal 1, allocations.map { |row| row.fetch("allocation_id") }.uniq.length
+
+      reopened = Hive::RuntimeControlPlane::Database.new(path: path).open!
+      repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: reopened)
+      repeated = Hive::CommandDispatchLifecycle.new(
+        repository: repository, store: Hive::CommandReceiptStore.new(database: reopened)
+      ).allocate_successor!(
+        predecessor_request_id: request_id, intent_id: "intent-1",
+        intent_version: 2, delivery_cycle_id: "cycle-1"
+      )
+      assert_equal allocations.first, repeated
+      reopened.disconnect
+    end
+  end
+
+  def test_sigkill_matrix_preserves_each_durable_command_boundary
+    skip "fork is unavailable" unless Process.respond_to?(:fork)
+
+    with_lifecycle do |project, database, _repository, _store, _lifecycle, _request_id, claim|
+      path = database.path
+      database.disconnect
+      checkpoints = %w[reserve intent effect commit output]
+      owners = checkpoints.to_h do |checkpoint|
+        reader, writer = IO.pipe
+        pid = fork do
+          reader.close
+          child_database = Hive::RuntimeControlPlane::Database.new(path: path).open!
+          child_store = Hive::CommandReceiptStore.new(database: child_database)
+          persist_crash_checkpoint(
+            store: child_store, project: project, principal: claim.principal,
+            checkpoint: checkpoint, writer: writer
+          )
+        rescue StandardError => error
+          writer.write(JSON.generate("error" => "#{error.class}: #{error.message}")) rescue nil
+          exit! 1
+        end
+        writer.close
+        payload = JSON.parse(reader.read)
+        reader.close
+        flunk payload.fetch("error") if payload["error"]
+        Process.kill("KILL", pid)
+        _waited, status = Process.wait2(pid)
+        assert status.signaled?
+        [ checkpoint, pid ]
+      end
+
+      reopened = Hive::RuntimeControlPlane::Database.new(path: path).open!
+      persisted = reopened.read do |connection|
+        checkpoints.to_h do |checkpoint|
+          row = connection[:command_receipts][
+            key_digest: Digest::SHA256.hexdigest("crash-#{checkpoint}")
+          ]
+          effect = row && connection[:command_effects][receipt_id: row.fetch(:receipt_id)]
+          [ checkpoint, [ row, effect ] ]
+        end
+      end
+      assert_equal "prepared", persisted.fetch("reserve").first.fetch(:state)
+      assert_nil persisted.fetch("reserve").last
+      assert_equal [ "executing", "prepared" ],
+                   persisted.fetch("intent").map { |row| row.fetch(:state) }
+      assert_equal [ "executing", "submitted" ],
+                   persisted.fetch("effect").map { |row| row.fetch(:state) }
+      %w[commit output].each do |checkpoint|
+        assert_equal [ "succeeded", "applied" ],
+                     persisted.fetch(checkpoint).map { |row| row.fetch(:state) }
+      end
+      %w[intent effect].each do |checkpoint|
+        assert_equal owners.fetch(checkpoint), persisted.fetch(checkpoint).first.fetch(:owner_pid)
+      end
+
+      replay = Hive::CommandOperation.new(
+        key: "crash-output", command: "approve", target: "task", request: {},
+        project_root: project, principal: claim.principal,
+        json: true, structured: true, store: Hive::CommandReceiptStore.new(database: reopened)
+      ).call { flunk "post-commit/pre-output recovery must replay without executing" }
+      assert_equal true, replay.fetch("ok")
+      reopened.disconnect
+    end
   end
 
   def test_context_validation_fails_closed_for_missing_or_changed_durable_state
@@ -216,6 +309,52 @@ class CommandDispatchLifecycleTest < Minitest::Test
   end
 
   private
+
+  def persist_crash_checkpoint(store:, project:, principal:, checkpoint:, writer:)
+    key = "crash-#{checkpoint}"
+    if checkpoint == "output"
+      original_succeed = store.method(:succeed)
+      store.define_singleton_method(:succeed) do |*args, **kwargs|
+        result = original_succeed.call(*args, **kwargs)
+        writer.write(JSON.generate("checkpoint" => checkpoint))
+        writer.close
+        sleep
+        result
+      end
+      Hive::CommandOperation.new(
+        key: key, command: "approve", target: "task", request: {},
+        project_root: project, principal: principal,
+        json: true, structured: true, store: store
+      ).call { { "schema" => "hive-approve", "ok" => true } }
+      return
+    end
+
+    claim = store.reserve(
+      project_root: project, key: key, command: "approve",
+      target: "task", request: {}, principal: principal,
+      execute: checkpoint != "reserve"
+    )
+    if %w[intent effect commit].include?(checkpoint)
+      effect = store.prepare_effect(
+        claim, ordinal: 0, kind: "approve:default", identity: { "target" => "task" }
+      )
+    end
+    if %w[effect commit].include?(checkpoint)
+      store.record_effect_submission(
+        receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id),
+        principal: claim.principal, request_fingerprint: claim.request_fingerprint,
+        kind: "github_push", identity: { "publication_id" => "publication-#{checkpoint}" }
+      )
+    end
+    if checkpoint == "commit"
+      result = { "format" => "json", "payload" => { "ok" => true } }
+      store.complete_effect(claim, effect_id: effect.fetch(:effect_id), result: result, status: 0)
+      store.succeed(claim, result: result, status: 0)
+    end
+    writer.write(JSON.generate("checkpoint" => checkpoint))
+    writer.close
+    sleep
+  end
 
   def with_lifecycle
     Dir.mktmpdir do |dir|

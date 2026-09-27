@@ -91,6 +91,47 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_environment_context_restores_the_originating_command_context
+    with_running_attempt do |store, _record|
+      resolver = Struct.new(:task) { def resolve = task }.new(
+        FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+      )
+      row = {
+        receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
+        principal_source: "local_cli", ordinal: 3, request_fingerprint: "fingerprint",
+        source_identity: "request-1", retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+      }
+      command_contexts = Object.new
+      command_contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
+      real_database = store.database
+      database = Object.new
+      database.define_singleton_method(:read) do |&block|
+        real_database.read do |real_connection|
+          connection = Object.new
+          connection.define_singleton_method(:table_exists?) do |name|
+            name == :command_dispatch_contexts || real_connection.table_exists?(name)
+          end
+          connection.define_singleton_method(:[]) do |name|
+            name == :command_dispatch_contexts ? command_contexts : real_connection[name]
+          end
+          block.call(connection)
+        end
+      end
+      store.define_singleton_method(:database) { database }
+
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
+        with_context_environment(store, capability: CLAIM_CAPABILITY) do
+          context = Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
+
+          assert_equal "receipt-1", context.command_context.receipt_id
+          assert_equal "effect-1", context.command_context.effect_id
+          assert_equal "owner", context.command_context.principal
+          assert_same context.command_context, Hive::CommandOperation.current_context
+        end
+      end
+    end
+  end
+
   def test_environment_context_publishes_opaque_ownership_generation
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(

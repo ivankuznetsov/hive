@@ -205,8 +205,12 @@ module Hive
       end
 
       def call!
-        if @idempotency_key_raw.nil? || @inside_command_operation || !receipt_extension_installed?
+        if @idempotency_key_raw.nil? || @inside_command_operation
           return perform_call!
+        end
+        unless receipt_extension_installed?
+          raise Hive::ConfigError,
+                "command receipts are not installed; run `hive setup --install-command-receipts`"
         end
 
         @inside_command_operation = true
@@ -216,7 +220,7 @@ module Hive
       end
 
       def receipt_extension_installed?
-        return true if @command_receipt_store
+        return true if @command_receipt_store && !receipt_store.database.respond_to?(:read)
 
         Hive::RuntimeControlPlane::CommandSchema.installed?(receipt_store.database)
       rescue Hive::Error, Sequel::Error => error

@@ -102,10 +102,10 @@ module Hive
           validate_database_custody!
           wal = File.exist?("#{path}-wal")
           shm = File.exist?("#{path}-shm")
-          unless wal == shm
+          unless wal && shm
             raise Hive::CommandCapacityError.new(
-              "command prune preview is unavailable while SQLite sidecars are recovering; " \
-              "restore normal database availability and retry",
+              "command prune preview requires the existing SQLite WAL and SHM sidecars; " \
+              "open the runtime normally before retrying the zero-write preview",
               reason: :command_prune_preview_unavailable, scope: :installation
             )
           end

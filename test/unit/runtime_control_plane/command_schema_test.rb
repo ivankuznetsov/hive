@@ -3,6 +3,9 @@
 require "test_helper"
 require "hive/runtime_control_plane/command_schema_installation"
 require "hive/runtime_control_plane/installation"
+require "logger"
+require "stringio"
+require "digest"
 
 class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
   include HiveTestHelper
@@ -17,8 +20,17 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
     Dir.mktmpdir do |dir|
       path = File.join(dir, "runtime.sqlite3")
       database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
+      database.read do |db|
+        installation_id = db[:installations].get(:installation_id)
+        db[:daemon_runtime].insert(
+          installation_id: installation_id, observation_json: '{"sentinel":true}'
+        )
+      end
       before_schema = base_schema(database)
-      before_rows = database.read { |db| db[:installations].all }
+      before_rows = base_rows(database)
+      sql = StringIO.new
+      logger = Logger.new(sql)
+      database.read { |db| db.loggers << logger }
 
       result = Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
         database: database, package_coordinates: TEST_PACKAGE
@@ -26,7 +38,14 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
 
       assert_equal "installed", result.fetch("status")
       assert_equal before_schema, base_schema(database)
-      assert_equal before_rows, database.read { |db| db[:installations].all }
+      assert_equal before_rows, base_rows(database)
+      base_names = before_rows.keys.join("|")
+      mutating = sql.string.lines.filter_map do |line|
+        statement = line.split(" INFO -- : ", 2)[1]&.sub(/\A\([^)]*\)\s*/, "")
+        statement if statement&.match?(/\A(?:ALTER|DROP|UPDATE|DELETE)\b/i) &&
+          statement.match?(/\b(?:#{base_names})\b/i)
+      end
+      assert_empty mutating
       assert_equal :ok, database.diagnostics.status
       assert Hive::RuntimeControlPlane::CommandSchema.installed?(database)
     ensure
@@ -81,6 +100,24 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
     end
   end
 
+  def test_compatibility_proof_tracks_schema_patch_and_fail_closed_install_sequence
+    root = File.expand_path("../../..", __dir__)
+    proof = File.read(File.join(root, "docs/implementation/command-receipt-compatibility-proof.md"))
+    guide = File.read(File.join(root, "docs/guides/current-format-migration.md"))
+    patch = File.join(root, "docs/implementation/command-receipt-compatibility.patch")
+    patch_sha256 = Digest::SHA256.file(patch).hexdigest
+    schema_sha256 = Hive::RuntimeControlPlane::CommandSchema::EXPECTED_SCHEMA_SHA256
+
+    [ proof, guide ].each do |document|
+      assert_includes document, schema_sha256
+      assert_includes document, patch_sha256
+      assert_match(/84163c17613771f85e6acfcd6c90a31bc21307d971b602f16ab0b29954745102/, document)
+      assert_match(/sha256sum --check --strict &&\s*gem install/m, document)
+    end
+    refute_includes proof, "docs/artifacts/"
+    refute_includes guide, "docs/artifacts/"
+  end
+
   def test_install_rejects_partial_and_mismatched_extension_shapes
     diagnosis = Object.new
     diagnosis.define_singleton_method(:ok?) { true }
@@ -124,12 +161,23 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
 
   private
 
-  def base_schema(database)
-    database.read do |db|
-      db[:sqlite_master].where(type: %w[table index])
-        .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
+    def base_schema(database)
+      database.read do |db|
+      db[:sqlite_master].where(type: %w[table index trigger view])
+        .exclude(Sequel.like(:name, "sqlite_%"))
         .exclude(name: Hive::RuntimeControlPlane::CommandSchema::OBJECT_NAMES)
         .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
+      end
     end
-  end
+
+    def base_rows(database)
+      database.read do |db|
+        db[:sqlite_master].where(type: "table")
+          .exclude(Sequel.like(:name, "sqlite_%"))
+          .exclude(name: Hive::RuntimeControlPlane::CommandSchema::TABLE_NAMES)
+          .order(:name).select_map(:name).to_h do |name|
+            [ name, db[name.to_sym].all.map { |row| row.sort.to_h } ]
+          end
+      end
+    end
 end

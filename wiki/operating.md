@@ -21,8 +21,8 @@ state) must be preserved together. A complete copied/rolled-back pair and
 multi-host continuity remain outside this increment's guarantee.
 
 Planning defaults are namespace A=32 executing and N=1,000 non-terminal;
-installation A=3,200 and N=100,000. A is a subset of N. At 100 fully occupied
-workspaces that is 3,200 executing within 100,000 non-terminal rows. One noisy
+installation A=3,200 and N=140,000. A is a subset of N. At 100 fully occupied
+workspaces that is 3,200 executing within 140,000 non-terminal rows. One noisy
 namespace stops itself at its limits; installation backstops can stop all
 namespaces. The preview marks 70% warning and 85% action bands.
 
@@ -50,7 +50,10 @@ installation A=3,200, one such allowance per executing command is 1.5625 GiB,
 leaving roughly 4.69 GiB below the 6.25 GiB installation threshold for
 retained rows, auxiliary evidence, checkpoints, and filesystem variation. The
 threshold remains an admission backstop, not reserved disk or a finalization
-guarantee.
+guarantee. The installation N=140,000 limit is independently derived from that
+remaining envelope at a conservative 33 KiB charged per non-terminal row
+(roughly 145,000 rows before rounding down); it is not the namespace limit
+multiplied by the supported namespace count.
 
 With retention W=30 days and weekly prune interval P=7, retained rows are:
 

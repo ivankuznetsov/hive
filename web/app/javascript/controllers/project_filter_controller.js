@@ -4,22 +4,9 @@ import { Turbo } from "@hotwired/turbo-rails"
 // Turbo preserves the composer node across history visits. Keep that useful
 // draft preservation, but realign its project after Back/Forward restores a
 // filtered URL; otherwise the visible project and submission target diverge.
-let historyProject = null
-
 window.addEventListener("popstate", () => {
-  historyProject = new URL(window.location.href).searchParams.get("project")
-  realignHistoryProject()
-})
-
-// A history render can restore the permanent composer after popstate has fired.
-// Reapply the URL-owned project once Turbo has finished replacing the page.
-document.addEventListener("turbo:render", realignHistoryProject)
-document.addEventListener("turbo:before-visit", () => {
-  historyProject = null
-})
-document.addEventListener("turbo:load", () => {
-  realignHistoryProject()
-  historyProject = null
+  const selected = new URL(window.location.href).searchParams.get("project")
+  if (selected) selectComposerProject(selected)
 })
 
 // Project filtering is an ordinary GET rendered by Rails. This one small
@@ -53,8 +40,4 @@ function selectComposerProject(selected) {
   if (Array.from(select?.options || []).some((option) => option.value === selected)) {
     select.value = selected
   }
-}
-
-function realignHistoryProject() {
-  if (historyProject) selectComposerProject(historyProject)
 }

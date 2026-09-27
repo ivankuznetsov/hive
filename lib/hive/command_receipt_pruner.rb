@@ -12,6 +12,7 @@ require "hive/lock"
 module Hive
   class CommandReceiptPruner
     RETENTION_SECONDS = 30 * 24 * 60 * 60
+    ADMINISTRATIVE_RETENTION_SECONDS = RETENTION_SECONDS
     DEFAULT_LIMIT = 100
     MAX_LIMIT = 1_000
     WARNING_BAND_PERCENT = 70
@@ -20,9 +21,7 @@ module Hive
     def initialize(database: Hive::RuntimeControlPlane.database, authority: nil,
                    clock: -> { Time.now.utc })
       @database = database
-      @authority = authority || Hive::CommandMaintenanceAuthority.local(
-        principal: Hive::CommandOperation.local_principal(database)
-      )
+      @authority = authority
       @clock = clock
     end
 
@@ -30,6 +29,7 @@ module Hive
       bounded = bounded_limit(limit)
       fixed_cutoff = cutoff
       @database.read_only do |connection|
+        authority(connection)
         selected = resolve_namespace_read_only(
           connection, project_root: project_root, namespace_id: namespace_id
         )
@@ -58,14 +58,19 @@ module Hive
           identity_cursor: cursor, identity_limit: bounded
         )
       end
-    rescue Sequel::DatabaseLockTimeout => error
+    rescue Sequel::DatabaseLockTimeout, SQLite3::BusyException => error
       maintenance_failure!(:command_prune_busy,
                            "resolve database contention, then rerun; free disk if storage is exhausted", error)
     rescue Errno::ENOSPC, Errno::EDQUOT => error
       maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
     rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
-      maintenance_failure!(:command_prune_preview_unavailable,
-                           "restore normal database availability before preview", error)
+      if sqlite_busy_error?(error)
+        maintenance_failure!(:command_prune_busy,
+                             "resolve database contention, then rerun; free disk if storage is exhausted", error)
+      else
+        maintenance_failure!(:command_prune_preview_unavailable,
+                             "restore normal database availability before preview", error)
+      end
     end
 
     def prune(project_root: nil, namespace_id: nil, limit: DEFAULT_LIMIT)
@@ -80,6 +85,7 @@ module Hive
         raise(Hive::ConfigError, "cannot record prune owner process start time")
 
       @database.transaction do |connection|
+        prune_completed_batches!(connection)
         busy = connection[:command_maintenance_batches]
           .where(state: %w[prepared executing]).first
         if busy && context && busy[:administrative_receipt_id] == context.receipt_id
@@ -90,7 +96,7 @@ module Hive
           next
         end
         if busy
-          message = if @authority.installation_owner? || busy.fetch(:principal) == @authority.principal
+          message = if authority.installation_owner? || busy.fetch(:principal) == authority.principal
             "another prune batch #{busy.fetch(:batch_id)} generation #{busy.fetch(:generation)} is unfinished; " \
               "resume it or use hive receipt abandon-batch"
           else
@@ -105,8 +111,8 @@ module Hive
         now = timestamp
         connection[:command_maintenance_batches].insert(
           batch_id: batch_id, namespace_id: selected,
-          administrative_receipt_id: context&.receipt_id, principal: @authority.principal,
-          principal_scope: @authority.installation_owner? ? "installation" : "own",
+          administrative_receipt_id: context&.receipt_id, principal: authority.principal,
+          principal_scope: authority.installation_owner? ? "installation" : "own",
           kind: "prune", state: "executing", generation: 1,
           owner_host: Socket.gethostname, owner_pid: Process.pid,
           owner_process_start: owner_process_start,
@@ -123,12 +129,17 @@ module Hive
           batch_id: batch_id, fixed_cutoff: fixed_cutoff
         )
       end
-    rescue Sequel::DatabaseLockTimeout => error
+    rescue Sequel::DatabaseLockTimeout, SQLite3::BusyException => error
       maintenance_failure!(:command_prune_busy,
                            "resolve database contention, then rerun; free disk if storage is exhausted", error)
     rescue Sequel::DatabaseError, SQLite3::Exception, Errno::ENOSPC, Errno::EDQUOT,
            SystemCallError, IOError => error
-      maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
+      if sqlite_busy_error?(error)
+        maintenance_failure!(:command_prune_busy,
+                             "resolve database contention, then rerun; free disk if storage is exhausted", error)
+      else
+        maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
+      end
     end
 
     private
@@ -172,8 +183,8 @@ module Hive
     def eligible_rows(connection, namespace_id, cutoff:, limit:)
       cutoff_value = timestamp(cutoff)
       connection[:command_receipts]
-        .where(namespace_id: namespace_id, state: %w[succeeded failed settled])
-        .then { |dataset| @authority.installation_owner? ? dataset : dataset.where(principal: @authority.principal) }
+        .where(namespace_id: namespace_id, state: Hive::CommandReceiptStore::TERMINAL_STATES)
+        .then { |dataset| authority.installation_owner? ? dataset : dataset.where(principal: authority.principal) }
         .where { terminal_at < cutoff_value }
         .exclude(receipt_id: connection[:command_receipt_pins]
           .where(lifecycle_status: "active").select(:receipt_id))
@@ -188,7 +199,7 @@ module Hive
     end
 
     def authorize_rows!(rows)
-      rows.each { |row| @authority.authorize!(row.fetch(:principal)) }
+      rows.each { |row| authority.authorize!(row.fetch(:principal)) }
     end
 
     def delete_candidates(batch_id, namespace_id, candidates, fixed_cutoff)
@@ -206,17 +217,17 @@ module Hive
                  current_batch.fetch(:generation) == expected_generation
             raise Hive::CommandConflict, "prune batch ownership changed before deletion"
           end
-          @authority.authorize!(current_batch.fetch(:principal))
+          authority.authorize!(current_batch.fetch(:principal))
           slice.each do |candidate|
             row = connection[:command_receipts][receipt_id: candidate.fetch(:receipt_id)]
             outcome = "skipped"
             if row && row.fetch(:generation) == candidate.fetch(:generation) &&
                row.fetch(:namespace_id) == namespace_id &&
-               %w[succeeded failed settled].include?(row.fetch(:state)) &&
+               Hive::CommandReceiptStore::TERMINAL_STATES.include?(row.fetch(:state)) &&
                valid_terminal_time?(row[:terminal_at], fixed_cutoff) &&
                !connection[:command_receipt_pins]
                  .where(receipt_id: row.fetch(:receipt_id), lifecycle_status: "active").any?
-              @authority.authorize!(row.fetch(:principal))
+              authority.authorize!(row.fetch(:principal))
               receipt_id = row.fetch(:receipt_id)
               logical_bytes = receipt_storage_bytes(connection, row)
               connection[:command_maintenance_audit].where(receipt_id: receipt_id).delete
@@ -268,18 +279,7 @@ module Hive
     def preview_payload(connection, namespace_id, rows, confirmed:, fixed_cutoff:,
                         outcomes: nil, batch_id: nil, identity_cursor: nil,
                         identity_limit: DEFAULT_LIMIT)
-      namespace_capacity = if @authority.installation_owner?
-        connection[:command_capacity][namespace_id: namespace_id]
-      else
-        own_rows = connection[:command_receipts].where(
-          namespace_id: namespace_id, principal: @authority.principal
-        ).all
-        {
-          nonterminal_count: own_rows.count { |row| Hive::CommandReceiptStore::NONTERMINAL_STATES.include?(row[:state]) },
-          executing_count: own_rows.count { |row| row[:state] == "executing" },
-          logical_bytes: own_rows.sum { |row| row[:frozen_request_json].to_s.bytesize + row[:result_json].to_s.bytesize + 1024 }
-        }
-      end
+      namespace_capacity = connection[:command_capacity][namespace_id: namespace_id]
       installation = connection[:command_capacity].select do
         [ sum(:nonterminal_count).as(:n), sum(:executing_count).as(:a), sum(:logical_bytes).as(:bytes) ]
       end.first
@@ -301,7 +301,7 @@ module Hive
         "warning_band_percent" => WARNING_BAND_PERCENT,
         "action_band_percent" => ACTION_BAND_PERCENT
       }
-      if @authority.installation_owner?
+      if authority.installation_owner?
         global = Hive::CommandReceiptCapacity.global_receipts
         physical = physical_utilization(connection)
         payload["installation_utilization"] = utilization(
@@ -428,7 +428,7 @@ module Hive
 
     def receipt_storage_bytes(connection, row)
       receipt_id = row.fetch(:receipt_id)
-      total = row.fetch(:frozen_request_json).bytesize + row[:result_json].to_s.bytesize + 1024
+      total = Hive::CommandReceiptCapacity.receipt_logical_bytes(row)
       total += connection[:command_effects].where(receipt_id: receipt_id).all.sum do |effect|
         effect[:identity_json].to_s.bytesize + effect[:evidence_json].to_s.bytesize + 512
       end
@@ -489,8 +489,38 @@ module Hive
     end
 
     def require_installation_owner!
-      return if @authority.installation_owner?
+      return if authority.installation_owner?
       raise Hive::ConfigError, "installation-wide receipt preview requires the installation owner"
+    end
+
+    def authority(connection = nil)
+      @authority ||= begin
+        principal = if connection
+          installation = connection[:installations].first&.fetch(:installation_id)
+          raise Hive::ConfigError, "runtime installation identity is missing" unless installation
+          "installation:#{installation}:uid:#{Process.uid}"
+        else
+          Hive::CommandOperation.local_principal(@database)
+        end
+        Hive::CommandMaintenanceAuthority.local(principal: principal)
+      end
+    end
+
+    def prune_completed_batches!(connection)
+      threshold = timestamp(@clock.call.utc - ADMINISTRATIVE_RETENTION_SECONDS)
+      batches = connection[:command_maintenance_batches]
+        .where(state: %w[completed abandoned]).where { completed_at < threshold }.all
+      batches.each do |batch|
+        audits = connection[:command_maintenance_audit].where(batch_id: batch.fetch(:batch_id)).all
+        connection[:command_maintenance_audit].where(batch_id: batch.fetch(:batch_id)).delete
+        connection[:command_maintenance_batches].where(batch_id: batch.fetch(:batch_id)).delete
+        bytes = audits.sum { |audit| audit[:evidence_json].to_s.bytesize + 512 }
+        next if bytes.zero? || batch[:namespace_id].to_s.empty?
+        connection[:command_capacity].where(namespace_id: batch.fetch(:namespace_id)).update(
+          logical_bytes: Sequel.function(:max, Sequel[:logical_bytes] - bytes, 0),
+          revision: Sequel[:revision] + 1, updated_at: timestamp
+        )
+      end
     end
 
     def cutoff = @clock.call.utc - RETENTION_SECONDS
@@ -503,6 +533,15 @@ module Hive
         "#{reason.to_s.tr('_', ' ')}: #{remedy} (#{error.class}: #{error.message})",
         reason: reason, scope: :installation
       )
+    end
+
+    def sqlite_busy_error?(error)
+      current = error
+      while current
+        return true if current.is_a?(SQLite3::BusyException)
+        current = current.cause
+      end
+      false
     end
   end
 end

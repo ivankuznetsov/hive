@@ -297,7 +297,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
                        "expires_in" => 900, "interval" => 2
                      ))
     token = http_ok(JSON.generate("access_token" => "gho_e2e"))
-    user = http_ok(JSON.generate("login" => login, "id" => 42))
+    user = http_ok(JSON.generate("login" => login))
     SessionsController.http_client = FakeGithubHttp.new(device: device, token: token, user: user)
   end
 

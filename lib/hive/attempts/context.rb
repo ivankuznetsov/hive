@@ -15,7 +15,7 @@ module Hive
       ENV_PREFIX = "HIVE_ATTEMPT_"
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
-                  :progress_token
+                  :progress_token, :command_context
 
       class << self
         def current
@@ -57,8 +57,10 @@ module Hive
           # not by a dedicated attempt-context override. This prevents supported
           # launch/inheritance paths from redirecting context installation; it
           # is not privilege separation from hostile same-UID process state.
-          record = Repository.open_default.fetch(attempt_id)
+          repository = Repository.open_default
+          record = repository.fetch(attempt_id)
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
+          command_context = load_command_context(repository, record)
           evidence_writer = if record["routing"]["mode"] == "explicit"
             EvidenceChannel::Writer.for_fd(
               values["HIVE_ATTEMPT_EVIDENCE_FD"],
@@ -77,6 +79,7 @@ module Hive
             intended_stage: record["intended_stage"],
             progress_token: record["progress_token"],
             routing: record["routing"],
+            command_context: command_context,
             evidence_writer: evidence_writer,
             diagnostic_writer: diagnostic_writer
           )
@@ -93,6 +96,27 @@ module Hive
         end
 
         private
+
+        def load_command_context(repository, record)
+          request_id = record["request_id"].to_s
+          return nil if request_id.empty?
+          row = repository.respond_to?(:database) && repository.database.read do |db|
+            next nil unless db.table_exists?(:command_dispatch_contexts)
+            db[:command_dispatch_contexts][request_id: request_id]
+          end
+          return nil unless row
+          unless row.fetch(:source_identity) == request_id
+            raise RepositoryError, "command dispatch context source identity mismatch"
+          end
+          require "hive/command_operation"
+          Hive::CommandOperation::Context.new(
+            receipt_id: row.fetch(:receipt_id), effect_id: row.fetch(:effect_id),
+            principal: row.fetch(:principal), principal_source: row.fetch(:principal_source),
+            ordinal: row.fetch(:ordinal), request_fingerprint: row.fetch(:request_fingerprint),
+            transport_request_id: row.fetch(:source_identity),
+            retry_horizon_expires_at: row[:retry_horizon_expires_at]
+          )
+        end
 
         def validate_record!(record, attempt_id:, argv:, claim_capability:)
           raise RepositoryError, "attempt #{attempt_id} is unavailable" unless record
@@ -183,7 +207,7 @@ module Hive
                      project: nil, task_slug: nil, intended_stage: nil,
                      routing: { "mode" => "legacy" }, evidence_writer: nil,
                      diagnostic_writer: nil,
-                     progress_token: nil)
+                     progress_token: nil, command_context: nil)
         @attempt_id = attempt_id.to_s
         @task_generation = Integer(task_generation)
         @ownership_generation = ownership_generation&.to_s
@@ -192,6 +216,7 @@ module Hive
         @intended_stage = intended_stage&.to_s
         @progress_token = progress_token&.to_s
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
+        @command_context = command_context
         @evidence_writer = evidence_writer
         @diagnostic_writer = diagnostic_writer
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?

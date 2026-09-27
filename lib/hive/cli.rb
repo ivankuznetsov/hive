@@ -2452,6 +2452,11 @@ module Hive
               "attestation_sha256" => options[:attestation] &&
                 ::Digest::SHA256.hexdigest(options[:attestation].to_s)
             },
+            project_roots: lambda {
+              Hive::CommandOperation.registered_project_roots(
+                target: target, project: options[:project]
+              )
+            },
             project_root: -> { resolve_closure_task(target).project_root },
             json: true, structured: true
           ).call { close_task_interactively_unwrapped(target, emit_success: false) }

@@ -130,8 +130,10 @@ class CommandReceiptContractTest < Minitest::Test
       assert_equal "/project", Hive::Commands::Receipt.new("prune", project: "demo").send(:project_root)
     end
 
+    owner = Object.new
+    owner.define_singleton_method(:authorize_namespace_selection!) { |value| value }
     assert_equal "namespace", Hive::Commands::Receipt.new(
-      "retire", "r", namespace_id: "namespace"
+      "retire", "r", namespace_id: "namespace", maintenance: owner
     ).send(:selected_namespace_id)
     assert_raises(Hive::UsageError) do
       Hive::Commands::Receipt.new(
@@ -182,6 +184,34 @@ class CommandReceiptContractTest < Minitest::Test
       missing.instance_variable_set(:@project_root, "/project")
       missing.send(:execute)
     end
+  end
+
+  def test_receipt_public_boundary_rejects_options_that_the_subcommand_would_ignore
+    [
+      Hive::Commands::Receipt.new("retire", "receipt", cursor: "next", settle_without_result: true),
+      Hive::Commands::Receipt.new("release-pin", "pin", limit: 10),
+      Hive::Commands::Receipt.new("abandon-batch", "batch", cursor: "next"),
+      Hive::Commands::Receipt.new("prune", confirm: true, cursor: "next")
+    ].each do |command|
+      assert_raises(Hive::UsageError) { command.call }
+    end
+  end
+
+  def test_receipt_public_boundary_authorizes_namespace_selection_before_lookup
+    maintenance = Object.new
+    maintenance.define_singleton_method(:authorize_namespace_selection!) do |_namespace_id|
+      raise Hive::ConfigError, "installation-owner authority required"
+    end
+    maintenance.define_singleton_method(:release_pin) do |*|
+      raise "foreign identifier was disclosed before namespace authorization"
+    end
+    command = Hive::Commands::Receipt.new(
+      "release-pin", "foreign-pin", namespace_id: "foreign-namespace",
+      expected_generation: 1, reason: "test", confirm: true, maintenance: maintenance
+    )
+
+    error = assert_raises(Hive::ConfigError) { command.call }
+    assert_includes error.message, "installation-owner authority required"
   end
 
   def test_receipt_envelope_classifies_typed_failures
@@ -679,27 +709,37 @@ class CommandReceiptContractTest < Minitest::Test
           nonterminal_count: 1, executing_count: 1, logical_bytes: 1
         )
       end
-      policies = [
-        base.with(nonterminal_limit: 10, installation_nonterminal_limit: 1),
-        base.with(nonterminal_limit: 10, installation_nonterminal_limit: 10,
-                  byte_admission_limit: Hive::CommandReceiptCapacity::NEXT_OPERATION_ALLOWANCE),
-        base.with(nonterminal_limit: 10, installation_nonterminal_limit: 10,
-                  byte_admission_limit: 10**9, installation_byte_admission_limit: 1),
-        base.with(concurrency_limit: 10, installation_concurrency_limit: 1)
+      cases = [
+        [ base.with(nonterminal_limit: 1), :nonterminal, "command_nonterminal_limit", "namespace", "nonterminal_limit" ],
+        [ base.with(nonterminal_limit: 10, installation_nonterminal_limit: 1), :nonterminal,
+          "command_nonterminal_limit", "installation", "installation_nonterminal_limit" ],
+        [ base.with(nonterminal_limit: 10, installation_nonterminal_limit: 10,
+                    byte_admission_limit: Hive::CommandReceiptCapacity::NEXT_OPERATION_ALLOWANCE),
+          :nonterminal, "command_capacity_exhausted", "namespace", "byte_admission_limit" ],
+        [ base.with(nonterminal_limit: 10, installation_nonterminal_limit: 10,
+                    byte_admission_limit: 10**9, installation_byte_admission_limit: 1),
+          :nonterminal, "command_capacity_exhausted", "installation", "installation_byte_admission_limit" ],
+        [ base.with(concurrency_limit: 1), :execution,
+          "command_concurrency_limit", "namespace", "concurrency_limit" ],
+        [ base.with(concurrency_limit: 10, installation_concurrency_limit: 1), :execution,
+          "command_concurrency_limit", "installation", "installation_concurrency_limit" ]
       ]
       database.read do |connection|
-        policies.first(3).each do |policy|
+        cases.each do |policy, operation, reason, scope, remedy|
           capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policy)
-          assert_raises(Hive::CommandCapacityError) do
-            capacity.admit_nonterminal!(
+          error = assert_raises(Hive::CommandCapacityError) do
+            if operation == :execution
+              capacity.admit_execution!(connection, namespace_id: namespace_id)
+            else
+              capacity.admit_nonterminal!(
               connection, namespace_id: namespace_id, request_bytes: 1,
               occupied_installation_bytes: 1
-            )
+              )
+            end
           end
-        end
-        capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policies.last)
-        assert_raises(Hive::CommandCapacityError) do
-          capacity.admit_execution!(connection, namespace_id: namespace_id)
+          assert_equal reason, error.reason
+          assert_equal scope, error.scope
+          assert_includes error.message, remedy
         end
       end
     end
@@ -749,27 +789,57 @@ class CommandReceiptContractTest < Minitest::Test
       "run", "task", observation: "token", project: "demo", json: true,
       idempotency_key: "key", command_receipt_store: store
     )
-    assert_instance_of Hive::CommandOperation, act.send(:command_operation)
+    act_operation = act.send(:command_operation)
+    assert_equal [ "key", "act", "task" ], %i[@key @command @target].map {
+      |name| act_operation.instance_variable_get(name)
+    }
+    assert_equal(
+      { "action_id" => "run", "observation" => "token", "project" => "demo" },
+      act_operation.instance_variable_get(:@request)
+    )
     assert_equal "uncertain", act.envelope_error_kind(outcome)
     assert_equal "full", act.envelope_error_kind(capacity)
 
     approve = Hive::Commands::Approve.new(
       "task", idempotency_key: "key", command_receipt_store: store
     )
-    assert_instance_of Hive::CommandOperation, approve.send(:command_operation)
+    approve_operation = approve.send(:command_operation)
+    assert_equal [ "key", "approve", "task" ], %i[@key @command @target].map {
+      |name| approve_operation.instance_variable_get(name)
+    }
+    assert_equal(
+      { "to" => nil, "from" => nil, "project" => nil, "force" => false },
+      approve_operation.instance_variable_get(:@request)
+    )
     assert_equal "uncertain", Hive::Commands::Approve.error_kind_for(outcome)
     assert_equal "full", Hive::Commands::Approve.error_kind_for(capacity)
 
     stage = Hive::Commands::StageAction.new(
       "plan", "task", idempotency_key: "key", command_receipt_store: store
     )
-    assert_instance_of Hive::CommandOperation, stage.send(:command_operation)
+    stage_operation = stage.send(:command_operation)
+    assert_equal [ "key", "stage_action", "plan", "task" ],
+                 %i[@key @command @mode @target].map {
+                   |name| stage_operation.instance_variable_get(name)
+                 }
+    assert_equal(
+      { "verb" => "plan", "from" => nil, "project" => nil },
+      stage_operation.instance_variable_get(:@request)
+    )
 
     answer = Hive::Commands::Answer.new(
       "task", binding: "binding", idempotency_key: "key", command_receipt_store: store
     )
+    answer_operation = nil
     with_replaced_singleton_method(answer, :decode_binding, ->(*) { { "project" => "demo" } }) do
-      assert_instance_of Hive::CommandOperation, answer.send(:command_operation, "yes")
+      answer_operation = answer.send(:command_operation, "yes")
+      assert_equal [ "key", "answer", "write", "task" ],
+                   %i[@key @command @mode @target].map {
+                     |name| answer_operation.instance_variable_get(name)
+                   }
+      answer_request = answer_operation.instance_variable_get(:@request)
+      assert_equal "demo", answer_request.fetch("binding").fetch("project")
+      assert_equal Digest::SHA256.hexdigest("yes"), answer_request.fetch("answer_sha256")
     end
     assert_equal "uncertain", answer.send(:error_kind, outcome)
     assert_equal "full", answer.send(:error_kind, capacity)
@@ -778,7 +848,16 @@ class CommandReceiptContractTest < Minitest::Test
       "demo", "idea", idempotency_key: "key", json: true,
       command_receipt_store: store
     )
-    assert_instance_of Hive::CommandOperation, fresh.send(:command_operation)
+    new_operation = fresh.send(:command_operation)
+    assert_equal [ "key", "new", "demo" ], %i[@key @command @target].map {
+      |name| new_operation.instance_variable_get(name)
+    }
+    assert_equal Digest::SHA256.hexdigest("idea"),
+                 new_operation.instance_variable_get(:@request).fetch("text_sha256")
+    [ act_operation, approve_operation, stage_operation, answer_operation, new_operation ].each do |operation|
+      assert_equal "installation:installation:uid:#{Process.uid}",
+                   operation.instance_variable_get(:@principal)
+    end
     assert_equal "uncertain", fresh.envelope_error_kind(outcome)
     assert_equal "full", fresh.envelope_error_kind(capacity)
     with_tmp_dir do |dir|

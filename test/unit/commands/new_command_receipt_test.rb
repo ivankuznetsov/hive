@@ -19,6 +19,25 @@ class NewCommandReceiptTest < Minitest::Test
     assert_includes error.message, "cannot verify command receipt storage"
   end
 
+  def test_keyed_call_refuses_a_real_base_only_runtime_before_task_creation
+    with_tmp_dir do |root|
+      activate_test_control_plane(root)
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(root)
+      ).open!
+      store = Hive::CommandReceiptStore.new(database: database)
+      command = Hive::Commands::New.new(
+        "demo", "idea", idempotency_key: "stable", command_receipt_store: store
+      )
+      command.define_singleton_method(:perform_call!) { flunk "legacy task capture executed" }
+
+      error = assert_raises(Hive::ConfigError) { command.call! }
+
+      assert_includes error.message, "command receipts are not installed"
+      database.disconnect
+    end
+  end
+
   def test_keyed_call_uses_command_operation_when_receipt_storage_is_available
     store = Struct.new(:database).new(Object.new)
     operation = Object.new

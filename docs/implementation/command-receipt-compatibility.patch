@@ -8,7 +8,7 @@ index be44fa474e..1c15bab8f1 100644
 -
 +
 +    COMMAND_RECEIPT_SCHEMA_SHA256 =
-+      "0de7f2bad101616088278812b14c9c50d14a849980963e41cf9779874ca4c9a2".freeze
++      "c96c7247e175fefe50960a38980e83fec328c4698f084a7195bcca771b747ef8".freeze
 +    COMMAND_RECEIPT_OBJECT_NAMES = %w[
 +      command_capacity
 +      command_dispatch_contexts

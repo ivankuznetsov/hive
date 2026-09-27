@@ -5,6 +5,8 @@ require "hive/command_receipt_maintenance"
 require "hive/command_receipt_pruner"
 require "hive/command_receipt_store"
 require "hive/runtime_control_plane/command_schema_installation"
+require "open3"
+require "rbconfig"
 
 class CommandReceiptMaintenanceTest < Minitest::Test
   include HiveTestHelper
@@ -292,6 +294,27 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_cold_preview_refuses_without_creating_wal_or_shm_sidecars
+    with_receipts do |project, database, _store, authority|
+      database.disconnect
+      wal = "#{database.path}-wal"
+      shm = "#{database.path}-shm"
+      File.delete(wal) if File.exist?(wal)
+      File.delete(shm) if File.exist?(shm)
+      before = Digest::SHA256.file(database.path).hexdigest
+
+      error = assert_raises(Hive::CommandCapacityError) do
+        Hive::CommandReceiptPruner.new(database: database, authority: authority)
+          .preview(project_root: project)
+      end
+
+      assert_equal "command_prune_preview_unavailable", error.reason
+      assert_equal before, Digest::SHA256.file(database.path).hexdigest
+      refute File.exist?(wal)
+      refute File.exist?(shm)
+    end
+  end
+
   def test_selected_namespace_maintenance_identities_paginate_with_effective_limits
     with_receipts do |project, database, store, authority|
       claims = 3.times.map do |index|
@@ -380,6 +403,123 @@ class CommandReceiptMaintenanceTest < Minitest::Test
       end
       assert_equal "another prune batch is unfinished; ask the installation owner to recover it",
                    error.message
+    end
+  end
+
+  def test_real_sqlite_writer_contention_reports_command_prune_busy
+    with_receipts do |project, database, store, authority|
+      claim = terminal_receipt(store, project, "busy-real")
+      locker = <<~'RUBY'
+        database = SQLite3::Database.new(ARGV.fetch(0))
+        database.execute("PRAGMA busy_timeout = 1")
+        database.execute("BEGIN IMMEDIATE")
+        database.execute("UPDATE command_capacity SET revision = revision")
+        STDOUT.write("locked")
+        STDOUT.flush
+        sleep
+      RUBY
+      child_input, child_output, child_error, child = Open3.popen3(
+        RbConfig.ruby, "-rsqlite3", "-e", locker, database.path
+      )
+      child_input.close
+      assert_equal "locked", child_output.read(6), child_error.read_nonblock(4096, exception: false).to_s
+      contender = Hive::RuntimeControlPlane::Database.new(
+        path: database.path, busy_timeout_ms: 1
+      ).open!
+
+      error = assert_raises(Hive::CommandCapacityError) do
+        Hive::CommandReceiptPruner.new(database: contender, authority: authority)
+          .prune(namespace_id: claim.namespace_id)
+      end
+      assert_equal "command_prune_busy", error.reason
+    ensure
+      contender&.disconnect
+      child_output&.close unless child_output&.closed?
+      child_error&.close unless child_error&.closed?
+      if child
+        Process.kill("KILL", child.pid) rescue Errno::ESRCH
+        child.value
+      end
+    end
+  end
+
+  def test_settle_then_prune_returns_the_logical_byte_ledger_to_baseline
+    with_receipts do |project, database, store, authority|
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      baseline = database.read do |db|
+        db[:command_capacity][namespace_id: identity.namespace_id].fetch(:logical_bytes)
+      end
+      claim = store.reserve(
+        project_root: project, key: "settle-prune-ledger", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      executing = store.mark_executing(
+        claim, owner_host: Socket.gethostname, owner_pid: 424_242,
+        owner_process_start: "dead-start"
+      )
+      store.mark_unresolved(executing, reason: "lost")
+      row = store.receipt(claim.receipt_id)
+      Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority,
+        alive: ->(*) { false }, ownership: ->(*) { :reused }
+      ).settle_without_result(
+        claim.receipt_id, expected_generation: row.fetch(:generation),
+        reason: "settled for ledger test", confirm: true
+      )
+      database.transaction do |db|
+        db[:command_receipts].where(receipt_id: claim.receipt_id).update(
+          terminal_at: Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc - 31 * 86_400)
+        )
+      end
+
+      Hive::CommandReceiptPruner.new(database: database, authority: authority)
+        .prune(namespace_id: identity.namespace_id)
+
+      after = database.read do |db|
+        db[:command_capacity][namespace_id: identity.namespace_id].fetch(:logical_bytes)
+      end
+      assert_equal baseline, after
+    end
+  end
+
+  def test_confirmed_prune_expires_completed_batch_bookkeeping_and_audit
+    with_receipts do |project, database, store, authority|
+      terminal = terminal_receipt(store, project, "batch-retention")
+      old = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc - 31 * 86_400)
+      now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+      database.transaction do |connection|
+        connection[:command_maintenance_batches].insert(
+          batch_id: "expired-batch", namespace_id: terminal.namespace_id,
+          principal: "owner", principal_scope: "own", kind: "prune",
+          state: "completed", generation: 2, fixed_cutoff: old,
+          candidates_json: "[]", outcomes_json: "[]", created_at: old,
+          updated_at: old, completed_at: old
+        )
+        connection[:command_maintenance_batches].insert(
+          batch_id: "expired-unkeyed-batch", namespace_id: nil,
+          administrative_receipt_id: nil, principal: "owner",
+          principal_scope: "installation", kind: "prune", state: "completed",
+          generation: 1, fixed_cutoff: old, candidates_json: "[]",
+          outcomes_json: "[]", created_at: old, updated_at: old, completed_at: old
+        )
+        connection[:command_maintenance_audit].insert(
+          audit_id: "expired-batch-audit", batch_id: "expired-batch",
+          namespace_id: terminal.namespace_id, acting_principal: "owner",
+          principal_source: "test", authority_basis: "installation_owner",
+          action: "prune", evidence_json: "{}", created_at: now
+        )
+      end
+
+      Hive::CommandReceiptPruner.new(database: database, authority: authority)
+        .prune(namespace_id: terminal.namespace_id)
+
+      database.read do |connection|
+        assert_nil connection[:command_maintenance_batches][batch_id: "expired-batch"]
+        assert_nil connection[:command_maintenance_batches][batch_id: "expired-unkeyed-batch"]
+        assert_nil connection[:command_maintenance_audit][audit_id: "expired-batch-audit"]
+      end
     end
   end
 
@@ -680,6 +820,53 @@ class CommandReceiptMaintenanceTest < Minitest::Test
           "changed-admin", expected_generation: 1, reason: "dead", confirm: true
         )
       end
+    end
+  end
+
+  def test_abandonment_preserves_existing_effect_evidence
+    with_receipts do |project, database, store, authority|
+      Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
+      claim = store.reserve(
+        project_root: project, key: "abandon-evidence", command: "receipt", mode: "prune",
+        target: "demo", request: {}, principal: "owner", maintenance: true,
+        execute: true, owner_process_start: "dead-start"
+      )
+      effect = store.prepare_effect(
+        claim, ordinal: 0, kind: "receipt:prune", identity: { "target" => "demo" }
+      )
+      store.update_effect(
+        claim, effect_id: effect.fetch(:effect_id), from: "prepared", to: "submitted",
+        evidence: { "provider_receipt" => "retain-me" }
+      )
+      store.mark_unresolved(claim, reason: "lost")
+      now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+      database.transaction do |connection|
+        connection[:command_maintenance_batches].insert(
+          batch_id: "abandon-evidence-batch", namespace_id: claim.namespace_id,
+          administrative_receipt_id: claim.receipt_id, principal: "owner",
+          principal_scope: "own", kind: "prune", state: "executing", generation: 1,
+          owner_host: Socket.gethostname, owner_pid: 424_242,
+          owner_process_start: "dead-start", fixed_cutoff: now,
+          candidates_json: "[]", outcomes_json: "[]", created_at: now, updated_at: now
+        )
+      end
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority,
+        alive: ->(*) { false }, ownership: ->(*) { :reused }
+      )
+
+      maintenance.abandon_batch(
+        "abandon-evidence-batch", expected_generation: 1,
+        reason: "owner died", confirm: true
+      )
+
+      evidence = database.read do |connection|
+        row = connection[:command_effects][effect_id: effect.fetch(:effect_id)]
+        Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:evidence_json))
+      end
+      assert_equal "retain-me", evidence.fetch("provider_receipt")
+      assert_equal true, evidence.fetch("batch_abandoned")
+      assert_equal "abandon-evidence-batch", evidence.fetch("batch_id")
     end
   end
 

@@ -33,7 +33,7 @@
         "next_cursor": { "type": ["string", "null"] },
         "batch_id": { "type": "string" },
         "outcomes": { "type": "array" },
-        "command_receipt": { "type": "object" }
+        "command_receipt": { "$ref": "#/$defs/CommandReceipt" }
         ,"nonterminal_receipts": { "type": "array" }
         ,"active_pins": { "type": "array" }
         ,"unfinished_batches": { "type": "array" }
@@ -69,7 +69,20 @@
         "scope": { "type": "string" },
         "batch_id": { "type": "string" },
         "outcomes": { "type": "array" },
-        "command_receipt": { "type": "object" }
+        "command_receipt": { "$ref": "#/$defs/CommandReceipt" }
+      }
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "generation", "state"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "state": {
+          "type": "string",
+          "enum": ["prepared", "executing", "unresolved", "succeeded", "failed", "settled", "aborted"]
+        }
       }
     }
   }

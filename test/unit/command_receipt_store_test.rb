@@ -259,6 +259,11 @@ class CommandReceiptStoreTest < Minitest::Test
         database: database, maintenance_authority: denying, host: "test-host"
       )
       assert_equal 0, guarded.send(:reclaim_dead_executing_owners, claim, scope: "namespace")
+
+      unprivileged = Hive::CommandReceiptStore.new(database: database, host: "test-host")
+      assert_equal 0,
+                   unprivileged.send(:reclaim_dead_executing_owners, claim, scope: "namespace")
+      assert_equal 0, database.read { |db| db[:command_maintenance_audit].count }
     end
 
     unavailable = Object.new
@@ -295,6 +300,13 @@ class CommandReceiptStoreTest < Minitest::Test
         request: {}, principal: "owner"
       )
       store.succeed(first, result: { "ok" => true }, status: 0)
+      stale = File.join(File.dirname(project), "stale-registration")
+      FileUtils.mkdir_p(stale)
+      replay = store.lookup_existing_in_projects(
+        project_roots: [ stale, project ], key: "shared", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      assert_equal :replay, replay.disposition
       assert_raises(Hive::CommandConflict) do
         store.lookup_existing_in_projects(
           project_roots: [ project ], key: "shared", command: "approve",
@@ -447,7 +459,7 @@ class CommandReceiptStoreTest < Minitest::Test
       raise Hive::CommandConflict, "race"
     end
     store.define_singleton_method(:receipt) { |_receipt_id| unresolved }
-    assert_raises(Hive::CommandUnresolved) do
+    assert_raises(Hive::CommandInProgress) do
       store.send(
         :classify_existing!, row, principal: "owner",
         request_fingerprint: "fingerprint", project_root: "/project"

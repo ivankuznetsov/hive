@@ -53,16 +53,33 @@ module Hive
       :request_fingerprint, :transport_request_id, :retry_horizon_expires_at
     )
 
-    def self.current_context = Thread.current[:hive_command_operation_context]
+    def self.current_context
+      Thread.current[:hive_command_operation_context] ||
+        (defined?(Hive::Attempts::Context) && Hive::Attempts::Context.current&.command_context)
+    end
     def self.current_operation = Thread.current[:hive_command_operation]
 
     def self.record_effect_submission(kind:, identity:)
-      current_operation&.send(:record_effect_submission, kind: kind, identity: identity)
+      return current_operation.send(:record_effect_submission, kind: kind, identity: identity) if current_operation
+      context = defined?(Hive::Attempts::Context) && Hive::Attempts::Context.current&.command_context
+      return unless context
+      Hive::CommandReceiptStore.new.record_effect_submission(
+        receipt_id: context.receipt_id, effect_id: context.effect_id,
+        principal: context.principal, request_fingerprint: context.request_fingerprint,
+        kind: kind, identity: identity
+      )
     end
 
     def self.record_effect_observation(source:, correlation_id:, evidence: {})
-      current_operation&.send(
+      return current_operation.send(
         :record_effect_observation,
+        source: source, correlation_id: correlation_id, evidence: evidence
+      ) if current_operation
+      context = defined?(Hive::Attempts::Context) && Hive::Attempts::Context.current&.command_context
+      return unless context
+      Hive::CommandReceiptStore.new.record_effect_observation(
+        receipt_id: context.receipt_id, effect_id: context.effect_id,
+        principal: context.principal, request_fingerprint: context.request_fingerprint,
         source: source, correlation_id: correlation_id, evidence: evidence
       )
     end
@@ -196,11 +213,7 @@ module Hive
       ) if context.retry_horizon_expires_at
       emit_or_return(emitted)
     rescue Exception => error # rubocop:disable Lint/RescueException -- preserve Interrupt/SystemExit ambiguity
-      if claim && effect && deterministic_non_application?(error)
-        persist_non_application_failure(claim, effect, error)
-      elsif claim
-        persist_uncertainty(claim, effect)
-      end
+      persist_uncertainty(claim, effect) if claim
       raise
     end
 
@@ -281,24 +294,6 @@ module Hive
       end
     end
 
-    def deterministic_non_application?(error)
-      error.is_a?(Hive::UsageError) || error.is_a?(Hive::InvalidTaskPath) ||
-        error.is_a?(Hive::WrongStage)
-    end
-
-    def persist_non_application_failure(claim, effect, error)
-      @store.update_effect(
-        claim, effect_id: effect.fetch(:effect_id), from: "prepared", to: "not_applied",
-        evidence: { "error_class" => error.class.name, "whole_effect_non_application" => true }
-      )
-      @store.fail_non_application(
-        claim, result: stored_failure(error), status: error.exit_code,
-        reason: "command_effect_not_applied", whole_effect_non_application: true
-      )
-    rescue StandardError
-      persist_uncertainty(claim, effect)
-    end
-
     def persist_uncertainty(claim, effect)
       return if effect && @store.authoritative_result_recorded?(
         receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id)
@@ -359,12 +354,14 @@ module Hive
       if canonical
         template = template_payload(canonical)
         text = @json ? render_text(canonical) : captured.to_s
-        return {
-          "format" => "dual", "payload" => template, "text" => text,
+        stored = {
+          "format" => "dual", "payload" => template,
           "expanded_sha256" => Digest::SHA256.hexdigest(
             Hive::RuntimeControlPlane::Codec.dump_json(canonical)
           )
         }
+        stored["text"] = text unless answer_binding?(canonical)
+        return stored
       end
       if @json || @structured
         template = template_payload(payload)
@@ -404,7 +401,8 @@ module Hive
           "slot" => payload.fetch("slot").merge(
             "binding" => {
               "$command_response_fields" => fields, "template_version" => 1,
-              "$command_response_value" => binding,
+              "$command_response_field_order" => fields.keys,
+              "encoding" => "base64url-json",
               "sha256" => Digest::SHA256.hexdigest(binding)
             }
           )
@@ -429,8 +427,7 @@ module Hive
           action: Hive::RuntimeControlPlane::Database::BACKUP_ACTION
         )
       end
-      if stored.fetch("format") == "text" ||
-         (stored.fetch("format") == "dual" && !@json && !@structured)
+      if stored.fetch("format") == "text"
         return stored.fetch("text") if @structured
         $stdout.write(stored.fetch("text"))
         exit(Integer(claim.status)) if claim.state == "failed"
@@ -443,6 +440,11 @@ module Hive
         raise Hive::CommandConflict,
               "retry inputs cannot reconstruct the original command response"
       end
+      if stored.fetch("format") == "dual" && !@json && !@structured
+        $stdout.write(stored["text"] || render_text(payload))
+        exit(Integer(claim.status)) if claim.state == "failed"
+        return nil
+      end
       if claim.state == "failed" && @structured
         $stdout.puts(JSON.generate(payload))
         exit(Integer(claim.status))
@@ -450,6 +452,10 @@ module Hive
       emitted = emit_or_return(payload)
       exit(Integer(claim.status)) if claim.state == "failed" && !@structured
       emitted
+    end
+
+    def answer_binding?(payload)
+      @command == "answer" && payload.dig("slot", "binding").is_a?(String)
     end
 
     def expand_template(payload)
@@ -468,7 +474,13 @@ module Hive
          binding_template["$command_response_fields"].is_a?(Hash) &&
          binding_template["template_version"] == 1
         fields = binding_template.fetch("$command_response_fields")
-        value = binding_template.fetch("$command_response_value")
+        order = binding_template.fetch("$command_response_field_order")
+        unless order.is_a?(Array) && order.sort == fields.keys.sort && order.uniq == order
+          raise KeyError
+        end
+        raise KeyError unless binding_template["encoding"] == "base64url-json"
+        ordered_fields = order.to_h { |key| [ key, fields.fetch(key) ] }
+        value = Base64.urlsafe_encode64(JSON.generate(ordered_fields), padding: false)
         decoded = JSON.parse(Base64.urlsafe_decode64(value))
         unless decoded == fields && Digest::SHA256.hexdigest(value) == binding_template["sha256"]
           raise Hive::CommandConflict,

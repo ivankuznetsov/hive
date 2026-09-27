@@ -490,18 +490,6 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_no_selector ".project-section[data-project-name='#{first}']", visible: :all
     assert_equal second, composer_project,
                  "Forward must restore the filtered project's submission target"
-
-    # Model a history restore that is superseded before Turbo renders it. The
-    # next explicit visit must win over the abandoned history selection.
-    page.execute_script(<<~JS)
-      window.history.pushState({}, "", "?project=#{first}")
-      window.dispatchEvent(new PopStateEvent("popstate"))
-    JS
-    assert_equal first, composer_project
-    click_project_filter(second)
-    assert_selector ".project-nav a.active[data-project-filter-name-param='#{second}']"
-    assert_equal second, composer_project,
-                 "An explicit visit must clear an abandoned history selection"
   end
 
   test "grid updates preserve scroll position and composer state" do

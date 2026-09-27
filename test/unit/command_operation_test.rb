@@ -141,6 +141,83 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_interrupted_task_activity_does_not_resume_without_authoritative_domain_reconciliation
+    with_operation(key: "task-activity-uncertain") do |_operation, store, project|
+      operation = Hive::CommandOperation.new(
+        key: "task-activity-uncertain", command: "approve", target: "task",
+        request: {}, project_root: project, principal: "owner",
+        json: true, structured: true, store: store
+      )
+      assert_raises(Hive::Error) do
+        operation.call do
+          Hive::CommandOperation.record_effect_submission(
+            kind: "task_activity", identity: { "request_id" => "activity-1" }
+          )
+          Hive::CommandOperation.record_effect_observation(
+            source: "task_activity", correlation_id: "activity-1",
+            evidence: { "task_stage" => "4-execute" }
+          )
+          raise Hive::Error, "failed after moving the task"
+        end
+      end
+
+      assert_raises(Hive::CommandUnresolved) do
+        operation.call { flunk "task mutation must not be repeated as whole-command resume" }
+      end
+    end
+  end
+
+  def test_interrupted_durable_dispatch_request_can_resume_from_persisted_request_state
+    with_operation(key: "dispatch-request-reconcile") do |_operation, store, project|
+      register_runtime_project(database: store.database, name: "demo", path: project)
+      repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: store.database)
+      attempts = 0
+      writes = 0
+      operation = Hive::CommandOperation.new(
+        key: "dispatch-request-reconcile", command: "stage_action", mode: "develop",
+        target: "task", request: {}, project_root: project, principal: "owner",
+        json: true, structured: true, store: store
+      )
+      body = lambda do
+        attempts += 1
+        context = Hive::CommandOperation.current_context
+        Hive::CommandOperation.record_effect_submission(
+          kind: "dispatch_request", identity: { "request_id" => context.transport_request_id }
+        )
+        unless repository.fetch(context.transport_request_id)
+          writes += 1
+          repository.write_request!(
+            project: "demo", slug: "task", argv: %w[hive run task],
+            request_id: context.transport_request_id, command_context: context
+          )
+        end
+        raise Hive::Error, "lost dispatch acknowledgement" if attempts == 1
+
+        { "schema" => "hive-stage-action", "ok" => true }
+      end
+
+      error = assert_raises(Hive::Error) { operation.call(&body) }
+      assert_equal "lost dispatch acknowledgement", error.message
+      receipt = store.database.read do |database|
+        database[:command_receipts].first(
+          key_digest: Digest::SHA256.hexdigest("dispatch-request-reconcile")
+        )
+      end
+      reconciliation_state = store.database.read do |database|
+        {
+          effect: database[:command_effects][receipt_id: receipt.fetch(:receipt_id)],
+          request: database[:dispatch_requests].first
+        }
+      end
+      assert store.send(:reconcilable_effect?, receipt), reconciliation_state.inspect
+      result = operation.call(&body)
+
+      assert_equal true, result.fetch("ok")
+      assert_equal 2, attempts
+      assert_equal 1, writes
+    end
+  end
+
   def test_interrupted_unknown_effect_remains_unresolved
     with_operation(key: "unknown-reconcile") do |_operation, store, project|
       operation = Hive::CommandOperation.new(
@@ -155,7 +232,7 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
-  def test_structured_failed_replay_emits_saved_payload_and_exits_with_saved_status
+  def test_usage_error_after_effect_intent_is_unresolved_without_non_application_proof
     with_operation do |_operation, store, project|
       structured = Hive::CommandOperation.new(
         key: "failed", command: "approve", target: "task", request: { from: "3-plan" },
@@ -165,15 +242,9 @@ class CommandOperationTest < Minitest::Test
         structured.call { raise Hive::UsageError, "invalid transition" }
       end
 
-      output, = capture_io do
-        exit_error = assert_raises(SystemExit) { structured.call { flunk "failed replay executed" } }
-        assert_equal Hive::ExitCodes::USAGE, exit_error.status
+      assert_raises(Hive::CommandUnresolved) do
+        structured.call { flunk "unproven failure replay executed" }
       end
-      payload = JSON.parse(output)
-      assert_equal false, payload.fetch("ok")
-      assert_equal "UsageError", payload.fetch("error_class")
-      assert_equal "usage", payload.fetch("error_kind")
-      assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
     end
   end
 
@@ -192,6 +263,11 @@ class CommandOperationTest < Minitest::Test
         { "schema" => "hive-answer", "ok" => true,
           "slot" => { "binding" => response_binding } }
       end
+      persisted = store.database.read do |database|
+        database[:command_receipts].first(key_digest: Digest::SHA256.hexdigest("answer"))
+      end
+      refute_includes persisted.fetch(:result_json), response_binding,
+                      "the literal response binding must be reconstructed, not stored"
       replayed = operation.call { flunk "answer replay executed" }
 
       assert_equal expected, replayed
@@ -400,10 +476,7 @@ class CommandOperationTest < Minitest::Test
       principal: "owner", store: store
     )
     claim = Struct.new(:receipt_id).new("receipt")
-    operation.send(
-      :persist_non_application_failure, claim, { effect_id: "effect" },
-      Hive::UsageError.new("invalid")
-    )
+    operation.send(:persist_uncertainty, claim, { effect_id: "effect" })
     assert_equal [ "receipt" ], unresolved
     assert_equal({ "format" => "text", "text" => "invalid\n" },
                  operation.send(:stored_failure, Hive::UsageError.new("invalid")))
@@ -414,12 +487,12 @@ class CommandOperationTest < Minitest::Test
     conflicting = {
       "slot" => { "binding" => {
         "$command_response_fields" => { "project" => "demo" },
-        "$command_response_value" => Base64.urlsafe_encode64(JSON.generate("project" => "other")),
-        "template_version" => 1, "sha256" => "wrong"
+        "$command_response_field_order" => [ "project" ],
+        "encoding" => "base64url-json", "template_version" => 1, "sha256" => "wrong"
       } }
     }
     assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }
-    conflicting["slot"]["binding"]["$command_response_value"] = "not-base64-json"
+    conflicting["slot"]["binding"]["encoding"] = "unknown"
     assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }
 
     assert_equal "config", operation.send(:failure_error_kind, Hive::ConfigError.new("bad"))

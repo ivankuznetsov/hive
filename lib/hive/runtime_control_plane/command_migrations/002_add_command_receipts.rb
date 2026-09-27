@@ -220,6 +220,14 @@ module Hive
             [ :namespace_id, :principal, :intent_id, :intent_version, :delivery_cycle_id ],
             unique: true, name: :command_successor_allocations_cycle_uidx
           )
+          database.add_index(
+            :command_successor_allocations, :predecessor_receipt_id,
+            name: :command_successor_allocations_predecessor_idx
+          )
+          database.add_index(
+            :command_successor_allocations, :successor_receipt_id,
+            name: :command_successor_allocations_successor_idx
+          )
 
           database.create_table(:command_dispatch_contexts) do
             String :request_id, primary_key: true, null: false

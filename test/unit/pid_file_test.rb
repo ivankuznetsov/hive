@@ -164,6 +164,30 @@ class HivePidFileModuleTest < Minitest::Test
     assert_equal :legacy, PF.ownership({ "pid" => 4242, "_legacy" => true }, 4242)
   end
 
+  def test_death_classification_covers_dead_reused_live_and_unverified_owners
+    assert_equal :dead, PF.death_classification(
+      pid: 4242, recorded_start_time: "boot-1", alive: ->(_pid) { false }
+    )
+    assert_equal :reused, PF.death_classification(
+      pid: 4242, recorded_start_time: "boot-1", alive: ->(_pid) { true },
+      ownership: ->(_payload, _pid) { :reused }
+    )
+    assert_equal :live, PF.death_classification(
+      pid: 4242, recorded_start_time: "boot-1", alive: ->(_pid) { true },
+      ownership: ->(_payload, _pid) { :verified }
+    )
+    assert_equal :unverified, PF.death_classification(
+      pid: 4242, recorded_start_time: "boot-1", alive: ->(_pid) { true },
+      ownership: ->(_payload, _pid) { :unverified }
+    )
+    assert_equal :unverified, PF.death_classification(
+      pid: nil, recorded_start_time: "boot-1"
+    )
+    assert_equal :unverified, PF.death_classification(
+      pid: 4242, recorded_start_time: nil
+    )
+  end
+
   def test_stop_returns_absent_for_missing_file
     Dir.mktmpdir("hive-pid-file") do |dir|
       assert_equal({ status: :absent, pid: nil }, PF.stop(File.join(dir, "absent.pid")))

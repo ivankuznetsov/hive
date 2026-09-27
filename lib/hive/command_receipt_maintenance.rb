@@ -25,6 +25,13 @@ module Hive
       @ownership = ownership
     end
 
+    def authorize_namespace_selection!(namespace_id)
+      unless @authority.installation_owner?
+        raise Hive::ConfigError, "--namespace-id requires the installation owner"
+      end
+      namespace_id
+    end
+
     def settle_without_result(receipt_id, expected_generation:, reason:, confirm: false,
                               namespace_id: nil)
       require_reason!(reason)
@@ -260,13 +267,21 @@ module Hive
 
       connection[:command_effects].where(
         receipt_id: receipt_id, state: %w[prepared submitted]
-      ).update(
-        state: "unknown",
-        evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(
-          "batch_abandoned" => true, "batch_id" => batch.fetch(:batch_id)
-        ),
-        updated_at: now
-      )
+      ).all.each do |effect|
+        prior = effect[:evidence_json] ?
+          Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json)) : {}
+        encoded = Hive::RuntimeControlPlane::Codec.dump_json(
+          prior.merge("batch_abandoned" => true, "batch_id" => batch.fetch(:batch_id))
+        )
+        changed_effect = connection[:command_effects].where(
+          effect_id: effect.fetch(:effect_id), state: effect.fetch(:state),
+          updated_at: effect.fetch(:updated_at)
+        ).update(state: "unknown", evidence_json: encoded, updated_at: now)
+        if changed_effect == 1
+          add_logical_bytes!(connection, receipt.fetch(:namespace_id),
+                             encoded.bytesize - effect[:evidence_json].to_s.bytesize)
+        end
+      end
     end
 
     def receipt!(receipt_id, namespace_id: nil)
@@ -418,6 +433,7 @@ module Hive
           if capacity_counted?(row)
             connection[:command_capacity].where(namespace_id: row.fetch(:namespace_id)).update(
               nonterminal_count: Sequel[:nonterminal_count] - 1,
+              logical_bytes: Sequel[:logical_bytes] + result_json.bytesize,
               revision: Sequel[:revision] + 1, updated_at: now
             )
           end
@@ -536,6 +552,7 @@ module Hive
     end
 
     def audit!(connection, row, action:, reason:, evidence:, pin_id: nil, batch_id: nil)
+      encoded_evidence = Hive::RuntimeControlPlane::Codec.dump_json(evidence || {})
       connection[:command_maintenance_audit].insert(
         audit_id: SecureRandom.uuid, receipt_id: row[:receipt_id], batch_id: batch_id,
         pin_id: pin_id, namespace_id: row[:namespace_id],
@@ -544,9 +561,10 @@ module Hive
         authority_basis: @authority.authority_basis,
         peer_address: @authority.peer_address, action: action,
         affected_principal: row[:principal], reason: reason,
-        evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(evidence || {}),
+        evidence_json: encoded_evidence,
         created_at: timestamp
       )
+      add_logical_bytes!(connection, row[:namespace_id], encoded_evidence.bytesize + 512) if row[:namespace_id]
     end
 
     def same_generation_state?(current, original, state)
@@ -558,8 +576,15 @@ module Hive
       %i[owner_host owner_pid owner_process_start].all? { |key| left[key] == right[key] }
     end
 
-    def capacity_counted?(row)
-      !(row[:command] == "receipt" && row[:mode] == "prune")
+    def capacity_counted?(row) = Hive::CommandReceiptCapacity.counts_receipt?(row)
+
+    def add_logical_bytes!(connection, namespace_id, delta)
+      return if delta.zero?
+      expression = delta.positive? ? Sequel[:logical_bytes] + delta :
+        Sequel.function(:max, Sequel[:logical_bytes] + delta, 0)
+      connection[:command_capacity].where(namespace_id: namespace_id).update(
+        logical_bytes: expression, revision: Sequel[:revision] + 1, updated_at: timestamp
+      )
     end
 
     def public_receipt(row, generation:, state:)

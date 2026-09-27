@@ -5,6 +5,73 @@ on startup or update. `hive migrate` and `hive runtime resume` have been removed
 An existing healthy current runtime database needs no conversion or cutover manifest.
 Use `hive runtime status --json` to check it. A fresh installation uses `hive setup`.
 
+## Additive command-receipt extension
+
+The base database remains schema v1. Ordinary `hive setup` and
+`hive setup --yes` initialize or validate only that base and can refresh
+services without installing command receipts. The extension is requested only
+with `hive setup --install-command-receipts` (or `--yes` for unattended
+consent). `--no-bootstrap` remains zero-mutation diagnosis even when combined
+with the flag. An installed extension is retained when later setup omits the
+flag. Namespace keyed intake is a separate, disabled-by-default project config
+switch; it neither installs nor removes schema.
+
+Migration 002 adds tables and indexes only. It does not alter or delete any
+existing object or row, including `schema_info` and installation identity. Its
+blast radius is the one shared host control-plane database: every Hive project
+and service using that database sees the objects even while every intake gate
+is disabled. Unmodified pre-compatibility binaries reject the added objects.
+
+Production installation therefore requires a published, retained rollback
+package whose exact version, authenticated HTTPS location, and SHA-256 are
+pinned in `CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE`. This Tier A
+source intentionally leaves those production coordinates unset; setup refuses
+the opt-in with CONFIG before *any* setup mutation. Until Tier B publication,
+run `hive setup` or `hive setup --yes` without
+`--install-command-receipts` for a base-only install or refresh.
+
+Code-complete rollback handoff status for this checkout:
+
+- pinned prior revision: `882b8e9ead2f9cf5321b158fe47648e6a01a2fca`
+- extension manifest SHA-256:
+  `d637611b5a0b17049690119343a3b5d41acb7f9e997113c944ec45f48a11bbea`
+- compatibility patch diff: pending a separately built prior-runtime package
+- local candidate package and SHA-256: not yet produced
+- published version/location/SHA-256: pending maintainer release authorization
+
+The last three items are activation blockers and must never be replaced with a
+source-tree-only claim. Once a candidate exists, use an isolated prefix and
+verify downloaded bytes before installation; abort on any mismatch:
+
+```sh
+candidate_url='HTTPS_AUTHENTICATED_CANDIDATE_URL'
+candidate_sha256='64_HEX_SHA256'
+candidate_gem="$PWD/hive-compat.gem"
+curl --fail --location --proto '=https' --tlsv1.2 "$candidate_url" -o "$candidate_gem"
+printf '%s  %s\n' "$candidate_sha256" "$candidate_gem" | sha256sum --check --strict
+gem install --install-dir "$PWD/hive-compat-prefix" "$candidate_gem"
+```
+
+Before extension installation, stop Hive daemon, babysitter, web, and all
+external writers; verify their PID/start identities are absent; take the normal
+private external backup of the database plus WAL/SHM and project markers. The
+installer repeats stopped-writer checks under the activation lock. Backup is
+disaster recovery, not the ordinary rollback mechanism.
+
+After Tier B qualification, replace the placeholders above with the exact
+published package coordinates pinned by the build, repeat checksum verification
+from that retained location, install the extension release, and enable projects
+one at a time only after capacity and maintenance verification.
+
+Routine rollback first stops delivery and drains/fences keyed effects because
+the compatible older runtime does not execute their protocol. Install the exact
+checksum-verified compatibility package, leave the extension tables, database
+identity, and receipts intact, and exercise ordinary attempt/lease/dispatch
+reads and writes. Re-upgrade with the exact newer package and verify a saved
+receipt replays. Arbitrary pre-compatibility versions are unsupported rollback
+targets, and rollback of the binary also rolls back unrelated code changes
+since the pinned revision.
+
 For an older installation, give your agent the prompt below. This is a supervised,
 one-off conversion of the state you choose to retain, not a supported migration
 engine. Keep the backup until you have checked the resulting tasks.

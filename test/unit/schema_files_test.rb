@@ -532,7 +532,11 @@ class SchemaFilesTest < Minitest::Test
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
       plan_review_blocked wrong_stage rollback_failed invalid_task_path dependency_wait
-      admission_error error
+      admission_error error command_conflict command_in_progress command_unresolved_pending
+      command_pin_horizon_elapsed command_capacity_exhausted command_nonterminal_limit
+      command_concurrency_limit command_prune_busy command_prune_storage_unavailable
+      command_prune_preview_unavailable command_orphaned_pin
+      command_original_result_unavailable command_intake_disabled
     ].sort
 
     assert_equal producer_kinds, schema_kinds,

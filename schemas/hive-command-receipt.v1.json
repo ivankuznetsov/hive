@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:command-receipt:v1",
+  "title": "hive receipt maintenance output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "required": ["schema", "schema_version", "ok", "operation", "preview", "confirmed"],
+      "properties": {
+        "schema": { "const": "hive-command-receipt" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "operation": {
+          "type": "string",
+          "enum": ["retire", "orphaned_owner", "release_pin", "abandon_batch", "enroll"]
+        },
+        "preview": { "type": "boolean" },
+        "confirmed": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-command-receipt" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "usage", "config", "internal", "command_conflict", "command_in_progress",
+            "command_unresolved_pending", "command_pin_horizon_elapsed",
+            "command_capacity_exhausted", "command_nonterminal_limit",
+            "command_concurrency_limit", "command_prune_busy",
+            "command_prune_storage_unavailable", "command_prune_preview_unavailable",
+            "command_orphaned_pin", "command_original_result_unavailable"
+          ]
+        },
+        "exit_code": { "type": "integer", "enum": [1, 20, 21, 22, 64, 70, 75, 78] },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

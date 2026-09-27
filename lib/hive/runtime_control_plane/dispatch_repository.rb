@@ -30,7 +30,7 @@ module Hive
       RECOVERY_PROJECTION_LIMIT = 500
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
-      REQUEST_ID_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
+      REQUEST_ID_RE = /\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
 
       Request = Data.define(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
@@ -92,7 +92,8 @@ module Hive
                          task_generation: nil,
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
-                         expected_marker_id: nil, recovery: nil, now: @clock.call, **)
+                         expected_marker_id: nil, recovery: nil, now: @clock.call,
+                         command_context: nil, **)
         payload = request_payload(
           project: project, slug: slug, argv: argv, requestor: requestor,
           request_id: request_id, chat_id: chat_id, update_id: update_id, trigger: trigger,
@@ -103,6 +104,7 @@ module Hive
         )
         database.transaction do |db|
           insert_request!(db, payload)
+          bind_command_context!(db, request_id, command_context)
         end
         request_id.to_s
       rescue Sequel::UniqueConstraintViolation => error
@@ -119,7 +121,8 @@ module Hive
           end
           [ by_id, current ]
         end
-        return request_id.to_s if existing_by_id && same_request?(existing_by_id, payload)
+        return request_id.to_s if existing_by_id && same_request?(existing_by_id, payload) &&
+          same_command_context?(request_id, command_context)
         raise IntegrityError.new(
           "dispatch request id is already bound", code: :dispatch_request_conflict
         ) if existing_by_id
@@ -179,6 +182,14 @@ module Hive
       def fetch(request_id, **)
         row = database.read { |db| db[:dispatch_requests].where(request_id: request_id.to_s).first }
         row && request_from(row)
+      end
+
+      def command_context(request_id)
+        database.read do |db|
+          next nil unless db.table_exists?(:command_dispatch_contexts)
+          row = db[:command_dispatch_contexts][request_id: request_id.to_s]
+          row && row.transform_keys(&:to_s)
+        end
       end
 
       def claim(request_id, pid:, process_start_time: nil, now: @clock.call,
@@ -509,6 +520,68 @@ module Hive
       end
 
       private
+
+      def bind_command_context!(db, request_id, context)
+        tagged = request_id.to_s.start_with?("command-dispatch:v1:")
+        if context.nil?
+          raise IntegrityError.new(
+            "tagged dispatch request is missing command context", code: :dispatch_context_missing
+          ) if tagged
+          return
+        end
+        unless db.table_exists?(:command_dispatch_contexts)
+          raise Hive::ConfigError,
+                "command dispatch context requires the installed command receipt schema"
+        end
+        values = normalize_command_context(context).merge(
+          request_id: request_id.to_s, created_at: @clock.call.utc.iso8601(6)
+        )
+        unless tagged && request_id.to_s == values.delete(:transport_request_id)
+          raise IntegrityError.new(
+            "command dispatch transport identity changed", code: :dispatch_context_conflict
+          )
+        end
+        existing = db[:command_dispatch_contexts][request_id: request_id.to_s]
+        if existing
+          comparable = values.except(:created_at)
+          unless comparable.all? { |key, value| existing[key] == value }
+            raise IntegrityError.new(
+              "command dispatch context conflicts", code: :dispatch_context_conflict
+            )
+          end
+          return
+        end
+        db[:command_dispatch_contexts].insert(values)
+      end
+
+      def normalize_command_context(context)
+        source = context.respond_to?(:to_h) ? context.to_h : context
+        source = source.transform_keys(&:to_sym)
+        required = %i[
+          receipt_id effect_id principal principal_source ordinal
+          request_fingerprint transport_request_id
+        ]
+        missing = required.reject { |key| source.key?(key) }
+        raise ArgumentError, "command context is missing #{missing.join(', ')}" unless missing.empty?
+        {
+          receipt_id: source.fetch(:receipt_id).to_s,
+          effect_id: source.fetch(:effect_id).to_s,
+          principal: source.fetch(:principal).to_s,
+          principal_source: source.fetch(:principal_source).to_s,
+          ordinal: Integer(source.fetch(:ordinal)),
+          request_fingerprint: source.fetch(:request_fingerprint).to_s,
+          source_identity: source[:source_identity]&.to_s,
+          transport_request_id: source.fetch(:transport_request_id).to_s
+        }
+      end
+
+      def same_command_context?(request_id, context)
+        existing = command_context(request_id)
+        return existing.nil? if context.nil?
+        expected = normalize_command_context(context).transform_keys(&:to_s)
+          .except("transport_request_id", "source_identity")
+        existing && expected.all? { |key, value| existing[key] == value }
+      end
 
       def request_payload(project:, slug:, argv:, requestor:, request_id:, now:, chat_id: nil,
                           update_id: nil, trigger: nil, task_generation: nil,

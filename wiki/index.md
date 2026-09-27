@@ -74,6 +74,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/patrol]] — `wiki/commands/patrol.md`
 - [[commands/pairing]] — `wiki/commands/pairing.md`
 - [[commands/prune]] — `wiki/commands/prune.md`
+- [[commands/receipt]] — `wiki/commands/receipt.md`
 - [[commands/publication-reconcile]] — `wiki/commands/publication-reconcile.md`
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
 - [[commands/refactor-patrol]] — `wiki/commands/refactor-patrol.md`

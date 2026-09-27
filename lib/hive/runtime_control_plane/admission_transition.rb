@@ -112,6 +112,9 @@ module Hive
                          recovery_source_attempt_id:)
         request_id = record["request_id"]
         return unless request_id
+        command_context = if defined?(Hive::CommandOperation)
+          Hive::CommandOperation.current_context
+        end
         row = db[:dispatch_requests].where(request_id: request_id).first
         unless row
           db[:dispatch_requests].insert(
@@ -129,6 +132,7 @@ module Hive
             created_at: record["accepted_at"], updated_at: record["accepted_at"],
             revision: 0
           )
+          bind_command_context!(db, request_id, command_context)
           return
         end
         unless %w[queued claimed].include?(row.fetch(:state)) && row.fetch(:project_id) == project_id
@@ -155,6 +159,38 @@ module Hive
           revision: Sequel[:revision] + 1
         )
         raise Attempts::CompareAndSwapFailed, "dispatch request claim raced" unless changed == 1
+        bind_command_context!(db, request_id, command_context)
+      end
+
+      def bind_command_context!(db, request_id, context)
+        tagged = request_id.to_s.start_with?("command-dispatch:v1:")
+        existing = db[:command_dispatch_contexts][request_id: request_id.to_s] if
+          db.table_exists?(:command_dispatch_contexts)
+        if context.nil?
+          if tagged && existing.nil?
+            raise Attempts::RepositoryError, "tagged command dispatch is missing authenticated context"
+          end
+          return
+        end
+        unless tagged && request_id.to_s == context.transport_request_id
+          raise Attempts::RepositoryError, "command dispatch transport identity changed"
+        end
+        payload = {
+          request_id: request_id.to_s, receipt_id: context.receipt_id,
+          effect_id: context.effect_id, principal: context.principal,
+          principal_source: context.principal_source, ordinal: context.ordinal,
+          request_fingerprint: context.request_fingerprint,
+          source_identity: nil,
+          created_at: Time.now.utc.iso8601(6)
+        }
+        if existing
+          comparable = payload.except(:created_at, :source_identity)
+          unless comparable.all? { |key, value| existing[key] == value }
+            raise Attempts::RepositoryError, "command dispatch context conflicts with its receipt"
+          end
+          return
+        end
+        db[:command_dispatch_contexts].insert(payload)
       end
 
       def admission_request_payload(record, recovery_source_attempt_id:)

@@ -28,9 +28,11 @@ module Hive
                  trigger: nil, request_id: nil,
                  task_generation: nil,
                  inherited_outputs: [], task_id: nil, expected_stage: nil,
-                 state_home: Hive::Paths.state_home, now: Time.now, repository: nil)
+                 state_home: Hive::Paths.state_home, now: Time.now, repository: nil,
+                 command_context: nil)
         repository ||= repository_for(state_home)
-        request_id ||= repository.generate_request_id
+        command_context ||= current_command_context
+        request_id ||= command_context&.transport_request_id || repository.generate_request_id
         repository.write_request!(
           project: project,
           slug: slug,
@@ -44,6 +46,7 @@ module Hive
           inherited_outputs: inherited_outputs,
           task_id: task_id,
           expected_stage: expected_stage,
+          command_context: command_context,
           state_home: state_home,
           now: now
         )
@@ -67,15 +70,16 @@ module Hive
       def dispatch!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                     trigger: nil, request_id: nil,
                     state_home: Hive::Paths.state_home, now: Time.now,
-                    entrypoint: nil, repository: nil)
+                    entrypoint: nil, repository: nil, command_context: nil)
         repository ||= repository_for(state_home)
-        request_id ||= repository.generate_request_id
+        command_context ||= current_command_context
+        request_id ||= command_context&.transport_request_id || repository.generate_request_id
         task, identity = resolve_task_identity(project: project, slug: slug, argv: argv)
         write!(
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
           request_id: request_id, state_home: state_home, now: now,
-          **identity, repository: repository
+          **identity, repository: repository, command_context: command_context
         )
         unless task
           return DispatchReference.new(
@@ -120,6 +124,12 @@ module Hive
         )
         raise
       end
+
+      def current_command_context
+        return unless defined?(Hive::CommandOperation)
+        Hive::CommandOperation.current_context
+      end
+      private_class_method :current_command_context
 
       # All ERROR / REVIEW_ERROR callers cross this boundary. Surface-specific
       # rows are normalized once, then the coordinator owns cooldown, lock,

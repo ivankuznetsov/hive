@@ -3,14 +3,79 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-09-25
-tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood]
+updated: 2026-09-27
+tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood, receipts]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
 Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist/pairing setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, community support, and how to disable automation mid-flight.
+
+## Durable command-receipt operating envelope
+
+Command receipts live in the host runtime control-plane SQLite database, not
+task folders. Project movement, archive, deletion, or registry removal cannot
+delete them. The project marker and complete database (including committed WAL
+state) must be preserved together. A complete copied/rolled-back pair and
+multi-host continuity remain outside this increment's guarantee.
+
+Planning defaults are namespace A=32 executing and N=1,000 non-terminal;
+installation A=3,200 and N=100,000. A is a subset of N. At 100 fully occupied
+workspaces that is 3,200 executing within 100,000 non-terminal rows. One noisy
+namespace stops itself at its limits; installation backstops can stop all
+namespaces. The preview marks 70% warning and 85% action bands.
+
+Local SQLite 3 measurement on 2026-09-27 used the real additive schema, FULL
+synchronous/WAL settings, and 4 KiB pages. The empty base plus extension
+occupied 360 KiB (398 KiB WAL immediately after installation). At 1,000
+terminal receipts carrying 2 KiB request and 2 KiB result payloads, occupied
+pages were 6,201,344 bytes: about 5.7 KiB incremental per receipt, with WAL at
+about 4.0 MiB after automatic checkpointing. A 50-row near-maximum sample with
+32 KiB requests and 220 KiB results added about 248.3 KiB per receipt. These
+are local allocation measurements, not universal filesystem guarantees; row,
+effect, pin, audit, intent, concurrent-writer, checkpoint, and headroom terms
+must be budgeted separately. The shipped byte limits are conservative operator
+admission thresholds, not reserved space or a finalization guarantee.
+
+With retention W=30 days and weekly prune interval P=7, retained rows are:
+
+`100 * daily_rate * (W + P) + missed_prune_backlog + pinned_terminals_outside_window + nonterminal_rows + orphan_namespace_rows`
+
+The base terms are 370,000, 3,700,000, and 37,000,000 receipts at 100, 1,000,
+and 10,000 operations/workspace/day. At the measured small-row footprint their
+occupied-page estimates alone are roughly 2.0 GiB, 19.6 GiB, and 196 GiB;
+near-maximum payloads are much larger. Pins, missed prune, and removed-project
+namespaces are unbounded until owner maintenance. Prune makes pages reusable
+and may relieve byte admission, but does not shrink the file and does not lower
+N; only terminalizing one non-terminal receipt lowers N.
+
+Unresolved incident sensitivities of 0.1, 1, and 10 per 1,000 operations are
+assumptions, not observed probabilities. At 10,000 operations/day and 10 per
+1,000, one namespace gains about 100 unresolved rows/day: N reaches 70% in 7
+days, 85% in 8.5 days, and stops at 10 days. Across 100 workspaces that is
+10,000/day against the installation cap. Disable new intake if actual arrivals
+exceed settlement capacity; replay and maintenance remain available.
+
+The default staffing assumption is one operator able to act within one business
+day. It is not a service guarantee, an allocated minutes/day value, or measured
+throughput. Installations may override operator count and response business
+days. If T operator minutes per namespace/day is explicitly allocated and a
+representative end-to-end investigation plus confirmed single-receipt
+settlement takes measured t minutes, sustainable arrivals must stay below
+`floor(T/t)` with headroom for backlog and orphan triage. Absent T does not mean
+zero, but it cannot justify a positive ceiling; explicit T=0 yields no positive
+sustainable rate.
+
+At an N stop, consider all of: raise the namespace N config with matching
+installation/byte headroom; terminal-only prune for reusable pages (not N);
+settle one receipt with `hive receipt retire ... --settle-without-result`;
+abandon a stranded maintenance batch; or provision storage. Owner-only
+`hive receipt prune --namespace-id UUID --json` supplies bounded ids and
+generations. An A stop additionally names a live config concurrency increase
+and confirmed orphan-owner reclassification when PID/start-time evidence proves
+death. See [[commands/receipt]] for the trust, pin, audit, and confirmation
+boundaries.
 
 ## Worktree-first workflow
 

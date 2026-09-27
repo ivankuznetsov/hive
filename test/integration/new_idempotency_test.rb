@@ -72,9 +72,13 @@ class NewIdempotencyTest < Minitest::Test
         ).call
       end
       payload = JSON.parse(out)
-      assert_equal Hive::ExitCodes::USAGE, status
+      # The pure call! boundary retains legacy TaskCapture protection. The
+      # public keyed CLI boundary now requires the explicitly installed
+      # durable-receipt extension before it can disclose or reserve a key.
+      assert_equal Hive::ExitCodes::CONFIG, status, payload.inspect
       assert_empty err
-      assert_equal "usage", payload.fetch("error_kind")
+      assert_equal "config", payload.fetch("error_kind")
+      assert_includes payload.fetch("message"), "setup --install-command-receipts"
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
       assert_empty schemer.validate(payload).to_a
       assert_equal 1, idempotent_tasks(project_root).size

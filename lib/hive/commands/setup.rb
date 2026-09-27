@@ -11,6 +11,8 @@ require "hive/web/app_bundle"
 require "hive/commands/setup_agents"
 require "hive/web/environment"
 require "hive/web/service_status"
+require "hive/runtime_control_plane/command_schema_installation"
+require "hive/runtime_control_plane/command_schema_writer_guard"
 
 module Hive
   module Commands
@@ -44,12 +46,16 @@ module Hive
       end
 
       def initialize(json: false, service: true, no_bootstrap: false,
-                     no_init: false, yes: false, input: $stdin, output: $stdout,
-                     error: $stderr, environment: ENV, setup_agents_factory: nil)
+                     no_init: false, install_command_receipts: false,
+                     yes: false, input: $stdin, output: $stdout,
+                     error: $stderr, environment: ENV, setup_agents_factory: nil,
+                     rollback_package: Hive::RuntimeControlPlane::CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE,
+                     command_schema_writer_guard: Hive::RuntimeControlPlane::CommandSchemaWriterGuard)
         @json = json
         @service = service
         @no_bootstrap = no_bootstrap
         @no_init = no_init
+        @install_command_receipts = install_command_receipts
         @yes = yes
         @input = input
         @output = output
@@ -59,10 +65,13 @@ module Hive
         @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
           Hive::Commands::SetupAgents.new(**kwargs)
         end
+        @rollback_package = rollback_package
+        @command_schema_writer_guard = command_schema_writer_guard
         @phases = []
       end
 
       def call
+        validate_receipt_installation_preconditions! if @install_command_receipts && !@no_bootstrap
         Hive::Web::Environment.emit_warnings(
           environment: @environment,
           output: @error || $stderr,
@@ -78,37 +87,40 @@ module Hive
         # enrollment either. Otherwise a "diagnose" run silently force-installs
         # the daemon and enrolls the cwd.
         unless @no_bootstrap
+          emit_receipt_installation_disclosure if @install_command_receipts
           setup_agent_skills
           unless agent_setup_refused?
             bootstrap_qmd_if_missing(diagnostics)
             web_bundle = bootstrap_web_bundle
             enroll_project unless @no_init
-            bootstrap_runtime_control_plane
-            install_daemon
-            install_babysitter
-            if @service
-              if web_config_error
-                # A malformed global `web` block must never be silently
-                # replaced by defaults for a real mutation: leave the service
-                # untouched and record why; add_web_phase fails the run below.
-                observe_web_service(
-                  mutation: "blocked",
-                  ok: false,
-                  message: "web service not installed because #{web_config_error.message}"
-                )
-              elsif web_bundle["ok"]
-                install_web_service
+            runtime_phase = bootstrap_runtime_control_plane
+            if runtime_phase["ok"]
+              install_daemon
+              install_babysitter
+              if @service
+                if web_config_error
+                  # A malformed global `web` block must never be silently
+                  # replaced by defaults for a real mutation: leave the service
+                  # untouched and record why; add_web_phase fails the run below.
+                  observe_web_service(
+                    mutation: "blocked",
+                    ok: false,
+                    message: "web service not installed because #{web_config_error.message}"
+                  )
+                elsif web_bundle["ok"]
+                  install_web_service
+                else
+                  observe_web_service(
+                    mutation: "blocked",
+                    ok: false,
+                    message: "web service not installed because web_bundle failed"
+                  )
+                end
               else
-                observe_web_service(
-                  mutation: "blocked",
-                  ok: false,
-                  message: "web service not installed because web_bundle failed"
-                )
+                observe_web_service
               end
-            else
-              observe_web_service
+              initialize_daily_digest
             end
-            initialize_daily_digest
           end
         end
         add_web_phase
@@ -118,6 +130,23 @@ module Hive
       end
 
       private
+
+      def validate_receipt_installation_preconditions!
+        require "hive/runtime_control_plane/command_schema_installation"
+        require "hive/runtime_control_plane/command_schema_writer_guard"
+        Hive::RuntimeControlPlane::CommandSchemaInstallation.validate_coordinates!(@rollback_package)
+        @command_schema_writer_guard.verify!(state_home: Hive::Paths.state_home)
+      end
+
+      def emit_receipt_installation_disclosure
+        coordinates = @rollback_package.transform_keys(&:to_sym)
+        message = "hive setup: command receipt installation changes the shared host control-plane " \
+          "database for every project/service, even while namespace intake gates are disabled; " \
+          "unmodified pre-compatibility builds will refuse it. Rollback package: " \
+          "#{coordinates.fetch(:version)} at #{coordinates.fetch(:location)} " \
+          "(sha256 #{coordinates.fetch(:sha256)})."
+        @error.puts(message) unless @json
+      end
 
       # Digest initialization is advisory to setup: failure keeps the feature
       # disabled and must not undo unrelated daemon/Web provisioning. The
@@ -250,9 +279,22 @@ module Hive
       def bootstrap_runtime_control_plane
         phase("runtime_control_plane") do
           require "hive/runtime_control_plane/installation"
-          status = Hive::RuntimeControlPlane::Installation.setup
-          [ true, { "phase" => status.fetch("phase"),
-                    "database" => status.fetch("database").fetch("path") } ]
+          status = Hive::RuntimeControlPlane::Installation.setup(
+            install_command_receipts: @install_command_receipts,
+            rollback_package: @rollback_package,
+            writer_guard: @command_schema_writer_guard
+          )
+          details = {
+            "phase" => status.fetch("phase"),
+            "database" => status.fetch("database").fetch("path"),
+            "command_receipts_requested" => @install_command_receipts
+          }
+          if @install_command_receipts
+            details["shared_installation_impact"] = true
+            details["namespace_intake_default"] = "disabled"
+            details["rollback_package"] = @rollback_package.transform_keys(&:to_s)
+          end
+          [ true, details ]
         end
       end
 

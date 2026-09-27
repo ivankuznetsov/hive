@@ -287,6 +287,15 @@ reference.
  "attempt_first_heartbeat_timeout_sec" => 30,
  "project_name" => nil,
  "permissions" => "yolo",
+ "command_receipts" =>
+  {"keyed_intake_enabled" => false,
+   "nonterminal_limit" => 1000,
+   "concurrency_limit" => 32,
+   "byte_admission_limit" => 67108864,
+   "staffing" =>
+    {"operator_count" => 1,
+     "response_business_days" => 1,
+     "minutes_per_namespace_per_day" => nil}},
  "claude" =>
   {"mode" => "tmux",
    "permission_mode" => "bypassPermissions",
@@ -572,7 +581,8 @@ reference.
    "port" => 4567,
    "origin" => "http://127.0.0.1:4567",
    "local_loopback" => true,
-   "github" => {"owner" => nil, "client_id" => "Ov23liYChIkP5PU4bvo1"},
+   "github" =>
+    {"owner" => nil, "owner_id" => nil, "client_id" => "Ov23liYChIkP5PU4bvo1"},
    "session_secret_file" => nil},
  "screenote" => {"base_url" => "https://screenote.ai"},
  "babysitter" =>

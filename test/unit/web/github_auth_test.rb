@@ -95,12 +95,12 @@ class GithubAuthTest < Minitest::Test
   def test_poll_grants_login_and_sends_device_grant_contract
     auth, http = build_auth(
       token: JSON.generate("access_token" => "tok"),
-      user: JSON.generate("login" => "octo")
+      user: JSON.generate("login" => "octo", "id" => 42)
     )
 
     result = auth.poll_device_flow("dev-1")
 
-    assert_equal({ state: :ok, login: "octo", token: "tok" }, result,
+    assert_equal({ state: :ok, login: "octo", id: 42, token: "tok" }, result,
                  "the granted token must be returned for callers that need API access (repo listing)")
     token_req = http.requests.find { |r| r.path.include?("/login/oauth/access_token") }
     assert token_req, "the poll must hit the token endpoint"
@@ -186,5 +186,18 @@ class GithubAuthTest < Minitest::Test
 
     assert auth.owner?("alice")
     refute auth.owner?("bob")
+  end
+
+  def test_maintenance_owner_requires_matching_login_and_numeric_id
+    auth = Hive::Web::GithubAuth.new(
+      config: { "github" => { "owner" => "Alice", "owner_id" => 42, "client_id" => "id" } }
+    )
+
+    assert auth.maintenance_owner?("alice", 42)
+    refute auth.maintenance_owner?("alice", 43)
+    refute auth.maintenance_owner?("bob", 42)
+    refute Hive::Web::GithubAuth.new(
+      config: { "github" => { "owner" => "Alice", "client_id" => "id" } }
+    ).maintenance_owner?("alice", 42)
   end
 end

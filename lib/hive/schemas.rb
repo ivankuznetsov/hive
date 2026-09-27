@@ -112,6 +112,8 @@ module Hive
       # conversations. Bindings are revalidated under a creation-disabled task
       # lock; the command never advances a workflow stage.
       "hive-answer" => 1,
+      "hive-command-receipt" => 1,
+      "hive-receipt-prune" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,
@@ -207,6 +209,15 @@ module Hive
           payload["reason_code"] = error.reason_code
           payload["offending_ref"] = error.offending_ref
           payload["safe_correction"] = error.safe_correction
+        end
+        if error.is_a?(Hive::CommandOutcomeError)
+          payload["reason"] = error.reason
+          payload["state"] = error.state
+          payload["command_receipt"] = error.command_receipt if error.command_receipt
+        end
+        if error.is_a?(Hive::CommandCapacityError)
+          payload["reason"] = error.reason
+          payload["scope"] = error.scope
         end
         payload
       end
@@ -329,6 +340,19 @@ module Hive
       CONFIG            = "config".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
+      COMMAND_CONFLICT = "command_conflict".freeze
+      COMMAND_IN_PROGRESS = "command_in_progress".freeze
+      COMMAND_UNRESOLVED_PENDING = "command_unresolved_pending".freeze
+      COMMAND_PIN_HORIZON_ELAPSED = "command_pin_horizon_elapsed".freeze
+      COMMAND_CAPACITY_EXHAUSTED = "command_capacity_exhausted".freeze
+      COMMAND_NONTERMINAL_LIMIT = "command_nonterminal_limit".freeze
+      COMMAND_CONCURRENCY_LIMIT = "command_concurrency_limit".freeze
+      COMMAND_PRUNE_BUSY = "command_prune_busy".freeze
+      COMMAND_PRUNE_STORAGE_UNAVAILABLE = "command_prune_storage_unavailable".freeze
+      COMMAND_PRUNE_PREVIEW_UNAVAILABLE = "command_prune_preview_unavailable".freeze
+      COMMAND_ORPHANED_PIN = "command_orphaned_pin".freeze
+      COMMAND_ORIGINAL_RESULT_UNAVAILABLE = "command_original_result_unavailable".freeze
+      COMMAND_INTAKE_DISABLED = "command_intake_disabled".freeze
       ALL = constants(false).reject { |constant| constant == :ALL }.map { |constant| const_get(constant) }.freeze
     end
 

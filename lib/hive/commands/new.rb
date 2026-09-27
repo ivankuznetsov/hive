@@ -23,6 +23,7 @@ require "hive/tui/text"
 require "hive/dependencies"
 require "hive/worktree"
 require "hive/daily_digest/task_creation_receipt"
+require "hive/command_operation"
 
 module Hive
   module Commands
@@ -86,7 +87,7 @@ module Hive
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
                      depends_on: nil, workflow: nil, idempotency_key: nil, json: false,
-                     task_capture_factory: nil)
+                     task_capture_factory: nil, command_receipt_store: nil)
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
@@ -97,6 +98,7 @@ module Hive
         @workflow_name = workflow
         @idempotency_key_raw = idempotency_key
         @task_capture_factory = task_capture_factory || ->(**options) { Hive::TaskCapture.new(**options) }
+        @command_receipt_store = command_receipt_store
         # Machine-readable creation was added for idempotent automation.
         # Preserve the legacy plain-text contract for a bare `hive new --json`
         # whose caller did not opt into that side-effect boundary.
@@ -123,7 +125,13 @@ module Hive
       # raising so they can rescue typed errors without losing the alt
       # screen.
       def call
-        call_with_envelope { call! }
+        call_with_envelope do
+          if @idempotency_key_raw.nil?
+            call!
+          else
+            command_operation.call { call! }
+          end
+        end
       rescue Hive::Error, SystemCallError, IOError => e
         warn "hive: #{e.message}" unless @json
         # Honor each typed error's contract exit code (e.g. UnknownWorkflow →
@@ -137,6 +145,8 @@ module Hive
 
       def envelope_error_kind(error)
         case error
+        when Hive::CommandOutcomeError then error.reason
+        when Hive::CommandCapacityError then error.reason
         when IdempotencyConflict, InvalidBaseError, InvalidDraftPrCombination,
              Hive::Workflows::UnknownWorkflow then "usage"
         when Hive::ConfigError, ProjectConfigUnreadable, UnregisteredProjectWorkflow then "config"
@@ -154,6 +164,41 @@ module Hive
       end
 
       def envelope_serialization_failure_policy = :raise
+
+      def command_operation
+        Hive::CommandOperation.new(
+          key: @idempotency_key_raw,
+          command: "new",
+          target: @project_name,
+          request: {
+            "text_sha256" => ::Digest::SHA256.hexdigest(@text),
+            "slug" => @slug_override,
+            "body_sha256" => @body_override && ::Digest::SHA256.hexdigest(@body_override.to_s),
+            "base" => @base,
+            "depends_on" => @depends_on,
+            "workflow" => @workflow_name,
+            "attachments" => @attachments.map { |attachment| attachment_identity(attachment) }
+          },
+          project_root: lambda {
+            project = Hive::Config.find_project(@project_name)
+            raise ProjectNotFound.new(
+              "project not initialized: #{@project_name} (run `hive init <path>` first)",
+              value: @project_name
+            ) unless project
+            project.fetch("path")
+          },
+          json: @json,
+          store: @command_receipt_store || Hive::CommandReceiptStore.new
+        )
+      end
+
+      def attachment_identity(attachment)
+        path = attachment.respond_to?(:path) ? attachment.path : attachment.to_s
+        {
+          "name" => File.basename(path.to_s),
+          "sha256" => File.file?(path.to_s) ? ::Digest::SHA256.file(path.to_s).hexdigest : nil
+        }
+      end
 
       def call!
         project = Hive::Config.find_project(@project_name)

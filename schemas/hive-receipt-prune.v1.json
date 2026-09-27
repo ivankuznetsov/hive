@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:receipt-prune:v1",
+  "title": "hive receipt prune output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "required": [
+        "schema", "schema_version", "ok", "preview", "confirmed", "cutoff",
+        "candidate_count", "candidates", "warning_band_percent", "action_band_percent"
+      ],
+      "properties": {
+        "schema": { "const": "hive-receipt-prune" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "preview": { "type": "boolean" },
+        "confirmed": { "type": "boolean" },
+        "namespace_id": { "type": ["string", "null"] },
+        "cutoff": { "type": "string", "format": "date-time" },
+        "candidate_count": { "type": "integer", "minimum": 0 },
+        "candidates": { "type": "array" },
+        "warning_band_percent": { "const": 70 },
+        "action_band_percent": { "const": 85 }
+      },
+      "additionalProperties": true
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-receipt-prune" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "usage", "config", "internal", "command_conflict", "command_in_progress",
+            "command_unresolved_pending", "command_capacity_exhausted",
+            "command_prune_busy", "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable"
+          ]
+        },
+        "exit_code": { "type": "integer", "enum": [1, 20, 21, 22, 64, 70, 75, 78] },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

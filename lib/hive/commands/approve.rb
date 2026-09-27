@@ -21,6 +21,7 @@ require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
 require "hive/plan_review/transition_guard"
 require "hive/task_activity"
+require "hive/command_operation"
 
 module Hive
   module Commands
@@ -52,6 +53,8 @@ module Hive
 
       def self.error_kind_for(error)
         case error
+        when Hive::CommandOutcomeError then error.reason
+        when Hive::CommandCapacityError then error.reason
         when Hive::PlanReview::TransitionBlocked then "plan_review_blocked"
         when Hive::AmbiguousSlug then "ambiguous_slug"
         when Hive::DestinationCollision then "destination_collision"
@@ -67,7 +70,8 @@ module Hive
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
                      observation_guard: nil, post_rearm_mutation: nil, commit_lock: true,
-                     clock: DEFAULT_CLOCK, dependency_admission: true)
+                     clock: DEFAULT_CLOCK, dependency_admission: true,
+                     idempotency_key: nil, command_receipt_store: nil)
         @target = target
         @to = to
         @from = from
@@ -83,10 +87,18 @@ module Hive
         @commit_lock = commit_lock
         @clock = clock
         @dependency_admission = dependency_admission
+        @idempotency_key = idempotency_key
+        @command_receipt_store = command_receipt_store
       end
 
       def call
-        call_with_envelope { do_call }
+        call_with_envelope do
+          if @idempotency_key
+            command_operation.call { do_call }
+          else
+            do_call
+          end
+        end
       end
 
       def envelope_schema
@@ -108,6 +120,21 @@ module Hive
       end
 
       private
+
+      def command_operation
+        Hive::CommandOperation.new(
+          key: @idempotency_key,
+          command: "approve",
+          target: @target,
+          request: {
+            "to" => @to, "from" => @from, "project" => @project_filter,
+            "force" => @force
+          },
+          project_root: -> { resolve_task.project_root },
+          json: @json,
+          store: @command_receipt_store || Hive::CommandReceiptStore.new
+        )
+      end
 
       # ── Pipeline ────────────────────────────────────────────────────────
 

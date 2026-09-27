@@ -7,13 +7,14 @@ require "sequel/extensions/migration"
 require "sqlite3"
 require "hive/atomic_file"
 require "hive/runtime_control_plane/file_fence"
+require "hive/runtime_control_plane/command_schema"
 
 module Hive
   module RuntimeControlPlane
     EXPECTED_SCHEMA_SHA256 = "92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0".freeze
 
     class Database
-      MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze
+      MIGRATE_ACTION = "stop Hive writers and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md; command receipts require explicit `hive setup --install-command-receipts`".freeze
       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
       MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
       attr_reader :path, :owner_pid
@@ -89,6 +90,26 @@ module Hive
           yield @connection
         ensure
           @connection&.run("PRAGMA query_only = OFF")
+        end
+      end
+
+      # Inspection path for receipt dry-runs. It deliberately avoids
+      # ensure_open!/connect!, which set WAL and connection pragmas. Refuse a
+      # recovering WAL shape instead of letting a preview create sidecars.
+      def read_only
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          validate_database_custody!
+          wal = File.exist?("#{path}-wal")
+          shm = File.exist?("#{path}-shm")
+          unless wal == shm
+            raise Hive::CommandCapacityError.new(
+              "command prune preview is unavailable while SQLite sidecars are recovering; " \
+              "restore normal database availability and retry",
+              reason: :command_prune_preview_unavailable, scope: :installation
+            )
+          end
+          inspect_database { |connection| yield connection }
         end
       end
 
@@ -574,17 +595,27 @@ module Hive
       end
 
       def exact_schema?(database, expected: EXPECTED_SCHEMA_SHA256)
-        schema_fingerprint(database) == expected
+        extension_rows, base_rows = schema_rows(database).partition do |row|
+          CommandSchema.extension_object?(row[1])
+        end
+        base_valid = Digest::SHA256.hexdigest(Codec.dump_json(base_rows)) == expected
+        extension_valid = extension_rows.empty? ||
+          (extension_rows.map { |row| row[1].to_s }.sort == CommandSchema::OBJECT_NAMES.sort &&
+           Digest::SHA256.hexdigest(Codec.dump_json(extension_rows)) ==
+             CommandSchema::EXPECTED_SCHEMA_SHA256)
+        base_valid && extension_valid
       rescue Sequel::Error
         false
       end
 
-
       def schema_fingerprint(database)
-        rows = database[:sqlite_master].where(type: %w[table index])
+        Digest::SHA256.hexdigest(Codec.dump_json(schema_rows(database)))
+      end
+
+      def schema_rows(database)
+        database[:sqlite_master].where(type: %w[table index])
           .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
           .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
-        Digest::SHA256.hexdigest(Codec.dump_json(rows))
       end
 
       def copy_quiescence_source!(temporary_path, now:, preserve_lifecycle:)

@@ -954,3 +954,21 @@ historical upgrade survivor lanes. Current setup, database integrity, task journ
 recovery, workflow-package upgrades and source-state visibility remain required.
 Old installations use the external agent conversion guide with verified backups.
 Current release artifact authenticity and native install checks remain required.
+
+## Additive command-receipt extension (2026-09-27)
+
+The base runtime control-plane remains schema version 1 with its existing
+checksum. Durable command receipts are an independently checksummed, purely
+additive extension installed only by explicit
+`hive setup --install-command-receipts`. Ordinary startup and ordinary setup do
+not install it. Exact validation partitions known base and extension objects;
+partial or unknown additions fail closed. Migration 002 creates new tables and
+indexes only and changes no existing table, row, or `schema_info` value.
+
+The supported rollback target is a compatibility-patched prior runtime that
+validates the unchanged base separately and recognizes the exact extension
+manifest while otherwise ignoring its retained rows. Production opt-in remains
+disabled until a maintainer publishes, retains, and pins that package's version,
+authenticated HTTPS location, and SHA-256. This is schema compatibility, not a
+consumer-adoption gate. Namespace keyed intake is separately disabled by
+default.

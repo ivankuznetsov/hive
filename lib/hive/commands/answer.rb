@@ -13,6 +13,7 @@ require "hive/task_meta"
 require "hive/task_resolver"
 require "hive/task_activity"
 require "hive/workflows"
+require "hive/command_operation"
 
 module Hive
   module Commands
@@ -52,17 +53,30 @@ module Hive
       end
 
       def initialize(target, project: nil, binding: nil, json: false,
-                     input: $stdin, output: $stdout)
+                     input: $stdin, output: $stdout, idempotency_key: nil,
+                     command_receipt_store: nil)
         @target = target.to_s
         @project_filter = project
         @binding_token = binding.to_s
         @json = json
         @input = input
         @output = output
+        @idempotency_key = idempotency_key
+        @command_receipt_store = command_receipt_store
       end
 
       def call
-        payload = @binding_token.empty? ? inventory_payload : mutation_payload
+        if @binding_token.empty?
+          raise InvalidBinding, "--idempotency-key is valid only with --binding" if @idempotency_key
+          payload = inventory_payload
+        elsif @idempotency_key
+          answer_text = read_answer!
+          payload = command_operation(answer_text).call do
+            mutation_payload(answer_text: answer_text)
+          end
+        else
+          payload = mutation_payload
+        end
         emit(payload)
         payload
       rescue Hive::Error => e
@@ -119,9 +133,9 @@ module Hive
         }
       end
 
-      def mutation_payload
+      def mutation_payload(answer_text: nil)
         binding = decode_binding(@binding_token)
-        answer_text = read_answer!
+        answer_text ||= read_answer!
         return write_outcome(binding, outcome: "stale", reason: "identity_changed") unless
           invocation_matches_binding?(binding)
 
@@ -144,6 +158,25 @@ module Hive
         rescue Errno::ENOENT
           write_outcome(binding, outcome: "stale", reason: "task_moved")
         end
+      end
+
+      def command_operation(answer_text)
+        binding = decode_binding(@binding_token)
+        Hive::CommandOperation.new(
+          key: @idempotency_key,
+          command: "answer",
+          mode: "write",
+          target: @target,
+          request: {
+            "project" => @project_filter,
+            "binding_sha256" => ::Digest::SHA256.hexdigest(@binding_token),
+            "answer_sha256" => answer_fingerprint(answer_text)
+          },
+          project_root: -> { resolve_task(@target, binding.fetch("project")).project_root },
+          json: true,
+          structured: true,
+          store: @command_receipt_store || Hive::CommandReceiptStore.new
+        )
       end
 
       def mutate_under_lock(binding, answer_text, observed_task)
@@ -677,6 +710,8 @@ module Hive
 
       def error_kind(error)
         case error
+        when Hive::CommandOutcomeError then error.reason
+        when Hive::CommandCapacityError then error.reason
         when InvalidBinding then "invalid_binding"
         when InvalidAnswer then "invalid_answer"
         when Hive::WrongStage then "wrong_stage"

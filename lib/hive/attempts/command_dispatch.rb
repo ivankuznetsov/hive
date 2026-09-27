@@ -11,12 +11,15 @@ module Hive
 
       def dispatch_durable
         task = resolve_task
-        result = (@attempts_api || Hive::Attempts::API.new).dispatch(
+        attributes = {
           task: task,
           intended_stage: durable_intended_stage(task),
           argv: durable_worker_argv(task),
           interactive: true
-        )
+        }
+        context = defined?(Hive::CommandOperation) && Hive::CommandOperation.current_context
+        attributes[:request_id] = context.transport_request_id if context
+        result = (@attempts_api || Hive::Attempts::API.new).dispatch(**attributes)
         if @json && result.output_status == :expired
           raise Hive::ConcurrentRunError,
                 "raw output for successful durable attempt #{result.attempt_id} expired; " \

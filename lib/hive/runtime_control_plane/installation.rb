@@ -1,6 +1,8 @@
 require "tmpdir"
 require "hive/runtime_control_plane"
 require "hive/daemon/activation_lock"
+require "hive/runtime_control_plane/command_schema_installation"
+require "hive/runtime_control_plane/command_schema_writer_guard"
 
 module Hive
   module RuntimeControlPlane
@@ -9,8 +11,12 @@ module Hive
     module Installation
       module_function
 
-      def setup(state_home: Hive::Paths.state_home)
+      def setup(state_home: Hive::Paths.state_home, install_command_receipts: false,
+                rollback_package: CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE,
+                writer_guard: CommandSchemaWriterGuard)
+        CommandSchemaInstallation.validate_coordinates!(rollback_package) if install_command_receipts
         Hive::Daemon::ActivationLock.new(hive_home: state_home).synchronize do
+          writer_guard.verify!(state_home: state_home) if install_command_receipts
           path = Hive::Paths.runtime_control_plane_path(state_home)
           database = Database.new(path: path)
           diagnosis = database.diagnostics
@@ -35,6 +41,16 @@ module Hive
             end
           else
             raise diagnosis.error unless diagnosis.ok?
+          end
+          if install_command_receipts
+            extension_database = Database.new(path: path)
+            begin
+              CommandSchemaInstallation.install!(
+                database: extension_database, package_coordinates: rollback_package
+              )
+            ensure
+              extension_database.disconnect
+            end
           end
           status(state_home: state_home)
         ensure

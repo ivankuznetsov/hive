@@ -9,6 +9,9 @@ module Hive
     ALREADY_INITIALIZED = 2
     TASK_IN_ERROR = 3
     WRONG_STAGE = 4
+    COMMAND_CONFLICT = 20
+    COMMAND_IN_PROGRESS = 21
+    COMMAND_UNRESOLVED = 22
     USAGE = 64
     UNAVAILABLE = 69
     SOFTWARE = 70
@@ -26,6 +29,60 @@ module Hive
     def exit_code
       ExitCodes::CONFIG
     end
+  end
+
+  class CommandOutcomeError < Error
+    attr_reader :reason, :state, :command_receipt
+
+    def initialize(message, reason:, state:, command_receipt: nil)
+      super(message)
+      @reason = reason.to_s
+      @state = state.to_s
+      @command_receipt = command_receipt
+    end
+  end
+
+  class CommandConflict < CommandOutcomeError
+    def initialize(message = "idempotency key is already claimed by a different request")
+      super(message, reason: "command_conflict", state: "conflict")
+    end
+
+    def exit_code = ExitCodes::COMMAND_CONFLICT
+  end
+
+  class CommandInProgress < CommandOutcomeError
+    def initialize(command_receipt: nil)
+      super(
+        "an identical keyed command is already in progress",
+        reason: "command_in_progress", state: "executing", command_receipt: command_receipt
+      )
+    end
+
+    def exit_code = ExitCodes::COMMAND_IN_PROGRESS
+  end
+
+  class CommandUnresolved < CommandOutcomeError
+    def initialize(reason: "command_unresolved_pending", state: "unresolved", command_receipt: nil,
+                   message: nil)
+      super(
+        message || "the original keyed command has unresolved effects and will not be repeated",
+        reason: reason, state: state, command_receipt: command_receipt
+      )
+    end
+
+    def exit_code = ExitCodes::COMMAND_UNRESOLVED
+  end
+
+  class CommandCapacityError < Error
+    attr_reader :reason, :scope
+
+    def initialize(message, reason:, scope:)
+      super(message)
+      @reason = reason.to_s
+      @scope = scope.to_s
+    end
+
+    def exit_code = ExitCodes::TEMPFAIL
   end
 
   # Process exit-code contract for the `hive` CLI.

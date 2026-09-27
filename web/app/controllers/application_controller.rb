@@ -53,6 +53,23 @@ class ApplicationController < ActionController::Base
     session[:github_login]
   end
 
+  # Internal command adapters consume this typed identity; request parameters,
+  # display labels and forwarded headers are never principal sources.
+  def command_maintenance_authority
+    require "hive/command_maintenance_authority"
+    database = Hive::RuntimeControlPlane.database
+    if local_loopback_request?
+      Hive::CommandMaintenanceAuthority.loopback(
+        database: database, peer_address: request.get_header("REMOTE_ADDR")
+      )
+    else
+      Hive::CommandMaintenanceAuthority.github(
+        config: Hive::Config.load_global_web, login: session[:github_login],
+        id: session[:github_id], peer_address: request.get_header("REMOTE_ADDR")
+      )
+    end
+  end
+
   # Loopback mode is authenticated by the connection itself rather than a
   # GitHub session. Treat that operator as signed in for navigation while
   # keeping GitHub-specific actions behind an explicit account connection.

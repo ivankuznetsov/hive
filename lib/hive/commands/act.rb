@@ -1,5 +1,7 @@
 require "json"
 require "hive/operational_action"
+require "hive/command_operation"
+require "hive/task_resolver"
 
 module Hive
   module Commands
@@ -7,23 +9,30 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
 
       def initialize(action_id, target, observation:, json: false,
-                     executor: Hive::OperationalAction::Executor.new)
+                     executor: Hive::OperationalAction::Executor.new,
+                     project: nil, idempotency_key: nil, command_receipt_store: nil)
         @action_id = action_id
         @target = target
         @observation = observation
         @json = json
         @executor = executor
+        @project_filter = project
+        @idempotency_key = idempotency_key
+        @command_receipt_store = command_receipt_store
       end
 
       def call
         call_with_envelope do
-          validate!
-          result = @executor.execute(
-            action_id: @action_id,
-            target: @target,
-            observation_token: @observation
-          )
-          emit_success(result)
+          invoke = lambda do
+            validate!
+            result = @executor.execute(
+              action_id: @action_id,
+              target: @target,
+              observation_token: @observation
+            )
+            emit_success(result)
+          end
+          @idempotency_key ? command_operation.call(&invoke) : invoke.call
         end
       end
 
@@ -35,6 +44,8 @@ module Hive
 
       def envelope_error_kind(error)
         case error
+        when Hive::CommandOutcomeError then error.reason
+        when Hive::CommandCapacityError then error.reason
         when Hive::AmbiguousSlug then "ambiguous_target"
         when Hive::OperationalActionUsageError, Hive::InvalidTaskPath then "usage"
         when Hive::StaleOperationalObservation, Hive::WrongStage then "stale_observation"
@@ -50,6 +61,24 @@ module Hive
       def envelope_serialization_failure_policy = :raise
 
       private
+
+      def command_operation
+        Hive::CommandOperation.new(
+          key: @idempotency_key,
+          command: "act",
+          target: @target,
+          request: {
+            "action_id" => @action_id,
+            "observation" => @observation,
+            "project" => @project_filter
+          },
+          project_root: lambda {
+            Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve.project_root
+          },
+          json: @json,
+          store: @command_receipt_store || Hive::CommandReceiptStore.new
+        )
+      end
 
       def validate!
         if @action_id.to_s.empty? || @target.to_s.empty?

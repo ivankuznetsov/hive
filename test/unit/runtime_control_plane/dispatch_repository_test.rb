@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/runtime_control_plane/command_schema_installation"
 
 class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
   include HiveTestHelper
@@ -77,6 +78,56 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
       assert restarted.acknowledge_result(id, now: NOW + 2)
       refute restarted.acknowledge_result(id, now: NOW + 2)
       assert_empty restarted.pending_results
+    end
+  end
+
+  def test_tagged_command_dispatch_persists_authenticated_context_atomically
+    with_repository do |repository|
+      Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+        database: repository.database,
+        package_coordinates: {
+          version: "test", location: "https://example.invalid/compat.gem",
+          sha256: "a" * 64
+        }
+      )
+      request_id = "command-dispatch:v1:#{'b' * 64}"
+      context = {
+        receipt_id: "receipt-1", effect_id: "effect-1", principal: "principal-1",
+        principal_source: "local_cli", ordinal: 0,
+        request_fingerprint: "c" * 64, transport_request_id: request_id
+      }
+      repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: request_id, task_generation: "generation-1", now: NOW,
+        command_context: context
+      )
+
+      assert_equal "principal-1", repository.command_context(request_id).fetch("principal")
+      assert_equal request_id, repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: request_id, task_generation: "generation-1", now: NOW,
+        command_context: context
+      )
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_request!(
+          project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: request_id, task_generation: "generation-1", now: NOW,
+          command_context: context.merge(principal: "forged")
+        )
+      end
+    end
+  end
+
+  def test_tagged_command_dispatch_refuses_missing_context
+    with_repository do |repository|
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_request!(
+          project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: "command-dispatch:v1:#{'d' * 64}", now: NOW
+        )
+      end
+      assert_equal :dispatch_context_missing, error.code
+      assert_empty repository.pending
     end
   end
 

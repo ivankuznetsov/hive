@@ -11,6 +11,23 @@ hive_state_path: .hive-state
 default_workflow: "<%= default_workflow %>"
 <% end -%>
 
+# Durable command receipts are installed separately with
+# `hive setup --install-command-receipts`. New keyed intake remains disabled
+# until this canonical project policy is explicitly enabled; linked worktrees
+# resolve this same file. Replay and authorized maintenance remain available
+# while intake is disabled.
+command_receipts:
+  keyed_intake_enabled: false
+  nonterminal_limit: 1000
+  concurrency_limit: 32
+  byte_admission_limit: 67108864
+  staffing:
+    operator_count: 1
+    response_business_days: 1
+    # Response latency is not settlement throughput. Set this only from an
+    # actual operator allocation; zero means no positive sustainable rate.
+    minutes_per_namespace_per_day:
+
 claude:
   # tmux uses your logged-in Claude session in an attachable pane.
   # headless keeps the non-interactive `claude -p` path.

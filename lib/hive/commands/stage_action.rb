@@ -11,6 +11,7 @@ require "hive/attempts/context"
 require "hive/attempts/command_dispatch"
 require "hive/conditions/transition_guard"
 require "hive/modules/event_publisher"
+require "hive/command_operation"
 
 module Hive
   module Commands
@@ -37,7 +38,8 @@ module Hive
       def initialize(verb, target, project: nil, from: nil, json: false,
                      durable: false, attempt_entrypoint: nil, quiet: false,
                      observation_guard: nil,
-                     module_event_publisher: nil)
+                     module_event_publisher: nil, idempotency_key: nil,
+                     command_receipt_store: nil)
         @verb = verb
         @target = target
         @project_filter = project
@@ -48,11 +50,14 @@ module Hive
         @quiet = quiet
         @observation_guard = observation_guard
         @module_event_publisher = module_event_publisher || Hive::Modules::EventPublisher.new
+        @idempotency_key = idempotency_key
+        @command_receipt_store = command_receipt_store
       end
 
       def call
         call_with_envelope do
-          @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call
+          invoke = -> { @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call }
+          @idempotency_key ? command_operation.call(&invoke) : invoke.call
         end
       end
 
@@ -71,6 +76,19 @@ module Hive
       def envelope_serialization_failure_policy = :raise
 
       private
+
+      def command_operation
+        Hive::CommandOperation.new(
+          key: @idempotency_key,
+          command: "stage_action",
+          mode: @verb,
+          target: @target,
+          request: { "verb" => @verb, "from" => @from, "project" => @project_filter },
+          project_root: -> { resolve_task.project_root },
+          json: @json,
+          store: @command_receipt_store || Hive::CommandReceiptStore.new
+        )
+      end
 
       def durable_intended_stage(_task)
         Hive::Workflows.for_verb(@verb).fetch(:target)

@@ -6,6 +6,18 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
     hive_state_path: <%= p["hive_state_path"] %>
 <% end %>
 
+# Installation backstops for the shared runtime control-plane database.
+# Project config cannot override these values. Raising a byte threshold does
+# not create disk space and all changes take effect on the next admission.
+# command_receipts:
+#   installation_nonterminal_limit: 100000
+#   installation_concurrency_limit: 3200
+#   installation_byte_admission_limit: 6710886400
+#   staffing:
+#     operator_count: 1
+#     response_business_days: 1
+#     minutes_per_namespace_per_day:
+
 # Optional provider-account registry. It is ignored until a project stage
 # declares an explicit `routing.pool`; unconfigured projects never load it.
 # `launch_binding` is a non-secret adapter-owned context identity, not a token,

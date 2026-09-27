@@ -316,7 +316,9 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
 
   def test_receipt_maintenance_retires_authoritatively_accounted_effects
     with_receipts do |project, database, store, authority|
-      maintenance = Hive::CommandReceiptMaintenance.new(database: database, authority: authority)
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority, alive: ->(_) { false }
+      )
 
       succeeded = executing_claim(store, project, "succeeded")
       effect = store.prepare_effect(succeeded, ordinal: 0, kind: "test", identity: {})
@@ -326,18 +328,13 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       store.mark_unresolved(succeeded, reason: "lost")
       row = store.receipt(succeeded.receipt_id)
       succeeded_row = row
-      preview = maintenance.retire_with_evidence(
-        row.fetch(:receipt_id), expected_generation: row.fetch(:generation),
-        evidence: { "outcome" => "succeeded", "result" => { "ok" => true } },
-        reason: "verified", confirm: false
-      )
-      assert preview.fetch("preview")
-      result = maintenance.retire_with_evidence(
-        row.fetch(:receipt_id), expected_generation: row.fetch(:generation),
-        evidence: { "outcome" => "succeeded", "result" => { "ok" => true } },
-        reason: "verified", confirm: true
-      )
-      assert_equal "succeeded", result.fetch("state")
+      assert_raises(Hive::CommandUnresolved) do
+        maintenance.retire_with_evidence(
+          row.fetch(:receipt_id), expected_generation: row.fetch(:generation),
+          evidence: { "outcome" => "succeeded", "result" => { "ok" => true } },
+          reason: "verified", confirm: false
+        )
+      end
 
       failed = executing_claim(store, project, "failed")
       effect = store.prepare_effect(failed, ordinal: 0, kind: "test", identity: {})
@@ -350,7 +347,8 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
         row.fetch(:receipt_id), expected_generation: row.fetch(:generation),
         evidence: {
           "outcome" => "not_applied", "whole_effect_non_application" => true,
-          "status" => 1, "result" => { "ok" => false }
+          "status" => 1,
+          "result" => { "format" => "text", "text" => "not applied\n" }
         }, reason: "verified", confirm: true
       )
       assert_equal "failed", result.fetch("state")
@@ -359,7 +357,7 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       assert_raises(Hive::CommandUnresolved) do
         maintenance.send(:validate_retirement_evidence!, row, { "outcome" => "unknown" })
       end
-      assert_raises(Hive::UsageError) do
+      assert_raises(Hive::CommandUnresolved) do
         maintenance.send(
           :validate_retirement_evidence!, succeeded_row,
           { "outcome" => "succeeded" }
@@ -371,7 +369,8 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
   def test_receipt_maintenance_recovers_dead_owner_and_abandons_dead_batch
     with_receipts do |project, database, store, authority|
       maintenance = Hive::CommandReceiptMaintenance.new(
-        database: database, authority: authority, alive: ->(*) { false }
+        database: database, authority: authority,
+        alive: ->(*) { true }, ownership: ->(*) { :reused }
       )
       claim = store.reserve(
         project_root: project, key: "orphan", command: "approve", target: "task",
@@ -385,17 +384,26 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
         claim.receipt_id, expected_generation: claim.generation,
         reason: "dead", confirm: false
       )
-      assert_equal "dead", preview.dig("evidence", "ownership")
+      assert_equal "reused", preview.dig("evidence", "ownership")
       result = maintenance.orphaned_owner(
         claim.receipt_id, expected_generation: claim.generation,
         reason: "dead", confirm: true
       )
       assert_equal "unresolved", result.fetch("state")
 
+      administrative = store.reserve(
+        project_root: project, key: "prune-batch", command: "receipt", mode: "prune",
+        target: "demo", request: { "confirm" => true }, principal: "owner",
+        maintenance: true, execute: true, owner_process_start: "start"
+      )
+      effect = store.prepare_effect(
+        administrative, ordinal: 0, kind: "receipt:prune", identity: {}
+      )
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
       database.transaction do |connection|
         connection[:command_maintenance_batches].insert(
           batch_id: "batch", namespace_id: claim.namespace_id, principal: "owner",
+          administrative_receipt_id: administrative.receipt_id,
           principal_scope: "own", kind: "prune", state: "executing", generation: 1,
           owner_host: Socket.gethostname, owner_pid: 4322, owner_process_start: "start",
           fixed_cutoff: now, candidates_json: "[]", outcomes_json: "[]",
@@ -410,6 +418,13 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
         "batch", expected_generation: 1, reason: "dead", confirm: true
       )
       assert_equal "abandoned", result.fetch("state")
+      settled = store.receipt(administrative.receipt_id)
+      assert_equal "settled", settled.fetch(:state)
+      assert_equal Hive::ExitCodes::COMMAND_UNRESOLVED, settled.fetch(:result_status)
+      assert_equal "unknown", database.read {
+        |connection| connection[:command_effects][effect_id: effect.fetch(:effect_id)].fetch(:state)
+      }
+      assert_equal "batch", JSON.parse(settled.fetch(:result_json)).dig("payload", "batch_id")
     end
   end
 
@@ -487,7 +502,8 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
         store.prepare_effect(stale, ordinal: 0, kind: "stale", identity: {})
       end
       failed = store.fail_non_application(
-        claim, result: { "ok" => false }, status: 1, reason: "not_applied"
+        claim, result: { "ok" => false }, status: 1, reason: "not_applied",
+        whole_effect_non_application: true
       )
       allocation = store.allocate_successor(
         namespace_id: failed.namespace_id, principal: failed.principal,
@@ -615,7 +631,10 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
         policies.first(3).each do |policy|
           capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policy)
           assert_raises(Hive::CommandCapacityError) do
-            capacity.admit_nonterminal!(connection, namespace_id: namespace_id, request_bytes: 1)
+            capacity.admit_nonterminal!(
+              connection, namespace_id: namespace_id, request_bytes: 1,
+              occupied_installation_bytes: 1
+            )
           end
         end
         capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policies.last)
@@ -738,7 +757,8 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
     context = Hive::CommandOperation::Context.new(
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
       principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
-      transport_request_id: request_id
+      transport_request_id: request_id,
+      retry_horizon_expires_at: "2030-01-01T00:00:00.000000Z"
     )
     transition.send(:bind_command_context!, db, request_id, context)
     transition.send(:bind_command_context!, db, request_id, context)
@@ -972,7 +992,16 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
           pruner: pruner, command_receipt_store: store
         )
         out, = capture_io { assert_equal true, command.call.fetch("ok") }
-        assert JSON.parse(out).fetch("command_receipt")
+        refute JSON.parse(out).key?("command_receipt")
+        assert_equal 0, database.read { |db| db[:command_receipts].count }
+        Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
+
+        confirmed = Hive::Commands::Receipt.new(
+          "prune", project: "demo", idempotency_key: "confirmed-key", json: true,
+          confirm: true, pruner: pruner, command_receipt_store: store
+        )
+        confirmed_out, = capture_io { assert_equal true, confirmed.call.fetch("ok") }
+        assert JSON.parse(confirmed_out).fetch("command_receipt")
       end
 
       command = Hive::Commands::Receipt.new(
@@ -1072,7 +1101,15 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       end
     end
 
-    fake_database = Struct.new(:path).new("/database")
+    fake_database = Struct.new(:path) do
+      def read
+        connection = Object.new
+        connection.define_singleton_method(:fetch) do |sql|
+          [ { value: sql.include?("page_size") ? 4096 : 1 } ]
+        end
+        yield connection
+      end
+    end.new("/database")
     policy = Hive::CommandReceiptCapacity::Policy.new(
       keyed_intake_enabled: true, nonterminal_limit: 1, concurrency_limit: 1,
       byte_admission_limit: 1, installation_nonterminal_limit: 1,
@@ -1080,16 +1117,10 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       revision: "r", staffing: {}
     )
     capacity = Hive::CommandReceiptCapacity.new(database: fake_database, policy: policy)
-    with_replaced_singleton_method(File, :exist?, ->(*) { true }) do
-      with_replaced_singleton_method(File, :size, ->(*) { raise Errno::EIO, "broken" }) do
-        connection = Object.new
-        connection.define_singleton_method(:fetch) do |sql|
-          [ { value: sql.include?("page_size") ? 4096 : 1 } ]
-        end
+    with_replaced_singleton_method(File, :stat, ->(*) { raise Errno::EIO, "broken" }) do
         assert_raises(Hive::CommandCapacityError) do
-          capacity.occupied_installation_bytes(connection)
+          capacity.occupied_installation_bytes
         end
-      end
     end
   end
 

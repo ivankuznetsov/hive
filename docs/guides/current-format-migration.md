@@ -34,7 +34,7 @@ Code-complete rollback handoff status for this checkout:
 
 - pinned prior revision: `882b8e9ead2f9cf5321b158fe47648e6a01a2fca`
 - extension manifest SHA-256:
-  `d637611b5a0b17049690119343a3b5d41acb7f9e997113c944ec45f48a11bbea`
+  `d28956db02856f13e924377a81804e021f4a104f4ea5216c91854b09b140707c`
 - compatibility patch diff: pending a separately built prior-runtime package
 - local candidate package and SHA-256: not yet produced
 - published version/location/SHA-256: pending maintainer release authorization

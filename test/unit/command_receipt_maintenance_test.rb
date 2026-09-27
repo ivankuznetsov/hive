@@ -49,7 +49,9 @@ class CommandReceiptMaintenanceTest < Minitest::Test
       claim = store.mark_executing(claim)
       store.mark_unresolved(claim, reason: "lost_acknowledgement")
       row = store.receipt(claim.receipt_id)
-      maintenance = Hive::CommandReceiptMaintenance.new(database: database, authority: authority)
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority, alive: ->(_) { false }
+      )
 
       preview = maintenance.settle_without_result(
         claim.receipt_id, expected_generation: row.fetch(:generation),

@@ -54,6 +54,33 @@ class CommandReceiptStoreTest < Minitest::Test
     end
   end
 
+  def test_lookup_is_scoped_to_the_resolved_project_namespace
+    with_store do |project, database, store|
+      first = store.reserve(
+        project_root: project, key: "shared", command: "approve", target: "task",
+        request: { from: "3-plan" }, principal: "owner"
+      )
+      store.succeed(first, result: { "ok" => true, "project" => "first" }, status: 0)
+
+      other = File.join(File.dirname(project), "other-project")
+      FileUtils.mkdir_p(other)
+      system("git", "init", "--quiet", other, exception: true)
+      write_receipt_config(other)
+
+      assert_nil store.lookup_existing(
+        project_root: other, key: "shared", command: "approve", target: "task",
+        request: { from: "3-plan" }, principal: "owner"
+      )
+      second = store.reserve(
+        project_root: other, key: "shared", command: "approve", target: "task",
+        request: { from: "3-plan" }, principal: "owner"
+      )
+      refute_equal first.namespace_id, second.namespace_id
+      refute_equal first.receipt_id, second.receipt_id
+      assert_equal 2, database.read { |connection| connection[:command_receipts].count }
+    end
+  end
+
   def test_active_and_unresolved_duplicates_return_typed_outcomes
     with_store do |project, _database, store|
       claim = store.reserve(
@@ -136,7 +163,7 @@ class CommandReceiptStoreTest < Minitest::Test
       )
       store = Hive::CommandReceiptStore.new(
         database: database, maintenance_authority: authority,
-        alive: ->(pid) { pid != 41_001 }, ownership: ->(*) { :verified },
+        alive: ->(*) { true }, ownership: ->(*) { :reused },
         host: "test-host"
       )
       abandoned = store.reserve(
@@ -189,7 +216,8 @@ class CommandReceiptStoreTest < Minitest::Test
 
       first = store.mark_executing(claim)
       first = store.fail_non_application(
-        first, result: { "ok" => false }, status: 1, reason: "not_applied"
+        first, result: { "ok" => false }, status: 1, reason: "not_applied",
+        whole_effect_non_application: true
       )
       store.allocate_successor(
         namespace_id: first.namespace_id, principal: first.principal,
@@ -202,7 +230,8 @@ class CommandReceiptStoreTest < Minitest::Test
       )
       second = store.mark_executing(second)
       second = store.fail_non_application(
-        second, result: { "ok" => false }, status: 1, reason: "not_applied"
+        second, result: { "ok" => false }, status: 1, reason: "not_applied",
+        whole_effect_non_application: true
       )
       error = assert_raises(Hive::CommandConflict) do
         store.allocate_successor(

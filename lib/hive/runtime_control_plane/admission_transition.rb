@@ -181,6 +181,7 @@ module Hive
           principal_source: context.principal_source, ordinal: context.ordinal,
           request_fingerprint: context.request_fingerprint,
           source_identity: nil,
+          retry_horizon_expires_at: context.retry_horizon_expires_at&.to_s,
           created_at: Time.now.utc.iso8601(6)
         }
         if existing

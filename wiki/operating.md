@@ -57,6 +57,14 @@ days, 85% in 8.5 days, and stops at 10 days. Across 100 workspaces that is
 10,000/day against the installation cap. Disable new intake if actual arrivals
 exceed settlement capacity; replay and maintenance remain available.
 
+Classify unresolved arrivals before choosing a remedy. A crash before an
+effect is submitted can be proven non-applying and may become a retry-eligible
+failed receipt. A crash mid-effect, a partially completed composite effect,
+provider-response uncertainty, a lost acknowledgement after application, or a
+failure while persisting the original response all remain unresolved until an
+authoritative domain/provider reconciliation accounts for every effect. Never
+infer non-application from process death, elapsed time, or a missing response.
+
 The default staffing assumption is one operator able to act within one business
 day. It is not a service guarantee, an allocated minutes/day value, or measured
 throughput. Installations may override operator count and response business
@@ -76,6 +84,18 @@ generations. An A stop additionally names a live config concurrency increase
 and confirmed orphan-owner reclassification when PID/start-time evidence proves
 death. See [[commands/receipt]] for the trust, pin, audit, and confirmation
 boundaries.
+
+For a removed project, use the installation-owner preview first:
+`hive receipt prune --json`, then select the orphan with
+`hive receipt prune --namespace-id UUID --json`. The bounded namespace result
+includes nonterminal receipt ids/generations, active pins, unfinished batches,
+and utilization needed to choose a single-receipt retirement, pin release, or
+batch abandonment. Restore the project identity and database together when
+possible; otherwise use only the owner-authorized namespace selector. Terminal
+prune makes pages reusable but deliberately retains the compact namespace,
+capacity, and enrollment metadata. That residual metadata is roughly one row
+in each table (about 1 KiB logical data before SQLite page overhead); no
+physical file shrink is promised.
 
 ## Worktree-first workflow
 

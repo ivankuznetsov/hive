@@ -24,6 +24,7 @@ class CommandOperationTest < Minitest::Test
       payload = JSON.parse(first)
       receipt = store.receipt(payload.dig("command_receipt", "id"))
       assert_equal "succeeded", receipt.fetch(:state)
+      refute_nil receipt.fetch(:owner_process_start)
       effect = store.database.read do |db|
         db[:command_effects][receipt_id: receipt.fetch(:receipt_id)]
       end
@@ -55,6 +56,26 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_structured_failed_replay_emits_saved_payload_and_exits_with_saved_status
+    with_operation do |_operation, store, project|
+      structured = Hive::CommandOperation.new(
+        key: "failed", command: "approve", target: "task", request: { from: "3-plan" },
+        project_root: project, principal: "owner", json: true, structured: true, store: store
+      )
+      assert_raises(Hive::UsageError) do
+        structured.call { raise Hive::UsageError, "invalid transition" }
+      end
+
+      output, = capture_io do
+        exit_error = assert_raises(SystemExit) { structured.call { flunk "failed replay executed" } }
+        assert_equal Hive::ExitCodes::USAGE, exit_error.status
+      end
+      payload = JSON.parse(output)
+      assert_equal false, payload.fetch("ok")
+      assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
+    end
+  end
+
   private
 
   def with_operation(key: "stable")
@@ -79,7 +100,7 @@ class CommandOperationTest < Minitest::Test
         key: key, command: "approve", target: "task", request: { from: "3-plan" },
         project_root: project, principal: "owner", json: true, store: store
       )
-      yield operation, store
+      yield operation, store, project
     ensure
       database&.disconnect
     end

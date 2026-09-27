@@ -24,6 +24,7 @@ require "hive/dependencies"
 require "hive/worktree"
 require "hive/daily_digest/task_creation_receipt"
 require "hive/command_operation"
+require "hive/command_error_kind"
 
 module Hive
   module Commands
@@ -129,7 +130,8 @@ module Hive
           if @idempotency_key_raw.nil?
             call!
           else
-            command_operation.call { call! }
+            @inside_command_operation = true
+            command_operation.call { perform_call! }
           end
         end
       rescue Hive::Error, SystemCallError, IOError => e
@@ -144,9 +146,9 @@ module Hive
       def envelope_schema = SCHEMA
 
       def envelope_error_kind(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
-        when Hive::CommandOutcomeError then error.reason
-        when Hive::CommandCapacityError then error.reason
         when IdempotencyConflict, InvalidBaseError, InvalidDraftPrCombination,
              Hive::Workflows::UnknownWorkflow then "usage"
         when Hive::ConfigError, ProjectConfigUnreadable, UnregisteredProjectWorkflow then "config"
@@ -188,7 +190,7 @@ module Hive
             project.fetch("path")
           },
           json: @json,
-          store: @command_receipt_store || Hive::CommandReceiptStore.new
+          store: receipt_store
         )
       end
 
@@ -201,6 +203,29 @@ module Hive
       end
 
       def call!
+        if @idempotency_key_raw.nil? || @inside_command_operation || !receipt_extension_installed?
+          return perform_call!
+        end
+
+        @inside_command_operation = true
+        command_operation.call { perform_call! }
+      ensure
+        @inside_command_operation = false
+      end
+
+      def receipt_extension_installed?
+        return true if @command_receipt_store
+
+        Hive::RuntimeControlPlane::CommandSchema.installed?(receipt_store.database)
+      rescue Hive::Error, Sequel::Error
+        false
+      end
+
+      def receipt_store
+        @command_receipt_store ||= Hive::CommandReceiptStore.new
+      end
+
+      def perform_call!
         project = Hive::Config.find_project(@project_name)
         unless project
           raise ProjectNotFound.new(
@@ -261,7 +286,11 @@ module Hive
             project: project
           ).call
           unless result.created
-            return emit_task_result(result.folder, workflow, created: false)
+            return emit_task_result(result.folder, workflow, created: false) unless @inside_command_operation
+
+            raise Hive::CommandUnresolved.new(
+              message: "legacy task creation matched, but its original caller response was not saved"
+            )
           end
 
           spawn_name_generator(task_dir)

@@ -19,13 +19,31 @@
           "enum": ["retire", "orphaned_owner", "release_pin", "abandon_batch", "enroll"]
         },
         "preview": { "type": "boolean" },
-        "confirmed": { "type": "boolean" }
+        "confirmed": { "type": "boolean" },
+        "receipt_id": { "type": "string" },
+        "pin_id": { "type": "string" },
+        "batch_id": { "type": "string" },
+        "generation": { "type": "integer", "minimum": 0 },
+        "state": { "type": "string" },
+        "outcome": { "type": "string" },
+        "warning": { "type": "string" },
+        "evidence": { "type": "object" },
+        "prior_progress": { "type": "array" },
+        "command_receipt": { "type": "object" },
+        "retry_horizon_expires_at": { "type": ["string", "null"] },
+        "observed_at": { "type": "string" },
+        "horizon_evidence": { "type": "string" },
+        "horizon_elapsed": { "type": "boolean" },
+        "elapsed_seconds": { "type": "number", "minimum": 0 },
+        "previous_identity": { "type": "string" },
+        "expected_generation": { "type": "integer", "minimum": 0 },
+        "namespace_id": { "type": ["string", "null"] }
       },
-      "additionalProperties": true
+      "additionalProperties": false
     },
     "ErrorPayload": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-command-receipt" },
@@ -44,7 +62,11 @@
           ]
         },
         "exit_code": { "type": "integer", "enum": [1, 20, 21, 22, 64, 70, 75, 78] },
-        "message": { "type": "string" }
+        "message": { "type": "string" },
+        "reason": { "type": "string" },
+        "state": { "type": "string" },
+        "scope": { "type": "string" },
+        "command_receipt": { "type": "object" }
       }
     }
   }

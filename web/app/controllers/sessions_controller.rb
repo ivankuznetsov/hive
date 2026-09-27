@@ -154,7 +154,13 @@ class SessionsController < ApplicationController
       github["owner_id"] = github_id
       true
     end
-    @github_auth = nil if enrolled
+    if enrolled
+      Rails.logger.warn(
+        "Hive web enrolled immutable owner id for GitHub login #{login.inspect} " \
+        "(id=#{github_id}) during authenticated admission"
+      )
+      @github_auth = nil
+    end
     enrolled
   end
 

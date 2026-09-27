@@ -1,11 +1,14 @@
 # frozen_string_literal: true
 
 require "digest"
+require "base64"
 require "json"
 require "stringio"
+require "tempfile"
 require "thread"
 require "securerandom"
 require "hive/command_receipt_store"
+require "hive/lock"
 
 module Hive
   # One caller receipt around one public command boundary. Keyed success is
@@ -13,9 +16,41 @@ module Hive
   # command's existing streaming behavior.
   class CommandOperation
     CAPTURE_MUTEX = Mutex.new
+    class ThreadRoutedOutput
+      def initialize(capture_thread:, captured:, passthrough:)
+        @capture_thread = capture_thread
+        @captured = captured
+        @passthrough = passthrough
+      end
+
+      def write(value) = destination.write(value)
+      def flush = destination.flush
+      def tty? = destination.tty?
+      def sync = destination.sync
+      def sync=(value)
+        destination.sync = value
+      end
+
+      def method_missing(name, *args, **kwargs, &block)
+        return super unless destination.respond_to?(name)
+
+        destination.public_send(name, *args, **kwargs, &block)
+      end
+
+      def respond_to_missing?(name, include_private = false)
+        destination.respond_to?(name, include_private) || super
+      end
+
+      private
+
+      def destination
+        Thread.current == @capture_thread ? @captured : @passthrough
+      end
+    end
+
     Context = Data.define(
       :receipt_id, :effect_id, :principal, :principal_source, :ordinal,
-      :request_fingerprint, :transport_request_id
+      :request_fingerprint, :transport_request_id, :retry_horizon_expires_at
     )
 
     def self.current_context = Thread.current[:hive_command_operation_context]
@@ -31,7 +66,9 @@ module Hive
 
     def initialize(key:, command:, target:, request:, project_root:, principal: nil,
                    principal_source: "local_cli", mode: nil, json: false,
-                   structured: false, store: Hive::CommandReceiptStore.new)
+                   structured: false, maintenance: false,
+                   retry_horizon_expires_at: nil,
+                   store: Hive::CommandReceiptStore.new)
       @key = key
       @command = command.to_s
       @target = target.to_s
@@ -43,19 +80,24 @@ module Hive
       @mode = mode
       @json = json
       @structured = structured
+      @maintenance = maintenance
+      @retry_horizon_expires_at = retry_horizon_expires_at
+      Hive::CommandMutations.validate_keyed!(
+        command: @command, mode: @mode, target: @target, options: @request
+      ) unless @key.nil?
     end
 
     def call
       return yield if @key.nil?
-
+      root = @project_root.respond_to?(:call) ? @project_root.call : @project_root
       if (existing = @store.lookup_existing(
+        project_root: root,
         key: @key, command: @command, target: @target,
         request: @request, principal: @principal
       ))
         return replay(existing)
       end
 
-      root = @project_root.respond_to?(:call) ? @project_root.call : @project_root
       claim = @store.reserve(
         project_root: root,
         key: @key,
@@ -64,11 +106,14 @@ module Hive
         target: @target,
         request: @request,
         principal: @principal,
-        principal_source: @principal_source
+        principal_source: @principal_source,
+        maintenance: @maintenance,
+        execute: true,
+        owner_process_start: Hive::Lock.process_start_time(Process.pid)
       )
       return replay(claim) if claim.disposition == :replay
+      claim = @store.resume_maintenance(claim) if claim.disposition == :resume
 
-      claim = @store.mark_executing(claim)
       effect = @store.prepare_effect(
         claim, ordinal: 0, kind: "#{@command}:#{@mode || 'default'}",
         identity: { "target" => @target, "request_fingerprint" => claim.request_fingerprint }
@@ -76,7 +121,7 @@ module Hive
       context = operation_context(claim, effect)
       result, captured = with_context(context) { capture { yield } }
       @store.update_effect(
-        claim, effect_id: effect.fetch(:effect_id), from: %w[prepared submitted], to: "applied",
+        claim, effect_id: effect.fetch(:effect_id), from: %w[prepared submitted unknown], to: "applied",
         evidence: { "boundary_completed" => true }
       )
       payload = response_payload(result, captured)
@@ -88,17 +133,16 @@ module Hive
       emitted = attach_receipt(payload, public_receipt)
       stored = stored_response(emitted)
       @store.succeed(claim, result: stored, status: Hive::ExitCodes::SUCCESS)
+      @store.close_pin(
+        receipt_id: claim.receipt_id, principal: claim.principal,
+        intent_id: context.transport_request_id, intent_generation: context.ordinal
+      ) if context.retry_horizon_expires_at
       emit_or_return(emitted)
-    rescue Exception # rubocop:disable Lint/RescueException -- preserve Interrupt/SystemExit ambiguity
-      begin
-        @store.update_effect(
-          claim, effect_id: effect.fetch(:effect_id), from: %w[prepared submitted], to: "unknown",
-          evidence: { "boundary_completed" => false }
-        ) if claim && effect
-        @store.mark_unresolved(claim, reason: "command_execution_interrupted") if claim
-      rescue StandardError
-        # The original failure remains authoritative. A failed uncertainty
-        # commit is still fail-closed because no buffered success is emitted.
+    rescue Exception => error # rubocop:disable Lint/RescueException -- preserve Interrupt/SystemExit ambiguity
+      if claim && effect && deterministic_non_application?(error)
+        persist_non_application_failure(claim, effect, error)
+      elsif claim
+        persist_uncertainty(claim, effect)
       end
       raise
     end
@@ -114,7 +158,8 @@ module Hive
         receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id),
         principal: claim.principal, principal_source: @principal_source,
         ordinal: ordinal, request_fingerprint: claim.request_fingerprint,
-        transport_request_id: transport
+        transport_request_id: transport,
+        retry_horizon_expires_at: @retry_horizon_expires_at
       )
     end
 
@@ -130,13 +175,81 @@ module Hive
       return [ yield, nil ] if @structured
 
       CAPTURE_MUTEX.synchronize do
-        previous = $stdout
-        buffer = StringIO.new
-        $stdout = buffer
-        result = yield
-        [ result, buffer.string ]
-      ensure
-        $stdout = previous
+        Tempfile.create("hive-command-output") do |file|
+          file.binmode
+          previous_stdout = $stdout
+          original_fd = STDOUT.dup
+          original_sync = STDOUT.sync
+          begin
+            STDOUT.flush
+            STDOUT.reopen(file)
+            STDOUT.sync = true
+            $stdout = ThreadRoutedOutput.new(
+              capture_thread: Thread.current, captured: STDOUT, passthrough: original_fd
+            )
+            result = yield
+            STDOUT.flush
+            file.rewind
+            [ result, file.read ]
+          ensure
+            STDOUT.reopen(original_fd)
+            STDOUT.sync = original_sync
+            original_fd.close
+            $stdout = previous_stdout
+          end
+        end
+      end
+    end
+
+    def deterministic_non_application?(error)
+      error.is_a?(Hive::UsageError) || error.is_a?(Hive::InvalidTaskPath) ||
+        error.is_a?(Hive::WrongStage)
+    end
+
+    def persist_non_application_failure(claim, effect, error)
+      @store.update_effect(
+        claim, effect_id: effect.fetch(:effect_id), from: "prepared", to: "not_applied",
+        evidence: { "error_class" => error.class.name, "whole_effect_non_application" => true }
+      )
+      @store.fail_non_application(
+        claim, result: stored_failure(error), status: error.exit_code,
+        reason: "command_effect_not_applied", whole_effect_non_application: true
+      )
+    rescue StandardError
+      persist_uncertainty(claim, effect)
+    end
+
+    def persist_uncertainty(claim, effect)
+      begin
+        @store.update_effect(
+          claim, effect_id: effect.fetch(:effect_id), from: %w[prepared submitted], to: "unknown",
+          evidence: { "boundary_completed" => false }
+        ) if effect
+      rescue StandardError
+        # An effect may already be applied (for example finalization failed).
+        # Receipt uncertainty still has to be persisted independently.
+      end
+      @store.mark_unresolved(claim, reason: "command_execution_interrupted")
+    rescue StandardError
+      # The original exception remains authoritative and no buffered success is emitted.
+    end
+
+    def stored_failure(error)
+      if @json || @structured
+        payload = {
+          "schema" => "hive-command-receipt", "schema_version" => 1,
+          "ok" => false, "error_kind" => error.class.name.split("::").last
+            .gsub(/([a-z\d])([A-Z])/, '\\1_\\2').downcase,
+          "exit_code" => error.exit_code, "message" => error.message
+        }
+        {
+          "format" => "json", "payload" => payload,
+          "expanded_sha256" => Digest::SHA256.hexdigest(
+            Hive::RuntimeControlPlane::Codec.dump_json(payload)
+          )
+        }
+      else
+        { "format" => "text", "text" => "#{error.message}\n" }
       end
     end
 
@@ -172,14 +285,27 @@ module Hive
     end
 
     def template_payload(payload)
-      return payload unless @command == "act" && payload["observation_token"].is_a?(String)
-      value = payload.fetch("observation_token")
-      payload.merge(
-        "observation_token" => {
-          "$command_request_field" => "observation",
-          "sha256" => Digest::SHA256.hexdigest(value)
-        }
-      )
+      if @command == "act" && payload["observation_token"].is_a?(String)
+        value = payload.fetch("observation_token")
+        return payload.merge(
+          "observation_token" => {
+            "$command_request_field" => "observation", "template_version" => 1,
+            "sha256" => Digest::SHA256.hexdigest(value)
+          }
+        )
+      end
+      if @command == "answer" && payload.dig("slot", "binding").is_a?(String)
+        binding = payload.dig("slot", "binding")
+        return payload.merge(
+          "slot" => payload.fetch("slot").merge(
+            "binding" => {
+              "$command_request_field" => "binding", "template_version" => 1,
+              "sha256" => Digest::SHA256.hexdigest(binding)
+            }
+          )
+        )
+      end
+      payload
     end
 
     def replay(claim)
@@ -201,6 +327,7 @@ module Hive
       if stored.fetch("format") == "text"
         return stored.fetch("text") if @structured
         $stdout.write(stored.fetch("text"))
+        exit(Integer(claim.status)) if claim.state == "failed"
         return nil
       end
 
@@ -210,18 +337,39 @@ module Hive
         raise Hive::CommandConflict,
               "retry inputs cannot reconstruct the original command response"
       end
-      emit_or_return(payload)
+      if claim.state == "failed" && @structured
+        $stdout.puts(JSON.generate(payload))
+        exit(Integer(claim.status))
+      end
+      emitted = emit_or_return(payload)
+      exit(Integer(claim.status)) if claim.state == "failed" && !@structured
+      emitted
     end
 
     def expand_template(payload)
       token = payload["observation_token"]
-      return payload unless token.is_a?(Hash) && token["$command_request_field"] == "observation"
-      value = @request[:observation] || @request["observation"]
-      unless value.is_a?(String) && Digest::SHA256.hexdigest(value) == token["sha256"]
-        raise Hive::CommandConflict,
-              "retry observation does not match the original command request"
+      if token.is_a?(Hash) && token["$command_request_field"] == "observation" &&
+         token["template_version"] == 1
+        value = @request[:observation] || @request["observation"]
+        unless value.is_a?(String) && Digest::SHA256.hexdigest(value) == token["sha256"]
+          raise Hive::CommandConflict,
+                "retry observation does not match the original command request"
+        end
+        return payload.merge("observation_token" => value)
       end
-      payload.merge("observation_token" => value)
+      binding_template = payload.dig("slot", "binding")
+      if binding_template.is_a?(Hash) &&
+         binding_template["$command_request_field"] == "binding" &&
+         binding_template["template_version"] == 1
+        fields = @request[:binding] || @request["binding"]
+        value = Base64.urlsafe_encode64(JSON.generate(fields), padding: false)
+        unless fields.is_a?(Hash) && Digest::SHA256.hexdigest(value) == binding_template["sha256"]
+          raise Hive::CommandConflict,
+                "retry answer binding cannot reconstruct the original response"
+        end
+        return payload.merge("slot" => payload.fetch("slot").merge("binding" => value))
+      end
+      payload
     end
 
     def emit_or_return(payload)

@@ -7,7 +7,7 @@ module Hive
   module RuntimeControlPlane
     module CommandSchema
       VERSION = 2
-      EXPECTED_SCHEMA_SHA256 = "d637611b5a0b17049690119343a3b5d41acb7f9e997113c944ec45f48a11bbea".freeze
+      EXPECTED_SCHEMA_SHA256 = "d28956db02856f13e924377a81804e021f4a104f4ea5216c91854b09b140707c".freeze
       TABLE_NAMES = %w[
         command_capacity
         command_dispatch_contexts

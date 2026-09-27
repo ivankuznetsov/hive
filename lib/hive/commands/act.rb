@@ -1,6 +1,7 @@
 require "json"
 require "hive/operational_action"
 require "hive/command_operation"
+require "hive/command_error_kind"
 require "hive/task_resolver"
 
 module Hive
@@ -43,9 +44,9 @@ module Hive
       end
 
       def envelope_error_kind(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
-        when Hive::CommandOutcomeError then error.reason
-        when Hive::CommandCapacityError then error.reason
         when Hive::AmbiguousSlug then "ambiguous_target"
         when Hive::OperationalActionUsageError, Hive::InvalidTaskPath then "usage"
         when Hive::StaleOperationalObservation, Hive::WrongStage then "stale_observation"

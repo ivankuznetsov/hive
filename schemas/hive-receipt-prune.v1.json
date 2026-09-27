@@ -24,13 +24,25 @@
         "candidate_count": { "type": "integer", "minimum": 0 },
         "candidates": { "type": "array" },
         "warning_band_percent": { "const": 70 },
-        "action_band_percent": { "const": 85 }
+        "action_band_percent": { "const": 85 },
+        "project_enrollment": { "type": "string" },
+        "namespace_utilization": { "type": "object" },
+        "installation_utilization": { "type": "object" },
+        "installation_pressure": { "type": "string" },
+        "namespaces": { "type": "array" },
+        "next_cursor": { "type": ["string", "null"] },
+        "batch_id": { "type": "string" },
+        "outcomes": { "type": "array" },
+        "command_receipt": { "type": "object" }
+        ,"nonterminal_receipts": { "type": "array" }
+        ,"active_pins": { "type": "array" }
+        ,"unfinished_batches": { "type": "array" }
       },
-      "additionalProperties": true
+      "additionalProperties": false
     },
     "ErrorPayload": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-receipt-prune" },
@@ -40,13 +52,22 @@
           "type": "string",
           "enum": [
             "usage", "config", "internal", "command_conflict", "command_in_progress",
-            "command_unresolved_pending", "command_capacity_exhausted",
+            "command_unresolved_pending", "command_pin_horizon_elapsed",
+            "command_capacity_exhausted", "command_nonterminal_limit",
+            "command_concurrency_limit", "command_orphaned_pin",
+            "command_original_result_unavailable",
             "command_prune_busy", "command_prune_storage_unavailable",
             "command_prune_preview_unavailable"
           ]
         },
         "exit_code": { "type": "integer", "enum": [1, 20, 21, 22, 64, 70, 75, 78] },
-        "message": { "type": "string" }
+        "message": { "type": "string" },
+        "reason": { "type": "string" },
+        "state": { "type": "string" },
+        "scope": { "type": "string" },
+        "batch_id": { "type": "string" },
+        "outcomes": { "type": "array" },
+        "command_receipt": { "type": "object" }
       }
     }
   }

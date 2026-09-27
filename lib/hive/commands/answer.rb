@@ -14,6 +14,7 @@ require "hive/task_resolver"
 require "hive/task_activity"
 require "hive/workflows"
 require "hive/command_operation"
+require "hive/command_error_kind"
 
 module Hive
   module Commands
@@ -169,6 +170,7 @@ module Hive
           target: @target,
           request: {
             "project" => @project_filter,
+            "binding" => binding,
             "binding_sha256" => ::Digest::SHA256.hexdigest(@binding_token),
             "answer_sha256" => answer_fingerprint(answer_text)
           },
@@ -709,9 +711,9 @@ module Hive
       end
 
       def error_kind(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
-        when Hive::CommandOutcomeError then error.reason
-        when Hive::CommandCapacityError then error.reason
         when InvalidBinding then "invalid_binding"
         when InvalidAnswer then "invalid_answer"
         when Hive::WrongStage then "wrong_stage"

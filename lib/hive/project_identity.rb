@@ -30,7 +30,7 @@ module Hive
       if persisted
         return verify_marker!(
           persisted, marker: marker, digest: digest,
-          installation_id: installation_id, database: database
+          installation_id: installation_id, database: database, create: create
         )
       end
 
@@ -39,27 +39,60 @@ module Hive
           installation_id: installation_id, git_common_dir_digest: digest
         ]
       end
-      return nil unless create || row
+      return nil unless create
       if row && row.fetch(:enrollment_state) == "active"
         raise Hive::ConfigError,
               "project receipt identity marker is missing for an existing namespace; " \
               "restore the matching marker and control-plane database together"
       end
 
-      row ||= reserve_pending!(
-        database: database, installation_id: installation_id,
-        digest: digest, project_root: project_root
+      row ||= reserve_pending_with_retry!(
+        database: database, installation_id: installation_id, digest: digest,
+        project_root: project_root
       )
       identity = identity_from(row, marker)
       write_marker(identity)
       activate!(database: database, identity: identity)
       identity.with(enrollment_generation: identity.enrollment_generation + 1)
-    rescue Sequel::UniqueConstraintViolation
-      retry
     end
 
     def marker_path(project_root)
       File.join(git_common_dir(project_root), MARKER_NAME)
+    end
+
+    # Resolve identity entirely through an already-open read-only SQLite
+    # snapshot. This never creates WAL sidecars, markers, or enrollment rows.
+    def resolve_read_only(project_root:, connection:)
+      common_dir = git_common_dir(project_root)
+      digest = Digest::SHA256.hexdigest(common_dir)
+      marker = File.join(common_dir, MARKER_NAME)
+      installation_id = connection[:installations].first&.fetch(:installation_id)
+      raise Hive::ConfigError, "runtime installation identity is missing" unless installation_id
+      persisted = read_marker(marker)
+      row = if persisted
+        unless persisted.is_a?(Hash) && persisted["schema"] == "hive-project-identity" &&
+               persisted["schema_version"] == 1 && persisted["installation_id"] == installation_id &&
+               persisted["git_common_dir_digest"] == digest
+          raise Hive::ConfigError,
+                "project receipt identity does not match this location or control-plane installation"
+        end
+        connection[:command_namespaces][namespace_id: persisted["namespace_id"].to_s]
+      else
+        connection[:command_namespaces][
+          installation_id: installation_id, git_common_dir_digest: digest
+        ]
+      end
+      return nil unless row
+      if !persisted && row.fetch(:enrollment_state) == "active"
+        raise Hive::ConfigError,
+              "project receipt identity marker is missing for an existing namespace; " \
+              "restore the matching marker and control-plane database together"
+      end
+      unless row.fetch(:installation_id) == installation_id &&
+             row.fetch(:git_common_dir_digest) == digest
+        raise Hive::ConfigError, "project receipt identity is not bound to this control-plane database"
+      end
+      identity_from(row, marker)
     end
 
     def enroll_new_identity(project_root:, database:, previous_identity:,
@@ -96,10 +129,21 @@ module Hive
       }
       return preview unless confirm
 
-      row ||= reserve_pending!(
-        database: database, installation_id: installation_id,
-        digest: digest, project_root: project_root
-      )
+      if row && row.fetch(:enrollment_state) == "active"
+        unless row.fetch(:namespace_id) == previous_identity
+          raise Hive::CommandConflict,
+                "--previous-identity does not match the active project identity"
+        end
+        row = replace_active_identity!(
+          database: database, row: row, installation_id: installation_id,
+          digest: digest, project_root: project_root, expected_generation: generation
+        )
+      else
+        row ||= reserve_pending_with_retry!(
+          database: database, installation_id: installation_id,
+          digest: digest, project_root: project_root
+        )
+      end
       unless row.fetch(:enrollment_state) == "pending" &&
              row.fetch(:enrollment_generation) == generation
         raise Hive::CommandConflict, "project enrollment changed before confirmation"
@@ -163,7 +207,7 @@ module Hive
     end
     private_class_method :read_marker
 
-    def verify_marker!(payload, marker:, digest:, installation_id:, database:)
+    def verify_marker!(payload, marker:, digest:, installation_id:, database:, create: false)
       unless payload.is_a?(Hash) && payload["schema"] == "hive-project-identity" &&
              payload["schema_version"] == 1 && payload["installation_id"] == installation_id &&
              payload["git_common_dir_digest"] == digest
@@ -173,13 +217,68 @@ module Hive
       namespace_id = payload["namespace_id"].to_s
       row = database.read { |connection| connection[:command_namespaces][namespace_id: namespace_id] }
       unless row && row.fetch(:installation_id) == installation_id &&
-             row.fetch(:git_common_dir_digest) == digest && row.fetch(:enrollment_state) == "active"
+             row.fetch(:git_common_dir_digest) == digest
         raise Hive::ConfigError,
-              "project receipt identity is not bound to an active namespace in this control-plane database"
+              "project receipt identity is not bound to this control-plane database"
       end
-      identity_from(row, marker)
+      identity = identity_from(row, marker)
+      return identity if row.fetch(:enrollment_state) == "active"
+      return nil unless create
+
+      activate!(database: database, identity: identity)
+      identity.with(enrollment_generation: identity.enrollment_generation + 1)
     end
     private_class_method :verify_marker!
+
+    def reserve_pending_with_retry!(**kwargs)
+      attempts = 0
+      begin
+        attempts += 1
+        reserve_pending!(**kwargs)
+      rescue Sequel::UniqueConstraintViolation
+        retry if attempts < 2
+        raise Hive::CommandConflict, "project identity enrollment conflicted repeatedly"
+      end
+    end
+    private_class_method :reserve_pending_with_retry!
+
+    def replace_active_identity!(database:, row:, installation_id:, digest:, project_root:,
+                                 expected_generation:)
+      namespace_id = SecureRandom.uuid
+      now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+      database.transaction do |connection|
+        current = connection[:command_namespaces][namespace_id: row.fetch(:namespace_id)]
+        unless current && current.fetch(:enrollment_state) == "active" &&
+               current.fetch(:enrollment_generation) == expected_generation &&
+               current.fetch(:git_common_dir_digest) == digest
+          raise Hive::CommandConflict, "project enrollment changed before confirmation"
+        end
+        retired_digest = Digest::SHA256.hexdigest(
+          [ "retired-command-namespace", current.fetch(:namespace_id), digest ].join("\0")
+        )
+        connection[:command_namespaces].where(namespace_id: current.fetch(:namespace_id)).update(
+          git_common_dir_digest: retired_digest, updated_at: now
+        )
+        connection[:command_project_enrollments].where(git_common_dir_digest: digest).delete
+        connection[:command_namespaces].insert(
+          namespace_id: namespace_id, installation_id: installation_id,
+          git_common_dir_digest: digest, project_label: File.basename(File.expand_path(project_root)),
+          enrollment_state: "pending", enrollment_generation: expected_generation,
+          keyed_intake_enabled: 0, policy_revision: 0, created_at: now, updated_at: now
+        )
+        connection[:command_project_enrollments].insert(
+          git_common_dir_digest: digest, namespace_id: namespace_id,
+          installation_id: installation_id, generation: expected_generation, state: "pending",
+          previous_identity: current.fetch(:namespace_id), created_at: now, updated_at: now
+        )
+        connection[:command_capacity].insert(
+          namespace_id: namespace_id, nonterminal_count: 0, executing_count: 0,
+          logical_bytes: 0, revision: 0, updated_at: now
+        )
+        connection[:command_namespaces][namespace_id: namespace_id]
+      end
+    end
+    private_class_method :replace_active_identity!
 
     def reserve_pending!(database:, installation_id:, digest:, project_root:)
       namespace_id = SecureRandom.uuid

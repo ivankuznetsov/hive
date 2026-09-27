@@ -118,7 +118,7 @@ module Hive
             unique [ :receipt_id, :principal, :intent_id, :intent_generation ],
                    name: :command_receipt_pins_intent_uidx
           end
-          database.add_index(:command_receipt_pins, [ :receipt_id, :lifecycle_status ],
+          database.add_index(:command_receipt_pins, [ :lifecycle_status, :receipt_id ],
                              name: :command_receipt_pins_active_idx)
 
           database.create_table(:command_maintenance_batches) do
@@ -143,7 +143,7 @@ module Hive
             check Sequel.lit("state IN ('prepared','executing','completed','abandoned')")
             check Sequel.lit("generation > 0")
           end
-          database.add_index(:command_maintenance_batches, [ :state, :batch_id ],
+          database.add_index(:command_maintenance_batches, [ :kind ],
                              unique: true, where: Sequel.lit("state IN ('prepared','executing')"),
                              name: :command_maintenance_batches_unfinished_uidx)
 
@@ -194,6 +194,7 @@ module Hive
             String :delivery_cycle_id, null: false
             String :predecessor_receipt_id, null: false
             String :successor_key_identity, null: false
+            String :successor_receipt_id
             Integer :successor_ordinal, null: false
             String :request_fingerprint, null: false
             Integer :allocation_version, null: false
@@ -214,6 +215,7 @@ module Hive
             Integer :ordinal, null: false
             String :request_fingerprint, null: false
             String :source_identity
+            String :retry_horizon_expires_at
             String :created_at, null: false
             check Sequel.lit("ordinal >= 0")
           end

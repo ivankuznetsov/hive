@@ -571,6 +571,7 @@ module Hive
           ordinal: Integer(source.fetch(:ordinal)),
           request_fingerprint: source.fetch(:request_fingerprint).to_s,
           source_identity: source[:source_identity]&.to_s,
+          retry_horizon_expires_at: source[:retry_horizon_expires_at]&.to_s,
           transport_request_id: source.fetch(:transport_request_id).to_s
         }
       end

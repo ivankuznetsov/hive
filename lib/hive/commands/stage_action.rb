@@ -39,6 +39,7 @@ module Hive
                      durable: false, attempt_entrypoint: nil, quiet: false,
                      observation_guard: nil,
                      module_event_publisher: nil, idempotency_key: nil,
+                     retry_horizon_expires_at: nil,
                      command_receipt_store: nil)
         @verb = verb
         @target = target
@@ -51,6 +52,7 @@ module Hive
         @observation_guard = observation_guard
         @module_event_publisher = module_event_publisher || Hive::Modules::EventPublisher.new
         @idempotency_key = idempotency_key
+        @retry_horizon_expires_at = retry_horizon_expires_at
         @command_receipt_store = command_receipt_store
       end
 
@@ -86,6 +88,7 @@ module Hive
           request: { "verb" => @verb, "from" => @from, "project" => @project_filter },
           project_root: -> { resolve_task.project_root },
           json: @json,
+          retry_horizon_expires_at: @retry_horizon_expires_at,
           store: @command_receipt_store || Hive::CommandReceiptStore.new
         )
       end

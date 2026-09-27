@@ -5,6 +5,7 @@ require "hive/plan_review"
 require "hive/stages"
 require "hive/workflows/registry"
 require "hive/task_closure_contract"
+require "hive/cli_receipt_options"
 
 module Hive
   class CLI < Thor
@@ -255,24 +256,7 @@ module Hive
     end
 
     desc "receipt SUBCOMMAND [IDENTIFIER]", "Preview or perform durable command-receipt maintenance"
-    option :project, type: :string, desc: "registered project selector"
-    option :namespace_id, type: :string, desc: "installation-owner namespace UUID selector"
-    option :expected_generation, type: :numeric, desc: "required generation CAS for non-prune mutations"
-    option :confirm, type: :boolean, default: false, desc: "commit the previewed maintenance action"
-    option :limit, type: :numeric, desc: "bounded prune/namespace page size (default 100, max 1000)"
-    option :cursor, type: :string, desc: "stable namespace preview cursor"
-    option :idempotency_key, type: :string, desc: "optional durable key for prune only"
-    option :settle_without_result, type: :boolean, default: false,
-                                   desc: "terminalize one unresolved receipt without claiming its original result"
-    option :orphaned_owner, type: :boolean, default: false,
-                            desc: "reclassify one executing receipt whose recorded owner is proven dead"
-    option :evidence, type: :string, desc: "bounded JSON evidence for verified retirement"
-    option :force, type: :boolean, default: false, desc: "required with confirmed pin release"
-    option :reason, type: :string, desc: "required audit reason"
-    option :new_identity, type: :boolean, default: false,
-                          desc: "mint an explicitly acknowledged replacement project identity"
-    option :previous_identity, type: :string,
-                               desc: "previous project identity UUID being abandoned"
+    Hive::CLIReceiptOptions.apply(self)
     def receipt(subcommand, identifier = nil)
       require "hive/commands/receipt"
       Hive::Commands::Receipt.new(
@@ -861,6 +845,8 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def brainstorm(target)
       run_stage_action("brainstorm", target)
     end
@@ -872,6 +858,8 @@ module Hive
     option :review_level, type: :string, enum: %w[standard mandatory],
                           desc: "raise this plan's minimum critique level (raise-only)"
     option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def plan(target)
       if options[:review_level] && options[:idempotency_key]
         raise Hive::UsageError,
@@ -946,6 +934,8 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def develop(target)
       run_stage_action("develop", target)
     end
@@ -955,6 +945,8 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def open_pr(target)
       run_stage_action("open-pr", target)
     end
@@ -967,6 +959,8 @@ module Hive
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :pr, type: :string, desc: "run an ad-hoc review for PR number, #number, or GitHub PR URL"
     option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def review(target = nil)
       if options[:pr]
         emit_review_usage_error("hive review: pass either TARGET or --pr, not both") if target
@@ -1010,6 +1004,8 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def artifacts(target)
       run_stage_action("artifacts", target)
     end
@@ -1019,6 +1015,8 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def finalize(target)
       run_stage_action("finalize", target)
     end
@@ -1044,8 +1042,16 @@ module Hive
                          desc: "operator reason for cancellation or superseded/cross-repository delivery"
     option :idempotency_key, type: :string,
                              desc: "durably replay an identical targeted archive; invalid for listing"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def archive(target = nil)
       if target.nil?
+        if options[:idempotency_key]
+          raise Hive::UsageError, "--idempotency-key requires an archive TARGET"
+        end
+        if options[:retry_horizon_expires_at]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires an archive TARGET"
+        end
         if closure_options?
           raise Hive::InvalidTaskPath,
                 "closure options require an archive TARGET"
@@ -2434,7 +2440,7 @@ module Hive
           end
           require "hive/command_operation"
           result = Hive::CommandOperation.new(
-            key: options[:idempotency_key], command: "archive", mode: "closure",
+            key: options[:idempotency_key], command: "archive", mode: "target",
             target: target,
             request: {
               "from" => options[:from], "project" => options[:project],
@@ -2530,6 +2536,7 @@ module Hive
           json: options[:json]
         }
         kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+        kwargs[:retry_horizon_expires_at] = options[:retry_horizon_expires_at] if options[:retry_horizon_expires_at]
 
         Hive::Commands::StageAction.new(
           verb,

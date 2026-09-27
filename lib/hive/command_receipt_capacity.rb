@@ -98,7 +98,8 @@ module Hive
 
     attr_reader :database, :policy
 
-    def admit_nonterminal!(connection, namespace_id:, request_bytes:)
+    def admit_nonterminal!(connection, namespace_id:, request_bytes:,
+                           occupied_installation_bytes:)
       namespace = connection[:command_capacity][namespace_id: namespace_id]
       totals = connection[:command_capacity].select do
         [ sum(:nonterminal_count).as(:nonterminal), sum(:executing_count).as(:executing) ]
@@ -113,8 +114,7 @@ module Hive
       if namespace.fetch(:logical_bytes) + allowance > policy.byte_admission_limit
         capacity_error!(:command_capacity_exhausted, :namespace, byte_remedy(:namespace))
       end
-      occupied = occupied_installation_bytes(connection)
-      if occupied + allowance > policy.installation_byte_admission_limit
+      if occupied_installation_bytes + allowance > policy.installation_byte_admission_limit
         capacity_error!(:command_capacity_exhausted, :installation, byte_remedy(:installation))
       end
       true
@@ -132,11 +132,18 @@ module Hive
       true
     end
 
-    def occupied_installation_bytes(connection)
-      page_size = pragma_integer(connection, "page_size")
-      occupied_pages = pragma_integer(connection, "page_count") - pragma_integer(connection, "freelist_count")
-      wal = File.exist?("#{database.path}-wal") ? File.size("#{database.path}-wal") : 0
+    # Measure before entering an admission write transaction. SQLite PRAGMAs
+    # and sidecar metadata reads must not extend the installation write lock.
+    def occupied_installation_bytes
+      page_size, occupied_pages = database.read do |connection|
+        size = pragma_integer(connection, "page_size")
+        pages = pragma_integer(connection, "page_count") - pragma_integer(connection, "freelist_count")
+        [ size, pages ]
+      end
+      wal = File.stat("#{database.path}-wal").size
       (occupied_pages * page_size) + wal
+    rescue Errno::ENOENT
+      occupied_pages * page_size
     rescue SystemCallError
       capacity_error!(
         :command_capacity_exhausted, :installation,
@@ -144,11 +151,13 @@ module Hive
       )
     end
 
-    private
-
     def pragma_integer(connection, name)
       Integer(connection.fetch("PRAGMA #{name}").first.values.first)
     end
+
+    private :pragma_integer
+
+    private
 
     def capacity_error!(reason, scope, remedy)
       raise Hive::CommandCapacityError.new(

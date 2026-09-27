@@ -35,6 +35,43 @@ class ProjectIdentityTest < Minitest::Test
     end
   end
 
+  def test_pending_enrollment_is_read_only_until_create_resumes_activation
+    with_store do |project, database|
+      common_dir = Hive::ProjectIdentity.git_common_dir(project)
+      digest = Digest::SHA256.hexdigest(common_dir)
+      installation_id = database.installation_identity.fetch(:installation_id)
+      row = Hive::ProjectIdentity.send(
+        :reserve_pending!, database: database, installation_id: installation_id,
+        digest: digest, project_root: project
+      )
+
+      assert_nil Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: false
+      )
+      refute File.exist?(Hive::ProjectIdentity.marker_path(project))
+      assert_equal "pending", database.read {
+        |connection| connection[:command_namespaces][namespace_id: row.fetch(:namespace_id)]
+          .fetch(:enrollment_state)
+      }
+
+      identity = Hive::ProjectIdentity::Identity.new(
+        namespace_id: row.fetch(:namespace_id), installation_id: installation_id,
+        git_common_dir_digest: digest, enrollment_generation: 0,
+        marker_path: Hive::ProjectIdentity.marker_path(project)
+      )
+      Hive::ProjectIdentity.send(:write_marker, identity)
+      resumed = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      assert_equal row.fetch(:namespace_id), resumed.namespace_id
+      assert_equal 1, resumed.enrollment_generation
+      assert_equal "active", database.read {
+        |connection| connection[:command_namespaces][namespace_id: row.fetch(:namespace_id)]
+          .fetch(:enrollment_state)
+      }
+    end
+  end
+
   def test_active_database_row_without_marker_fails_closed
     with_store do |project, database|
       identity = Hive::ProjectIdentity.resolve(
@@ -67,6 +104,13 @@ class ProjectIdentityTest < Minitest::Test
       assert_equal "active", database.read {
         |db| db[:command_namespaces][namespace_id: result.fetch("namespace_id")].fetch(:enrollment_state)
       }
+      replacement = Hive::ProjectIdentity.enroll_new_identity(
+        project_root: project, database: database,
+        previous_identity: result.fetch("namespace_id"),
+        expected_generation: 1, confirm: true
+      )
+      refute_equal result.fetch("namespace_id"), replacement.fetch("namespace_id")
+      assert_equal 2, replacement.fetch("generation")
       assert_raises(Hive::CommandConflict) do
         Hive::ProjectIdentity.enroll_new_identity(
           project_root: project, database: database, previous_identity: previous,
@@ -100,7 +144,7 @@ class ProjectIdentityTest < Minitest::Test
           expected_generation: 1, confirm: true
         )
       end
-      assert_equal "project enrollment changed before confirmation", error.message
+      assert_equal "--previous-identity does not match the active project identity", error.message
     end
   end
 

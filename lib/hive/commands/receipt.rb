@@ -44,7 +44,7 @@ module Hive
 
       def call
         call_with_envelope do
-          payload = if @subcommand == "prune" && @idempotency_key
+          payload = if @subcommand == "prune" && @idempotency_key && @confirm
             raise Hive::UsageError, "keyed prune requires --project" unless project_root
             command_operation.call { execute }
           else
@@ -152,6 +152,7 @@ module Hive
             "confirm" => @confirm, "limit" => @limit
           },
           project_root: project_root, json: true, structured: true,
+          maintenance: true,
           store: receipt_store
         )
       end

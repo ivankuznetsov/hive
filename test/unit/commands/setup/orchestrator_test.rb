@@ -338,6 +338,32 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal 0, exit_code, "clean diagnostics with no provisioning still exits via successful?"
   end
 
+  def test_no_bootstrap_with_receipt_installation_stays_diagnose_only
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+    fake_diag = Object.new
+    fake_diag.define_singleton_method(:run) { diagnostics }
+
+    exit_code = with_replaced_singleton_method(
+      Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }
+    ) do
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::Installation, :setup,
+        ->(**) { flunk "receipt schema must not be installed in --no-bootstrap mode" }
+      ) do
+        stub_web_config do
+          Hive::Commands::Setup.new(
+            json: true, no_bootstrap: true, install_command_receipts: true,
+            output: output
+          ).call
+        end
+      end
+    end
+
+    assert_equal 0, exit_code
+    assert_equal "diagnose_only", JSON.parse(output.string).fetch("mode")
+  end
+
   def test_no_bootstrap_exit_reflects_hard_diagnostic_failure
     output = StringIO.new
     hard = result(name: "git", status: "missing", fix_command: "brew install git", bootstrappable: false)

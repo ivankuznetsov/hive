@@ -54,7 +54,7 @@ module Hive
 
     def supported?(command:, target: nil, mode: nil, options: {})
       command = command.to_s
-      return !options[:binding].to_s.empty? if command == "answer"
+      return !(options[:binding] || options["binding"]).to_s.empty? if command == "answer"
       return !target.nil? && !target.to_s.empty? if command == "archive"
       return STAGE_VERBS.include?(mode.to_s) if command == "stage_action"
       return RECEIPT_MODES.include?(mode.to_s) if command == "receipt"
@@ -77,6 +77,21 @@ module Hive
 
     def key_policy(command:, mode: nil)
       descriptor(command: command, mode: mode).key_policy
+    end
+
+    def validate_keyed!(command:, mode:, target:, options: {})
+      command = command.to_s
+      unless supported?(command: command, target: target, mode: mode, options: options)
+        raise Hive::UsageError, "unsupported keyed mutation: #{[ command, mode ].compact.join(' ')}"
+      end
+      item = descriptor(command: command, mode: mode)
+      if item.mode && item.mode != mode.to_s
+        raise Hive::UsageError, "unsupported keyed mutation mode: #{command} #{mode}"
+      end
+      if item.key_policy == :forbidden
+        raise Hive::UsageError, "idempotency keys are forbidden for #{command} #{mode}".strip
+      end
+      item
     end
 
     def normalize_key(value)

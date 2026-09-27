@@ -1,4 +1,5 @@
 require "hive/attempts/api"
+require "hive/command_receipt_store"
 
 module Hive
   module Attempts
@@ -18,7 +19,19 @@ module Hive
           interactive: true
         }
         context = defined?(Hive::CommandOperation) && Hive::CommandOperation.current_context
-        attributes[:request_id] = context.transport_request_id if context
+        @command_dispatch_context = context
+        if context
+          if context.retry_horizon_expires_at.to_s.empty?
+            raise Hive::UsageError,
+                  "keyed durable dispatch requires an absolute --retry-horizon-expires-at"
+          end
+          Hive::CommandReceiptStore.new.acquire_pin(
+            receipt_id: context.receipt_id, principal: context.principal,
+            intent_id: context.transport_request_id, intent_generation: context.ordinal,
+            retry_horizon_expires_at: context.retry_horizon_expires_at
+          )
+          attributes[:request_id] = context.transport_request_id
+        end
         result = (@attempts_api || Hive::Attempts::API.new).dispatch(**attributes)
         if @json && result.output_status == :expired
           raise Hive::ConcurrentRunError,
@@ -32,7 +45,9 @@ module Hive
 
       def handle_durable_failure!(result)
         if result.status == :lost
-          exit(result.exit_status) if @json && result.stdout_emitted?
+          if @json && result.stdout_emitted? && !@command_dispatch_context
+            exit(result.exit_status)
+          end
 
           raise Hive::ConcurrentRunError,
                 "durable attempt lost before producing a receipt for #{@target}: #{result.attempt_id}"
@@ -48,6 +63,13 @@ module Hive
           )
         end
 
+        if @command_dispatch_context
+          raise Hive::AttemptExecutionError.new(
+            "durable attempt #{result.attempt_id} failed after buffered JSON output",
+            exit_code: result.exit_status, attempt_id: result.attempt_id,
+            outcome: result.outcome
+          )
+        end
         exit(result.exit_status)
       end
     end

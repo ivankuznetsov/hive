@@ -6,12 +6,15 @@ require "hive/command_maintenance_authority"
 require "hive/command_operation"
 require "hive/project_identity"
 require "hive/runtime_control_plane"
+require "hive/lock"
 
 module Hive
   class CommandReceiptPruner
     RETENTION_SECONDS = 30 * 24 * 60 * 60
     DEFAULT_LIMIT = 100
     MAX_LIMIT = 1_000
+    WARNING_BAND_PERCENT = 70
+    ACTION_BAND_PERCENT = 85
 
     def initialize(database: Hive::RuntimeControlPlane.database, authority: nil,
                    clock: -> { Time.now.utc })
@@ -24,16 +27,20 @@ module Hive
 
     def preview(project_root: nil, namespace_id: nil, limit: DEFAULT_LIMIT, cursor: nil)
       bounded = bounded_limit(limit)
-      selected = resolve_namespace(project_root: project_root, namespace_id: namespace_id, write: false)
-      unenrolled_project = !project_root.nil? && selected.nil?
       fixed_cutoff = cutoff
       @database.read_only do |connection|
+        selected = resolve_namespace_read_only(
+          connection, project_root: project_root, namespace_id: namespace_id
+        )
+        unenrolled_project = !project_root.nil? && selected.nil?
         if unenrolled_project
           return {
             "schema" => "hive-receipt-prune", "schema_version" => 1, "ok" => true,
             "preview" => true, "confirmed" => false, "namespace_id" => nil,
             "cutoff" => timestamp(fixed_cutoff), "candidate_count" => 0,
-            "candidates" => [], "project_enrollment" => "absent"
+            "candidates" => [], "project_enrollment" => "absent",
+            "warning_band_percent" => WARNING_BAND_PERCENT,
+            "action_band_percent" => ACTION_BAND_PERCENT
           }
         end
         if selected.nil?
@@ -52,6 +59,8 @@ module Hive
     rescue Sequel::DatabaseLockTimeout => error
       maintenance_failure!(:command_prune_busy,
                            "resolve database contention, then rerun; free disk if storage is exhausted", error)
+    rescue Errno::ENOSPC, Errno::EDQUOT => error
+      maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
     rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
       maintenance_failure!(:command_prune_preview_unavailable,
                            "restore normal database availability before preview", error)
@@ -62,12 +71,20 @@ module Hive
       raise Hive::UsageError, "confirmed prune requires --project or --namespace-id" unless selected
       bounded = bounded_limit(limit)
       fixed_cutoff = cutoff
+      context = Hive::CommandOperation.current_context
       batch_id = SecureRandom.uuid
       candidates = []
 
       @database.transaction do |connection|
         busy = connection[:command_maintenance_batches]
           .where(state: %w[prepared executing]).first
+        if busy && context && busy[:administrative_receipt_id] == context.receipt_id
+          batch_id = busy.fetch(:batch_id)
+          selected = busy.fetch(:namespace_id)
+          fixed_cutoff = Hive::RuntimeControlPlane::Codec.load_time(busy.fetch(:fixed_cutoff))
+          candidates = JSON.parse(busy.fetch(:candidates_json), symbolize_names: true)
+          next
+        end
         if busy
           message = if @authority.installation_owner? || busy.fetch(:principal) == @authority.principal
             "another prune batch #{busy.fetch(:batch_id)} generation #{busy.fetch(:generation)} is unfinished; " \
@@ -83,10 +100,13 @@ module Hive
         authorize_rows!(candidates)
         now = timestamp
         connection[:command_maintenance_batches].insert(
-          batch_id: batch_id, namespace_id: selected, principal: @authority.principal,
+          batch_id: batch_id, namespace_id: selected,
+          administrative_receipt_id: context&.receipt_id, principal: @authority.principal,
           principal_scope: @authority.installation_owner? ? "installation" : "own",
           kind: "prune", state: "executing", generation: 1,
           owner_host: Socket.gethostname, owner_pid: Process.pid,
+          owner_process_start: Hive::Lock.process_start_time(Process.pid) ||
+            raise(Hive::ConfigError, "cannot record prune owner process start time"),
           fixed_cutoff: timestamp(fixed_cutoff),
           candidates_json: codec(candidates.map { |row| candidate_identity(row) }),
           outcomes_json: "[]", created_at: now, updated_at: now
@@ -109,6 +129,22 @@ module Hive
     end
 
     private
+
+    def resolve_namespace_read_only(connection, project_root:, namespace_id:)
+      if project_root && namespace_id
+        raise Hive::UsageError, "--project and --namespace-id are mutually exclusive"
+      end
+      if namespace_id
+        require_installation_owner!
+        row = connection[:command_namespaces][namespace_id: namespace_id]
+        raise Hive::UsageError, "unknown command namespace #{namespace_id}" unless row
+        return row.fetch(:namespace_id)
+      end
+      return unless project_root
+      Hive::ProjectIdentity.resolve_read_only(
+        project_root: project_root, connection: connection
+      )&.namespace_id
+    end
 
     def resolve_namespace(project_root:, namespace_id:, write:)
       if project_root && namespace_id
@@ -134,6 +170,7 @@ module Hive
       cutoff_value = timestamp(cutoff)
       connection[:command_receipts]
         .where(namespace_id: namespace_id, state: %w[succeeded failed settled])
+        .then { |dataset| @authority.installation_owner? ? dataset : dataset.where(principal: @authority.principal) }
         .where { terminal_at < cutoff_value }
         .exclude(receipt_id: connection[:command_receipt_pins]
           .where(lifecycle_status: "active").select(:receipt_id))
@@ -152,9 +189,21 @@ module Hive
     end
 
     def delete_candidates(batch_id, namespace_id, candidates, fixed_cutoff)
-      outcomes = []
+      batch = @database.read { |connection| connection[:command_maintenance_batches][batch_id: batch_id] }
+      outcomes = JSON.parse(batch.fetch(:outcomes_json))
+      expected_generation = batch.fetch(:generation)
+      completed_ids = outcomes.filter_map do |outcome|
+        outcome["receipt_id"] if outcome["outcome"] == "deleted"
+      end
+      candidates = candidates.reject { |candidate| completed_ids.include?(candidate.fetch(:receipt_id)) }
       candidates.each_slice(DEFAULT_LIMIT) do |slice|
         @database.transaction do |connection|
+          current_batch = connection[:command_maintenance_batches][batch_id: batch_id]
+          unless current_batch && current_batch.fetch(:state) == "executing" &&
+                 current_batch.fetch(:generation) == expected_generation
+            raise Hive::CommandConflict, "prune batch ownership changed before deletion"
+          end
+          @authority.authorize!(current_batch.fetch(:principal))
           slice.each do |candidate|
             row = connection[:command_receipts][receipt_id: candidate.fetch(:receipt_id)]
             outcome = "skipped"
@@ -166,6 +215,7 @@ module Hive
                  .where(receipt_id: row.fetch(:receipt_id), lifecycle_status: "active").any?
               @authority.authorize!(row.fetch(:principal))
               receipt_id = row.fetch(:receipt_id)
+              logical_bytes = receipt_storage_bytes(connection, row)
               connection[:command_maintenance_audit].where(receipt_id: receipt_id).delete
               connection[:command_effects].where(receipt_id: receipt_id).delete
               connection[:command_dispatch_contexts].where(receipt_id: receipt_id).delete
@@ -175,7 +225,6 @@ module Hive
               connection[:command_receipts].where(
                 receipt_id: receipt_id, generation: row.fetch(:generation)
               ).delete
-              logical_bytes = row.fetch(:frozen_request_json).bytesize + 1024
               connection[:command_capacity].where(namespace_id: namespace_id).update(
                 logical_bytes: Sequel.function(
                   :max, Sequel[:logical_bytes] - logical_bytes, 0
@@ -185,26 +234,46 @@ module Hive
               )
               outcome = "deleted"
             end
-            outcomes << candidate_identity(candidate).merge("outcome" => outcome)
+            identity = candidate_identity(candidate)
+            outcomes.reject! { |existing| existing["receipt_id"] == identity["receipt_id"] }
+            outcomes << identity.merge("outcome" => outcome)
           end
           now = timestamp
-          connection[:command_maintenance_batches].where(batch_id: batch_id, state: "executing")
+          changed = connection[:command_maintenance_batches].where(
+            batch_id: batch_id, state: "executing", generation: expected_generation
+          )
             .update(outcomes_json: codec(outcomes), generation: Sequel[:generation] + 1,
                     updated_at: now)
+          raise Hive::CommandConflict, "prune batch changed during deletion" unless changed == 1
         end
+        expected_generation += 1
       end
       @database.transaction do |connection|
         now = timestamp
-        connection[:command_maintenance_batches].where(batch_id: batch_id, state: "executing")
+        changed = connection[:command_maintenance_batches].where(
+          batch_id: batch_id, state: "executing", generation: expected_generation
+        )
           .update(state: "completed", generation: Sequel[:generation] + 1,
                   outcomes_json: codec(outcomes), updated_at: now, completed_at: now)
+        raise Hive::CommandConflict, "prune batch changed before completion" unless changed == 1
       end
       outcomes
     end
 
     def preview_payload(connection, namespace_id, rows, confirmed:, fixed_cutoff:,
                         outcomes: nil, batch_id: nil)
-      namespace_capacity = connection[:command_capacity][namespace_id: namespace_id]
+      namespace_capacity = if @authority.installation_owner?
+        connection[:command_capacity][namespace_id: namespace_id]
+      else
+        own_rows = connection[:command_receipts].where(
+          namespace_id: namespace_id, principal: @authority.principal
+        ).all
+        {
+          nonterminal_count: own_rows.count { |row| Hive::CommandReceiptStore::NONTERMINAL_STATES.include?(row[:state]) },
+          executing_count: own_rows.count { |row| row[:state] == "executing" },
+          logical_bytes: own_rows.sum { |row| row[:frozen_request_json].to_s.bytesize + row[:result_json].to_s.bytesize + 1024 }
+        }
+      end
       installation = connection[:command_capacity].select do
         [ sum(:nonterminal_count).as(:n), sum(:executing_count).as(:a), sum(:logical_bytes).as(:bytes) ]
       end.first
@@ -215,7 +284,8 @@ module Hive
         "candidate_count" => rows.length,
         "candidates" => rows.map { |row| candidate_identity(row) },
         "namespace_utilization" => utilization(namespace_capacity),
-        "warning_band_percent" => 70, "action_band_percent" => 85
+        "warning_band_percent" => WARNING_BAND_PERCENT,
+        "action_band_percent" => ACTION_BAND_PERCENT
       }
       if @authority.installation_owner?
         payload["installation_utilization"] = {
@@ -225,6 +295,7 @@ module Hive
           "main_bytes" => File.size(@database.path),
           "wal_bytes" => File.exist?("#{@database.path}-wal") ? File.size("#{@database.path}-wal") : 0
         }
+        payload.merge!(maintenance_identities(connection, namespace_id))
       else
         payload["installation_pressure"] = "ask_installation_owner"
       end
@@ -248,11 +319,15 @@ module Hive
           {
             "namespace_id" => row.fetch(:namespace_id),
             "generation" => row.fetch(:enrollment_generation),
-            "keyed_intake_enabled" => row.fetch(:keyed_intake_enabled) == 1
-          }.merge(utilization(capacity))
+            "keyed_intake_enabled" => row.fetch(:keyed_intake_enabled) == 1,
+            "configured_limits" => { "available" => false }
+          }.merge(utilization(capacity)).merge(
+            maintenance_identities(connection, row.fetch(:namespace_id))
+          )
         end,
         "next_cursor" => more ? rows.last.fetch(:namespace_id) : nil,
-        "warning_band_percent" => 70, "action_band_percent" => 85
+        "warning_band_percent" => WARNING_BAND_PERCENT,
+        "action_band_percent" => ACTION_BAND_PERCENT
       }
     end
 
@@ -266,6 +341,40 @@ module Hive
 
     def candidate_identity(row)
       { "receipt_id" => row.fetch(:receipt_id), "generation" => row.fetch(:generation) }
+    end
+
+    def receipt_storage_bytes(connection, row)
+      receipt_id = row.fetch(:receipt_id)
+      total = row.fetch(:frozen_request_json).bytesize + row[:result_json].to_s.bytesize + 1024
+      total += connection[:command_effects].where(receipt_id: receipt_id).all.sum do |effect|
+        effect[:identity_json].to_s.bytesize + effect[:evidence_json].to_s.bytesize + 512
+      end
+      total += connection[:command_receipt_pins].where(receipt_id: receipt_id).count * 512
+      total += connection[:command_maintenance_audit].where(receipt_id: receipt_id).all.sum do |audit|
+        audit[:evidence_json].to_s.bytesize + 512
+      end
+      total += connection[:command_dispatch_contexts].where(receipt_id: receipt_id).count * 512
+      total += connection[:command_successor_allocations]
+        .where(predecessor_receipt_id: receipt_id).count * 512
+      total
+    end
+
+    def maintenance_identities(connection, namespace_id)
+      receipt_ids = connection[:command_receipts].where(namespace_id: namespace_id).select(:receipt_id)
+      {
+        "nonterminal_receipts" => connection[:command_receipts]
+          .where(namespace_id: namespace_id, state: Hive::CommandReceiptStore::NONTERMINAL_STATES)
+          .order(:receipt_id).limit(DEFAULT_LIMIT).select_map([ :receipt_id, :generation ])
+          .map { |receipt_id, generation| { "receipt_id" => receipt_id, "generation" => generation } },
+        "active_pins" => connection[:command_receipt_pins]
+          .where(receipt_id: receipt_ids, lifecycle_status: "active")
+          .order(:pin_id).limit(DEFAULT_LIMIT).select_map([ :pin_id, :generation ])
+          .map { |pin_id, generation| { "pin_id" => pin_id, "generation" => generation } },
+        "unfinished_batches" => connection[:command_maintenance_batches]
+          .where(namespace_id: namespace_id, state: %w[prepared executing])
+          .order(:batch_id).limit(DEFAULT_LIMIT).select_map([ :batch_id, :generation ])
+          .map { |batch_id, generation| { "batch_id" => batch_id, "generation" => generation } }
+      }
     end
 
     def bounded_limit(value)

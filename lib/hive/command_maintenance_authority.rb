@@ -44,6 +44,9 @@ module Hive
       new(
         principal: "github:#{id}", principal_source: "signed_in_web",
         installation_owner: auth.maintenance_owner?(login, id),
+        installation_owner_check: -> {
+          Hive::Web::GithubAuth.new(config: config).maintenance_owner?(login, id)
+        },
         peer_address: peer_address
       )
     end
@@ -59,16 +62,19 @@ module Hive
     end
 
     def initialize(principal:, principal_source:, installation_owner: false,
-                   peer_address: nil, custody_uid: nil)
+                   installation_owner_check: nil, peer_address: nil, custody_uid: nil)
       @principal = principal.to_s
       @principal_source = principal_source.to_s
       @installation_owner = installation_owner == true
+      @installation_owner_check = installation_owner_check
       @peer_address = peer_address&.to_s
       @custody_uid = custody_uid
       raise ArgumentError, "maintenance principal is required" if @principal.empty?
     end
 
-    def installation_owner? = @installation_owner
+    def installation_owner?
+      @installation_owner_check ? @installation_owner_check.call == true : @installation_owner
+    end
 
     def authorize!(affected_principal)
       return authority_basis if installation_owner? || affected_principal.to_s == principal

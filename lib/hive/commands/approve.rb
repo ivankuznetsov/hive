@@ -22,6 +22,7 @@ require "hive/task_meta"
 require "hive/plan_review/transition_guard"
 require "hive/task_activity"
 require "hive/command_operation"
+require "hive/command_error_kind"
 
 module Hive
   module Commands
@@ -52,9 +53,9 @@ module Hive
       VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
 
       def self.error_kind_for(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
-        when Hive::CommandOutcomeError then error.reason
-        when Hive::CommandCapacityError then error.reason
         when Hive::PlanReview::TransitionBlocked then "plan_review_blocked"
         when Hive::AmbiguousSlug then "ambiguous_slug"
         when Hive::DestinationCollision then "destination_collision"

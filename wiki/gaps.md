@@ -1654,3 +1654,16 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
 - Browser regressions simulate document visibility and exercise real Cable
   subscriptions and feed scans. CPU and memory savings in the installed local
   service have not yet been measured for this change.
+
+## Command receipt activation boundaries (2026-09-27)
+
+- The compatibility rollback package remains a production-activation
+  dependency; source support does not prove a published, retained package can
+  be fetched.
+- Receipt maintenance is CLI-only in this increment. There is no shipped web
+  route for prune, retirement, pin release, batch abandonment, or enrollment.
+- Project identity and receipt continuity cover one intact host database plus
+  its bound marker. Multi-host continuity and decommission witnesses remain a
+  follow-up.
+- Terminal prune reclaims reusable SQLite pages. It does not guarantee that the
+  database or WAL files shrink on disk.

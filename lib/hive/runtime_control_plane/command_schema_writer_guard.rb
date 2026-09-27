@@ -38,13 +38,15 @@ module Hive
           raise Hive::ConfigError,
                 "cannot verify command-schema writer liveness from #{path}; repair the PID file and retry"
         end
-        return true unless alive.call(pid)
-        classification = ownership.call(payload, pid)
-        return true if classification == :reused
+        classification = Hive::PidFile.death_classification(
+          pid: pid, recorded_start_time: payload["process_start_time"],
+          alive: alive, ownership: ownership
+        )
+        return true if %i[dead reused].include?(classification)
 
         raise Hive::ConfigError,
               "command receipt installation requires stopped writers; #{path} identifies a " \
-              "#{classification == :verified || classification == :legacy ? 'live' : 'liveness-unverifiable'} process"
+              "#{classification == :live ? 'live' : 'liveness-unverifiable'} process"
       rescue Hive::Error
         raise
       rescue SystemCallError, IOError => error

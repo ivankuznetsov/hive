@@ -55,6 +55,26 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  # After a reviewer sent the task back for implementation rework, the next
+  # evidence round must be accepted: a malformed package cannot fall through
+  # to best effort and skip the gate that caught real gaps.
+  def test_best_effort_is_disabled_once_a_reviewer_rework_is_on_record
+    Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
+      task = make_artifacts_task(dir)
+      reworks = File.join(task.folder, "outcome-evidence", "reworks")
+      FileUtils.mkdir_p(reworks)
+      File.write(File.join(reworks, "rework-01.json"), "{}")
+      invalid = ->(*_) { raise Hive::Artifacts::OutcomeEvidence::StoreError, "claim requires document proof, not terminal" }
+      with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, invalid) do
+        assert_equal :error, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal :error, marker.name
+        assert_equal "outcome_evidence_invalid", marker.attrs.fetch("reason")
+        refute_equal "unavailable", marker.attrs["evidence_status"]
+      end
+    end
+  end
+
   def test_best_effort_continues_after_capture_quota_or_a_blocked_capture
     Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
       %w[limits_reached outcome_evidence_capability_blocked outcome_evidence_recaptures_exhausted].each do |reason|

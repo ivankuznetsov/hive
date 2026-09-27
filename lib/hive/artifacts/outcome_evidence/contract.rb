@@ -103,20 +103,22 @@ module Hive
           verdict_by_target = verdicts.to_h { |item| [ item.fetch("target_id"), item ] }
           # A rejected candidate is still valuable durable history: recording
           # the independent review is what lets the next producer receive its
-          # revision guidance. Requiring rejected evidence to satisfy the
-          # acceptance contract first stranded malformed candidates as
-          # perpetually pending and every daemon retry reviewed the same bytes.
-          # Preserve the strict boundary by allowing a wrong proof kind only
-          # when the reviewer explicitly revises that same claim. Publication
-          # can therefore never admit it, while autonomous recapture can move
-          # forward from the immutable failed attempt.
-          wrong_kind.each do |claim_id, kind|
-            next if verdict_by_target.fetch(claim_id).fetch("verdict") == "revise"
+          # revision guidance. Publication can never admit wrong-kind proof, so
+          # a reviewer "accepted" verdict on it is downgraded to "revise" with
+          # the required kind as guidance. Raising here discarded the whole
+          # round, so the next producer repeated the same wrong kind; stronger
+          # verdicts (rework, blocked) are kept as given.
+          verdicts = verdicts.map do |item|
+            kind = wrong_kind[item.fetch("target_id")]
+            next item unless kind && item.fetch("verdict") == "accepted"
 
-            raise StoreError,
-                  "claim #{claim_id} requires #{claim_by_id.fetch(claim_id).fetch('proof_kind')} " \
-                  "proof, not #{kind}"
+            required = claim_by_id.fetch(item.fetch("target_id")).fetch("proof_kind")
+            guidance = "Controller: this claim requires #{required} proof, but the evidence " \
+                       "supplied #{kind}; recapture it as #{required}. Reviewer note: #{item.fetch('reason')}"
+            item.merge("verdict" => "revise",
+                       "reason" => guidance.byteslice(0, MAX_STATEMENT_BYTES).scrub(""))
           end
+          verdict_by_target = verdicts.to_h { |item| [ item.fetch("target_id"), item ] }
           accepted_without_proof = uncovered.select do |claim_id|
             verdict_by_target.fetch(claim_id).fetch("verdict") == "accepted"
           end

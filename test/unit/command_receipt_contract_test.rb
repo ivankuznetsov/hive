@@ -705,6 +705,30 @@ class CommandReceiptContractTest < Minitest::Test
     end
   end
 
+  def test_settlement_budget_distinguishes_unspecified_zero_and_allocated_time
+    measured = 4.802 / 60_000
+    absent = Hive::CommandReceiptCapacity.settlement_budget(
+      staffing: {}, settlement_minutes: measured
+    )
+    zero = Hive::CommandReceiptCapacity.settlement_budget(
+      staffing: { "minutes_per_namespace_per_day" => 0 },
+      settlement_minutes: measured
+    )
+    allocated = Hive::CommandReceiptCapacity.settlement_budget(
+      staffing: { "operator_count" => 4, "minutes_per_namespace_per_day" => 30 },
+      settlement_minutes: measured
+    )
+
+    assert_nil absent.fetch(:daily_ceiling)
+    assert_equal 0, zero.fetch(:daily_ceiling)
+    assert_equal 374_843, allocated.fetch(:daily_ceiling)
+    assert_raises(Hive::ConfigError) do
+      Hive::CommandReceiptCapacity.settlement_budget(
+        staffing: { "minutes_per_namespace_per_day" => 30 }, settlement_minutes: 0
+      )
+    end
+  end
+
   def test_command_adapters_build_operations_and_classify_receipt_failures
     database = Struct.new(:installation_identity).new({ installation_id: "installation" })
     store = Struct.new(:database).new(database)

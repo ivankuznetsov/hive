@@ -11,7 +11,10 @@ module Hive
     DEFAULT_INSTALLATION_NONTERMINAL_LIMIT = 100_000
     DEFAULT_INSTALLATION_CONCURRENCY_LIMIT = 3_200
     DEFAULT_INSTALLATION_BYTE_LIMIT = 6_710_886_400
-    NEXT_OPERATION_ALLOWANCE = 266_240
+    # Measured maximum-payload finalization grew the main file by 225,280
+    # bytes and WAL by 255,472 bytes. Round their combined 480,752-byte
+    # physical delta up to 512 KiB for the conservative next-operation check.
+    NEXT_OPERATION_ALLOWANCE = 512 * 1024
     INSTALLATION_KEYS = %w[
       installation_nonterminal_limit installation_concurrency_limit
       installation_byte_admission_limit
@@ -91,6 +94,27 @@ module Hive
       raise Hive::ConfigError, "#{label} must be a positive integer"
     end
     private_class_method :positive_integer
+
+    def self.settlement_budget(staffing:, settlement_minutes:)
+      duration = Float(settlement_minutes)
+      unless duration.positive? && duration.finite?
+        raise Hive::ConfigError, "settlement_minutes must be a positive finite number"
+      end
+      allocated = staffing.fetch("minutes_per_namespace_per_day", nil)
+      return { allocated_minutes: nil, settlement_minutes: duration, daily_ceiling: nil } if allocated.nil?
+      minutes = Float(allocated)
+      unless minutes >= 0 && minutes.finite?
+        raise Hive::ConfigError,
+              "command_receipts.staffing.minutes_per_namespace_per_day must be nonnegative"
+      end
+      {
+        allocated_minutes: minutes,
+        settlement_minutes: duration,
+        daily_ceiling: (minutes / duration).floor
+      }
+    rescue ArgumentError, TypeError
+      raise Hive::ConfigError, "settlement capacity inputs must be numeric"
+    end
 
     def initialize(database:, policy:)
       @database = database

@@ -42,10 +42,12 @@ maintenance audit row 193 bytes/receipt, and one dispatch-intent context 397
 bytes/receipt (rounded page-allocation deltas). Four concurrent writer
 processes inserting the same 1,000-row control serialized successfully and
 peaked at a 4,140,632-byte WAL against 970,752 occupied main bytes, a 4.27x
-transient amplification. This is why admission uses main occupied pages plus
-the current WAL and reserves a 260 KiB next-operation allowance. At the default
-installation A=3,200, one such allowance per executing command is about 813
-MiB, leaving roughly 5.46 GiB below the 6.25 GiB installation threshold for
+transient amplification. A maximum-result finalization qualification then
+measured 225,280 bytes of main-file growth plus 255,472 bytes of WAL growth,
+480,752 bytes total. Admission therefore uses main occupied pages plus the
+current WAL and a rounded-up 512 KiB next-operation allowance. At the default
+installation A=3,200, one such allowance per executing command is 1.5625 GiB,
+leaving roughly 4.69 GiB below the 6.25 GiB installation threshold for
 retained rows, auxiliary evidence, checkpoints, and filesystem variation. The
 threshold remains an admission backstop, not reserved disk or a finalization
 guarantee.
@@ -97,16 +99,26 @@ binding; a changed frozen request cannot claim that binding.
 
 The default staffing assumption is one operator able to act within one business
 day. It is not a service guarantee or an allocated minutes/day value.
-Installations may override operator count and response business days. A local
-100-receipt run measured the storage transaction itself at 3.19 ms p50 and
-4.14 ms p95; the preview-plus-confirm API path measured 2.50 ms p50 and 3.20 ms
-p95 after warm-up. Those figures exclude the human/provider investigation and
-therefore cannot be used as settlement throughput. Each installation must time
-that investigation and confirmation workflow as `t` minutes, explicitly
-allocate `T` operator minutes per namespace/day, and keep arrivals below
-`floor(T/t)` with headroom for backlog and orphan triage. No `T` is invented by
-Hive: absent T cannot justify a positive ceiling, and explicit T=0 yields no
-positive sustainable rate.
+Installations may override operator count and response business days. The
+reproducible 100-receipt qualification now measures a complete deterministic
+settlement workflow: read the exact persisted provider observation, correlate
+it to every effect, construct the evidence, run the read-only preview, and
+commit the single-receipt retirement. On Ruby 3.4.10 / SQLite 3.53.2 it measured
+3.761 ms p50 and 4.802 ms p95 (`t_lab = 0.00008004` minutes). This is a lower
+bound for incidents whose authoritative evidence is already available; human
+judgment, restoring provider authority, queue cancellation, and ambiguous
+evidence increase the installation's measured `t_actual`.
+
+Conditional capacity is `floor(T/t_actual)`, with headroom for backlog and
+orphan triage. The qualification shows the arithmetic without assigning an
+operator budget: absent T has no numeric ceiling, T=0 has ceiling 0, and an
+illustrative T=30 minutes with the lab-only p95 lower bound gives 374,815/day.
+That last number is not a production sustainable-rate claim. Configure and use
+the actual shared operator allocation; `operator_count` is not multiplied into
+T. The one-business-day response assumption alone never supplies T. Reproduce
+the measurements with `bundle exec ruby script/measure_command_receipts.rb`;
+the complete F/P and exhaustion receipt is in
+`docs/implementation/command-receipt-capacity-qualification.md`.
 
 At an N stop, consider all of: raise the namespace N config with matching
 installation/byte headroom; terminal-only prune for reusable pages (not N);

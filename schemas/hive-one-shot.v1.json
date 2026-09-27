@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-one-shot.v1.json",
+  "title": "Hive one-shot execution report (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "component", "project", "status", "started_at", "finished_at", "ran", "pending", "next_due_at", "wake_conditions", "safe_to_stop", "owner", "error"],
+  "properties": {
+    "schema": {"const": "hive-one-shot"},
+    "schema_version": {"const": 1},
+    "component": {"enum": ["patrol", "architecture_patrol", "babysitter", "dispatch"]},
+    "project": {"type": ["string", "null"], "minLength": 1},
+    "status": {"enum": ["ok", "refused", "error"]},
+    "started_at": {"$ref": "#/$defs/Timestamp"},
+    "finished_at": {"$ref": "#/$defs/Timestamp"},
+    "ran": {"type": "array", "items": {"$ref": "#/$defs/Run"}},
+    "pending": {"oneOf": [{"$ref": "#/$defs/Pending"}, {"type": "null"}]},
+    "next_due_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+    "wake_conditions": {"type": "array", "items": {"$ref": "#/$defs/WakeCondition"}},
+    "safe_to_stop": {"type": "boolean"},
+    "owner": {"oneOf": [{"$ref": "#/$defs/Owner"}, {"type": "null"}]},
+    "error": {"oneOf": [{"$ref": "#/$defs/Error"}, {"type": "null"}]},
+    "projects": {"type": "array", "items": {"$ref": "#"}},
+    "owning_projects": {"type": "array", "items": {"$ref": "#/$defs/OwningProject"}},
+    "host_stop_allowed": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"project": {"type": "null"}}},
+      "then": {"required": ["projects", "owning_projects", "host_stop_allowed"]},
+      "else": {"not": {"anyOf": [{"required": ["projects"]}, {"required": ["owning_projects"]}, {"required": ["host_stop_allowed"]}]}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "ok"}}},
+      "then": {"properties": {"pending": {"$ref": "#/$defs/Pending"}, "error": {"type": "null"}}},
+      "else": {"properties": {"pending": {"type": "null"}, "next_due_at": {"type": "null"}, "safe_to_stop": {"const": false}, "error": {"$ref": "#/$defs/Error"}}}
+    }
+  ],
+  "$defs": {
+    "Timestamp": {"type": "string", "format": "date-time"},
+    "Run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "action", "outcome"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "action": {"type": "string", "minLength": 1},
+        "outcome": {"type": "string", "minLength": 1}, "project": {"type": "string", "minLength": 1},
+        "details": {"type": "object"}
+      }
+    },
+    "Pending": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runnable_now", "waiting_external", "waiting_operator"],
+      "properties": {
+        "runnable_now": {"type": "array", "items": {"$ref": "#/$defs/PendingItem"}},
+        "waiting_external": {"type": "array", "items": {"$ref": "#/$defs/PendingItem"}},
+        "waiting_operator": {"type": "array", "items": {"$ref": "#/$defs/PendingItem"}}
+      }
+    },
+    "PendingItem": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "component", "reason", "next_check_at", "condition"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "component": {"type": "string", "minLength": 1},
+        "project": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1},
+        "next_check_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "condition": {"oneOf": [{"$ref": "#/$defs/Condition"}, {"type": "null"}]}
+      }
+    },
+    "Condition": {
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["time_due", "check_state_changed", "review_changed", "pr_changed", "task_changed", "attempt_completed", "dependency_completed", "capacity_available", "operator_action"]},
+        "repository": {"type": "string"}, "project": {"type": "string"}, "pr": {"type": "integer", "minimum": 1},
+        "head_sha": {"type": "string"}, "task": {"type": "string"}, "attempt": {"type": "string"},
+        "resource": {"type": "string"}, "dependency": {"type": "string"}, "deadline": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "WakeCondition": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "affected_pending_ids"],
+      "properties": {
+        "kind": {"enum": ["time_due", "check_state_changed", "review_changed", "pr_changed", "task_changed", "attempt_completed", "dependency_completed", "capacity_available", "operator_action"]},
+        "repository": {"type": "string"}, "project": {"type": "string"}, "pr": {"type": "integer", "minimum": 1},
+        "head_sha": {"type": "string"}, "task": {"type": "string"}, "attempt": {"type": "string"},
+        "resource": {"type": "string"}, "dependency": {"type": "string"}, "deadline": {"$ref": "#/$defs/Timestamp"},
+        "affected_pending_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "Owner": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "pid", "process_identity"],
+      "properties": {
+        "kind": {"enum": ["daemon", "one_shot", "babysitter"]}, "pid": {"type": ["integer", "null"], "minimum": 1},
+        "process_identity": {"type": ["string", "object", "null"]}, "state_root": {"type": "string"}, "started_at": {"type": ["string", "null"]}
+      }
+    },
+    "Error": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message"],
+      "properties": {"code": {"type": "string", "minLength": 1}, "message": {"type": "string"}, "details": {"type": "object"}}
+    },
+    "OwningProject": {
+      "type": "object", "additionalProperties": false, "required": ["project", "owner"],
+      "properties": {"project": {"type": "string", "minLength": 1}, "owner": {"$ref": "#/$defs/Owner"}}
+    }
+  }
+}

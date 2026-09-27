@@ -47,6 +47,7 @@ module Hive
         diagnosis = database.diagnostics
         raise diagnosis.error if diagnosis.error
         identity = database.installation_identity if diagnosis.ok?
+        snapshot = database.quiescence_status_snapshot if diagnosis.ok?
         if diagnosis.ok? && (!identity || identity.fetch(:installation_id).to_s.empty?)
           raise IntegrityError.new("runtime installation identity is missing", code: :installation_identity_missing,
                                    action: Database::BACKUP_ACTION)
@@ -54,9 +55,22 @@ module Hive
         { "phase" => diagnosis.ok? ? "active" : "absent",
           "installation_id" => identity && identity.fetch(:installation_id),
           "next_action" => diagnosis.ok? ? nil : "hive setup",
+          "lifecycle" => lifecycle_status(snapshot && snapshot[:lifecycle]),
           "database" => Codec.normalize(diagnosis.to_h) }
       ensure
         database&.disconnect
+      end
+
+      def lifecycle_status(row)
+        return unless row
+
+        phase = row[:phase].to_s
+        {
+          "phase" => phase,
+          "generation" => row[:generation],
+          "revision" => row[:revision],
+          "admission_open" => phase == "running"
+        }
       end
     end
   end

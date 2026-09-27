@@ -48,10 +48,13 @@ module Hive
       "hive-prune" => 1,
       "hive-worktree" => 1,
       "hive-daemon-status" => 1,
+      "hive-daemon-quiesce" => 1,
+      "hive-daemon-resume" => 1,
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,
       "hive-daemon-reload" => 1,
       "hive-daemon-install" => 1,
+      "hive-one-shot" => 1,
       # Read-only inspection of the daemon's dispatch-request queue
       # (`hive daemon queue [list|show|prune]`). See AN-1/2/3 and
       # `Hive::Commands::Daemon#queue_command`.

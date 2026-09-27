@@ -430,6 +430,37 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     end
   end
 
+  def test_claim_recovery_only_mutates_selected_projects
+    with_repository do |repository|
+      timestamp = NOW.iso8601(6)
+      repository.database.transaction do |db|
+        installation = db[:installations].first.fetch(:installation_id)
+        db[:projects].insert(
+          project_id: "project-2", installation_id: installation,
+          registration_id: "registration-2", name: "other", observed_path: "/other",
+          state_root_path: "/other/.hive-state", active: 1,
+          registered_at: timestamp, last_observed_at: timestamp
+        )
+      end
+      selected = repository.write_request!(
+        project: "hive", slug: "selected-task", argv: %w[hive run selected-task],
+        request_id: "selected", now: NOW
+      )
+      unrelated = repository.write_request!(
+        project: "other", slug: "other-task", argv: %w[hive run other-task],
+        request_id: "unrelated", now: NOW
+      )
+      repository.claim(selected, pid: 1, now: NOW)
+      repository.claim(unrelated, pid: 1, now: NOW)
+
+      assert_equal 1, repository.recover_claims(
+        projects: [ "hive" ], now: NOW + 20_000, alive: ->(*) { false }
+      )
+      assert_nil repository.fetch(selected)
+      assert_equal "claimed", repository.fetch(unrelated).state
+    end
+  end
+
   def test_payload_lookup_and_revision_race_fail_closed
     with_repository do |repository|
       id = repository.write_request!(

@@ -9,6 +9,7 @@ require "hive/babysitter/worktree"
 require "hive/commands/babysit"
 require "hive/commands/init/prompts"
 require "hive/cli"
+require "hive/one_shot/result"
 
 class BabysitterCoverageGapsTest < Minitest::Test
   include HiveTestHelper
@@ -76,7 +77,7 @@ class BabysitterCoverageGapsTest < Minitest::Test
     end
     assert_equal [
       [ "status", nil ],
-      { detach: false, dry_run: false, once: false, all: false, force: false }
+      { detach: false, dry_run: false, once: false, all: false, force: false, json: false }
     ], calls.first
 
     cli = Hive::CLI.new([], { once: false, detach: false, dry_run: true, all: false, force: false })
@@ -164,7 +165,9 @@ class BabysitterCoverageGapsTest < Minitest::Test
     with_tmp_global_config do |home|
       cmd = Hive::Commands::Babysit.new(nil, nil, once: true, all: true, hive_home: home)
       out, _err = capture_io { cmd.call }
-      assert_includes out, "0 enabled projects"
+      payload = JSON.parse(out)
+      assert_equal "hive-one-shot", payload.fetch("schema")
+      assert_empty payload.fetch("projects")
 
       assert_raises(Hive::InvalidTaskPath) do
         Hive::Commands::Babysit.new(nil, "demo", once: true, all: true, hive_home: home).call
@@ -178,22 +181,32 @@ class BabysitterCoverageGapsTest < Minitest::Test
     end
   end
 
-  def test_run_once_builds_dispatcher_for_known_project
+  def test_run_once_builds_adapter_for_known_project
     with_tmp_global_config do |home|
-      project = { "name" => "demo", "path" => "/tmp/demo" }
+      project = {
+        "name" => "demo", "path" => "/tmp/demo",
+        "hive_state_path" => "/tmp/demo/.hive-state",
+        "repository_identity" => "github.com/acme/demo"
+      }
       with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { project }) do
-        dispatcher = Object.new
+        adapter = Object.new
         ran = false
-        dispatcher.define_singleton_method(:run_forever) { ran = true }
-        cmd = Hive::Commands::Babysit.new(nil, "demo", once: true, hive_home: home)
-        build_args = nil
-        cmd.define_singleton_method(:build_dispatcher) do |project_name:, max_ticks:|
-          build_args = [ project_name, max_ticks ]
-          dispatcher
+        report = Hive::OneShot::Result.ok(
+          component: :babysitter, project: "demo", started_at: Time.now,
+          finished_at: Time.now, ran: [], items: [], safe_to_stop: true
+        )
+        adapter.define_singleton_method(:call) do
+          ran = true
+          report
         end
-        cmd.call
+        selected = nil
+        cmd = Hive::Commands::Babysit.new(
+          nil, "demo", once: true, hive_home: home,
+          one_shot_factory: ->(entry) { selected = entry; adapter }
+        )
+        capture_io { cmd.call }
         assert ran
-        assert_equal [ "demo", 1 ], build_args
+        assert_equal project, selected
       end
     end
   end

@@ -395,7 +395,8 @@ module Hive
       end
 
       def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
-                      log_reference:, now:, provider_evidence: nil)
+                      log_reference:, now:, provider_evidence: nil, pause_generation: nil,
+                      authority: nil, timeout_sec: nil)
         version = observed.lease_version + 1
         receipt = {
           "receipt_version" => Record::RECEIPT_VERSION,
@@ -408,7 +409,8 @@ module Hive
           "final_checkpoint" => Hive::StringifyKeys.call(final_checkpoint),
           "output_references" => Hive::StringifyKeys.call(output_references),
           "log_reference" => Hive::StringifyKeys.call(log_reference),
-          "provider_evidence" => Hive::StringifyKeys.call(provider_evidence)
+          "provider_evidence" => Hive::StringifyKeys.call(provider_evidence),
+          "pause_generation" => pause_generation
         }
         Record.validate_receipt!(
           receipt, attempt_id: observed.attempt_id,
@@ -417,7 +419,11 @@ module Hive
           task_input_epoch: observed.task_input_epoch,
           terminal_lease_version: version, routing: observed["routing"]
         )
-        mutate(observed, allowed_states: [ "running" ], pending_receipt: receipt) do |data|
+        mutate(
+          observed, allowed_states: [ "running" ], pending_receipt: receipt,
+          authority: authority, cleanup_attempt_id: observed.attempt_id,
+          timeout_sec: timeout_sec
+        ) do |data|
           data.merge(
             "state" => "terminal", "outcome" => outcome, "lease_version" => version,
             "heartbeat_deadline" => nil, "ended_at" => Record.iso8601(now),
@@ -429,8 +435,28 @@ module Hive
         end
       end
 
-      def mark_lost(observed, reason:, now:, diagnostics: {})
-        mutate(observed, allowed_states: %w[launching running], pending_receipt: {}) do |data|
+      # A quiescence controller may publish interruption only after it has
+      # identity-verified that the running worker is gone. The ordinary CAS in
+      # terminalize keeps a genuine completion receipt authoritative when the
+      # two race.
+      def interrupt(observed, pause_generation:, exit_status:, final_checkpoint:,
+                    output_references:, log_reference:, now:, authority: nil,
+                    timeout_sec: nil)
+        terminalize(
+          observed, outcome: "interrupted", exit_status: exit_status,
+          final_checkpoint: final_checkpoint, output_references: output_references,
+          log_reference: log_reference, pause_generation: Integer(pause_generation), now: now,
+          authority: authority, timeout_sec: timeout_sec
+        )
+      end
+
+      def mark_lost(observed, reason:, now:, diagnostics: {}, authority: nil,
+                    timeout_sec: nil)
+        mutate(
+          observed, allowed_states: %w[launching running], pending_receipt: {},
+          authority: authority, cleanup_attempt_id: observed.attempt_id,
+          timeout_sec: timeout_sec
+        ) do |data|
           data.merge(
             "state" => "lost", "lease_version" => data.fetch("lease_version") + 1,
             "claim_deadline" => nil, "first_heartbeat_deadline" => nil,
@@ -465,9 +491,13 @@ module Hive
         ).count
       end
 
-      def mutate(observed, allowed_states:, pending_receipt: nil)
+      def mutate(observed, allowed_states:, pending_receipt: nil, authority: nil,
+                 cleanup_attempt_id: nil, timeout_sec: nil)
         replacement = nil
-        database.transaction do |db|
+        database.transaction(
+          authority: authority, cleanup_attempt_id: cleanup_attempt_id,
+          timeout_sec: timeout_sec
+        ) do |db|
           row = db[:attempts].where(attempt_id: observed.attempt_id).first
           current = row && record_from(row)
           verify_cas!(current, observed, allowed_states)
@@ -614,7 +644,8 @@ module Hive
       end
 
       def translate_store_error(error, prefix)
-        raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed)
+        raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed) ||
+          error.is_a?(RuntimeControlPlane::AdmissionClosed)
         raise RepositoryError, "#{prefix}: #{error.message}"
       end
     end

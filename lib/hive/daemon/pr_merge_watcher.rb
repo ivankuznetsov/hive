@@ -15,6 +15,8 @@ module Hive
   module Daemon
     # Tasks and GitHub are authority. Poll cadence is process-local; restart
     # rediscovers tasks and repeats idempotent intake and closure operations.
+    # An optional scheduler checkpoint preserves only the fair-selection cursor
+    # used by fresh one-shot processes.
     class PrMergeWatcher
       SUPPORTED_STAGES = %w[open-pr review artifacts finalize].map do |verb|
         Hive::Workflows::VERBS.fetch(verb).fetch(:target)
@@ -26,7 +28,8 @@ module Hive
                      gh: Hive::Gh, config_lookup: Hive::Config.method(:find_project),
                      config_loader: Hive::Config.method(:load),
                      task_factory: Hive::Task.method(:new),
-                     task_closure: Hive::TaskClosure, dry_run: false)
+                     task_closure: Hive::TaskClosure, dry_run: false,
+                     schedule_state_factory: nil)
         @poll_interval_sec = positive_number(poll_interval_sec, "poll interval", allow_zero: true)
         @poll_timeout_sec = positive_number(poll_timeout_sec, "poll timeout")
         @merge_intake = merge_intake
@@ -38,11 +41,17 @@ module Hive
         @task_factory = task_factory
         @task_closure = task_closure
         @dry_run = dry_run
+        @schedule_state_factory = schedule_state_factory
+        @selection_cursors = {}
         @contexts = {}
         @last_observation_results = []
       end
 
       attr_reader :last_observation_results
+
+      def next_poll_at(now: Time.now.utc)
+        now + @poll_interval_sec
+      end
 
       def observe(rows, now: Time.now.utc, projects: nil)
         @last_observation_results = []
@@ -93,11 +102,16 @@ module Hive
             item.dig("observation", "held") != true &&
               (!@polls[item["key"]] || @polls[item["key"]][:at] + @poll_interval_sec <= now)
           end
+          cursor = selection_cursor(project)
+          slugs = candidates.map { |item| item.dig("task", "slug") }.sort
+          rotation = slugs.rotate(cursor && slugs.include?(cursor) ? slugs.index(cursor) + 1 : 0)
           candidate = candidates.min_by do |item|
-            [ @polls.dig(item["key"], :at) || Time.at(0), item.dig("task", "slug") ]
+            [ @polls.dig(item["key"], :at) || Time.at(0),
+              rotation.index(item.dig("task", "slug")) ]
           end
           next unless candidate
 
+          record_selection_cursor(project, candidate.dig("task", "slug"), now: now)
           result = process_candidate(@contexts.fetch(project), candidate, now: now)
           @polls[candidate["key"]] = { at: now, state: result.dig(:remote, "state") }
           result.merge(project: project, slug: candidate.dig("task", "slug"))
@@ -120,6 +134,22 @@ module Hive
       end
 
       private
+
+      def selection_cursor(project)
+        return @selection_cursors[project] if @selection_cursors.key?(project)
+
+        state = @schedule_state_factory&.call(project)&.read("merge_watcher")
+        @selection_cursors[project] = state && state["last_selected_slug"]
+      end
+
+      def record_selection_cursor(project, slug, now:)
+        @selection_cursors[project] = slug
+        return if @dry_run
+
+        @schedule_state_factory&.call(project)&.update("merge_watcher", now: now) do
+          { "last_selected_slug" => slug }
+        end
+      end
 
       def candidate_for(row, identity)
         task = @task_factory.call(row.folder)

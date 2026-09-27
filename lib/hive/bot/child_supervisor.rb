@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "time"
 require "tmpdir"
+require "hive/runtime_control_plane/command_registration"
 
 module Hive
   module Bot
@@ -46,7 +47,10 @@ module Hive
         log_io.puts("[hive-bot] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
 
-        pid = Process.spawn(*argv, chdir: cwd, pgroup: true, out: log_io, err: log_io)
+        pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
+          *argv, role: argv[1] || "bot-child",
+          chdir: cwd, pgroup: true, out: log_io, err: log_io
+        )
         log_io.close
         @mutex.synchronize do
           @running[pid] = entry(project: project, slug: slug, command_argv: argv,

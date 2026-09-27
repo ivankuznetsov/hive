@@ -23,9 +23,11 @@ require "hive/daily_digest/migration"
 require "hive/daemon/daily_digest_delivery_scheduler"
 require "hive/daemon/logger"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_fix_runtime"
 require "hive/daemon/status_report"
+require "hive/daemon/quiescence"
 require "hive/invoked_binary"
 require "hive/update_check/state"
 require "hive/attempts/repository"
@@ -37,6 +39,10 @@ require "hive/attempts/finalization_maintenance"
 require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
+require "hive/one_shot/project_guard"
+require "hive/one_shot/result"
+require "hive/one_shot/schedule_state"
+require "hive/one_shot/dispatch_adapter"
 require "hive/commands/service_installer/result_presenter"
 
 module Hive
@@ -52,12 +58,24 @@ module Hive
     #   tail                           Stream daemon.log (tail -F semantics).
     #   enable [PROJECT|--all]         Set daemon.enabled: true in per-project YAML.
     #   disable [PROJECT|--all]        Set daemon.enabled: false in per-project YAML.
+    #   clear-hold PROJECT [SLUG]      Clear one persisted dispatch hold.
     class Daemon
       include Hive::Schemas::EnvelopeEmitter
       include Hive::PidFile
       include Hive::Commands::ServiceInstaller::ResultPresenter
 
-      VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable install queue].freeze
+      VALID_SUBCOMMANDS = %w[
+        start stop status quiesce resume reload tail enable disable install queue clear-hold
+      ].freeze
+
+      class LifecycleIncomplete < Hive::Error
+        def initialize(message, exit_code: Hive::ExitCodes::TEMPFAIL)
+          super(message)
+          @exit_code = exit_code
+        end
+
+        attr_reader :exit_code
+      end
 
       # Actions for `hive daemon queue ACTION` (AN-1/2/3). `list` is the
       # default when no action is given.
@@ -79,9 +97,10 @@ module Hive
 
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
                      all: false, json: false, force: false,
+                     timeout: nil, quiescence_factory: nil, resume_factory: nil,
                      queue_args: [],
                      hive_home: Hive::Paths.state_home,
-                     activation_lock: nil)
+                     activation_lock: nil, once: false, one_shot_factory: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -89,12 +108,20 @@ module Hive
         @all = all
         @json = json
         @force = force
+        @timeout = timeout
+        @quiescence_factory = quiescence_factory
+        @resume_factory = resume_factory
         @queue_args = Array(queue_args)
+        @hold_slug = @subcommand == "clear-hold" ? @queue_args[1] : nil
         @hive_home = hive_home
         @activation_lock = activation_lock
+        @once = once
+        @one_shot_factory = one_shot_factory
       end
 
       def call
+        return run_once if @once
+
         unless VALID_SUBCOMMANDS.include?(@subcommand)
           raise Hive::InvalidTaskPath,
                 "hive daemon: unknown subcommand #{@subcommand.inspect} " \
@@ -105,10 +132,13 @@ module Hive
         when "start"            then start_daemon
         when "stop"             then stop_daemon
         when "status"           then status_daemon
+        when "quiesce"          then quiesce_daemon
+        when "resume"           then resume_daemon
         when "reload"           then reload_daemon
         when "tail"             then tail_daemon
         when "install"          then install_daemon
         when "queue"            then queue_command
+        when "clear-hold"       then clear_hold
         when "enable", "disable" then call_with_envelope { do_call }
         end
       end
@@ -129,6 +159,102 @@ module Hive
       end
 
       private
+
+      def clear_hold
+        if @all
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: --all is not supported; name exactly one PROJECT"
+        end
+        if @json
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: --json is not supported"
+        end
+        if @dry_run || @detach
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: --dry-run and --detach are not supported"
+        end
+        if @target.to_s.strip.empty?
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: missing PROJECT"
+        end
+        entry = Hive::Config.find_project(@target)
+        unless entry
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: unknown project #{@target.inspect} " \
+                "(see `hive status` for the registered set)"
+        end
+        slug = @hold_slug.to_s
+        if !@hold_slug.nil? && slug.strip.empty?
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: SLUG must not be empty"
+        end
+
+        cleared = daemon_activation_lock.synchronize do
+          if File.exist?(pid_file)
+            raise Hive::ConcurrentRunError.new(
+              "hive daemon clear-hold: stop the daemon before changing persisted holds " \
+              "(run `hive daemon stop` first, including to clean a stale PID file)",
+              holder: { pid: read_pid_file_payload&.fetch("pid", nil) },
+              lock_path: pid_file
+            )
+          end
+
+          guard = Hive::OneShot::ProjectGuard.new(
+            state_root: entry.fetch("hive_state_path"),
+            project: entry.fetch("name"), kind: :one_shot
+          )
+          guard.synchronize do
+            controller = hold_recovery_controller(entry)
+            if @hold_slug.nil?
+              controller.clear_project_dropped(project: entry.fetch("name"))
+            else
+              controller.clear_quarantine(project: entry.fetch("name"), slug: slug)
+            end
+          end
+        end
+        hold = @hold_slug.nil? ? "dropped-project hold" : "quarantine for #{slug}"
+        action = cleared ? "cleared" : "no matching hold"
+        puts "hive daemon: #{action} #{hold} on #{entry.fetch('name')}"
+        cleared
+      end
+
+      def hold_recovery_controller(entry)
+        daemon_defaults = Hive::Config::DEFAULTS.fetch("daemon")
+        project = entry.fetch("name")
+        state = Hive::OneShot::ScheduleState.new(
+          state_root: entry.fetch("hive_state_path")
+        )
+        Hive::Daemon::ConcurrencyController.new(
+          max_concurrent_runs: daemon_defaults.fetch("max_concurrent_runs"),
+          max_concurrent_per_project: daemon_defaults.fetch("max_concurrent_per_project"),
+          max_runs_per_day_per_project: daemon_defaults.fetch("max_runs_per_day_per_project"),
+          max_concurrent_patrol_scans: daemon_defaults.fetch("max_concurrent_patrol_scans"),
+          persistence_scope_projects: [ project ],
+          schedule_state_factory: ->(candidate) { state if candidate == project }
+        )
+      end
+
+      def run_once
+        if @target.to_s.empty?
+          raise Hive::InvalidTaskPath, "hive daemon --once: missing PROJECT"
+        end
+        entry = Hive::Config.find_project(@target)
+        unless entry
+          raise Hive::InvalidTaskPath, "hive daemon --once: unknown project #{@target.inspect}"
+        end
+
+        adapter = if @one_shot_factory
+          @one_shot_factory.call(entry)
+        else
+          Hive::OneShot::DispatchAdapter.new(
+            entry: entry, hive_home: @hive_home, dry_run: @dry_run
+          )
+        end
+        result = adapter.call
+        puts result.to_json
+        @stdout_written = true
+        result
+      end
 
       def start_daemon
         warn_unsupported_json_flag if @json
@@ -219,6 +345,13 @@ module Hive
           max_bytes: daemon_cfg.fetch("log_max_bytes"),
           max_files: daemon_cfg.fetch("log_max_files")
         )
+        project_ownership = Hive::OneShot::ProjectGuard::Collection.new(
+          kind: "daemon", registry: -> { Hive::Config.registered_projects },
+          enabled: lambda do |entry|
+            Hive::Config.load(entry.fetch("path")).dig("daemon", "enabled") == true
+          end
+        )
+        project_ownership.refresh!
         if daily_digest_error
           logger.event(
             :daily_digest_configuration_disabled,
@@ -234,7 +367,12 @@ module Hive
           # Persist first-sight dispatch baselines so a daemon restart doesn't
           # re-strand already-answered needs_input tasks. The store owns all
           # `:daemon_dispatch_baselines_*` typed events via its own logger.
-          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger)
+          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger),
+          persistence_scope_projects: -> { project_ownership.owned_projects },
+          schedule_state_factory: lambda do |project|
+            entry = Hive::Config.find_project(project)
+            entry && Hive::OneShot::ScheduleState.new(state_root: entry.fetch("hive_state_path"))
+          end
         )
         supervisor = Hive::Daemon::ChildSupervisor.new(
           dry_run: @dry_run,
@@ -339,6 +477,9 @@ module Hive
           ),
           poll_interval_sec: daemon_cfg.fetch("poll_interval_sec", 30)
         )
+        lifecycle_repository = Hive::RuntimeControlPlane::LifecycleRepository.new(
+          database: attempt_store.database
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
@@ -360,7 +501,10 @@ module Hive
           lost_outcome_processor: lost_outcome_processor,
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
+          project_ownership: project_ownership,
           runtime_ready_callback: -> { activation_lock.release! },
+          persistent_admission: -> { lifecycle_repository.current.admission_open? },
+          quiescence_lifecycle: lifecycle_repository,
           clock: -> { Time.now.utc },
           patrol_discovery_async: true
         )
@@ -370,6 +514,7 @@ module Hive
           dispatcher.run_forever
           reexec_requested = dispatcher.reexec_requested?
         ensure
+          project_ownership&.release_all!
           # PR-40 follow-up review C2: parse via read_pid_file_payload
           # so the cleanup matches the YAML-payload format the daemon
           # writes. The earlier `File.read.strip.to_i` returned 0 against
@@ -526,6 +671,148 @@ module Hive
         end
         # Exit code: 0 for running, 1 for not running (per plan U8)
         raise Hive::Error, "daemon not running" unless state[:running]
+      end
+
+      def quiesce_daemon
+        timeout = lifecycle_timeout!("quiesce")
+        ensure_current_runtime!("hive-daemon-quiesce") unless @quiescence_factory
+        controller = (@quiescence_factory || lambda { |timeout_sec:|
+          Hive::Daemon::Quiescence.new(state_home: @hive_home, timeout_sec: timeout_sec)
+        }).call(timeout_sec: timeout)
+        result = call_lifecycle_controller("hive-daemon-quiesce", controller)
+        payload = lifecycle_result_envelope("quiesce", result)
+        emit_lifecycle_result(payload)
+        return 0 if result.paused
+
+        exit_code = result.reason == "storage_error" ?
+          Hive::ExitCodes::SOFTWARE : Hive::ExitCodes::TEMPFAIL
+        raise LifecycleIncomplete.new(
+          "hive daemon quiesce did not pause: #{result.reason}", exit_code: exit_code
+        )
+      end
+
+      def resume_daemon
+        timeout = lifecycle_timeout!("resume")
+        ensure_current_runtime!("hive-daemon-resume") unless @resume_factory
+        controller = (@resume_factory || lambda { |timeout_sec:|
+          Hive::Daemon::Resume.new(state_home: @hive_home, timeout_sec: timeout_sec)
+        }).call(timeout_sec: timeout)
+        result = call_lifecycle_controller("hive-daemon-resume", controller)
+        payload = lifecycle_result_envelope("resume", result)
+        emit_lifecycle_result(payload)
+        return 0 if result.resumed
+
+        exit_code = result.reason == "storage_error" ?
+          Hive::ExitCodes::SOFTWARE : Hive::ExitCodes::TEMPFAIL
+        raise LifecycleIncomplete.new(
+          "hive daemon resume did not complete: #{result.reason}", exit_code: exit_code
+        )
+      end
+
+      def lifecycle_timeout!(action)
+        default = action == "resume" ?
+          Hive::Daemon::Resume::DEFAULT_TIMEOUT_SEC :
+          Hive::Daemon::Quiescence::DEFAULT_TIMEOUT_SEC
+        value = @timeout.nil? ? default : Float(@timeout)
+        return value if value.positive? && value.finite?
+
+        raise ArgumentError
+      rescue ArgumentError, TypeError
+        error = Hive::UsageError.new(
+          "hive daemon #{action}: --timeout must be a finite positive number"
+        )
+        emit_lifecycle_error(action, error, error_kind: "usage")
+        raise error
+      end
+
+      def call_lifecycle_controller(schema, controller)
+        controller.call
+      rescue Hive::RuntimeControlPlane::MigrationRequired => error
+        emit_lifecycle_storage_error(schema, error)
+        raise
+      end
+
+      def ensure_current_runtime!(schema)
+        database = Hive::RuntimeControlPlane::Database.new(
+          path: Hive::Paths.runtime_control_plane_path(@hive_home)
+        )
+        diagnosis = database.diagnostics
+        error = diagnosis.error
+        unless diagnosis.ok?
+          error ||= Hive::RuntimeControlPlane::MigrationRequired.new(
+            "runtime control-plane database is missing; run hive setup",
+            code: :missing_database, action: "run hive setup"
+          )
+          emit_lifecycle_storage_error(schema, error)
+          raise error
+        end
+        true
+      ensure
+        database&.disconnect
+      end
+
+      def emit_lifecycle_storage_error(schema, error)
+        return unless @json
+
+        action = schema.delete_prefix("hive-daemon-")
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error,
+          error_kind: error.is_a?(Hive::RuntimeControlPlane::MigrationRequired) ?
+            "migration_required" : "storage",
+          extras: {
+            "action" => action,
+            "runtime_code" => error.respond_to?(:code) ? error.code.to_s : "storage_error",
+            "next_action" => error.respond_to?(:action) ? error.action : nil,
+            "details" => error.respond_to?(:details) ?
+              Hive::RuntimeControlPlane::Codec.normalize(error.details) : {}
+          }
+        )
+        puts JSON.generate(payload)
+        @stdout_written = true
+      end
+
+      def emit_lifecycle_error(action, error, error_kind:)
+        return unless @json
+
+        schema = "hive-daemon-#{action}"
+        puts JSON.generate(Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error, error_kind: error_kind,
+          extras: {
+            "action" => action, "runtime_code" => "usage",
+            "next_action" => nil, "details" => {}
+          }
+        ))
+        @stdout_written = true
+      end
+
+      def lifecycle_result_envelope(action, result)
+        schema = "hive-daemon-#{action}"
+        payload = {
+          "schema" => schema,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(schema),
+          "ok" => action == "quiesce" ? result.paused : result.resumed,
+          "result" => result.status
+        }.merge(result.to_h.reject { |key, _value| key == "status" })
+        if action == "quiesce"
+          payload["quiescence_capability"] = payload.delete("capability")
+        end
+        if action == "quiesce" && !result.paused && result.admission_open == false
+          payload["resume_required"] = true
+          payload["resume_command"] = "hive daemon resume"
+        end
+        payload
+      end
+
+      def emit_lifecycle_result(payload)
+        if @json
+          puts JSON.generate(payload)
+          @stdout_written = true
+        elsif payload.fetch("ok")
+          puts "hive daemon: #{payload.fetch('result')} (generation #{payload['generation']})"
+        else
+          warn "hive daemon: #{payload.fetch('result')} (#{payload['reason']})"
+          warn "hive daemon: run #{payload['resume_command']}" if payload["resume_required"]
+        end
       end
 
       def reload_daemon
@@ -1187,4 +1474,24 @@ module Hive
       end
     end
   end
+end
+
+require "hive/cli_usage_contracts"
+
+# `hive daemon PROJECT --once` rides the hive-one-shot.v1 usage contract; the
+# quiesce/resume lifecycle actions fall back to their hive-daemon-<action>
+# envelopes.
+Hive::OneShot::Result.declare_usage_contract("daemon", component: :dispatch) do |argv, command_index:, option_argv:|
+  action = Hive::CliUsageContracts.subcommand(
+    argv, command_index, value_options: %w[--timeout]
+  )
+  next unless %w[quiesce resume].include?(action)
+
+  {
+    schema: "hive-daemon-#{action}", error_kind: "usage",
+    extras: {
+      "action" => action, "runtime_code" => "usage",
+      "next_action" => nil, "details" => {}
+    }
+  }
 end

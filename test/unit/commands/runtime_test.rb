@@ -17,6 +17,7 @@ class RuntimeCommandTest < Minitest::Test
       assert_equal "absent", payload.dig("result", "phase")
       assert_equal "missing", payload.dig("result", "database", "status")
       assert_equal "hive setup", payload.dig("result", "next_action")
+      assert_nil payload.dig("result", "lifecycle")
       assert_empty runtime_schema.validate(payload).to_a
       refute_path_exists Hive::Paths.runtime_control_plane_path(root)
     end
@@ -83,6 +84,8 @@ class RuntimeCommandTest < Minitest::Test
       payload = JSON.parse(output.string)
       assert_equal true, payload.fetch("ok")
       assert_equal status, payload.fetch("result")
+      assert_equal "running", payload.dig("result", "lifecycle", "phase")
+      assert_equal true, payload.dig("result", "lifecycle", "admission_open")
       assert_empty runtime_schema.validate(payload).to_a
       text = StringIO.new
       assert_equal 0, Hive::Commands::Runtime.new("status", output: text, state_home: root).call

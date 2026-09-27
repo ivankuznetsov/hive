@@ -991,6 +991,39 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_routing_decision_for_request_projects_capacity_without_admission
+    with_dispatcher do |dispatcher, launcher, task|
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      policy = Object.new
+      policy.define_singleton_method(:explicit?) { true }
+      dispatcher.define_singleton_method(:resolve_routing_policy) { |*, **| policy }
+      selection = nil
+      dispatcher.define_singleton_method(:select_provider_route) do |**attributes|
+        selection = attributes
+        :capacity_saturated
+      end
+      capacity = Object.new
+      view = Struct.new(:records) do
+        attr_accessor :capacity_value
+        def capacity(now:) = capacity_value
+      end.new([])
+      view.capacity_value = capacity
+      request = FakeRequest.new(
+        slug: task.slug, project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: "readiness", inherited_outputs: []
+      )
+
+      result = dispatcher.routing_decision_for_request(
+        request, now: NOW, admission_view: view
+      )
+
+      assert_equal :capacity_saturated, result
+      assert_same capacity, selection.fetch(:snapshot)
+      assert_equal [], selection.fetch(:records)
+      assert_empty launcher.launched
+    end
+  end
+
   def test_lost_generation_defers_ordinary_admission_until_recovery
     with_dispatcher do |dispatcher, _launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")

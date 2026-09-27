@@ -78,17 +78,32 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal(
       {
         "Hive::Attempts::FinalizationMaintenance" => [
-          "lib/hive/commands/daemon.rb"
+          "lib/hive/commands/daemon.rb", "lib/hive/one_shot/runner.rb"
         ],
-        "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
-        "Hive::Attempts::LostOutcomeTransition" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::LostOutcomeProcessor" => [
+          "lib/hive/commands/daemon.rb", "lib/hive/one_shot/runner.rb"
+        ],
+        "Hive::Attempts::LostOutcomeTransition" => [
+          "lib/hive/commands/daemon.rb", "lib/hive/one_shot/runner.rb"
+        ],
         "Hive::Attempts::ProcessIdentity" => [
-          "lib/hive/commands/daemon.rb"
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/daemon/quiescence.rb",
+          "lib/hive/daemon/status_report.rb",
+          "lib/hive/one_shot/runner.rb",
+          "lib/hive/runtime_control_plane/process_registry.rb"
         ],
-        "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::Reconciler" => [
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/daemon/quiescence.rb",
+          "lib/hive/daemon/quiescence_finalizer.rb",
+          "lib/hive/one_shot/runner.rb"
+        ],
         "Hive::Attempts::Repository" => [
           "lib/hive/commands/attempt_supervise.rb",
           "lib/hive/commands/daemon.rb",
+          "lib/hive/one_shot/runner.rb",
+          "lib/hive/one_shot/project_liveness.rb",
           "lib/hive/commands/module/dry_run.rb",
           "lib/hive/commands/status.rb",
           "lib/hive/conditions/execute_boundary.rb",
@@ -96,6 +111,8 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/artifacts/outcome_evidence/store.rb",
           "lib/hive/implementation_identity/store.rb",
           "lib/hive/modules/inspector.rb",
+          "lib/hive/daemon/quiescence.rb",
+          "lib/hive/daemon/quiescence_process_evidence.rb",
           "lib/hive/daemon/recovery_coordinator.rb",
           "lib/hive/task_activity.rb",
           "lib/hive/task_closure.rb",

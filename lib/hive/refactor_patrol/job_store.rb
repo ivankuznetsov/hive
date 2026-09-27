@@ -337,6 +337,47 @@ module Hive
         raise InconsistentRecord, "refactor patrol claim has invalid scheduling evidence (#{e.message})"
       end
 
+      # Settle abandoned discovery authority without acquiring replacement work.
+      # A dispatch-only one-shot uses this before its liveness drain so an expired
+      # claim from a dead Architecture Patrol process cannot hold the project guard
+      # forever. Unexpired claims are recovered only with positive proof that their
+      # recorded owner is gone.
+      def recover_stale_discovery_claims!(now: Time.now, claim_resolver: nil,
+                                          claim_liveness_resolver: nil)
+        jobs.each_with_object({ recovered: [], unresolved: [] }) do |snapshot, result|
+          next unless snapshot.fetch("state") == "analyzing"
+          next unless active_discovery_attempt(snapshot)
+
+          outcome = mutate_job(snapshot.fetch("job_id")) do |aggregate, _path|
+            active = active_discovery_attempt(aggregate)
+            next [ aggregate, :inactive ] unless active
+
+            expired = Time.iso8601(active.fetch("expires_at")) <= now
+            resolver = expired ? claim_resolver : claim_liveness_resolver
+            unless claim_resolved?(active, resolver)
+              next [ aggregate, expired ? :unresolved : :active ]
+            end
+
+            @claim_transitions.finish!(
+              active,
+              state: "superseded",
+              outcome: expired ? "expired_claim_resolved" : "inactive_claim_resolved",
+              now: now,
+              touch_heartbeat: false
+            )
+            aggregate["state"] = "blocked"
+            aggregate["complete"] = false
+            aggregate["updated_at"] = now.utc.iso8601
+            [ aggregate, :recovered ]
+          end
+          result.fetch(:recovered) << snapshot.fetch("job_id") if outcome == :recovered
+          result.fetch(:unresolved) << snapshot.fetch("job_id") if outcome == :unresolved
+        end
+      rescue ArgumentError, KeyError => error
+        raise InconsistentRecord,
+              "refactor patrol claim has invalid recovery evidence (#{error.message})"
+      end
+
       # Action scheduling is intentionally separate from discovery scheduling:
       # an action-blocked job must never be sent back through read-only review.
       def actionable_jobs(now: Time.now)

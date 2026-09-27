@@ -158,6 +158,27 @@ module Hive
         )
       end
 
+      # Read-only provider-route projection used by scheduler readiness. Global,
+      # project, and task attempt capacity remain with the caller's normal gate.
+      def routing_decision_for_request(request, now: @clock.call, admission_view: nil)
+        task = @task_resolver.call(request)
+        intended_stage = intended_stage_for(request.argv, task)
+        generation = Generation.resolve(
+          task: task, project: request.project, intended_stage: intended_stage,
+          progress_token: command_progress_token(request.argv, task),
+          task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil
+        )
+        policy = resolve_routing_policy(task, intended_stage)
+        return nil unless policy.explicit?
+
+        view = admission_view || AdmissionView.new(store: @store, records: @store.active_attempts)
+        snapshot = view.capacity(now: now)
+        select_provider_route(
+          policy: policy, snapshot: snapshot, records: view.records,
+          generation: generation, now: now
+        )
+      end
+
       private
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
@@ -249,7 +270,7 @@ module Hive
             task_generation: generation.task_generation,
             subject: subject || task_subject(generation)
           )
-          if previous && %w[failed cancelled].include?(previous.outcome)
+          if previous && %w[failed cancelled interrupted].include?(previous.outcome)
             retry_at = Time.iso8601(previous.receipt.fetch("ended_at")) +
               Hive::Recovery::RetryPolicy.delay_sec(previous["retry_charge"])
             return deferred_result("transition_retry", attempt: previous, receipt: previous.receipt) if now.utc < retry_at

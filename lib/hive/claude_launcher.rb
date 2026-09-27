@@ -593,7 +593,8 @@ module Hive
           return marker if marker
         end
 
-        if Time.now >= deadline
+        now = Time.now
+        if now >= deadline
           existing = Hive::Markers.current(task.state_file)
           # When `marker_from_sentinel_tail` already stamped
           # `:error reason="tmux_pane_unreadable"` (its terminal-
@@ -609,7 +610,7 @@ module Hive
           return Hive::Markers.current(task.state_file)
         end
 
-        sleep [ poll_interval, deadline - Time.now ].min
+        sleep [ poll_interval, [ deadline - now, 0.0 ].max ].min
       end
     end
 
@@ -717,14 +718,15 @@ module Hive
           end
         end
 
-        if Time.now >= deadline
+        now = Time.now
+        if now >= deadline
           return {
             status: :timeout,
             error_message: "expected output file missing or empty: #{expected_output}"
           }
         end
 
-        sleep [ poll_interval, deadline - Time.now ].min
+        sleep [ poll_interval, [ deadline - now, 0.0 ].max ].min
       end
     end
 
@@ -851,7 +853,8 @@ module Hive
           end
         end
 
-        if Time.now >= deadline
+        now = Time.now
+        if now >= deadline
           return {
             status: :timeout,
             error_message: "claude stop hook did not signal completion",
@@ -864,7 +867,7 @@ module Hive
           }
         end
 
-        sleep [ poll_interval, deadline - Time.now ].min
+        sleep [ poll_interval, [ deadline - now, 0.0 ].max ].min
       end
     end
 

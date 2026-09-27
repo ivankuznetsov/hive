@@ -503,6 +503,49 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_dispatch_recovery_settles_stale_claim_without_reserving_replacement_work
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      dead = store.claim_discovery!(
+        "job-7", owner: "daemon-crashed", analysis_sha: "head",
+        now: T0, lease_sec: 60, owner_pid: 4242,
+        owner_process_start_time: "boot-dead"
+      )
+      store.attach_discovery_process!(
+        dead, pid: 4242, process_start_time: "boot-dead", pgid: 4242,
+        now: T0 + 1, lease_sec: 60
+      )
+      active = scheduler(entry, store, claim_resolver: ->(_claim) { :resolved })
+
+      result = active.recover_stale_claims(project: "demo", now: T0 + 120)
+
+      assert_equal [ "job-7" ], result.fetch(:recovered)
+      assert_empty result.fetch(:unresolved)
+      job = store.read_job("job-7")
+      assert_equal "blocked", job.fetch("state")
+      assert_equal "superseded", job.fetch("attempts").last.fetch("state")
+      assert_equal 1, job.fetch("attempts").length
+    end
+  end
+
+  def test_dispatch_recovery_reports_expired_claim_without_proof_of_owner_death
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      store.claim_discovery!(
+        "job-7", owner: "daemon-crashed", analysis_sha: "head",
+        now: T0, lease_sec: 60, owner_pid: 4242,
+        owner_process_start_time: "boot-unknown"
+      )
+      cautious = scheduler(entry, store, claim_resolver: ->(_claim) { :unresolved })
+
+      result = cautious.recover_stale_claims(project: "demo", now: T0 + 120)
+
+      assert_empty result.fetch(:recovered)
+      assert_equal [ "job-7" ], result.fetch(:unresolved)
+      assert_equal "claimed", store.read_job("job-7").fetch("attempts").last.fetch("state")
+    end
+  end
+
   def test_restart_reclaims_a_dead_discovery_child_before_its_lease_expires
     with_project do |_dir, entry, store|
       enqueue(store)
@@ -915,16 +958,25 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def test_disabled_discovery_is_not_a_candidate_and_reservation_fails_closed
     with_project do |_dir, entry, store|
       enqueue(store)
+      classifier = Hive::RefactorPatrol::MergeClassifier.new(
+        root: File.join(
+          entry.fetch("hive_state_path"), "refactor_patrol", "v2", "merge-classifications"
+        ),
+        decision_provider: ->(*) { raise "disabled classification must not run" }
+      )
+      classifier.hydrate(classification_snapshot, now: T0)
       cfg = enabled_cfg
       cfg.fetch("refactor_patrol")["enabled"] = false
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
         registry: -> { [ entry ] }, config_loader: ->(_path) { cfg },
         job_store_factory: ->(_path) { store },
+        classifier_factory: ->(*) { classifier },
         repository_resolver: ->(_entry, _cfg) { repository_identity },
         checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a"
       )
 
       assert_empty scheduler.candidates(now: T0)
+      assert_empty scheduler.readiness(project: "demo", now: T0, candidates: [])
       aggregate = store.read_job("job-7")
       candidate = scheduler.send(:candidate_for, entry, aggregate, phase: :discovery)
       error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
@@ -1033,6 +1085,24 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
                    retired.fetch("attempts").last.fetch("reason")
       assert_empty scheduler.candidates(now: T0 + 10_000)
       assert_equal 1, guard_calls, "a retired source must never re-enter checkout validation"
+    end
+  end
+
+  def test_candidates_skip_discovery_when_runtime_configuration_disables_it
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      disabled_entry = entry.merge(
+        "_refactor_patrol_cfg" => enabled_cfg.merge(
+          "refactor_patrol" => { "enabled" => false }
+        )
+      )
+      scheduler = scheduler(entry, store)
+      scheduler.define_singleton_method(:managed_entries) { [ disabled_entry ] }
+      store.define_singleton_method(:claimable_jobs) do |**|
+        flunk "disabled discovery must not inspect claimable jobs"
+      end
+
+      assert_empty scheduler.candidates(now: T0)
     end
   end
 
@@ -1506,6 +1576,75 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         active.reserve(active.candidates(now: T0).fetch(0), now: T0)
       end
       assert_equal "checkout_guard", error.reason
+    end
+  end
+
+  def test_readiness_includes_runnable_and_waiting_jobs_with_both_wake_shapes
+    with_project do |_dir, entry, store|
+      active = scheduler(entry, store)
+      jobs = [
+        { "job_id" => "done", "complete" => true, "state" => "complete" },
+        { "job_id" => "run", "complete" => false, "state" => "queued" },
+        {
+          "job_id" => "timed", "complete" => false, "state" => "retry",
+          "attempts" => [ { "next_eligible_at" => (T0 + 60).iso8601(6) } ]
+        },
+        { "job_id" => "active", "complete" => false, "state" => "claimed" }
+      ]
+      fake_store = Object.new
+      fake_store.define_singleton_method(:jobs) { jobs }
+      active.define_singleton_method(:store_for) { |_| fake_store }
+      candidates = [ { job_id: "run", action_phase: :discovery } ]
+
+      items = active.readiness(project: "demo", now: T0, candidates: candidates)
+
+      assert_equal %w[runnable_now waiting_external waiting_external],
+                   items.map { |item| item.fetch("bucket") }
+      assert_equal %w[time_due attempt_completed],
+                   items.drop(1).map { |item| item.dig("condition", "kind") }
+      assert_empty active.readiness(project: "missing", now: T0, candidates: [])
+    end
+  end
+
+  def test_readiness_preserves_unready_classification_retry_and_claim_deadlines
+    with_project do |_dir, entry, store|
+      records = [
+        {
+          "occurrence_id" => "due", "status" => "pending", "materialization" => nil,
+          "claim" => nil, "retry_at" => nil
+        },
+        {
+          "occurrence_id" => "retry", "status" => "retry_wait", "materialization" => nil,
+          "claim" => nil, "retry_at" => (T0 + 60).iso8601(6)
+        },
+        {
+          "occurrence_id" => "claimed", "status" => "pending", "materialization" => nil,
+          "claim" => { "expires_at" => (T0 + 120).iso8601(6) }, "retry_at" => nil
+        },
+        {
+          "occurrence_id" => "unclaimed", "status" => "pending", "materialization" => nil,
+          "claim" => nil, "retry_at" => nil
+        }
+      ]
+      classifier = Object.new
+      classifier.define_singleton_method(:each_record) { records.each }
+      active = scheduler(entry, store, classifier_factory: ->(*) { classifier })
+      candidates = [ {
+        action_phase: :classification, job_id: "classification-due",
+        classification_occurrence_id: "due"
+      } ]
+
+      items = active.readiness(project: "demo", now: T0, candidates: candidates)
+
+      assert_equal %w[
+        architecture:classification:due
+        architecture:classification:retry
+        architecture:classification:claimed
+        architecture:classification:unclaimed
+      ], items.map { |item| item.fetch("id") }
+      assert_equal [ T0 + 60, T0 + 120 ],
+                   items.drop(1).filter_map { |item| item.fetch("next_check_at") }
+      assert_equal "attempt_completed", items.last.dig("condition", "kind")
     end
   end
 

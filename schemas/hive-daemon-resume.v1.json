@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:daemon-resume:v1",
+  "title": "hive daemon resume output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/ResultPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "ResultPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "result", "resumed", "reason",
+        "phase", "admission_open", "admission_reopened", "generation",
+        "lifecycle_revision", "reconciled_attempt_ids", "remaining", "services", "details"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-resume" },
+        "schema_version": { "const": 1 },
+        "ok": { "type": "boolean" },
+        "result": { "enum": ["resumed", "partially_resumed", "not_resumed"] },
+        "resumed": { "type": "boolean" },
+        "reason": {
+          "enum": [
+            null, "controller_busy", "storage_error", "lifecycle_busy",
+            "deadline_exhausted", "launch_fence_busy", "writer_drain_timeout",
+            "reconciliation_incomplete", "service_restore_failed"
+          ]
+        },
+        "phase": { "enum": ["running", "quiescing", "paused", "resuming", "unknown"] },
+        "admission_open": { "type": "boolean" },
+        "admission_reopened": { "type": "boolean" },
+        "generation": { "type": ["integer", "null"], "minimum": 0 },
+        "lifecycle_revision": { "type": ["integer", "null"], "minimum": 0 },
+        "reconciled_attempt_ids": {
+          "type": "array", "items": { "type": "string" }, "uniqueItems": true
+        },
+        "remaining": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "services": {
+          "type": "array", "items": {
+            "type": "object", "additionalProperties": true,
+            "required": ["service_identity", "ok"],
+            "properties": {
+              "service_identity": { "type": "string" },
+              "ok": { "type": "boolean" },
+              "reason": { "type": ["string", "null"] },
+              "error": { "type": "string" }
+            }
+          }
+        },
+        "details": { "type": "object", "additionalProperties": true }
+      },
+      "if": { "properties": { "resumed": { "const": true } }, "required": ["resumed"] },
+      "then": {
+        "properties": {
+          "ok": { "const": true }, "result": { "const": "resumed" },
+          "reason": { "type": "null" }, "admission_open": { "const": true },
+          "admission_reopened": { "const": true }
+        }
+      },
+      "else": { "properties": { "ok": { "const": false } } }
+    },
+    "ErrorPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message", "action", "runtime_code", "next_action", "details"
+      ],
+      "properties": {
+        "schema": { "const": "hive-daemon-resume" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["usage", "storage", "migration_required"] },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "action": { "const": "resume" },
+        "runtime_code": { "type": "string" },
+        "next_action": { "type": ["string", "null"] },
+        "details": { "type": "object", "additionalProperties": true }
+      }
+    }
+  }
+}

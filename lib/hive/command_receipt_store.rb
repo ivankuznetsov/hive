@@ -277,11 +277,11 @@ module Hive
 
     def allocate_successor(namespace_id:, principal:, intent_id:, intent_version:,
                            predecessor_receipt_id:, delivery_cycle_id:, request_fingerprint:)
-      now = timestamp
+      intent_version, now = Integer(intent_version), timestamp
       database.transaction do |connection|
         existing = connection[:command_successor_allocations][
           namespace_id: namespace_id, principal: principal.to_s,
-          intent_id: intent_id.to_s, intent_version: Integer(intent_version),
+          intent_id: intent_id.to_s, intent_version: intent_version,
           delivery_cycle_id: delivery_cycle_id.to_s
         ]
         if existing
@@ -297,7 +297,7 @@ module Hive
         raise Hive::CommandUnresolved.new(message: "predecessor is not eligible for a successor") unless valid
         latest = connection[:command_successor_allocations]
           .where(namespace_id: namespace_id, principal: principal.to_s, intent_id: intent_id.to_s,
-                 intent_version: Integer(intent_version))
+                 intent_version: intent_version)
           .order(Sequel.desc(:allocation_version)).first
         if latest && latest.fetch(:successor_key_identity) != predecessor_receipt_id.to_s
           raise Hive::CommandConflict, "successor predecessor is stale"
@@ -310,7 +310,7 @@ module Hive
         allocation_id = SecureRandom.uuid
         connection[:command_successor_allocations].insert(
           allocation_id: allocation_id, namespace_id: namespace_id, principal: principal.to_s,
-          intent_id: intent_id.to_s, intent_version: Integer(intent_version),
+          intent_id: intent_id.to_s, intent_version: intent_version,
           delivery_cycle_id: delivery_cycle_id.to_s,
           predecessor_receipt_id: predecessor_receipt_id.to_s,
           successor_key_identity: successor_identity, successor_ordinal: ordinal,

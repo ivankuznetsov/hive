@@ -19,6 +19,7 @@ require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recovery_coordinator"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/runtime_control_plane/boot_identity"
+require "hive/command_dispatch_lifecycle"
 
 require "hive/daemon/logger"
 require "hive/daemon/answer_digest_scheduler"
@@ -114,6 +115,7 @@ module Hive
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      dispatch_repository: nil,
+                     command_dispatch_lifecycle: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      operational_snapshot: nil, recovery_coordinator: nil,
@@ -173,6 +175,7 @@ module Hive
           Array(scope_projects).map(&:to_s).to_h { |name| [ name, true ] }.freeze
         end
         @dispatch_repository = dispatch_repository
+        @command_dispatch_lifecycle = command_dispatch_lifecycle
         @dispatch_state_home = dispatch_request_state_home || dispatch_result_state_home ||
           Hive::Paths.state_home
         @attempt_snapshot = nil
@@ -3987,7 +3990,22 @@ module Hive
           raise Hive::ConfigError,
                 "tagged command dispatch is missing its durable caller context"
         end
+        command_dispatch_lifecycle.protect_request!(request.request_id) if context
         context
+      end
+
+      def allocate_command_successor!(predecessor_request_id:, intent_id:, intent_version:,
+                                      delivery_cycle_id:)
+        command_dispatch_lifecycle.allocate_successor!(
+          predecessor_request_id: predecessor_request_id, intent_id: intent_id,
+          intent_version: intent_version, delivery_cycle_id: delivery_cycle_id
+        )
+      end
+
+      def command_dispatch_lifecycle
+        @command_dispatch_lifecycle ||= Hive::CommandDispatchLifecycle.new(
+          repository: dispatch_repository, state_home: @dispatch_state_home
+        )
       end
 
       def durable_task_request?(req)

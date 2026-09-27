@@ -3,6 +3,7 @@ require "securerandom"
 require "hive/paths"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/command_receipt_store"
+require "hive/command_dispatch_lifecycle"
 require "hive/attempts/api"
 require "hive/attempts/generation"
 require "hive/recovery/api"
@@ -30,10 +31,15 @@ module Hive
                  task_generation: nil,
                  inherited_outputs: [], task_id: nil, expected_stage: nil,
                  state_home: Hive::Paths.state_home, now: Time.now, repository: nil,
-                 command_context: nil)
+                 command_context: nil, command_lifecycle: nil)
         repository ||= repository_for(state_home)
         command_context ||= current_command_context
         request_id ||= command_context&.transport_request_id || repository.generate_request_id
+        if command_context
+          (command_lifecycle || Hive::CommandDispatchLifecycle.new(
+            repository: repository, state_home: state_home
+          )).protect_context!(command_context)
+        end
         if command_context && defined?(Hive::CommandOperation)
           Hive::CommandOperation.record_effect_submission(
             kind: "dispatch_request",
@@ -78,27 +84,15 @@ module Hive
       # predecessor dispatch context; callers cannot substitute labels.
       def allocate_successor!(predecessor_request_id:, intent_id:, intent_version:,
                               delivery_cycle_id:, state_home: Hive::Paths.state_home,
-                              repository: nil, store: nil)
+                              repository: nil, store: nil, command_lifecycle: nil)
         repository ||= repository_for(state_home)
-        context = repository.command_context(predecessor_request_id)
-        unless context
-          raise Hive::CommandUnresolved.new(
-            message: "predecessor dispatch has no durable command context"
-          )
-        end
-        store ||= Hive::CommandReceiptStore.new(database: repository.database)
-        receipt = store.receipt(context.fetch("receipt_id"))
-        unless receipt && receipt.fetch(:principal) == context.fetch("principal") &&
-               receipt.fetch(:request_fingerprint) == context.fetch("request_fingerprint")
-          raise Hive::CommandConflict, "predecessor command context changed"
-        end
-        store.allocate_successor(
-          namespace_id: receipt.fetch(:namespace_id),
-          principal: context.fetch("principal"), intent_id: intent_id,
+        lifecycle = command_lifecycle || Hive::CommandDispatchLifecycle.new(
+          repository: repository, store: store, state_home: state_home
+        )
+        lifecycle.allocate_successor!(
+          predecessor_request_id: predecessor_request_id, intent_id: intent_id,
           intent_version: intent_version,
-          predecessor_receipt_id: receipt.fetch(:receipt_id),
-          delivery_cycle_id: delivery_cycle_id,
-          request_fingerprint: context.fetch("request_fingerprint")
+          delivery_cycle_id: delivery_cycle_id
         )
       end
 
@@ -109,7 +103,8 @@ module Hive
       def dispatch!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                     trigger: nil, request_id: nil,
                     state_home: Hive::Paths.state_home, now: Time.now,
-                    entrypoint: nil, repository: nil, command_context: nil)
+                    entrypoint: nil, repository: nil, command_context: nil,
+                    command_lifecycle: nil)
         repository ||= repository_for(state_home)
         command_context ||= current_command_context
         request_id ||= command_context&.transport_request_id || repository.generate_request_id
@@ -118,7 +113,8 @@ module Hive
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
           request_id: request_id, state_home: state_home, now: now,
-          **identity, repository: repository, command_context: command_context
+          **identity, repository: repository, command_context: command_context,
+          command_lifecycle: command_lifecycle
         )
         unless task
           return DispatchReference.new(

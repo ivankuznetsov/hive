@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/bot/dispatch_request_writer"
+require "hive/command_operation"
 
 class BotDispatchRequestWriterDurableTest < Minitest::Test
   include HiveTestHelper
@@ -11,30 +12,56 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
     def state_file = File.join(project_root, "task.md")
   end
 
-  def test_successor_allocation_uses_persisted_dispatch_provenance
-    context = {
-      "receipt_id" => "receipt-1", "principal" => "owner",
-      "request_fingerprint" => "fingerprint"
-    }
-    repository = Struct.new(:database) do
-      define_method(:command_context) { |_request_id| context }
-    end.new(Object.new)
-    store = Object.new
-    store.define_singleton_method(:receipt) do |_receipt_id|
-      { receipt_id: "receipt-1", namespace_id: "namespace-1",
-        principal: "owner", request_fingerprint: "fingerprint" }
+  def test_same_cycle_bot_handlers_and_failed_successor_redelivery_use_shared_allocator
+    calls = []
+    mutex = Mutex.new
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:allocate_successor!) do |**attributes|
+      mutex.synchronize { calls << attributes }
+      { "allocation_id" => "stable-allocation" }
     end
-    store.define_singleton_method(:allocate_successor) { |**attributes| attributes }
-
-    allocation = Hive::Bot::DispatchRequestWriter.allocate_successor!(
+    repository = Struct.new(:database).new(Object.new)
+    attributes = {
       predecessor_request_id: "command-dispatch:v1:predecessor",
       intent_id: "intent-1", intent_version: 3, delivery_cycle_id: "cycle-4",
-      repository: repository, store: store
+      repository: repository, command_lifecycle: lifecycle
+    }
+    concurrent = 4.times.map do
+      Thread.new { Hive::Bot::DispatchRequestWriter.allocate_successor!(**attributes) }
+    end.map(&:value)
+    repeated = Hive::Bot::DispatchRequestWriter.allocate_successor!(
+      **attributes
     )
 
-    assert_equal "namespace-1", allocation.fetch(:namespace_id)
-    assert_equal "receipt-1", allocation.fetch(:predecessor_receipt_id)
-    assert_equal "fingerprint", allocation.fetch(:request_fingerprint)
+    assert_equal 1, (concurrent + [ repeated ]).uniq.length
+    assert_equal 5, calls.length
+    assert_equal "command-dispatch:v1:predecessor",
+                 calls.first.fetch(:predecessor_request_id)
+  end
+
+  def test_keyed_bot_write_acquires_pin_before_enqueue
+    context = Hive::CommandOperation::Context.new(
+      receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
+      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'c' * 64}",
+      retry_horizon_expires_at: (Time.now.utc + 3600).iso8601
+    )
+    order = []
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:protect_context!) do |received|
+      order << :pin
+      raise "wrong context" unless received == context
+    end
+    repository = Object.new
+    repository.define_singleton_method(:write_request!) { |**| order << :enqueue }
+
+    Hive::Bot::DispatchRequestWriter.write!(
+      project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+      repository: repository, command_context: context,
+      command_lifecycle: lifecycle
+    )
+
+    assert_equal %i[pin enqueue], order
   end
 
   def test_local_admission_returns_attempt_without_a_second_writer_side_claim

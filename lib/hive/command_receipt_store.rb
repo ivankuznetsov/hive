@@ -208,10 +208,16 @@ module Hive
           created_at: now,
           updated_at: now
         )
-        connection[:command_successor_allocations].where(
+        successor = connection[:command_successor_allocations].where(
           namespace_id: identity.namespace_id, principal: principal.to_s,
           successor_key_identity: normalized_key, successor_receipt_id: nil
-        ).update(successor_receipt_id: receipt_id)
+        ).first
+        if successor && successor.fetch(:request_fingerprint) != request_fingerprint
+          raise Hive::CommandConflict, "successor frozen request identity changed"
+        end
+        connection[:command_successor_allocations].where(
+          allocation_id: successor.fetch(:allocation_id)
+        ).update(successor_receipt_id: receipt_id) if successor
         unless maintenance
           connection[:command_capacity].where(namespace_id: identity.namespace_id).update(
             nonterminal_count: Sequel[:nonterminal_count] + 1,

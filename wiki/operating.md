@@ -84,6 +84,17 @@ success. Identical retries may resume only the bounded task-activity,
 publication, or attempt-dispatch state machines whose durable correlation can
 be re-observed. Other unknown effects remain unresolved.
 
+Bot enqueue, foreground durable Attempts dispatch, and Daemon consumption use
+one receipt-owned dispatch lifecycle. Before any keyed delivery can rely on
+replay protection, that lifecycle acquires the pin carrying the caller's
+absolute retry horizon. A restarted daemon reloads the receipt, principal,
+request fingerprint, effect identity, ordinal, and horizon from the private
+dispatch-context row and reacquires the same pin identity. Missing or changed
+context fails closed; it never becomes an unkeyed delivery. All three callers
+also request successors from the store's single cycle allocator. Concurrent
+handlers and redelivery of a cycle whose successor failed receive the same
+binding; a changed frozen request cannot claim that binding.
+
 The default staffing assumption is one operator able to act within one business
 day. It is not a service guarantee or an allocated minutes/day value.
 Installations may override operator count and response business days. A local

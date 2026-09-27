@@ -1,5 +1,6 @@
 require "hive/attempts/api"
 require "hive/command_receipt_store"
+require "hive/command_dispatch_lifecycle"
 
 module Hive
   module Attempts
@@ -25,11 +26,7 @@ module Hive
             raise Hive::UsageError,
                   "keyed durable dispatch requires an absolute --retry-horizon-expires-at"
           end
-          Hive::CommandReceiptStore.new.acquire_pin(
-            receipt_id: context.receipt_id, principal: context.principal,
-            intent_id: context.transport_request_id, intent_generation: context.ordinal,
-            retry_horizon_expires_at: context.retry_horizon_expires_at
-          )
+          command_dispatch_lifecycle.protect_context!(context)
           attributes[:request_id] = context.transport_request_id
           Hive::CommandOperation.record_effect_submission(
             kind: "attempt_dispatch",
@@ -48,6 +45,22 @@ module Hive
         handle_durable_failure!(result) unless result.exit_status.zero?
 
         result
+      end
+
+      def allocate_command_successor!(predecessor_request_id:, intent_id:, intent_version:,
+                                      delivery_cycle_id:)
+        command_dispatch_lifecycle.allocate_successor!(
+          predecessor_request_id: predecessor_request_id, intent_id: intent_id,
+          intent_version: intent_version, delivery_cycle_id: delivery_cycle_id
+        )
+      end
+
+      def command_dispatch_lifecycle
+        @command_dispatch_lifecycle ||= Hive::CommandDispatchLifecycle.new(
+          repository: @command_dispatch_repository,
+          store: @command_receipt_store,
+          state_home: defined?(@state_home) && @state_home ? @state_home : Hive::Paths.state_home
+        )
       end
 
       def handle_durable_failure!(result)

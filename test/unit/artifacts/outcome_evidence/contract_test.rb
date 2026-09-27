@@ -253,13 +253,23 @@ class OutcomeEvidenceContractTest < Minitest::Test
     )
     assert_equal "revise", review.fetch("status")
 
+    # An accepted verdict on wrong-kind proof is downgraded to revise with
+    # guidance, so the round is recorded and the next producer recaptures.
     output.fetch("verdicts").first["verdict"] = "accepted"
-    error = assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
-      Contract.review!(
-        requirement: requirement, evidence: evidence, **actors, output: output
-      )
-    end
-    assert_match(/requires video proof, not screenshot/, error.message)
+    downgraded = Contract.review!(
+      requirement: requirement, evidence: evidence, **actors, output: output
+    )
+    assert_equal "revise", downgraded.fetch("status")
+    refute downgraded.fetch("accepted")
+    verdict = downgraded.fetch("verdicts").first
+    assert_equal "revise", verdict.fetch("verdict")
+    assert_match(/requires video proof, but the evidence supplied screenshot/, verdict.fetch("reason"))
+
+    output.fetch("verdicts").first["verdict"] = "rework"
+    kept = Contract.review!(
+      requirement: requirement, evidence: evidence, **actors, output: output
+    )
+    assert_equal "rework", kept.fetch("status")
   end
 
   def test_rejects_secret_shaped_semantic_claims_exclusions_and_verdicts
@@ -378,13 +388,12 @@ class OutcomeEvidenceContractTest < Minitest::Test
       ]
     }
 
-    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
-      Contract.review!(
-        requirement: requirement,
-        evidence: [ evidence.first.merge("kind" => "screenshot") ],
-        producer: producer, reviewer: reviewer, output: output
-      )
-    end
+    wrong_kind = Contract.review!(
+      requirement: requirement,
+      evidence: [ evidence.first.merge("kind" => "screenshot") ],
+      producer: producer, reviewer: reviewer, output: output
+    )
+    assert_equal "revise", wrong_kind.fetch("status"), "wrong-kind proof can never be accepted"
     assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
       Contract.review!(
         requirement: requirement, evidence: evidence,

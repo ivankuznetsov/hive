@@ -85,7 +85,13 @@ module Hive
         # would submit Claude Code's input box on the first line break
         # instead of keeping the prompt multi-line. The explicit
         # send_keys("Enter") below is the single, intended submit.
-        run_tmux("paste-buffer", "-d", "-r", "-b", buffer_name, "-t", target_pane)
+        #
+        # `-p` wraps the buffer in bracketed-paste markers when the agent has
+        # enabled that mode (Claude Code does). Without it tmux feeds a large
+        # buffer as many unbracketed chunks: Claude Code turned each into a
+        # separate "[Pasted text #N]" and a short trailing chunk into typed
+        # text, and executors received only the prompt's last lines.
+        run_tmux("paste-buffer", "-d", "-p", "-r", "-b", buffer_name, "-t", target_pane)
         # A large bracketed paste renders into the agent's input box over
         # many frames. A fixed sleep here let `Enter` fire mid-ingest on
         # big prompts, so the submit was swallowed and the prompt sat

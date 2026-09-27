@@ -27,6 +27,7 @@ module Hive
 
       def initialize(path: self.class.default_path, logger: nil)
         @path = path ? File.expand_path(path) : nil
+        @lock_path = @path && "#{@path}.lock"
         @logger = logger
         # Set true when the on-disk file carries a NEWER schema_version than
         # this process understands: read what we recognize, but never write
@@ -90,11 +91,21 @@ module Hive
 
       # A failed write must not stop task advancement; the previous persisted
       # baseline remains usable and the failure is visible in the daemon log.
-      def write(map)
+      def write(map, scope_projects: nil)
         return unless @path
         return if @suspend_writes
 
-        persist!(map)
+        with_write_lock do
+          value = if scope_projects
+            existing = load
+            return if @suspend_writes
+
+            merge_scoped(existing, map, Array(scope_projects).map(&:to_s))
+          else
+            map
+          end
+          persist!(value)
+        end
       rescue StandardError => e
         # Defense in depth against everything `persist!`'s narrower
         # `SystemCallError/IOError` rescue doesn't catch — programmer errors
@@ -111,6 +122,19 @@ module Hive
       end
 
       private
+
+      def with_write_lock
+        FileUtils.mkdir_p(File.dirname(@lock_path))
+        File.open(@lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          yield
+        end
+      end
+
+      def merge_scoped(existing, replacement, projects)
+        existing.reject { |(project, _slug), _| projects.include?(project.to_s) }
+                .merge(replacement.select { |(project, _slug), _| projects.include?(project.to_s) })
+      end
 
       def reset_corrupt(reason)
         @logger&.event(:daemon_dispatch_baselines_corrupt, path: @path, reason: reason)

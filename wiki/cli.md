@@ -172,7 +172,7 @@ contracts retain their established unversioned or schema-less shapes.
 | 4 | `WRONG_STAGE` | `hive run` invoked on an inert stage (e.g. `1-inbox`) | `Hive::WrongStage` |
 | 64 | `USAGE` | EX_USAGE — bad arguments, or setup-agents consent declined/missing without TTY/`--yes` | `Hive::UsageError`; `Hive::InvalidTaskPath` for task/path failures and preserved `invalid_task_path` contracts; `SetupAgents` |
 | 70 | `SOFTWARE` | EX_SOFTWARE — git, worktree, agent, or stage-runner failure | `GitError`, `WorktreeError`, `AgentError`, `StageError` |
-| 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError` |
+| 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError`; `Hive::OneShot::ProjectGuard::OwnershipError` |
 | 78 | `CONFIG` | EX_CONFIG — bad project/global config or invalid agent-skills manifest/filter | `Hive::ConfigError`, `SetupAgents` |
 
 Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb`. See [CONTRIBUTING.md](../CONTRIBUTING.md) "CLI contract for agent callers".

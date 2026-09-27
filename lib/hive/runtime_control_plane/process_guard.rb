@@ -16,6 +16,16 @@ module Hive
         true
       end
 
+      def register_fork_resource(resource)
+        state[:mutex].synchronize { state[:fork_resources][resource] = true }
+        resource
+      end
+
+      def unregister_fork_resource(resource)
+        state[:mutex].synchronize { state[:fork_resources].delete(resource) }
+        true
+      end
+
       def checkout(transaction: false)
         current = state
         checked_out = false
@@ -99,8 +109,10 @@ module Hive
       # multi-threaded parent is not safe to reuse.
       def after_fork_child!
         databases = @state ? database_list(@state) : []
+        resources = @state ? fork_resource_list(@state) : []
         @state = fresh_state
         databases.each { |database| @state[:databases][database] = true }
+        resources.each(&:after_fork_child!)
         true
       end
 
@@ -148,6 +160,7 @@ module Hive
           mutex: mutex,
           condition: ConditionVariable.new,
           databases: {}.compare_by_identity,
+          fork_resources: {}.compare_by_identity,
           checkouts: 0,
           transactions: 0,
           owners: {}.compare_by_identity,
@@ -162,7 +175,13 @@ module Hive
         current.fetch(:databases).each_key { |database| values << database }
         values
       end
-      private_class_method :state, :fresh_state, :database_list
+
+      def fork_resource_list(current)
+        values = []
+        current.fetch(:fork_resources).each_key { |resource| values << resource }
+        values
+      end
+      private_class_method :state, :fresh_state, :database_list, :fork_resource_list
     end
   end
 end

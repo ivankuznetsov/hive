@@ -51,6 +51,31 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_reconcile_settles_existing_work_without_admitting_retry_when_closed
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      first = runtime.fetch(:attempt_store).active_attempts.first
+      terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
+
+      result = runtime.fetch(:daemon_runtime).reconcile(
+        now: NOW + 3, admission_open: -> { true },
+        retry_admission_open: -> { false }, projects: [ "demo" ]
+      ).fetch(0)
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal 1, result.fetch(:completions)
+      assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size,
+                   "a drain pass must leave retry admission for the next scheduler pass"
+      assert_equal "running", current_run(runtime).fetch("status")
+      retry_item = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + 3
+      ).find { |item| item.fetch("reason") == "module_retry_due" }
+      assert_equal "runnable_now", retry_item.fetch("bucket")
+    end
+  end
+
   def test_disable_closes_pending_retry_without_replay
     with_runtime do |runtime|
       runtime.fetch(:module_dispatcher).dispatch(
@@ -169,6 +194,80 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       assert_equal 1, first.fetch(:decisions)
       assert_equal 0, second.fetch(:decisions)
       assert_equal 1, runtime.fetch(:attempt_store).active_attempts.size
+    end
+  end
+
+  def test_readiness_inventories_event_backlog_and_future_schedule_without_advancing_cursor
+    with_runtime(schedules: [ "0 * * * *" ]) do |runtime|
+      daemon = runtime.fetch(:daemon_runtime)
+      cursor = File.join(
+        runtime.fetch(:store).hive_state_path,
+        "module-runtime", "daemon-event-cursor.json"
+      )
+
+      before = daemon.readiness(project: "demo", now: NOW + 1)
+
+      assert_includes before.map { |item| item.fetch("reason") }, "module_event_pending"
+      assert_includes before.map { |item| item.fetch("reason") }, "module_schedule_due"
+      refute_path_exists cursor
+
+      daemon.tick(now: NOW + 1)
+      after = daemon.readiness(project: "demo", now: NOW + 2)
+      schedule = after.find { |item| item.fetch("reason") == "module_schedule" }
+      assert_equal "waiting_external", schedule.fetch("bucket")
+      assert_equal Time.utc(2026, 7, 22, 11, 0, 0), schedule.fetch("next_check_at")
+    end
+  end
+
+  def test_readiness_preserves_deferred_module_retry_deadline
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      path = Dir.glob(
+        File.join(runtime.fetch(:store).runtime_path("demo"), "runs", "*.json")
+      ).fetch(0)
+      run = JSON.parse(File.binread(path))
+      run["status"] = "retrying"
+      run["updated_at"] = NOW.utc.iso8601(6)
+      File.binwrite(path, Hive::WorkflowPackage::CanonicalJSON.generate(run))
+
+      item = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + 1
+      ).find { |candidate| candidate.fetch("reason") == "module_retry_cooldown" }
+
+      assert_equal NOW + Hive::Modules::DaemonRuntime::RETRY_DELAY_SEC,
+                   item.fetch("next_check_at")
+
+      due = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + Hive::Modules::DaemonRuntime::RETRY_DELAY_SEC
+      ).find { |candidate| candidate.fetch("id").include?(run.fetch("run_id")) }
+      assert_equal [ "runnable_now", "module_retry_due" ],
+                   due.values_at("bucket", "reason")
+    end
+  end
+
+  def test_readiness_identifies_running_module_attempts_with_and_without_attempt_ids
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      path = Dir.glob(
+        File.join(runtime.fetch(:store).runtime_path("demo"), "runs", "*.json")
+      ).fetch(0)
+      run = JSON.parse(File.binread(path))
+
+      item = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + 1
+      ).find { |candidate| candidate.fetch("id").include?(run.fetch("run_id")) }
+      assert_equal "attempt_completed", item.dig("condition", "kind")
+
+      run.delete("attempt_id")
+      File.binwrite(path, Hive::WorkflowPackage::CanonicalJSON.generate(run))
+      item = runtime.fetch(:daemon_runtime).readiness(
+        project: "demo", now: NOW + 1
+      ).find { |candidate| candidate.fetch("id").include?(run.fetch("run_id")) }
+      assert_equal "task_changed", item.dig("condition", "kind")
     end
   end
 
@@ -313,6 +412,46 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_reconcile_finalizes_runs_without_admitting_event_backlog
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      attempt = runtime.fetch(:attempt_store).active_attempts.first
+      terminalize(runtime.fetch(:attempt_store), attempt, outcome: "succeeded")
+      cursor = File.join(
+        runtime.fetch(:store).hive_state_path,
+        "module-runtime", "daemon-event-cursor.json"
+      )
+
+      result = runtime.fetch(:daemon_runtime).reconcile(
+        now: NOW + 3, projects: [ "demo" ]
+      ).first
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal "succeeded", current_run(runtime).fetch("status")
+      refute_path_exists cursor,
+                         "completion-only reconciliation must not drain event admissions"
+    end
+  end
+
+  def test_reconcile_dispatcher_clock_is_fixed_to_the_pass_timestamp
+    with_runtime(publish_event: false) do |runtime|
+      fake_dispatcher = Object.new
+      observed_times = []
+      with_replaced_singleton_method(
+        Hive::Modules::Dispatcher, :new, lambda { |**options|
+          observed_times << options.fetch(:clock).call
+          fake_dispatcher
+        }
+      ) do
+        result = runtime.fetch(:daemon_runtime).reconcile(now: NOW + 3).first
+        assert_equal :ok, result.fetch(:status)
+      end
+      assert_equal [ NOW + 3 ], observed_times
+    end
+  end
+
   def test_empty_and_corrupt_projects_return_idle_or_bounded_blocked_results
     with_tmp_dir do |root|
       attempt_store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), migrate: true)
@@ -349,6 +488,33 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       ).tick(now: NOW).first
       assert_equal :blocked, blocked.fetch(:status)
       assert_match(/malformed|JSON/, blocked.fetch(:reason))
+
+      daemon = Hive::Modules::DaemonRuntime.new(
+        attempt_store: attempt_store, attempt_dispatcher: attempt_dispatcher,
+        registry: -> { [ corrupt_entry ] }
+      )
+      assert_raises(Hive::ConfigError) do
+        daemon.readiness(project: "corrupt", now: NOW)
+      end
+      reconciled = daemon.reconcile(now: NOW).first
+      assert_equal :blocked, reconciled.fetch(:status)
+    end
+  end
+
+  def test_tick_can_scope_registry_to_one_project
+    with_tmp_dir do |root|
+      entries = %w[chosen unrelated].map do |name|
+        { "name" => name, "hive_state_path" => File.join(root, name),
+          "project_id" => "#{name}-id" }
+      end
+      daemon = Hive::Modules::DaemonRuntime.new(
+        attempt_store: Object.new, attempt_dispatcher: Object.new,
+        registry: -> { entries }
+      )
+
+      results = daemon.tick(now: NOW, projects: [ "chosen" ])
+
+      assert_equal [ "chosen" ], results.map { |result| result.fetch(:project) }
     end
   end
 
@@ -442,6 +608,11 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         attempt_store: attempt_store, attempt_dispatcher: attempt_dispatcher,
         registry: -> { [ entry ] }
       )
+
+      setup = daemon.readiness(project: "demo", now: NOW).find do |item|
+        item.fetch("reason") == "module_setup_pending"
+      end
+      assert_equal "runnable_now", setup.fetch("bucket")
 
       first = daemon.tick(now: NOW).first
       second = daemon.tick(now: NOW + 1).first

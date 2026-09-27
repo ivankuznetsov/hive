@@ -689,6 +689,8 @@ class WikiCommandIndexTest < Minitest::Test
       [ "`install`", "0" ], [ "`install`", "64" ], [ "`install`", "70" ],
       [ "`enable` / `disable`", "0" ], [ "`enable` / `disable`", "64" ],
       [ "`enable` / `disable`", "70" ], [ "`enable` / `disable`", "78" ],
+      [ "`clear-hold`", "0" ], [ "`clear-hold`", "64" ],
+      [ "`clear-hold`", "75" ],
       [ "`queue list` / `queue prune`", "0" ], [ "`queue show <id>`", "0" ],
       [ "`queue show <id>`", "1" ], [ "`queue` (any)", "64" ],
       [ "`queue` (any)", "70" ], [ "(any)", "64" ]

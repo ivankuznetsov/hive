@@ -1,4 +1,5 @@
 require "open3"
+require "set"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/process_identity"
 require "hive/attempts/storage_status"
@@ -37,8 +38,9 @@ module Hive
         @store.fetch(attempt_id)
       end
 
-      def reconcile(now: Time.now.utc)
+      def reconcile(now: Time.now.utc, mutate_projects: nil)
         records = @store.active_attempts
+        mutable = mutate_projects && Array(mutate_projects).map(&:to_s).to_set
         statuses = []
         newly_lost = []
         all_lost = []
@@ -46,6 +48,12 @@ module Hive
         effective_records = []
 
         records.each do |record|
+          if mutable && !mutable.include?(record["project"].to_s)
+            untouched = reconciled(record, :unowned, :not_applicable, {})
+            statuses << untouched
+            effective_records << record
+            next
+          end
           reconciled = reconcile_record(record, now: now)
           prepared = @finalization_maintenance&.prepare(reconciled.attempt)
           observation = observe_condition(reconciled, now: now)

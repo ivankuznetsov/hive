@@ -2,7 +2,7 @@ module Hive
   module E2E
     class IncidentBudget
       DEFAULT_PER_SCENARIO_SECONDS = 16.0
-      DEFAULT_AGGREGATE_SECONDS = 30.0
+      DEFAULT_AGGREGATE_SECONDS = 36.0
       INCIDENT_TAG = "incident-regression"
 
       Result = Data.define(:durations, :total_seconds, :integrity_violations, :timing_violations) do

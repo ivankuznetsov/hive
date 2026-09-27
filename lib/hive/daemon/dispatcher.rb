@@ -58,11 +58,28 @@ module Hive
     class Dispatcher
       attr_reader :controller, :supervisor, :logger
 
+      class OneShotDrainTimeout < Hive::Error
+        attr_reader :code
+
+        def initialize(project:, timeout_sec:)
+          @code = "drain_timeout"
+          super(
+            "one-shot drain timed out after #{timeout_sec} seconds; " \
+            "project #{project} still has unsettled work"
+          )
+        end
+
+        def exit_code = Hive::ExitCodes::TEMPFAIL
+      end
+
       OperationalQueueState = Data.define(:pending, :claimed, :malformed, :error)
       FastProbe = Data.define(:task_keys, :full_tick)
       DISPATCH_AGING_STEP_SEC = 30 * 60
       PatrolDiscoveryResult = Data.define(:candidates, :error)
       TERMINAL_RECOVERY_PRUNE_INTERVAL_SEC = 60 * 60
+      # How often a one-shot pass re-settles abandoned Architecture Patrol
+      # discovery claims while it drains.
+      ONE_SHOT_CLAIM_RECOVERY_INTERVAL_SEC = 5
       STATE_FILE_PROBE_BATCH_SIZE = 64
       STALE_RECOVERY_BLOCK_REASONS = %w[
         generation_conflict task_identity_conflict
@@ -102,8 +119,13 @@ module Hive
                      digest_hold_observer: Hive::DailyDigest::HoldObserver.new,
                      plan_approval: Hive::Daemon::PlanApproval,
                      module_runtime: nil,
+                     project_ownership: nil,
+                     project_liveness: nil,
+                     scope_projects: nil,
                      runtime_ready_callback: nil,
                      clock: nil,
+                     monotonic_clock: nil,
+                     one_shot_drain_timeout_sec: nil,
                      patrol_discovery_async: false)
         @config = config
         @controller = controller
@@ -132,7 +154,15 @@ module Hive
         @operational_snapshot = operational_snapshot
         @runtime_ready_callback = runtime_ready_callback
         @clock = clock
+        @monotonic_clock = monotonic_clock || lambda do
+          Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        end
         @module_runtime = module_runtime
+        @project_ownership = project_ownership
+        @project_liveness = project_liveness
+        @scope_projects = if scope_projects
+          Array(scope_projects).map(&:to_s).to_h { |name| [ name, true ] }.freeze
+        end
         @dispatch_repository = dispatch_repository
         @dispatch_state_home = dispatch_request_state_home || dispatch_result_state_home ||
           Hive::Paths.state_home
@@ -162,6 +192,12 @@ module Hive
         # channel is nudge-only. U7 will read it when it lands.
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
         @shutdown_grace_sec = @daemon_cfg.fetch("shutdown_grace_sec", 600)
+        # A one-shot drain must not replace each worker's configured execution
+        # timeout with the (usually much shorter) daemon shutdown grace. An
+        # explicit value remains available to callers/tests that need a hard
+        # parent bound; otherwise the supervisor and durable attempt leases own
+        # their normal timeout policy.
+        @one_shot_drain_timeout_sec = one_shot_drain_timeout_sec
         @poll_interval_sec = @daemon_cfg.fetch("poll_interval_sec", 30)
         @fast_poll_sec = @daemon_cfg.fetch("fast_poll_sec", 1)
         # Grace window for AGENT_WORKING markers with no PID attribute
@@ -249,7 +285,11 @@ module Hive
         # inherit it so a freshly completed task cannot reuse its slot before
         # older capacity-deferred rows are reconsidered by the next full scan.
         @priority_capacity_fences = { global: nil, projects: {} }
+        @one_shot_ran = []
+        @one_shot_failure = nil
       end
+
+      attr_reader :one_shot_ran
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
       # handling, no sleep. Public so tests can drive a single tick
@@ -258,6 +298,7 @@ module Hive
         tick_started = false
         tick_clock_started_at = nil
         return unless admission_open?
+        @one_shot_failure = nil if scoped_execution?
 
         tick_clock_started_at = full_tick_clock_time
         tick_started = true
@@ -268,19 +309,27 @@ module Hive
         # cache populated on first sight stuck for the daemon's
         # lifetime and the only way to honour a disable was SIGHUP.
         @enabled_cache.clear
+        unless refresh_project_ownership
+          @one_shot_failure = "project ownership unavailable" if scoped_execution?
+          publish_operational_snapshot(
+            :fail, phase: "failed", reason: "project_ownership_unavailable", now: now
+          )
+          return
+        end
         @routing_observations.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
         reset_active_agent_snapshot
 
         # 0. Throttled release check (independent of task status). Sets the
         # TUI-footer nudge state when behind; resilient — never crashes a tick.
-        maybe_check_for_update(now: now)
+        maybe_check_for_update(now: now) unless scoped_execution?
 
         # Durable task ownership is reconciled before status-derived capacity,
         # healers, queue admission, or auto-advance. If reconciliation itself
         # fails, fail closed for this tick rather than admitting against an
         # unknown ownership view.
         unless reconcile_attempts(now: now)
+          @one_shot_failure = "attempt reconciliation failed" if scoped_execution?
           publish_operational_snapshot(
             :fail, phase: "failed", reason: "attempt_reconciliation_failed", now: now
           )
@@ -296,7 +345,7 @@ module Hive
             admission_view: @attempt_snapshot&.admission_view
           )
           reconcile_lost_attempt_deliveries(now: now)
-          if @attempt_reconciler&.respond_to?(:sweep_finalization_maintenance)
+          if !scoped_execution? && @attempt_reconciler&.respond_to?(:sweep_finalization_maintenance)
             begin
               result = @attempt_reconciler.sweep_finalization_maintenance(now: now)
               refresh_attempt_storage_snapshot if result&.fetch(:ran, false)
@@ -328,8 +377,10 @@ module Hive
         return unless admission_open?
 
         # 1d. Bound the dispatch-result notice dir (ADV-1 #6).
-        prune_dispatch_results(now: now)
-        prune_terminal_recovery_receipts(now: now)
+        unless scoped_execution?
+          prune_dispatch_results(now: now)
+          prune_terminal_recovery_receipts(now: now)
+        end
 
         # 1e. Global daily merged-PR digest. This is not project-scoped and
         # does not depend on the status snapshot, so it runs before status
@@ -338,19 +389,24 @@ module Hive
         # + catch-up-cap `write_state`), and an unguarded SystemCallError
         # (ENOSPC/EROFS/EACCES) would otherwise crash the whole tick and
         # trip the unit's restart-loop cap.
-        run_digest_scheduler_tick(
-          @daily_digest_close_scheduler, "daily_digest_close_scheduler.tick", now: now
-        )
-        run_digest_scheduler_tick(
-          @daily_digest_delivery_scheduler, "daily_digest_delivery_scheduler.tick", now: now
-        )
-        run_digest_scheduler_tick(@answer_digest_scheduler, "answer_digest_scheduler.tick", now: now)
+        unless scoped_execution?
+          run_digest_scheduler_tick(
+            @daily_digest_close_scheduler, "daily_digest_close_scheduler.tick", now: now
+          )
+          run_digest_scheduler_tick(
+            @daily_digest_delivery_scheduler, "daily_digest_delivery_scheduler.tick", now: now
+          )
+          run_digest_scheduler_tick(
+            @answer_digest_scheduler, "answer_digest_scheduler.tick", now: now
+          )
+        end
 
         # 2. Fetch status
         result = @status_consumer.fetch
         return unless admission_open?
 
         unless result.ok
+          @one_shot_failure = "status observation failed: #{result.error}" if scoped_execution?
           @logger.event(:status_failure, error: result.error)
           publish_operational_snapshot(
             :fail, phase: "failed", reason: "status_failure", now: now
@@ -358,13 +414,15 @@ module Hive
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
+        capacity_result = result
+        result = scope_status_result(result) if scoped_execution?
         # Non-fatal projection advisory captured by the in-process producer.
         # Log it once per tick while continuing with the valid graph.
         @logger.event(:status_warning, message: result.warning) if result.warning
         # Rebuild the per-tick set of half-migrated projects from the
         # status snapshot. Issue #95.
         refresh_legacy_layout_projects(result.projects)
-        refresh_active_agent_snapshot(result.rows)
+        refresh_active_agent_snapshot(capacity_result.rows)
 
         apply_external_running_counts
 
@@ -378,19 +436,26 @@ module Hive
         run_pr_merge_reconciliation(
           rows_without_invalid_task_histories(result.rows), projects: result.projects, now: now
         )
-        run_refactor_patrol_merge_reconciler_tick(now: now)
+        run_refactor_patrol_merge_reconciler_tick(now: now) unless scoped_execution?
 
         # Project-local module occurrences are already durable at this point.
         # Drain them only from the daemon, after attempt reconciliation and PR
         # intake, so no command-side producer can become a second dispatcher.
         begin
-          @module_runtime&.tick(
-            now: now, admission_open: -> { admission_open? }
-          )&.each do |module_result|
+          module_options = { now: now, admission_open: -> { admission_open? } }
+          module_projects = if scoped_execution?
+            @scope_projects.keys
+          elsif @project_ownership
+            @project_ownership.owned_projects
+          end
+          module_options[:projects] = module_projects if module_projects
+          @module_runtime&.tick(**module_options)&.each do |module_result|
             next if module_result.fetch(:status) == :idle
             @logger.event(:module_runtime, **module_result)
+            record_one_shot_module_result(module_result) if scoped_execution?
           end
         rescue StandardError => e
+          @one_shot_failure ||= "module runtime failed: #{e.message}" if scoped_execution?
           @logger.event(
             :fatal, message: "module runtime raised: #{e.class}: #{e.message}",
             keeping_previous: true
@@ -414,6 +479,7 @@ module Hive
             daemon_enabled_projects: daemon_enabled_projects_for(result.rows)
           )
         rescue StandardError => e
+          @one_shot_failure ||= "stale-agent reconciliation failed: #{e.message}" if scoped_execution?
           @logger.event(:fatal,
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
@@ -482,7 +548,7 @@ module Hive
         # discovery worker. Git/config inspection can be slow or blocked on one
         # repository; only candidate enumeration leaves the dispatcher thread.
         # Reservation, gates, and spawn remain serialized here on a later tick.
-        poll_patrol_scheduler(now: now)
+        poll_patrol_scheduler(now: now) unless scoped_execution?
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
@@ -492,6 +558,69 @@ module Hive
             started_at: now, clock_started_at: tick_clock_started_at
           )
         end
+      end
+
+      def run_one_shot(project:, now: Time.now.utc, sleeper: ->(seconds) { sleep(seconds) })
+        raise ArgumentError, "dispatcher is not scoped to #{project}" unless
+          scoped_execution? && scoped_project?(project)
+
+        @one_shot_ran = []
+        recover_dispatch_claims(now: now)
+        recover_one_shot_architecture_claims(project: project, now: now)
+        tick(now: now)
+        raise @one_shot_failure if @one_shot_failure.is_a?(Exception)
+        raise Hive::Error, @one_shot_failure if @one_shot_failure
+
+        drain_deadline = @one_shot_drain_timeout_sec &&
+          (@monotonic_clock.call + @one_shot_drain_timeout_sec)
+        recovers_claims = @refactor_patrol_scheduler.respond_to?(:recover_stale_claims)
+        next_claim_recovery = recovers_claims &&
+          (@monotonic_clock.call + ONE_SHOT_CLAIM_RECOVERY_INTERVAL_SEC)
+        loop do
+          loop do
+            current = @clock ? @clock.call.utc : Time.now.utc
+            reap_completed(now: current)
+            enforce_child_timeouts(now: current)
+            raise Hive::Error, "attempt reconciliation failed while draining" unless
+              reconcile_attempts(now: current)
+            # An architecture claim unexpired at entry can lose its owner while
+            # the pass drains; keep settling abandoned claims so its guard
+            # cannot outlive the owner.
+            if recovers_claims && @monotonic_clock.call >= next_claim_recovery
+              recover_one_shot_architecture_claims(project: project, now: current)
+              next_claim_recovery = @monotonic_clock.call + ONE_SHOT_CLAIM_RECOVERY_INTERVAL_SEC
+            end
+            break unless project_worker_live?(project)
+
+            remaining = drain_deadline && (drain_deadline - @monotonic_clock.call)
+            fail_one_shot_drain!(project: project) if remaining && !remaining.positive?
+            sleep_for = [ @fast_poll_sec.to_f, 0.25 ].min
+            sleep_for = [ sleep_for, remaining ].min if remaining
+            sleeper.call(sleep_for)
+          end
+
+          reconcile_one_shot_module_runs(project: project)
+          current = @clock ? @clock.call.utc : Time.now.utc
+          raise Hive::Error, "attempt reconciliation failed after module completion" unless
+            reconcile_attempts(now: current)
+          break unless project_worker_live?(project)
+        end
+        finalize_one_shot_runs
+        { ran: @one_shot_ran.dup, items: one_shot_readiness(project: project),
+          safe_to_stop: !project_worker_live?(project) }
+      rescue Interrupt, SignalException
+        entries = @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
+        record_completed(Array(entries), now: Time.now.utc)
+        raise
+      end
+
+      def observe_one_shot(project:, now: Time.now.utc)
+        if @attempt_reconciler
+          @attempt_snapshot = @attempt_reconciler.reconcile(now: now, mutate_projects: [])
+          @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
+        end
+        { ran: [], items: one_shot_readiness(project: project, now: now),
+          safe_to_stop: !project_worker_live?(project) }
       end
 
       # A fast tick is intentionally task-local. It refreshes only rows whose
@@ -508,6 +637,7 @@ module Hive
         return true if keys.empty?
 
         @enabled_cache.clear
+        return false unless refresh_project_ownership
         @logger.event(:tick_begin, now: now.utc.iso8601, scope: "changed_tasks", tasks: keys.length)
         result = @status_consumer.fetch_tasks(keys)
         return false unless admission_open?
@@ -672,6 +802,433 @@ module Hive
 
       private
 
+      def live_attempt?(project)
+        Array(@attempt_snapshot&.attempts).any? do |status|
+          attempt = status.attempt
+          scoped_project?(attempt["project"]) && attempt["project"].to_s == project.to_s && attempt.live?
+        end
+      end
+
+      def project_worker_live?(project)
+        @supervisor.in_flight?(project: project) || live_attempt?(project) ||
+          (@project_liveness && !@project_liveness.safe_to_stop?)
+      end
+
+      def fail_one_shot_drain!(project:)
+        entries = @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
+        current = @clock ? @clock.call.utc : Time.now.utc
+        record_completed(Array(entries), now: current)
+        reconcile_attempts(now: current)
+        finalize_one_shot_runs
+        raise OneShotDrainTimeout.new(
+          project: project, timeout_sec: @one_shot_drain_timeout_sec
+        )
+      end
+
+      def finalize_one_shot_runs
+        @one_shot_ran.each do |run|
+          attempt_id = run.dig("details", "attempt_id")
+          attempt = @attempt_reconciler&.fetch(attempt_id) if attempt_id
+          run["outcome"] = attempt.outcome.to_s if attempt&.final?
+        end
+      end
+
+      def reconcile_one_shot_module_runs(project:)
+        return unless @module_runtime&.respond_to?(:reconcile)
+
+        current = @clock ? @clock.call.utc : Time.now.utc
+        results = @module_runtime.reconcile(
+          now: current, admission_open: -> { admission_open? },
+          retry_admission_open: -> { false }, projects: [ project ]
+        )
+        Array(results).each do |module_result|
+          @logger.event(:module_runtime, **module_result)
+          next unless module_result.fetch(:status) == :blocked
+
+          raise Hive::Error,
+                "module runtime reconciliation failed: #{module_result[:reason] || 'unknown error'}"
+        end
+      end
+
+      def one_shot_readiness(project:, now: (@clock ? @clock.call.utc : Time.now.utc))
+        result = @status_consumer.fetch
+        raise Hive::Error, "status observation failed: #{result.error}" unless result.ok
+        unless Array(result.projects).any? { |observed| observed.name.to_s == project.to_s }
+          raise Hive::Error, "status observation failed for project #{project}"
+        end
+
+        refresh_active_agent_snapshot(result.rows)
+        apply_external_running_counts
+        result = scope_status_result(result)
+        refresh_legacy_layout_projects(result.projects)
+        project_observation = result.projects.find do |observed|
+          observed.name.to_s == project.to_s
+        end
+        queue = dispatch_repository.pending(state_home: dispatch_request_state_home)
+          .select { |request| request.project.to_s == project.to_s }
+        rows_by_slug = result.rows.to_h { |row| [ row.slug.to_s, row ] }
+        items = queue.map do |request|
+          dispatch_request_pending_item(
+            request, row: rows_by_slug[request.slug.to_s], now: now,
+            project_observation: project_observation
+          )
+        end
+        active = active_attempts_for(project)
+        active_slugs = active.to_h { |attempt| [ attempt["task_slug"].to_s, true ] }
+        items.concat(active.map { |attempt| active_attempt_pending_item(attempt) })
+        result.rows.each do |row|
+          next if active_slugs.key?(row.slug.to_s)
+
+          item = row_pending_item(row, now: now)
+          items << item if item
+        end
+        if @module_runtime&.respond_to?(:readiness)
+          items.concat(@module_runtime.readiness(project: project, now: now))
+        end
+        if @patrol_fix_admission_scheduler&.respond_to?(:readiness)
+          items.concat(@patrol_fix_admission_scheduler.readiness(project: project, now: now))
+        end
+        items.uniq { |item| item.fetch("id") }
+      end
+
+      def record_one_shot_module_result(result)
+        decisions = result.fetch(:decisions, 0).to_i
+        schedules = result.fetch(:schedules, 0).to_i
+        completions = result.fetch(:completions, 0).to_i
+        return unless result.fetch(:status) == :ok &&
+                      [ decisions, schedules, completions ].any?(&:positive?)
+
+        @one_shot_ran << {
+          "id" => "dispatch:module:#{result.fetch(:project)}",
+          "action" => "module runtime",
+          "outcome" => "completed",
+          "details" => {
+            "decisions" => decisions, "schedules" => schedules,
+            "completions" => completions
+          }
+        }
+      end
+
+      def active_attempts_for(project)
+        Array(@attempt_snapshot&.attempts).filter_map do |status|
+          attempt = status.attempt
+          attempt if attempt["project"].to_s == project.to_s && attempt.live?
+        end
+      end
+
+      def dispatch_request_pending_item(request, row:, now:, project_observation: nil)
+        id = "dispatch:request:#{request.request_id}"
+        unless project_owned?(request.project)
+          raise Hive::Error, "project ownership lost while observing #{request.project}"
+        end
+        unless project_enabled?(request.project) || explicit_action_recovery?(request)
+          return pending_item("waiting_operator", id, "project_disabled",
+                              condition: operator_condition(row || request))
+        end
+        if @legacy_layout_projects.key?(request.project)
+          return pending_item("waiting_operator", id, "legacy_layout",
+                              condition: operator_condition(row || request))
+        end
+        if row && task_history_invalid_row?(row)
+          return pending_item("waiting_operator", id, "task_history_invalid",
+                              condition: operator_condition(row))
+        end
+        if request.recovery.is_a?(Hash)
+          if stale_recovery_request?(
+            request, row, project_observation: project_observation
+          )
+            return pending_item("waiting_operator", id, "stale_task_identity",
+                                condition: operator_condition(row || request))
+          end
+          unless row
+            return pending_item("waiting_operator", id, "recovery_observation_unavailable",
+                                condition: operator_condition(request))
+          end
+          blocked_reason = request.recovery["blocked_reason"].to_s
+          unless blocked_reason.empty?
+            return pending_item(
+              "waiting_operator", id, blocked_reason,
+              condition: operator_condition(row)
+            )
+          end
+          lifecycle = recovery_lifecycle_pending_item(request, row: row, now: now, id: id)
+          return lifecycle if lifecycle
+        end
+        if dependency_gated_request?(request) && row&.admission_error
+          return pending_item("waiting_operator", id, "admission_error",
+                              condition: operator_condition(row))
+        end
+        if dependency_gated_request?(request) && row&.blocked == true
+          bucket = row.blocked_by ? "waiting_external" : "waiting_operator"
+          condition = if row.blocked_by
+            { "kind" => "dependency_completed", "task" => row.slug,
+              "dependency" => row.blocked_by }
+          else
+            operator_condition(row)
+          end
+          return pending_item(bucket, id, "dependency_blocked", condition: condition)
+        end
+        if @controller.running_task?(project: request.project, slug: request.slug)
+          return pending_item(
+            "waiting_external", id, "in_flight",
+            condition: { "kind" => "task_changed", "task" => request.slug }
+          )
+        end
+
+        gate = @controller.can_dispatch?(
+          project: request.project, slug: request.slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(request.project),
+          mutate: !@dry_run
+        )
+        return gate_pending_item(row || request, gate, now: now, id: id,
+                                 eligible_reason: "queued_dispatch_request") unless gate == :ok
+
+        provider_capacity_pending_item(
+          request, row || request, now: now, id: id,
+          eligible_reason: "queued_dispatch_request"
+        )
+      end
+
+      def recovery_lifecycle_pending_item(request, row:, now:, id:)
+        receipt = @recovery_coordinator.receipt_for_request(request, now: now)
+        return nil if receipt.status == "queued" && %w[admitted cleared].include?(receipt.phase)
+
+        if %w[cooldown running].include?(receipt.status)
+          deadline = receipt.next_eligible_at && Time.iso8601(receipt.next_eligible_at)
+          condition = if receipt.status == "running"
+            { "kind" => "attempt_completed", "attempt" => receipt.attempt_id }
+          else
+            time_condition(deadline, :recovery)
+          end
+          return pending_item(
+            "waiting_external", id, "recovery_#{receipt.status}",
+            next_check_at: deadline, condition: condition
+          )
+        end
+
+        pending_item(
+          "waiting_operator", id, receipt.reason || "recovery_#{receipt.status}",
+          condition: operator_condition(row)
+        )
+      end
+
+      def active_attempt_pending_item(attempt)
+        deadline = attempt.active_deadline
+        pending_item(
+          "waiting_external", "dispatch:attempt:#{attempt.attempt_id}", "attempt_running",
+          next_check_at: deadline,
+          condition: { "kind" => "attempt_completed", "attempt" => attempt.attempt_id,
+                       "task" => attempt["task_slug"] }
+        )
+      end
+
+      def row_pending_item(row, now:)
+        return pending_item("waiting_operator", "dispatch:task:#{row.slug}",
+                            "task_history_invalid", condition: operator_condition(row)) if
+          task_history_invalid_row?(row)
+        return nil if row.action.nil? || row.action == "archived"
+        unless project_enabled?(row.project)
+          return pending_item("waiting_operator", "dispatch:task:#{row.slug}",
+                              "project_disabled", condition: operator_condition(row))
+        end
+        if @legacy_layout_projects.key?(row.project)
+          return pending_item("waiting_operator", "dispatch:task:#{row.slug}",
+                              "legacy_layout", condition: operator_condition(row))
+        end
+        return retry_pending_item(row, now: now) if retryable_error_row?(row)
+
+        decision = one_shot_policy_decision(row, now: now)
+        case decision
+        when :dispatch
+          gate = @controller.can_dispatch?(
+            project: row.project, slug: row.slug, now: now,
+            external_global_count: @external_active_agent_total,
+            external_project_count: external_active_agent_count_for(row.project),
+            mutate: !@dry_run
+          )
+          return gate_pending_item(row, gate, now: now) unless gate == :ok
+
+          provider_capacity_pending_item(
+            readiness_request(row, now: now), row, now: now,
+            id: "dispatch:task:#{row.slug}", eligible_reason: "eligible"
+          )
+        when :wait_for_debounce
+          due = row.state_file_mtime && row.state_file_mtime + @edit_debounce_sec
+          pending_item("waiting_external", "dispatch:task:#{row.slug}", "edit_debounce",
+                       next_check_at: due, condition: time_condition(due))
+        when :blocked_on_dependency
+          bucket = row.blocked_by ? "waiting_external" : "waiting_operator"
+          kind = row.blocked_by ? "dependency_completed" : "operator_action"
+          pending_item(bucket, "dispatch:task:#{row.slug}", "dependency_blocked",
+                       condition: { "kind" => kind, "task" => row.slug,
+                                    "dependency" => row.blocked_by || row.depends_on }.compact)
+        when :poll_for_merge
+          pending_item("waiting_external", "dispatch:task:#{row.slug}", "pull_request_pending",
+                       next_check_at: @merge_watcher&.next_poll_at(now: now),
+                       condition: pr_condition(row))
+        when :wait_for_answers, :admission_error, :markerless_stalled, :record_baseline
+          pending_item("waiting_operator", "dispatch:task:#{row.slug}", decision.to_s,
+                       condition: operator_condition(row))
+        when :skip
+          if row.action == "agent_running"
+            pending_item("waiting_external", "dispatch:task:#{row.slug}", "worker_running",
+                         condition: { "kind" => "task_changed", "task" => row.slug })
+          elsif row.action == "needs_input" || row.action.to_s.start_with?("recover_")
+            pending_item("waiting_operator", "dispatch:task:#{row.slug}", row.action,
+                         condition: operator_condition(row))
+          end
+        end
+      end
+
+      def retry_pending_item(row, now:)
+        assessment = @stale_agent_healer.retry_assessment(row, now: now)
+        id = "dispatch:task:#{row.slug}"
+        if row.live_task_lock == true
+          return pending_item(
+            "waiting_external", id, "retry_in_flight",
+            condition: { "kind" => "task_changed", "task" => row.slug }
+          )
+        end
+        unless assessment[:safe]
+          if assessment[:safety_reason].to_s.start_with?("inspection failed:")
+            raise Hive::Error,
+                  "automatic recovery observation failed: #{assessment[:safety_reason]}"
+          end
+          return pending_item("waiting_operator", id, "retry_safety_blocked",
+                              condition: operator_condition(row))
+        end
+        if assessment[:due]
+          return pending_item("runnable_now", id, "retry_pending", condition: nil)
+        end
+
+        deadline = assessment[:retry_at]
+        pending_item("waiting_external", id, "retry_cooldown",
+                     next_check_at: deadline,
+                     condition: time_condition(deadline, :recovery))
+      end
+
+      def one_shot_policy_decision(row, now:)
+        answers = brainstorm_answer_state(row)
+        Policy.decide(
+          action: row.action, stage: row.stage, workflow: row.workflow,
+          command: row.suggested_command, state_file_mtime: row.state_file_mtime,
+          last_dispatched_state_file_mtime: @controller.last_dispatched_state_file_mtime_for(
+            project: row.project, slug: row.slug
+          ), now: now, edit_debounce_sec: @edit_debounce_sec,
+          answers_pending: answers[:pending], answers_complete: answers[:complete],
+          blocked: row.blocked == true, admission_error: !row.admission_error.nil?
+        )
+      end
+
+      def gate_pending_item(row, gate, now:, id: "dispatch:task:#{row.slug}",
+                            eligible_reason: "eligible")
+        return pending_item("runnable_now", id, eligible_reason,
+                            condition: nil) if gate == :ok
+        # Project-local selection limits do not require an external event. A
+        # fresh scheduler pass can select this work immediately, whereas only
+        # host-wide capacity contention needs a bounded polling wake.
+        return pending_item("runnable_now", id, gate.to_s,
+                            condition: nil) if gate == :project_cap
+        if %i[global_cap cooldown daily_cap].include?(gate)
+          due = if gate == :global_cap
+            now + @poll_interval_sec
+          else
+            @controller.next_check_at(project: row.project, slug: row.slug, gate: gate, now: now)
+          end
+          return pending_item("waiting_external", id, gate.to_s,
+                              next_check_at: due, condition: time_condition(due, gate))
+        end
+        pending_item("waiting_operator", id, gate.to_s,
+                     condition: operator_condition(row))
+      end
+
+      def provider_capacity_pending_item(request, row, now:, id:, eligible_reason:)
+        unless @attempt_dispatcher&.respond_to?(:routing_decision_for_request)
+          return pending_item("runnable_now", id, eligible_reason, condition: nil)
+        end
+
+        decision = @attempt_dispatcher.routing_decision_for_request(
+          request, now: now, admission_view: @attempt_snapshot&.admission_view
+        )
+        unless decision&.capacity_saturated?
+          return pending_item("runnable_now", id, eligible_reason, condition: nil)
+        end
+
+        due = now + @poll_interval_sec
+        pending_item(
+          "waiting_external", id, "provider_capacity", next_check_at: due,
+          condition: time_condition(due, :provider_capacity)
+        )
+      end
+
+      def readiness_request(row, now:)
+        Hive::RuntimeControlPlane::DispatchRepository::Request.new(
+          request_id: "one-shot-readiness-#{row.project}-#{row.slug}",
+          created_at: now.utc, project: row.project, slug: row.slug,
+          argv: Shellwords.split(row.suggested_command), requestor: "daemon",
+          chat_id: nil, update_id: nil, trigger: "readiness",
+          task_generation: row.task_generation, inherited_outputs: [],
+          schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION
+        )
+      end
+
+      def pending_item(bucket, id, reason, next_check_at: nil, condition:)
+        { "bucket" => bucket, "id" => id, "component" => "dispatch", "reason" => reason,
+          "next_check_at" => next_check_at, "condition" => condition }
+      end
+
+      def operator_condition(row)
+        { "kind" => "operator_action", "task" => row.slug }
+      end
+
+      def time_condition(deadline, resource = nil)
+        return nil unless deadline
+
+        { "kind" => "time_due", "deadline" => deadline.utc.iso8601(6),
+          "resource" => resource&.to_s }.compact
+      end
+
+      def pr_condition(row)
+        condition = { "kind" => "pr_changed", "task" => row.slug }
+        number = row.pr_url.to_s[%r{/pull/(\d+)}, 1]
+        condition["pr"] = number.to_i if number
+        condition
+      end
+
+      def scoped_execution?
+        !@scope_projects.nil?
+      end
+
+      def scoped_project?(project)
+        !scoped_execution? || @scope_projects.key?(project.to_s)
+      end
+
+      def scope_status_result(result)
+        projects = Array(result.projects).select { |project| scoped_project?(project.name) }
+        Hive::Daemon::StatusConsumer::Result.new(
+          ok: true,
+          rows: Array(result.rows).select { |row| scoped_project?(row.project) },
+          projects: projects,
+          warning: result.warning,
+          hidden_archived_task_count: projects.sum(&:hidden_archived_task_count)
+        )
+      end
+
+      def scoped_deliveries(deliveries)
+        deliveries.select do |delivery|
+          scoped_project?(delivery.request.project) && project_owned?(delivery.request.project)
+        end
+      end
+
+      def scoped_attempts(attempts)
+        return attempts unless scoped_execution? || @project_ownership
+
+        attempts.select do |attempt|
+          scoped_project?(attempt["project"]) && project_owned?(attempt["project"])
+        end
+      end
+
       def dispatch_repository
         @dispatch_repository ||= Hive::RuntimeControlPlane::DispatchRepository.open_default(
           state_home: @dispatch_state_home
@@ -834,6 +1391,10 @@ module Hive
 
       def record_completed(entries, now:)
         entries.each do |entry|
+          if scoped_execution?
+            run = @one_shot_ran.find { |item| item.dig("details", "pid") == entry.pid }
+            run["outcome"] = entry.exit_code.zero? ? "completed" : "failed" if run
+          end
           @controller.record_completion(
             pid: entry.pid, exit_code: entry.exit_code, completed_at: now
           )
@@ -1036,6 +1597,7 @@ module Hive
             result.status == :decision_dispatch
         end
       rescue StandardError => error
+        @one_shot_failure ||= "Patrol Fix admission failed: #{error.message}" if scoped_execution?
         @logger.event(
           :fatal,
           message: "Patrol Fix admission scheduler raised: #{error.class}: #{error.message}",
@@ -1083,10 +1645,12 @@ module Hive
         candidates = []
         error = nil
         begin
+          arguments = { now: now }
+          arguments[:projects] = @project_ownership.owned_projects if @project_ownership
           candidates = if @patrol_arbiter
-            @patrol_arbiter.candidates(now: now)
+            @patrol_arbiter.candidates(**arguments)
           else
-            @patrol_scheduler&.tick(now: now)
+            @patrol_scheduler&.tick(**arguments)
           end
         rescue StandardError => discovery_error
           error = discovery_error
@@ -1240,7 +1804,9 @@ module Hive
       def run_refactor_patrol_merge_reconciler_tick(now:)
         return unless @refactor_patrol_merge_reconciler
 
-        @refactor_patrol_merge_reconciler.tick(now: now).each do |result|
+        arguments = { now: now }
+        arguments[:projects] = @project_ownership.owned_projects if @project_ownership
+        @refactor_patrol_merge_reconciler.tick(**arguments).each do |result|
           case result.fetch(:status)
           when :blocked
             @logger.event(
@@ -1284,9 +1850,10 @@ module Hive
           project_enabled?(project) && !@legacy_layout_projects.key?(project)
         end
         eligible_rows = rows.select { |row| projects.include?(row.project) }
-        @merge_watcher.observe(
+        observation_results = @merge_watcher.observe(
           eligible_rows, now: now, projects: projects
-        ).each do |result|
+        )
+        Array(observation_results).each do |result|
           next unless result.fetch(:status) == :blocked
 
           @logger.event(
@@ -1297,7 +1864,8 @@ module Hive
             reason: result.fetch(:reason)
           )
         end
-        @merge_watcher.tick(now: now, projects: projects).each do |result|
+        merge_results = @merge_watcher.tick(now: now, projects: projects)
+        Array(merge_results).each do |result|
           status = result.fetch(:status)
           payload = {
             project: result.fetch(:project),
@@ -1321,7 +1889,18 @@ module Hive
             )
           end
         end
+        failures = Array(observation_results).select do |result|
+          %i[blocked failed].include?(result.fetch(:status))
+        end
+        failures.concat(Array(merge_results).select do |result|
+          %i[blocked failed].include?(result.fetch(:status))
+        end)
+        if scoped_execution? && failures.any?
+          reasons = failures.map { |result| result[:reason] || result.fetch(:status).to_s }.uniq
+          @one_shot_failure ||= "merge observation failed: #{reasons.join(', ')}"
+        end
       rescue StandardError => e
+        @one_shot_failure ||= e if scoped_execution?
         @logger.event(
           :fatal,
           message: "task merge reconciliation failed: #{e.class}: #{e.message}"
@@ -2288,7 +2867,16 @@ module Hive
 
           project_key = row.project.to_s
           capacity_fence = global_fence || project_fences[project_key]
-          outcome = handle_row(row, now: now, capacity_fence: capacity_fence)
+          outcome = begin
+            handle_row(row, now: now, capacity_fence: capacity_fence)
+          rescue Hive::OneShot::ScheduleState::StateError => error
+            @one_shot_failure ||= error if scoped_execution?
+            @logger.event(
+              :blocked, project: row.project, slug: row.slug, stage: row.stage,
+              reason: error.code, message: error.message
+            )
+            next
+          end
           if %i[dispatched in_flight attempt_terminal_replay task_source_changed].include?(outcome)
             @advance_rows_by_key.delete(task_key(row))
           end
@@ -2355,7 +2943,7 @@ module Hive
 
           per_project[row.project] += 1
         end
-        if @attempt_snapshot
+        if @attempt_snapshot&.respond_to?(:capacity)
           @controller.set_capacity_snapshot(
             @attempt_snapshot.capacity,
             legacy_per_project: per_project
@@ -2697,6 +3285,7 @@ module Hive
       #      row and log `:dispatch_request_completed`.
       def process_dispatch_requests(now:, rows:, projects: nil)
         pending = dispatch_repository.pending(state_home: dispatch_request_state_home)
+        pending = pending.select { |request| scoped_project?(request.project) }
         pending = prepare_dispatch_requests(pending, now: now)
         current_request_ids = pending.to_h { |request| [ request.request_id.to_s, true ] }
         @dispatch_request_log_signatures.delete_if do |(request_id, _event), _signature|
@@ -2980,6 +3569,15 @@ module Hive
           else
             reject_request(req, reason: "unknown_project")
           end
+          return
+        end
+
+        unless project_owned?(req.project)
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: "project_not_owned"
+          )
           return
         end
 
@@ -3288,6 +3886,13 @@ module Hive
             command: command, trigger: req.trigger,
             chat_id: req.chat_id, update_id: req.update_id
           )
+          if scoped_execution? && result.status == :accepted
+            @one_shot_ran << {
+              "id" => "dispatch:attempt:#{result.attempt.attempt_id}",
+              "action" => command, "outcome" => "admitted",
+              "details" => { "attempt_id" => result.attempt.attempt_id }
+            }
+          end
           return result
         end
 
@@ -3490,6 +4095,11 @@ module Hive
           recorded.to_s == live_start.to_s
         end
 
+        recovery_projects = if scoped_execution?
+          @scope_projects.keys
+        elsif @project_ownership
+          @project_ownership.owned_projects
+        end
         dispatch_repository.recover_claims(
           state_home: dispatch_request_state_home, now: now, alive: alive,
           attempt_alive: lambda { |attempt_id, task_generation|
@@ -3498,7 +4108,7 @@ module Hive
             attempt = @attempt_reconciler.fetch(attempt_id)
             attempt && attempt.task_generation == task_generation
           },
-          expiry_sec: claim_expiry_sec,
+          expiry_sec: claim_expiry_sec, projects: recovery_projects,
           handler: ->(request_id:, reason:) {
             @logger.event(:dispatch_request_recovered,
                           request_id: request_id, reason: reason)
@@ -3510,10 +4120,25 @@ module Hive
                       keeping_previous: true)
       end
 
+      def recover_one_shot_architecture_claims(project:, now:)
+        return unless @refactor_patrol_scheduler&.respond_to?(:recover_stale_claims)
+
+        result = @refactor_patrol_scheduler.recover_stale_claims(
+          project: project, now: now
+        )
+        unresolved = Array(result && result[:unresolved])
+        return if unresolved.empty?
+
+        raise Hive::Error,
+              "architecture claim recovery remains unresolved for #{unresolved.join(', ')}"
+      end
+
       def reconcile_attempts(now:)
         return true unless @attempt_reconciler
 
-        @attempt_snapshot = @attempt_reconciler.reconcile(now: now.utc)
+        arguments = { now: now.utc }
+        arguments[:mutate_projects] = @project_ownership.owned_projects if @project_ownership
+        @attempt_snapshot = @attempt_reconciler.reconcile(**arguments)
         @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
         refresh_attempt_storage_snapshot
         reconcile_attempt_deliveries(now: now)
@@ -3540,12 +4165,12 @@ module Hive
       end
 
       def reconcile_attempt_deliveries(now:)
-        terminal_attempts = Array(@attempt_snapshot&.terminal_attempts)
+        terminal_attempts = scoped_attempts(Array(@attempt_snapshot&.terminal_attempts))
         terminal_attempts.each { |attempt| refresh_post_attempt_completion_mtime(attempt) }
 
-        claimed = dispatch_repository.claimed(
+        claimed = scoped_deliveries(dispatch_repository.claimed(
           state_home: dispatch_request_state_home
-        )
+        ))
         claimed_attempt_ids = claimed.filter_map do |delivery|
           attempt_id = delivery.claim["attempt_id"].to_s
           attempt_id unless attempt_id.empty?
@@ -3648,9 +4273,9 @@ module Hive
       def reconcile_lost_attempt_deliveries(now:)
         return unless @lost_outcome_store
 
-        claimed = dispatch_repository.claimed(
+        claimed = scoped_deliveries(dispatch_repository.claimed(
           state_home: dispatch_request_state_home
-        )
+        ))
         claimed_attempt_ids = claimed.filter_map do |delivery|
           attempt_id = delivery.claim["attempt_id"].to_s
           attempt_id unless attempt_id.empty?
@@ -3688,12 +4313,12 @@ module Hive
           end
         end
 
-        Array(@attempt_snapshot&.lost_attempts).each do |attempt|
+        scoped_attempts(Array(@attempt_snapshot&.lost_attempts)).each do |attempt|
           unless claimed_attempt_ids.key?(attempt.attempt_id)
             acknowledge_attempt_finalization(attempt, :dispatch)
           end
         end
-        Array(@attempt_snapshot&.lost_attempts).each do |attempt|
+        scoped_attempts(Array(@attempt_snapshot&.lost_attempts)).each do |attempt|
           promote_attempt_finalization(attempt)
         end
       end
@@ -3924,6 +4549,10 @@ module Hive
         @logger.event(:dispatched, pid: pid, project: project, slug: slug,
                                    stage: stage, command: command, trigger: trigger,
                                    dry_run: @dry_run)
+        @one_shot_ran << {
+          "id" => "dispatch:task:#{slug}", "action" => command, "outcome" => "admitted",
+          "details" => { "pid" => pid }
+        } if scoped_execution?
         @dispatched_today += 1
         pid
       end
@@ -3974,6 +4603,11 @@ module Hive
             reason: result.reason, dry_run: false
           )
           @dispatched_today += 1
+          @one_shot_ran << {
+            "id" => "dispatch:attempt:#{result.attempt.attempt_id}",
+            "action" => command, "outcome" => "admitted",
+            "details" => { "attempt_id" => result.attempt.attempt_id }
+          } if scoped_execution?
         elsif result.status == :deferred
           @logger.event(
             :blocked,
@@ -4181,9 +4815,36 @@ module Hive
         end
 
         cfg = Hive::Config.load(entry["path"])
-        @enabled_cache[project_name] = cfg.dig("daemon", "enabled") == true
+        enabled = cfg.dig("daemon", "enabled") == true
+        enabled &&= @project_ownership.owned?(project_name) if @project_ownership
+        @enabled_cache[project_name] = enabled
       rescue Hive::ConfigError
         @enabled_cache[project_name] = false
+      end
+
+      def project_owned?(project_name)
+        !@project_ownership || @project_ownership.owned?(project_name)
+      rescue StandardError
+        false
+      end
+
+      def refresh_project_ownership
+        return true unless @project_ownership
+
+        @project_ownership.refresh!
+        @project_ownership.contentions.each do |project, error|
+          @logger.event(
+            :blocked, project: project, stage: "daemon", action: "project_ownership",
+            reason: error.code, owner: error.owner
+          )
+        end
+        true
+      rescue StandardError => error
+        @logger.event(
+          :fatal, message: "project ownership refresh failed: #{error.class}: #{error.message}",
+          keeping_previous: true
+        )
+        false
       end
 
       def reload_config!

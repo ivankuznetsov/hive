@@ -67,6 +67,8 @@ components:
       - lib/hive/daemon/dispatcher.rb
       - lib/hive/daemon/operational_snapshot.rb
       - lib/hive/lock.rb
+      - lib/hive/one_shot/project_guard.rb
+      - lib/hive/one_shot/process_executor.rb
       - lib/hive/patrol/launch_budget.rb
       - lib/hive/runtime_control_plane/installation.rb
       - lib/hive/task_counter.rb
@@ -389,6 +391,8 @@ components:
         files:
           - lib/hive/commands/attempt_supervise.rb
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
+          - lib/hive/one_shot/project_liveness.rb
           - lib/hive/commands/module/dry_run.rb
           - lib/hive/commands/status.rb
           - lib/hive/conditions/execute_boundary.rb
@@ -408,27 +412,34 @@ components:
       - constant: Hive::Attempts::Reconciler
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
         reason: "The daemon composition root injects reconciliation into its scheduler without exposing lifecycle operations through the admission facade."
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
         reason: "The daemon composition root uses the process-identity verifier to classify live workers safely."
       - constant: Hive::Attempts::LostOutcomeTransition
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
         reason: "The daemon composition root owns internal loss evidence persistence and injection."
       - constant: Hive::Attempts::LostOutcomeProcessor
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
         reason: "The daemon composition root owns internal loss-policy wiring; it is not a public recovery operation."
       - constant: Hive::Attempts::FinalizationMaintenance
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
         reason: "The daemon composition root owns finalization wiring; callers receive the composed service."
     hive_consumers:
       - lib/hive/commands/run.rb
       - lib/hive/commands/stage_action.rb
       - lib/hive/commands/daemon.rb
+      - lib/hive/one_shot/runner.rb
+      - lib/hive/one_shot/project_liveness.rb
       - lib/hive/bot/dispatch_request_writer.rb
     mutation_authority: "The facade accepts explicit admission requests; the repository owns atomic admission, lifecycle, live-capacity, accounting, lost-recovery, failure, and terminal-publication transitions."
     recovery_surface: "The facade admits independent recovery attempts; reconciliation, healing, cancellation, export, and generic lifecycle policy remain internal."

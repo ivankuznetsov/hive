@@ -195,6 +195,32 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     end
   end
 
+  def test_scheduler_checkpoint_rotates_selection_across_fresh_watchers
+    with_merge_project(stages: %w[6-review 7-artifacts]) do |tasks, home|
+      gh = FakeGh.new
+      state_factory = lambda do |_project|
+        Hive::OneShot::ScheduleState.new(state_root: File.join(home, ".hive-state"))
+      end
+      rows = tasks.map { |task| row_for(task) }
+      first = build_watcher(gh: gh, schedule_state_factory: state_factory)
+      first.observe(rows, now: T0)
+      first_slug = first.tick(now: T0).first.fetch(:slug)
+
+      restarted = build_watcher(gh: gh, schedule_state_factory: state_factory)
+      restarted.observe(rows, now: T0 + 1)
+      second_slug = restarted.tick(now: T0 + 1).first.fetch(:slug)
+
+      refute_equal first_slug, second_slug
+      assert_equal tasks.map(&:slug).sort, [ first_slug, second_slug ].sort
+    end
+  end
+
+  def test_next_poll_at_uses_configured_interval
+    watcher = build_watcher(poll_interval_sec: 90)
+
+    assert_equal T0 + 90, watcher.next_poll_at(now: T0)
+  end
+
   def test_current_durable_pr_binding_replaces_historical_observation
     with_merge_project(stages: [ "6-review" ]) do |tasks, _|
       task = tasks.first
@@ -538,12 +564,14 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
   def build_watcher(gh: FakeGh.new, task_closure: FakeClosure.new,
                     merge_intake: nil, poll_interval_sec: 0,
-                    poll_timeout_sec: 7, config_lookup: nil, dry_run: false)
+                    poll_timeout_sec: 7, config_lookup: nil, dry_run: false,
+                    schedule_state_factory: nil)
     Hive::Daemon::PrMergeWatcher.new(
       poll_interval_sec: poll_interval_sec, poll_timeout_sec: poll_timeout_sec,
       merge_intake: merge_intake, gh: gh,
       config_lookup: config_lookup || Hive::Config.method(:find_project),
-      task_closure: task_closure, dry_run: dry_run
+      task_closure: task_closure, dry_run: dry_run,
+      schedule_state_factory: schedule_state_factory
     )
   end
 

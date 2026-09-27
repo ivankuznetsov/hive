@@ -37,6 +37,10 @@ require "hive/attempts/finalization_maintenance"
 require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
+require "hive/one_shot/project_guard"
+require "hive/one_shot/result"
+require "hive/one_shot/schedule_state"
+require "hive/one_shot/dispatch_adapter"
 require "hive/commands/service_installer/result_presenter"
 
 module Hive
@@ -52,12 +56,15 @@ module Hive
     #   tail                           Stream daemon.log (tail -F semantics).
     #   enable [PROJECT|--all]         Set daemon.enabled: true in per-project YAML.
     #   disable [PROJECT|--all]        Set daemon.enabled: false in per-project YAML.
+    #   clear-hold PROJECT [SLUG]      Clear one persisted dispatch hold.
     class Daemon
       include Hive::Schemas::EnvelopeEmitter
       include Hive::PidFile
       include Hive::Commands::ServiceInstaller::ResultPresenter
 
-      VALID_SUBCOMMANDS = %w[start stop status reload tail enable disable install queue].freeze
+      VALID_SUBCOMMANDS = %w[
+        start stop status reload tail enable disable install queue clear-hold
+      ].freeze
 
       # Actions for `hive daemon queue ACTION` (AN-1/2/3). `list` is the
       # default when no action is given.
@@ -81,7 +88,7 @@ module Hive
                      all: false, json: false, force: false,
                      queue_args: [],
                      hive_home: Hive::Paths.state_home,
-                     activation_lock: nil)
+                     activation_lock: nil, once: false, one_shot_factory: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -90,11 +97,16 @@ module Hive
         @json = json
         @force = force
         @queue_args = Array(queue_args)
+        @hold_slug = @subcommand == "clear-hold" ? @queue_args[1] : nil
         @hive_home = hive_home
         @activation_lock = activation_lock
+        @once = once
+        @one_shot_factory = one_shot_factory
       end
 
       def call
+        return run_once if @once
+
         unless VALID_SUBCOMMANDS.include?(@subcommand)
           raise Hive::InvalidTaskPath,
                 "hive daemon: unknown subcommand #{@subcommand.inspect} " \
@@ -109,6 +121,7 @@ module Hive
         when "tail"             then tail_daemon
         when "install"          then install_daemon
         when "queue"            then queue_command
+        when "clear-hold"       then clear_hold
         when "enable", "disable" then call_with_envelope { do_call }
         end
       end
@@ -129,6 +142,102 @@ module Hive
       end
 
       private
+
+      def clear_hold
+        if @all
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: --all is not supported; name exactly one PROJECT"
+        end
+        if @json
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: --json is not supported"
+        end
+        if @dry_run || @detach
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: --dry-run and --detach are not supported"
+        end
+        if @target.to_s.strip.empty?
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: missing PROJECT"
+        end
+        entry = Hive::Config.find_project(@target)
+        unless entry
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: unknown project #{@target.inspect} " \
+                "(see `hive status` for the registered set)"
+        end
+        slug = @hold_slug.to_s
+        if !@hold_slug.nil? && slug.strip.empty?
+          raise Hive::InvalidTaskPath,
+                "hive daemon clear-hold: SLUG must not be empty"
+        end
+
+        cleared = daemon_activation_lock.synchronize do
+          if File.exist?(pid_file)
+            raise Hive::ConcurrentRunError.new(
+              "hive daemon clear-hold: stop the daemon before changing persisted holds " \
+              "(run `hive daemon stop` first, including to clean a stale PID file)",
+              holder: { pid: read_pid_file_payload&.fetch("pid", nil) },
+              lock_path: pid_file
+            )
+          end
+
+          guard = Hive::OneShot::ProjectGuard.new(
+            state_root: entry.fetch("hive_state_path"),
+            project: entry.fetch("name"), kind: :one_shot
+          )
+          guard.synchronize do
+            controller = hold_recovery_controller(entry)
+            if @hold_slug.nil?
+              controller.clear_project_dropped(project: entry.fetch("name"))
+            else
+              controller.clear_quarantine(project: entry.fetch("name"), slug: slug)
+            end
+          end
+        end
+        hold = @hold_slug.nil? ? "dropped-project hold" : "quarantine for #{slug}"
+        action = cleared ? "cleared" : "no matching hold"
+        puts "hive daemon: #{action} #{hold} on #{entry.fetch('name')}"
+        cleared
+      end
+
+      def hold_recovery_controller(entry)
+        daemon_defaults = Hive::Config::DEFAULTS.fetch("daemon")
+        project = entry.fetch("name")
+        state = Hive::OneShot::ScheduleState.new(
+          state_root: entry.fetch("hive_state_path")
+        )
+        Hive::Daemon::ConcurrencyController.new(
+          max_concurrent_runs: daemon_defaults.fetch("max_concurrent_runs"),
+          max_concurrent_per_project: daemon_defaults.fetch("max_concurrent_per_project"),
+          max_runs_per_day_per_project: daemon_defaults.fetch("max_runs_per_day_per_project"),
+          max_concurrent_patrol_scans: daemon_defaults.fetch("max_concurrent_patrol_scans"),
+          persistence_scope_projects: [ project ],
+          schedule_state_factory: ->(candidate) { state if candidate == project }
+        )
+      end
+
+      def run_once
+        if @target.to_s.empty?
+          raise Hive::InvalidTaskPath, "hive daemon --once: missing PROJECT"
+        end
+        entry = Hive::Config.find_project(@target)
+        unless entry
+          raise Hive::InvalidTaskPath, "hive daemon --once: unknown project #{@target.inspect}"
+        end
+
+        adapter = if @one_shot_factory
+          @one_shot_factory.call(entry)
+        else
+          Hive::OneShot::DispatchAdapter.new(
+            entry: entry, hive_home: @hive_home, dry_run: @dry_run
+          )
+        end
+        result = adapter.call
+        puts result.to_json
+        @stdout_written = true
+        result
+      end
 
       def start_daemon
         warn_unsupported_json_flag if @json
@@ -219,6 +328,13 @@ module Hive
           max_bytes: daemon_cfg.fetch("log_max_bytes"),
           max_files: daemon_cfg.fetch("log_max_files")
         )
+        project_ownership = Hive::OneShot::ProjectGuard::Collection.new(
+          kind: "daemon", registry: -> { Hive::Config.registered_projects },
+          enabled: lambda do |entry|
+            Hive::Config.load(entry.fetch("path")).dig("daemon", "enabled") == true
+          end
+        )
+        project_ownership.refresh!
         if daily_digest_error
           logger.event(
             :daily_digest_configuration_disabled,
@@ -234,7 +350,12 @@ module Hive
           # Persist first-sight dispatch baselines so a daemon restart doesn't
           # re-strand already-answered needs_input tasks. The store owns all
           # `:daemon_dispatch_baselines_*` typed events via its own logger.
-          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger)
+          dispatch_state: Hive::Daemon::DispatchBaselines.new(logger: logger),
+          persistence_scope_projects: -> { project_ownership.owned_projects },
+          schedule_state_factory: lambda do |project|
+            entry = Hive::Config.find_project(project)
+            entry && Hive::OneShot::ScheduleState.new(state_root: entry.fetch("hive_state_path"))
+          end
         )
         supervisor = Hive::Daemon::ChildSupervisor.new(
           dry_run: @dry_run,
@@ -360,6 +481,7 @@ module Hive
           lost_outcome_processor: lost_outcome_processor,
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
+          project_ownership: project_ownership,
           runtime_ready_callback: -> { activation_lock.release! },
           clock: -> { Time.now.utc },
           patrol_discovery_async: true
@@ -370,6 +492,7 @@ module Hive
           dispatcher.run_forever
           reexec_requested = dispatcher.reexec_requested?
         ensure
+          project_ownership&.release_all!
           # PR-40 follow-up review C2: parse via read_pid_file_payload
           # so the cleanup matches the YAML-payload format the daemon
           # writes. The earlier `File.read.strip.to_i` returned 0 against
@@ -1188,3 +1311,7 @@ module Hive
     end
   end
 end
+
+require "hive/cli_usage_contracts"
+
+Hive::OneShot::Result.declare_usage_contract("daemon", component: :dispatch)

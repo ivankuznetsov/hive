@@ -23,6 +23,12 @@ class CommandDispatchLifecycleTest < Minitest::Test
     def allocate(**attributes)
       allocate_command_successor!(**attributes)
     end
+
+    def dispatch = dispatch_durable
+
+    def fail!(result)
+      handle_durable_failure!(result)
+    end
   end
 
   def test_restart_reacquires_one_pin_and_same_cycle_successor_is_stable
@@ -106,6 +112,107 @@ class CommandDispatchLifecycleTest < Minitest::Test
     assert_equal 1, (concurrent + [ repeated ]).uniq.length
     assert_equal 5, calls.length
     assert calls.all? { |call| call.fetch(:predecessor_request_id) == "request-1" }
+  end
+
+  def test_context_validation_fails_closed_for_missing_or_changed_durable_state
+    repository = Object.new
+    repository.define_singleton_method(:command_context) { |_request_id| nil }
+    lifecycle = Hive::CommandDispatchLifecycle.new(repository: repository, store: Object.new)
+    assert_raises(Hive::CommandUnresolved) { lifecycle.protect_request!("missing") }
+
+    context = {
+      receipt_id: "receipt", effect_id: "effect", principal: "owner",
+      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'a' * 64}",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    }
+    store = Object.new
+    store.define_singleton_method(:receipt) do |_receipt_id|
+      { receipt_id: "receipt", principal: "other", request_fingerprint: "fingerprint" }
+    end
+    lifecycle = Hive::CommandDispatchLifecycle.new(repository: repository, store: store)
+    assert_raises(Hive::CommandConflict) { lifecycle.protect_context!(context) }
+    assert_raises(Hive::CommandUnresolved) { lifecycle.send(:normalize_context, {}) }
+
+    store.define_singleton_method(:receipt) do |_receipt_id|
+      { receipt_id: "receipt", principal: "owner", request_fingerprint: "fingerprint" }
+    end
+    database = Object.new
+    database.define_singleton_method(:read) do |&block|
+      table = Object.new
+      table.define_singleton_method(:[]) { |_query| { effect_id: "effect" } }
+      connection = Object.new
+      connection.define_singleton_method(:[]) { |_name| table }
+      block.call(connection)
+    end
+    store.define_singleton_method(:database) { database }
+    lifecycle.define_singleton_method(:normalize_context) do |_context|
+      context.transform_keys(&:to_s).merge("source_identity" => context.fetch(:transport_request_id),
+                                           "retry_horizon_expires_at" => nil)
+    end
+    assert_raises(Hive::UsageError) do
+      lifecycle.protect_context!(context)
+    end
+  end
+
+  def test_attempt_dispatch_binds_context_and_reports_buffered_failure
+    lifecycle = Object.new
+    protected = []
+    lifecycle.define_singleton_method(:protect_context!) { |context| protected << context }
+    caller = AttemptsCaller.new(lifecycle)
+    caller.instance_variable_set(:@target, "task")
+    caller.instance_variable_set(:@json, true)
+    caller.define_singleton_method(:resolve_task) { :task }
+    caller.define_singleton_method(:durable_intended_stage) { |_task| "4-execute" }
+    caller.define_singleton_method(:durable_worker_argv) { |_task| %w[hive run task] }
+    api = Object.new
+    result = Struct.new(
+      :exit_status, :output_status, :attempt_id, :status, :outcome,
+      keyword_init: true
+    ) do
+      def stdout_emitted? = true
+    end.new(exit_status: 0, output_status: :available, attempt_id: "attempt-1",
+            status: :finished, outcome: "failed")
+    dispatched = []
+    api.define_singleton_method(:dispatch) { |**attributes| dispatched << attributes; result }
+    caller.instance_variable_set(:@attempts_api, api)
+    context = Hive::CommandOperation::Context.new(
+      receipt_id: "receipt", effect_id: "effect", principal: "owner",
+      principal_source: "test", ordinal: 2, request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'b' * 64}",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    )
+    Thread.current[:hive_command_operation_context] = context
+    assert_equal result, caller.dispatch
+    assert_equal [ context ], protected
+    assert_equal context.transport_request_id, dispatched.first.fetch(:request_id)
+  ensure
+    Thread.current[:hive_command_operation_context] = nil
+
+    caller.instance_variable_set(:@command_dispatch_context, context)
+    result.exit_status = 9
+    error = assert_raises(Hive::AttemptExecutionError) { caller.fail!(result) }
+    assert_match(/failed after buffered JSON output/, error.message)
+  end
+
+  def test_attempt_dispatch_requires_a_retry_horizon_and_uses_default_state_home
+    caller = AttemptsCaller.new(nil)
+    caller.instance_variable_set(:@target, "task")
+    caller.define_singleton_method(:resolve_task) { :task }
+    caller.define_singleton_method(:durable_intended_stage) { |_task| "4-execute" }
+    caller.define_singleton_method(:durable_worker_argv) { |_task| %w[hive run task] }
+    context = Hive::CommandOperation::Context.new(
+      receipt_id: "receipt", effect_id: "effect", principal: "owner",
+      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'c' * 64}", retry_horizon_expires_at: nil
+    )
+    Thread.current[:hive_command_operation_context] = context
+    assert_raises(Hive::UsageError) { caller.dispatch }
+  ensure
+    Thread.current[:hive_command_operation_context] = nil
+    caller.instance_variable_set(:@command_dispatch_lifecycle, nil)
+    lifecycle = caller.send(:command_dispatch_lifecycle)
+    assert_equal Hive::Paths.state_home, lifecycle.instance_variable_get(:@state_home)
   end
 
   private

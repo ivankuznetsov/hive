@@ -545,11 +545,12 @@ module Hive
     end
 
     def close_pin(receipt_id:, principal:, intent_id:, intent_generation:)
+      intent_generation = Integer(intent_generation)
       now = timestamp
       database.transaction do |connection|
         pin = connection[:command_receipt_pins][
           receipt_id: receipt_id, principal: principal.to_s,
-          intent_id: intent_id.to_s, intent_generation: Integer(intent_generation)
+          intent_id: intent_id.to_s, intent_generation: intent_generation
         ]
         next false unless pin && pin.fetch(:lifecycle_status) == "active"
         connection[:command_receipt_pins].where(

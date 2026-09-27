@@ -10,8 +10,11 @@ module Hive
   module CommandOwnerProof
     module_function
 
-    def dead(row, host: Socket.gethostname, alive: Hive::PidFile.method(:alive?),
-             ownership: Hive::PidFile.method(:ownership), clock: -> { Time.now.utc })
+    def dead(row, host: nil, alive: nil, ownership: nil, clock: nil)
+      host ||= Socket.gethostname
+      alive ||= Hive::PidFile.method(:alive?)
+      ownership ||= Hive::PidFile.method(:ownership)
+      clock ||= -> { Time.now.utc }
       pid = row[:owner_pid]
       recorded = row[:owner_process_start]
       return unless row[:owner_host] == host && pid.is_a?(Integer) && pid.positive? && recorded

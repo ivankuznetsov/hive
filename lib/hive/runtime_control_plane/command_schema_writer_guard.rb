@@ -52,7 +52,6 @@ module Hive
         raise Hive::ConfigError,
               "cannot verify command-schema writer liveness from #{path}: #{error.message}"
       end
-
     end
   end
 end

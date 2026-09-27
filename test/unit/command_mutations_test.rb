@@ -4,6 +4,8 @@ require "test_helper"
 require "hive/command_mutations"
 
 class CommandMutationsTest < Minitest::Test
+  include HiveTestHelper
+
   def test_catalog_freezes_supported_mutation_boundaries
     assert_equal(
       %w[act answer approve archive new receipt stage_action],
@@ -58,5 +60,32 @@ class CommandMutationsTest < Minitest::Test
       Hive::CommandMutations.descriptor(command: "receipt", mode: "redrive")
     end
     assert_includes error.message, "unsupported keyed mutation"
+  end
+
+  def test_keyed_validation_rejects_unsupported_and_forbidden_mutations
+    assert_raises(Hive::UsageError) do
+      Hive::CommandMutations.validate_keyed!(
+        command: "archive", mode: nil, target: nil, options: {}
+      )
+    end
+    assert_raises(Hive::UsageError) do
+      Hive::CommandMutations.validate_keyed!(
+        command: "receipt", mode: "retire", target: "receipt-1", options: {}
+      )
+    end
+
+    descriptor = Hive::CommandMutations::Descriptor.new(
+      command: "receipt", mode: "prune", key_policy: :optional, mutating: true,
+      semantic_options: []
+    )
+    with_replaced_singleton_method(Hive::CommandMutations, :supported?, ->(**) { true }) do
+      with_replaced_singleton_method(Hive::CommandMutations, :descriptor, ->(**) { descriptor }) do
+        assert_raises(Hive::UsageError) do
+          Hive::CommandMutations.validate_keyed!(
+            command: "receipt", mode: "retire", target: "receipt-1", options: {}
+          )
+        end
+      end
+    end
   end
 end

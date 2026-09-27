@@ -727,6 +727,16 @@ class CommandReceiptContractTest < Minitest::Test
         staffing: { "minutes_per_namespace_per_day" => 30 }, settlement_minutes: 0
       )
     end
+    assert_raises(Hive::ConfigError) do
+      Hive::CommandReceiptCapacity.settlement_budget(
+        staffing: { "minutes_per_namespace_per_day" => -1 }, settlement_minutes: measured
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::CommandReceiptCapacity.settlement_budget(
+        staffing: { "minutes_per_namespace_per_day" => "many" }, settlement_minutes: measured
+      )
+    end
   end
 
   def test_command_adapters_build_operations_and_classify_receipt_failures
@@ -977,7 +987,7 @@ class CommandReceiptContractTest < Minitest::Test
 
     Dir.mktmpdir do |state_home|
       guard = Object.new
-      guard.define_singleton_method(:verify!) { |**| true }
+      guard.define_singleton_method(:verify!) { |web_running:, **| !web_running.call }
       result = Hive::RuntimeControlPlane::Installation.setup(
         state_home: state_home, install_command_receipts: true,
         rollback_package: TEST_PACKAGE, writer_guard: guard
@@ -1003,20 +1013,46 @@ class CommandReceiptContractTest < Minitest::Test
         "run", "task", observation: "token", project: "demo", json: true,
         idempotency_key: "key", command_receipt_store: store
       )
-      assert_equal "/project", act.send(:command_operation).instance_variable_get(:@project_root).call
+      operation = act.send(:command_operation)
+      assert_equal "/project", operation.instance_variable_get(:@project_root).call
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ { "name" => "demo", "path" => "/project" } ] }
+      ) do
+        assert_equal [ "/project" ], operation.instance_variable_get(:@project_roots).call
+      end
+      failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
+      assert_equal false, failure.fetch("ok")
+      text = operation.instance_variable_get(:@text_renderer).call(
+        "result" => { "task_state" => "running", "stage" => "4-execute", "marker" => "EXECUTE" }
+      )
+      assert_includes text, "running"
     end
 
     approve = Hive::Commands::Approve.new(
       "task", idempotency_key: "key", command_receipt_store: store
     )
     with_replaced_singleton_method(approve, :resolve_task, -> { task }) do
-      assert_equal "/project", approve.send(:command_operation).instance_variable_get(:@project_root).call
+      operation = approve.send(:command_operation)
+      assert_equal "/project", operation.instance_variable_get(:@project_root).call
+      failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
+      assert_equal false, failure.fetch("ok")
+      text = operation.instance_variable_get(:@text_renderer).call(
+        "noop" => true, "slug" => "task", "to_stage_dir" => "4-execute"
+      )
+      assert_kind_of String, text
     end
     stage = Hive::Commands::StageAction.new(
       "plan", "task", idempotency_key: "key", command_receipt_store: store
     )
     with_replaced_singleton_method(stage, :resolve_receipt_project_root, -> { task.project_root }) do
-      assert_equal "/project", stage.send(:command_operation).instance_variable_get(:@project_root).call
+      operation = stage.send(:command_operation)
+      assert_equal "/project", operation.instance_variable_get(:@project_root).call
+      failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
+      assert_equal false, failure.fetch("ok")
+      text = operation.instance_variable_get(:@text_renderer).call(
+        "noop" => true, "slug" => "task", "to_stage_dir" => "3-plan"
+      )
+      assert_kind_of String, text
     end
     answer = Hive::Commands::Answer.new(
       "task", binding: "binding", idempotency_key: "key", command_receipt_store: store
@@ -1025,6 +1061,13 @@ class CommandReceiptContractTest < Minitest::Test
       with_replaced_singleton_method(answer, :resolve_task, ->(*) { task }) do
         operation = answer.send(:command_operation, "yes")
         assert_equal "/project", operation.instance_variable_get(:@project_root).call
+        with_replaced_singleton_method(
+          Hive::Config, :registered_projects, -> { [ { "name" => "demo", "path" => "/project" } ] }
+        ) do
+          assert_equal [ "/project" ], operation.instance_variable_get(:@project_roots).call
+        end
+        failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
+        assert_equal false, failure.fetch("ok")
       end
     end
 
@@ -1041,6 +1084,15 @@ class CommandReceiptContractTest < Minitest::Test
         operation.instance_variable_get(:@project_root).call
       end
     end
+    failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
+    assert_equal false, failure.fetch("ok")
+    created = { "created" => true, "task_folder" => "/project/.hive-state/stages/1-inbox/task" }
+    existing = created.merge("created" => false)
+    task = Struct.new(:state_file).new("/project/.hive-state/stages/1-inbox/task/task.md")
+    with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
+      assert_includes operation.instance_variable_get(:@text_renderer).call(created), "captured"
+    end
+    assert_includes operation.instance_variable_get(:@text_renderer).call(existing), "already exists"
 
     yielding = Object.new
     yielding.define_singleton_method(:call) { |&block| block.call }
@@ -1102,6 +1154,55 @@ class CommandReceiptContractTest < Minitest::Test
       assert_equal "hive-command-receipt",
                    Hive::CliUsageContracts.contract(%w[receipt retire id --json]).fetch(:schema)
       assert database
+    end
+  end
+
+  def test_default_guards_and_missing_schema_fail_closed
+    assert_nil Hive::CommandOwnerProof.dead({})
+
+    with_tmp_dir do |state_home|
+      assert Hive::RuntimeControlPlane::CommandSchemaWriterGuard.verify!(
+        state_home: state_home, registered_projects: [],
+        alive: ->(*) { false }, ownership: ->(*) { :dead }
+      )
+      status = Hive::RuntimeControlPlane::Installation.setup(state_home: state_home)
+      assert_equal "active", status.fetch("phase")
+    end
+
+    transition = Hive::RuntimeControlPlane::AdmissionTransition.new(
+      repository: Struct.new(:database).new(nil)
+    )
+    db = Object.new
+    db.define_singleton_method(:table_exists?) { |_name| false }
+    context = Hive::CommandOperation::Context.new(
+      receipt_id: "receipt", effect_id: "effect", principal: "owner",
+      principal_source: "test", ordinal: 0, request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'a' * 64}",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    )
+    assert_raises(Hive::ConfigError) do
+      transition.send(:bind_command_context!, db, context.transport_request_id, context)
+    end
+  end
+
+  def test_receipt_command_defensive_option_and_failure_callbacks
+    maintenance = Recorder.new
+    command = Hive::Commands::Receipt.new("retire", "receipt", maintenance: maintenance)
+    assert_raises(Hive::UsageError) { command.send(:execute_retire) }
+    assert_raises(Hive::UsageError) do
+      Hive::Commands::Receipt.new("prune", force: true).send(:validate_subcommand_options!)
+    end
+
+    database = Struct.new(:installation_identity).new({ installation_id: "installation" })
+    store = Struct.new(:database).new(database)
+    keyed = Hive::Commands::Receipt.new(
+      "prune", project: "demo", confirm: true, idempotency_key: "key",
+      command_receipt_store: store
+    )
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(*) { { "path" => "/project" } }) do
+      operation = keyed.send(:command_operation)
+      failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
+      assert_equal false, failure.fetch("ok")
     end
   end
 
@@ -1199,6 +1300,13 @@ class CommandReceiptContractTest < Minitest::Test
       revision: "r", staffing: {}
     )
     capacity = Hive::CommandReceiptCapacity.new(database: fake_database, policy: policy)
+    connection = Object.new
+    connection.define_singleton_method(:fetch) do |sql|
+      [ { value: sql.include?("page_size") ? 4096 : (sql.include?("page_count") ? 2 : 1) } ]
+    end
+    with_replaced_singleton_method(File, :stat, ->(*) { raise Errno::ENOENT }) do
+      assert_equal 4096, capacity.occupied_installation_bytes(connection: connection)
+    end
     with_replaced_singleton_method(File, :stat, ->(*) { raise Errno::EIO, "broken" }) do
         assert_raises(Hive::CommandCapacityError) do
           capacity.occupied_installation_bytes

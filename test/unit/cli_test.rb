@@ -930,6 +930,18 @@ class HiveCliTest < Minitest::Test
       ])
     end
     assert_match(/require an archive TARGET/, error.message)
+
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([ "archive", "--idempotency-key", "stable" ])
+    end
+    assert_match(/idempotency-key requires an archive TARGET/, error.message)
+
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([
+        "archive", "--retry-horizon-expires-at", "2030-01-01T00:00:00Z"
+      ])
+    end
+    assert_match(/retry-horizon-expires-at requires an archive TARGET/, error.message)
   end
 
   def test_status_approve_findings_and_finding_toggles_pass_options

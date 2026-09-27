@@ -11554,6 +11554,11 @@ end
     )
 
     assert_equal context, dispatcher.send(:validate_command_dispatch_context!, request)
+    repository.define_singleton_method(:command_context) { |_request_id| nil }
+    assert_raises(Hive::ConfigError) do
+      dispatcher.send(:validate_command_dispatch_context!, request)
+    end
+    repository.define_singleton_method(:command_context) { |_request_id| context }
     attributes = {
       predecessor_request_id: request_id, intent_id: "intent-1",
       intent_version: 4, delivery_cycle_id: "cycle-1"

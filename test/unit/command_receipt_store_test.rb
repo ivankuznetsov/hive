@@ -288,6 +288,201 @@ class CommandReceiptStoreTest < Minitest::Test
     end
   end
 
+  def test_bounded_lookup_detects_conflicts_ambiguity_and_absence
+    with_store do |project, _database, store|
+      first = store.reserve(
+        project_root: project, key: "shared", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      store.succeed(first, result: { "ok" => true }, status: 0)
+      assert_raises(Hive::CommandConflict) do
+        store.lookup_existing_in_projects(
+          project_roots: [ project ], key: "shared", command: "approve",
+          target: "changed", request: {}, principal: "owner"
+        )
+      end
+
+      missing = File.join(File.dirname(project), "missing")
+      FileUtils.mkdir_p(missing)
+      system("git", "init", "--quiet", missing, exception: true)
+      write_receipt_config(missing)
+      assert_nil store.lookup_existing_in_projects(
+        project_roots: [ missing ], key: "absent", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+
+      second = store.reserve(
+        project_root: missing, key: "shared", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      store.succeed(second, result: { "ok" => true }, status: 0)
+      assert_raises(Hive::CommandConflict) do
+        store.lookup_existing_in_projects(
+          project_roots: [ project, missing ], key: "shared", command: "approve",
+          target: "task", request: {}, principal: "owner"
+        )
+      end
+    end
+  end
+
+  def test_reservation_retries_capacity_once_and_fails_repeated_insert_races
+    with_store do |project, _database, store|
+      assert_raises(Hive::ConfigError) do
+        store.reserve(
+          project_root: project, key: "maintenance", command: "receipt", mode: "prune",
+          target: "demo", request: {}, principal: "owner", maintenance: true
+        )
+      end
+    end
+
+    with_store do |project, database, store|
+      Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
+      transaction = database.method(:transaction)
+      attempts = 0
+      database.define_singleton_method(:transaction) do |**kwargs, &block|
+        attempts += 1
+        if attempts == 1
+          raise Hive::CommandCapacityError.new(
+            "full", reason: :command_concurrency_limit, scope: :namespace
+          )
+        end
+        transaction.call(**kwargs, &block)
+      end
+      store.define_singleton_method(:reclaim_dead_executing_owners) { |*_, **| 1 }
+      claim = store.reserve(
+        project_root: project, key: "capacity-retry", command: "approve", target: "task",
+        request: {}, principal: "owner", execute: true, owner_process_start: "start"
+      )
+      assert_equal :new, claim.disposition
+      assert_equal 2, attempts
+    end
+
+    with_store do |project, database, store|
+      Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
+      database.define_singleton_method(:transaction) do |**_kwargs, &_block|
+        raise Sequel::UniqueConstraintViolation, "race"
+      end
+      assert_raises(Hive::CommandConflict) do
+        store.reserve(
+          project_root: project, key: "repeated-race", command: "approve", target: "task",
+          request: {}, principal: "owner"
+        )
+      end
+    end
+  end
+
+  def test_store_rejects_unproven_failures_invalid_observations_and_oversized_results
+    with_store do |project, _database, store|
+      claim = store.reserve(
+        project_root: project, key: "guards", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      assert_raises(Hive::CommandUnresolved) do
+        store.fail_non_application(
+          claim, result: {}, status: 1, reason: "unknown",
+          whole_effect_non_application: false
+        )
+      end
+      executing = store.mark_executing(claim)
+      effect = store.prepare_effect(executing, ordinal: 0, kind: "approve:default")
+      assert_raises(Hive::CommandUnresolved) do
+        store.complete_effect(
+          executing, effect_id: effect.fetch(:effect_id),
+          result: { "value" => "x" * (Hive::CommandReceiptStore::MAX_RESULT_BYTES + 1) },
+          status: 0
+        )
+      end
+      assert_raises(Hive::UsageError) do
+        store.record_effect_observation(
+          receipt_id: executing.receipt_id, effect_id: effect.fetch(:effect_id),
+          principal: executing.principal,
+          request_fingerprint: executing.request_fingerprint,
+          source: "", correlation_id: "", evidence: {}
+        )
+      end
+      refute store.close_pin(
+        receipt_id: executing.receipt_id, principal: executing.principal,
+        intent_id: "missing", intent_generation: 0
+      )
+      pin = store.acquire_pin(
+        receipt_id: executing.receipt_id, principal: executing.principal,
+        intent_id: "active", intent_generation: 1,
+        retry_horizon_expires_at: (Time.now.utc + 3600).iso8601,
+        owner_process_start: "start"
+      )
+      assert store.close_pin(
+        receipt_id: executing.receipt_id, principal: executing.principal,
+        intent_id: "active", intent_generation: 1
+      )
+      refute store.close_pin(
+        receipt_id: executing.receipt_id, principal: executing.principal,
+        intent_id: "missing", intent_generation: "invalid"
+      )
+    end
+  end
+
+  def test_corrupt_recovery_evidence_and_finalize_races_fail_closed
+    database = Object.new
+    store = Hive::CommandReceiptStore.new(database: database)
+    row = {
+      receipt_id: "receipt", namespace_id: "namespace", generation: 1,
+      state: "executing", principal: "owner", request_fingerprint: "fingerprint"
+    }
+    effect = { state: "unknown", evidence_json: "{" }
+    database.define_singleton_method(:read) do |&block|
+      table = Object.new
+      table.define_singleton_method(:[]) { |_query| effect }
+      connection = Object.new
+      connection.define_singleton_method(:[]) { |_name| table }
+      block.call(connection)
+    end
+    unresolved = row.merge(state: "unresolved")
+    refute store.send(:reconcilable_effect?, unresolved)
+    assert_nil store.send(:authoritative_result, effect.merge(state: "applied"))
+
+    store.define_singleton_method(:authoritative_result_for_receipt) do |_row|
+      [ { "format" => "text", "text" => "ok\n" }, 0 ]
+    end
+    store.define_singleton_method(:finalize!) do |*_, **|
+      raise Hive::CommandConflict, "race"
+    end
+    store.define_singleton_method(:receipt) { |_receipt_id| unresolved }
+    assert_raises(Hive::CommandUnresolved) do
+      store.send(
+        :classify_existing!, row, principal: "owner",
+        request_fingerprint: "fingerprint", project_root: "/project"
+      )
+    end
+  end
+
+  def test_negative_logical_byte_adjustment_is_clamped
+    with_store do |project, database, store|
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      database.transaction do |connection|
+        store.send(:add_logical_bytes!, connection, identity.namespace_id, -1)
+      end
+    end
+  end
+
+  def test_store_requires_the_installed_receipt_extension
+    Dir.mktmpdir do |dir|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(dir)
+      ).migrate!
+      store = Hive::CommandReceiptStore.new(database: database)
+      assert_raises(Hive::ConfigError) do
+        store.lookup_existing(
+          project_root: dir, key: "key", command: "approve", target: "task",
+          request: {}, principal: "owner"
+        )
+      end
+    ensure
+      database&.disconnect
+    end
+  end
+
   private
 
   def with_store

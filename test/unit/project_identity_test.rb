@@ -5,6 +5,8 @@ require "hive/project_identity"
 require "hive/runtime_control_plane/command_schema_installation"
 
 class ProjectIdentityTest < Minitest::Test
+  include HiveTestHelper
+
   TEST_PACKAGE = {
     version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "b" * 64
   }.freeze
@@ -148,6 +150,110 @@ class ProjectIdentityTest < Minitest::Test
         )
       end
       assert_equal "--previous-identity does not match the active project identity", error.message
+    end
+  end
+
+  def test_read_only_resolution_rejects_marker_and_database_identity_drift
+    with_store do |project, database|
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      marker = JSON.parse(File.read(identity.marker_path))
+      marker["installation_id"] = "other-installation"
+      File.write(identity.marker_path, JSON.generate(marker))
+      File.chmod(0o600, identity.marker_path)
+      assert_raises(Hive::ConfigError) do
+        database.read do |connection|
+          Hive::ProjectIdentity.resolve_read_only(project_root: project, connection: connection)
+        end
+      end
+    end
+
+    with_store do |project, database|
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      File.delete(identity.marker_path)
+      assert_raises(Hive::ConfigError) do
+        database.read do |connection|
+          Hive::ProjectIdentity.resolve_read_only(project_root: project, connection: connection)
+        end
+      end
+    end
+
+    with_store do |project, database|
+      identity = Hive::ProjectIdentity.resolve(
+        project_root: project, database: database, create: true
+      )
+      database.transaction do |connection|
+        connection[:command_namespaces].where(namespace_id: identity.namespace_id)
+          .update(git_common_dir_digest: "changed")
+      end
+      assert_raises(Hive::ConfigError) do
+        database.read do |connection|
+          Hive::ProjectIdentity.resolve_read_only(project_root: project, connection: connection)
+        end
+      end
+    end
+  end
+
+  def test_enrollment_compare_and_swap_failures_are_explicit
+    with_store do |project, database|
+      mismatched = {
+        namespace_id: "new-namespace", enrollment_state: "pending",
+        enrollment_generation: 1, installation_id: database.installation_identity.fetch(:installation_id),
+        git_common_dir_digest: Digest::SHA256.hexdigest(Hive::ProjectIdentity.git_common_dir(project))
+      }
+      with_replaced_singleton_method(
+        Hive::ProjectIdentity, :reserve_pending_with_retry!, ->(**) { mismatched }
+      ) do
+        assert_raises(Hive::CommandConflict) do
+          Hive::ProjectIdentity.enroll_new_identity(
+            project_root: project, database: database,
+            previous_identity: "11111111-1111-4111-8111-111111111111",
+            expected_generation: 0, confirm: true
+          )
+        end
+      end
+
+      common_dir = Hive::ProjectIdentity.git_common_dir(project)
+      digest = Digest::SHA256.hexdigest(common_dir)
+      installation_id = database.installation_identity.fetch(:installation_id)
+      row = Hive::ProjectIdentity.send(
+        :reserve_pending!, database: database, installation_id: installation_id,
+        digest: digest, project_root: project
+      )
+      database.transaction do |connection|
+        connection[:command_namespaces].where(namespace_id: row.fetch(:namespace_id))
+          .update(enrollment_generation: 1)
+      end
+      assert_raises(Hive::CommandConflict) do
+        Hive::ProjectIdentity.enroll_new_identity(
+          project_root: project, database: database,
+          previous_identity: "11111111-1111-4111-8111-111111111111",
+          expected_generation: 0, confirm: true
+        )
+      end
+    end
+
+    assert_raises(Hive::CommandConflict) do
+      with_replaced_singleton_method(
+        Hive::ProjectIdentity, :reserve_pending!,
+        ->(**) { raise Sequel::UniqueConstraintViolation, "race" }
+      ) do
+        Hive::ProjectIdentity.send(:reserve_pending_with_retry!)
+      end
+    end
+
+    with_store do |project, database|
+      assert_raises(Hive::CommandConflict) do
+        Hive::ProjectIdentity.send(
+          :replace_active_identity!, database: database,
+          row: { namespace_id: "missing" },
+          installation_id: database.installation_identity.fetch(:installation_id),
+          digest: "digest", project_root: project, expected_generation: 1
+        )
+      end
     end
   end
 

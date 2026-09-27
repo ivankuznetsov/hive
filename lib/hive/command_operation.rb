@@ -397,7 +397,9 @@ module Hive
       end
       if @command == "answer" && payload.dig("slot", "binding").is_a?(String)
         binding = payload.dig("slot", "binding")
-        fields = JSON.parse(Base64.urlsafe_decode64(binding))
+        fields = begin JSON.parse(Base64.urlsafe_decode64(binding))
+        rescue JSON::ParserError, ArgumentError then nil end
+        return payload unless fields.is_a?(Hash)
         return payload.merge(
           "slot" => payload.fetch("slot").merge(
             "binding" => {
@@ -408,8 +410,6 @@ module Hive
           )
         )
       end
-      payload
-    rescue JSON::ParserError, ArgumentError
       payload
     end
 

@@ -330,6 +330,101 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_thread_routed_output_delegates_only_supported_io_methods
+    captured = StringIO.new
+    passthrough = StringIO.new
+    output = Hive::CommandOperation::ThreadRoutedOutput.new(
+      capture_thread: Thread.current, captured: captured, passthrough: passthrough
+    )
+
+    output.sync = true
+    assert output.sync
+    output.write("captured")
+    assert_equal "captured", output.string
+    assert output.respond_to?(:string)
+    refute output.respond_to?(:not_an_io_method)
+    assert_raises(NoMethodError) { output.not_an_io_method }
+  end
+
+  def test_registered_project_roots_are_bounded_by_name_and_addressable_paths
+    projects = [
+      { "name" => "one", "path" => "/srv/one", "hive_state_path" => "/state/one" },
+      { "name" => "two", "path" => "/srv/two" }
+    ]
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+      assert_equal [ "/srv/one" ],
+                   Hive::CommandOperation.registered_project_roots(target: "task", project: "one")
+      assert_empty Hive::CommandOperation.registered_project_roots(target: "task", project: "missing")
+      assert_equal %w[/srv/one /srv/two],
+                   Hive::CommandOperation.registered_project_roots(target: "task")
+      assert_equal [ "/srv/one" ],
+                   Hive::CommandOperation.registered_project_roots(target: "/state/one/stages/task")
+    end
+  end
+
+  def test_cross_project_lookup_can_resume_an_interrupted_maintenance_operation
+    claim = Hive::CommandReceiptStore::Claim.new(
+      disposition: :resume, receipt_id: "receipt", namespace_id: "namespace",
+      generation: 3, state: "unresolved", principal: "owner",
+      request_fingerprint: "fingerprint", result: nil, status: nil, reason: nil,
+      public_receipt: nil, project_root: "/project"
+    )
+    executing = claim.with(disposition: :new, generation: 4, state: "executing")
+    store = Object.new
+    store.define_singleton_method(:lookup_existing_in_projects) { |**| claim }
+    store.define_singleton_method(:resume_maintenance) { |_claim| executing }
+    store.define_singleton_method(:prepare_effect) do |_claim, **|
+      { effect_id: "effect", ordinal: 0 }
+    end
+    store.define_singleton_method(:complete_effect) { |*_, **| true }
+    store.define_singleton_method(:succeed) { |*_, **| true }
+    operation = Hive::CommandOperation.new(
+      key: "resume", command: "receipt", mode: "prune", target: "demo",
+      request: { confirm: true }, project_roots: [ "/project" ],
+      project_root: -> { flunk "resumed lookup must retain its stored project root" },
+      principal: "owner", json: true, structured: true, maintenance: true, store: store
+    )
+
+    result = operation.call { { "schema" => "hive-receipt-prune", "ok" => true } }
+    assert_equal "succeeded", result.dig("command_receipt", "state")
+  end
+
+  def test_failure_persistence_and_replay_templates_fail_closed
+    store = Object.new
+    store.define_singleton_method(:update_effect) { |*_, **| raise Hive::CommandConflict }
+    store.define_singleton_method(:authoritative_result_recorded?) { |**| false }
+    unresolved = []
+    store.define_singleton_method(:mark_unresolved) { |claim, **| unresolved << claim.receipt_id }
+    operation = Hive::CommandOperation.new(
+      key: nil, command: "approve", target: "task", request: {}, project_root: "/project",
+      principal: "owner", store: store
+    )
+    claim = Struct.new(:receipt_id).new("receipt")
+    operation.send(
+      :persist_non_application_failure, claim, { effect_id: "effect" },
+      Hive::UsageError.new("invalid")
+    )
+    assert_equal [ "receipt" ], unresolved
+    assert_equal({ "format" => "text", "text" => "invalid\n" },
+                 operation.send(:stored_failure, Hive::UsageError.new("invalid")))
+
+    malformed = { "slot" => { "binding" => Base64.urlsafe_encode64("{") } }
+    assert_equal malformed, operation.send(:template_payload, malformed)
+    conflicting = {
+      "slot" => { "binding" => {
+        "$command_response_fields" => { "project" => "demo" },
+        "$command_response_value" => Base64.urlsafe_encode64(JSON.generate("project" => "other")),
+        "template_version" => 1, "sha256" => "wrong"
+      } }
+    }
+    assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }
+    conflicting["slot"]["binding"]["$command_response_value"] = "not-base64-json"
+    assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }
+
+    assert_equal "config", operation.send(:failure_error_kind, Hive::ConfigError.new("bad"))
+    assert_equal "internal", operation.send(:failure_error_kind, Hive::Error.new("bad"))
+  end
+
   private
 
   def with_operation(key: "stable")

@@ -96,6 +96,27 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
         principal_source: "local_cli", ordinal: 0,
         request_fingerprint: "c" * 64, transport_request_id: request_id
       }
+      installation_id = repository.database.installation_identity.fetch(:installation_id)
+      repository.database.transaction do |db|
+        db[:command_namespaces].insert(
+          namespace_id: "namespace-1", installation_id: installation_id,
+          git_common_dir_digest: "d" * 64, enrollment_state: "active",
+          enrollment_generation: 1, keyed_intake_enabled: 1, policy_revision: 1,
+          created_at: NOW.iso8601(6), activated_at: NOW.iso8601(6),
+          updated_at: NOW.iso8601(6)
+        )
+        db[:command_capacity].insert(
+          namespace_id: "namespace-1", updated_at: NOW.iso8601(6)
+        )
+        db[:command_receipts].insert(
+          receipt_id: "receipt-1", namespace_id: "namespace-1",
+          key_digest: "e" * 64, principal: "principal-1",
+          principal_source: "local_cli", command: "run", original_target: "sqlite-cutover",
+          request_fingerprint: "c" * 64, frozen_request_json: "{}",
+          state: "executing", generation: 1, retry_eligible: 0,
+          created_at: NOW.iso8601(6), updated_at: NOW.iso8601(6)
+        )
+      end
       repository.write_request!(
         project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
         request_id: request_id, task_generation: "generation-1", now: NOW,

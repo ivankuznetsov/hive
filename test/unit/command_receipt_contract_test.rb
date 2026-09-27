@@ -13,6 +13,7 @@ require "hive/commands/act"
 require "hive/commands/answer"
 require "hive/commands/approve"
 require "hive/commands/new"
+require "hive/commands/setup"
 require "hive/commands/stage_action"
 require "hive/commands/web/service_installer"
 require "hive/cli"
@@ -21,7 +22,7 @@ require "hive/runtime_control_plane/command_schema_installation"
 require "hive/runtime_control_plane/command_schema_writer_guard"
 require "hive/runtime_control_plane/installation"
 
-class CommandReceiptCoverageGapsTest < Minitest::Test
+class CommandReceiptContractTest < Minitest::Test
   include HiveTestHelper
 
   FakeClaim = Data.define(:state, :result, :public_receipt)
@@ -109,7 +110,12 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
   def test_receipt_command_validates_keys_projects_namespaces_enrollment_and_evidence
     command = Hive::Commands::Receipt.new("retire", idempotency_key: "key")
     assert_raises(Hive::UsageError) { command.send(:reject_forbidden_key!) }
-    Hive::Commands::Receipt.new("prune", idempotency_key: "key").send(:reject_forbidden_key!)
+    assert_raises(Hive::UsageError) do
+      Hive::Commands::Receipt.new("prune", idempotency_key: "key").send(:reject_forbidden_key!)
+    end
+    Hive::Commands::Receipt.new(
+      "prune", idempotency_key: "key", confirm: true
+    ).send(:reject_forbidden_key!)
     Hive::Commands::Receipt.new("retire").send(:reject_forbidden_key!)
     assert_raises(Hive::UsageError) { Hive::Commands::Receipt.new("retire").send(:required_identifier!) }
     assert_equal "r", Hive::Commands::Receipt.new("retire", "r").send(:required_identifier!)
@@ -328,13 +334,27 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       store.mark_unresolved(succeeded, reason: "lost")
       row = store.receipt(succeeded.receipt_id)
       succeeded_row = row
-      assert_raises(Hive::CommandUnresolved) do
-        maintenance.retire_with_evidence(
-          row.fetch(:receipt_id), expected_generation: row.fetch(:generation),
-          evidence: { "outcome" => "succeeded", "result" => { "ok" => true } },
-          reason: "verified", confirm: false
+      payload = { "schema" => "hive-approve", "schema_version" => 2, "ok" => true }
+      replay = {
+        "format" => "json", "payload" => payload,
+        "expanded_sha256" => Digest::SHA256.hexdigest(
+          Hive::RuntimeControlPlane::Codec.dump_json(payload)
         )
-      end
+      }
+      success_evidence = {
+        "outcome" => "succeeded", "result" => replay,
+        "effects" => [ {
+          "effect_id" => effect.fetch(:effect_id), "ordinal" => 0,
+          "identity_sha256" => Digest::SHA256.hexdigest(effect.fetch(:identity_json)),
+          "observation" => { "source" => "provider", "correlation_id" => "remote-1" }
+        } ]
+      }
+      retired = maintenance.retire_with_evidence(
+        row.fetch(:receipt_id), expected_generation: row.fetch(:generation),
+        evidence: success_evidence, reason: "verified", confirm: true
+      )
+      assert_equal "succeeded", retired.fetch("state")
+      assert_equal "succeeded", store.receipt(row.fetch(:receipt_id)).fetch(:state)
 
       failed = executing_claim(store, project, "failed")
       effect = store.prepare_effect(failed, ordinal: 0, kind: "test", identity: {})
@@ -360,7 +380,7 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       assert_raises(Hive::CommandUnresolved) do
         maintenance.send(
           :validate_retirement_evidence!, succeeded_row,
-          { "outcome" => "succeeded" }
+          { "outcome" => "succeeded", "result" => replay, "effects" => [] }
         )
       end
     end
@@ -651,12 +671,10 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
     outcome = Hive::CommandUnresolved.new(reason: "uncertain")
     capacity = Hive::CommandCapacityError.new("full", reason: :full, scope: :namespace)
 
-    act = Hive::Commands::Act.allocate
-    {
-      idempotency_key: "key", target: "task", action_id: "run",
-      observation: "token", project_filter: "demo", json: true,
-      command_receipt_store: store
-    }.each { |name, value| act.instance_variable_set("@#{name}", value) }
+    act = Hive::Commands::Act.new(
+      "run", "task", observation: "token", project: "demo", json: true,
+      idempotency_key: "key", command_receipt_store: store
+    )
     assert_instance_of Hive::CommandOperation, act.send(:command_operation)
     assert_equal "uncertain", act.envelope_error_kind(outcome)
     assert_equal "full", act.envelope_error_kind(capacity)
@@ -682,12 +700,10 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
     assert_equal "uncertain", answer.send(:error_kind, outcome)
     assert_equal "full", answer.send(:error_kind, capacity)
 
-    fresh = Hive::Commands::New.allocate
-    {
-      idempotency_key_raw: "key", project_name: "demo", text: "idea",
-      slug_override: nil, body_override: nil, base: nil, depends_on: nil,
-      workflow_name: nil, attachments: [], json: true, command_receipt_store: store
-    }.each { |name, value| fresh.instance_variable_set("@#{name}", value) }
+    fresh = Hive::Commands::New.new(
+      "demo", "idea", idempotency_key: "key", json: true,
+      command_receipt_store: store
+    )
     assert_instance_of Hive::CommandOperation, fresh.send(:command_operation)
     assert_equal "uncertain", fresh.envelope_error_kind(outcome)
     assert_equal "full", fresh.envelope_error_kind(capacity)
@@ -742,7 +758,8 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
   end
 
   def test_admission_transition_binds_and_rejects_command_contexts
-    transition = Hive::RuntimeControlPlane::AdmissionTransition.allocate
+    repository = Struct.new(:database).new(nil)
+    transition = Hive::RuntimeControlPlane::AdmissionTransition.new(repository: repository)
     rows = {}
     table = Object.new
     table.define_singleton_method(:[]) { |query| rows[query.fetch(:request_id)] }
@@ -762,6 +779,7 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
     )
     transition.send(:bind_command_context!, db, request_id, context)
     transition.send(:bind_command_context!, db, request_id, context)
+    assert_equal request_id, rows.fetch(request_id).fetch(:source_identity)
     changed = context.with(effect_id: "changed")
     assert_raises(Hive::Attempts::RepositoryError) do
       transition.send(:bind_command_context!, db, request_id, changed)
@@ -853,17 +871,19 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
 
     fake_installer = Object.new
     fake_installer.define_singleton_method(:service_lifecycle_state) { { "service_running" => true } }
+    setup = Hive::Commands::Setup.new(environment: {})
+    setup.define_singleton_method(:web_config) { {} }
     with_replaced_singleton_method(
       Hive::Commands::Web::ServiceInstaller, :new, ->(**) { fake_installer }
     ) do
-      assert Hive::RuntimeControlPlane::CommandSchemaWriterGuard.managed_web_running?
+      assert setup.send(:managed_web_running?)
     end
     fallback = Object.new
     fallback.define_singleton_method(:service_state) { { "service_running" => false } }
     with_replaced_singleton_method(
       Hive::Commands::Web::ServiceInstaller, :new, ->(**) { fallback }
     ) do
-      refute Hive::RuntimeControlPlane::CommandSchemaWriterGuard.managed_web_running?
+      refute setup.send(:managed_web_running?)
     end
     broken = Object.new
     broken.define_singleton_method(:service_lifecycle_state) { raise Hive::Error, "broken" }
@@ -871,7 +891,7 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       Hive::Commands::Web::ServiceInstaller, :new, ->(**) { broken }
     ) do
       assert_raises(Hive::ConfigError) do
-        Hive::RuntimeControlPlane::CommandSchemaWriterGuard.managed_web_running?
+        setup.send(:managed_web_running?)
       end
     end
 
@@ -915,11 +935,10 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
 
     resolver = Struct.new(:resolved) { def resolve = resolved }.new(task)
     with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
-      act = Hive::Commands::Act.allocate
-      {
-        idempotency_key: "key", target: "task", action_id: "run", observation: "token",
-        project_filter: "demo", json: true, command_receipt_store: store
-      }.each { |name, value| act.instance_variable_set("@#{name}", value) }
+      act = Hive::Commands::Act.new(
+        "run", "task", observation: "token", project: "demo", json: true,
+        idempotency_key: "key", command_receipt_store: store
+      )
       assert_equal "/project", act.send(:command_operation).instance_variable_get(:@project_root).call
     end
 
@@ -932,7 +951,7 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
     stage = Hive::Commands::StageAction.new(
       "plan", "task", idempotency_key: "key", command_receipt_store: store
     )
-    with_replaced_singleton_method(stage, :resolve_task, -> { task }) do
+    with_replaced_singleton_method(stage, :resolve_receipt_project_root, -> { task.project_root }) do
       assert_equal "/project", stage.send(:command_operation).instance_variable_get(:@project_root).call
     end
     answer = Hive::Commands::Answer.new(
@@ -945,13 +964,10 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       end
     end
 
-    fresh = Hive::Commands::New.allocate
-    {
-      idempotency_key_raw: "key", project_name: "demo", text: "idea",
-      slug_override: nil, body_override: nil, base: nil, depends_on: nil,
-      workflow_name: nil, attachments: [ "/missing" ], json: true,
+    fresh = Hive::Commands::New.new(
+      "demo", "idea", attachments: [ "/missing" ], idempotency_key: "key", json: true,
       command_receipt_store: store
-    }.each { |name, value| fresh.instance_variable_set("@#{name}", value) }
+    )
     operation = fresh.send(:command_operation)
     with_replaced_singleton_method(Hive::Config, :find_project, ->(*) { { "path" => "/project" } }) do
       assert_equal "/project", operation.instance_variable_get(:@project_root).call
@@ -991,8 +1007,10 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
           "prune", project: "demo", idempotency_key: "key", json: true,
           pruner: pruner, command_receipt_store: store
         )
-        out, = capture_io { assert_equal true, command.call.fetch("ok") }
-        refute JSON.parse(out).key?("command_receipt")
+        out, = capture_io do
+          assert_raises(Hive::UsageError) { command.call }
+        end
+        assert_equal "usage", JSON.parse(out).fetch("error_kind")
         assert_equal 0, database.read { |db| db[:command_receipts].count }
         Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
 
@@ -1061,7 +1079,7 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
 
   def test_remaining_validation_and_fault_translation_paths
     invalid = Hive::Commands::New::InvalidBaseError.new("bad")
-    assert_equal "usage", Hive::Commands::New.allocate.envelope_error_kind(invalid)
+    assert_equal "usage", Hive::Commands::New.new("demo", "idea").envelope_error_kind(invalid)
 
     with_receipts do |project, database, store, authority|
       terminal = terminal_claim(store, project, "terminal")
@@ -1180,6 +1198,7 @@ class CommandReceiptCoverageGapsTest < Minitest::Test
       refute repository.send(:same_command_context?, "id", context)
     end
     existing = context.transform_keys(&:to_s).except("transport_request_id")
+      .merge("source_identity" => context.fetch(:transport_request_id))
     with_replaced_singleton_method(repository, :command_context, ->(*) { existing }) do
       assert repository.send(:same_command_context?, "id", context)
     end

@@ -551,6 +551,36 @@ class SchemaFilesTest < Minitest::Test
                  "schema NextAction.kind enum must mirror Hive::Schemas::NextActionKind::ALL"
   end
 
+  def test_command_receipt_schemas_match_error_envelope_producer
+    kinds = %w[
+      usage config internal command_conflict command_in_progress
+      command_unresolved_pending command_pin_horizon_elapsed
+      command_capacity_exhausted command_nonterminal_limit
+      command_concurrency_limit command_prune_busy
+      command_prune_storage_unavailable command_prune_preview_unavailable
+      command_orphaned_pin command_original_result_unavailable
+      command_intake_disabled
+    ].sort
+
+    %w[hive-command-receipt hive-receipt-prune].each do |name|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(name)))
+      error = document.dig("$defs", "ErrorPayload")
+      required = error.fetch("required")
+      properties = error.fetch("properties")
+      assert_empty required - properties.keys,
+                   "#{name} requires undeclared ErrorPayload properties"
+      assert_equal kinds, properties.dig("error_kind", "enum").sort
+
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: name,
+        error: Hive::CommandIntakeDisabled.new("disabled"),
+        error_kind: "command_intake_disabled"
+      )
+      assert JSONSchemer.schema(document).valid?(payload),
+             "#{name} must validate its emitted intake-disabled envelope"
+    end
+  end
+
   # ── hive-status ────────────────────────────────────────────────────────
 
   def test_hive_status_schema_file_exists_and_is_valid_json

@@ -11,6 +11,32 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
     def state_file = File.join(project_root, "task.md")
   end
 
+  def test_successor_allocation_uses_persisted_dispatch_provenance
+    context = {
+      "receipt_id" => "receipt-1", "principal" => "owner",
+      "request_fingerprint" => "fingerprint"
+    }
+    repository = Struct.new(:database) do
+      define_method(:command_context) { |_request_id| context }
+    end.new(Object.new)
+    store = Object.new
+    store.define_singleton_method(:receipt) do |_receipt_id|
+      { receipt_id: "receipt-1", namespace_id: "namespace-1",
+        principal: "owner", request_fingerprint: "fingerprint" }
+    end
+    store.define_singleton_method(:allocate_successor) { |**attributes| attributes }
+
+    allocation = Hive::Bot::DispatchRequestWriter.allocate_successor!(
+      predecessor_request_id: "command-dispatch:v1:predecessor",
+      intent_id: "intent-1", intent_version: 3, delivery_cycle_id: "cycle-4",
+      repository: repository, store: store
+    )
+
+    assert_equal "namespace-1", allocation.fetch(:namespace_id)
+    assert_equal "receipt-1", allocation.fetch(:predecessor_receipt_id)
+    assert_equal "fingerprint", allocation.fetch(:request_fingerprint)
+  end
+
   def test_local_admission_returns_attempt_without_a_second_writer_side_claim
     with_tmp_dir do |state_home|
       repository(state_home)

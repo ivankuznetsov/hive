@@ -36,6 +36,9 @@ class CommandMaintenanceAuthorityTest < Minitest::Test
         assert_equal "127.0.0.1", authority.peer_address
         assert_equal "installation:install-1:uid:#{Process.euid}", authority.principal
         assert authority.installation_owner?
+        assert Hive::CommandMaintenanceAuthority.loopback(
+          database: database, peer_address: "127.0.0.2"
+        ).installation_owner?
         assert_raises(Hive::ConfigError) do
           Hive::CommandMaintenanceAuthority.loopback(
             database: database, peer_address: "203.0.113.9"
@@ -51,5 +54,18 @@ class CommandMaintenanceAuthorityTest < Minitest::Test
     )
     assert_equal "own_receipt", authority.authorize!("caller")
     assert_raises(Hive::ConfigError) { authority.authorize!("someone-else") }
+  end
+
+  def test_github_owner_authority_reloads_current_configuration
+    current = { "github" => { "owner" => "Alice", "owner_id" => 42 } }
+    authority = Hive::CommandMaintenanceAuthority.github(
+      config: current, login: "Alice", id: 42,
+      config_loader: -> { current }
+    )
+    assert authority.installation_owner?
+
+    current = { "github" => { "owner" => "Bob", "owner_id" => 7 } }
+    refute authority.installation_owner?
+    assert_raises(Hive::ConfigError) { authority.authorize!("another-principal") }
   end
 end

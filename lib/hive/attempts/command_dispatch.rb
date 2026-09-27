@@ -31,6 +31,13 @@ module Hive
             retry_horizon_expires_at: context.retry_horizon_expires_at
           )
           attributes[:request_id] = context.transport_request_id
+          Hive::CommandOperation.record_effect_submission(
+            kind: "attempt_dispatch",
+            identity: {
+              "request_id" => context.transport_request_id,
+              "target" => @target.to_s, "ordinal" => context.ordinal
+            }
+          )
         end
         result = (@attempts_api || Hive::Attempts::API.new).dispatch(**attributes)
         if @json && result.output_status == :expired

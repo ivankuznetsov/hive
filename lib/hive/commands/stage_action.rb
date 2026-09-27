@@ -86,8 +86,13 @@ module Hive
           mode: @verb,
           target: @target,
           request: { "verb" => @verb, "from" => @from, "project" => @project_filter },
-          project_root: -> { resolve_task.project_root },
+          # Receipt lookup must not evaluate the mutable --from assertion. A
+          # successful first call has already moved the task by the time an
+          # identical lost-response retry arrives.
+          project_root: -> { resolve_receipt_project_root },
           json: @json,
+          failure_payload: ->(error) { envelope_payload_for(error) },
+          text_renderer: ->(payload) { stage_action_text(payload) },
           retry_horizon_expires_at: @retry_horizon_expires_at,
           store: @command_receipt_store || Hive::CommandReceiptStore.new
         )
@@ -158,6 +163,10 @@ module Hive
           current_stage: actual,
           target_stage: @from
         )
+      end
+
+      def resolve_receipt_project_root
+        Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve.project_root
       end
 
       # Archive on a task already at the terminal stage with :complete is a
@@ -234,21 +243,26 @@ module Hive
       # ── Reporting ───────────────────────────────────────────────────────
 
       def emit_phase(task, phase)
-        return unless @json && !@quiet
-
-        puts JSON.generate(success_payload(task, phase))
+        payload = success_payload(task, phase)
+        puts JSON.generate(payload) if @json && !@quiet
+        payload
       end
 
       def emit_archive_noop(task)
         marker = Hive::Markers.current(task.state_file)
+        payload = success_payload(task, "noop", noop: true,
+                                  reason: "already_archived", marker: marker)
         if @json && !@quiet
-          puts JSON.generate(success_payload(task, "noop",
-                                             noop: true,
-                                             reason: "already_archived",
-                                             marker: marker))
+          puts JSON.generate(payload)
         elsif !@quiet
-          puts "hive: noop — #{task.slug} is already at #{Hive::Stages::DIRS.last}"
+          print stage_action_text(payload)
         end
+        payload
+      end
+
+      def stage_action_text(payload)
+        return "" unless payload.fetch("noop")
+        "hive: noop — #{payload.fetch('slug')} is already at #{payload.fetch('to_stage_dir')}\n"
       end
 
       def success_payload(task, phase, noop: false, reason: nil, marker: nil)

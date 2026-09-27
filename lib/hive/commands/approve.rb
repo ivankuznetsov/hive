@@ -133,6 +133,8 @@ module Hive
           },
           project_root: -> { resolve_task.project_root },
           json: @json,
+          failure_payload: ->(error) { envelope_payload_for(error) },
+          text_renderer: ->(payload) { approval_text(payload) },
           store: @command_receipt_store || Hive::CommandReceiptStore.new
         )
       end
@@ -734,29 +736,39 @@ module Hive
       # ── Reporting ───────────────────────────────────────────────────────
 
       def emit_noop(task, dest_stage)
-        return if @quiet
+        payload = success_payload(task, dest_stage, task.folder, nil, nil, "same", noop: true)
+        return payload if @quiet
 
         if @json
-          puts JSON.generate(success_payload(task, dest_stage, task.folder, nil, nil, "same", noop: true))
+          puts JSON.generate(payload)
         else
-          puts "hive: noop — #{task.slug} already at #{dest_stage}"
+          print approval_text(payload)
         end
+        payload
       end
 
       def emit_success(task, dest_stage, new_folder, marker, commit_action, direction)
-        return if @quiet
+        payload = success_payload(task, dest_stage, new_folder, marker, commit_action, direction)
+        return payload if @quiet
 
         if @json
-          puts JSON.generate(success_payload(task, dest_stage, new_folder, marker, commit_action, direction))
+          puts JSON.generate(payload)
         else
-          verb = direction == "backward" ? "rejected" : "approved"
-          puts "hive: #{verb} #{task.slug}"
-          puts "  from: #{task.folder}"
-          puts "  to:   #{new_folder}"
+          print approval_text(payload)
           # Hint goes to stderr so a `| jq` consumer doesn't get prose mixed
           # with data when the user forgot --json.
           warn "next: #{workflow_command_for(task, dest_stage)}"
         end
+        payload
+      end
+
+      def approval_text(payload)
+        return "hive: noop — #{payload.fetch('slug')} already at #{payload.fetch('to_stage_dir')}\n" if
+          payload.fetch("noop")
+        verb = payload.fetch("direction") == "backward" ? "rejected" : "approved"
+        "hive: #{verb} #{payload.fetch('slug')}\n" \
+          "  from: #{payload.fetch('from_folder')}\n" \
+          "  to:   #{payload.fetch('to_folder')}\n"
       end
 
       def success_payload(task, dest_stage, new_folder, marker, commit_action, direction, noop: false)

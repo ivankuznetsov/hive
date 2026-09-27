@@ -23,7 +23,7 @@ module Hive
     def resolve(project_root:, database:, create:)
       common_dir = git_common_dir(project_root)
       digest = Digest::SHA256.hexdigest(common_dir)
-      marker = File.join(common_dir, MARKER_NAME)
+      marker = marker_path_for(common_dir)
       installation_id = database.installation_identity.fetch(:installation_id)
       persisted = read_marker(marker)
 
@@ -39,12 +39,12 @@ module Hive
           installation_id: installation_id, git_common_dir_digest: digest
         ]
       end
-      return nil unless create
       if row && row.fetch(:enrollment_state) == "active"
         raise Hive::ConfigError,
               "project receipt identity marker is missing for an existing namespace; " \
               "restore the matching marker and control-plane database together"
       end
+      return nil unless create
 
       row ||= reserve_pending_with_retry!(
         database: database, installation_id: installation_id, digest: digest,
@@ -57,7 +57,7 @@ module Hive
     end
 
     def marker_path(project_root)
-      File.join(git_common_dir(project_root), MARKER_NAME)
+      marker_path_for(git_common_dir(project_root))
     end
 
     # Resolve identity entirely through an already-open read-only SQLite
@@ -65,7 +65,7 @@ module Hive
     def resolve_read_only(project_root:, connection:)
       common_dir = git_common_dir(project_root)
       digest = Digest::SHA256.hexdigest(common_dir)
-      marker = File.join(common_dir, MARKER_NAME)
+      marker = marker_path_for(common_dir)
       installation_id = connection[:installations].first&.fetch(:installation_id)
       raise Hive::ConfigError, "runtime installation identity is missing" unless installation_id
       persisted = read_marker(marker)
@@ -106,7 +106,7 @@ module Hive
 
       common_dir = git_common_dir(project_root)
       digest = Digest::SHA256.hexdigest(common_dir)
-      marker = File.join(common_dir, MARKER_NAME)
+      marker = marker_path_for(common_dir)
       installation_id = database.installation_identity.fetch(:installation_id)
       row = database.read do |connection|
         connection[:command_namespaces][
@@ -193,6 +193,11 @@ module Hive
     rescue SystemCallError => error
       raise Hive::ConfigError, "cannot resolve Git common directory for command receipts: #{error.message}"
     end
+
+    def marker_path_for(common_dir)
+      File.join(common_dir, MARKER_NAME)
+    end
+    private_class_method :marker_path_for
 
     def read_marker(path)
       return unless File.exist?(path) || File.symlink?(path)

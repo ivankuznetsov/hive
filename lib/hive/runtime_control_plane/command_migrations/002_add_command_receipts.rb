@@ -31,15 +31,21 @@ module Hive
             Integer :enrollment_generation, null: false, default: 0
             Integer :keyed_intake_enabled, null: false, default: 0
             Integer :policy_revision, null: false, default: 0
+            Integer :nonterminal_limit, null: false, default: 1_000
+            Integer :concurrency_limit, null: false, default: 32
+            Integer :byte_admission_limit, null: false, default: 67_108_864
             String :created_at, null: false
             String :activated_at
             String :updated_at, null: false
             check Sequel.lit("enrollment_state IN ('pending', 'active')")
-            check Sequel.lit("enrollment_generation >= 0 AND policy_revision >= 0")
+            check Sequel.lit(
+              "enrollment_generation >= 0 AND policy_revision >= 0 AND " \
+              "nonterminal_limit > 0 AND concurrency_limit > 0 AND byte_admission_limit > 0"
+            )
             check Sequel.lit("keyed_intake_enabled IN (0, 1)")
-            unique [ :installation_id, :git_common_dir_digest ],
-                   name: :command_namespaces_git_common_uidx
           end
+          database.add_index(:command_namespaces, [ :installation_id, :git_common_dir_digest ],
+                             unique: true, name: :command_namespaces_git_common_uidx)
 
           database.create_table(:command_receipts) do
             String :receipt_id, primary_key: true, null: false
@@ -73,8 +79,9 @@ module Hive
             check Sequel.lit("generation > 0")
             check Sequel.lit("owner_pid IS NULL OR owner_pid > 0")
             check Sequel.lit("retry_eligible IN (0, 1)")
-            unique [ :namespace_id, :key_digest ], name: :command_receipts_key_uidx
           end
+          database.add_index(:command_receipts, [ :namespace_id, :key_digest ],
+                             unique: true, name: :command_receipts_key_uidx)
           database.add_index(:command_receipts, [ :namespace_id, :state, :terminal_at, :receipt_id ],
                              name: :command_receipts_terminal_idx)
           database.add_index(:command_receipts, [ :state, :owner_host, :owner_pid, :receipt_id ],
@@ -93,8 +100,9 @@ module Hive
             String :updated_at, null: false
             check Sequel.lit("ordinal >= 0")
             check Sequel.lit("state IN ('prepared','submitted','applied','not_applied','unknown')")
-            unique [ :receipt_id, :ordinal ], name: :command_effects_ordinal_uidx
           end
+          database.add_index(:command_effects, [ :receipt_id, :ordinal ],
+                             unique: true, name: :command_effects_ordinal_uidx)
 
           database.create_table(:command_receipt_pins) do
             String :pin_id, primary_key: true, null: false
@@ -115,9 +123,11 @@ module Hive
             check Sequel.lit("intent_generation >= 0 AND generation > 0")
             check Sequel.lit("owner_pid IS NULL OR owner_pid > 0")
             check Sequel.lit("lifecycle_status IN ('active','closed','force_released')")
-            unique [ :receipt_id, :principal, :intent_id, :intent_generation ],
-                   name: :command_receipt_pins_intent_uidx
           end
+          database.add_index(
+            :command_receipt_pins, [ :receipt_id, :principal, :intent_id, :intent_generation ],
+            unique: true, name: :command_receipt_pins_intent_uidx
+          )
           database.add_index(:command_receipt_pins, [ :lifecycle_status, :receipt_id ],
                              name: :command_receipt_pins_active_idx)
 
@@ -192,9 +202,11 @@ module Hive
             String :intent_id, null: false
             Integer :intent_version, null: false
             String :delivery_cycle_id, null: false
-            String :predecessor_receipt_id, null: false
+            foreign_key :predecessor_receipt_id, :command_receipts, type: String,
+                        key: :receipt_id, null: false, on_delete: :restrict, on_update: :restrict
             String :successor_key_identity, null: false
-            String :successor_receipt_id
+            foreign_key :successor_receipt_id, :command_receipts, type: String,
+                        key: :receipt_id, null: true, on_delete: :restrict, on_update: :restrict
             Integer :successor_ordinal, null: false
             String :request_fingerprint, null: false
             Integer :allocation_version, null: false
@@ -202,13 +214,17 @@ module Hive
             check Sequel.lit(
               "intent_version >= 0 AND successor_ordinal > 0 AND allocation_version > 0"
             )
-            unique [ :namespace_id, :principal, :intent_id, :intent_version, :delivery_cycle_id ],
-                   name: :command_successor_allocations_cycle_uidx
           end
+          database.add_index(
+            :command_successor_allocations,
+            [ :namespace_id, :principal, :intent_id, :intent_version, :delivery_cycle_id ],
+            unique: true, name: :command_successor_allocations_cycle_uidx
+          )
 
           database.create_table(:command_dispatch_contexts) do
             String :request_id, primary_key: true, null: false
-            String :receipt_id, null: false
+            foreign_key :receipt_id, :command_receipts, type: String, key: :receipt_id,
+                        null: false, on_delete: :restrict, on_update: :restrict
             String :effect_id, null: false
             String :principal, null: false
             String :principal_source, null: false

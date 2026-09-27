@@ -144,6 +144,131 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_force_released_pin_cannot_be_reacquired_before_horizon_either
+    with_receipts do |project, database, store, authority|
+      claim = terminal_receipt(store, project, "released-pin-future")
+      horizon = (Time.now.utc + 3600).iso8601
+      pin = store.acquire_pin(
+        receipt_id: claim.receipt_id, principal: "owner", intent_id: "intent",
+        intent_generation: 1, retry_horizon_expires_at: horizon,
+        owner_process_start: "start"
+      )
+      Hive::CommandReceiptMaintenance.new(database: database, authority: authority).release_pin(
+        pin.pin_id, expected_generation: pin.generation,
+        reason: "intent cancelled", confirm: true, force: true
+      )
+
+      assert_raises(Hive::CommandUnresolved) do
+        store.acquire_pin(
+          receipt_id: claim.receipt_id, principal: "owner", intent_id: "intent",
+          intent_generation: 1, retry_horizon_expires_at: horizon
+        )
+      end
+    end
+  end
+
+  def test_maintenance_authorization_precedes_disclosure_and_mutation
+    with_receipts do |project, database, store, owner|
+      claim = store.reserve(
+        project_root: project, key: "foreign", command: "approve", target: "task",
+        request: {}, principal: "foreign"
+      )
+      claim = store.mark_executing(claim)
+      store.mark_unresolved(claim, reason: "lost")
+      row = store.receipt(claim.receipt_id)
+      nonowner = Hive::CommandMaintenanceAuthority.new(
+        principal: "caller", principal_source: "test"
+      )
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: nonowner, alive: ->(_) { false }
+      )
+
+      assert_raises(Hive::ConfigError) do
+        maintenance.settle_without_result(
+          claim.receipt_id, expected_generation: row.fetch(:generation),
+          reason: "denied", confirm: true
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        maintenance.settle_without_result(
+          "unknown", expected_generation: 1, reason: "denied", confirm: false
+        )
+      end
+      assert_equal "unresolved", store.receipt(claim.receipt_id).fetch(:state)
+      assert_equal 0, database.read { |db| db[:command_maintenance_audit].count }
+
+      preview = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: owner, alive: ->(_) { false }
+      ).settle_without_result(
+        claim.receipt_id, expected_generation: row.fetch(:generation),
+        reason: "owner preview", confirm: false
+      )
+      assert_equal true, preview.fetch("preview")
+    end
+  end
+
+  def test_revoked_github_owner_is_denied_at_confirm_time_without_audit
+    with_receipts do |project, database, store, _owner|
+      claim = store.reserve(
+        project_root: project, key: "github-revoked", command: "approve", target: "task",
+        request: {}, principal: "foreign"
+      )
+      executing = store.mark_executing(claim)
+      store.mark_unresolved(executing, reason: "lost")
+      row = store.receipt(claim.receipt_id)
+      current = { "github" => { "owner" => "Alice", "owner_id" => 42 } }
+      authority = Hive::CommandMaintenanceAuthority.github(
+        config: current, login: "Alice", id: 42, config_loader: -> { current }
+      )
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority, alive: ->(*) { false }
+      )
+      preview = maintenance.settle_without_result(
+        claim.receipt_id, expected_generation: row.fetch(:generation),
+        reason: "preview", confirm: false
+      )
+      assert preview.fetch("preview")
+
+      current = { "github" => { "owner" => "Bob", "owner_id" => 7 } }
+      assert_raises(Hive::ConfigError) do
+        maintenance.settle_without_result(
+          claim.receipt_id, expected_generation: row.fetch(:generation),
+          reason: "revoked", confirm: true
+        )
+      end
+      assert_equal "unresolved", store.receipt(claim.receipt_id).fetch(:state)
+      assert_equal 0, database.read { |db| db[:command_maintenance_audit].count }
+    end
+  end
+
+  def test_maintenance_prune_receipt_does_not_decrement_unreserved_capacity
+    with_receipts do |project, database, store, authority|
+      Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
+      claim = store.reserve(
+        project_root: project, key: "maintenance", command: "receipt", mode: "prune",
+        target: "demo", request: {}, principal: "owner", maintenance: true,
+        execute: true, owner_process_start: "dead"
+      )
+      before = database.read { |db| db[:command_capacity][namespace_id: claim.namespace_id] }
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority, alive: ->(_) { false }
+      )
+      maintenance.orphaned_owner(
+        claim.receipt_id, expected_generation: claim.generation,
+        reason: "dead maintenance owner", confirm: true
+      )
+      unresolved = store.receipt(claim.receipt_id)
+      maintenance.settle_without_result(
+        claim.receipt_id, expected_generation: unresolved.fetch(:generation),
+        reason: "abandon interrupted prune", confirm: true
+      )
+      after = database.read { |db| db[:command_capacity][namespace_id: claim.namespace_id] }
+
+      assert_equal before.slice(:nonterminal_count, :executing_count),
+                   after.slice(:nonterminal_count, :executing_count)
+    end
+  end
+
   def test_read_only_preview_does_not_change_database_or_sidecar_bytes
     with_receipts do |project, database, store, authority|
       terminal_receipt(store, project, "snapshot")
@@ -162,6 +287,31 @@ class CommandReceiptMaintenanceTest < Minitest::Test
         [ path, File.exist?(path) ? Digest::SHA256.file(path).hexdigest : nil ]
       end
       assert_equal before, after
+    end
+  end
+
+  def test_selected_namespace_maintenance_identities_paginate_with_effective_limits
+    with_receipts do |project, database, store, authority|
+      claims = 3.times.map do |index|
+        store.reserve(
+          project_root: project, key: "page-#{index}", command: "approve",
+          target: "task-#{index}", request: {}, principal: "owner"
+        )
+      end
+      pruner = Hive::CommandReceiptPruner.new(database: database, authority: authority)
+
+      first = pruner.preview(namespace_id: claims.first.namespace_id, limit: 1)
+      cursor = first.fetch("maintenance_next_cursor")
+      second = pruner.preview(
+        namespace_id: claims.first.namespace_id, limit: 1, cursor: cursor
+      )
+
+      refute_nil cursor
+      refute_equal first.fetch("nonterminal_receipts"), second.fetch("nonterminal_receipts")
+      assert_equal 1_000, first.dig("namespace_utilization", "limits", "nonterminal_count")
+      assert first.dig("installation_utilization", "occupied_bytes").positive?
+      assert_includes %w[normal warning action],
+                      first.dig("installation_utilization", "pressure_band")
     end
   end
 

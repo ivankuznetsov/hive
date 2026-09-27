@@ -7,7 +7,7 @@ module Hive
   module RuntimeControlPlane
     module CommandSchema
       VERSION = 2
-      EXPECTED_SCHEMA_SHA256 = "d28956db02856f13e924377a81804e021f4a104f4ea5216c91854b09b140707c".freeze
+      EXPECTED_SCHEMA_SHA256 = "0de7f2bad101616088278812b14c9c50d14a849980963e41cf9779874ca4c9a2".freeze
       TABLE_NAMES = %w[
         command_capacity
         command_dispatch_contexts
@@ -22,12 +22,17 @@ module Hive
         command_successor_allocations
       ].freeze
       INDEX_NAMES = %w[
+        command_effects_ordinal_uidx
         command_dispatch_contexts_receipt_ordinal_uidx
         command_maintenance_audit_receipt_idx
         command_maintenance_batches_unfinished_uidx
         command_receipt_pins_active_idx
+        command_receipt_pins_intent_uidx
+        command_receipts_key_uidx
         command_receipts_owner_idx
         command_receipts_terminal_idx
+        command_namespaces_git_common_uidx
+        command_successor_allocations_cycle_uidx
       ].freeze
       OBJECT_NAMES = (TABLE_NAMES + INDEX_NAMES).freeze
 

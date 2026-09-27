@@ -31,6 +31,15 @@ module Hive
     end
   end
 
+  class CommandIntakeDisabled < ConfigError
+    attr_reader :reason
+
+    def initialize(message)
+      super
+      @reason = "command_intake_disabled"
+    end
+  end
+
   class CommandOutcomeError < Error
     attr_reader :reason, :state, :command_receipt
 

@@ -177,6 +177,11 @@ module Hive
           project_root: -> { resolve_task(@target, binding.fetch("project")).project_root },
           json: true,
           structured: true,
+          failure_payload: lambda { |error|
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: SCHEMA, error: error, error_kind: error_kind(error)
+            )
+          },
           store: @command_receipt_store || Hive::CommandReceiptStore.new
         )
       end

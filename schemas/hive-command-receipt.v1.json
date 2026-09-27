@@ -58,7 +58,8 @@
             "command_capacity_exhausted", "command_nonterminal_limit",
             "command_concurrency_limit", "command_prune_busy",
             "command_prune_storage_unavailable", "command_prune_preview_unavailable",
-            "command_orphaned_pin", "command_original_result_unavailable"
+            "command_orphaned_pin", "command_original_result_unavailable",
+            "command_intake_disabled"
           ]
         },
         "exit_code": { "type": "integer", "enum": [1, 20, 21, 22, 64, 70, 75, 78] },

@@ -2,7 +2,9 @@
 
 require "hive/paths"
 require "hive/errors"
+require "hive/config"
 require "hive/web/github_auth"
+require "hive/web/loopback"
 
 module Hive
   # Authenticated actor and the one cross-principal elevation predicate used
@@ -23,7 +25,7 @@ module Hive
 
     def self.loopback(database:, peer_address:)
       custody = validate_state_home_custody!
-      unless %w[127.0.0.1 ::1].include?(peer_address.to_s)
+      unless Hive::Web::Loopback.address?(peer_address)
         raise Hive::ConfigError, "loopback command authority requires a loopback peer address"
       end
       installation = database.installation_identity.fetch(:installation_id)
@@ -36,7 +38,8 @@ module Hive
       )
     end
 
-    def self.github(config:, login:, id:, peer_address: nil)
+    def self.github(config:, login:, id:, peer_address: nil,
+                    config_loader: -> { Hive::Config.load_global_web })
       unless id.is_a?(Integer) && id.positive?
         raise Hive::ConfigError, "keyed web execution requires an authenticated numeric GitHub identity"
       end
@@ -45,7 +48,7 @@ module Hive
         principal: "github:#{id}", principal_source: "signed_in_web",
         installation_owner: auth.maintenance_owner?(login, id),
         installation_owner_check: -> {
-          Hive::Web::GithubAuth.new(config: config).maintenance_owner?(login, id)
+          Hive::Web::GithubAuth.new(config: config_loader.call).maintenance_owner?(login, id)
         },
         peer_address: peer_address
       )

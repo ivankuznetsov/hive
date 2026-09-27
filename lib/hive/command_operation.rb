@@ -4,7 +4,6 @@ require "digest"
 require "base64"
 require "json"
 require "stringio"
-require "tempfile"
 require "thread"
 require "securerandom"
 require "hive/command_receipt_store"
@@ -54,6 +53,11 @@ module Hive
     )
 
     def self.current_context = Thread.current[:hive_command_operation_context]
+    def self.current_operation = Thread.current[:hive_command_operation]
+
+    def self.record_effect_submission(kind:, identity:)
+      current_operation&.send(:record_effect_submission, kind: kind, identity: identity)
+    end
 
     def self.local_principal(database)
       unless Process.uid == Process.euid
@@ -67,6 +71,8 @@ module Hive
     def initialize(key:, command:, target:, request:, project_root:, principal: nil,
                    principal_source: "local_cli", mode: nil, json: false,
                    structured: false, maintenance: false,
+                   failure_payload: nil,
+                   text_renderer: nil,
                    retry_horizon_expires_at: nil,
                    store: Hive::CommandReceiptStore.new)
       @key = key
@@ -81,6 +87,8 @@ module Hive
       @json = json
       @structured = structured
       @maintenance = maintenance
+      @failure_payload = failure_payload
+      @text_renderer = text_renderer
       @retry_horizon_expires_at = retry_horizon_expires_at
       Hive::CommandMutations.validate_keyed!(
         command: @command, mode: @mode, target: @target, options: @request
@@ -95,10 +103,11 @@ module Hive
         key: @key, command: @command, target: @target,
         request: @request, principal: @principal
       ))
-        return replay(existing)
+        return replay(existing) unless existing.disposition == :resume
+        claim = existing
       end
 
-      claim = @store.reserve(
+      claim ||= @store.reserve(
         project_root: root,
         key: @key,
         command: @command,
@@ -131,7 +140,8 @@ module Hive
         "state" => "succeeded"
       }
       emitted = attach_receipt(payload, public_receipt)
-      stored = stored_response(emitted)
+      canonical = result.is_a?(Hash) ? attach_receipt(result, public_receipt) : nil
+      stored = stored_response(emitted, canonical: canonical, captured: captured)
       @store.succeed(claim, result: stored, status: Hive::ExitCodes::SUCCESS)
       @store.close_pin(
         receipt_id: claim.receipt_id, principal: claim.principal,
@@ -165,38 +175,41 @@ module Hive
 
     def with_context(context)
       previous = self.class.current_context
+      previous_operation = self.class.current_operation
       Thread.current[:hive_command_operation_context] = context
+      Thread.current[:hive_command_operation] = self
       yield
     ensure
       Thread.current[:hive_command_operation_context] = previous
+      Thread.current[:hive_command_operation] = previous_operation
+    end
+
+    def record_effect_submission(kind:, identity:)
+      context = self.class.current_context
+      return unless context
+
+      @store.record_effect_submission(
+        receipt_id: context.receipt_id, effect_id: context.effect_id,
+        principal: context.principal, request_fingerprint: context.request_fingerprint,
+        kind: kind, identity: identity
+      )
     end
 
     def capture
       return [ yield, nil ] if @structured
 
       CAPTURE_MUTEX.synchronize do
-        Tempfile.create("hive-command-output") do |file|
-          file.binmode
-          previous_stdout = $stdout
-          original_fd = STDOUT.dup
-          original_sync = STDOUT.sync
-          begin
-            STDOUT.flush
-            STDOUT.reopen(file)
-            STDOUT.sync = true
-            $stdout = ThreadRoutedOutput.new(
-              capture_thread: Thread.current, captured: STDOUT, passthrough: original_fd
-            )
-            result = yield
-            STDOUT.flush
-            file.rewind
-            [ result, file.read ]
-          ensure
-            STDOUT.reopen(original_fd)
-            STDOUT.sync = original_sync
-            original_fd.close
-            $stdout = previous_stdout
-          end
+        captured = StringIO.new
+        previous_stdout = $stdout
+        begin
+          $stdout = ThreadRoutedOutput.new(
+            capture_thread: Thread.current, captured: captured, passthrough: previous_stdout
+          )
+          result = yield
+          captured.flush
+          [ result, captured.string ]
+        ensure
+          $stdout = previous_stdout
         end
       end
     end
@@ -235,15 +248,17 @@ module Hive
     end
 
     def stored_failure(error)
-      if @json || @structured
-        payload = {
+      payload = @failure_payload&.call(error)
+      if payload || @json || @structured
+        payload ||= {
           "schema" => "hive-command-receipt", "schema_version" => 1,
-          "ok" => false, "error_kind" => error.class.name.split("::").last
-            .gsub(/([a-z\d])([A-Z])/, '\\1_\\2').downcase,
+          "ok" => false, "error_class" => error.class.name.split("::").last,
+          "error_kind" => failure_error_kind(error),
           "exit_code" => error.exit_code, "message" => error.message
         }
         {
-          "format" => "json", "payload" => payload,
+          "format" => "dual", "payload" => payload,
+          "text" => "#{error.message}\n",
           "expanded_sha256" => Digest::SHA256.hexdigest(
             Hive::RuntimeControlPlane::Codec.dump_json(payload)
           )
@@ -269,7 +284,17 @@ module Hive
       payload.merge("command_receipt" => receipt)
     end
 
-    def stored_response(payload)
+    def stored_response(payload, canonical: nil, captured: nil)
+      if canonical
+        template = template_payload(canonical)
+        text = @json ? render_text(canonical) : captured.to_s
+        return {
+          "format" => "dual", "payload" => template, "text" => text,
+          "expanded_sha256" => Digest::SHA256.hexdigest(
+            Hive::RuntimeControlPlane::Codec.dump_json(canonical)
+          )
+        }
+      end
       if @json || @structured
         template = template_payload(payload)
         {
@@ -284,6 +309,11 @@ module Hive
       end
     end
 
+    def render_text(payload)
+      return @text_renderer.call(payload) if @text_renderer
+      "#{payload}\n"
+    end
+
     def template_payload(payload)
       if @command == "act" && payload["observation_token"].is_a?(String)
         value = payload.fetch("observation_token")
@@ -296,15 +326,19 @@ module Hive
       end
       if @command == "answer" && payload.dig("slot", "binding").is_a?(String)
         binding = payload.dig("slot", "binding")
+        fields = JSON.parse(Base64.urlsafe_decode64(binding))
         return payload.merge(
           "slot" => payload.fetch("slot").merge(
             "binding" => {
-              "$command_request_field" => "binding", "template_version" => 1,
+              "$command_response_fields" => fields, "template_version" => 1,
+              "$command_response_value" => binding,
               "sha256" => Digest::SHA256.hexdigest(binding)
             }
           )
         )
       end
+      payload
+    rescue JSON::ParserError, ArgumentError
       payload
     end
 
@@ -317,14 +351,15 @@ module Hive
         )
       end
       stored = claim.result
-      unless stored.is_a?(Hash) && %w[json text].include?(stored["format"])
+      unless stored.is_a?(Hash) && %w[dual json text].include?(stored["format"])
         raise Hive::RuntimeControlPlane::IntegrityError.new(
           "command receipt result has an unsupported replay representation",
           code: :command_result_invalid,
           action: Hive::RuntimeControlPlane::Database::BACKUP_ACTION
         )
       end
-      if stored.fetch("format") == "text"
+      if stored.fetch("format") == "text" ||
+         (stored.fetch("format") == "dual" && !@json && !@structured)
         return stored.fetch("text") if @structured
         $stdout.write(stored.fetch("text"))
         exit(Integer(claim.status)) if claim.state == "failed"
@@ -359,17 +394,31 @@ module Hive
       end
       binding_template = payload.dig("slot", "binding")
       if binding_template.is_a?(Hash) &&
-         binding_template["$command_request_field"] == "binding" &&
+         binding_template["$command_response_fields"].is_a?(Hash) &&
          binding_template["template_version"] == 1
-        fields = @request[:binding] || @request["binding"]
-        value = Base64.urlsafe_encode64(JSON.generate(fields), padding: false)
-        unless fields.is_a?(Hash) && Digest::SHA256.hexdigest(value) == binding_template["sha256"]
+        fields = binding_template.fetch("$command_response_fields")
+        value = binding_template.fetch("$command_response_value")
+        decoded = JSON.parse(Base64.urlsafe_decode64(value))
+        unless decoded == fields && Digest::SHA256.hexdigest(value) == binding_template["sha256"]
           raise Hive::CommandConflict,
                 "retry answer binding cannot reconstruct the original response"
         end
         return payload.merge("slot" => payload.fetch("slot").merge("binding" => value))
       end
       payload
+    rescue JSON::ParserError, ArgumentError, KeyError
+      raise Hive::CommandConflict,
+            "retry answer binding cannot reconstruct the original response"
+    end
+
+    def failure_error_kind(error)
+      return error.reason if error.is_a?(Hive::CommandOutcomeError) ||
+        error.is_a?(Hive::CommandCapacityError) || error.is_a?(Hive::CommandIntakeDisabled)
+      return "usage" if error.is_a?(Hive::UsageError) || error.is_a?(Hive::InvalidTaskPath) ||
+        error.is_a?(Hive::WrongStage)
+      return "config" if error.is_a?(Hive::ConfigError)
+
+      "internal"
     end
 
     def emit_or_return(payload)

@@ -77,6 +77,8 @@ module Hive
             Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve.project_root
           },
           json: @json,
+          failure_payload: ->(error) { envelope_payload_for(error) },
+          text_renderer: ->(payload) { text_success(payload.fetch("result")) },
           store: @command_receipt_store || Hive::CommandReceiptStore.new
         )
       end
@@ -92,24 +94,30 @@ module Hive
       end
 
       def emit_success(result)
+        payload = {
+          "schema" => "hive-act",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-act"),
+          "ok" => true,
+          "action_id" => @action_id,
+          "target" => @target,
+          "observation_token" => @observation,
+          "result" => result
+        }
         if @json
-          puts JSON.generate(
-            "schema" => "hive-act",
-            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-act"),
-            "ok" => true,
-            "action_id" => @action_id,
-            "target" => @target,
-            "observation_token" => @observation,
-            "result" => result
-          )
+          puts JSON.generate(payload)
           @stdout_written = true
         else
-          if (recovery = result["recovery"])
-            puts recovery_summary(recovery)
-          else
-            puts "advanced #{@target} — #{result.fetch('task_state')} at " \
-                 "#{result.fetch('stage')} (#{result.fetch('marker')})"
-          end
+          print text_success(result)
+        end
+        payload
+      end
+
+      def text_success(result)
+        if (recovery = result["recovery"])
+          recovery_summary(recovery)
+        else
+          "advanced #{@target} — #{result.fetch('task_state')} at " \
+            "#{result.fetch('stage')} (#{result.fetch('marker')})\n"
         end
       end
 

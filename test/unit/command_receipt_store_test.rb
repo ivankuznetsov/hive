@@ -271,6 +271,23 @@ class CommandReceiptStoreTest < Minitest::Test
     assert_equal 0, store.send(:reclaim_dead_executing_owners, claim, scope: "namespace")
   end
 
+  def test_late_owner_cannot_finalize_with_a_stale_generation
+    with_store do |project, _database, store|
+      prepared = store.reserve(
+        project_root: project, key: "late-owner", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      executing = store.mark_executing(prepared)
+
+      assert_raises(Hive::CommandConflict) do
+        store.succeed(prepared, result: { "ok" => true }, status: 0)
+      end
+      assert_equal "executing", store.receipt(executing.receipt_id).fetch(:state)
+      store.succeed(executing, result: { "ok" => true }, status: 0)
+      assert_equal "succeeded", store.receipt(executing.receipt_id).fetch(:state)
+    end
+  end
+
   private
 
   def with_store

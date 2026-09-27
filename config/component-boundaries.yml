@@ -28,6 +28,10 @@ components:
     owned_paths:
       - lib/hive/runtime_control_plane.rb
       - lib/hive/runtime_control_plane/codec.rb
+      - lib/hive/runtime_control_plane/command_migrations/002_add_command_receipts.rb
+      - lib/hive/runtime_control_plane/command_schema.rb
+      - lib/hive/runtime_control_plane/command_schema_installation.rb
+      - lib/hive/runtime_control_plane/command_schema_writer_guard.rb
       - lib/hive/runtime_control_plane/database.rb
       - lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
       - lib/hive/runtime_control_plane/operational_repository.rb
@@ -51,6 +55,7 @@ components:
       - hive/config
       - hive/errors
       - hive/paths
+      - hive/pid_file
       - hive/task_meta
     internal_collaborators:
       - Sequel::Database

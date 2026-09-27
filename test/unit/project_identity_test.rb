@@ -82,6 +82,9 @@ class ProjectIdentityTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
       end
+      assert_raises(Hive::ConfigError) do
+        Hive::ProjectIdentity.resolve(project_root: project, database: database, create: false)
+      end
     end
   end
 

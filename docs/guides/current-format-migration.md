@@ -34,20 +34,24 @@ Code-complete rollback handoff status for this checkout:
 
 - pinned prior revision: `882b8e9ead2f9cf5321b158fe47648e6a01a2fca`
 - extension manifest SHA-256:
-  `d28956db02856f13e924377a81804e021f4a104f4ea5216c91854b09b140707c`
-- compatibility patch diff: pending a separately built prior-runtime package
-- local candidate package and SHA-256: not yet produced
+  `0de7f2bad101616088278812b14c9c50d14a849980963e41cf9779874ca4c9a2`
+- compatibility patch diff:
+  `docs/implementation/command-receipt-compatibility.patch`
+- local candidate package:
+  `docs/artifacts/hive-cli-0.7.4-command-receipt-compat-candidate.gem`
+- local candidate SHA-256:
+  `84163c17613771f85e6acfcd6c90a31bc21307d971b602f16ab0b29954745102`
+- isolated packaged rollback drill:
+  `docs/implementation/command-receipt-compatibility-proof.md`
 - published version/location/SHA-256: pending maintainer release authorization
 
-The last three items are activation blockers and must never be replaced with a
-source-tree-only claim. Once a candidate exists, use an isolated prefix and
-verify downloaded bytes before installation; abort on any mismatch:
+Published retained coordinates remain an activation blocker and must never be
+replaced with the local candidate. For the Tier A candidate drill, verify the
+checked-in bytes before installation and abort on any mismatch:
 
 ```sh
-candidate_url='HTTPS_AUTHENTICATED_CANDIDATE_URL'
-candidate_sha256='64_HEX_SHA256'
-candidate_gem="$PWD/hive-compat.gem"
-curl --fail --location --proto '=https' --tlsv1.2 "$candidate_url" -o "$candidate_gem"
+candidate_sha256='84163c17613771f85e6acfcd6c90a31bc21307d971b602f16ab0b29954745102'
+candidate_gem="$PWD/docs/artifacts/hive-cli-0.7.4-command-receipt-compat-candidate.gem"
 printf '%s  %s\n' "$candidate_sha256" "$candidate_gem" | sha256sum --check --strict
 gem install --install-dir "$PWD/hive-compat-prefix" "$candidate_gem"
 ```

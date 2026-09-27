@@ -6,14 +6,13 @@ require "securerandom"
 require "socket"
 require "hive/command_maintenance_authority"
 require "hive/command_operation"
+require "hive/command_owner_proof"
 require "hive/command_receipt_capacity"
 require "hive/pid_file"
 require "hive/runtime_control_plane"
 
 module Hive
   class CommandReceiptMaintenance
-    DEFAULT_NAMESPACE_CONCURRENCY_LIMIT = 32
-
     def initialize(database: Hive::RuntimeControlPlane.database, authority: nil,
                    clock: -> { Time.now.utc }, alive: Hive::PidFile.method(:alive?),
                    ownership: Hive::PidFile.method(:ownership))
@@ -119,10 +118,12 @@ module Hive
           typed_reason: "command_orphaned_owner", owner_token: nil, updated_at: now
         )
         if count == 1
-          connection[:command_capacity].where(namespace_id: row.fetch(:namespace_id)).update(
-            executing_count: Sequel[:executing_count] - 1,
-            revision: Sequel[:revision] + 1, updated_at: now
-          )
+          if capacity_counted?(row)
+            connection[:command_capacity].where(namespace_id: row.fetch(:namespace_id)).update(
+              executing_count: Sequel[:executing_count] - 1,
+              revision: Sequel[:revision] + 1, updated_at: now
+            )
+          end
           audit!(connection, row, action: "orphaned_owner", reason: reason, evidence: proof)
         end
         count
@@ -174,11 +175,11 @@ module Hive
                       namespace_id: nil)
       require_reason!(reason)
       batch = @database.read { |connection| connection[:command_maintenance_batches][batch_id: batch_id] }
+      authorize_or_conceal!(batch && batch.fetch(:principal))
       raise Hive::UsageError, "unknown receipt maintenance batch #{batch_id}" unless batch
       if namespace_id && batch[:namespace_id] != namespace_id
         raise Hive::UsageError, "batch is not associated with namespace #{namespace_id}"
       end
-      @authority.authorize!(batch.fetch(:principal))
       validate_generation!(batch, expected_generation)
       unless %w[prepared executing].include?(batch.fetch(:state))
         raise Hive::UsageError, "only an unfinished receipt maintenance batch can be abandoned"
@@ -270,6 +271,7 @@ module Hive
 
     def receipt!(receipt_id, namespace_id: nil)
       row = @database.read { |connection| connection[:command_receipts][receipt_id: receipt_id] }
+      authorize_or_conceal!(row && row.fetch(:principal))
       raise Hive::UsageError, "unknown command receipt #{receipt_id}" unless row
       if namespace_id && row.fetch(:namespace_id) != namespace_id
         raise Hive::UsageError, "receipt is not associated with namespace #{namespace_id}"
@@ -279,8 +281,23 @@ module Hive
 
     def pin_and_receipt!(pin_id, namespace_id: nil)
       pin = @database.read { |connection| connection[:command_receipt_pins][pin_id: pin_id] }
+      receipt = pin && @database.read do |connection|
+        connection[:command_receipts][receipt_id: pin.fetch(:receipt_id)]
+      end
+      authorize_or_conceal!(receipt && receipt.fetch(:principal))
       raise Hive::UsageError, "unknown command receipt pin #{pin_id}" unless pin
-      [ pin, receipt!(pin.fetch(:receipt_id), namespace_id: namespace_id) ]
+      raise Hive::CommandConflict, "maintenance target changed" unless receipt
+      if namespace_id && receipt.fetch(:namespace_id) != namespace_id
+        raise Hive::UsageError, "receipt is not associated with namespace #{namespace_id}"
+      end
+      [ pin, receipt ]
+    end
+
+    def authorize_or_conceal!(affected_principal)
+      return @authority.authorize!(affected_principal) if affected_principal
+      return @authority.authority_basis if @authority.installation_owner?
+
+      @authority.authorize!("unknown-maintenance-target")
     end
 
     def authorize!(row)
@@ -312,9 +329,13 @@ module Hive
         }
       end
       if data["outcome"] == "succeeded"
-        raise Hive::CommandUnresolved.new(
-          message: "successful retirement requires an authoritatively reconstructed original response"
-        )
+        validate_successful_reconciliation!(effect_rows, data)
+        result = data.fetch("result")
+        validate_replay_envelope!(result)
+        return {
+          "state" => "succeeded", "status" => Integer(data.fetch("status", Hive::ExitCodes::SUCCESS)),
+          "typed_reason" => nil, "result" => result, "retry_eligible" => false
+        }
       end
       raise Hive::CommandUnresolved.new(
         message: "retirement evidence does not authoritatively account for every command effect"
@@ -323,11 +344,37 @@ module Hive
       raise Hive::UsageError, "retirement evidence has an unsupported shape"
     end
 
+    def validate_successful_reconciliation!(effect_rows, data)
+      supplied = Array(data["effects"])
+      expected_ids = effect_rows.map { |effect| effect.fetch(:effect_id) }.sort
+      supplied_ids = supplied.filter_map { |effect| effect["effect_id"] if effect.is_a?(Hash) }.sort
+      unless !effect_rows.empty? && expected_ids == supplied_ids &&
+             effect_rows.all? { |effect| effect.fetch(:state) == "applied" }
+        raise Hive::CommandUnresolved.new(
+          message: "successful retirement requires applied evidence for every command effect"
+        )
+      end
+      effect_rows.each do |effect|
+        proof = supplied.find { |entry| entry["effect_id"] == effect.fetch(:effect_id) }
+        expected_identity = Digest::SHA256.hexdigest(effect.fetch(:identity_json))
+        observation = proof["observation"]
+        valid = proof["ordinal"] == effect.fetch(:ordinal) &&
+          proof["identity_sha256"] == expected_identity &&
+          observation.is_a?(Hash) && !observation["source"].to_s.empty? &&
+          !observation["correlation_id"].to_s.empty?
+        unless valid
+          raise Hive::CommandUnresolved.new(
+            message: "successful retirement evidence does not match the stored effect identity"
+          )
+        end
+      end
+    end
+
     def terminalize!(row, state:, result:, status:, typed_reason:, reason:, evidence: {})
       validate_replay_envelope!(result)
       result_json = Hive::RuntimeControlPlane::Codec.dump_json(result)
       now = timestamp
-      concurrency_limits = retirement_concurrency_limits
+      concurrency_limits = retirement_concurrency_limits(row)
       changed = @database.transaction do |connection|
         current = connection[:command_receipts][receipt_id: row.fetch(:receipt_id)]
         authorize!(current)
@@ -344,10 +391,12 @@ module Hive
           terminal_at: now, updated_at: now, owner_token: nil
         )
         if count == 1
-          connection[:command_capacity].where(namespace_id: row.fetch(:namespace_id)).update(
-            nonterminal_count: Sequel[:nonterminal_count] - 1,
-            revision: Sequel[:revision] + 1, updated_at: now
-          )
+          if capacity_counted?(row)
+            connection[:command_capacity].where(namespace_id: row.fetch(:namespace_id)).update(
+              nonterminal_count: Sequel[:nonterminal_count] - 1,
+              revision: Sequel[:revision] + 1, updated_at: now
+            )
+          end
           audit!(connection, row, action: "retire_#{state}", reason: reason, evidence: evidence)
         end
         count
@@ -355,17 +404,22 @@ module Hive
       raise Hive::CommandConflict, "receipt changed during retirement" unless changed == 1
     end
 
-    def retirement_concurrency_limits
+    def retirement_concurrency_limits(row)
       global = Hive::CommandReceiptCapacity.global_receipts
+      namespace = @database.read do |connection|
+        connection[:command_namespaces][namespace_id: row.fetch(:namespace_id)]&.
+          fetch(:concurrency_limit, nil)
+      end
       installation = global.fetch(
         "installation_concurrency_limit",
         Hive::CommandReceiptCapacity::DEFAULT_INSTALLATION_CONCURRENCY_LIMIT
       )
-      unless installation.is_a?(Integer) && installation.positive?
+      unless namespace.is_a?(Integer) && namespace.positive? &&
+             installation.is_a?(Integer) && installation.positive?
         raise Hive::ConfigError,
-              "command_receipts.installation_concurrency_limit must be a positive integer"
+              "command receipt concurrency limits must be positive integers"
       end
-      [ DEFAULT_NAMESPACE_CONCURRENCY_LIMIT, installation ]
+      [ namespace, installation ]
     end
 
     def admit_existing_work_execution!(connection, row, limits)
@@ -388,50 +442,22 @@ module Hive
     end
 
     def dead_owner_proof!(row)
-      host = row[:owner_host]
-      pid = row[:owner_pid]
-      recorded = row[:owner_process_start]
-      unless host == Socket.gethostname && pid.is_a?(Integer) && pid.positive? && recorded
-        raise Hive::CommandUnresolved.new(
-          reason: "command_orphaned_pin",
-          message: "owner identity is remote or incomplete and cannot be proven dead"
-        )
-      end
-      observed_at = timestamp
-      classification = Hive::PidFile.death_classification(
-        pid: pid, recorded_start_time: recorded, alive: @alive, ownership: @ownership
+      Hive::CommandOwnerProof.dead!(
+        row, host: Socket.gethostname, alive: @alive, ownership: @ownership, clock: @clock
       )
-      unless %i[dead reused].include?(classification)
-        raise Hive::CommandUnresolved.new(
-          reason: "command_orphaned_pin",
-          message: "owner is live or its identity is unverifiable"
-        )
-      end
-      {
-        "host" => host, "pid" => pid, "recorded_start_time" => recorded,
-        "alive" => classification != :dead, "ownership" => classification.to_s,
-        "observed_at" => observed_at
-      }
     end
 
     def ensure_settlement_safe!(row)
-      if row[:owner_pid] && row[:owner_process_start]
-        classification = Hive::PidFile.death_classification(
-          pid: row[:owner_pid], recorded_start_time: row[:owner_process_start],
-          alive: @alive, ownership: @ownership
-        )
-        unless %i[dead reused].include?(classification)
-          raise Hive::CommandUnresolved.new(
-            message: "receipt owner is live or unverifiable; stop it before retirement"
-          )
-        end
+      dead_owner_proof!(row)
+      continuations = @database.read do |connection|
+        connection[:command_dispatch_contexts]
+          .where(receipt_id: row.fetch(:receipt_id)).all.filter_map do |context|
+            connection[:dispatch_requests][request_id: context.fetch(:request_id)]
+          end
       end
-      continuation = @database.read do |connection|
-        context = connection[:command_dispatch_contexts][receipt_id: row.fetch(:receipt_id)]
-        next nil unless context
-        connection[:dispatch_requests][request_id: context.fetch(:request_id)]
-      end
-      if continuation && %w[queued claimed admitted running].include?(continuation[:state].to_s)
+      if continuations.any? { |continuation|
+        %w[queued claimed admitted running].include?(continuation[:state].to_s)
+      }
         raise Hive::CommandUnresolved.new(
           message: "a resumable command continuation is still queued or in flight"
         )
@@ -439,16 +465,19 @@ module Hive
     end
 
     def validate_replay_envelope!(result)
-      unless result.is_a?(Hash) && %w[json text].include?(result["format"])
-        raise Hive::UsageError, "retirement result must be a durable json or text replay envelope"
+      unless result.is_a?(Hash) && %w[dual json text].include?(result["format"])
+        raise Hive::UsageError, "retirement result must be a durable dual, json, or text replay envelope"
       end
-      if result["format"] == "json"
+      if %w[dual json].include?(result["format"])
         payload = result["payload"]
         digest = result["expanded_sha256"]
         unless payload.is_a?(Hash) && digest == Digest::SHA256.hexdigest(
           Hive::RuntimeControlPlane::Codec.dump_json(payload)
         )
           raise Hive::UsageError, "retirement JSON result has an invalid replay digest"
+        end
+        if result["format"] == "dual" && !result["text"].is_a?(String)
+          raise Hive::UsageError, "retirement dual result must contain text"
         end
       elsif !result["text"].is_a?(String)
         raise Hive::UsageError, "retirement text result must contain text"
@@ -503,6 +532,10 @@ module Hive
 
     def same_owner?(left, right)
       %i[owner_host owner_pid owner_process_start].all? { |key| left[key] == right[key] }
+    end
+
+    def capacity_counted?(row)
+      !(row[:command] == "receipt" && row[:mode] == "prune")
     end
 
     def public_receipt(row, generation:, state:)

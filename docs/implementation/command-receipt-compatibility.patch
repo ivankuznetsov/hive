@@ -1,0 +1,55 @@
+diff --git a/lib/hive/runtime_control_plane/database.rb b/lib/hive/runtime_control_plane/database.rb
+index be44fa474e..1c15bab8f1 100644
+--- a/lib/hive/runtime_control_plane/database.rb
++++ b/lib/hive/runtime_control_plane/database.rb
+@@ -11,6 +11,33 @@ module Hive
+   module RuntimeControlPlane
+     EXPECTED_SCHEMA_SHA256 = "f237684b17dfd8f7ded175a5e3c7a1b0445c4a7bee109fca4f2f51e498ead0a7".freeze
+-
++
++    COMMAND_RECEIPT_SCHEMA_SHA256 =
++      "0de7f2bad101616088278812b14c9c50d14a849980963e41cf9779874ca4c9a2".freeze
++    COMMAND_RECEIPT_OBJECT_NAMES = %w[
++      command_capacity
++      command_dispatch_contexts
++      command_dispatch_contexts_receipt_ordinal_uidx
++      command_effects
++      command_effects_ordinal_uidx
++      command_maintenance_audit
++      command_maintenance_audit_receipt_idx
++      command_maintenance_batches
++      command_maintenance_batches_unfinished_uidx
++      command_namespaces
++      command_namespaces_git_common_uidx
++      command_project_enrollments
++      command_receipt_pins
++      command_receipt_pins_active_idx
++      command_receipt_pins_intent_uidx
++      command_receipts
++      command_receipts_key_uidx
++      command_receipts_owner_idx
++      command_receipts_terminal_idx
++      command_schema_versions
++      command_successor_allocations
++      command_successor_allocations_cycle_uidx
++    ].freeze
++
+     class Database
+       MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze
+       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
+@@ -268,7 +294,14 @@ module Hive
+         rows = database[:sqlite_master].where(type: %w[table index])
+           .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
+           .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
+-        Digest::SHA256.hexdigest(Codec.dump_json(rows)) == expected
++        extension_rows, base_rows = rows.partition do |row|
++          COMMAND_RECEIPT_OBJECT_NAMES.include?(row[1].to_s)
++        end
++        Digest::SHA256.hexdigest(Codec.dump_json(base_rows)) == expected &&
++          (extension_rows.empty? ||
++           (extension_rows.map { |row| row[1].to_s }.sort == COMMAND_RECEIPT_OBJECT_NAMES.sort &&
++            Digest::SHA256.hexdigest(Codec.dump_json(extension_rows)) ==
++              COMMAND_RECEIPT_SCHEMA_SHA256))
+       rescue Sequel::Error
+         false
+       end

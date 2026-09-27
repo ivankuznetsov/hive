@@ -88,7 +88,7 @@ module Hive
       if item.mode && item.mode != mode.to_s
         raise Hive::UsageError, "unsupported keyed mutation mode: #{command} #{mode}"
       end
-      if item.key_policy == :forbidden
+      if key_policy(command: command, mode: mode) == :forbidden
         raise Hive::UsageError, "idempotency keys are forbidden for #{command} #{mode}".strip
       end
       item

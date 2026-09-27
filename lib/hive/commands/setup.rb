@@ -135,7 +135,9 @@ module Hive
         require "hive/runtime_control_plane/command_schema_installation"
         require "hive/runtime_control_plane/command_schema_writer_guard"
         Hive::RuntimeControlPlane::CommandSchemaInstallation.validate_coordinates!(@rollback_package)
-        @command_schema_writer_guard.verify!(state_home: Hive::Paths.state_home)
+        @command_schema_writer_guard.verify!(
+          state_home: Hive::Paths.state_home, web_running: method(:managed_web_running?)
+        )
       end
 
       def emit_receipt_installation_disclosure
@@ -282,7 +284,8 @@ module Hive
           status = Hive::RuntimeControlPlane::Installation.setup(
             install_command_receipts: @install_command_receipts,
             rollback_package: @rollback_package,
-            writer_guard: @command_schema_writer_guard
+            writer_guard: @command_schema_writer_guard,
+            web_running: method(:managed_web_running?)
           )
           details = {
             "phase" => status.fetch("phase"),
@@ -446,6 +449,24 @@ module Hive
             }.merge(state)
           )
         end
+      end
+
+      def managed_web_running?
+        require "hive/commands/web/service_installer"
+        installer = Hive::Commands::Web::ServiceInstaller.new(
+          binary_path: Hive::InvokedBinary.path,
+          environment: @environment,
+          config: web_config
+        )
+        state = if installer.respond_to?(:service_lifecycle_state)
+          installer.service_lifecycle_state
+        else
+          installer.service_state
+        end
+        state["service_running"] == true
+      rescue Hive::Error, SystemCallError, IOError => error
+        raise Hive::ConfigError,
+              "cannot verify managed Hive web writer liveness: #{error.message}"
       end
 
       def observe_web_service(mutation: "opted_out", ok: true, message: nil)

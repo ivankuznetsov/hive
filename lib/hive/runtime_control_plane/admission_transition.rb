@@ -164,8 +164,8 @@ module Hive
 
       def bind_command_context!(db, request_id, context)
         tagged = request_id.to_s.start_with?("command-dispatch:v1:")
-        existing = db[:command_dispatch_contexts][request_id: request_id.to_s] if
-          db.table_exists?(:command_dispatch_contexts)
+        table_available = db.table_exists?(:command_dispatch_contexts)
+        existing = db[:command_dispatch_contexts][request_id: request_id.to_s] if table_available
         if context.nil?
           if tagged && existing.nil?
             raise Attempts::RepositoryError, "tagged command dispatch is missing authenticated context"
@@ -175,17 +175,21 @@ module Hive
         unless tagged && request_id.to_s == context.transport_request_id
           raise Attempts::RepositoryError, "command dispatch transport identity changed"
         end
+        unless table_available
+          raise Hive::ConfigError,
+                "command dispatch context requires the installed command receipt schema"
+        end
         payload = {
           request_id: request_id.to_s, receipt_id: context.receipt_id,
           effect_id: context.effect_id, principal: context.principal,
           principal_source: context.principal_source, ordinal: context.ordinal,
           request_fingerprint: context.request_fingerprint,
-          source_identity: nil,
+          source_identity: context.transport_request_id,
           retry_horizon_expires_at: context.retry_horizon_expires_at&.to_s,
           created_at: Time.now.utc.iso8601(6)
         }
         if existing
-          comparable = payload.except(:created_at, :source_identity)
+          comparable = payload.except(:created_at)
           unless comparable.all? { |key, value| existing[key] == value }
             raise Attempts::RepositoryError, "command dispatch context conflicts with its receipt"
           end

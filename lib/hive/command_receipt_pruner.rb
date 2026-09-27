@@ -4,6 +4,7 @@ require "securerandom"
 require "socket"
 require "hive/command_maintenance_authority"
 require "hive/command_operation"
+require "hive/command_receipt_capacity"
 require "hive/project_identity"
 require "hive/runtime_control_plane"
 require "hive/lock"
@@ -53,7 +54,8 @@ module Hive
         rows = eligible_rows(connection, selected, cutoff: fixed_cutoff, limit: bounded)
         authorize_rows!(rows)
         preview_payload(
-          connection, selected, rows, confirmed: false, fixed_cutoff: fixed_cutoff
+          connection, selected, rows, confirmed: false, fixed_cutoff: fixed_cutoff,
+          identity_cursor: cursor, identity_limit: bounded
         )
       end
     rescue Sequel::DatabaseLockTimeout => error
@@ -74,6 +76,8 @@ module Hive
       context = Hive::CommandOperation.current_context
       batch_id = SecureRandom.uuid
       candidates = []
+      owner_process_start = Hive::Lock.process_start_time(Process.pid) ||
+        raise(Hive::ConfigError, "cannot record prune owner process start time")
 
       @database.transaction do |connection|
         busy = connection[:command_maintenance_batches]
@@ -105,8 +109,7 @@ module Hive
           principal_scope: @authority.installation_owner? ? "installation" : "own",
           kind: "prune", state: "executing", generation: 1,
           owner_host: Socket.gethostname, owner_pid: Process.pid,
-          owner_process_start: Hive::Lock.process_start_time(Process.pid) ||
-            raise(Hive::ConfigError, "cannot record prune owner process start time"),
+          owner_process_start: owner_process_start,
           fixed_cutoff: timestamp(fixed_cutoff),
           candidates_json: codec(candidates.map { |row| candidate_identity(row) }),
           outcomes_json: "[]", created_at: now, updated_at: now
@@ -222,6 +225,8 @@ module Hive
               connection[:command_receipt_pins].where(receipt_id: receipt_id).delete
               connection[:command_successor_allocations]
                 .where(predecessor_receipt_id: receipt_id).delete
+              connection[:command_successor_allocations]
+                .where(successor_receipt_id: receipt_id).delete
               connection[:command_receipts].where(
                 receipt_id: receipt_id, generation: row.fetch(:generation)
               ).delete
@@ -261,7 +266,8 @@ module Hive
     end
 
     def preview_payload(connection, namespace_id, rows, confirmed:, fixed_cutoff:,
-                        outcomes: nil, batch_id: nil)
+                        outcomes: nil, batch_id: nil, identity_cursor: nil,
+                        identity_limit: DEFAULT_LIMIT)
       namespace_capacity = if @authority.installation_owner?
         connection[:command_capacity][namespace_id: namespace_id]
       else
@@ -277,25 +283,52 @@ module Hive
       installation = connection[:command_capacity].select do
         [ sum(:nonterminal_count).as(:n), sum(:executing_count).as(:a), sum(:logical_bytes).as(:bytes) ]
       end.first
+      namespace = connection[:command_namespaces][namespace_id: namespace_id]
       payload = {
         "schema" => "hive-receipt-prune", "schema_version" => 1, "ok" => true,
         "preview" => !confirmed, "confirmed" => confirmed,
         "namespace_id" => namespace_id, "cutoff" => timestamp(fixed_cutoff),
         "candidate_count" => rows.length,
         "candidates" => rows.map { |row| candidate_identity(row) },
-        "namespace_utilization" => utilization(namespace_capacity),
+        "namespace_utilization" => utilization(
+          namespace_capacity,
+          limits: {
+            nonterminal_count: namespace&.fetch(:nonterminal_limit, nil),
+            executing_count: namespace&.fetch(:concurrency_limit, nil),
+            logical_bytes: namespace&.fetch(:byte_admission_limit, nil)
+          }
+        ),
         "warning_band_percent" => WARNING_BAND_PERCENT,
         "action_band_percent" => ACTION_BAND_PERCENT
       }
       if @authority.installation_owner?
-        payload["installation_utilization"] = {
+        global = Hive::CommandReceiptCapacity.global_receipts
+        physical = physical_utilization(connection)
+        payload["installation_utilization"] = utilization(
+          {
           "nonterminal_count" => installation.fetch(:n).to_i,
           "executing_count" => installation.fetch(:a).to_i,
-          "logical_namespace_bytes" => installation.fetch(:bytes).to_i,
-          "main_bytes" => File.size(@database.path),
-          "wal_bytes" => File.exist?("#{@database.path}-wal") ? File.size("#{@database.path}-wal") : 0
-        }
-        payload.merge!(maintenance_identities(connection, namespace_id))
+          "logical_bytes" => installation.fetch(:bytes).to_i,
+          "occupied_bytes" => physical.fetch("occupied_bytes")
+          },
+          limits: {
+            nonterminal_count: global.fetch(
+              "installation_nonterminal_limit",
+              Hive::CommandReceiptCapacity::DEFAULT_INSTALLATION_NONTERMINAL_LIMIT
+            ),
+            executing_count: global.fetch(
+              "installation_concurrency_limit",
+              Hive::CommandReceiptCapacity::DEFAULT_INSTALLATION_CONCURRENCY_LIMIT
+            ),
+            occupied_bytes: global.fetch(
+              "installation_byte_admission_limit",
+              Hive::CommandReceiptCapacity::DEFAULT_INSTALLATION_BYTE_LIMIT
+            )
+          }
+        ).merge(physical)
+        payload.merge!(maintenance_identities(
+          connection, namespace_id, limit: identity_limit, cursor: identity_cursor
+        ))
       else
         payload["installation_pressure"] = "ask_installation_owner"
       end
@@ -320,9 +353,20 @@ module Hive
             "namespace_id" => row.fetch(:namespace_id),
             "generation" => row.fetch(:enrollment_generation),
             "keyed_intake_enabled" => row.fetch(:keyed_intake_enabled) == 1,
-            "configured_limits" => { "available" => false }
-          }.merge(utilization(capacity)).merge(
-            maintenance_identities(connection, row.fetch(:namespace_id))
+            "configured_limits" => {
+              "nonterminal_count" => row.fetch(:nonterminal_limit),
+              "executing_count" => row.fetch(:concurrency_limit),
+              "logical_bytes" => row.fetch(:byte_admission_limit)
+            }
+          }.merge(utilization(
+            capacity,
+            limits: {
+              nonterminal_count: row.fetch(:nonterminal_limit),
+              executing_count: row.fetch(:concurrency_limit),
+              logical_bytes: row.fetch(:byte_admission_limit)
+            }
+          )).merge(
+            maintenance_identities(connection, row.fetch(:namespace_id), limit: DEFAULT_LIMIT)
           )
         end,
         "next_cursor" => more ? rows.last.fetch(:namespace_id) : nil,
@@ -331,12 +375,51 @@ module Hive
       }
     end
 
-    def utilization(row)
-      {
-        "nonterminal_count" => row&.fetch(:nonterminal_count, 0).to_i,
-        "executing_count" => row&.fetch(:executing_count, 0).to_i,
-        "logical_bytes" => row&.fetch(:logical_bytes, 0).to_i
+    def utilization(row, limits: {})
+      values = {
+        "nonterminal_count" => value_from(row, :nonterminal_count).to_i,
+        "executing_count" => value_from(row, :executing_count).to_i,
+        "logical_bytes" => value_from(row, :logical_bytes).to_i
       }
+      occupied = value_from(row, :occupied_bytes)
+      values["occupied_bytes"] = occupied.to_i unless occupied.nil?
+      values["limits"] = limits.transform_keys(&:to_s)
+      values["percent"] = limits.each_with_object({}) do |(key, limit), result|
+        next unless limit.to_i.positive?
+        result[key.to_s] = ((values.fetch(key.to_s, 0).to_f / limit) * 100).round(2)
+      end
+      values["pressure_band"] = pressure_band(values.fetch("percent").values.max.to_f)
+      values
+    end
+
+    def value_from(row, key)
+      return unless row.respond_to?(:key?)
+      return row[key] if row.key?(key)
+      row[key.to_s] if row.key?(key.to_s)
+    end
+
+    def pressure_band(percent)
+      return "action" if percent >= ACTION_BAND_PERCENT
+      return "warning" if percent >= WARNING_BAND_PERCENT
+      "normal"
+    end
+
+    def physical_utilization(connection)
+      page_size = pragma_integer(connection, "page_size")
+      page_count = pragma_integer(connection, "page_count")
+      freelist_count = pragma_integer(connection, "freelist_count")
+      wal_bytes = File.exist?("#{@database.path}-wal") ? File.size("#{@database.path}-wal") : 0
+      {
+        "page_size" => page_size, "page_count" => page_count,
+        "freelist_count" => freelist_count,
+        "occupied_main_bytes" => (page_count - freelist_count) * page_size,
+        "wal_bytes" => wal_bytes,
+        "occupied_bytes" => ((page_count - freelist_count) * page_size) + wal_bytes
+      }
+    end
+
+    def pragma_integer(connection, name)
+      Integer(connection.fetch("PRAGMA #{name}").first.values.first)
     end
 
     def candidate_identity(row)
@@ -359,21 +442,41 @@ module Hive
       total
     end
 
-    def maintenance_identities(connection, namespace_id)
+    def maintenance_identities(connection, namespace_id, limit:, cursor: nil)
       receipt_ids = connection[:command_receipts].where(namespace_id: namespace_id).select(:receipt_id)
+      cursor_kind, cursor_id = cursor.to_s.split(":", 2) if cursor
+      sources = [
+        [ "batch", :batch_id, connection[:command_maintenance_batches]
+          .where(namespace_id: namespace_id, state: %w[prepared executing]) ],
+        [ "pin", :pin_id, connection[:command_receipt_pins]
+          .where(receipt_id: receipt_ids, lifecycle_status: "active") ],
+        [ "receipt", :receipt_id, connection[:command_receipts]
+          .where(namespace_id: namespace_id, state: Hive::CommandReceiptStore::NONTERMINAL_STATES) ]
+      ]
+      identities = sources.each_with_object([]) do |(kind, id_column, dataset), rows|
+        next if cursor_kind && kind < cursor_kind
+        scoped = dataset
+        scoped = scoped.where { Sequel[id_column] > cursor_id.to_s } if cursor_kind == kind
+        remaining = limit + 1 - rows.length
+        break rows unless remaining.positive?
+        rows.concat(scoped.order(id_column).limit(remaining)
+          .select_map([ id_column, :generation ])
+          .map { |id, generation| [ kind, id, generation ] })
+      end
+      more = identities.length > limit
+      page = identities.first(limit)
+      grouped = page.group_by(&:first)
       {
-        "nonterminal_receipts" => connection[:command_receipts]
-          .where(namespace_id: namespace_id, state: Hive::CommandReceiptStore::NONTERMINAL_STATES)
-          .order(:receipt_id).limit(DEFAULT_LIMIT).select_map([ :receipt_id, :generation ])
-          .map { |receipt_id, generation| { "receipt_id" => receipt_id, "generation" => generation } },
-        "active_pins" => connection[:command_receipt_pins]
-          .where(receipt_id: receipt_ids, lifecycle_status: "active")
-          .order(:pin_id).limit(DEFAULT_LIMIT).select_map([ :pin_id, :generation ])
-          .map { |pin_id, generation| { "pin_id" => pin_id, "generation" => generation } },
-        "unfinished_batches" => connection[:command_maintenance_batches]
-          .where(namespace_id: namespace_id, state: %w[prepared executing])
-          .order(:batch_id).limit(DEFAULT_LIMIT).select_map([ :batch_id, :generation ])
-          .map { |batch_id, generation| { "batch_id" => batch_id, "generation" => generation } }
+        "nonterminal_receipts" => Array(grouped["receipt"]).map {
+          |_kind, id, generation| { "receipt_id" => id, "generation" => generation }
+        },
+        "active_pins" => Array(grouped["pin"]).map {
+          |_kind, id, generation| { "pin_id" => id, "generation" => generation }
+        },
+        "unfinished_batches" => Array(grouped["batch"]).map {
+          |_kind, id, generation| { "batch_id" => id, "generation" => generation }
+        },
+        "maintenance_next_cursor" => more ? "#{page.last[0]}:#{page.last[1]}" : nil
       }
     end
 

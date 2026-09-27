@@ -570,7 +570,7 @@ module Hive
           principal_source: source.fetch(:principal_source).to_s,
           ordinal: Integer(source.fetch(:ordinal)),
           request_fingerprint: source.fetch(:request_fingerprint).to_s,
-          source_identity: source[:source_identity]&.to_s,
+          source_identity: (source[:source_identity] || source.fetch(:transport_request_id)).to_s,
           retry_horizon_expires_at: source[:retry_horizon_expires_at]&.to_s,
           transport_request_id: source.fetch(:transport_request_id).to_s
         }
@@ -580,7 +580,7 @@ module Hive
         existing = command_context(request_id)
         return existing.nil? if context.nil?
         expected = normalize_command_context(context).transform_keys(&:to_s)
-          .except("transport_request_id", "source_identity")
+          .except("transport_request_id")
         existing && expected.all? { |key, value| existing[key] == value }
       end
 

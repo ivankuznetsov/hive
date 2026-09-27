@@ -13,10 +13,11 @@ module Hive
 
       def setup(state_home: Hive::Paths.state_home, install_command_receipts: false,
                 rollback_package: CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE,
-                writer_guard: CommandSchemaWriterGuard)
+                writer_guard: CommandSchemaWriterGuard, web_running: -> { false })
         CommandSchemaInstallation.validate_coordinates!(rollback_package) if install_command_receipts
         Hive::Daemon::ActivationLock.new(hive_home: state_home).synchronize do
-          writer_guard.verify!(state_home: state_home) if install_command_receipts
+          writer_guard.verify!(state_home: state_home, web_running: web_running) if
+            install_command_receipts
           path = Hive::Paths.runtime_control_plane_path(state_home)
           database = Database.new(path: path)
           diagnosis = database.diagnostics

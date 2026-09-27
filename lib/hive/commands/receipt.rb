@@ -76,6 +76,7 @@ module Hive
       private
 
       def execute
+        validate_subcommand_options!
         case @subcommand
         when "prune" then execute_prune
         when "retire" then execute_retire
@@ -129,6 +130,31 @@ module Hive
         end
       end
 
+      def validate_subcommand_options!
+        supplied = {
+          "--settle-without-result" => @settle_without_result,
+          "--orphaned-owner" => @orphaned_owner,
+          "--evidence" => !@evidence_path.nil?,
+          "--force" => @force,
+          "--new-identity" => @new_identity,
+          "--previous-identity" => !@previous_identity.nil?
+        }.select { |_flag, present| present }.keys
+        allowed = case @subcommand
+        when "retire" then %w[--settle-without-result --orphaned-owner --evidence]
+        when "release-pin" then %w[--force]
+        when "enroll" then %w[--new-identity --previous-identity]
+        else []
+        end
+        ignored = supplied - allowed
+        unless ignored.empty?
+          raise Hive::UsageError, "#{ignored.join(', ')} not accepted by receipt #{@subcommand}"
+        end
+        if @subcommand == "retire" && (supplied & allowed).length != 1
+          raise Hive::UsageError,
+                "retire requires exactly one of --evidence, --orphaned-owner, or --settle-without-result"
+        end
+      end
+
       def execute_enroll
         raise Hive::UsageError, "enroll requires --project" unless project_root
         raise Hive::UsageError, "enroll requires --new-identity" unless @new_identity
@@ -153,12 +179,19 @@ module Hive
           },
           project_root: project_root, json: true, structured: true,
           maintenance: true,
+          failure_payload: ->(error) { envelope_payload_for(error) },
           store: receipt_store
         )
       end
 
       def reject_forbidden_key!
-        return if @idempotency_key.nil? || @subcommand == "prune"
+        return if @idempotency_key.nil?
+        if @subcommand == "prune" && @confirm
+          return
+        end
+        if @subcommand == "prune"
+          raise Hive::UsageError, "--idempotency-key requires confirmed receipt prune"
+        end
         raise Hive::UsageError, "--idempotency-key is supported only by hive receipt prune"
       end
 

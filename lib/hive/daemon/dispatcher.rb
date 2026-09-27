@@ -3827,6 +3827,7 @@ module Hive
         return :shutdown unless admission_open?
 
         now = current_dispatch_time(now)
+        validate_command_dispatch_context!(req)
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
         durable_admission = @attempt_dispatcher && durable_task_request?(req)
@@ -3975,6 +3976,18 @@ module Hive
           req.request_id, state_home: dispatch_request_state_home
         )
         raise
+      end
+
+      def validate_command_dispatch_context!(request)
+        tagged = request.request_id.to_s.start_with?("command-dispatch:v1:")
+        return unless dispatch_repository.respond_to?(:command_context)
+
+        context = dispatch_repository.command_context(request.request_id)
+        if tagged && context.nil?
+          raise Hive::ConfigError,
+                "tagged command dispatch is missing its durable caller context"
+        end
+        context
       end
 
       def durable_task_request?(req)

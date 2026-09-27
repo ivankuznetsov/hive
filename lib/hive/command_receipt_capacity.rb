@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require "sqlite3"
 require "hive/config"
 require "hive/errors"
 require "hive/runtime_control_plane/codec"
@@ -132,19 +133,23 @@ module Hive
       true
     end
 
-    # Measure before entering an admission write transaction. SQLite PRAGMAs
-    # and sidecar metadata reads must not extend the installation write lock.
-    def occupied_installation_bytes
-      page_size, occupied_pages = database.read do |connection|
-        size = pragma_integer(connection, "page_size")
-        pages = pragma_integer(connection, "page_count") - pragma_integer(connection, "freelist_count")
-        [ size, pages ]
+    # Admission passes its active transaction connection so page/freelist and
+    # WAL bytes are observed in the same atomic threshold decision.
+    def occupied_installation_bytes(connection: nil)
+      measure = lambda do |active_connection|
+        page_size = pragma_integer(active_connection, "page_size")
+        occupied_pages = pragma_integer(active_connection, "page_count") -
+          pragma_integer(active_connection, "freelist_count")
+        occupied_main = occupied_pages * page_size
+        wal = begin
+          File.stat("#{database.path}-wal").size
+        rescue Errno::ENOENT
+          0
+        end
+        occupied_main + wal
       end
-      wal = File.stat("#{database.path}-wal").size
-      (occupied_pages * page_size) + wal
-    rescue Errno::ENOENT
-      occupied_pages * page_size
-    rescue SystemCallError
+      connection ? measure.call(connection) : database.read { |db| measure.call(db) }
+    rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError, ArgumentError, TypeError
       capacity_error!(
         :command_capacity_exhausted, :installation,
         "free disk and restore runtime database availability, then rerun"

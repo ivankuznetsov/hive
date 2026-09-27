@@ -33,10 +33,22 @@ terminal receipts carrying 2 KiB request and 2 KiB result payloads, occupied
 pages were 6,201,344 bytes: about 5.7 KiB incremental per receipt, with WAL at
 about 4.0 MiB after automatic checkpointing. A 50-row near-maximum sample with
 32 KiB requests and 220 KiB results added about 248.3 KiB per receipt. These
-are local allocation measurements, not universal filesystem guarantees; row,
-effect, pin, audit, intent, concurrent-writer, checkpoint, and headroom terms
-must be budgeted separately. The shipped byte limits are conservative operator
-admission thresholds, not reserved space or a finalization guarantee.
+are local allocation measurements, not universal filesystem guarantees.
+
+A second 1,000-row differential run measured the auxiliary tables after a
+truncate checkpoint. The receipt-only control occupied 970,752 bytes. One
+effect added 180 bytes/receipt, one active pin 225 bytes/receipt, one
+maintenance audit row 193 bytes/receipt, and one dispatch-intent context 397
+bytes/receipt (rounded page-allocation deltas). Four concurrent writer
+processes inserting the same 1,000-row control serialized successfully and
+peaked at a 4,140,632-byte WAL against 970,752 occupied main bytes, a 4.27x
+transient amplification. This is why admission uses main occupied pages plus
+the current WAL and reserves a 260 KiB next-operation allowance. At the default
+installation A=3,200, one such allowance per executing command is about 813
+MiB, leaving roughly 5.46 GiB below the 6.25 GiB installation threshold for
+retained rows, auxiliary evidence, checkpoints, and filesystem variation. The
+threshold remains an admission backstop, not reserved disk or a finalization
+guarantee.
 
 With retention W=30 days and weekly prune interval P=7, retained rows are:
 
@@ -66,14 +78,17 @@ authoritative domain/provider reconciliation accounts for every effect. Never
 infer non-application from process death, elapsed time, or a missing response.
 
 The default staffing assumption is one operator able to act within one business
-day. It is not a service guarantee, an allocated minutes/day value, or measured
-throughput. Installations may override operator count and response business
-days. If T operator minutes per namespace/day is explicitly allocated and a
-representative end-to-end investigation plus confirmed single-receipt
-settlement takes measured t minutes, sustainable arrivals must stay below
-`floor(T/t)` with headroom for backlog and orphan triage. Absent T does not mean
-zero, but it cannot justify a positive ceiling; explicit T=0 yields no positive
-sustainable rate.
+day. It is not a service guarantee or an allocated minutes/day value.
+Installations may override operator count and response business days. A local
+100-receipt run measured the storage transaction itself at 3.19 ms p50 and
+4.14 ms p95; the preview-plus-confirm API path measured 2.50 ms p50 and 3.20 ms
+p95 after warm-up. Those figures exclude the human/provider investigation and
+therefore cannot be used as settlement throughput. Each installation must time
+that investigation and confirmation workflow as `t` minutes, explicitly
+allocate `T` operator minutes per namespace/day, and keep arrivals below
+`floor(T/t)` with headroom for backlog and orphan triage. No `T` is invented by
+Hive: absent T cannot justify a positive ceiling, and explicit T=0 yields no
+positive sustainable rate.
 
 At an N stop, consider all of: raise the namespace N config with matching
 installation/byte headroom; terminal-only prune for reusable pages (not N);

@@ -641,6 +641,12 @@ module Hive
         state = write_state(state.merge(
           "push_attempted_at" => timestamp, "updated_at" => timestamp
         ))
+        record_command_effect_submission(
+          "github_push",
+          request,
+          "expected_remote_oid" => state.fetch("expected_remote_oid"),
+          "head_oid" => request.head_oid
+        )
         begin
           receipt = @git.push_exact(
             worktree_path: request.worktree_path, branch: request.branch,
@@ -707,6 +713,12 @@ module Hive
           "create_attempts" => attempts, "create_attempted_at" => timestamp,
           "updated_at" => timestamp
         ))
+        record_command_effect_submission(
+          "github_pull_request",
+          request,
+          "publication_id" => request.publication_id,
+          "head_oid" => request.head_oid
+        )
         begin
           @github.create_pull_request(
             request: request, publication_id: request.publication_id
@@ -736,6 +748,19 @@ module Hive
         return exact.first if candidates.one? && exact.one?
 
         blocked!("pr_identity_conflict", "pull-request identity conflict requires operator reconciliation")
+      end
+
+      def record_command_effect_submission(kind, request, identity)
+        return unless defined?(Hive::CommandOperation)
+
+        Hive::CommandOperation.record_effect_submission(
+          kind: kind,
+          identity: {
+            "publication_id" => request.publication_id,
+            "host" => request.host, "repository" => request.repository,
+            "branch" => request.branch
+          }.merge(identity)
+        )
       end
 
       def complete_inventory(request)

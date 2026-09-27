@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "hive/config"
-require "hive/invoked_binary"
 require "hive/paths"
 require "hive/pid_file"
 
@@ -14,7 +13,7 @@ module Hive
                   registered_projects: Hive::Config.registered_projects,
                   alive: Hive::PidFile.method(:alive?),
                   ownership: Hive::PidFile.method(:ownership),
-                  web_running: method(:managed_web_running?))
+                  web_running: -> { false })
         roots = [ state_home ] + Array(registered_projects).filter_map do |entry|
           entry.is_a?(Hash) && (entry["hive_state_path"] ||
             (entry["path"] && File.join(entry["path"], ".hive-state")))
@@ -54,21 +53,6 @@ module Hive
               "cannot verify command-schema writer liveness from #{path}: #{error.message}"
       end
 
-      def managed_web_running?
-        require "hive/commands/web/service_installer"
-        installer = Hive::Commands::Web::ServiceInstaller.new(
-          binary_path: Hive::InvokedBinary.path
-        )
-        state = if installer.respond_to?(:service_lifecycle_state)
-          installer.service_lifecycle_state
-        else
-          installer.service_state
-        end
-        state["service_running"] == true
-      rescue Hive::Error, SystemCallError, IOError => error
-        raise Hive::ConfigError,
-              "cannot verify managed Hive web writer liveness: #{error.message}"
-      end
     end
   end
 end

@@ -2,6 +2,7 @@ require "time"
 require "securerandom"
 require "hive/paths"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/command_receipt_store"
 require "hive/attempts/api"
 require "hive/attempts/generation"
 require "hive/recovery/api"
@@ -33,6 +34,15 @@ module Hive
         repository ||= repository_for(state_home)
         command_context ||= current_command_context
         request_id ||= command_context&.transport_request_id || repository.generate_request_id
+        if command_context && defined?(Hive::CommandOperation)
+          Hive::CommandOperation.record_effect_submission(
+            kind: "dispatch_request",
+            identity: {
+              "request_id" => request_id.to_s, "project" => project.to_s,
+              "slug" => slug.to_s
+            }
+          )
+        end
         repository.write_request!(
           project: project,
           slug: slug,
@@ -60,6 +70,35 @@ module Hive
         write!(
           project: project, slug: slug, argv: argv,
           **attributes, **identity
+        )
+      end
+
+      # Allocate the one durable successor identity for an automated delivery
+      # cycle. All receipt/principal/request bindings come from the persisted
+      # predecessor dispatch context; callers cannot substitute labels.
+      def allocate_successor!(predecessor_request_id:, intent_id:, intent_version:,
+                              delivery_cycle_id:, state_home: Hive::Paths.state_home,
+                              repository: nil, store: nil)
+        repository ||= repository_for(state_home)
+        context = repository.command_context(predecessor_request_id)
+        unless context
+          raise Hive::CommandUnresolved.new(
+            message: "predecessor dispatch has no durable command context"
+          )
+        end
+        store ||= Hive::CommandReceiptStore.new(database: repository.database)
+        receipt = store.receipt(context.fetch("receipt_id"))
+        unless receipt && receipt.fetch(:principal) == context.fetch("principal") &&
+               receipt.fetch(:request_fingerprint) == context.fetch("request_fingerprint")
+          raise Hive::CommandConflict, "predecessor command context changed"
+        end
+        store.allocate_successor(
+          namespace_id: receipt.fetch(:namespace_id),
+          principal: context.fetch("principal"), intent_id: intent_id,
+          intent_version: intent_version,
+          predecessor_receipt_id: receipt.fetch(:receipt_id),
+          delivery_cycle_id: delivery_cycle_id,
+          request_fingerprint: context.fetch("request_fingerprint")
         )
       end
 

@@ -190,6 +190,8 @@ module Hive
             project.fetch("path")
           },
           json: @json,
+          failure_payload: ->(error) { envelope_payload_for(error) },
+          text_renderer: ->(payload) { new_result_text(payload) },
           store: receipt_store
         )
       end
@@ -217,8 +219,9 @@ module Hive
         return true if @command_receipt_store
 
         Hive::RuntimeControlPlane::CommandSchema.installed?(receipt_store.database)
-      rescue Hive::Error, Sequel::Error
-        false
+      rescue Hive::Error, Sequel::Error => error
+        raise Hive::ConfigError,
+              "cannot verify command receipt storage for keyed new: #{error.message}"
       end
 
       def receipt_store
@@ -436,6 +439,18 @@ module Hive
           puts "next: #{action.command}" if action.command
         end
         payload
+      end
+
+      def new_result_text(payload)
+        if payload.fetch("created")
+          task = Hive::Task.new(payload.fetch("task_folder"))
+          command = payload.dig("next_action", "command")
+          "hive: captured #{task.state_file}\n#{command ? "next: #{command}\n" : ''}"
+        else
+          command = payload.dig("next_action", "command")
+          "hive: idempotent task already exists at #{payload.fetch('task_folder')}\n" \
+            "#{command ? "next: #{command}\n" : ''}"
+        end
       end
 
       def resolve_workflow(project)

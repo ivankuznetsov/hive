@@ -78,7 +78,7 @@ hive receipt retire RECEIPT_ID --expected-generation G \
 hive receipt retire RECEIPT_ID --expected-generation G \
   --orphaned-owner --reason TEXT --confirm --json
 
-# Restore-authority evidence is bounded JSON and must account for every effect.
+# Authoritative reconciliation evidence is bounded JSON and must account for every effect.
 hive receipt retire RECEIPT_ID --expected-generation G \
   --evidence evidence.json --reason TEXT --confirm --json
 
@@ -93,12 +93,25 @@ hive receipt abandon-batch BATCH_ID --expected-generation G \
 Installation owners can preview bounded namespace summaries without a project,
 and can use `--namespace-id UUID` after a project has been forgotten. The
 selector exposes IDs and generations needed for maintenance, not keys or saved
-results. Other principals cannot enumerate namespaces or foreign operations.
+results. `maintenance_next_cursor` paginates the combined batch, pin, and
+non-terminal receipt identities within the selected namespace. Other
+principals cannot enumerate namespaces or foreign operations. Preview reports
+effective namespace and installation limits, calculated utilization, physical
+page/freelist/WAL occupancy, and the 70/85 percent pressure band used by
+admission diagnostics.
 
 ```sh
 hive receipt prune --json --limit 100
 hive receipt prune --namespace-id UUID --json
 ```
+
+A successful evidence retirement accepts only a durable replay envelope plus
+one reconciliation entry for every stored effect. Each entry must match the
+stored effect id, ordinal, and identity digest and include a nonempty
+authoritative observation source and correlation id; every stored effect must
+already be `applied`. A partial list, an unknown effect, or a bare operator
+assertion remains unresolved. Confirm-time generation and authority checks
+still fence late owners and revoked installation-owner credentials.
 
 Relocation or a re-clone with a deliberately abandoned prior identity is
 explicit and cannot recover old keys in the new store:

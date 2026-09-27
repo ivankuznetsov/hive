@@ -449,6 +449,14 @@ class WebSupervisorTest < Minitest::Test
     assert_includes errors, "identity receipt cleanup failed"
   end
 
+  def test_clear_supervisor_identity_tolerates_a_receipt_removed_before_cleanup
+    supervisor = build
+    supervisor.instance_variable_set(:@supervisor_identity, { "pid" => Process.pid })
+    supervisor.define_singleton_method(:pid_file) { File.join(Dir.tmpdir, "missing-supervisor.pid") }
+
+    assert_nil supervisor.send(:clear_supervisor_identity!)
+  end
+
   def test_start_due_restarts_respawns_only_due_entries_and_not_while_stopping
     with_tmp_global_config do
       sup = build

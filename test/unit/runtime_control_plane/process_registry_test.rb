@@ -296,6 +296,32 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
+  def test_unreadable_legacy_pid_receipt_is_reported_as_unknown
+    with_registry do |database, _registry, root|
+      receipt = File.join(root, ".daemon.pid")
+      File.write(receipt, { "pid" => Process.pid }.to_yaml)
+      original_file_read = File.method(:read)
+
+      capability = Hive::RuntimeControlPlane::QuiescenceCapability.new(
+        database: database, state_home: root,
+        custody: Hive::Attempts::ProcessCustody.unsupported("test")
+      )
+
+      with_replaced_singleton_method(File, :read, lambda { |path, *args|
+        raise IOError, "receipt vanished during read" if path == receipt
+
+        original_file_read.call(path, *args)
+      }) do
+        legacy = capability.send(:known_legacy_processes)
+
+        assert_equal [ {
+          "service_identity" => ".daemon.pid", "pid" => nil,
+          "unknown_reason" => "pid_receipt_unreadable"
+        } ], legacy
+      end
+    end
+  end
+
   def test_capability_records_an_inherited_supervisor_when_its_identity_is_available
     identity = Hive::Attempts::ProcessSnapshot.new(
       pid: 123, start_fingerprint: "supervisor", session_id: 123, process_group_id: 123

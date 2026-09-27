@@ -408,6 +408,7 @@ class CommandOperationTest < Minitest::Test
     assert_equal({ "format" => "text", "text" => "invalid\n" },
                  operation.send(:stored_failure, Hive::UsageError.new("invalid")))
 
+    operation.instance_variable_set(:@command, "answer")
     malformed = { "slot" => { "binding" => Base64.urlsafe_encode64("{") } }
     assert_equal malformed, operation.send(:template_payload, malformed)
     conflicting = {

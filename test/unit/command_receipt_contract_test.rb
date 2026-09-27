@@ -1034,6 +1034,11 @@ class CommandReceiptContractTest < Minitest::Test
     with_replaced_singleton_method(approve, :resolve_task, -> { task }) do
       operation = approve.send(:command_operation)
       assert_equal "/project", operation.instance_variable_get(:@project_root).call
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ { "name" => "demo", "path" => "/project" } ] }
+      ) do
+        assert_equal [ "/project" ], operation.instance_variable_get(:@project_roots).call
+      end
       failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
       assert_equal false, failure.fetch("ok")
       text = operation.instance_variable_get(:@text_renderer).call(
@@ -1044,9 +1049,15 @@ class CommandReceiptContractTest < Minitest::Test
     stage = Hive::Commands::StageAction.new(
       "plan", "task", idempotency_key: "key", command_receipt_store: store
     )
-    with_replaced_singleton_method(stage, :resolve_receipt_project_root, -> { task.project_root }) do
+    resolver = Struct.new(:resolved) { def resolve = resolved }.new(task)
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
       operation = stage.send(:command_operation)
       assert_equal "/project", operation.instance_variable_get(:@project_root).call
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ { "name" => "demo", "path" => "/project" } ] }
+      ) do
+        assert_equal [ "/project" ], operation.instance_variable_get(:@project_roots).call
+      end
       failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
       assert_equal false, failure.fetch("ok")
       text = operation.instance_variable_get(:@text_renderer).call(
@@ -1087,12 +1098,16 @@ class CommandReceiptContractTest < Minitest::Test
     failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
     assert_equal false, failure.fetch("ok")
     created = { "created" => true, "task_folder" => "/project/.hive-state/stages/1-inbox/task" }
-    existing = created.merge("created" => false)
+    existing = created.merge(
+      "created" => false, "next_action" => { "command" => "hive brainstorm task" }
+    )
     task = Struct.new(:state_file).new("/project/.hive-state/stages/1-inbox/task/task.md")
     with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
       assert_includes operation.instance_variable_get(:@text_renderer).call(created), "captured"
     end
-    assert_includes operation.instance_variable_get(:@text_renderer).call(existing), "already exists"
+    existing_text = operation.instance_variable_get(:@text_renderer).call(existing)
+    assert_includes existing_text, "already exists"
+    assert_includes existing_text, "next: hive brainstorm task"
 
     yielding = Object.new
     yielding.define_singleton_method(:call) { |&block| block.call }

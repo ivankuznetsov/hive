@@ -18,4 +18,22 @@ class NewCommandReceiptTest < Minitest::Test
 
     assert_includes error.message, "cannot verify command receipt storage"
   end
+
+  def test_keyed_call_uses_command_operation_when_receipt_storage_is_available
+    store = Struct.new(:database).new(Object.new)
+    operation = Object.new
+    operation.define_singleton_method(:call) { |&block| block.call }
+    command = Hive::Commands::New.new(
+      "demo", "idea", idempotency_key: "stable", command_receipt_store: store
+    )
+    command.define_singleton_method(:command_operation) { operation }
+    command.define_singleton_method(:perform_call!) do
+      raise "command operation context was not active" unless @inside_command_operation
+
+      "created"
+    end
+
+    assert_equal "created", command.call!
+    refute command.instance_variable_get(:@inside_command_operation)
+  end
 end

@@ -511,6 +511,21 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_durable_boundary_refuses_legacy_duplicate_without_saved_response
+    with_initialized_project do |_project_root, project|
+      create_json(project, "legacy retry", key: "creator:legacy", slug: "legacy-task")
+      command = Hive::Commands::New.new(
+        project, "legacy retry", slug_override: "ignored-task",
+        idempotency_key: "creator:legacy", json: true
+      )
+      command.instance_variable_set(:@inside_command_operation, true)
+
+      error = assert_raises(Hive::CommandUnresolved) { command.send(:perform_call!) }
+
+      assert_includes error.message, "original caller response was not saved"
+    end
+  end
+
   def test_legacy_creation_does_not_write_idempotency_metadata
     with_initialized_project do |project_root, project|
       capture_io { Hive::Commands::New.new(project, "ordinary task", slug_override: "ordinary-task").call! }

@@ -329,11 +329,11 @@ module Hive
         }
       end
       if data["outcome"] == "succeeded"
-        validate_successful_reconciliation!(effect_rows, data)
-        result = data.fetch("result")
+        authoritative = validate_successful_reconciliation!(effect_rows, data)
+        result = authoritative.fetch("result")
         validate_replay_envelope!(result)
         return {
-          "state" => "succeeded", "status" => Integer(data.fetch("status", Hive::ExitCodes::SUCCESS)),
+          "state" => "succeeded", "status" => authoritative.fetch("status"),
           "typed_reason" => nil, "result" => result, "retry_eligible" => false
         }
       end
@@ -358,16 +358,40 @@ module Hive
         proof = supplied.find { |entry| entry["effect_id"] == effect.fetch(:effect_id) }
         expected_identity = Digest::SHA256.hexdigest(effect.fetch(:identity_json))
         observation = proof["observation"]
+        persisted = effect[:evidence_json] ?
+          Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json)) : {}
         valid = proof["ordinal"] == effect.fetch(:ordinal) &&
           proof["identity_sha256"] == expected_identity &&
-          observation.is_a?(Hash) && !observation["source"].to_s.empty? &&
-          !observation["correlation_id"].to_s.empty?
+          observation.is_a?(Hash) && Array(persisted["observations"]).include?(observation)
         unless valid
           raise Hive::CommandUnresolved.new(
-            message: "successful retirement evidence does not match the stored effect identity"
+            message: "successful retirement evidence does not match a stored authoritative observation"
           )
         end
       end
+      boundary = effect_rows.find { |effect| effect.fetch(:ordinal) == 0 }
+      persisted = boundary[:evidence_json] &&
+        Hive::RuntimeControlPlane::Codec.load_json(boundary.fetch(:evidence_json))
+      result = persisted && persisted["authoritative_result"]
+      encoded = result && Hive::RuntimeControlPlane::Codec.dump_json(result)
+      valid_result = result.is_a?(Hash) &&
+        persisted["authoritative_result_sha256"] == Digest::SHA256.hexdigest(encoded)
+      if data.key?("result")
+        valid_result &&= Hive::RuntimeControlPlane::Codec.dump_json(data["result"]) == encoded
+      end
+      unless valid_result
+        raise Hive::CommandUnresolved.new(
+          message: "successful retirement requires the stored authoritative original result"
+        )
+      end
+      {
+        "result" => result,
+        "status" => Integer(persisted.fetch("authoritative_status"))
+      }
+    rescue Hive::RuntimeControlPlane::CodecError, KeyError, ArgumentError, TypeError
+      raise Hive::CommandUnresolved.new(
+        message: "successful retirement requires the stored authoritative original result"
+      )
     end
 
     def terminalize!(row, state:, result:, status:, typed_reason:, reason:, evidence: {})

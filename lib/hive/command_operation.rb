@@ -60,6 +60,13 @@ module Hive
       current_operation&.send(:record_effect_submission, kind: kind, identity: identity)
     end
 
+    def self.record_effect_observation(source:, correlation_id:, evidence: {})
+      current_operation&.send(
+        :record_effect_observation,
+        source: source, correlation_id: correlation_id, evidence: evidence
+      )
+    end
+
     def self.local_principal(database)
       unless Process.uid == Process.euid
         raise Hive::ConfigError,
@@ -169,10 +176,6 @@ module Hive
       )
       context = operation_context(claim, effect)
       result, captured = with_context(context) { capture { yield } }
-      @store.update_effect(
-        claim, effect_id: effect.fetch(:effect_id), from: %w[prepared submitted unknown], to: "applied",
-        evidence: { "boundary_completed" => true }
-      )
       payload = response_payload(result, captured)
       public_receipt = {
         "id" => claim.receipt_id,
@@ -182,6 +185,10 @@ module Hive
       emitted = attach_receipt(payload, public_receipt)
       canonical = result.is_a?(Hash) ? attach_receipt(result, public_receipt) : nil
       stored = stored_response(emitted, canonical: canonical, captured: captured)
+      @store.complete_effect(
+        claim, effect_id: effect.fetch(:effect_id), result: stored,
+        status: Hive::ExitCodes::SUCCESS
+      )
       @store.succeed(claim, result: stored, status: Hive::ExitCodes::SUCCESS)
       @store.close_pin(
         receipt_id: claim.receipt_id, principal: claim.principal,
@@ -244,6 +251,17 @@ module Hive
       )
     end
 
+    def record_effect_observation(source:, correlation_id:, evidence:)
+      context = self.class.current_context
+      return unless context
+
+      @store.record_effect_observation(
+        receipt_id: context.receipt_id, effect_id: context.effect_id,
+        principal: context.principal, request_fingerprint: context.request_fingerprint,
+        source: source, correlation_id: correlation_id, evidence: evidence
+      )
+    end
+
     def capture
       return [ yield, nil ] if @structured
 
@@ -282,10 +300,14 @@ module Hive
     end
 
     def persist_uncertainty(claim, effect)
+      return if effect && @store.authoritative_result_recorded?(
+        receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id)
+      )
+
       begin
         @store.update_effect(
           claim, effect_id: effect.fetch(:effect_id), from: %w[prepared submitted], to: "unknown",
-          evidence: { "boundary_completed" => false }
+          evidence: { "boundary_completed" => false, "owner_released" => true }
         ) if effect
       rescue StandardError
         # An effect may already be applied (for example finalization failed).

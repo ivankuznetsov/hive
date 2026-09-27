@@ -328,12 +328,6 @@ class CommandReceiptContractTest < Minitest::Test
 
       succeeded = executing_claim(store, project, "succeeded")
       effect = store.prepare_effect(succeeded, ordinal: 0, kind: "test", identity: {})
-      store.update_effect(
-        succeeded, effect_id: effect.fetch(:effect_id), from: "prepared", to: "applied"
-      )
-      store.mark_unresolved(succeeded, reason: "lost")
-      row = store.receipt(succeeded.receipt_id)
-      succeeded_row = row
       payload = { "schema" => "hive-approve", "schema_version" => 2, "ok" => true }
       replay = {
         "format" => "json", "payload" => payload,
@@ -341,12 +335,30 @@ class CommandReceiptContractTest < Minitest::Test
           Hive::RuntimeControlPlane::Codec.dump_json(payload)
         )
       }
+      observation = {
+        "source" => "provider", "correlation_id" => "remote-1",
+        "evidence" => { "remote_oid" => "a" * 40 }
+      }
+      store.update_effect(
+        succeeded, effect_id: effect.fetch(:effect_id), from: "prepared", to: "applied",
+        evidence: {
+          "authoritative_result" => replay,
+          "authoritative_result_sha256" => Digest::SHA256.hexdigest(
+            Hive::RuntimeControlPlane::Codec.dump_json(replay)
+          ),
+          "authoritative_status" => 0,
+          "observations" => [ observation ]
+        }
+      )
+      store.mark_unresolved(succeeded, reason: "lost")
+      row = store.receipt(succeeded.receipt_id)
+      succeeded_row = row
       success_evidence = {
         "outcome" => "succeeded", "result" => replay,
         "effects" => [ {
           "effect_id" => effect.fetch(:effect_id), "ordinal" => 0,
           "identity_sha256" => Digest::SHA256.hexdigest(effect.fetch(:identity_json)),
-          "observation" => { "source" => "provider", "correlation_id" => "remote-1" }
+          "observation" => observation
         } ]
       }
       retired = maintenance.retire_with_evidence(
@@ -383,6 +395,34 @@ class CommandReceiptContractTest < Minitest::Test
           { "outcome" => "succeeded", "result" => replay, "effects" => [] }
         )
       end
+
+      forged_payload = payload.merge("forged" => true)
+      forged_replay = {
+        "format" => "json", "payload" => forged_payload,
+        "expanded_sha256" => Digest::SHA256.hexdigest(
+          Hive::RuntimeControlPlane::Codec.dump_json(forged_payload)
+        )
+      }
+      error = assert_raises(Hive::CommandUnresolved) do
+        maintenance.send(
+          :validate_retirement_evidence!, succeeded_row,
+          success_evidence.merge("result" => forged_replay)
+        )
+      end
+      assert_includes error.message, "authoritative original result"
+
+      forged_observation = observation.merge("correlation_id" => "attacker-selected")
+      error = assert_raises(Hive::CommandUnresolved) do
+        maintenance.send(
+          :validate_retirement_evidence!, succeeded_row,
+          success_evidence.merge(
+            "effects" => [ success_evidence.fetch("effects").first.merge(
+              "observation" => forged_observation
+            ) ]
+          )
+        )
+      end
+      assert_includes error.message, "stored authoritative observation"
     end
   end
 

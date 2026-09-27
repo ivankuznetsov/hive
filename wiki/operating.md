@@ -76,6 +76,13 @@ provider-response uncertainty, a lost acknowledgement after application, or a
 failure while persisting the original response all remain unresolved until an
 authoritative domain/provider reconciliation accounts for every effect. Never
 infer non-application from process death, elapsed time, or a missing response.
+Task-activity and GitHub publication observations are copied into the owning
+receipt by those domain authorities. Evidence retirement accepts only the exact
+original replay envelope already persisted by the command boundary and exact
+stored observations; operator-supplied result bytes or labels cannot establish
+success. Identical retries may resume only the bounded task-activity,
+publication, or attempt-dispatch state machines whose durable correlation can
+be re-observed. Other unknown effects remain unresolved.
 
 The default staffing assumption is one operator able to act within one business
 day. It is not a service guarantee or an allocated minutes/day value.

@@ -274,12 +274,17 @@ module Hive
     def resume_maintenance(claim, owner_host: Socket.gethostname, owner_pid: Process.pid,
                            owner_process_start: nil)
       owner_process_start ||= process_start(owner_pid)
+      row = receipt(claim.receipt_id)
+      counted = capacity_counted?(row)
+      policy = Hive::CommandReceiptCapacity.load(claim.project_root) if counted
       transition!(
         claim, from: "unresolved", to: "executing",
         updates: {
           owner_host: owner_host, owner_pid: owner_pid,
           owner_process_start: owner_process_start, owner_token: SecureRandom.hex(16)
-        }
+        },
+        executing_delta: counted ? 1 : 0,
+        execution_policy: policy
       )
     end
 
@@ -369,6 +374,42 @@ module Hive
       true
     end
 
+    # Persist the exact replay representation before the receipt can report
+    # success. This evidence is written by the command boundary, not supplied
+    # later by a maintenance caller, so a lost final receipt commit can be
+    # completed without manufacturing a business result.
+    def complete_effect(claim, effect_id:, result:, status:)
+      encoded = Hive::RuntimeControlPlane::Codec.dump_json(result)
+      if encoded.bytesize > MAX_RESULT_BYTES
+        raise Hive::CommandUnresolved.new(
+          message: "original command result exceeded the durable receipt limit"
+        )
+      end
+      digest = Digest::SHA256.hexdigest(encoded)
+      record_effect_observation(
+        receipt_id: claim.receipt_id, effect_id: effect_id,
+        principal: claim.principal, request_fingerprint: claim.request_fingerprint,
+        source: "command_boundary", correlation_id: effect_id,
+        evidence: { "result_sha256" => digest }
+      )
+      update_effect(
+        claim, effect_id: effect_id, from: %w[prepared submitted unknown], to: "applied",
+        evidence: {
+          "boundary_completed" => true,
+          "authoritative_result" => result,
+          "authoritative_result_sha256" => digest,
+          "authoritative_status" => Integer(status)
+        }
+      )
+    end
+
+    def authoritative_result_recorded?(receipt_id:, effect_id:)
+      row = database.read do |connection|
+        connection[:command_effects][receipt_id: receipt_id.to_s, effect_id: effect_id.to_s]
+      end
+      !authoritative_result(row).nil?
+    end
+
     def record_effect_submission(receipt_id:, effect_id:, principal:, request_fingerprint:,
                                  kind:, identity:)
       correlation = {
@@ -384,7 +425,7 @@ module Hive
         effect = connection[:command_effects][
           effect_id: effect_id.to_s, receipt_id: receipt_id.to_s
         ]
-        next 0 unless effect && %w[prepared submitted].include?(effect.fetch(:state))
+        next 0 unless effect && %w[prepared submitted unknown].include?(effect.fetch(:state))
         prior = effect[:evidence_json] ?
           Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json)) : {}
         submissions = Array(prior["submissions"])
@@ -404,6 +445,46 @@ module Hive
         count
       end
       raise Hive::CommandConflict, "command effect submission changed" unless changed == 1
+      true
+    end
+
+    def record_effect_observation(receipt_id:, effect_id:, principal:, request_fingerprint:,
+                                  source:, correlation_id:, evidence: {})
+      observation = {
+        "source" => source.to_s, "correlation_id" => correlation_id.to_s,
+        "evidence" => Hive::RuntimeControlPlane::Codec.normalize(evidence)
+      }
+      if observation["source"].empty? || observation["correlation_id"].empty?
+        raise Hive::UsageError, "command effect observation requires source and correlation identity"
+      end
+      now = timestamp
+      changed = database.transaction do |connection|
+        receipt = connection[:command_receipts][receipt_id: receipt_id.to_s]
+        next 0 unless receipt && receipt.fetch(:state) == "executing" &&
+                      receipt.fetch(:principal) == principal.to_s &&
+                      receipt.fetch(:request_fingerprint) == request_fingerprint.to_s
+        effect = connection[:command_effects][effect_id: effect_id.to_s, receipt_id: receipt_id.to_s]
+        next 0 unless effect && %w[prepared submitted unknown].include?(effect.fetch(:state))
+        prior = effect[:evidence_json] ?
+          Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json)) : {}
+        observations = Array(prior["observations"])
+        observations << observation unless observations.include?(observation)
+        encoded = Hive::RuntimeControlPlane::Codec.dump_json(
+          prior.merge("observations" => observations)
+        )
+        count = connection[:command_effects].where(
+          effect_id: effect_id.to_s, receipt_id: receipt_id.to_s,
+          state: effect.fetch(:state), updated_at: effect.fetch(:updated_at)
+        ).update(evidence_json: encoded, updated_at: now)
+        if count == 1
+          add_logical_bytes!(
+            connection, receipt.fetch(:namespace_id),
+            encoded.bytesize - effect[:evidence_json].to_s.bytesize
+          )
+        end
+        count
+      end
+      raise Hive::CommandConflict, "command effect observation changed" unless changed == 1
       true
     end
 
@@ -643,6 +724,20 @@ module Hive
         raise Hive::CommandConflict
       end
 
+      if row.fetch(:state) == "executing" &&
+         (authoritative = authoritative_result_for_receipt(row))
+        begin
+          result, status = authoritative
+          claim = claim_from(row, :replay, project_root: project_root)
+          return finalize!(
+            claim, state: "succeeded", result: result, status: status,
+            reason: nil, retry_eligible: false
+          )
+        rescue Hive::CommandConflict
+          row = receipt(row.fetch(:receipt_id))
+        end
+      end
+
       public_receipt = public_receipt(row)
       case row.fetch(:state)
       when *TERMINAL_STATES
@@ -650,7 +745,7 @@ module Hive
       when "prepared", "executing"
         raise Hive::CommandInProgress.new(command_receipt: public_receipt)
       when "unresolved", "aborted"
-        if resumable_prune?(row)
+        if resumable_prune?(row) || reconcilable_effect?(row)
           return claim_from(row, :resume, project_root: project_root)
         end
         raise Hive::CommandUnresolved.new(command_receipt: public_receipt)
@@ -799,6 +894,47 @@ module Hive
           administrative_receipt_id: row.fetch(:receipt_id), state: %w[prepared executing]
         ).any?
       end
+    end
+
+    RECONCILABLE_EFFECT_KINDS = %w[
+      task_activity github_push github_pull_request attempt_dispatch
+    ].freeze
+
+    def reconcilable_effect?(row)
+      return false unless row.fetch(:state) == "unresolved"
+      effect = database.read do |connection|
+        connection[:command_effects][receipt_id: row.fetch(:receipt_id), ordinal: 0]
+      end
+      return false unless effect && %w[submitted unknown].include?(effect.fetch(:state))
+      evidence = effect[:evidence_json] ?
+        Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json)) : {}
+      submissions = Array(evidence["submissions"])
+      evidence["owner_released"] == true && !submissions.empty? && submissions.all? do |entry|
+        entry.is_a?(Hash) && RECONCILABLE_EFFECT_KINDS.include?(entry["kind"])
+      end
+    rescue Hive::RuntimeControlPlane::CodecError
+      false
+    end
+
+    def authoritative_result_for_receipt(row)
+      effect = database.read do |connection|
+        connection[:command_effects][receipt_id: row.fetch(:receipt_id), ordinal: 0]
+      end
+      data = authoritative_result(effect)
+      data && [ data.fetch("result"), data.fetch("status") ]
+    end
+
+    def authoritative_result(effect)
+      return unless effect && effect.fetch(:state) == "applied" && effect[:evidence_json]
+      evidence = Hive::RuntimeControlPlane::Codec.load_json(effect.fetch(:evidence_json))
+      result = evidence["authoritative_result"]
+      encoded = Hive::RuntimeControlPlane::Codec.dump_json(result)
+      return unless result.is_a?(Hash) && encoded.bytesize <= MAX_RESULT_BYTES
+      return unless evidence["authoritative_result_sha256"] == Digest::SHA256.hexdigest(encoded)
+      status = Integer(evidence.fetch("authoritative_status"))
+      { "result" => result, "status" => status }
+    rescue Hive::RuntimeControlPlane::CodecError, KeyError, ArgumentError, TypeError
+      nil
     end
 
     def safe_request(value, parent_key = nil)

@@ -105,13 +105,22 @@ hive receipt prune --json --limit 100
 hive receipt prune --namespace-id UUID --json
 ```
 
-A successful evidence retirement accepts only a durable replay envelope plus
-one reconciliation entry for every stored effect. Each entry must match the
-stored effect id, ordinal, and identity digest and include a nonempty
-authoritative observation source and correlation id; every stored effect must
-already be `applied`. A partial list, an unknown effect, or a bare operator
-assertion remains unresolved. Confirm-time generation and authority checks
+A successful evidence retirement can select only the original replay envelope
+that the keyed command boundary persisted before attempting its final receipt
+commit. A maintenance evidence file cannot supply or replace that result. It
+also provides one reconciliation entry for every stored effect; each entry must
+match the stored effect id, ordinal, identity digest, and an exact observation
+already written by the authoritative task/provider reconciler. A self-consistent
+caller-created result, a made-up observation string, a partial list, or an
+unknown effect remains unresolved. Confirm-time generation and authority checks
 still fence late owners and revoked installation-owner credentials.
+
+When an authoritative task activity or GitHub publication state machine has a
+safe continuation, an identical keyed retry may resume that state machine. It
+re-observes the exact correlation and never treats a timeout or process exit as
+proof that an external effect did not happen. If the command boundary saved the
+original response but its final receipt commit was not acknowledged, the retry
+finalizes and replays that saved response without running the command body.
 
 Relocation or a re-clone with a deliberately abandoned prior identity is
 explicit and cannot recover old keys in the new store:

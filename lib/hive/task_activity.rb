@@ -598,6 +598,15 @@ module Hive
           )
         )
         update!("state" => "complete", "event_id" => result.event_id)
+        if defined?(Hive::CommandOperation)
+          Hive::CommandOperation.record_effect_observation(
+            source: "task_activity", correlation_id: operation_id,
+            evidence: {
+              "event_id" => result.event_id,
+              "result_fingerprint" => receipt.fetch("result_fingerprint")
+            }
+          )
+        end
         result
       end
 

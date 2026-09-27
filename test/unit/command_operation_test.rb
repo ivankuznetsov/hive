@@ -65,6 +65,96 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_retry_finalizes_the_authoritative_boundary_result_after_lost_receipt_commit
+    with_operation(key: "lost-finalization") do |_operation, store, project|
+      effects = 0
+      original_succeed = store.method(:succeed)
+      fail_once = true
+      store.define_singleton_method(:succeed) do |claim, result:, status: 0|
+        if fail_once
+          fail_once = false
+          raise Sequel::DatabaseError, "simulated lost finalization acknowledgement"
+        end
+        original_succeed.call(claim, result: result, status: status)
+      end
+      operation = Hive::CommandOperation.new(
+        key: "lost-finalization", command: "approve", target: "task",
+        request: { from: "3-plan" }, project_root: project, principal: "owner",
+        json: true, structured: true, store: store
+      )
+
+      assert_raises(Sequel::DatabaseError) do
+        operation.call do
+          effects += 1
+          { "schema" => "hive-approve", "ok" => true, "slug" => "task" }
+        end
+      end
+      row = store.database.read do |db|
+        db[:command_receipts].first(key_digest: Digest::SHA256.hexdigest("lost-finalization"))
+      end
+      assert_equal "executing", row.fetch(:state)
+
+      replayed = operation.call { flunk "authoritative-result recovery must not repeat the effect" }
+      assert_equal "task", replayed.fetch("slug")
+      assert_equal "succeeded", replayed.dig("command_receipt", "state")
+      assert_equal 1, effects
+    end
+  end
+
+  def test_interrupted_reconcilable_provider_effect_resumes_without_resubmitting_applied_push
+    with_operation(key: "provider-reconcile") do |_operation, store, project|
+      provider_applied = false
+      push_calls = 0
+      attempts = 0
+      operation = Hive::CommandOperation.new(
+        key: "provider-reconcile", command: "stage_action", mode: "open-pr",
+        target: "task", request: { from: "4-execute" }, project_root: project,
+        principal: "owner", json: true, structured: true, store: store
+      )
+      body = lambda do
+        attempts += 1
+        Hive::CommandOperation.record_effect_submission(
+          kind: "github_push", identity: { "publication_id" => "publication-1", "head_oid" => "a" * 40 }
+        )
+        unless provider_applied
+          push_calls += 1
+          provider_applied = true
+          Hive::CommandOperation.record_effect_observation(
+            source: "github_push", correlation_id: "publication-1",
+            evidence: { "after_oid" => "a" * 40 }
+          )
+          raise Hive::Error, "provider acknowledgement was lost"
+        end
+        Hive::CommandOperation.record_effect_observation(
+          source: "github_push", correlation_id: "publication-1",
+          evidence: { "after_oid" => "a" * 40 }
+        )
+        { "schema" => "hive-stage-action", "ok" => true, "phase" => "published" }
+      end
+
+      assert_raises(Hive::Error) { operation.call(&body) }
+      result = operation.call(&body)
+
+      assert_equal "published", result.fetch("phase")
+      assert_equal 2, attempts
+      assert_equal 1, push_calls
+    end
+  end
+
+  def test_interrupted_unknown_effect_remains_unresolved
+    with_operation(key: "unknown-reconcile") do |_operation, store, project|
+      operation = Hive::CommandOperation.new(
+        key: "unknown-reconcile", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true, store: store
+      )
+      assert_raises(Hive::Error) { operation.call { raise Hive::Error, "unknown effect" } }
+
+      assert_raises(Hive::CommandUnresolved) do
+        operation.call { flunk "unknown effects must not be resumed" }
+      end
+    end
+  end
+
   def test_structured_failed_replay_emits_saved_payload_and_exits_with_saved_status
     with_operation do |_operation, store, project|
       structured = Hive::CommandOperation.new(

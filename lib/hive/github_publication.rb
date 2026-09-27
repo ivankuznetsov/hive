@@ -619,10 +619,12 @@ module Hive
             "after_oid" => request.head_oid,
             "remote_fingerprint" => current.fetch("remote_fingerprint")
           }
-          return write_state(state.merge(
+          observed = write_state(state.merge(
             "phase" => "branch_observed", "push_observation" => observation,
             "updated_at" => timestamp
           ))
+          record_command_effect_observation("github_push", request, observation)
+          return observed
         end
         unless current.fetch("oid") == state.fetch("expected_remote_oid")
           blocked!("remote_branch_conflict", "remote branch lease no longer matches publication intent")
@@ -665,10 +667,12 @@ module Hive
               "after_oid" => request.head_oid,
               "remote_fingerprint" => after_failure.fetch("remote_fingerprint")
             }
-            return write_state(state.merge(
+            observed = write_state(state.merge(
               "phase" => "branch_observed", "push_observation" => observation,
               "updated_at" => timestamp
             ))
+            record_command_effect_observation("github_push", request, observation)
+            return observed
           end
           if after_failure.fetch("oid") == state.fetch("expected_remote_oid")
             write_state(state.merge(
@@ -688,10 +692,12 @@ module Hive
           "after_oid" => after.fetch("oid"),
           "remote_fingerprint" => after.fetch("remote_fingerprint")
         }
-        write_state(state.merge(
+        observed = write_state(state.merge(
           "phase" => "branch_observed", "push_observation" => observation,
           "updated_at" => timestamp
         ))
+        record_command_effect_observation("github_push", request, observation)
+        observed
       end
 
       def reconcile_create(request, state, revalidate)
@@ -760,6 +766,21 @@ module Hive
             "host" => request.host, "repository" => request.repository,
             "branch" => request.branch
           }.merge(identity)
+        )
+      end
+
+      def record_command_effect_observation(source, request, evidence)
+        return unless defined?(Hive::CommandOperation)
+
+        Hive::CommandOperation.record_effect_observation(
+          source: source,
+          correlation_id: request.publication_id,
+          evidence: {
+            "publication_id" => request.publication_id,
+            "host" => request.host,
+            "repository" => request.repository,
+            "branch" => request.branch
+          }.merge(evidence)
         )
       end
 
@@ -847,9 +868,11 @@ module Hive
           "number" => record.fetch("number"), "url" => record.fetch("url"),
           "hosted_state" => hosted_state(record), "observed_at" => timestamp
         )
-        write_state(state.merge(
+        observed = write_state(state.merge(
           "phase" => "pr_observed", "pr" => pr, "updated_at" => timestamp
         ))
+        record_command_effect_observation("github_pull_request", request, pr)
+        observed
       end
 
       def observe(request)

@@ -50,7 +50,7 @@ publication projection—lives in the managed wiki's
 
 | Preset | Effect |
 |---|---|
-| `yolo` | Current default. Claude receives bypass permissions and no tool allowlist or denylist from Hive. OpenCode rejects this implicit policy. |
+| `yolo` | Current default. Claude receives bypass permissions and no tool allowlist or denylist from the scope. In tmux mode the launcher always denies `AskUserQuestion`, because a detached stage session has no one to answer a question menu. OpenCode rejects this implicit policy. |
 | `read-only` | Allows read/list/search operations and explicitly denies edits, shell, unsafe tools, network tools, and external writes. |
 | `scoped` | Custom non-interactive scope. You provide `tools:` and optionally `dirs:`, or use `bash:` as Claude-only sugar on the read-only base set. Requests unmatched by any generated rule are denied. |
 

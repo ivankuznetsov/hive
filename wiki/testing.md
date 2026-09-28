@@ -900,7 +900,7 @@ duplicate metadata/results, and invalid durations as functional failures. A
 separate `continue-on-error` job downloads the retained report and runs only
 the timing mode of `test/e2e/check_incident_budget.rb`, flagging enabled
 incidents at or above sixteen seconds (including sandbox bootstrap) or a group
-total at or above thirty-two seconds without blocking the merge. The #9771
+total at or above thirty-six seconds without blocking the merge. The #9771
 dependency-gate and repository-routing incidents are enabled; four
 sibling-gated fixtures remain pending. The incident index and activation rules
 live in `test/e2e/scenarios/README.md`.

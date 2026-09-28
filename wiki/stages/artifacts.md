@@ -349,10 +349,10 @@ and reviewer capability. Legacy media follows in a visibly labelled
   `ERROR reason=outcome_evidence_integrity_invalid`; exhausted implementation
   reworks retain their semantic blocker. Neither becomes unavailable evidence.
 - Once a reviewer has issued an implementation rework for the task (a
-  `outcome-evidence/reworks/rework-*.json` receipt exists), best effort no
-  longer applies. A later capture or evidence failure keeps its `ERROR` (for
-  example `outcome_evidence_invalid`) and is retried rather than completing as
-  unavailable evidence. Otherwise a malformed package, such as a proof-kind
+  `outcome-evidence/reworks/rework-*.json` receipt exists), a malformed package
+  (`outcome_evidence_invalid`) keeps its `ERROR` and is retried rather than
+  completing as unavailable evidence. Infrastructure limits (quota, a blocked
+  capture capability, exhausted recaptures) still fall back to best effort. Otherwise a malformed package, such as a proof-kind
   mismatch, let a reworked task skip the gate that had caught real gaps.
   `hive evidence recover` remains the operator escape.
 - Typed provider failures retain the provider, status code, message, and retry

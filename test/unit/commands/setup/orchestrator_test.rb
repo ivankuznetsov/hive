@@ -498,7 +498,25 @@ class SetupOrchestratorTest < Minitest::Test
       phase = setup.instance_variable_get(:@phases).last
       assert phase.fetch("ok")
       assert_equal "active", phase.fetch("phase")
+      database = Hive::RuntimeControlPlane::Database.new(path: path)
+      refute Hive::RuntimeControlPlane::CommandSchema.installed?(database)
+      database.disconnect
     end
+  end
+
+  def test_yes_does_not_imply_command_receipt_installation
+    setup = Hive::Commands::Setup.new(json: true, yes: true, output: StringIO.new)
+    received = nil
+    runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" } }
+
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::Installation, :setup,
+      ->(**kwargs) { received = kwargs; runtime }
+    ) do
+      setup.send(:bootstrap_runtime_control_plane)
+    end
+
+    assert_equal false, received.fetch(:install_command_receipts)
   end
 
   def test_setup_reuses_an_active_runtime_control_plane

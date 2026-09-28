@@ -63,6 +63,14 @@ class CommandMutationsTest < Minitest::Test
   end
 
   def test_keyed_validation_rejects_unsupported_and_forbidden_mutations
+    unsupported_option = assert_raises(Hive::UsageError) do
+      Hive::CommandMutations.validate_keyed!(
+        command: "act", mode: nil, target: "demo:task",
+        options: { action_id: "run", observation: "token", ignored_flag: true }
+      )
+    end
+    assert_includes unsupported_option.message, "ignored_flag"
+
     assert_raises(Hive::UsageError) do
       Hive::CommandMutations.validate_keyed!(
         command: "archive", mode: nil, target: nil, options: {}

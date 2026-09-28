@@ -117,25 +117,21 @@ class CommandOperationTest < Minitest::Test
         json: true, structured: true, store: store
       )
 
-      assert_raises(Sequel::DatabaseError) do
+      persistence_error = assert_raises(Hive::CommandUnresolved) do
         operation.call do
           effects += 1
           { "schema" => "hive-approve", "ok" => true, "slug" => "task" }
         end
       end
+      assert_equal "command_unresolved_pending", persistence_error.reason
+      refute_nil persistence_error.command_receipt
       row = store.database.read do |db|
         db[:command_receipts].first(key_digest: Digest::SHA256.hexdigest("lost-finalization"))
       end
-      assert_equal "executing", row.fetch(:state)
-      store.database.transaction do |db|
-        db[:command_receipts].where(receipt_id: row.fetch(:receipt_id)).update(
-          state: "unresolved", generation: row.fetch(:generation) + 1,
-          typed_reason: "command_orphaned_owner"
-        )
-        db[:command_capacity].where(namespace_id: row.fetch(:namespace_id)).update(
-          executing_count: Sequel[:executing_count] - 1
-        )
-      end
+      assert_equal "unresolved", row.fetch(:state)
+      assert_equal row.fetch(:receipt_id), persistence_error.command_receipt.fetch("id")
+      assert_equal row.fetch(:generation), persistence_error.command_receipt.fetch("generation")
+      assert_equal "unresolved", persistence_error.command_receipt.fetch("state")
 
       replayed = operation.call { flunk "authoritative-result recovery must not repeat the effect" }
       assert_equal "task", replayed.fetch("slug")
@@ -360,6 +356,13 @@ class CommandOperationTest < Minitest::Test
       )
       assert_equal row.fetch(:receipt_id), successor.fetch("predecessor_receipt_id")
       assert_equal 1, successor.fetch("successor_ordinal")
+
+      store.define_singleton_method(:fail_non_application) do |*_, **|
+        flunk "terminal replay must not persist failure again"
+      end
+      store.define_singleton_method(:mark_unresolved) do |*_, **|
+        flunk "terminal replay must not persist uncertainty again"
+      end
 
       output, = capture_io do
         replay_exit = assert_raises(SystemExit) do

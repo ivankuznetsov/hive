@@ -385,7 +385,8 @@ class CommandReceiptContractTest < Minitest::Test
             path, alive: ->(*) { true }, ownership: ->(*) { classification }
           )
         end
-        assert_includes error.message, classification == :unknown ? "liveness-unverifiable" : "live"
+        expected = classification == :verified ? "a live process" : "a liveness-unverifiable process"
+        assert_includes error.message, expected
       end
     end
   end
@@ -1442,6 +1443,7 @@ class CommandReceiptContractTest < Minitest::Test
       assert_equal "/project", operation_args.fetch(:project_root).call
     end
     assert_equal "2030-01-01T00:00:00Z", operation_args.fetch(:retry_horizon_expires_at)
+    assert_equal false, operation_args.fetch(:display_json)
   end
 
   def test_remaining_validation_and_fault_translation_paths

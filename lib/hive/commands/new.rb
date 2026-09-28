@@ -161,7 +161,9 @@ module Hive
       def envelope_extras_for(error)
         extras = {}
         extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
-        extras["idempotency_key"] = @idempotency_key if @idempotency_key
+        if @idempotency_key_raw
+          extras["idempotency_key_sha256"] = ::Digest::SHA256.hexdigest(@idempotency_key_raw.to_s)
+        end
         extras
       end
 

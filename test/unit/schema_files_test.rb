@@ -529,28 +529,18 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
     schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
 
-    producer_kinds = %w[
+    producer_kinds = (%w[
       ambiguous_slug destination_collision final_stage
       plan_review_blocked wrong_stage rollback_failed invalid_task_path dependency_wait
-      admission_error error command_conflict command_in_progress command_unresolved_pending
-      command_pin_horizon_elapsed command_capacity_exhausted command_nonterminal_limit
-      command_concurrency_limit command_prune_busy command_prune_storage_unavailable
-      command_prune_preview_unavailable command_orphaned_pin
-      command_original_result_unavailable command_intake_disabled
-    ].sort
+      admission_error error
+    ] + Hive::CommandErrorKind::ALL).sort
 
     assert_equal producer_kinds, schema_kinds,
                  "schema/producer error_kind enum drift"
   end
 
   def test_all_bounded_command_error_kind_enums_match_their_producers
-    receipt_kinds = %w[
-      command_conflict command_in_progress command_unresolved_pending
-      command_pin_horizon_elapsed command_capacity_exhausted command_nonterminal_limit
-      command_concurrency_limit command_prune_busy command_prune_storage_unavailable
-      command_prune_preview_unavailable command_orphaned_pin
-      command_original_result_unavailable command_intake_disabled
-    ]
+    receipt_kinds = Hive::CommandErrorKind::ALL
     producer_kinds = {
       "hive-act" => %w[
         usage stale_observation ambiguous_target concurrent_run dependency_wait
@@ -608,15 +598,7 @@ class SchemaFilesTest < Minitest::Test
   end
 
   def test_command_receipt_schemas_match_error_envelope_producer
-    kinds = %w[
-      usage config internal command_conflict command_in_progress
-      command_unresolved_pending command_pin_horizon_elapsed
-      command_capacity_exhausted command_nonterminal_limit
-      command_concurrency_limit command_prune_busy
-      command_prune_storage_unavailable command_prune_preview_unavailable
-      command_orphaned_pin command_original_result_unavailable
-      command_intake_disabled
-    ].sort
+    kinds = (%w[usage config internal] + Hive::CommandErrorKind::ALL).sort
 
     %w[hive-command-receipt hive-receipt-prune].each do |name|
       document = JSON.parse(File.read(Hive::Schemas.schema_path(name)))

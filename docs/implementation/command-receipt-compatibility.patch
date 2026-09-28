@@ -8,13 +8,17 @@ index 578d1a1769..e5e5a809c4 100644
 -
 +
 +    COMMAND_RECEIPT_SCHEMA_SHA256 =
-+      "a108a7018f7e4b0d9e83674bda6457ac0d2c875539c1a7ecd8a95277546b4a3d".freeze
++      "cf2d9423475a3117089f9c92dff976395671c7712995c8c1c446614e9599f8cb".freeze
 +    COMMAND_RECEIPT_OBJECT_NAMES = %w[
 +      command_capacity
++      command_capacity_installation_delete
++      command_capacity_installation_insert
++      command_capacity_installation_update
 +      command_dispatch_contexts
 +      command_dispatch_contexts_receipt_ordinal_uidx
 +      command_effects
 +      command_effects_ordinal_uidx
++      command_installation_capacity
 +      command_maintenance_audit
 +      command_maintenance_audit_batch_idx
 +      command_maintenance_audit_receipt_idx
@@ -48,17 +52,21 @@ index 578d1a1769..e5e5a809c4 100644
 +
        def exact_schema?(database, expected: EXPECTED_SCHEMA_SHA256)
 -        schema_fingerprint(database) == expected
-+        rows = database[:sqlite_master].where(type: %w[table index])
++        rows = database[:sqlite_master].where(type: %w[table index trigger])
 +          .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
 +          .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
 +        extension_rows, base_rows = rows.partition do |row|
 +          COMMAND_RECEIPT_OBJECT_NAMES.include?(row[1].to_s)
 +        end
++        ledger = extension_rows.empty? ? [] :
++          database[:command_schema_versions].order(:version).all
 +        Digest::SHA256.hexdigest(Codec.dump_json(base_rows)) == expected &&
 +          (extension_rows.empty? ||
 +           (extension_rows.map { |row| row[1].to_s }.sort == COMMAND_RECEIPT_OBJECT_NAMES.sort &&
 +            Digest::SHA256.hexdigest(Codec.dump_json(extension_rows)) ==
-+              COMMAND_RECEIPT_SCHEMA_SHA256))
++              COMMAND_RECEIPT_SCHEMA_SHA256 && ledger.length == 1 &&
++            ledger.first.fetch(:version) == 2 &&
++            ledger.first.fetch(:schema_sha256) == COMMAND_RECEIPT_SCHEMA_SHA256))
        rescue Sequel::Error
          false
        end

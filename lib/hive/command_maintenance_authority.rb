@@ -86,6 +86,17 @@ module Hive
       @installation_owner_check ? @installation_owner_check.call == true : @installation_owner
     end
 
+    # Resolve mutable web-owner policy before entering a SQLite write
+    # transaction. The returned authority retains no provider/config callback,
+    # so repeated authorization checks inside the transaction are memory-only.
+    def snapshot
+      self.class.new(
+        principal: principal, principal_source: principal_source,
+        installation_owner: installation_owner?, peer_address: peer_address,
+        custody_uid: custody_uid
+      )
+    end
+
     def authorize!(affected_principal)
       return authority_basis if installation_owner? || affected_principal.to_s == principal
 

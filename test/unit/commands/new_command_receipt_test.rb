@@ -6,6 +6,16 @@ require "hive/commands/new"
 class NewCommandReceiptTest < Minitest::Test
   include HiveTestHelper
 
+  def test_failure_envelope_contains_only_idempotency_key_digest
+    raw_key = "operator-secret-key"
+    command = Hive::Commands::New.new("demo", "idea", idempotency_key: raw_key, json: true)
+
+    extras = command.envelope_extras_for(Hive::UsageError.new("bad"))
+
+    refute_includes JSON.generate(extras), raw_key
+    assert_equal Digest::SHA256.hexdigest(raw_key), extras.fetch("idempotency_key_sha256")
+  end
+
   def test_keyed_call_fails_closed_when_receipt_storage_cannot_be_inspected
     database = Object.new
     database.define_singleton_method(:read) { raise Sequel::DatabaseLockTimeout, "busy" }

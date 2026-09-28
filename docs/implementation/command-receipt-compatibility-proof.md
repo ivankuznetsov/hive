@@ -6,12 +6,17 @@ Proof date: 2026-09-28.
 - Base schema v2
 - Base schema SHA-256: `92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0`
 - Narrow source patch: `docs/implementation/command-receipt-compatibility.patch`
-- Compatibility patch SHA-256: `d2b6a51eb5b3341555d57f8ec916aa995cb26786551602e70a29b65e4379915e`
+- Compatibility patch SHA-256: `9cab1e4290a1d253401d4841260ff2972618f7bc396a756c3e71b6fb54bca118`
 - Candidate build output: `hive-cli-command-receipt-compat-candidate.gem` (retained outside Git)
 - Candidate SHA-256: `ea14234d40d7efc995164ed9590ce7817a04d9ce2a40350577c3d852dea71c34`
 - Pinned `agent-cli-runtime` candidate SHA-256:
   `e7b71c6b5607760c41297dcd63de0ed5f441fbd258d650c10387424e75f55f81`
-- Extension schema SHA-256: `a108a7018f7e4b0d9e83674bda6457ac0d2c875539c1a7ecd8a95277546b4a3d`
+- Extension schema SHA-256: `cf2d9423475a3117089f9c92dff976395671c7712995c8c1c446614e9599f8cb`
+
+The recorded candidate predates the installation-capacity aggregate added to
+the extension manifest in this review pass. Its checksum remains historical
+evidence, but the candidate must be rebuilt and the drill below repeated before
+it can qualify the revised manifest.
 
 The candidate is a local rollback proof artifact, not a release or a version
 decision, and its binary is deliberately not committed. Its only source change
@@ -19,12 +24,13 @@ teaches base-schema-v2 validation to accept either no receipt extension or the e
 closed extension object inventory and checksum. Partial, altered, or unknown
 objects still fail closed.
 
-The artifact was built from a clean archive of the pinned baseline after the
-recorded patch applied cleanly. The patch inventory was checked against all 27
-objects in the frozen migration manifest. `sha256sum --check --strict` verified
-the packaged bytes before an isolated `gem install --install-dir`; the locally
-built pinned `agent-cli-runtime` dependency was installed into the same
-isolated prefix.
+The historical artifact was built from a clean archive of the pinned baseline
+after the preceding patch applied cleanly. The current patch inventory is
+checked against all 31 objects in the revised frozen migration manifest, but a
+new packaged candidate has not yet been built from it. For the historical
+drill, `sha256sum --check --strict` verified the packaged bytes before an
+isolated `gem install --install-dir`; the locally built pinned
+`agent-cli-runtime` dependency was installed into the same isolated prefix.
 
 The drill used a fresh base-schema-v2 database, installed the current additive
 extension, and then ran the packaged candidate against that retained database.

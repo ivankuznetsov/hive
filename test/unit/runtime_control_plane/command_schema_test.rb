@@ -76,21 +76,28 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
   def test_extension_version_ledger_is_part_of_exact_schema_validation
     assert_equal Hive::RuntimeControlPlane::CommandSchema::VERSION,
                  Hive::RuntimeControlPlane::CommandMigrations::AddCommandReceipts002::VERSION
-    Dir.mktmpdir do |dir|
-      database = Hive::RuntimeControlPlane::Database.new(
-        path: File.join(dir, "runtime.sqlite3")
-      ).migrate!
-      Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
-        database: database, package_coordinates: TEST_PACKAGE
-      )
-      database.transaction do |db|
-        db[:command_schema_versions].update(version: 99)
-      end
+    %i[unknown empty].each do |condition|
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "runtime.sqlite3")
+        database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
+        Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+          database: database, package_coordinates: TEST_PACKAGE
+        )
+        database.transaction do |db|
+          condition == :unknown ? db[:command_schema_versions].update(version: 99) :
+            db[:command_schema_versions].delete
+        end
 
-      refute database.read { |db| Hive::RuntimeControlPlane::CommandSchema.exact?(db) }
-      refute Hive::RuntimeControlPlane::CommandSchema.installed?(database)
-    ensure
-      database&.disconnect
+        refute database.read { |db| Hive::RuntimeControlPlane::CommandSchema.exact?(db) }
+        refute Hive::RuntimeControlPlane::CommandSchema.installed?(database)
+        database.disconnect
+        database = nil
+        assert_raises(Hive::RuntimeControlPlane::MigrationRequired) do
+          Hive::RuntimeControlPlane::Database.new(path: path).open!
+        end
+      ensure
+        database&.disconnect
+      end
     end
   end
 

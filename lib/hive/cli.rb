@@ -261,8 +261,9 @@ module Hive
       are read-only; destructive actions require --confirm plus the operation's
       generation, evidence, force, or reason guard.
 
-      Subcommands: prune, retire, orphaned-owner, release-pin, abandon-batch,
-      enroll, and show. Receipt failures use exit 20 for conflicts, 21 for work
+      Subcommands: prune, retire, release-pin, abandon-batch, and enroll.
+      Orphaned-owner recovery is selected with `receipt retire --orphaned-owner`.
+      Receipt failures use exit 20 for conflicts, 21 for work
       still in progress, 22 for unresolved outcomes, 75 for transient prune
       contention or storage pressure, and 78 for configuration failures.
 
@@ -2485,7 +2486,7 @@ module Hive
               )
             },
             project_root: -> { resolve_closure_task(target).project_root },
-            json: true, structured: true,
+            json: true, structured: true, display_json: false,
             retry_horizon_expires_at: options[:retry_horizon_expires_at]
           ).call { close_task_interactively_unwrapped(target, emit_success: false) }
           emit_closure_success(result)

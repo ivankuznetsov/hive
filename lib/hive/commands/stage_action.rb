@@ -61,6 +61,10 @@ module Hive
           if @retry_horizon_expires_at && !@idempotency_key
             raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
           end
+          if @durable && @idempotency_key && @retry_horizon_expires_at.to_s.empty?
+            raise Hive::UsageError,
+                  "keyed durable dispatch requires an absolute --retry-horizon-expires-at"
+          end
           invoke = -> { @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call }
           @idempotency_key ? command_operation.call(&invoke) : invoke.call
         end
@@ -113,7 +117,7 @@ module Hive
       def durable_worker_argv(task)
         argv = [ "hive", @verb, task.folder ]
         argv.concat([ "--from", @from ]) if @from
-        argv << "--json" if @json
+        argv << "--json" if @json || @idempotency_key
         argv
       end
 

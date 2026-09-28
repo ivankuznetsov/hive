@@ -602,7 +602,8 @@ module Hive
         extension_valid = extension_rows.empty? ||
           (extension_rows.map { |row| row[1].to_s }.sort == CommandSchema::OBJECT_NAMES.sort &&
            Digest::SHA256.hexdigest(Codec.dump_json(extension_rows)) ==
-             CommandSchema::EXPECTED_SCHEMA_SHA256)
+             CommandSchema::EXPECTED_SCHEMA_SHA256 &&
+           CommandSchema.version_ledger_exact?(database))
         base_valid && extension_valid
       rescue Sequel::Error
         false
@@ -613,7 +614,7 @@ module Hive
       end
 
       def schema_rows(database)
-        database[:sqlite_master].where(type: %w[table index])
+        database[:sqlite_master].where(type: %w[table index trigger])
           .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
           .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
       end

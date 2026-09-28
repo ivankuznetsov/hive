@@ -204,16 +204,32 @@ module Hive
         "generation" => claim.generation + 1,
         "state" => "succeeded"
       }
-      emitted = attach_receipt(payload, public_receipt)
-      canonical = result.is_a?(Hash) ? attach_receipt(result, public_receipt) : nil
+      canonical_source = canonical_payload(result, captured)
+      canonical = canonical_source&.merge("command_receipt" => public_receipt)
+      emitted = if !@json && canonical_source && !result.is_a?(Hash)
+        render_text(canonical)
+      else
+        attach_receipt(payload, public_receipt)
+      end
       stored = stored_response(emitted, canonical: canonical, captured: captured)
-      @store.complete_effect(
-        claim, effect_id: effect.fetch(:effect_id), result: stored,
-        status: Hive::ExitCodes::SUCCESS
-      )
-      @store.succeed(claim, result: stored, status: Hive::ExitCodes::SUCCESS)
+      begin
+        @store.complete_effect(
+          claim, effect_id: effect.fetch(:effect_id), result: stored,
+          status: Hive::ExitCodes::SUCCESS
+        )
+        @store.succeed(claim, result: stored, status: Hive::ExitCodes::SUCCESS)
+      rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => persistence_error
+        persist_uncertainty(claim, effect, persistence_error)
+        persistence_failed = true
+        raise Hive::CommandUnresolved.new(
+          command_receipt: persisted_receipt_identity(claim),
+          message: "the command effect completed but its durable result could not be finalized"
+        )
+      end
       emit_or_return(emitted)
     rescue Exception => error # rubocop:disable Lint/RescueException -- preserve Interrupt/SystemExit ambiguity
+      raise if persistence_failed
+      raise if error.is_a?(SystemExit) && claim&.disposition == :replay
       if claim && effect && deterministic_non_application?(error)
         persist_failure(claim, effect, error)
       elsif claim
@@ -316,9 +332,12 @@ module Hive
     end
 
     def persist_uncertainty(claim, effect, error = nil)
-      return if effect && @store.authoritative_result_recorded?(
+      if effect && @store.authoritative_result_recorded?(
         receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id)
       )
+        @store.mark_unresolved(claim, reason: "command_execution_interrupted")
+        return
+      end
 
       if effect && retryable_pre_submission_contention?(error)
         @store.abort_pre_submission(
@@ -347,6 +366,18 @@ module Hive
       rescue StandardError
         # The original exception remains authoritative and no buffered success is emitted.
       end
+    end
+
+    def persisted_receipt_identity(claim)
+      row = @store.receipt(claim.receipt_id)
+      return {
+        "id" => row.fetch(:receipt_id), "generation" => row.fetch(:generation),
+        "state" => row.fetch(:state)
+      } if row
+
+      { "id" => claim.receipt_id, "generation" => claim.generation, "state" => claim.state }
+    rescue StandardError
+      { "id" => claim.receipt_id, "generation" => claim.generation, "state" => claim.state }
     end
 
     def persist_failure(claim, effect, error)
@@ -396,6 +427,16 @@ module Hive
       parsed
     rescue JSON::ParserError => error
       raise Hive::InternalError, "keyed command emitted invalid JSON: #{error.message}"
+    end
+
+    def canonical_payload(result, captured)
+      return result if result.is_a?(Hash)
+      return unless !@json && @text_renderer && captured.to_s.lstrip.start_with?("{")
+
+      parsed = JSON.parse(captured)
+      parsed if parsed.is_a?(Hash)
+    rescue JSON::ParserError
+      nil
     end
 
     def attach_receipt(payload, receipt)
@@ -484,7 +525,14 @@ module Hive
         )
       end
       if stored.fetch("format") == "text"
-        return stored.fetch("text") if @structured
+        if @structured
+          if claim.state == "failed"
+            raise Hive::CommandReplayFailure.new(
+              stored.fetch("text").strip, exit_code: claim.status
+            )
+          end
+          return stored.fetch("text")
+        end
         $stdout.write(stored.fetch("text"))
         exit(Integer(claim.status)) if claim.state == "failed"
         return nil

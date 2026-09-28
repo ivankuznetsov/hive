@@ -8,6 +8,7 @@ require "hive/command_operation"
 require "hive/command_receipt_capacity"
 require "hive/project_identity"
 require "hive/runtime_control_plane"
+require "hive/runtime_control_plane/sqlite_support"
 require "hive/lock"
 
 module Hive
@@ -34,9 +35,10 @@ module Hive
       bounded = bounded_limit(limit)
       fixed_cutoff = cutoff
       @database.read_only do |connection|
-        authority(connection)
-        selected = resolve_namespace_read_only(
-          connection, project_root: project_root, namespace_id: namespace_id
+        prepare_authority!(connection)
+        selected = resolve_namespace(
+          project_root: project_root, namespace_id: namespace_id,
+          write: false, connection: connection
         )
         unenrolled_project = !project_root.nil? && selected.nil?
         if unenrolled_project
@@ -69,9 +71,11 @@ module Hive
     rescue Errno::ENOSPC, Errno::EDQUOT => error
       maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
     rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
-      if sqlite_busy_error?(error)
+      if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
         maintenance_failure!(:command_prune_busy,
                              "resolve database contention, then rerun; free disk if storage is exhausted", error)
+      elsif Hive::RuntimeControlPlane::SQLiteSupport.storage_exhaustion_error?(error)
+        maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
       else
         maintenance_failure!(:command_prune_preview_unavailable,
                              "restore normal database availability before preview", error)
@@ -79,6 +83,7 @@ module Hive
     end
 
     def prune(project_root: nil, namespace_id: nil, limit: DEFAULT_LIMIT)
+      prepare_authority!
       selected = resolve_namespace(project_root: project_root, namespace_id: namespace_id, write: true)
       raise Hive::UsageError, "confirmed prune requires --project or --namespace-id" unless selected
       bounded = bounded_limit(limit)
@@ -91,7 +96,7 @@ module Hive
         raise(Hive::ConfigError, "cannot record prune owner process start time")
 
       @database.transaction do |connection|
-        prune_completed_batches!(connection)
+        prune_completed_batches!(connection, limit: bounded)
         owned_batch = if context
           connection[:command_maintenance_batches][administrative_receipt_id: context.receipt_id]
         end
@@ -107,6 +112,7 @@ module Hive
         busy = connection[:command_maintenance_batches]
           .where(state: %w[prepared executing]).first
         if busy && context && busy[:administrative_receipt_id] == context.receipt_id
+          authority.authorize!(busy.fetch(:principal))
           batch_id = busy.fetch(:batch_id)
           selected = busy.fetch(:namespace_id)
           fixed_cutoff = Hive::RuntimeControlPlane::Codec.load_time(busy.fetch(:fixed_cutoff))
@@ -162,9 +168,11 @@ module Hive
     rescue Errno::ENOSPC, Errno::EDQUOT => error
       maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
     rescue Sequel::DatabaseError, SQLite3::Exception => error
-      if sqlite_busy_error?(error)
+      if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
         maintenance_failure!(:command_prune_busy,
                              "resolve database contention, then rerun; free disk if storage is exhausted", error)
+      elsif Hive::RuntimeControlPlane::SQLiteSupport.storage_exhaustion_error?(error)
+        maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
       else
         raise
       end
@@ -172,37 +180,27 @@ module Hive
 
     private
 
-    def resolve_namespace_read_only(connection, project_root:, namespace_id:)
+    def resolve_namespace(project_root:, namespace_id:, write:, connection: nil)
       if project_root && namespace_id
         raise Hive::UsageError, "--project and --namespace-id are mutually exclusive"
       end
       if namespace_id
         require_installation_owner!
-        row = connection[:command_namespaces][namespace_id: namespace_id]
-        raise Hive::UsageError, "unknown command namespace #{namespace_id}" unless row
-        return row.fetch(:namespace_id)
-      end
-      return unless project_root
-      Hive::ProjectIdentity.resolve_read_only(
-        project_root: project_root, connection: connection
-      )&.namespace_id
-    end
-
-    def resolve_namespace(project_root:, namespace_id:, write:)
-      if project_root && namespace_id
-        raise Hive::UsageError, "--project and --namespace-id are mutually exclusive"
-      end
-      if namespace_id
-        require_installation_owner!
-        row = @database.read { |connection| connection[:command_namespaces][namespace_id: namespace_id] }
+        row = if connection
+          connection[:command_namespaces][namespace_id: namespace_id]
+        else
+          @database.read { |db| db[:command_namespaces][namespace_id: namespace_id] }
+        end
         raise Hive::UsageError, "unknown command namespace #{namespace_id}" unless row
         return row.fetch(:namespace_id)
       end
       return unless project_root
 
-      identity = Hive::ProjectIdentity.resolve(
-        project_root: project_root, database: @database, create: false
-      )
+      identity = if connection
+        Hive::ProjectIdentity.resolve_read_only(project_root: project_root, connection: connection)
+      else
+        Hive::ProjectIdentity.resolve(project_root: project_root, database: @database, create: false)
+      end
       return nil if identity.nil? && !write
       raise Hive::ConfigError, "project has no command namespace" unless identity
       identity.namespace_id
@@ -316,9 +314,6 @@ module Hive
       else
         principal_utilization(connection, namespace_id, authority.principal)
       end
-      installation = connection[:command_capacity].select do
-        [ sum(:nonterminal_count).as(:n), sum(:executing_count).as(:a), sum(:logical_bytes).as(:bytes) ]
-      end.first
       namespace = connection[:command_namespaces][namespace_id: namespace_id]
       payload = {
         "schema" => "hive-receipt-prune", "schema_version" => 1, "ok" => true,
@@ -339,13 +334,15 @@ module Hive
         "action_band_percent" => ACTION_BAND_PERCENT
       }
       if authority.installation_owner?
+        installation = connection[:command_installation_capacity][singleton_id: 1]
+        raise Hive::CommandConflict, "installation command capacity is unavailable" unless installation
         global = Hive::CommandReceiptCapacity.global_receipts
         physical = physical_utilization(connection)
         payload["installation_utilization"] = utilization(
           {
-          "nonterminal_count" => installation.fetch(:n).to_i,
-          "executing_count" => installation.fetch(:a).to_i,
-          "logical_bytes" => installation.fetch(:bytes).to_i,
+          "nonterminal_count" => installation.fetch(:nonterminal_count).to_i,
+          "executing_count" => installation.fetch(:executing_count).to_i,
+          "logical_bytes" => installation.fetch(:logical_bytes).to_i,
           "occupied_bytes" => physical.fetch("occupied_bytes")
           },
           limits: {
@@ -442,9 +439,9 @@ module Hive
     end
 
     def physical_utilization(connection)
-      page_size = pragma_integer(connection, "page_size")
-      page_count = pragma_integer(connection, "page_count")
-      freelist_count = pragma_integer(connection, "freelist_count")
+      page_size = Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(connection, "page_size")
+      page_count = Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(connection, "page_count")
+      freelist_count = Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(connection, "freelist_count")
       wal_bytes = File.exist?("#{@database.path}-wal") ? File.size("#{@database.path}-wal") : 0
       {
         "page_size" => page_size, "page_count" => page_count,
@@ -453,10 +450,6 @@ module Hive
         "wal_bytes" => wal_bytes,
         "occupied_bytes" => ((page_count - freelist_count) * page_size) + wal_bytes
       }
-    end
-
-    def pragma_integer(connection, name)
-      Integer(connection.fetch("PRAGMA #{name}").first.values.first)
     end
 
     def candidate_identity(row)
@@ -482,18 +475,34 @@ module Hive
     end
 
     def principal_utilization(connection, namespace_id, principal)
-      rows = connection[:command_receipts].where(
+      receipts = connection[:command_receipts].where(
         namespace_id: namespace_id, principal: principal
-      ).all
+      ).exclude(Sequel.&({ command: "receipt" }, { mode: "prune" }))
+      receipt_ids = receipts.select(:receipt_id)
+      length = ->(column) { Sequel.function(:coalesce, Sequel.function(:length, column), 0) }
+      sum = lambda do |dataset, expression|
+        dataset.get(Sequel.function(:coalesce, Sequel.function(:sum, expression), 0)).to_i
+      end
+      logical_bytes = sum.call(
+        receipts, length.call(:frozen_request_json) + length.call(:result_json) + 1024
+      )
+      logical_bytes += sum.call(
+        connection[:command_effects].where(receipt_id: receipt_ids),
+        length.call(:identity_json) + length.call(:evidence_json) + 512
+      )
+      logical_bytes += connection[:command_receipt_pins].where(receipt_id: receipt_ids).count * 512
+      logical_bytes += sum.call(
+        connection[:command_maintenance_audit].where(receipt_id: receipt_ids),
+        length.call(:evidence_json) + 512
+      )
+      logical_bytes += connection[:command_dispatch_contexts].where(receipt_id: receipt_ids).count * 512
+      logical_bytes += connection[:command_successor_allocations].where(Sequel.|(
+        { predecessor_receipt_id: receipt_ids }, { successor_receipt_id: receipt_ids }
+      )).count * 512
       {
-        nonterminal_count: rows.count { |row|
-          Hive::CommandReceiptCapacity.counts_receipt?(row) &&
-            Hive::CommandReceiptStore::NONTERMINAL_STATES.include?(row.fetch(:state))
-        },
-        executing_count: rows.count { |row|
-          Hive::CommandReceiptCapacity.counts_receipt?(row) && row.fetch(:state) == "executing"
-        },
-        logical_bytes: rows.sum { |row| receipt_storage_bytes(connection, row) }
+        nonterminal_count: receipts.where(state: Hive::CommandReceiptStore::NONTERMINAL_STATES).count,
+        executing_count: receipts.where(state: "executing").count,
+        logical_bytes: logical_bytes
       }
     end
 
@@ -595,7 +604,7 @@ module Hive
       )
     end
 
-    def authority(connection = nil)
+    def base_authority(connection = nil)
       @authority ||= begin
         principal = if connection
           installation = connection[:installations].first&.fetch(:installation_id)
@@ -608,10 +617,20 @@ module Hive
       end
     end
 
-    def prune_completed_batches!(connection)
+    def prepare_authority!(connection = nil)
+      authority = base_authority(connection)
+      @prepared_authority = authority.respond_to?(:snapshot) ? authority.snapshot : authority
+    end
+
+    def authority(connection = nil)
+      @prepared_authority || base_authority(connection)
+    end
+
+    def prune_completed_batches!(connection, limit:)
       threshold = timestamp(@clock.call.utc - ADMINISTRATIVE_RETENTION_SECONDS)
       batches = connection[:command_maintenance_batches]
-        .where(state: %w[completed abandoned]).where { completed_at < threshold }.all
+        .where(state: %w[completed abandoned]).where { completed_at < threshold }
+        .order(:completed_at, :batch_id).limit(limit).all
       batches.select! { |batch|
         receipt_id = batch[:administrative_receipt_id]
         receipt = receipt_id && connection[:command_receipts][receipt_id: receipt_id]
@@ -644,15 +663,6 @@ module Hive
         "#{reason.to_s.tr('_', ' ')}: #{remedy} (#{error.class}: #{error.message})",
         reason: reason, scope: :installation
       )
-    end
-
-    def sqlite_busy_error?(error)
-      current = error
-      while current
-        return true if current.is_a?(SQLite3::BusyException)
-        current = current.cause
-      end
-      false
     end
   end
 end

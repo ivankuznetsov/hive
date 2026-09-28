@@ -6,7 +6,7 @@ module Hive
   module RuntimeControlPlane
     module CommandMigrations
       # Additive receipt extension. This deliberately does not use Sequel's
-      # IntegerMigrator: base schema_info remains version 1 so a compatible
+      # IntegerMigrator: base schema_info remains version 2 so a compatible
       # prior runtime can continue to operate while ignoring these objects.
       module AddCommandReceipts002
         VERSION = 2
@@ -201,6 +201,59 @@ module Hive
               "executing_count <= nonterminal_count AND logical_bytes >= 0 AND revision >= 0"
             )
           end
+
+          database.create_table(:command_installation_capacity) do
+            Integer :singleton_id, primary_key: true, null: false
+            Integer :nonterminal_count, null: false, default: 0
+            Integer :executing_count, null: false, default: 0
+            Integer :logical_bytes, null: false, default: 0
+            String :reclamation_cursor_updated_at
+            String :reclamation_cursor_receipt_id
+            String :updated_at, null: false
+            check Sequel.lit("singleton_id = 1")
+            check Sequel.lit(
+              "nonterminal_count >= 0 AND executing_count >= 0 AND " \
+              "executing_count <= nonterminal_count AND logical_bytes >= 0"
+            )
+          end
+          now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+          database[:command_installation_capacity].insert(singleton_id: 1, updated_at: now)
+          database.run(<<~SQL)
+            CREATE TRIGGER command_capacity_installation_insert
+            AFTER INSERT ON command_capacity
+            BEGIN
+              UPDATE command_installation_capacity
+              SET nonterminal_count = nonterminal_count + NEW.nonterminal_count,
+                  executing_count = executing_count + NEW.executing_count,
+                  logical_bytes = logical_bytes + NEW.logical_bytes,
+                  updated_at = NEW.updated_at
+              WHERE singleton_id = 1;
+            END
+          SQL
+          database.run(<<~SQL)
+            CREATE TRIGGER command_capacity_installation_update
+            AFTER UPDATE OF nonterminal_count, executing_count, logical_bytes ON command_capacity
+            BEGIN
+              UPDATE command_installation_capacity
+              SET nonterminal_count = max(nonterminal_count + NEW.nonterminal_count - OLD.nonterminal_count, 0),
+                  executing_count = max(executing_count + NEW.executing_count - OLD.executing_count, 0),
+                  logical_bytes = max(logical_bytes + NEW.logical_bytes - OLD.logical_bytes, 0),
+                  updated_at = NEW.updated_at
+              WHERE singleton_id = 1;
+            END
+          SQL
+          database.run(<<~SQL)
+            CREATE TRIGGER command_capacity_installation_delete
+            AFTER DELETE ON command_capacity
+            BEGIN
+              UPDATE command_installation_capacity
+              SET nonterminal_count = max(nonterminal_count - OLD.nonterminal_count, 0),
+                  executing_count = max(executing_count - OLD.executing_count, 0),
+                  logical_bytes = max(logical_bytes - OLD.logical_bytes, 0),
+                  updated_at = OLD.updated_at
+              WHERE singleton_id = 1;
+            END
+          SQL
 
           database.create_table(:command_successor_allocations) do
             String :allocation_id, primary_key: true, null: false

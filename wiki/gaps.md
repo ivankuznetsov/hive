@@ -9,6 +9,13 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 
 ## Command-receipt external evidence gaps (2026-09-28)
 
+The retained compatibility candidate checksum predates the installation-wide
+capacity aggregate added during review. The current compatibility patch and
+31-object manifest are checked together in source, but the candidate must be
+rebuilt and the isolated rollback/re-upgrade drill repeated before the revised
+manifest can claim Tier A qualification. Publication remains a separate Tier B
+authorization boundary.
+
 The producer checkout still has no concrete hivedev C4 request/response
 mapping, so local verification covers only the bounded Hive adapters. Durable
 follow-up tasks `hive:43362`, `hive:43363`, and `hive:43364` exist, but the

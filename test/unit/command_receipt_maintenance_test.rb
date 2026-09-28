@@ -68,6 +68,59 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_prune_cutoff_is_strict_and_excludes_future_terminal_rows
+    with_receipts do |project, database, store, authority|
+      now = Time.utc(2030, 2, 1, 12)
+      cutoff = now - Hive::CommandReceiptPruner::RETENTION_SECONDS
+      claims = %w[before exact after future].to_h do |name|
+        [ name, terminal_receipt(store, project, "cutoff-#{name}") ]
+      end
+      terminal_times = {
+        "before" => cutoff - 1, "exact" => cutoff,
+        "after" => cutoff + 1, "future" => now + 86_400
+      }
+      database.transaction do |connection|
+        claims.each do |name, claim|
+          connection[:command_receipts].where(receipt_id: claim.receipt_id).update(
+            terminal_at: Hive::RuntimeControlPlane::Codec.dump_time(terminal_times.fetch(name))
+          )
+        end
+      end
+
+      pruner = Hive::CommandReceiptPruner.new(
+        database: database, authority: authority, clock: -> { now }
+      )
+      preview = pruner.preview(namespace_id: claims.fetch("before").namespace_id)
+      assert_equal [ claims.fetch("before").receipt_id ],
+                   preview.fetch("candidates").map { |row| row.fetch("receipt_id") }
+      result = pruner.prune(namespace_id: claims.fetch("before").namespace_id)
+      assert_equal [ claims.fetch("before").receipt_id ],
+                   result.fetch("outcomes").map { |row| row.fetch("receipt_id") }
+      %w[exact after future].each { |name| assert store.receipt(claims.fetch(name).receipt_id) }
+    end
+  end
+
+  def test_prune_limit_default_and_maximum_boundaries
+    with_receipts do |project, database, store, authority|
+      claims = 101.times.map { |index| terminal_receipt(store, project, "limit-#{index}") }
+      old = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc - 31 * 86_400)
+      database.transaction do |connection|
+        connection[:command_receipts].where(
+          receipt_id: claims.map(&:receipt_id)
+        ).update(terminal_at: old)
+      end
+      pruner = Hive::CommandReceiptPruner.new(database: database, authority: authority)
+
+      assert_equal 100, pruner.preview(namespace_id: claims.first.namespace_id)
+        .fetch("candidates").length
+      assert_equal 101, pruner.preview(namespace_id: claims.first.namespace_id, limit: 1_000)
+        .fetch("candidates").length
+      assert_raises(Hive::UsageError) do
+        pruner.preview(namespace_id: claims.first.namespace_id, limit: 1_001)
+      end
+    end
+  end
+
   def test_prune_preserves_successor_binding_while_predecessor_intent_is_active
     with_receipts do |project, database, store, authority|
       predecessor = terminal_receipt(store, project, "bound-predecessor")
@@ -187,6 +240,8 @@ class CommandReceiptMaintenanceTest < Minitest::Test
         reason: "intent was explicitly cancelled"
       )
       assert_equal false, preview.fetch("horizon_elapsed")
+      assert_includes preview.fetch("warning"), "unreachable-but-live"
+      assert_includes preview.fetch("warning"), "replay/conflict protection"
       assert_includes %w[dead live_remote_or_unverifiable unverifiable],
                       preview.dig("evidence", "owner_liveness", "status")
       maintenance.release_pin(
@@ -240,6 +295,27 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_active_pin_reacquisition_keeps_identity_after_horizon
+    with_receipts do |project, database, store, _authority|
+      claim = terminal_receipt(store, project, "active-pin-past-horizon")
+      now = Time.utc(2030, 1, 1)
+      horizon = (now + 60).iso8601
+      initial_store = Hive::CommandReceiptStore.new(database: database, clock: -> { now })
+      first = initial_store.acquire_pin(
+        receipt_id: claim.receipt_id, principal: "owner", intent_id: "intent",
+        intent_generation: 1, retry_horizon_expires_at: horizon, project_root: project
+      )
+      later_store = Hive::CommandReceiptStore.new(database: database, clock: -> { now + 120 })
+      repeated = later_store.acquire_pin(
+        receipt_id: claim.receipt_id, principal: "owner", intent_id: "intent",
+        intent_generation: 1, retry_horizon_expires_at: horizon
+      )
+
+      assert_equal first.pin_id, repeated.pin_id
+      assert_equal "active", repeated.lifecycle_status
+    end
+  end
+
   def test_maintenance_authorization_precedes_disclosure_and_mutation
     with_receipts do |project, database, store, owner|
       claim = store.reserve(
@@ -256,17 +332,18 @@ class CommandReceiptMaintenanceTest < Minitest::Test
         database: database, authority: nonowner, alive: ->(_) { false }
       )
 
-      assert_raises(Hive::ConfigError) do
+      foreign_error = assert_raises(Hive::ConfigError) do
         maintenance.settle_without_result(
           claim.receipt_id, expected_generation: row.fetch(:generation),
           reason: "denied", confirm: true
         )
       end
-      assert_raises(Hive::ConfigError) do
+      missing_error = assert_raises(Hive::ConfigError) do
         maintenance.settle_without_result(
           "unknown", expected_generation: 1, reason: "denied", confirm: false
         )
       end
+      assert_equal foreign_error.message.b, missing_error.message.b
       assert_equal "unresolved", store.receipt(claim.receipt_id).fetch(:state)
       assert_equal 0, database.read { |db| db[:command_maintenance_audit].count }
 
@@ -1014,6 +1091,24 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
     assert_equal "command_prune_storage_unavailable", error.reason
 
+    wrapped_full = Object.new
+    wrapped_full.define_singleton_method(:transaction) do |**|
+      begin
+        raise SQLite3::FullException, "database or disk is full"
+      rescue SQLite3::FullException
+        raise Sequel::DatabaseError, "wrapped SQLITE_FULL"
+      end
+    end
+    wrapped_pruner = Hive::CommandReceiptPruner.new(database: wrapped_full, authority: authority)
+    with_replaced_singleton_method(
+      wrapped_pruner, :resolve_namespace, ->(**) { "namespace" }
+    ) do
+      error = assert_raises(Hive::CommandCapacityError) do
+        wrapped_pruner.prune(namespace_id: "namespace")
+      end
+      assert_equal "command_prune_storage_unavailable", error.reason
+    end
+
     with_receipts do |project, database, store, owner|
       receipt = terminal_receipt(store, project, "unexpected-database-fault")
       broken = Object.new
@@ -1098,6 +1193,9 @@ class CommandReceiptMaintenanceTest < Minitest::Test
                    preview.fetch("nonterminal_receipts").map { |row| row.fetch("receipt_id") }
       assert_equal "ask_installation_owner", preview.fetch("installation_pressure")
       refute preview.key?("installation_utilization")
+      refute_includes preview.to_json, "occupied_bytes"
+      refute_includes preview.to_json, "page_count"
+      refute_includes preview.to_json, "wal_bytes"
     end
   end
 

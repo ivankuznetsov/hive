@@ -17,8 +17,8 @@ flag. An installed extension is retained when later setup omits the flag.
 Namespace keyed intake is a separate, disabled-by-default project config
 switch; it neither installs nor removes schema.
 
-Migration 002 adds tables and indexes only. It does not alter or delete any
-existing object or row, including `schema_info` and installation identity. Its
+Migration 002 adds tables, indexes, and aggregate-maintenance triggers only. It
+does not alter or delete any existing object or row, including `schema_info` and installation identity. Its
 blast radius is the one shared host control-plane database: every Hive project
 and service using that database sees the objects even while every intake gate
 is disabled. Unmodified pre-compatibility binaries reject the added objects.
@@ -37,11 +37,11 @@ Code-complete rollback handoff status for this checkout:
 - base schema SHA-256:
   `92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0`
 - extension manifest SHA-256:
-  `a108a7018f7e4b0d9e83674bda6457ac0d2c875539c1a7ecd8a95277546b4a3d`
+  `cf2d9423475a3117089f9c92dff976395671c7712995c8c1c446614e9599f8cb`
 - compatibility patch diff:
   `docs/implementation/command-receipt-compatibility.patch`
 - compatibility patch SHA-256:
-  `d2b6a51eb5b3341555d57f8ec916aa995cb26786551602e70a29b65e4379915e`
+  `9cab1e4290a1d253401d4841260ff2972618f7bc396a756c3e71b6fb54bca118`
 - externally retained candidate output (not committed):
   `hive-cli-command-receipt-compat-candidate.gem`
 - candidate SHA-256:
@@ -49,6 +49,10 @@ Code-complete rollback handoff status for this checkout:
 - isolated packaged rollback drill:
   `docs/implementation/command-receipt-compatibility-proof.md`
 - published version/location/SHA-256: pending maintainer release authorization
+
+The retained candidate checksum above belongs to the preceding extension
+manifest. Rebuild the candidate from the current compatibility patch and repeat
+the isolated drill before treating the revised manifest as Tier A qualified.
 
 Published retained coordinates remain an activation blocker and must never be
 replaced with the local candidate. For the Tier A candidate drill, point to the

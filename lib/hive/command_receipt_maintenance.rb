@@ -28,7 +28,8 @@ module Hive
     end
 
     def authorize_namespace_selection!(namespace_id)
-      unless @authority.installation_owner?
+      prepare_authority!
+      unless authority.installation_owner?
         raise Hive::ConfigError, "--namespace-id requires the installation owner"
       end
       namespace_id
@@ -36,6 +37,7 @@ module Hive
 
     def settle_without_result(receipt_id, expected_generation:, reason:, confirm: false,
                               namespace_id: nil)
+      prepare_authority!
       require_reason!(reason)
       row = receipt!(receipt_id, namespace_id: namespace_id)
       authorize!(row)
@@ -78,6 +80,7 @@ module Hive
 
     def retire_with_evidence(receipt_id, expected_generation:, evidence:, reason:, confirm: false,
                              namespace_id: nil)
+      prepare_authority!
       require_reason!(reason)
       row = receipt!(receipt_id, namespace_id: namespace_id)
       authorize!(row)
@@ -106,6 +109,7 @@ module Hive
 
     def orphaned_owner(receipt_id, expected_generation:, reason:, confirm: false,
                        namespace_id: nil)
+      prepare_authority!
       require_reason!(reason)
       row = receipt!(receipt_id, namespace_id: namespace_id)
       authorize!(row)
@@ -146,6 +150,7 @@ module Hive
 
     def release_pin(pin_id, expected_generation:, reason:, confirm: false, force: false,
                     namespace_id: nil)
+      prepare_authority!
       require_reason!(reason)
       pin, row = pin_and_receipt!(pin_id, namespace_id: namespace_id)
       authorize!(row)
@@ -157,7 +162,9 @@ module Hive
         "schema" => "hive-command-receipt", "schema_version" => 1, "ok" => true,
         "operation" => "release_pin", "preview" => !confirm, "confirmed" => confirm,
         "pin_id" => pin.fetch(:pin_id), "generation" => pin.fetch(:generation),
-        "warning" => "force release can let a later eligible prune remove replay/conflict protection and duplicate an effect",
+        "warning" => "force release can remove replay/conflict protection while an " \
+                     "unreachable-but-live caller still depends on it, allowing eligible prune " \
+                     "and duplicate effects",
         "evidence" => { "horizon" => horizon, "owner_liveness" => liveness }
       }.merge(horizon)
       return payload unless confirm
@@ -186,6 +193,7 @@ module Hive
 
     def abandon_batch(batch_id, expected_generation:, reason:, confirm: false,
                       namespace_id: nil)
+      prepare_authority!
       require_reason!(reason)
       batch = @database.read { |connection| connection[:command_maintenance_batches][batch_id: batch_id] }
       authorize_or_conceal!(batch && batch.fetch(:principal))
@@ -210,7 +218,7 @@ module Hive
       now = timestamp
       changed = @database.transaction do |connection|
         current = connection[:command_maintenance_batches][batch_id: batch_id]
-        @authority.authorize!(current.fetch(:principal)) if current
+        authority.authorize!(current.fetch(:principal)) if current
         next 0 unless current && current.fetch(:generation) == batch.fetch(:generation) &&
                       %w[prepared executing].include?(current.fetch(:state)) && same_owner?(current, batch)
         count = connection[:command_maintenance_batches].where(
@@ -236,7 +244,7 @@ module Hive
       return if receipt_id.to_s.empty?
 
       receipt = connection[:command_receipts][receipt_id: receipt_id]
-      @authority.authorize!(receipt.fetch(:principal)) if receipt
+      authority.authorize!(receipt.fetch(:principal)) if receipt
       unless receipt && receipt[:namespace_id] == batch[:namespace_id] &&
              receipt[:command] == "receipt" && receipt[:mode] == "prune" &&
              %w[prepared executing unresolved aborted].include?(receipt[:state])
@@ -316,15 +324,15 @@ module Hive
     end
 
     def authorize_or_conceal!(affected_principal)
-      return @authority.authorize!(affected_principal) if affected_principal
-      return @authority.authority_basis if @authority.installation_owner?
+      return authority.authorize!(affected_principal) if affected_principal
+      return authority.authority_basis if authority.installation_owner?
 
-      @authority.authorize!("unknown-maintenance-target")
+      authority.authorize!("unknown-maintenance-target")
     end
 
     def authorize!(row)
       raise Hive::CommandConflict, "maintenance target changed" unless row
-      @authority.authorize!(row.fetch(:principal))
+      authority.authorize!(row.fetch(:principal))
     end
 
     def validate_generation!(row, expected)
@@ -481,7 +489,9 @@ module Hive
           reason: :command_concurrency_limit, scope: :namespace
         )
       end
-      if connection[:command_capacity].sum(:executing_count).to_i >= installation_limit
+      installation = connection[:command_installation_capacity][singleton_id: 1]
+      raise Hive::CommandConflict, "installation command capacity is unavailable" unless installation
+      if installation.fetch(:executing_count).to_i >= installation_limit
         raise Hive::CommandCapacityError.new(
           "command concurrency limit at installation scope; stop live work or confirm orphan recovery first",
           reason: :command_concurrency_limit, scope: :installation
@@ -600,10 +610,10 @@ module Hive
       Hive::CommandReceiptLedger.insert_audit!(connection,
         audit_id: SecureRandom.uuid, receipt_id: row[:receipt_id], batch_id: batch_id,
         pin_id: pin_id, namespace_id: row[:namespace_id],
-        acting_principal: @authority.principal,
-        principal_source: @authority.principal_source,
-        authority_basis: @authority.authority_basis,
-        peer_address: @authority.peer_address, action: action,
+        acting_principal: authority.principal,
+        principal_source: authority.principal_source,
+        authority_basis: authority.authority_basis,
+        peer_address: authority.peer_address, action: action,
         affected_principal: row[:principal], reason: reason,
         evidence_json: encoded_evidence,
         created_at: timestamp
@@ -637,5 +647,13 @@ module Hive
     end
 
     def timestamp(value = @clock.call.utc) = Hive::RuntimeControlPlane::Codec.dump_time(value)
+
+    def prepare_authority!
+      @prepared_authority = @authority.respond_to?(:snapshot) ? @authority.snapshot : @authority
+    end
+
+    def authority
+      @prepared_authority || @authority
+    end
   end
 end

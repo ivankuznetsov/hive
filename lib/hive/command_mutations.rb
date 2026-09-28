@@ -19,11 +19,11 @@ module Hive
     CATALOG = {
       "new" => Descriptor.new(
         command: "new", mode: nil, key_policy: :optional, mutating: true,
-        semantic_options: %i[base depends_on workflow attachments]
+        semantic_options: %i[text_sha256 slug body_sha256 base depends_on workflow attachments]
       ),
       "answer" => Descriptor.new(
         command: "answer", mode: "write", key_policy: :optional, mutating: true,
-        semantic_options: %i[binding answer_digest]
+        semantic_options: %i[project binding binding_sha256 answer_sha256]
       ),
       "approve" => Descriptor.new(
         command: "approve", mode: nil, key_policy: :optional, mutating: true,
@@ -31,21 +31,20 @@ module Hive
       ),
       "stage_action" => Descriptor.new(
         command: "stage_action", mode: nil, key_policy: :optional, mutating: true,
-        semantic_options: %i[verb from project observation]
+        semantic_options: %i[verb from project]
       ),
       "act" => Descriptor.new(
         command: "act", mode: nil, key_policy: :optional, mutating: true,
-        semantic_options: %i[action_id observation]
+        semantic_options: %i[action_id observation project]
       ),
       "archive" => Descriptor.new(
         command: "archive", mode: "target", key_policy: :optional, mutating: true,
-        semantic_options: %i[from project reason evidence successor attestation]
+        semantic_options: %i[from project reason evidence_sha256 successor attestation_sha256]
       ),
       "receipt" => Descriptor.new(
         command: "receipt", mode: nil, key_policy: :forbidden, mutating: true,
         semantic_options: %i[
-          namespace_id project expected_generation confirm limit evidence
-          orphaned_owner settle_without_result force reason retry_horizon_expires_at
+          namespace_id project confirm limit
         ]
       )
     }.freeze
@@ -90,6 +89,11 @@ module Hive
       end
       if key_policy(command: command, mode: mode) == :forbidden
         raise Hive::UsageError, "idempotency keys are forbidden for #{command} #{mode}".strip
+      end
+      unsupported = options.keys.map(&:to_sym).uniq - item.semantic_options
+      unless unsupported.empty?
+        raise Hive::UsageError,
+              "unsupported keyed option(s) for #{command}: #{unsupported.sort.join(', ')}"
       end
       item
     end

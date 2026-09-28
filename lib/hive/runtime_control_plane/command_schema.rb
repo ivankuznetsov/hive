@@ -7,9 +7,10 @@ module Hive
   module RuntimeControlPlane
     module CommandSchema
       VERSION = 2
-      EXPECTED_SCHEMA_SHA256 = "a108a7018f7e4b0d9e83674bda6457ac0d2c875539c1a7ecd8a95277546b4a3d".freeze
+      EXPECTED_SCHEMA_SHA256 = "cf2d9423475a3117089f9c92dff976395671c7712995c8c1c446614e9599f8cb".freeze
       TABLE_NAMES = %w[
         command_capacity
+        command_installation_capacity
         command_dispatch_contexts
         command_effects
         command_maintenance_audit
@@ -20,6 +21,11 @@ module Hive
         command_receipts
         command_schema_versions
         command_successor_allocations
+      ].freeze
+      TRIGGER_NAMES = %w[
+        command_capacity_installation_delete
+        command_capacity_installation_insert
+        command_capacity_installation_update
       ].freeze
       INDEX_NAMES = %w[
         command_effects_ordinal_uidx
@@ -39,7 +45,7 @@ module Hive
         command_successor_allocations_predecessor_idx
         command_successor_allocations_successor_idx
       ].freeze
-      OBJECT_NAMES = (TABLE_NAMES + INDEX_NAMES).freeze
+      OBJECT_NAMES = (TABLE_NAMES + INDEX_NAMES + TRIGGER_NAMES).freeze
 
       module_function
 
@@ -48,7 +54,7 @@ module Hive
       end
 
       def object_rows(database)
-        database[:sqlite_master].where(type: %w[table index], name: OBJECT_NAMES)
+        database[:sqlite_master].where(type: %w[table index trigger], name: OBJECT_NAMES)
           .exclude(Sequel.like(:name, "sqlite_%"))
           .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
       end
@@ -58,7 +64,7 @@ module Hive
       end
 
       def absent?(database)
-        names = database[:sqlite_master].where(type: %w[table index])
+        names = database[:sqlite_master].where(type: %w[table index trigger])
           .select_map(:name).map(&:to_s)
         (names & OBJECT_NAMES).empty?
       end

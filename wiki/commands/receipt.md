@@ -3,7 +3,7 @@ title: hive receipt
 type: command
 source: lib/hive/commands/receipt.rb, lib/hive/command_receipt_{store,pruner,maintenance,capacity,ledger}.rb
 created: 2026-09-27
-updated: 2026-09-27
+updated: 2026-09-28
 tags: [command, idempotency, receipts, sqlite, maintenance]
 ---
 
@@ -24,7 +24,8 @@ hive setup --yes --install-command-receipts
 ```
 
 This changes the one shared host control-plane database for every project and
-service using it. All writers must be provably stopped. `--yes` alone never
+service using it. All writers, including a foreground `hive web`, must be
+provably stopped. `--yes` alone never
 installs the extension. `--no-bootstrap` is diagnosis-only and takes precedence
 over the opt-in flag. Ordinary later setup retains an installed extension.
 
@@ -67,10 +68,13 @@ dispatch-context bind, and observation is fenced by the receipt's ownership
 generation and principal, so a reclaimed owner cannot append evidence to its
 successor's execution.
 
-Untemplated JSON success and failure envelopes retain the exact emitted line
-for byte-identical replay. Display mode remains a caller choice: a text caller
-never receives a stored JSON failure merely because the original invocation
-used JSON internally.
+Untemplated JSON success and failure envelopes retain the canonical typed
+payload for replay. Display mode remains a caller choice: text-first durable
+stage execution is captured as typed JSON internally, and a text caller never
+receives a stored JSON failure merely because the original invocation used
+JSON internally. If an applied effect's saved result is missing or corrupt,
+replay returns `command_original_result_unavailable` instead of presenting the
+loss as an in-progress command.
 
 ## Maintenance
 
@@ -109,16 +113,17 @@ and can use `--namespace-id UUID` after a project has been forgotten. The
 selector exposes IDs and generations needed for maintenance, not keys or saved
 results. `maintenance_next_cursor` paginates the combined batch, pin, and
 non-terminal receipt identities within the selected namespace. Other
-principals cannot enumerate namespaces or foreign operations. Preview reports
-effective namespace and installation limits, calculated utilization, physical
+principals cannot enumerate namespaces or foreign operations. Installation
+owners receive effective installation limits, aggregate utilization, physical
 page/freelist/WAL occupancy, and the 70/85 percent pressure band used by
-admission diagnostics.
+admission diagnostics. Non-owners receive none of those installation or
+physical-byte fields.
 
 Non-owner project previews include only that principal's utilization and its
 own active pins, unfinished batches, and non-terminal receipt identities. The
 namespace intake gate is reported separately. Admission-time dead-owner probes
-use a durable bounded cursor so live owners at the front of the ordering cannot
-permanently hide a later dead owner.
+use separate durable namespace and installation cursors so a wider scan cannot
+advance a namespace past its own oldest dead-owner candidate.
 
 ```sh
 hive receipt prune --json --limit 100
@@ -215,6 +220,11 @@ The additive extension is accepted only when both its closed SQLite manifest
 checksum and its single `command_schema_versions` ledger row match the runtime
 version. Owner reclamation and maintenance lookup paths have dedicated indexes;
 the bounded owner scan occurs outside the immediate write transaction.
+Installation nonterminal, execution, and logical-byte admission reads a
+trigger-maintained singleton aggregate instead of rescanning every enrolled
+namespace. Completed maintenance-batch cleanup is bounded by the same prune
+limit, and rejected keyed prune reservations are removed rather than retained
+as an unbounded administrative backlog.
 
 ## Backlinks
 

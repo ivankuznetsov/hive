@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "hive/command_receipt_store"
+require "hive/command_operation"
 require "hive/runtime_control_plane/command_schema_installation"
 
 class CommandReceiptStoreTest < Minitest::Test
@@ -50,9 +51,25 @@ class CommandReceiptStoreTest < Minitest::Test
             **changed
           )
         end
-        refute_includes error.message, "owner"
-        refute_includes error.message, "approve"
+        assert_equal "idempotency key is already claimed by a different request", error.message
+        assert_nil error.command_receipt
       end
+    end
+  end
+
+  def test_persisted_request_never_contains_raw_observation_token
+    with_store do |project, database, store|
+      token = "raw-observation-token-#{SecureRandom.hex(24)}"
+      claim = store.reserve(
+        project_root: project, key: "token", command: "act", target: "task",
+        request: { observation: token }, principal: "owner"
+      )
+
+      persisted = database.read do |connection|
+        connection[:command_receipts][receipt_id: claim.receipt_id].fetch(:frozen_request_json)
+      end
+      refute_includes persisted, token
+      assert_equal Digest::SHA256.hexdigest(token), JSON.parse(persisted).dig("observation", "sha256")
     end
   end
 
@@ -104,6 +121,23 @@ class CommandReceiptStoreTest < Minitest::Test
         )
       end
       assert_equal "command_unresolved_pending", error.reason
+    end
+  end
+
+  def test_missing_effect_update_is_a_typed_conflict
+    with_store do |project, _database, store|
+      claim = store.reserve(
+        project_root: project, key: "missing-effect", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      claim = store.mark_executing(claim)
+
+      error = assert_raises(Hive::CommandConflict) do
+        store.update_effect(
+          claim, effect_id: "missing", from: "prepared", to: "submitted", evidence: {}
+        )
+      end
+      assert_equal "command effect ownership changed", error.message
     end
   end
 
@@ -706,7 +740,10 @@ class CommandReceiptStoreTest < Minitest::Test
     end
     unresolved = row.merge(state: "unresolved")
     refute store.send(:reconcilable_effect?, unresolved)
-    assert_nil store.send(:authoritative_result, effect.merge(state: "applied"))
+    result_error = assert_raises(Hive::CommandUnresolved) do
+      store.send(:authoritative_result, effect.merge(state: "applied"))
+    end
+    assert_equal "command_original_result_unavailable", result_error.reason
 
     store.define_singleton_method(:authoritative_result_for_receipt) do |_row|
       [ { "format" => "text", "text" => "ok\n" }, 0 ]
@@ -715,15 +752,48 @@ class CommandReceiptStoreTest < Minitest::Test
       raise Hive::CommandConflict, "race"
     end
     store.define_singleton_method(:receipt) { |_receipt_id| unresolved }
-    assert_raises(Hive::CommandUnresolved) do
-      store.send(
-        :classify_existing!, row, principal: "owner",
-        request_fingerprint: "fingerprint", project_root: "/project"
-      )
+    context = Hive::CommandOperation::Context.new(
+      receipt_id: "receipt", effect_id: "effect", principal: "owner",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'b' * 64}",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    )
+    Thread.current[:hive_command_operation_context] = context
+    begin
+      assert_raises(Hive::CommandUnresolved) do
+        store.send(
+          :classify_existing!, row, principal: "owner",
+          request_fingerprint: "fingerprint", project_root: "/project"
+        )
+      end
+    ensure
+      Thread.current[:hive_command_operation_context] = nil
     end
 
     store.define_singleton_method(:process_start) { |_pid| raise IOError, "unavailable" }
     refute store.send(:current_process_owner?, row)
+  end
+
+  def test_same_process_different_operation_cannot_claim_receipt_ownership
+    store = Hive::CommandReceiptStore.new(database: Object.new)
+    store.define_singleton_method(:process_start) { |_pid| "same-start" }
+    row = {
+      receipt_id: "other-receipt", owner_host: Socket.gethostname,
+      owner_pid: Process.pid, owner_process_start: "same-start"
+    }
+    context = Hive::CommandOperation::Context.new(
+      receipt_id: "current-receipt", effect_id: "effect", principal: "owner",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'a' * 64}",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    )
+    Thread.current[:hive_command_operation_context] = context
+
+    refute store.send(:current_process_owner?, row)
+  ensure
+    Thread.current[:hive_command_operation_context] = nil
   end
 
   # An executing receipt owned by another process may be replayed from its
@@ -801,6 +871,26 @@ class CommandReceiptStoreTest < Minitest::Test
       database.transaction do |connection|
         store.send(:add_logical_bytes!, connection, identity.namespace_id, -1)
       end
+    end
+  end
+
+  def test_rejected_keyed_prune_removes_its_administrative_reservation
+    with_store do |project, database, store|
+      claim = store.reserve(
+        project_root: project, key: "administrative-prune", command: "receipt",
+        mode: "prune", target: project, request: {}, principal: "owner"
+      )
+      claim = store.mark_executing(claim)
+      effect = store.prepare_effect(claim, ordinal: 0, kind: "receipt:prune", identity: {})
+
+      assert_nil store.abort_pre_submission(
+        claim, effect_id: effect.fetch(:effect_id), reason: "command_prune_busy"
+      )
+      assert_nil store.receipt(claim.receipt_id)
+      effect_count = database.read do |connection|
+        connection[:command_effects].where(receipt_id: claim.receipt_id).count
+      end
+      assert_equal 0, effect_count
     end
   end
 

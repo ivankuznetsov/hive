@@ -4,9 +4,30 @@ require "hive/commands/web"
 require "hive/commands/web/capture_server"
 require "hive/web/source_bundle"
 require "hive/web/task_capture"
+require "hive/runtime_control_plane/command_schema_writer_guard"
 
 class CommandsWebTest < Minitest::Test
   include HiveTestHelper
+
+  def test_foreground_web_publishes_writer_identity_for_schema_install_guard
+    Dir.mktmpdir("foreground-web") do |state_home|
+      command = Hive::Commands::Web.new
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state_home }) do
+        command.send(:publish_foreground_writer_identity!)
+      end
+
+      path = File.join(state_home, ".web.pid")
+      payload = Hive::PidFile.parse_payload(File.read(path))
+      assert_equal Process.pid, payload.fetch("pid")
+      assert_equal Hive::Lock.process_start_time(Process.pid), payload.fetch("process_start_time")
+      error = assert_raises(Hive::ConfigError) do
+        Hive::RuntimeControlPlane::CommandSchemaWriterGuard.verify_pid_file!(
+          path, alive: ->(*) { true }, ownership: ->(*) { :verified }
+        )
+      end
+      assert_includes error.message, "live process"
+    end
+  end
 
   class FakeRuntime
     attr_reader :prepares, :lifecycle, :cleanups

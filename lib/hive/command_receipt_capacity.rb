@@ -5,6 +5,7 @@ require "sqlite3"
 require "hive/config"
 require "hive/errors"
 require "hive/runtime_control_plane/codec"
+require "hive/runtime_control_plane/sqlite_support"
 
 module Hive
   class CommandReceiptCapacity
@@ -34,7 +35,7 @@ module Hive
     )
 
     def self.load(project_root)
-      _path, raw_project = Hive::Config.read_project_config(project_root)
+      path, raw_project = Hive::Config.read_project_config(project_root)
       raw_receipts = raw_project.fetch("command_receipts", {})
       forbidden = raw_receipts.keys.map(&:to_s) & INSTALLATION_KEYS
       unless forbidden.empty?
@@ -42,7 +43,8 @@ module Hive
               "project command_receipts cannot override installation backstops: #{forbidden.sort.join(', ')}"
       end
 
-      project = Hive::Config.load(project_root).fetch("command_receipts")
+      project = Hive::Config.build_project_config(project_root, path, raw_project)
+        .fetch("command_receipts")
       global = global_receipts
       installation_nonterminal = positive_integer(
         global.fetch("installation_nonterminal_limit", DEFAULT_INSTALLATION_NONTERMINAL_LIMIT),
@@ -143,13 +145,11 @@ module Hive
     def admit_nonterminal!(connection, namespace_id:, request_bytes:,
                            occupied_installation_bytes:)
       namespace = connection[:command_capacity][namespace_id: namespace_id]
-      totals = connection[:command_capacity].select do
-        [ sum(:nonterminal_count).as(:nonterminal), sum(:executing_count).as(:executing) ]
-      end.first
+      totals = installation_capacity(connection)
       if namespace.fetch(:nonterminal_count) >= policy.nonterminal_limit
         capacity_error!(:command_nonterminal_limit, :namespace, nonterminal_remedy(:namespace))
       end
-      if totals.fetch(:nonterminal).to_i >= policy.installation_nonterminal_limit
+      if totals.fetch(:nonterminal_count).to_i >= policy.installation_nonterminal_limit
         capacity_error!(:command_nonterminal_limit, :installation, nonterminal_remedy(:installation))
       end
       admit_bytes!(
@@ -173,7 +173,7 @@ module Hive
 
     def admit_execution!(connection, namespace_id:)
       namespace = connection[:command_capacity][namespace_id: namespace_id]
-      totals = connection[:command_capacity].sum(:executing_count).to_i
+      totals = installation_capacity(connection).fetch(:executing_count).to_i
       if namespace.fetch(:executing_count) >= policy.concurrency_limit
         capacity_error!(:command_concurrency_limit, :namespace, concurrency_remedy(:namespace))
       end
@@ -187,9 +187,9 @@ module Hive
     # WAL bytes are observed in the same atomic threshold decision.
     def occupied_installation_bytes(connection: nil)
       measure = lambda do |active_connection|
-        page_size = pragma_integer(active_connection, "page_size")
-        occupied_pages = pragma_integer(active_connection, "page_count") -
-          pragma_integer(active_connection, "freelist_count")
+        page_size = Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(active_connection, "page_size")
+        occupied_pages = Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(active_connection, "page_count") -
+          Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(active_connection, "freelist_count")
         occupied_main = occupied_pages * page_size
         wal = begin
           File.stat("#{database.path}-wal").size
@@ -199,20 +199,25 @@ module Hive
         occupied_main + wal
       end
       connection ? measure.call(connection) : database.read { |db| measure.call(db) }
-    rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError, ArgumentError, TypeError
-      capacity_error!(
-        :command_capacity_exhausted, :installation,
-        "free disk and restore runtime database availability, then rerun"
-      )
+    rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError, ArgumentError, TypeError => error
+      if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
+        capacity_error!(:command_prune_busy, :installation,
+                        "resolve database contention, then rerun; free disk if storage is exhausted")
+      elsif Hive::RuntimeControlPlane::SQLiteSupport.storage_exhaustion_error?(error)
+        capacity_error!(:command_prune_storage_unavailable, :installation,
+                        "free disk, then rerun")
+      else
+        capacity_error!(:command_prune_preview_unavailable, :installation,
+                        "restore normal database availability before retrying admission")
+      end
     end
-
-    def pragma_integer(connection, name)
-      Integer(connection.fetch("PRAGMA #{name}").first.values.first)
-    end
-
-    private :pragma_integer
 
     private
+
+    def installation_capacity(connection)
+      connection[:command_installation_capacity][singleton_id: 1] ||
+        raise(Hive::CommandConflict, "installation command capacity is unavailable")
+    end
 
     def capacity_error!(reason, scope, remedy)
       raise Hive::CommandCapacityError.new(

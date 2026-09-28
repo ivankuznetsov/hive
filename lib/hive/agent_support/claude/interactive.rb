@@ -24,6 +24,10 @@ module Hive::AgentSupport::Claude::Interactive
 
   PLANNER_TOOLS = "Read,Write,Edit,LS".freeze
   IMPLEMENTER_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
+  # Stage sessions run detached in tmux and only finish through the Stop hook,
+  # so a question menu has no one to answer it and hangs the stage until its
+  # timeout. Every launch denies it, whatever the permission scope.
+  HEADLESS_DENIED_TOOLS = %w[AskUserQuestion].freeze
 
   def ensure_claude_profile!(profile)
     return if profile.name == :claude
@@ -50,7 +54,9 @@ module Hive::AgentSupport::Claude::Interactive
     command.concat(Array(cli_flags))
     command.concat(runtime_policy ? runtime_policy.cli_flags : mcp_cli_flags(mcp_config_path, strict_mcp_config))
     allowed = Hive::PermissionScope.tool_csv(allowed_tools)
-    disallowed = Hive::PermissionScope.tool_csv(disallowed_tools)
+    disallowed = Hive::PermissionScope.tool_csv(
+      Hive::PermissionScope.tool_csv(disallowed_tools).to_s.split(",") + HEADLESS_DENIED_TOOLS
+    )
     command.concat([ "--allowedTools", allowed ]) if allowed
     command.concat([ "--disallowedTools", disallowed ]) if disallowed
     command.concat([ "--bin", profile.bin ])

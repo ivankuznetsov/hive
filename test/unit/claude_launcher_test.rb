@@ -1128,7 +1128,36 @@ class ClaudeLauncherTest < Minitest::Test
     )
 
     assert_equal %w[--allowedTools Read,LS], command.each_cons(2).find { |a, _| a == "--allowedTools" }
-    assert_equal %w[--disallowedTools Write,Bash], command.each_cons(2).find { |a, _| a == "--disallowedTools" }
+    assert_equal %w[--disallowedTools Write,Bash,AskUserQuestion],
+                 command.each_cons(2).find { |a, _| a == "--disallowedTools" }
+  end
+
+  # A detached stage session has no one to answer a question menu; before
+  # this deny, a yolo execute agent sat on one for hours until its timeout.
+  def test_wrapper_command_denies_ask_user_question_even_for_yolo
+    profile = Hive::AgentProfiles.lookup(:claude)
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp", add_dirs: [], profile: profile,
+      permission_mode: "bypassPermissions",
+      allowed_tools: nil, disallowed_tools: nil
+    )
+
+    assert_equal %w[--disallowedTools AskUserQuestion],
+                 command.each_cons(2).find { |a, _| a == "--disallowedTools" }
+  end
+
+  def test_wrapper_command_does_not_duplicate_ask_user_question
+    profile = Hive::AgentProfiles.lookup(:claude)
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp", add_dirs: [], profile: profile,
+      permission_mode: "default",
+      disallowed_tools: "Write,AskUserQuestion"
+    )
+
+    assert_equal %w[--disallowedTools Write,AskUserQuestion],
+                 command.each_cons(2).find { |a, _| a == "--disallowedTools" }
   end
 
 

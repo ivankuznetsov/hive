@@ -1281,15 +1281,17 @@ class SpawnAgentTest < Minitest::Test
         disallowed_tools: tmux_scope.fetch(:disallowed_tools)
       )
       # Byte-identical tmux golden (U10-4 requires it in BOTH modes): tmux
-      # yolo keeps the builtin allowlist threaded and emits NO deny list — so
-      # a reordered/extra wrapper flag, a dropped default_allowed_tools, or a
-      # leaked --disallowedTools would all fail here, not just presence/absence.
+      # yolo keeps the builtin allowlist threaded and its only deny is the
+      # launcher's headless AskUserQuestion — so a reordered/extra wrapper
+      # flag, a dropped default_allowed_tools, or a leaked scope deny list
+      # would all fail here, not just presence/absence.
       expected_tmux = [
         "bash", WRAPPER_SCRIPT,
         "--cwd", task.folder,
         "--add-dir", task.folder,
         "--dangerously-skip-permissions",
         "--allowedTools", Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS,
+        "--disallowedTools", "AskUserQuestion",
         "--bin", profile.bin
       ]
       assert_equal expected_tmux, wrapper,
@@ -1357,6 +1359,7 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--dangerously-skip-permissions",
         "--allowedTools", Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
+        "--disallowedTools", "AskUserQuestion",
         "--bin", profile.bin
       ]
       assert_equal expected_tmux, wrapper,
@@ -1424,6 +1427,7 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--dangerously-skip-permissions",
         "--allowedTools", Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS,
+        "--disallowedTools", "AskUserQuestion",
         "--bin", profile.bin
       ]
       assert_equal expected_tmux, wrapper,

@@ -707,6 +707,42 @@ class CommandOperationTest < Minitest::Test
       :failure_error_kind, Hive::OperationalActionUsageError.new("bad")
     )
     assert_equal "internal", operation.send(:failure_error_kind, Hive::Error.new("bad"))
+
+    unavailable_database = Object.new
+    unavailable_database.define_singleton_method(:read) { |_block = nil, &block| block&.call }
+    unavailable_store = Struct.new(:database).new(unavailable_database)
+    unavailable = Hive::CommandOperation.new(
+      key: nil, command: "approve", target: "task", request: {}, project_root: "/project",
+      principal: "owner", store: unavailable_store
+    )
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::CommandSchema, :installed?, ->(*) { false }
+    ) do
+      assert_raises(Hive::ConfigError) { unavailable.send(:verify_receipt_extension!) }
+    end
+
+    replay = Hive::CommandOperation.new(
+      key: nil, command: "approve", target: "task", request: {}, project_root: "/project",
+      principal: "owner", json: true, store: store
+    )
+    payload = { "ok" => true }
+    stored = {
+      "format" => "json", "payload" => payload,
+      "expanded_sha256" => Digest::SHA256.hexdigest(
+        Hive::RuntimeControlPlane::Codec.dump_json(payload)
+      )
+    }
+    replay_claim = Struct.new(:state, :result, :status, :public_receipt)
+      .new("succeeded", stored, 0, {})
+    output, = capture_io { assert_nil replay.send(:replay, replay_claim) }
+    assert_equal "#{JSON.generate(payload)}\n", output
+
+    assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+      replay.send(:exact_json_payload, { "json_bytes" => "{}\n" }, payload)
+    end
+    assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+      replay.send(:exact_json_payload, { "json_bytes" => "{\n" }, payload)
+    end
   end
 
   private

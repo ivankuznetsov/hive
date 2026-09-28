@@ -311,6 +311,24 @@ class ProjectIdentityTest < Minitest::Test
         :reserve_pending!, database: database, installation_id: installation_id,
         digest: digest, project_root: project
       )
+      assert_raises(Hive::CommandConflict) do
+        Hive::ProjectIdentity.send(
+          :persist_pending_audit_context!, database: database,
+          row: row.merge(enrollment_generation: row.fetch(:enrollment_generation) + 1),
+          authority: owner_authority, audit_context: { "attempt" => 1 }
+        )
+      end
+      database.transaction do |connection|
+        connection[:command_project_enrollments].where(
+          namespace_id: row.fetch(:namespace_id)
+        ).update(audit_context_json: "{}")
+      end
+      assert_raises(Hive::CommandConflict) do
+        Hive::ProjectIdentity.send(
+          :persist_pending_audit_context!, database: database, row: row,
+          authority: owner_authority, audit_context: { "attempt" => 2 }
+        )
+      end
       database.transaction do |connection|
         connection[:command_namespaces].where(namespace_id: row.fetch(:namespace_id))
           .update(enrollment_generation: 1)

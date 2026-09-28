@@ -821,6 +821,64 @@ class CommandReceiptStoreTest < Minitest::Test
     end
   end
 
+  def test_store_translates_corrupt_contention_and_resume_evidence
+    broken = Hive::CommandReceiptStore.new(database: Object.new)
+    broken.define_singleton_method(:require_extension!) { raise Hive::Error, "broken" }
+    error = assert_raises(Hive::ConfigError) { broken.verify_extension! }
+    assert_includes error.message, "cannot verify command receipt storage"
+
+    with_store do |project, database, store|
+      claim = store.reserve(
+        project_root: project, key: "contention", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      executing = store.mark_executing(claim)
+      effect = store.prepare_effect(
+        executing, ordinal: 0, kind: "approve:default", identity: {}
+      )
+      database.transaction do |connection|
+        connection[:command_effects].where(effect_id: effect.fetch(:effect_id)).update(
+          evidence_json: Hive::RuntimeControlPlane::Codec.dump_json("submissions" => [])
+        )
+      end
+      aborted = store.abort_pre_submission(
+        executing, effect_id: effect.fetch(:effect_id), reason: "busy"
+      )
+      assert_equal "aborted", aborted.state
+
+      database.transaction do |connection|
+        connection[:command_effects].where(effect_id: effect.fetch(:effect_id)).update(
+          evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(
+            "whole_effect_non_application" => false, "submissions" => []
+          )
+        )
+      end
+      assert_raises(Hive::CommandConflict) { store.resume_maintenance(aborted) }
+      refute store.send(
+        :safely_not_applied_effect?, state: "not_applied", evidence_json: "{"
+      )
+
+      corrupt = store.reserve(
+        project_root: project, key: "corrupt-contention", command: "approve", target: "task",
+        request: {}, principal: "owner"
+      )
+      corrupt = store.mark_executing(corrupt)
+      corrupt_effect = store.prepare_effect(
+        corrupt, ordinal: 0, kind: "approve:default", identity: {}
+      )
+      database.transaction do |connection|
+        connection[:command_effects].where(
+          effect_id: corrupt_effect.fetch(:effect_id)
+        ).update(evidence_json: "{")
+      end
+      assert_raises(Hive::CommandConflict) do
+        store.abort_pre_submission(
+          corrupt, effect_id: corrupt_effect.fetch(:effect_id), reason: "busy"
+        )
+      end
+    end
+  end
+
   private
 
   def with_store

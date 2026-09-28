@@ -71,6 +71,32 @@ class CommandDispatchLifecycleTest < Minitest::Test
     end
   end
 
+  def test_explicit_project_root_prefers_configuration_and_falls_back_to_observed_identity
+    observed = { observed_path: "/observed/project" }
+    projects = Object.new
+    projects.define_singleton_method(:[]) { |**_query| observed }
+    connection = Object.new
+    connection.define_singleton_method(:[]) { |_name| projects }
+    database = Object.new
+    database.define_singleton_method(:read) { |&block| block.call(connection) }
+    lifecycle = Hive::CommandDispatchLifecycle.new(store: Struct.new(:database).new(database))
+
+    with_replaced_singleton_method(
+      Hive::Config, :find_project,
+      ->(name) { name == "configured" ? { "path" => "/configured/project" } : nil }
+    ) do
+      assert_equal "/configured/project",
+                   lifecycle.send(:project_root_for_project, "configured")
+      assert_equal "/observed/project",
+                   lifecycle.send(:project_root_for_project, "observed")
+
+      observed = { observed_path: "__global__" }
+      assert_raises(Hive::ConfigError) do
+        lifecycle.send(:project_root_for_project, "unavailable")
+      end
+    end
+  end
+
   def test_restart_reacquires_one_pin_and_same_cycle_successor_is_stable
     with_lifecycle do |project, database, repository, store, lifecycle, request_id, claim|
       first_pin = lifecycle.protect_request!(request_id)

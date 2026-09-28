@@ -1348,6 +1348,19 @@ class CommandReceiptContractTest < Minitest::Test
     assert_raises(Hive::ConfigError) do
       transition.send(:bind_command_context!, db, context.transport_request_id, context)
     end
+
+    contexts = Object.new
+    contexts.define_singleton_method(:[]) { |**_query| nil }
+    receipts = Object.new
+    receipts.define_singleton_method(:[]) { |**_query| nil }
+    bound_db = Object.new
+    bound_db.define_singleton_method(:table_exists?) { |_name| true }
+    bound_db.define_singleton_method(:[]) do |name|
+      name == :command_dispatch_contexts ? contexts : receipts
+    end
+    assert_raises(Hive::Attempts::RepositoryError) do
+      transition.send(:bind_command_context!, bound_db, context.transport_request_id, context)
+    end
   end
 
   def test_dead_owner_proof_independently_requires_local_host_pid_and_start_time
@@ -1378,15 +1391,19 @@ class CommandReceiptContractTest < Minitest::Test
 
     database = Struct.new(:installation_identity).new({ installation_id: "installation" })
     store = Struct.new(:database).new(database)
+    authority = Hive::CommandMaintenanceAuthority.new(
+      principal: "owner", principal_source: "test", installation_owner: true
+    )
     keyed = Hive::Commands::Receipt.new(
       "prune", project: "demo", confirm: true, idempotency_key: "key",
-      command_receipt_store: store
+      command_receipt_store: store, authority: authority
     )
     with_replaced_singleton_method(Hive::Config, :find_project, ->(*) { { "path" => "/project" } }) do
       operation = keyed.send(:command_operation)
       failure = operation.instance_variable_get(:@failure_payload).call(Hive::UsageError.new("bad"))
       assert_equal false, failure.fetch("ok")
     end
+    assert_instance_of Hive::CommandReceiptPruner, keyed.send(:pruner)
   end
 
   def test_cli_rejects_mixed_plan_policy_and_emits_keyed_archive_receipt
@@ -1560,6 +1577,32 @@ class CommandReceiptContractTest < Minitest::Test
     with_replaced_singleton_method(repository, :command_context, ->(*) { existing }) do
       assert repository.send(:same_command_context?, "id", context)
     end
+
+    contexts = Object.new
+    contexts.define_singleton_method(:[]) { |**_query| nil }
+    contexts.define_singleton_method(:insert) { |_values| true }
+    receipts = Object.new
+    receipts.define_singleton_method(:[]) do |**_query|
+      {
+        receipt_id: "receipt", namespace_id: "namespace", state: "executing",
+        generation: 1, principal: "owner", request_fingerprint: "fingerprint"
+      }
+    end
+    capacity = Object.new
+    capacity.define_singleton_method(:where) { |**_query| capacity }
+    capacity.define_singleton_method(:update) { |**_values| 0 }
+    capacity_db = Object.new
+    capacity_db.define_singleton_method(:table_exists?) { |_name| true }
+    capacity_db.define_singleton_method(:[]) do |name|
+      { command_dispatch_contexts: contexts, command_receipts: receipts,
+        command_capacity: capacity }.fetch(name)
+    end
+    error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+      repository.send(
+        :bind_command_context!, capacity_db, context.fetch(:transport_request_id), context
+      )
+    end
+    assert_equal :dispatch_context_conflict, error.code
   end
 
   def test_github_auth_rejects_non_numeric_identity

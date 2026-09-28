@@ -856,6 +856,67 @@ class CommandReceiptMaintenanceTest < Minitest::Test
         row: { command: "approve", mode: nil }
       )
     end
+
+    {
+      "new" => [ "usage", 1 ],
+      "answer" => [ "invalid_answer", 1 ],
+      "stage_action" => [ "error", 1 ]
+    }.each do |command, (kind, exit_code)|
+      maintenance.send(
+        :validate_closed_error_enums!,
+        { "error_kind" => kind, "exit_code" => exit_code },
+        { command: command, mode: nil }
+      )
+    end
+    assert_raises(Hive::UsageError) do
+      maintenance.send(
+        :validate_closed_error_enums!,
+        { "error_kind" => "error", "exit_code" => 99 },
+        { command: "approve", mode: nil }
+      )
+    end
+    with_replaced_singleton_method(
+      Hive::Schemas, :schema_path, ->(*) { "/missing/command-schema.json" }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        maintenance.send(
+          :validate_closed_error_enums!,
+          { "error_kind" => "error", "exit_code" => 1 },
+          { command: "approve", mode: nil }
+        )
+      end
+    end
+
+    authority = Hive::CommandMaintenanceAuthority.new(
+      principal: "owner", principal_source: "test", installation_owner: true
+    )
+    liveness = Hive::CommandReceiptMaintenance.new(database: Object.new, authority: authority)
+    with_replaced_singleton_method(Hive::CommandOwnerProof, :dead, ->(*, **) { nil }) do
+      evidence = liveness.send(:owner_liveness_evidence, {})
+      assert_equal "live_remote_or_unverifiable", evidence.fetch("status")
+    end
+    with_replaced_singleton_method(
+      Hive::CommandOwnerProof, :dead, ->(*, **) { raise Hive::Error, "unavailable" }
+    ) do
+      evidence = liveness.send(:owner_liveness_evidence, {})
+      assert_equal "unverifiable", evidence.fetch("status")
+    end
+
+    pruner = Hive::CommandReceiptPruner.new(
+      database: Object.new, authority: authority, clock: -> { Time.utc(2030) }
+    )
+    with_replaced_singleton_method(Hive::CommandOwnerProof, :dead, ->(*, **) { nil }) do
+      evidence = pruner.send(
+        :active_pin_identity,
+        pin_id: "pin", generation: 1, retry_horizon_expires_at: nil
+      )
+      assert_equal "unavailable", evidence.fetch("horizon_evidence")
+    end
+    evidence = pruner.send(
+      :active_pin_identity,
+      pin_id: "pin", generation: 1, retry_horizon_expires_at: "not-a-time"
+    )
+    assert_equal "invalid_or_unavailable", evidence.fetch("horizon_evidence")
   end
 
   def test_owner_proof_uses_default_ownership_probe

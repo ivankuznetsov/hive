@@ -15,12 +15,13 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
     location: "https://example.invalid/hive-compat-0.0.0-test.gem",
     sha256: "a" * 64
   }.freeze
+  COMPATIBILITY_BASELINE = "f3de256100aaa9cb4dbc6f9bc9b0b6f8901b314d".freeze
 
   def test_additive_install_preserves_base_schema_and_rows
     Dir.mktmpdir do |dir|
       path = File.join(dir, "runtime.sqlite3")
       database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
-      database.read do |db|
+      database.transaction do |db|
         installation_id = db[:installations].get(:installation_id)
         db[:daemon_runtime].insert(
           installation_id: installation_id, observation_json: '{"sentinel":true}'
@@ -126,17 +127,32 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
     proof = File.read(File.join(root, "docs/implementation/command-receipt-compatibility-proof.md"))
     guide = File.read(File.join(root, "docs/guides/current-format-migration.md"))
     patch = File.join(root, "docs/implementation/command-receipt-compatibility.patch")
+    patch_source = File.read(patch)
     patch_sha256 = Digest::SHA256.file(patch).hexdigest
     schema_sha256 = Hive::RuntimeControlPlane::CommandSchema::EXPECTED_SCHEMA_SHA256
 
     [ proof, guide ].each do |document|
+      assert_includes document, COMPATIBILITY_BASELINE
+      assert_includes document, "schema v#{Hive::RuntimeControlPlane::SCHEMA_VERSION}"
       assert_includes document, schema_sha256
       assert_includes document, patch_sha256
-      assert_match(/cf7eae51b26bdace854d4a40ab681c53ff67aebb1670fc939310ff7fce3ba712/, document)
+      assert_match(/ea14234d40d7efc995164ed9590ce7817a04d9ce2a40350577c3d852dea71c34/, document)
       assert_match(/sha256sum --check --strict &&\s*gem install/m, document)
     end
     refute_includes proof, "docs/artifacts/"
     refute_includes guide, "docs/artifacts/"
+
+    object_block = patch_source.match(
+      /^\+    COMMAND_RECEIPT_OBJECT_NAMES = %w\[\n(?<rows>.*?)^\+    \]\.freeze$/m
+    )
+    refute_nil object_block, "compatibility patch must carry a closed extension inventory"
+    patched_objects = object_block[:rows].lines.filter_map do |line|
+      line[/^\+      ([a-z][a-z0-9_]*)\s*$/, 1]
+    end
+    assert_equal Hive::RuntimeControlPlane::CommandSchema::OBJECT_NAMES.sort,
+                 patched_objects.sort
+    assert_includes patch_source,
+                    %(EXPECTED_SCHEMA_SHA256 = "#{Hive::RuntimeControlPlane::EXPECTED_SCHEMA_SHA256}")
   end
 
   def test_install_rejects_partial_and_mismatched_extension_shapes

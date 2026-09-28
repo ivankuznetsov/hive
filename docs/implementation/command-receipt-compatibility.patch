@@ -1,10 +1,10 @@
 diff --git a/lib/hive/runtime_control_plane/database.rb b/lib/hive/runtime_control_plane/database.rb
-index be44fa474e..1c15bab8f1 100644
+index 578d1a1769..e5e5a809c4 100644
 --- a/lib/hive/runtime_control_plane/database.rb
 +++ b/lib/hive/runtime_control_plane/database.rb
-@@ -11,6 +11,34 @@ module Hive
+@@ -12,6 +12,38 @@ module Hive
    module RuntimeControlPlane
-     EXPECTED_SCHEMA_SHA256 = "f237684b17dfd8f7ded175a5e3c7a1b0445c4a7bee109fca4f2f51e498ead0a7".freeze
+     EXPECTED_SCHEMA_SHA256 = "92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0".freeze
 -
 +
 +    COMMAND_RECEIPT_SCHEMA_SHA256 =
@@ -16,8 +16,11 @@ index be44fa474e..1c15bab8f1 100644
 +      command_effects
 +      command_effects_ordinal_uidx
 +      command_maintenance_audit
++      command_maintenance_audit_batch_idx
 +      command_maintenance_audit_receipt_idx
 +      command_maintenance_batches
++      command_maintenance_batches_completed_idx
++      command_maintenance_batches_receipt_idx
 +      command_maintenance_batches_unfinished_uidx
 +      command_namespaces
 +      command_namespaces_git_common_uidx
@@ -27,6 +30,7 @@ index be44fa474e..1c15bab8f1 100644
 +      command_receipt_pins_intent_uidx
 +      command_receipts
 +      command_receipts_key_uidx
++      command_receipts_owner_reclamation_idx
 +      command_receipts_terminal_idx
 +      command_schema_versions
 +      command_successor_allocations
@@ -38,11 +42,15 @@ index be44fa474e..1c15bab8f1 100644
      class Database
        MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze
        BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
-@@ -268,7 +295,14 @@ module Hive
-         rows = database[:sqlite_master].where(type: %w[table index])
-           .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
-           .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
--        Digest::SHA256.hexdigest(Codec.dump_json(rows)) == expected
+@@ -574,7 +606,17 @@ module Hive
+       end
+-
++
+       def exact_schema?(database, expected: EXPECTED_SCHEMA_SHA256)
+-        schema_fingerprint(database) == expected
++        rows = database[:sqlite_master].where(type: %w[table index])
++          .exclude(name: "schema_info").exclude(Sequel.like(:name, "sqlite_%"))
++          .order(:type, :name).select_map([ :type, :name, :tbl_name, :sql ])
 +        extension_rows, base_rows = rows.partition do |row|
 +          COMMAND_RECEIPT_OBJECT_NAMES.include?(row[1].to_s)
 +        end

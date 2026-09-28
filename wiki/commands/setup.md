@@ -21,7 +21,7 @@ non-TTY setup requires `--yes` and otherwise performs no mutation. Human and
 
 `hive setup [--json] [--service|--no-service] [--no-bootstrap] [--no-init] [--yes] [--install-command-receipts]`
 
-Ordinary setup creates or validates base schema v1 only. The default-false
+Ordinary setup creates or validates the current base schema v2 only. The default-false
 `--install-command-receipts` flag separately requests the additive command
 receipt extension. `--yes` never implies it, and enabling a namespace intake
 gate never implies it. Pre-publication builds have no pinned published rollback

@@ -114,7 +114,7 @@ module Hive
       end
 
       def transaction(mode: :immediate, authority: nil, cleanup_attempt_id: nil,
-                      timeout_sec: nil)
+                      timeout_sec: nil, track_mutation: true)
         fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
           [ Float(timeout_sec), 0.0 ].max
         wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -140,7 +140,7 @@ module Hive
               @connection.transaction(mode: mode, rollback: :reraise) do
                 authorize_mutation!(@connection, authority: authority,
                                     cleanup_attempt_id: cleanup_attempt_id)
-                increment_mutation_sequence!(@connection)
+                increment_mutation_sequence!(@connection) if track_mutation
                 yield @connection
               end
             ensure

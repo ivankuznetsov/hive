@@ -7,7 +7,7 @@ Use `hive runtime status --json` to check it. A fresh installation uses `hive se
 
 ## Additive command-receipt extension
 
-The base database remains schema v1. Ordinary `hive setup` and
+The base database remains at the current schema v2. Ordinary `hive setup` and
 `hive setup --yes` initialize or validate only that base and can refresh
 services without installing command receipts. The extension is requested only
 with `hive setup --install-command-receipts`; add `--yes` when unattended
@@ -33,17 +33,19 @@ run `hive setup` or `hive setup --yes` without
 
 Code-complete rollback handoff status for this checkout:
 
-- pinned prior revision: `882b8e9ead2f9cf5321b158fe47648e6a01a2fca`
+- pinned prior revision: `f3de256100aaa9cb4dbc6f9bc9b0b6f8901b314d`
+- base schema SHA-256:
+  `92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0`
 - extension manifest SHA-256:
   `a108a7018f7e4b0d9e83674bda6457ac0d2c875539c1a7ecd8a95277546b4a3d`
 - compatibility patch diff:
   `docs/implementation/command-receipt-compatibility.patch`
 - compatibility patch SHA-256:
-  `fdfd638d7b092f09583960dfcc0ae505037f3499e34f60a99ef8bd3e7d289c2e`
+  `d2b6a51eb5b3341555d57f8ec916aa995cb26786551602e70a29b65e4379915e`
 - externally retained candidate output (not committed):
   `hive-cli-command-receipt-compat-candidate.gem`
 - candidate SHA-256:
-  `cf7eae51b26bdace854d4a40ab681c53ff67aebb1670fc939310ff7fce3ba712`
+  `ea14234d40d7efc995164ed9590ce7817a04d9ce2a40350577c3d852dea71c34`
 - isolated packaged rollback drill:
   `docs/implementation/command-receipt-compatibility-proof.md`
 - published version/location/SHA-256: pending maintainer release authorization
@@ -53,7 +55,7 @@ replaced with the local candidate. For the Tier A candidate drill, point to the
 retained build output, verify it before installation, and abort on any mismatch:
 
 ```sh
-candidate_sha256='cf7eae51b26bdace854d4a40ab681c53ff67aebb1670fc939310ff7fce3ba712'
+candidate_sha256='ea14234d40d7efc995164ed9590ce7817a04d9ce2a40350577c3d852dea71c34'
 candidate_gem=${HIVE_COMPAT_CANDIDATE_GEM:?set to the retained candidate path}
 printf '%s  %s\n' "$candidate_sha256" "$candidate_gem" | sha256sum --check --strict &&
   gem install --install-dir "$PWD/hive-compat-prefix" "$candidate_gem"

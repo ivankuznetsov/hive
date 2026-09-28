@@ -53,7 +53,7 @@ module Hive
           end
         end
 
-        database.transaction do |connection|
+        database.transaction(track_mutation: false) do |connection|
           CommandMigrations::AddCommandReceipts002.apply(
             connection, checksum: CommandSchema::EXPECTED_SCHEMA_SHA256
           )

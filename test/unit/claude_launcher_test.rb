@@ -1633,6 +1633,55 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  # C10 regression: an execute agent opened a question menu in its detached
+  # session and the wait burned the full stage timeout (~4h). Once the menu
+  # has stayed up past the grace window the waits fail with a named cause.
+  def test_waits_fail_fast_on_stranded_interactive_menu
+    menu_pane = pane_fixture("ask_user_question_stranded.txt")
+    runner = Struct.new(:tail) do
+      def session_exists? = true
+      def capture_pane_tail(bytes:) = tail
+    end.new(menu_pane)
+
+    with_env("HIVE_CLAUDE_TMUX_STRANDED_MENU_GRACE_SEC" => "0") do
+      with_tmp_task do |task|
+        result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "execute")
+
+        assert_equal :error, result.fetch(:status)
+        assert_match(/waiting on an interactive menu/, result.fetch(:error_message))
+      end
+
+      with_tmp_task do |task|
+        output = File.join(task.folder, "result.md")
+        result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+        assert_equal :error, result.fetch(:status)
+        assert_match(/waiting on an interactive menu/, result.fetch(:error_message))
+      end
+
+      with_tmp_task do |task|
+        marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
+
+        assert_equal :error, marker.name
+        assert_equal "interactive_menu_stranded", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_stranded_menu_waits_out_grace_and_ignores_quoted_footer
+    menu_pane = pane_fixture("ask_user_question_stranded.txt")
+    since = Hive::ClaudeLauncher.stranded_menu_since(menu_pane, nil)
+
+    refute_nil since
+    assert_same since, Hive::ClaudeLauncher.stranded_menu_since(menu_pane, since),
+                "the first-seen time is kept across polls"
+    refute Hive::ClaudeLauncher.stranded_menu_expired?(since), "a fresh menu is inside the grace window"
+
+    quoted = "#{menu_pane}\n● The menu was answered; continuing.\n  Ran 2 shell commands\n  Wrote plan.md\n"
+    assert_nil Hive::ClaudeLauncher.stranded_menu_since(quoted, since),
+               "a footer above newer output is history, not a live menu"
+  end
+
   def test_waits_ignore_quoted_limit_menu_after_agent_moved_on
     quoted_pane = pane_fixture("limit_quoted_7456.txt")
 

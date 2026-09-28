@@ -25,6 +25,14 @@ module Hive
     DONE_POLL_INTERVAL_SEC = 0.5
     SENTINEL_POLL_INTERVAL_SEC = 5
     SENTINEL_CAPTURE_BYTES = 8192
+    # Claude's selection-menu footer. At the bottom of a detached stage pane
+    # it means Claude is waiting on a keypress nobody will send; the waits
+    # fail fast instead of burning the whole stage timeout.
+    STRANDED_MENU_FOOTER_RE = %r{Enter to select\s*·\s*↑/↓ to navigate}
+    STRANDED_MENU_TAIL_LINES = 3
+    # Grace before a menu counts as stranded, so an operator who attached
+    # to the session can still answer it.
+    STRANDED_MENU_GRACE_SEC = 300
     PANE_LOG_CAPTURE_BYTES = 64 * 1024
     # Shared-session reviewer sends re-call `prepare_claude_session!`
     # between each per-reviewer prompt; a 30s ceiling was too tight for
@@ -573,6 +581,7 @@ module Hive
     def wait_for_terminal_marker(task, runner, timeout)
       deadline = Time.now + timeout
       last_sentinel_check = Time.at(0)
+      menu_since = nil
       loop do
         if File.exist?(done_path(task))
           marker = Hive::Markers.current(task.state_file)
@@ -588,6 +597,14 @@ module Hive
 
           limit = limits_reached_marker(task, runner)
           return limit if limit
+
+          menu_since = stranded_menu_since(capture_limit_tail(runner), menu_since)
+          if stranded_menu_expired?(menu_since)
+            Hive::Markers.set(task.state_file, :error,
+                              reason: "interactive_menu_stranded",
+                              message: stranded_menu_message)
+            return Hive::Markers.current(task.state_file)
+          end
 
           marker = marker_from_sentinel_tail(task, runner)
           return marker if marker
@@ -672,6 +689,7 @@ module Hive
       tmux_error_streak = 0
       last_tmux_error_msg = nil
       output_manifest = expected_output_manifest(expected_output)
+      menu_since = nil
       loop do
         output_available = expected_output_available?(
           expected_output, manifest: output_manifest
@@ -685,6 +703,8 @@ module Hive
             error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude")
           }
         end
+        menu_since = stranded_menu_since(pane_tail, menu_since)
+        return { status: :error, error_message: stranded_menu_message } if stranded_menu_expired?(menu_since)
 
         unless expected_output_session_alive?(runner)
           return { status: :ok, log_label: log_label } if output_available && File.exist?(done_path(task))
@@ -760,6 +780,28 @@ module Hive
       false
     end
 
+    # When the pane's bottom lines show a live selection menu, returns the
+    # time it was first seen (kept across polls); nil once it goes away.
+    def stranded_menu_since(pane, since)
+      bottom = pane.to_s.lines.map(&:strip).reject(&:empty?).last(STRANDED_MENU_TAIL_LINES)
+      return nil unless bottom.any? { |line| line.match?(STRANDED_MENU_FOOTER_RE) }
+
+      since || Time.now
+    end
+
+    def stranded_menu_expired?(since)
+      since && Time.now - since >= stranded_menu_grace
+    end
+
+    def stranded_menu_message
+      "claude is waiting on an interactive menu in a detached session " \
+        "(no answer after #{stranded_menu_grace.round}s)"
+    end
+
+    def stranded_menu_grace
+      Float(tmux_env("STRANDED_MENU_GRACE_SEC", STRANDED_MENU_GRACE_SEC.to_s))
+    end
+
     def capture_limit_tail(runner)
       return "" unless runner.respond_to?(:capture_pane_tail)
 
@@ -771,6 +813,7 @@ module Hive
     def wait_for_done_signal(task, runner, timeout, log_label)
       deadline = Time.now + timeout
       work_started = false
+      menu_since = nil
       loop do
         # A usage/credit wall stalls claude WITHOUT ever touching `.done`,
         # so this exit_code_only path (the default `claude`/tmux execute
@@ -791,6 +834,8 @@ module Hive
             error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude")
           }
         end
+        menu_since = stranded_menu_since(pane_tail, menu_since)
+        return { status: :error, error_message: stranded_menu_message } if stranded_menu_expired?(menu_since)
 
         if File.exist?(done_path(task))
           # The stop-hook touches `.done` even on `empty_stdin` /

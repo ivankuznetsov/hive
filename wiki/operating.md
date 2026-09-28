@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-09-27
+updated: 2026-09-28
 tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood, receipts]
 ---
 
@@ -43,8 +43,8 @@ bytes/receipt (rounded page-allocation deltas). Four concurrent writer
 processes inserting the same 1,000-row control serialized successfully and
 peaked at a 4,140,632-byte WAL against 970,752 occupied main bytes, a 4.27x
 transient amplification. A maximum-result finalization qualification then
-measured 225,280 bytes of main-file growth plus 255,472 bytes of WAL growth,
-480,752 bytes total. Admission therefore uses main occupied pages plus the
+measured 225,280 bytes of main-file growth plus 263,712 bytes of WAL growth,
+488,992 bytes total. Admission therefore uses main occupied pages plus the
 current WAL and a rounded-up 512 KiB next-operation allowance. At the default
 installation A=3,200, one such allowance per executing command is 1.5625 GiB,
 leaving roughly 4.69 GiB below the 6.25 GiB installation threshold for
@@ -85,9 +85,11 @@ Task-activity and GitHub publication observations are copied into the owning
 receipt by those domain authorities. Evidence retirement accepts only the exact
 original replay envelope already persisted by the command boundary and exact
 stored observations; operator-supplied result bytes or labels cannot establish
-success. Identical retries may resume only the bounded task-activity,
-publication, or attempt-dispatch state machines whose durable correlation can
-be re-observed. Other unknown effects remain unresolved.
+success. Identical retries may finalize from an exact original boundary result
+or resume only the bounded publication and attempt-dispatch state machines
+whose durable correlation can be authoritatively re-observed. Generic task
+activity alone never authorizes global resumption. Other unknown effects remain
+unresolved.
 
 Bot enqueue, foreground durable Attempts dispatch, and Daemon consumption use
 one receipt-owned dispatch lifecycle. Before any keyed delivery can rely on
@@ -107,7 +109,7 @@ reproducible 100-receipt qualification now measures a complete deterministic
 settlement workflow: read the exact persisted provider observation, correlate
 it to every effect, construct the evidence, run the read-only preview, and
 commit the single-receipt retirement. On Ruby 3.4.10 / SQLite 3.53.2 it measured
-3.761 ms p50 and 4.802 ms p95 (`t_lab = 0.00008004` minutes). This is a lower
+4.148 ms p50 and 5.425 ms p95 (`t_lab = 0.00009041` minutes). This is a lower
 bound for incidents whose authoritative evidence is already available; human
 judgment, restoring provider authority, queue cancellation, and ambiguous
 evidence increase the installation's measured `t_actual`.
@@ -115,7 +117,7 @@ evidence increase the installation's measured `t_actual`.
 Conditional capacity is `floor(T/t_actual)`, with headroom for backlog and
 orphan triage. The qualification shows the arithmetic without assigning an
 operator budget: absent T has no numeric ceiling, T=0 has ceiling 0, and an
-illustrative T=30 minutes with the lab-only p95 lower bound gives 374,815/day.
+illustrative T=30 minutes with the lab-only p95 lower bound gives 331,814/day.
 That last number is not a production sustainable-rate claim. Configure and use
 the actual shared operator allocation; `operator_count` is not multiplied into
 T. The one-business-day response assumption alone never supplies T. Reproduce

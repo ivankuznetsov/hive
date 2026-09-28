@@ -97,6 +97,7 @@ module CommandReceiptMeasurement
       store.record_effect_observation(
         receipt_id: claim.receipt_id, effect_id: effect.fetch(:effect_id),
         principal: claim.principal, request_fingerprint: claim.request_fingerprint,
+        generation: claim.generation,
         **observation.transform_keys(&:to_sym)
       )
       result = replay_result("settled-#{index}")

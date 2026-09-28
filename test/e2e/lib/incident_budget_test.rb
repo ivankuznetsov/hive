@@ -48,13 +48,25 @@ class E2EIncidentBudgetTest < Minitest::Test
     assert checked.ok?
   end
 
+  def test_observed_three_incident_hosted_total_stays_within_budget
+    checked = Hive::E2E::IncidentBudget.check(
+      report(
+        metadata: [ metadata("plan"), metadata("provider"), metadata("repository") ],
+        scenarios: [ result("plan", 11.956), result("provider", 11.590),
+                     result("repository", 7.097) ]
+      )
+    )
+
+    assert checked.ok?
+  end
+
   def test_enabled_incident_group_must_be_below_thirty_two_seconds
     checked = Hive::E2E::IncidentBudget.check(
       report(
         metadata: [ metadata("one"), metadata("two") ],
         scenarios: [ result("one", 16.0), result("two", 16.0) ]
       ),
-      per_scenario_limit: 17.0
+      per_scenario_limit: 20.0
     )
 
     refute checked.ok?

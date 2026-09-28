@@ -5,6 +5,8 @@ require "hive/command_receipt_store"
 require "hive/command_receipt_pruner"
 require "hive/command_maintenance_authority"
 require "hive/runtime_control_plane/command_schema_installation"
+require "open3"
+require "rbconfig"
 
 class CommandReceiptCapacityQualificationTest < Minitest::Test
   include HiveTestHelper
@@ -12,6 +14,20 @@ class CommandReceiptCapacityQualificationTest < Minitest::Test
   TEST_PACKAGE = {
     version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "f" * 64
   }.freeze
+
+  def test_measurement_script_emits_reproducible_qualification_json
+    script = File.expand_path("../../script/measure_command_receipts.rb", __dir__)
+    output, error, status = Open3.capture3(
+      { "HIVE_RECEIPT_MEASUREMENT_SAMPLES" => "2" }, RbConfig.ruby, script
+    )
+
+    assert status.success?, error
+    payload = JSON.parse(output)
+    assert_equal "hive-command-receipt-measurement", payload.fetch("schema")
+    assert_equal 2, payload.dig("settlement", "samples")
+    assert_equal 100, payload.dig("prune_batch", "candidate_limit")
+    assert_operator payload.dig("maximum_finalization", "payload_bytes"), :>, 0
+  end
 
   def test_real_sqlite_page_exhaustion_never_reports_success_and_finalization_recovers
     with_store do |project, database, store|

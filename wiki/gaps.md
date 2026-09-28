@@ -3,9 +3,26 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-27
+updated: 2026-09-28
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Command-receipt external evidence gaps (2026-09-28)
+
+The producer checkout still has no concrete hivedev C4 request/response
+mapping, so local verification covers only the bounded Hive adapters. Durable
+follow-up tasks `hive:43362`, `hive:43363`, and `hive:43364` exist, but the
+worktree-only execution context could not attach the bounded-search record to
+their external task bodies. An authorized task-artifact update remains needed;
+the task identities and missing evidence are recorded in
+`docs/command-receipts-c4-comparison.md`.
+
+The project-filter history behavior has a passing real Playwright system test
+and an ordered storyboard in
+`docs/implementation/browser-history-project-proof.md`, but this execution
+context exposes no admitted video-capture channel. The absence of a recording
+does not imply a browser failure and is not represented as accepted video
+evidence.
 
 ## Incident timing calibration (2026-09-27)
 

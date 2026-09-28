@@ -86,10 +86,11 @@ receipt by those domain authorities. Evidence retirement accepts only the exact
 original replay envelope already persisted by the command boundary and exact
 stored observations; operator-supplied result bytes or labels cannot establish
 success. Identical retries may finalize from an exact original boundary result
-or resume only the bounded publication and attempt-dispatch state machines
-whose durable correlation can be authoritatively re-observed. Generic task
-activity alone never authorizes global resumption. Other unknown effects remain
-unresolved.
+or resume only the bounded publication, attempt-dispatch, and task-activity
+state machines whose durable correlation can be authoritatively re-observed.
+An uncorrelated activity record never authorizes resumption. A proven-dead
+executing owner with no effect rows is aborted and reacquired automatically;
+other unknown effects remain unresolved.
 
 Bot enqueue, foreground durable Attempts dispatch, and Daemon consumption use
 one receipt-owned dispatch lifecycle. Before any keyed delivery can rely on
@@ -100,7 +101,10 @@ dispatch-context row and reacquires the same pin identity. Missing or changed
 context fails closed; it never becomes an unkeyed delivery. All three callers
 also request successors from the store's single cycle allocator. Concurrent
 handlers and redelivery of a cycle whose successor failed receive the same
-binding; a changed frozen request cannot claim that binding.
+binding; a changed frozen request cannot claim that binding. A released or
+unresolvable pin rejects and removes the queued dispatch instead of retrying it
+forever. Active predecessor pins protect their bound successors from prune even
+though the transport source identity and caller intent identity are distinct.
 
 The default staffing assumption is one operator able to act within one business
 day. It is not a service guarantee or an allocated minutes/day value.
@@ -154,6 +158,12 @@ prune makes pages reusable but deliberately retains the compact namespace,
 capacity, and enrollment metadata. That residual metadata is roughly one row
 in each table (about 1 KiB logical data before SQLite page overhead); no
 physical file shrink is promised.
+
+Prune excludes active pins and protected successor bindings before applying its
+candidate limit, then refreshes maintenance authority inside every bounded
+deletion transaction. A stranded batch can be abandoned after its
+administrative receipt has already become terminal or been pruned; the batch
+audit remains the recovery record.
 
 ## Worktree-first workflow
 

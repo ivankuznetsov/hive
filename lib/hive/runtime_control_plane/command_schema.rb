@@ -7,7 +7,7 @@ module Hive
   module RuntimeControlPlane
     module CommandSchema
       VERSION = 2
-      EXPECTED_SCHEMA_SHA256 = "cf2d9423475a3117089f9c92dff976395671c7712995c8c1c446614e9599f8cb".freeze
+      EXPECTED_SCHEMA_SHA256 = "ccadc759fea6e2dd2f886fb151ccc3db08f666d5648127f512c40df3767f9dbe".freeze
       TABLE_NAMES = %w[
         command_capacity
         command_installation_capacity
@@ -70,12 +70,12 @@ module Hive
       end
 
       def exact?(database)
+        return false if absent?(database)
+
         rows = object_rows(database)
         rows.map { |row| row[1].to_s }.sort == OBJECT_NAMES.sort &&
           checksum(database) == EXPECTED_SCHEMA_SHA256 &&
           version_ledger_exact?(database)
-      rescue Sequel::Error
-        false
       end
 
       def version_ledger_exact?(database)

@@ -3830,7 +3830,16 @@ module Hive
         return :shutdown unless admission_open?
 
         now = current_dispatch_time(now)
-        validate_command_dispatch_context!(req)
+        begin
+          validate_command_dispatch_context!(req)
+        rescue Hive::CommandUnresolved, Hive::CommandConflict, Hive::ConfigError => error
+          reject_request(
+            req,
+            reason: "command_context_rejected: #{error.class.name.split('::').last}: " \
+                    "#{error.message.to_s[0, 160]}"
+          )
+          return
+        end
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
         durable_admission = @attempt_dispatcher && durable_task_request?(req)

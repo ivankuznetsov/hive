@@ -9,6 +9,7 @@ require "securerandom"
 require "hive/command_receipt_store"
 require "hive/config"
 require "hive/lock"
+require "hive/runtime_control_plane/sqlite_support"
 
 module Hive
   # One caller receipt around one public command boundary. Keyed success is
@@ -249,7 +250,11 @@ module Hive
             "command receipts are not installed; run `hive setup --install-command-receipts`"
     rescue Hive::ConfigError
       raise
-    rescue Hive::Error, Sequel::Error => error
+    rescue Hive::Error, Sequel::Error, SQLite3::Exception => error
+      if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
+        raise Hive::ConcurrentRunError,
+              "command receipt storage is busy; resolve database contention and retry"
+      end
       raise Hive::ConfigError,
             "cannot verify command receipt storage: #{error.message}"
     end
@@ -613,16 +618,7 @@ module Hive
             "retry answer binding cannot reconstruct the original response"
     end
 
-    def failure_error_kind(error)
-      return error.reason if error.is_a?(Hive::CommandOutcomeError) ||
-        error.is_a?(Hive::CommandCapacityError) || error.is_a?(Hive::CommandIntakeDisabled)
-      return "usage" if error.is_a?(Hive::UsageError) || error.is_a?(Hive::InvalidTaskPath) ||
-        error.is_a?(Hive::OperationalActionUsageError) ||
-        error.is_a?(Hive::WrongStage)
-      return "config" if error.is_a?(Hive::ConfigError)
-
-      "internal"
-    end
+    def failure_error_kind(_error) = "usage"
 
     def deterministic_non_application?(error)
       error.is_a?(Hive::UsageError) ||

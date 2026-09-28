@@ -122,7 +122,7 @@ module Hive
           [ by_id, current ]
         end
         return request_id.to_s if existing_by_id && same_request?(existing_by_id, payload) &&
-          same_command_context?(request_id, command_context)
+          rebind_existing_command_context?(request_id, command_context)
         raise IntegrityError.new(
           "dispatch request id is already bound", code: :dispatch_request_conflict
         ) if existing_by_id
@@ -566,12 +566,13 @@ module Hive
         existing = db[:command_dispatch_contexts][request_id: request_id.to_s]
         if existing
           comparable = values.except(:created_at)
-          unless comparable.all? { |key, value| existing[key] == value }
-            raise IntegrityError.new(
-              "command dispatch context conflicts", code: :dispatch_context_conflict
-            )
-          end
-          return
+          return if comparable.all? { |key, value| existing[key] == value }
+          return if advance_command_context_generation!(
+            db, request_id.to_s, existing, comparable
+          )
+          raise IntegrityError.new(
+            "command dispatch context conflicts", code: :dispatch_context_conflict
+          )
         end
         receipt = db[:command_receipts][receipt_id: values.fetch(:receipt_id)]
         unless receipt && receipt.fetch(:state) == "executing" &&
@@ -626,6 +627,35 @@ module Hive
         expected = normalize_command_context(context).transform_keys(&:to_s)
           .except("transport_request_id")
         existing && expected.all? { |key, value| existing[key] == value }
+      end
+
+      def rebind_existing_command_context?(request_id, context)
+        database.transaction do |db|
+          existing = if db.table_exists?(:command_dispatch_contexts)
+            db[:command_dispatch_contexts][request_id: request_id.to_s]
+          end
+          next existing.nil? if context.nil?
+          next false unless existing
+
+          expected = normalize_command_context(context).except(:transport_request_id)
+          next true if expected.all? { |key, value| existing[key] == value }
+          advance_command_context_generation!(db, request_id.to_s, existing, expected)
+        end
+      end
+
+      def advance_command_context_generation!(db, request_id, existing, expected)
+        immutable = expected.except(:receipt_generation)
+        return false unless immutable.all? { |key, value| existing[key] == value }
+        return false unless expected.fetch(:receipt_generation) > existing.fetch(:receipt_generation)
+
+        receipt = db[:command_receipts][receipt_id: expected.fetch(:receipt_id)]
+        return false unless receipt && receipt.fetch(:state) == "executing" &&
+                            receipt.fetch(:generation) == expected.fetch(:receipt_generation) &&
+                            receipt.fetch(:principal) == expected.fetch(:principal) &&
+                            receipt.fetch(:request_fingerprint) == expected.fetch(:request_fingerprint)
+        db[:command_dispatch_contexts].where(
+          request_id: request_id, receipt_generation: existing.fetch(:receipt_generation)
+        ).update(receipt_generation: expected.fetch(:receipt_generation)) == 1
       end
 
       def request_payload(project:, slug:, argv:, requestor:, request_id:, now:, chat_id: nil,

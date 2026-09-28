@@ -11575,6 +11575,25 @@ end
     assert_equal 5, allocations.length
   end
 
+  def test_dispatch_rejects_an_unprotectable_command_context_once
+    dispatcher, = make_dispatcher(rows: [])
+    request = Q::Request.new(
+      request_id: "command-dispatch:v1:#{'e' * 64}", created_at: T0,
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task], requestor: "daemon"
+    )
+    dispatcher.define_singleton_method(:validate_command_dispatch_context!) do |_request|
+      raise Hive::CommandUnresolved.new(reason: "command_pin_horizon_elapsed")
+    end
+    rejected = []
+    dispatcher.define_singleton_method(:reject_request) do |candidate, reason:|
+      rejected << [ candidate.request_id, reason ]
+    end
+
+    assert_nil dispatcher.send(:dispatch_request!, request, now: T0)
+    assert_equal request.request_id, rejected.dig(0, 0)
+    assert_includes rejected.dig(0, 1), "CommandUnresolved"
+  end
+
   def test_nondurable_request_releases_preclaim_when_shutdown_starts_after_claim
     Dir.mktmpdir("hive-dispatch-final-gate") do |state_home|
       dispatcher, supervisor, = make_dispatcher(

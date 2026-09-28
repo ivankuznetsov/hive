@@ -37,29 +37,25 @@ Code-complete rollback handoff status for this checkout:
 - base schema SHA-256:
   `92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0`
 - extension manifest SHA-256:
-  `cf2d9423475a3117089f9c92dff976395671c7712995c8c1c446614e9599f8cb`
+  `ccadc759fea6e2dd2f886fb151ccc3db08f666d5648127f512c40df3767f9dbe`
 - compatibility patch diff:
   `docs/implementation/command-receipt-compatibility.patch`
 - compatibility patch SHA-256:
-  `9cab1e4290a1d253401d4841260ff2972618f7bc396a756c3e71b6fb54bca118`
+  `82562752649c00ef78937f4fbcaa1524d5454b7e0ccaf3609194d8e9b1e233a3`
 - externally retained candidate output (not committed):
   `hive-cli-command-receipt-compat-candidate.gem`
 - candidate SHA-256:
-  `ea14234d40d7efc995164ed9590ce7817a04d9ce2a40350577c3d852dea71c34`
+  `4ac48a4adb50d3068df71ba204a10ab9839ad7827d8840bb63366d2732c18a9a`
 - isolated packaged rollback drill:
   `docs/implementation/command-receipt-compatibility-proof.md`
 - published version/location/SHA-256: pending maintainer release authorization
-
-The retained candidate checksum above belongs to the preceding extension
-manifest. Rebuild the candidate from the current compatibility patch and repeat
-the isolated drill before treating the revised manifest as Tier A qualified.
 
 Published retained coordinates remain an activation blocker and must never be
 replaced with the local candidate. For the Tier A candidate drill, point to the
 retained build output, verify it before installation, and abort on any mismatch:
 
 ```sh
-candidate_sha256='ea14234d40d7efc995164ed9590ce7817a04d9ce2a40350577c3d852dea71c34'
+candidate_sha256='4ac48a4adb50d3068df71ba204a10ab9839ad7827d8840bb63366d2732c18a9a'
 candidate_gem=${HIVE_COMPAT_CANDIDATE_GEM:?set to the retained candidate path}
 printf '%s  %s\n' "$candidate_sha256" "$candidate_gem" | sha256sum --check --strict &&
   gem install --install-dir "$PWD/hive-compat-prefix" "$candidate_gem"

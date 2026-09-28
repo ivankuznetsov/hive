@@ -812,6 +812,7 @@ class CommandReceiptStoreTest < Minitest::Test
     store.define_singleton_method(:public_receipt) { |receipt| { "receipt_id" => receipt.fetch(:receipt_id) } }
     store.define_singleton_method(:claim_from) { |*_args, **_kwargs| :claim }
     store.define_singleton_method(:finalize!) { |claim, **kwargs| [ claim, kwargs.fetch(:state) ] }
+    store.define_singleton_method(:receipt_effects_empty?) { |_receipt_id| false }
     classify = lambda do
       store.send(:classify_existing!, row, principal: "owner",
                  request_fingerprint: "fingerprint", project_root: "/project")
@@ -881,7 +882,13 @@ class CommandReceiptStoreTest < Minitest::Test
         mode: "prune", target: project, request: {}, principal: "owner"
       )
       claim = store.mark_executing(claim)
+      before_effect = database.read do |connection|
+        connection[:command_capacity][namespace_id: claim.namespace_id].fetch(:logical_bytes)
+      end
       effect = store.prepare_effect(claim, ordinal: 0, kind: "receipt:prune", identity: {})
+      after_effect = database.read do |connection|
+        connection[:command_capacity][namespace_id: claim.namespace_id].fetch(:logical_bytes)
+      end
 
       assert_nil store.abort_pre_submission(
         claim, effect_id: effect.fetch(:effect_id), reason: "command_prune_busy"
@@ -891,6 +898,38 @@ class CommandReceiptStoreTest < Minitest::Test
         connection[:command_effects].where(receipt_id: claim.receipt_id).count
       end
       assert_equal 0, effect_count
+      after_abort = database.read do |connection|
+        connection[:command_capacity][namespace_id: claim.namespace_id].fetch(:logical_bytes)
+      end
+      assert_operator after_effect, :>, before_effect
+      assert_equal before_effect, after_abort
+    end
+  end
+
+  def test_retry_recovers_a_proven_dead_executing_owner_before_any_effect
+    with_store do |project, database, store|
+      claim = store.reserve(
+        project_root: project, key: "dead-before-effect", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      store.mark_executing(
+        claim, owner_host: Socket.gethostname, owner_pid: 424_242,
+        owner_process_start: "dead-start"
+      )
+      recovering = Hive::CommandReceiptStore.new(
+        database: database, alive: ->(*) { false }, ownership: ->(*) { :dead }
+      )
+
+      resumed = recovering.lookup_existing(
+        project_root: project, key: "dead-before-effect", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+
+      assert_equal :resume, resumed.disposition
+      assert_equal "aborted", resumed.state
+      assert_empty database.read {
+        |connection| connection[:command_effects].where(receipt_id: claim.receipt_id).all
+      }
     end
   end
 
@@ -916,6 +955,22 @@ class CommandReceiptStoreTest < Minitest::Test
     broken.define_singleton_method(:require_extension!) { raise Hive::Error, "broken" }
     error = assert_raises(Hive::ConfigError) { broken.verify_extension! }
     assert_includes error.message, "cannot verify command receipt storage"
+
+    busy = Hive::CommandReceiptStore.new(database: Object.new)
+    busy.define_singleton_method(:require_extension!) do
+      begin
+        raise SQLite3::BusyException, "busy"
+      rescue SQLite3::BusyException => cause
+        raise Sequel::DatabaseError, "wrapped busy", cause: cause
+      end
+    end
+    assert_raises(Hive::ConcurrentRunError) { busy.verify_extension! }
+
+    timed_out = Hive::CommandReceiptStore.new(database: Object.new)
+    timed_out.define_singleton_method(:require_extension!) do
+      raise Sequel::DatabaseLockTimeout, "lock timeout"
+    end
+    assert_raises(Hive::ConcurrentRunError) { timed_out.verify_extension! }
 
     with_store do |project, database, store|
       claim = store.reserve(

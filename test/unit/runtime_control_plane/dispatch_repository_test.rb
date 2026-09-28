@@ -132,6 +132,15 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
         request_id: request_id, task_generation: "generation-1", now: NOW,
         command_context: context
       )
+      repository.database.transaction do |db|
+        db[:command_receipts].where(receipt_id: "receipt-1").update(generation: 2)
+      end
+      assert_equal request_id, repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: request_id, task_generation: "generation-1", now: NOW,
+        command_context: context.merge(receipt_generation: 2)
+      )
+      assert_equal 2, repository.command_context(request_id).fetch("receipt_generation")
       assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
         repository.write_request!(
           project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
@@ -160,9 +169,6 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
         |db| db[:command_receipt_pins][pin_id: "pin-1"].fetch(:lifecycle_status)
       }
 
-      repository.database.transaction do |db|
-        db[:command_receipts].where(receipt_id: "receipt-1").update(generation: 2)
-      end
       stale_request = "command-dispatch:v1:#{'f' * 64}"
       assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
         repository.write_request!(

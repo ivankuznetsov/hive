@@ -125,6 +125,28 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_attachment_tuple_rejects_changed_source_bytes_for_the_same_key
+    with_initialized_project do |project_root, project|
+      with_tmp_dir do |dir|
+        source = File.join(dir, "source.png")
+        File.binwrite(source, "first-bytes")
+        create_json_with(
+          project, "task with mutable image", key: "creator:mutable-attachment",
+          slug: "mutable-attachment-task", attachments: [ [ source, "source.png" ] ]
+        )
+
+        File.binwrite(source, "changed-bytes")
+        assert_raises(Hive::CommandConflict) do
+          create_json_with(
+            project, "task with mutable image", key: "creator:mutable-attachment",
+            slug: "mutable-attachment-task", attachments: [ [ source, "source.png" ] ]
+          )
+        end
+        assert_equal 1, idempotent_tasks(project_root).size
+      end
+    end
+  end
+
   def test_idempotent_attachment_fingerprint_and_task_use_one_byte_snapshot
     with_initialized_project do |project_root, project|
       with_tmp_dir do |dir|

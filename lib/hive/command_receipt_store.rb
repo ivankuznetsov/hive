@@ -13,6 +13,7 @@ require "hive/lock"
 require "hive/project_identity"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/command_schema"
+require "hive/runtime_control_plane/sqlite_support"
 require "hive/command_receipt_store/effects"
 require "hive/command_receipt_store/pins"
 require "hive/command_receipt_store/reclamation"
@@ -57,7 +58,11 @@ module Hive
       require_extension!
     rescue Hive::ConfigError
       raise
-    rescue Hive::Error, Sequel::Error => error
+    rescue Hive::Error, Sequel::Error, SQLite3::Exception => error
+      if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
+        raise Hive::ConcurrentRunError,
+              "command receipt storage is busy; resolve database contention and retry"
+      end
       raise Hive::ConfigError,
             "cannot verify command receipt storage: #{error.message}"
     end
@@ -388,14 +393,17 @@ module Hive
           )
         )
         if !capacity_counted?(row)
+          refund = effect[:identity_json].to_s.bytesize + effect[:evidence_json].to_s.bytesize + 512
           effect_changed = connection[:command_effects].where(
             effect_id: effect_id.to_s, receipt_id: claim.receipt_id,
             state: "prepared", updated_at: effect.fetch(:updated_at)
           ).delete
           next 0 unless effect_changed == 1
-          next connection[:command_receipts].where(
+          receipt_changed = connection[:command_receipts].where(
             receipt_id: claim.receipt_id, generation: claim.generation, state: "executing"
           ).delete
+          add_logical_bytes!(connection, claim.namespace_id, -refund) if receipt_changed == 1
+          next receipt_changed
         end
 
         effect_changed = connection[:command_effects].where(

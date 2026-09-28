@@ -167,7 +167,7 @@ module Hive
                            "resolve database contention, then rerun; free disk if storage is exhausted", error)
     rescue Errno::ENOSPC, Errno::EDQUOT => error
       maintenance_failure!(:command_prune_storage_unavailable, "free disk, then rerun", error)
-    rescue Sequel::DatabaseError, SQLite3::Exception => error
+    rescue Sequel::Error, SQLite3::Exception => error
       if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
         maintenance_failure!(:command_prune_busy,
                              "resolve database contention, then rerun; free disk if storage is exhausted", error)
@@ -176,6 +176,11 @@ module Hive
       else
         raise
       end
+    rescue SystemCallError, IOError => error
+      maintenance_failure!(
+        :command_prune_storage_unavailable,
+        "restore receipt storage availability, then rerun", error
+      )
     end
 
     private
@@ -208,17 +213,23 @@ module Hive
 
     def eligible_rows(connection, namespace_id, cutoff:, limit:)
       cutoff_value = timestamp(cutoff)
+      protected_successors = connection[:command_successor_allocations]
+        .from(Sequel[:command_successor_allocations].as(:allocation))
+        .join(Sequel[:command_receipt_pins].as(:pin),
+              receipt_id: Sequel[:allocation][:predecessor_receipt_id],
+              principal: Sequel[:allocation][:principal])
+        .where(Sequel[:pin][:lifecycle_status] => "active")
+        .exclude(Sequel[:allocation][:successor_receipt_id] => nil)
+        .select(Sequel[:allocation][:successor_receipt_id])
       connection[:command_receipts]
         .where(namespace_id: namespace_id, state: Hive::CommandReceiptStore::TERMINAL_STATES)
         .then { |dataset| authority.installation_owner? ? dataset : dataset.where(principal: authority.principal) }
         .where { terminal_at < cutoff_value }
         .exclude(receipt_id: connection[:command_receipt_pins]
           .where(lifecycle_status: "active").select(:receipt_id))
+        .exclude(receipt_id: protected_successors)
         .order(:terminal_at, :receipt_id).limit(limit).all
-        .select { |row|
-          valid_terminal_time?(row[:terminal_at], cutoff) &&
-            !active_successor_binding?(connection, row.fetch(:receipt_id))
-        }
+        .select { |row| valid_terminal_time?(row[:terminal_at], cutoff) }
     end
 
     def valid_terminal_time?(value, before)
@@ -241,6 +252,7 @@ module Hive
       candidates = candidates.reject { |candidate| completed_ids.include?(candidate.fetch(:receipt_id)) }
       candidates.each_slice(DEFAULT_LIMIT) do |slice|
         @database.transaction do |connection|
+          prepare_authority!(connection)
           current_batch = connection[:command_maintenance_batches][batch_id: batch_id]
           unless current_batch && current_batch.fetch(:state) == "executing" &&
                  current_batch.fetch(:generation) == expected_generation
@@ -442,7 +454,11 @@ module Hive
       page_size = Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(connection, "page_size")
       page_count = Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(connection, "page_count")
       freelist_count = Hive::RuntimeControlPlane::SQLiteSupport.pragma_integer(connection, "freelist_count")
-      wal_bytes = File.exist?("#{@database.path}-wal") ? File.size("#{@database.path}-wal") : 0
+      wal_bytes = begin
+        File.stat("#{@database.path}-wal").size
+      rescue Errno::ENOENT
+        0
+      end
       {
         "page_size" => page_size, "page_count" => page_count,
         "freelist_count" => freelist_count,
@@ -479,7 +495,11 @@ module Hive
         namespace_id: namespace_id, principal: principal
       ).exclude(Sequel.&({ command: "receipt" }, { mode: "prune" }))
       receipt_ids = receipts.select(:receipt_id)
-      length = ->(column) { Sequel.function(:coalesce, Sequel.function(:length, column), 0) }
+      length = lambda do |column|
+        Sequel.function(
+          :coalesce, Sequel.function(:length, Sequel.cast(column, :blob)), 0
+        )
+      end
       sum = lambda do |dataset, expression|
         dataset.get(Sequel.function(:coalesce, Sequel.function(:sum, expression), 0)).to_i
       end
@@ -568,8 +588,6 @@ module Hive
           connection[:command_receipt_pins].where(
             receipt_id: allocation.fetch(:predecessor_receipt_id),
             principal: allocation.fetch(:principal),
-            intent_id: allocation.fetch(:intent_id),
-            intent_generation: allocation.fetch(:intent_version),
             lifecycle_status: "active"
           ).any?
         end

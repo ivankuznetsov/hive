@@ -12,7 +12,11 @@ module Hive
       end
 
       def busy_error?(error)
-        caused_by?(error) { |current| current.is_a?(SQLite3::BusyException) }
+        caused_by?(error) do |current|
+          current.is_a?(SQLite3::BusyException) ||
+            (defined?(Sequel::DatabaseLockTimeout) &&
+             current.is_a?(Sequel::DatabaseLockTimeout))
+        end
       end
 
       def storage_exhaustion_error?(error)

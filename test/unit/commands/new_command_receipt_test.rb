@@ -24,9 +24,9 @@ class NewCommandReceiptTest < Minitest::Test
     command.define_singleton_method(:receipt_store) { store }
     command.define_singleton_method(:perform_call!) { flunk "legacy task capture executed" }
 
-    error = assert_raises(Hive::ConfigError) { command.call! }
+    error = assert_raises(Hive::ConcurrentRunError) { command.call! }
 
-    assert_includes error.message, "cannot verify command receipt storage"
+    assert_includes error.message, "command receipt storage is busy"
   end
 
   def test_keyed_call_refuses_a_real_base_only_runtime_before_task_creation

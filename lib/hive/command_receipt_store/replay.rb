@@ -11,6 +11,17 @@ module Hive
           raise Hive::CommandConflict
         end
 
+        if row.fetch(:state) == "executing" && !current_process_owner?(row) &&
+           receipt_effects_empty?(row.fetch(:receipt_id))
+          proof = Hive::CommandOwnerProof.dead(
+            row, host: @host, alive: @alive, ownership: @ownership, clock: @clock
+          )
+          if proof
+            claim = claim_from(row, :resume, project_root: project_root)
+            return abort_before_effect(claim, reason: "command_orphaned_owner")
+          end
+        end
+
         if %w[executing unresolved].include?(row.fetch(:state)) &&
            (authoritative = authoritative_result_for_receipt(row))
           if row.fetch(:state) == "executing" && !current_process_owner?(row)
@@ -22,6 +33,7 @@ module Hive
           begin
             result, status = authoritative
             claim = claim_from(row, :replay, project_root: project_root)
+            claim = resume_maintenance(claim) if row.fetch(:state) == "unresolved"
             return finalize!(
               claim, state: "succeeded", result: result, status: status,
               reason: nil, retry_eligible: false
@@ -87,7 +99,7 @@ module Hive
       end
 
       RECONCILABLE_EFFECT_KINDS = %w[
-        github_push github_pull_request attempt_dispatch dispatch_request
+        github_push github_pull_request attempt_dispatch dispatch_request task_activity
       ].freeze
 
       def reconcilable_effect?(row)
@@ -129,7 +141,7 @@ module Hive
         identity = submission["identity"]
         return false unless identity.is_a?(Hash)
 
-        correlation = identity["publication_id"] || identity["request_id"]
+        correlation = identity["publication_id"] || identity["request_id"] || identity["operation_id"]
         return false if correlation.to_s.empty?
         return true if observations.any? do |observation|
           observation.is_a?(Hash) && observation["source"] == kind &&
@@ -140,6 +152,12 @@ module Hive
         database.read do |connection|
           request = connection[:dispatch_requests][request_id: correlation.to_s]
           request && %w[queued claimed admitted running completed].include?(request[:state].to_s)
+        end
+      end
+
+      def receipt_effects_empty?(receipt_id)
+        database.read do |connection|
+          !connection[:command_effects].where(receipt_id: receipt_id).any?
         end
       end
 

@@ -235,9 +235,9 @@ module Hive
             AFTER UPDATE OF nonterminal_count, executing_count, logical_bytes ON command_capacity
             BEGIN
               UPDATE command_installation_capacity
-              SET nonterminal_count = max(nonterminal_count + NEW.nonterminal_count - OLD.nonterminal_count, 0),
-                  executing_count = max(executing_count + NEW.executing_count - OLD.executing_count, 0),
-                  logical_bytes = max(logical_bytes + NEW.logical_bytes - OLD.logical_bytes, 0),
+              SET nonterminal_count = nonterminal_count + NEW.nonterminal_count - OLD.nonterminal_count,
+                  executing_count = executing_count + NEW.executing_count - OLD.executing_count,
+                  logical_bytes = logical_bytes + NEW.logical_bytes - OLD.logical_bytes,
                   updated_at = NEW.updated_at
               WHERE singleton_id = 1;
             END
@@ -247,9 +247,9 @@ module Hive
             AFTER DELETE ON command_capacity
             BEGIN
               UPDATE command_installation_capacity
-              SET nonterminal_count = max(nonterminal_count - OLD.nonterminal_count, 0),
-                  executing_count = max(executing_count - OLD.executing_count, 0),
-                  logical_bytes = max(logical_bytes - OLD.logical_bytes, 0),
+              SET nonterminal_count = nonterminal_count - OLD.nonterminal_count,
+                  executing_count = executing_count - OLD.executing_count,
+                  logical_bytes = logical_bytes - OLD.logical_bytes,
                   updated_at = OLD.updated_at
               WHERE singleton_id = 1;
             END

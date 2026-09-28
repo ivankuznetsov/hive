@@ -140,6 +140,48 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_authoritative_finalization_reacquires_live_execution_capacity
+    with_operation(key: "capacity-finalization") do |_operation, store, project|
+      original_succeed = store.method(:succeed)
+      fail_once = true
+      store.define_singleton_method(:succeed) do |claim, result:, status: 0|
+        if fail_once
+          fail_once = false
+          raise Sequel::DatabaseError, "simulated lost finalization acknowledgement"
+        end
+        original_succeed.call(claim, result: result, status: status)
+      end
+      operation = Hive::CommandOperation.new(
+        key: "capacity-finalization", command: "approve", target: "task",
+        request: { from: "3-plan" }, project_root: project, principal: "owner",
+        json: true, structured: true, store: store
+      )
+      assert_raises(Hive::CommandUnresolved) do
+        operation.call { { "schema" => "hive-approve", "ok" => true } }
+      end
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        { "command_receipts" => {
+          "keyed_intake_enabled" => true, "concurrency_limit" => 1
+        } }.to_yaml
+      )
+      blocker = store.reserve(
+        project_root: project, key: "capacity-blocker", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      blocker = store.mark_executing(blocker)
+
+      error = assert_raises(Hive::CommandCapacityError) do
+        operation.call { flunk "authoritative finalization must not repeat the effect" }
+      end
+      assert_equal "command_concurrency_limit", error.reason
+
+      store.abort_before_effect(blocker, reason: "test complete")
+      result = operation.call { flunk "authoritative finalization must not repeat the effect" }
+      assert_equal "succeeded", result.dig("command_receipt", "state")
+    end
+  end
+
   def test_interrupted_reconcilable_provider_effect_resumes_without_resubmitting_applied_push
     with_operation(key: "provider-reconcile") do |_operation, store, project|
       remote = File.join(File.dirname(project), "remote.git")
@@ -189,7 +231,7 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
-  def test_interrupted_task_activity_does_not_resume_without_authoritative_domain_reconciliation
+  def test_interrupted_task_activity_resumes_after_authoritative_domain_reconciliation
     with_operation(key: "task-activity-uncertain") do |_operation, store, project|
       operation = Hive::CommandOperation.new(
         key: "task-activity-uncertain", command: "approve", target: "task",
@@ -209,9 +251,9 @@ class CommandOperationTest < Minitest::Test
         end
       end
 
-      assert_raises(Hive::CommandUnresolved) do
-        operation.call { flunk "task mutation must not be repeated as whole-command resume" }
-      end
+      result = operation.call { { "schema" => "hive-approve", "ok" => true } }
+      assert result.fetch("ok")
+      assert_equal "succeeded", result.dig("command_receipt", "state")
     end
   end
 
@@ -705,11 +747,10 @@ class CommandOperationTest < Minitest::Test
     conflicting["slot"]["binding"]["encoding"] = "unknown"
     assert_raises(Hive::CommandConflict) { operation.send(:expand_template, conflicting) }
 
-    assert_equal "config", operation.send(:failure_error_kind, Hive::ConfigError.new("bad"))
+    assert_equal "usage", operation.send(:failure_error_kind, Hive::UsageError.new("bad"))
     assert_equal "usage", operation.send(
       :failure_error_kind, Hive::OperationalActionUsageError.new("bad")
     )
-    assert_equal "internal", operation.send(:failure_error_kind, Hive::Error.new("bad"))
 
     unavailable_database = Object.new
     unavailable_database.define_singleton_method(:read) { |_block = nil, &block| block&.call }

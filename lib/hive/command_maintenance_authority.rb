@@ -47,6 +47,7 @@ module Hive
 
     def self.github(config:, login:, id:, peer_address: nil,
                     config_loader: -> { Hive::Config.load_global_web })
+      custody = validate_state_home_custody!
       unless id.is_a?(Integer) && id.positive?
         raise Hive::ConfigError, "keyed web execution requires an authenticated numeric GitHub identity"
       end
@@ -57,7 +58,7 @@ module Hive
         installation_owner_check: -> {
           Hive::Web::GithubAuth.new(config: config_loader.call).maintenance_owner?(login, id)
         },
-        peer_address: peer_address
+        peer_address: peer_address, custody_uid: custody.uid
       )
     end
 

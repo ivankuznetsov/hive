@@ -143,7 +143,7 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
       assert_includes document, "schema v#{Hive::RuntimeControlPlane::SCHEMA_VERSION}"
       assert_includes document, schema_sha256
       assert_includes document, patch_sha256
-      assert_match(/ea14234d40d7efc995164ed9590ce7817a04d9ce2a40350577c3d852dea71c34/, document)
+      assert_match(/4ac48a4adb50d3068df71ba204a10ab9839ad7827d8840bb63366d2732c18a9a/, document)
       assert_match(/sha256sum --check --strict &&\s*gem install/m, document)
     end
     refute_includes proof, "docs/artifacts/"
@@ -198,6 +198,45 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
         assert_equal :command_schema_mismatch, error.code
       end
       assert database.read { |connection| Hive::RuntimeControlPlane::CommandSchema.absent?(connection) }
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_installation_capacity_triggers_fail_closed_on_negative_aggregate
+    Dir.mktmpdir do |dir|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime.sqlite3")
+      ).migrate!
+      Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+        database: database, package_coordinates: TEST_PACKAGE
+      )
+      now = Time.now.utc.iso8601(6)
+      database.transaction do |connection|
+        installation_id = connection[:installations].get(:installation_id)
+        connection[:command_namespaces].insert(
+          namespace_id: "negative-trigger", installation_id: installation_id,
+          git_common_dir_digest: "a" * 64, enrollment_state: "active",
+          enrollment_generation: 1, keyed_intake_enabled: 1, policy_revision: 1,
+          created_at: now, activated_at: now, updated_at: now
+        )
+        connection[:command_capacity].insert(
+          namespace_id: "negative-trigger", nonterminal_count: 1,
+          executing_count: 1, logical_bytes: 1, updated_at: now
+        )
+        connection[:command_installation_capacity].where(singleton_id: 1).update(
+          nonterminal_count: 0, executing_count: 0, logical_bytes: 0
+        )
+      end
+
+      assert_raises(Sequel::DatabaseError) do
+        database.transaction do |connection|
+          connection[:command_capacity].where(namespace_id: "negative-trigger").delete
+        end
+      end
+      assert database.read {
+        |connection| connection[:command_capacity][namespace_id: "negative-trigger"]
+      }
     ensure
       database&.disconnect
     end

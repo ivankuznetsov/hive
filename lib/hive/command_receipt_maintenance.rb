@@ -15,10 +15,11 @@ require "hive/schemas"
 
 module Hive
   class CommandReceiptMaintenance
-    def initialize(database: Hive::RuntimeControlPlane.database, authority: nil,
+    def initialize(database: Hive::RuntimeControlPlane.database, authority: nil, project_root: nil,
                    clock: -> { Time.now.utc }, alive: Hive::PidFile.method(:alive?),
                    ownership: Hive::PidFile.method(:ownership))
       @database = database
+      @project_root = project_root
       @authority = authority || Hive::CommandMaintenanceAuthority.local(
         principal: Hive::CommandOperation.local_principal(database)
       )
@@ -245,9 +246,13 @@ module Hive
 
       receipt = connection[:command_receipts][receipt_id: receipt_id]
       authority.authorize!(receipt.fetch(:principal)) if receipt
-      unless receipt && receipt[:namespace_id] == batch[:namespace_id] &&
-             receipt[:command] == "receipt" && receipt[:mode] == "prune" &&
-             %w[prepared executing unresolved aborted].include?(receipt[:state])
+      return unless receipt
+      unless receipt[:namespace_id] == batch[:namespace_id] &&
+             receipt[:command] == "receipt" && receipt[:mode] == "prune"
+        raise Hive::CommandConflict, "prune administrative receipt changed before abandonment"
+      end
+      return if Hive::CommandReceiptStore::TERMINAL_STATES.include?(receipt[:state])
+      unless %w[prepared executing unresolved aborted].include?(receipt[:state])
         raise Hive::CommandConflict, "prune administrative receipt changed before abandonment"
       end
       public_receipt = public_receipt(
@@ -429,13 +434,15 @@ module Hive
       validate_replay_envelope!(result, row: row)
       result_json = Hive::RuntimeControlPlane::Codec.dump_json(result)
       now = timestamp
-      concurrency_limits = retirement_concurrency_limits(row)
+      policy = retirement_capacity_policy(row)
       changed = @database.transaction do |connection|
         current = connection[:command_receipts][receipt_id: row.fetch(:receipt_id)]
         authorize!(current)
         next 0 unless current && current.fetch(:generation) == row.fetch(:generation) &&
                       current.fetch(:state) == row.fetch(:state)
-        admit_existing_work_execution!(connection, row, concurrency_limits)
+        Hive::CommandReceiptCapacity.new(
+          database: @database, policy: policy
+        ).admit_execution!(connection, namespace_id: row.fetch(:namespace_id))
         count = connection[:command_receipts].where(
           receipt_id: row.fetch(:receipt_id), generation: row.fetch(:generation), state: row.fetch(:state)
         ).update(
@@ -460,43 +467,35 @@ module Hive
       raise Hive::CommandConflict, "receipt changed during retirement" unless changed == 1
     end
 
-    def retirement_concurrency_limits(row)
-      global = Hive::CommandReceiptCapacity.global_receipts
+    def retirement_capacity_policy(row)
+      root = @project_root || Hive::Config.registered_projects.filter_map do |project|
+        candidate = project["path"]
+        next if candidate.to_s.empty?
+        identity = Hive::ProjectIdentity.resolve(
+          project_root: candidate, database: @database, create: false
+        )
+        candidate if identity&.namespace_id == row.fetch(:namespace_id)
+      rescue Hive::Error, SystemCallError, IOError
+        nil
+      end.first
+      return Hive::CommandReceiptCapacity.load(root) if root
+
       namespace = @database.read do |connection|
-        connection[:command_namespaces][namespace_id: row.fetch(:namespace_id)]&.
-          fetch(:concurrency_limit, nil)
+        connection[:command_namespaces][namespace_id: row.fetch(:namespace_id)]
       end
-      installation = global.fetch(
+      raise Hive::CommandConflict, "receipt namespace capacity policy is unavailable" unless namespace
+      global = Hive::CommandReceiptCapacity.global_receipts
+      namespace_limit = namespace.fetch(:concurrency_limit)
+      installation_limit = global.fetch(
         "installation_concurrency_limit",
         Hive::CommandReceiptCapacity::DEFAULT_INSTALLATION_CONCURRENCY_LIMIT
       )
-      unless namespace.is_a?(Integer) && namespace.positive? &&
-             installation.is_a?(Integer) && installation.positive?
-        raise Hive::ConfigError,
-              "command receipt concurrency limits must be positive integers"
+      unless namespace_limit.is_a?(Integer) && namespace_limit.positive? &&
+             installation_limit.is_a?(Integer) && installation_limit.positive?
+        raise Hive::ConfigError, "command receipt concurrency limits must be positive integers"
       end
-      [ namespace, installation ]
-    end
-
-    def admit_existing_work_execution!(connection, row, limits)
-      namespace_limit, installation_limit = limits
-      capacity = connection[:command_capacity][namespace_id: row.fetch(:namespace_id)]
-      raise Hive::CommandConflict, "receipt namespace capacity is unavailable" unless capacity
-
-      if capacity.fetch(:executing_count) >= namespace_limit
-        raise Hive::CommandCapacityError.new(
-          "command concurrency limit at namespace scope; stop live work or confirm orphan recovery first",
-          reason: :command_concurrency_limit, scope: :namespace
-        )
-      end
-      installation = connection[:command_installation_capacity][singleton_id: 1]
-      raise Hive::CommandConflict, "installation command capacity is unavailable" unless installation
-      if installation.fetch(:executing_count).to_i >= installation_limit
-        raise Hive::CommandCapacityError.new(
-          "command concurrency limit at installation scope; stop live work or confirm orphan recovery first",
-          reason: :command_concurrency_limit, scope: :installation
-        )
-      end
+      Struct.new(:concurrency_limit, :installation_concurrency_limit)
+        .new(namespace_limit, installation_limit)
     end
 
     def dead_owner_proof!(row)

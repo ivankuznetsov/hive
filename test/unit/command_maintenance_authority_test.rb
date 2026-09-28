@@ -86,15 +86,22 @@ class CommandMaintenanceAuthorityTest < Minitest::Test
   end
 
   def test_github_owner_authority_reloads_current_configuration
-    current = { "github" => { "owner" => "Alice", "owner_id" => 42 } }
-    authority = Hive::CommandMaintenanceAuthority.github(
-      config: current, login: "Alice", id: 42,
-      config_loader: -> { current }
-    )
-    assert authority.installation_owner?
+    with_tmp_dir do |root|
+      state = File.join(root, "state")
+      Dir.mkdir(state, 0o700)
+      current = { "github" => { "owner" => "Alice", "owner_id" => 42 } }
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state }) do
+        authority = Hive::CommandMaintenanceAuthority.github(
+          config: current, login: "Alice", id: 42,
+          config_loader: -> { current }
+        )
+        assert authority.installation_owner?
+        assert_equal Process.euid, authority.custody_uid
 
-    current = { "github" => { "owner" => "Bob", "owner_id" => 7 } }
-    refute authority.installation_owner?
-    assert_raises(Hive::ConfigError) { authority.authorize!("another-principal") }
+        current = { "github" => { "owner" => "Bob", "owner_id" => 7 } }
+        refute authority.installation_owner?
+        assert_raises(Hive::ConfigError) { authority.authorize!("another-principal") }
+      end
+    end
   end
 end

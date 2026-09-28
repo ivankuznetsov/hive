@@ -318,7 +318,7 @@ end
 # Hive::CliUsageContracts).
 require "hive/cli_usage_contracts"
 
-%w[brainstorm plan develop open-pr review artifacts finalize archive].each do |verb|
+Hive::Workflows::VERBS.each_key do |verb|
   Hive::CliUsageContracts.declare(
     verb,
     { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => verb } }

@@ -121,35 +121,78 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_prune_refreshes_installation_owner_authority_for_each_delete_slice
+    with_receipts do |project, database, store, _authority|
+      claims = 101.times.map { |index| terminal_receipt(store, project, "authority-#{index}") }
+      old = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc - 31 * 86_400)
+      database.transaction do |connection|
+        connection[:command_receipts].where(
+          receipt_id: claims.map(&:receipt_id)
+        ).update(terminal_at: old)
+      end
+      snapshots = 0
+      dynamic = Object.new
+      dynamic.define_singleton_method(:snapshot) do
+        snapshots += 1
+        Hive::CommandMaintenanceAuthority.new(
+          principal: "github:42", principal_source: "github",
+          installation_owner: snapshots < 3
+        )
+      end
+
+      assert_raises(Hive::ConfigError) do
+        Hive::CommandReceiptPruner.new(database: database, authority: dynamic)
+          .prune(namespace_id: claims.first.namespace_id, limit: 101)
+      end
+      assert_equal 3, snapshots
+      assert_equal 1, database.read { |db| db[:command_receipts].count }
+    end
+  end
+
   def test_prune_preserves_successor_binding_while_predecessor_intent_is_active
     with_receipts do |project, database, store, authority|
-      predecessor = terminal_receipt(store, project, "bound-predecessor")
-      successor = terminal_receipt(store, project, "bound-successor")
+      predecessor = store.reserve(
+        project_root: project, key: "bound-predecessor", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      predecessor = store.mark_executing(predecessor)
+      predecessor = store.fail_non_application(
+        predecessor, result: { "ok" => false }, status: 1, reason: "not_applied",
+        whole_effect_non_application: true
+      )
       horizon = (Time.now.utc + 3600).iso8601
       store.acquire_pin(
-        receipt_id: predecessor.receipt_id, principal: "owner", intent_id: "intent",
-        intent_generation: 1, retry_horizon_expires_at: horizon, project_root: project
+        receipt_id: predecessor.receipt_id, principal: "owner",
+        intent_id: "command-dispatch:v1:#{'a' * 64}", intent_generation: 4,
+        retry_horizon_expires_at: horizon, project_root: project
       )
-      old = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc - 31 * 86_400)
+      allocation = store.allocate_successor(
+        namespace_id: predecessor.namespace_id, principal: "owner",
+        intent_id: "opaque-intent", intent_version: 3,
+        predecessor_receipt_id: predecessor.receipt_id, delivery_cycle_id: "cycle",
+        request_fingerprint: predecessor.request_fingerprint, project_root: project
+      )
+      successor = store.reserve(
+        project_root: project, key: allocation.fetch("successor_key_identity"),
+        command: "approve", target: "task", request: {}, principal: "owner"
+      )
+      successor = store.succeed(successor, result: { "ok" => true }, status: 0)
+      eligible = terminal_receipt(store, project, "eligible-after-protected-successor")
+      old = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc - 32 * 86_400)
+      younger = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc - 31 * 86_400)
       database.transaction do |db|
         db[:command_receipts].where(
           receipt_id: [ predecessor.receipt_id, successor.receipt_id ]
         ).update(terminal_at: old)
-        db[:command_successor_allocations].insert(
-          allocation_id: SecureRandom.uuid, namespace_id: predecessor.namespace_id,
-          principal: "owner", intent_id: "intent", intent_version: 1,
-          delivery_cycle_id: "cycle", predecessor_receipt_id: predecessor.receipt_id,
-          successor_receipt_id: successor.receipt_id, successor_key_identity: "successor-key",
-          successor_ordinal: 1, request_fingerprint: predecessor.request_fingerprint,
-          allocation_version: 1, created_at: old
-        )
+        db[:command_receipts].where(receipt_id: eligible.receipt_id).update(terminal_at: younger)
       end
 
       preview = Hive::CommandReceiptPruner.new(database: database, authority: authority)
-        .preview(namespace_id: predecessor.namespace_id)
+        .preview(namespace_id: predecessor.namespace_id, limit: 1)
       ids = preview.fetch("candidates").map { |candidate| candidate.fetch("receipt_id") }
       refute_includes ids, predecessor.receipt_id
       refute_includes ids, successor.receipt_id
+      assert_equal [ eligible.receipt_id ], ids
     end
   end
 
@@ -367,9 +410,12 @@ class CommandReceiptMaintenanceTest < Minitest::Test
       store.mark_unresolved(executing, reason: "lost")
       row = store.receipt(claim.receipt_id)
       current = { "github" => { "owner" => "Alice", "owner_id" => 42 } }
-      authority = Hive::CommandMaintenanceAuthority.github(
-        config: current, login: "Alice", id: 42, config_loader: -> { current }
-      )
+      state_home = File.dirname(database.path)
+      authority = with_replaced_singleton_method(Hive::Paths, :state_home, -> { state_home }) do
+        Hive::CommandMaintenanceAuthority.github(
+          config: current, login: "Alice", id: 42, config_loader: -> { current }
+        )
+      end
       maintenance = Hive::CommandReceiptMaintenance.new(
         database: database, authority: authority, alive: ->(*) { false }
       )
@@ -805,36 +851,6 @@ class CommandReceiptMaintenanceTest < Minitest::Test
       assert_raises(Hive::CommandUnresolved) do
         maintenance.send(:validate_successful_reconciliation!, [ effect ], "effects" => [ proof ])
       end
-
-      database.read do |connection|
-        capacity = connection[:command_capacity][namespace_id: row.fetch(:namespace_id)]
-        limits = [ capacity.fetch(:executing_count), 100 ]
-        assert_raises(Hive::CommandCapacityError) do
-          maintenance.send(:admit_existing_work_execution!, connection, row, limits)
-        end
-        limits = [ 100, connection[:command_capacity].sum(:executing_count).to_i ]
-        assert_raises(Hive::CommandCapacityError) do
-          maintenance.send(:admit_existing_work_execution!, connection, row, limits)
-        end
-      end
-
-      bad_limits = Object.new
-      bad_limits.define_singleton_method(:read) do |&block|
-        table = Object.new
-        table.define_singleton_method(:[]) { |_query| { concurrency_limit: 0 } }
-        connection = Object.new
-        connection.define_singleton_method(:[]) { |_name| table }
-        block.call(connection)
-      end
-      invalid = Hive::CommandReceiptMaintenance.new(database: bad_limits, authority: authority)
-      with_replaced_singleton_method(
-        Hive::CommandReceiptCapacity, :global_receipts,
-        -> { { "installation_concurrency_limit" => 1 } }
-      ) do
-        assert_raises(Hive::ConfigError) do
-          invalid.send(:retirement_concurrency_limits, namespace_id: "namespace")
-        end
-      end
     end
   end
 
@@ -864,6 +880,51 @@ class CommandReceiptMaintenanceTest < Minitest::Test
       )
 
       assert_equal 0, store.receipt(claim.receipt_id).fetch(:retry_eligible)
+    end
+  end
+
+  def test_terminalization_uses_the_live_canonical_execution_capacity_gate
+    with_receipts do |project, database, store, authority|
+      config_path = File.join(project, ".hive-state", "config.yml")
+      File.write(
+        config_path,
+        { "command_receipts" => {
+          "keyed_intake_enabled" => true, "concurrency_limit" => 1
+        } }.to_yaml
+      )
+      target = store.reserve(
+        project_root: project, key: "retire-capacity", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      target = store.mark_executing(
+        target, owner_host: Socket.gethostname, owner_pid: 424_242,
+        owner_process_start: "dead-start"
+      )
+      target = store.mark_unresolved(target, reason: "lost")
+      blocker = store.reserve(
+        project_root: project, key: "retire-capacity-blocker", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      blocker = store.mark_executing(blocker)
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority, project_root: project,
+        alive: ->(*) { false }, ownership: ->(*) { :dead }
+      )
+
+      error = assert_raises(Hive::CommandCapacityError) do
+        maintenance.settle_without_result(
+          target.receipt_id, expected_generation: target.generation,
+          reason: "capacity test", confirm: true
+        )
+      end
+      assert_equal "command_concurrency_limit", error.reason
+
+      store.abort_before_effect(blocker, reason: "test complete")
+      result = maintenance.settle_without_result(
+        target.receipt_id, expected_generation: target.generation,
+        reason: "capacity available", confirm: true
+      )
+      assert_equal "settled", result.fetch("state")
     end
   end
 
@@ -1091,6 +1152,20 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
     assert_equal "command_prune_storage_unavailable", error.reason
 
+    unavailable = Object.new
+    unavailable.define_singleton_method(:transaction) { |**| raise Errno::ENOENT, "wal vanished" }
+    unavailable_pruner = Hive::CommandReceiptPruner.new(
+      database: unavailable, authority: authority
+    )
+    with_replaced_singleton_method(
+      unavailable_pruner, :resolve_namespace, ->(**) { "namespace" }
+    ) do
+      error = assert_raises(Hive::CommandCapacityError) do
+        unavailable_pruner.prune(namespace_id: "namespace")
+      end
+      assert_equal "command_prune_storage_unavailable", error.reason
+    end
+
     wrapped_full = Object.new
     wrapped_full.define_singleton_method(:transaction) do |**|
       begin
@@ -1199,6 +1274,26 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_nonowner_preview_counts_utf8_receipt_storage_in_bytes
+    with_receipts do |project, database, store, _authority|
+      claim = store.reserve(
+        project_root: project, key: "utf8-preview", command: "approve", target: "task",
+        request: { "note" => "café 雪" }, principal: "caller"
+      )
+      authority = Hive::CommandMaintenanceAuthority.new(
+        principal: "caller", principal_source: "test"
+      )
+      row = store.receipt(claim.receipt_id)
+      expected = Hive::CommandReceiptCapacity.receipt_logical_bytes(row)
+
+      preview = Hive::CommandReceiptPruner.new(
+        database: database, authority: authority
+      ).preview(project_root: project)
+
+      assert_equal expected, preview.dig("namespace_utilization", "logical_bytes")
+    end
+  end
+
   def test_nonowner_cleanup_preserves_expired_foreign_administrative_batches
     with_receipts do |project, database, store, _authority|
       identity = terminal_receipt(store, project, "cleanup-namespace")
@@ -1271,9 +1366,14 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
   end
 
-  def test_abandonment_rejects_a_changed_administrative_receipt
+  def test_abandonment_allows_an_already_terminal_administrative_receipt
     with_receipts do |project, database, store, authority|
-      receipt = terminal_receipt(store, project, "administrative")
+      Hive::ProjectIdentity.resolve(project_root: project, database: database, create: true)
+      receipt = store.reserve(
+        project_root: project, key: "administrative", command: "receipt", mode: "prune",
+        target: project, request: {}, principal: "owner", maintenance: true
+      )
+      receipt = store.succeed(receipt, result: { "ok" => true }, status: 0)
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
       database.transaction do |connection|
         connection[:command_maintenance_batches].insert(
@@ -1289,11 +1389,37 @@ class CommandReceiptMaintenanceTest < Minitest::Test
         database: database, authority: authority,
         alive: ->(*) { false }, ownership: ->(*) { :dead }
       )
-      assert_raises(Hive::CommandConflict) do
-        maintenance.abandon_batch(
-          "changed-admin", expected_generation: 1, reason: "dead", confirm: true
+      result = maintenance.abandon_batch(
+        "changed-admin", expected_generation: 1, reason: "dead", confirm: true
+      )
+      assert_equal "abandoned", result.fetch("state")
+      assert_equal "succeeded", store.receipt(receipt.receipt_id).fetch(:state)
+    end
+  end
+
+  def test_abandonment_allows_a_missing_administrative_receipt
+    with_receipts do |_project, database, _store, authority|
+      now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+      database.transaction do |connection|
+        connection[:command_maintenance_batches].insert(
+          batch_id: "missing-admin", namespace_id: nil,
+          administrative_receipt_id: "missing-receipt", principal: "owner",
+          principal_scope: "own", kind: "prune", state: "executing", generation: 1,
+          owner_host: Socket.gethostname, owner_pid: 424_242,
+          owner_process_start: "dead-start", fixed_cutoff: now,
+          candidates_json: "[]", outcomes_json: "[]", created_at: now, updated_at: now
         )
       end
+      maintenance = Hive::CommandReceiptMaintenance.new(
+        database: database, authority: authority,
+        alive: ->(*) { false }, ownership: ->(*) { :dead }
+      )
+
+      result = maintenance.abandon_batch(
+        "missing-admin", expected_generation: 1, reason: "dead", confirm: true
+      )
+
+      assert_equal "abandoned", result.fetch("state")
     end
   end
 

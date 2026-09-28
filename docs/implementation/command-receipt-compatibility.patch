@@ -2,13 +2,13 @@ diff --git a/lib/hive/runtime_control_plane/database.rb b/lib/hive/runtime_contr
 index 578d1a1769..e5e5a809c4 100644
 --- a/lib/hive/runtime_control_plane/database.rb
 +++ b/lib/hive/runtime_control_plane/database.rb
-@@ -12,6 +12,38 @@ module Hive
+@@ -12,6 +12,42 @@ module Hive
    module RuntimeControlPlane
      EXPECTED_SCHEMA_SHA256 = "92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0".freeze
 -
 +
 +    COMMAND_RECEIPT_SCHEMA_SHA256 =
-+      "cf2d9423475a3117089f9c92dff976395671c7712995c8c1c446614e9599f8cb".freeze
++      "ccadc759fea6e2dd2f886fb151ccc3db08f666d5648127f512c40df3767f9dbe".freeze
 +    COMMAND_RECEIPT_OBJECT_NAMES = %w[
 +      command_capacity
 +      command_capacity_installation_delete
@@ -46,7 +46,7 @@ index 578d1a1769..e5e5a809c4 100644
      class Database
        MIGRATE_ACTION = "stop Hive, back up state, and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md".freeze
        BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
-@@ -574,7 +606,17 @@ module Hive
+@@ -574,7 +610,21 @@ module Hive
        end
 -
 +

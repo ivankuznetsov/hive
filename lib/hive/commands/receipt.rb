@@ -3,6 +3,7 @@
 require "digest"
 require "json"
 require "hive/command_operation"
+require "hive/command_error_kind"
 require "hive/command_receipt_maintenance"
 require "hive/command_receipt_pruner"
 require "hive/config"
@@ -62,9 +63,9 @@ module Hive
       end
 
       def envelope_error_kind(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
-        when Hive::CommandOutcomeError then error.reason
-        when Hive::CommandCapacityError then error.reason
         when Hive::UsageError then "usage"
         when Hive::ConfigError then "config"
         else "internal"
@@ -255,7 +256,7 @@ module Hive
       end
       def maintenance
         @maintenance ||= Hive::CommandReceiptMaintenance.new(
-          database: receipt_database, authority: authority
+          database: receipt_database, authority: authority, project_root: project_root
         )
       end
       def receipt_database

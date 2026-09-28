@@ -4,6 +4,7 @@ require "digest"
 require "json"
 require "time"
 require "hive/errors"
+require "hive/workflows"
 
 module Hive
   # Closed catalog for the command mutations protected by durable command
@@ -11,7 +12,7 @@ module Hive
   # adding a command family here is an explicit public-contract change.
   module CommandMutations
     MAX_KEY_BYTES = 512
-    STAGE_VERBS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
+    STAGE_VERBS = Hive::Workflows::VERBS.keys.freeze
     RECEIPT_MODES = %w[prune retire release-pin abandon-batch enroll].freeze
 
     Descriptor = Data.define(:command, :mode, :key_policy, :mutating, :semantic_options)

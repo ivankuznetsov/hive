@@ -199,9 +199,15 @@ module Hive
       end
 
       def attachment_identity(attachment)
-        path = attachment.respond_to?(:path) ? attachment.path : attachment.to_s
+        path, destination = if attachment.respond_to?(:path)
+          [ attachment.path, File.basename(attachment.path.to_s) ]
+        elsif attachment.is_a?(Array)
+          attachment
+        else
+          [ attachment, File.basename(attachment.to_s) ]
+        end
         {
-          "name" => File.basename(path.to_s),
+          "name" => File.basename(destination.to_s),
           "sha256" => File.file?(path.to_s) ? ::Digest::SHA256.file(path.to_s).hexdigest : nil
         }
       end

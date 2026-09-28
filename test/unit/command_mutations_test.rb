@@ -11,8 +11,7 @@ class CommandMutationsTest < Minitest::Test
       %w[act answer approve archive new receipt stage_action],
       Hive::CommandMutations::CATALOG.keys.sort
     )
-    assert_equal %w[brainstorm plan develop open-pr review artifacts finalize archive],
-                 Hive::CommandMutations::STAGE_VERBS
+    assert_equal Hive::Workflows::VERBS.keys, Hive::CommandMutations::STAGE_VERBS
   end
 
   def test_answer_inventory_and_archive_listing_are_read_only

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "json_schemer"
 require "hive/command_maintenance_authority"
 require "hive/command_mutations"
 require "hive/command_operation"
@@ -260,23 +261,71 @@ class CommandReceiptContractTest < Minitest::Test
     capacity = Hive::CommandCapacityError.new("full", reason: :full, scope: :namespace)
     assert_equal "uncertain", command.envelope_error_kind(outcome)
     assert_equal "full", command.envelope_error_kind(capacity)
+    assert_equal "command_intake_disabled",
+                 command.envelope_error_kind(Hive::CommandIntakeDisabled.new("disabled"))
     assert_equal "usage", command.envelope_error_kind(Hive::UsageError.new("bad"))
     assert_equal "config", command.envelope_error_kind(Hive::ConfigError.new("bad"))
     assert_equal "internal", command.envelope_error_kind(StandardError.new("bad"))
   end
 
-  def test_authority_validates_github_identity_and_state_home_errors
-    assert_raises(Hive::ConfigError) do
-      Hive::CommandMaintenanceAuthority.github(config: {}, login: "owner", id: "1")
-    end
-    auth = Object.new
-    auth.define_singleton_method(:maintenance_owner?) { |login, id| login == "owner" && id == 1 }
-    with_replaced_singleton_method(Hive::Web::GithubAuth, :new, ->(**) { auth }) do
-      authority = Hive::CommandMaintenanceAuthority.github(
-        config: {}, login: "owner", id: 1, peer_address: "127.0.0.1"
+  def test_each_keyed_command_schema_accepts_exit_20_21_and_22_envelopes
+    commands = {
+      "hive-new" => Hive::Commands::New.new("demo", "task", json: true),
+      "hive-answer" => nil,
+      "hive-approve" => Hive::Commands::Approve.new("task", json: true),
+      "hive-stage-action" => Hive::Commands::StageAction.new("plan", "task", json: true),
+      "hive-act" => Hive::Commands::Act.new(
+        "workflow.advance", "demo:task", observation: "a" * 64, json: true
       )
-      assert authority.installation_owner?
-      assert_equal "github:1", authority.principal
+    }
+    errors = [
+      Hive::CommandConflict.new,
+      Hive::CommandInProgress.new(
+        command_receipt: { "id" => "receipt", "generation" => 1, "state" => "executing" }
+      ),
+      Hive::CommandUnresolved.new(
+        command_receipt: { "id" => "receipt", "generation" => 2, "state" => "unresolved" }
+      )
+    ]
+
+    commands.each do |schema_name, command|
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path(schema_name)))
+      )
+      errors.each do |error|
+        payload = if command
+          command.send(:envelope_payload_for, error)
+        else
+          Hive::Schemas::ErrorEnvelope.build(
+            schema: schema_name, error: error,
+            error_kind: Hive::CommandErrorKind.typed(error)
+          )
+        end
+        assert_equal error.exit_code, payload.fetch("exit_code"), schema_name
+        assert_empty schema.validate(payload).to_a, "#{schema_name}: #{payload.inspect}"
+      end
+    end
+  end
+
+  def test_authority_validates_github_identity_and_state_home_errors
+    with_tmp_dir do |root|
+      state = File.join(root, "state")
+      Dir.mkdir(state, 0o700)
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state }) do
+        assert_raises(Hive::ConfigError) do
+          Hive::CommandMaintenanceAuthority.github(config: {}, login: "owner", id: "1")
+        end
+        auth = Object.new
+        auth.define_singleton_method(:maintenance_owner?) { |login, id| login == "owner" && id == 1 }
+        with_replaced_singleton_method(Hive::Web::GithubAuth, :new, ->(**) { auth }) do
+          authority = Hive::CommandMaintenanceAuthority.github(
+            config: {}, login: "owner", id: 1, peer_address: "127.0.0.1"
+          )
+          assert authority.installation_owner?
+          assert_equal "github:1", authority.principal
+          assert_equal Process.euid, authority.custody_uid
+        end
+      end
     end
     with_replaced_singleton_method(File, :lstat, ->(*) { raise Errno::ENOENT, "gone" }) do
       error = assert_raises(Hive::ConfigError) do
@@ -1149,7 +1198,9 @@ class CommandReceiptContractTest < Minitest::Test
   def test_command_schema_handles_database_errors
     connection = Object.new
     connection.define_singleton_method(:[]) { |_name| raise Sequel::DatabaseError, "broken" }
-    refute Hive::RuntimeControlPlane::CommandSchema.exact?(connection)
+    assert_raises(Sequel::DatabaseError) do
+      Hive::RuntimeControlPlane::CommandSchema.exact?(connection)
+    end
   end
 
   def test_command_operation_project_root_callbacks_and_keyed_call_paths

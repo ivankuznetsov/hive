@@ -23,12 +23,14 @@ remains a separate Tier B authorization boundary: no published coordinates
 exist, and the candidate is not a distribution.
 
 The producer checkout still has no concrete hivedev C4 request/response
-mapping, so local verification covers only the bounded Hive adapters. Durable
-follow-up tasks `hive:43362`, `hive:43363`, and `hive:43364` exist, but the
-worktree-only execution context could not attach the bounded-search record to
-their external task bodies. An authorized task-artifact update remains needed;
-the task identities and missing evidence are recorded in
-`docs/command-receipts-c4-comparison.md`.
+mapping, so local verification covers only the bounded Hive adapters. The
+bounded-search record in `docs/command-receipts-c4-comparison.md` is attached
+to the hivedev C4 consumer task `c4-implement-durable-command-operations-260923-9817`
+(`.hive-state/stages/1-inbox/c4-implement-durable-command-operations-260923-9817/idea.md`)
+by hivedev state commit `f54b9b998b4d9b83799283ef175d54e0cee5b2b2`. That
+commit is on the local `hive/state` branch and has not been pushed to the
+hivedev remote. The Hive follow-up tasks `hive:43362`, `hive:43363`, and
+`hive:43364` exist, but their bodies still do not link the record.
 
 The project-filter history behavior has a passing real Playwright system test
 and an ordered storyboard in

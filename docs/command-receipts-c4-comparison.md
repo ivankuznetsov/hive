@@ -29,10 +29,22 @@ durable follow-up destinations already exist:
 | General adjudication UX | `hive:43363` | `follow-up-to-extend-idempotency-260926-5ad8` | `1-inbox` |
 | Multi-host/decommission hardening | `hive:43364` | `follow-up-to-extend-idempotency-260926-e467` | `1-inbox` |
 
-This document is the producer's bounded-search and missing-evidence record. The
-worktree-only execution boundary does not authorize editing those external task
-artifacts, and their current idea bodies do not attach this record. An
-authorized Hive task-artifact update must attach or link this comparison to the
-appropriate follow-up before claiming the Tier A evidence-bearing-task
-deliverable is complete. The durable identities above are verified; the
-attachment is not.
+This document is the producer's bounded-search and missing-evidence record.
+The Hive follow-up destinations above are verified. Their idea bodies still do
+not attach this record, because this change touched only the C4 consumer task.
+
+## Attached consumer evidence
+
+On 2026-09-28 this record was attached to the hivedev C4 consumer task:
+
+- Task slug: `c4-implement-durable-command-operations-260923-9817`
+- Task body: `.hive-state/stages/1-inbox/c4-implement-durable-command-operations-260923-9817/idea.md`
+  in the hivedev repository, section "Comparison evidence from hive PR #1494"
+- hivedev state commit: `f54b9b998b4d9b83799283ef175d54e0cee5b2b2` on the
+  `hive/state` branch (local state branch, not published to the hivedev remote)
+- Referenced producer commit: `7de98ab33cdc70f2c0359a24b4220e86656b22d9`
+  (`ivankuznetsov/hive`, PR #1494)
+
+The attachment leaves the task's `WAITING` marker unchanged. It does not change
+the comparison outcome, which remains **unavailable** until C4 supplies a
+concrete request/response mapping.

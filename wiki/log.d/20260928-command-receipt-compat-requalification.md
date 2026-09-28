@@ -13,3 +13,7 @@ title: Requalify the command-receipt compatibility candidate
   closed with `partial_schema`.
 - Update the proof, the migration guide, the pinned proof test, and the
   `wiki/gaps.md` command-receipt section so they agree.
+- Attach the C4 comparison record to hivedev task
+  `c4-implement-durable-command-operations-260923-9817` (hivedev state commit
+  `f54b9b99`). Record that durable reference in
+  `docs/command-receipts-c4-comparison.md` and `wiki/gaps.md`.

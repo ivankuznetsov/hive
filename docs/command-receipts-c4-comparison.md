@@ -30,8 +30,9 @@ durable follow-up destinations already exist:
 | Multi-host/decommission hardening | `hive:43364` | `follow-up-to-extend-idempotency-260926-e467` | `1-inbox` |
 
 This document is the producer's bounded-search and missing-evidence record.
-The Hive follow-up destinations above are verified. Their idea bodies still do
-not attach this record, because this change touched only the C4 consumer task.
+The Hive follow-up destinations above are verified. On 2026-09-28 each of their
+idea bodies gained a "Comparison evidence from hive PR #1494" section that links
+this record, by hive state commit `3cbb2e5e62` on the `hive/state` branch.
 
 ## Attached consumer evidence
 

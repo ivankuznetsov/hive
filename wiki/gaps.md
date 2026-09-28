@@ -30,7 +30,7 @@ to the hivedev C4 consumer task `c4-implement-durable-command-operations-260923-
 by hivedev state commit `f54b9b998b4d9b83799283ef175d54e0cee5b2b2`. That
 commit is on the local `hive/state` branch and has not been pushed to the
 hivedev remote. The Hive follow-up tasks `hive:43362`, `hive:43363`, and
-`hive:43364` exist, but their bodies still do not link the record.
+`hive:43364` link the record from their bodies (hive state commit `3cbb2e5e62`).
 
 The project-filter history behavior has a passing real Playwright system test
 and an ordered storyboard in

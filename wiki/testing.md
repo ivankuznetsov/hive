@@ -899,10 +899,24 @@ duplicate metadata/results, and invalid durations as functional failures. A
 separate `continue-on-error` job downloads the retained report and runs only
 the timing mode of `test/e2e/check_incident_budget.rb`, flagging enabled
 incidents at or above sixteen seconds (including sandbox bootstrap) or a group
-total at or above thirty-six seconds without blocking the merge. The #9771
+total at or above thirty-two seconds without blocking the merge. The #9771
 dependency-gate and repository-routing incidents are enabled; four
 sibling-gated fixtures remain pending. The incident index and activation rules
 live in `test/e2e/scenarios/README.md`.
+
+Command-receipt qualification is split by the authority it can actually prove.
+`test/integration/command_receipt_capacity_qualification_test.rb` uses real
+SQLite for the physical page ceiling, recovery and measurement entrypoint;
+maintenance tests use real transactions and byte snapshots for retention,
+read-only preview, pins and batches, with injected ENOSPC explicitly labelled
+as an injected fault. Dispatch lifecycle tests use real reopen, competing
+process and SIGKILL boundaries, while publication reconciliation uses
+deterministic provider observations rather than live GitHub. The current
+evidence maps and reproducible commands live in
+`docs/implementation/command-receipt-{capacity-qualification,dispatch-reconciliation}.md`
+and `docs/implementation/keyed-command-results-proof.md`. The lab settlement
+timer is a mechanical lower bound and never stands in for human investigation
+throughput.
 
 `durable_attempt_1849_replay.yml` is the ownership acceptance replay. It starts
 a foreground develop attachment, makes three provider commits, kills the

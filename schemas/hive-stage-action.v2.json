@@ -110,6 +110,9 @@
         },
         "next_action": {
           "$ref": "#/$defs/NextAction"
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
         }
       }
     },
@@ -164,7 +167,20 @@
             "invalid_task_path",
             "dependency_wait",
             "admission_error",
-            "error"
+            "error",
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
           ]
         },
         "exit_code": {
@@ -172,6 +188,9 @@
           "enum": [
             1,
             4,
+            20,
+            21,
+            22,
             64,
             70,
             75,
@@ -261,17 +280,57 @@
         },
         "next_action": {
           "$ref": "#/$defs/ConditionRecoveryAction"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "namespace",
+            "installation"
+          ]
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
         }
       }
     },
     "ConditionRecoveryAction": {
       "type": "object",
-      "required": ["kind"],
+      "required": [
+        "kind"
+      ],
       "additionalProperties": true,
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
+          "enum": [
+            "edit",
+            "mv",
+            "approve",
+            "run",
+            "recover_stale",
+            "no_op"
+          ]
         }
       }
     },
@@ -326,6 +385,37 @@
           "type": [
             "string",
             "null"
+          ]
+        }
+      }
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "generation",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "prepared",
+            "executing",
+            "unresolved",
+            "succeeded",
+            "failed",
+            "settled",
+            "aborted"
           ]
         }
       }

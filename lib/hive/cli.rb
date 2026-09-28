@@ -1,9 +1,11 @@
 require "json"
+require "digest"
 require "thor"
 require "hive/plan_review"
 require "hive/stages"
 require "hive/workflows/registry"
 require "hive/task_closure_contract"
+require "hive/cli_receipt_options"
 
 module Hive
   class CLI < Thor
@@ -253,6 +255,40 @@ module Hive
       Hive::Commands::Prune.new(dry_run: options[:dry_run], json: options[:json]).call
     end
 
+    desc "receipt SUBCOMMAND [IDENTIFIER]", "Preview or perform durable command-receipt maintenance"
+    long_desc <<~DESC
+      Inspects or maintains durable idempotency receipts. Public prune previews
+      are read-only; destructive actions require --confirm plus the operation's
+      generation, evidence, force, or reason guard.
+
+      Subcommands: prune, retire, release-pin, abandon-batch, and enroll.
+      Orphaned-owner recovery is selected with `receipt retire --orphaned-owner`.
+      Receipt failures use exit 20 for conflicts, 21 for work
+      still in progress, 22 for unresolved outcomes, 75 for transient prune
+      contention or storage pressure, and 78 for configuration failures.
+
+      Examples:
+
+        hive receipt prune --project demo --json
+        hive receipt prune --namespace-id UUID --confirm --reason "capacity cleanup"
+        hive receipt retire RECEIPT --expected-generation 3 --settle-without-result --confirm --reason "operator reconciliation"
+        hive receipt release-pin PIN --expected-generation 1 --force --confirm --reason "caller intent closed"
+        hive receipt enroll --project demo --new-identity --previous-identity UUID --expected-generation 4 --confirm
+    DESC
+    Hive::CLIReceiptOptions.apply(self)
+    def receipt(subcommand, identifier = nil)
+      require "hive/commands/receipt"
+      Hive::Commands::Receipt.new(
+        subcommand, identifier, project: options[:project], namespace_id: options[:namespace_id],
+        expected_generation: options[:expected_generation], confirm: options[:confirm],
+        limit: options[:limit], cursor: options[:cursor], idempotency_key: options[:idempotency_key],
+        settle_without_result: options[:settle_without_result], orphaned_owner: options[:orphaned_owner],
+        evidence: options[:evidence], force: options[:force], reason: options[:reason],
+        new_identity: options[:new_identity], previous_identity: options[:previous_identity],
+        json: options[:json]
+      ).call
+    end
+
     desc "doctor", "Inspect managed agent skill health without changing agent state"
     long_desc <<~DESC
       Resolves the effective enabled stages, named reviewers, browser hooks,
@@ -355,6 +391,8 @@ module Hive
                      desc: "install and start the managed Hive web service (use --no-service to opt out)"
     option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
     option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
+    option :install_command_receipts, type: :boolean, default: false,
+              desc: "explicitly install the shared command-receipt schema; requires a published rollback package"
     def setup
       require "hive/commands/setup"
       exit Hive::Commands::Setup.new(
@@ -362,6 +400,7 @@ module Hive
         service: options[:service],
         no_bootstrap: options[:no_bootstrap],
         no_init: options[:no_init],
+        install_command_receipts: options[:install_command_receipts],
         yes: options[:yes]
       ).call
     end
@@ -824,6 +863,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def brainstorm(target)
       run_stage_action("brainstorm", target)
     end
@@ -834,7 +876,15 @@ module Hive
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :review_level, type: :string, enum: %w[standard mandatory],
                           desc: "raise this plan's minimum critique level (raise-only)"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def plan(target)
+      validate_retry_horizon_key!
+      if options[:review_level] && options[:idempotency_key]
+        raise Hive::UsageError,
+              "--review-level is a separate policy mutation and cannot be combined with --idempotency-key"
+      end
       if options[:review_level]
         require "hive/commands/plan_review"
         Hive::Commands::PlanReview.persist_raise_for_target!(
@@ -903,6 +953,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def develop(target)
       run_stage_action("develop", target)
     end
@@ -911,6 +964,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def open_pr(target)
       run_stage_action("open-pr", target)
     end
@@ -922,6 +978,9 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :pr, type: :string, desc: "run an ad-hoc review for PR number, #number, or GitHub PR URL"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def review(target = nil)
       if options[:pr]
         emit_review_usage_error("hive review: pass either TARGET or --pr, not both") if target
@@ -930,6 +989,12 @@ module Hive
         # it. Refuse the combo (mirroring the TARGET + `--pr` guard above)
         # rather than silently dropping the flag.
         emit_review_usage_error("hive review: --from is not valid with --pr") if options[:from]
+        emit_review_usage_error(
+          "hive review: --idempotency-key is not valid with --pr; key the resulting task stage action"
+        ) if options[:idempotency_key]
+        emit_review_usage_error(
+          "hive review: --retry-horizon-expires-at is not valid with --pr"
+        ) if options[:retry_horizon_expires_at]
 
         require "hive/commands/adhoc_review"
         require "hive/commands/stage_action"
@@ -961,6 +1026,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def artifacts(target)
       run_stage_action("artifacts", target)
     end
@@ -969,6 +1037,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def finalize(target)
       run_stage_action("finalize", target)
     end
@@ -992,8 +1063,18 @@ module Hive
                        desc: "registered project:slug that supersedes this task"
     option :attestation, type: :string,
                          desc: "operator reason for cancellation or superseded/cross-repository delivery"
+    option :idempotency_key, type: :string,
+                             desc: "durably replay an identical targeted archive; invalid for listing"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def archive(target = nil)
       if target.nil?
+        if options[:idempotency_key]
+          raise Hive::UsageError, "--idempotency-key requires an archive TARGET"
+        end
+        if options[:retry_horizon_expires_at]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires an archive TARGET"
+        end
         if closure_options?
           raise Hive::InvalidTaskPath,
                 "closure options require an archive TARGET"
@@ -1005,7 +1086,12 @@ module Hive
         return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
       end
 
-      return close_task_interactively(target) if closure_options?
+      if closure_options?
+        if options[:retry_horizon_expires_at] && !options[:idempotency_key]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+        end
+        return close_task_interactively(target)
+      end
 
       run_stage_action("archive", target)
     end
@@ -1242,14 +1328,13 @@ module Hive
     DESC
     option :project, type: :string, desc: "scope task lookup to one registered project"
     option :binding, type: :string, desc: "opaque slot binding returned by a fresh inventory"
+    option :idempotency_key, type: :string,
+                             desc: "durably replay an identical answer write; valid only with --binding"
     def answer(target)
       require "hive/commands/answer"
-      Hive::Commands::Answer.new(
-        target,
-        project: options[:project],
-        binding: options[:binding],
-        json: options[:json]
-      ).call
+      kwargs = { project: options[:project], binding: options[:binding], json: options[:json] }
+      kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+      Hive::Commands::Answer.new(target, **kwargs).call
     end
 
     desc "answer-digest", "Send a daily digest of tasks waiting on human input"
@@ -1516,14 +1601,14 @@ module Hive
     # row enough to truncate unrelated command summaries.
     option :observation, type: :string,
                          desc: "opaque observation token from operational status"
+    option :project, type: :string, desc: "scope target lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical operational action"
     def act(action_id, target)
       require "hive/commands/act"
-      Hive::Commands::Act.new(
-        action_id,
-        target,
-        observation: options[:observation],
-        json: options[:json]
-      ).call
+      kwargs = { observation: options[:observation], json: options[:json] }
+      kwargs[:project] = options[:project] if options[:project]
+      kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+      Hive::Commands::Act.new(action_id, target, **kwargs).call
     end
 
     desc "approve TARGET", "Move a task to the next stage (or --to <stage>); agent-callable equivalent of `mv`"
@@ -1548,16 +1633,18 @@ module Hive
                   desc: "expected current stage; raises WRONG_STAGE on mismatch, idempotency (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :force, type: :boolean, default: false, desc: "skip terminal-marker check on forward move"
+    option :idempotency_key, type: :string, desc: "durably replay an identical approval"
     def approve(target)
       require "hive/commands/approve"
-      Hive::Commands::Approve.new(
-        target,
+      kwargs = {
         to: options[:to],
         from: options[:from],
         project: options[:project],
         force: options[:force],
         json: options[:json]
-      ).call
+      }
+      kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+      Hive::Commands::Approve.new(target, **kwargs).call
     end
 
     desc "decide TARGET OUTCOME", "Apply a named outcome to a durable human workflow stage"
@@ -2374,15 +2461,48 @@ module Hive
       end
 
       def close_task_interactively(target)
+        if options[:idempotency_key]
+          if options[:json]
+            raise Hive::UsageError,
+                  "--idempotency-key applies to confirmed archive closure, not read-only JSON preview"
+          end
+          require "hive/command_operation"
+          result = Hive::CommandOperation.new(
+            key: options[:idempotency_key], command: "archive", mode: "target",
+            target: target,
+            request: {
+              "from" => options[:from], "project" => options[:project],
+              "reason" => options[:reason],
+              "evidence_sha256" => Array(options[:evidence]).map {
+                |value| ::Digest::SHA256.hexdigest(value.to_s)
+              },
+              "successor" => options[:successor],
+              "attestation_sha256" => options[:attestation] &&
+                ::Digest::SHA256.hexdigest(options[:attestation].to_s)
+            },
+            project_roots: lambda {
+              Hive::CommandOperation.registered_project_roots(
+                target: target, project: options[:project]
+              )
+            },
+            project_root: -> { resolve_closure_task(target).project_root },
+            json: true, structured: true, display_json: false,
+            retry_horizon_expires_at: options[:retry_horizon_expires_at]
+          ).call { close_task_interactively_unwrapped(target, emit_success: false) }
+          emit_closure_success(result)
+          return result
+        end
+        close_task_interactively_unwrapped(target, emit_success: true)
+      end
+
+      def close_task_interactively_unwrapped(target, emit_success:)
         require "hive/task_closure"
         require "hive/task_resolver"
         unless options[:json] || $stdin.tty?
           raise Hive::TaskClosure::Unauthorized,
                 "evidence closure requires an interactive terminal and explicit confirmation"
         end
-        task = Hive::TaskResolver.new(
-          target, project_filter: options[:project], stage_filter: options[:from]
-        ).resolve
+        task = resolve_closure_task(target)
         project = options[:project] || Hive::Config.registered_projects.find do |entry|
           File.expand_path(entry.fetch("path")) == task.project_root
         end&.fetch("name")
@@ -2421,9 +2541,25 @@ module Hive
           preview_digest: preview.preview_digest,
           operator: operator, channel: "cli", authorized: true
         )
-        puts "hive: archived #{task.slug} as #{receipt.fetch('reason')}"
-        puts "  receipt: #{receipt.fetch('receipt_digest')}"
+        emit_closure_success(receipt, slug: task.slug) if emit_success
         receipt
+      end
+
+      def resolve_closure_task(target)
+        require "hive/task_resolver"
+        Hive::TaskResolver.new(
+          target, project_filter: options[:project], stage_filter: options[:from]
+        ).resolve
+      end
+
+      def emit_closure_success(receipt, slug: nil)
+        slug ||= receipt.dig("task", "slug") || receipt["task_slug"] || "task"
+        puts "hive: archived #{slug} as #{receipt.fetch('reason')}"
+        puts "  receipt: #{receipt.fetch('receipt_digest')}"
+        if (command_receipt = receipt["command_receipt"])
+          puts "  command receipt: #{command_receipt.fetch('id')} generation " \
+               "#{command_receipt.fetch('generation')} (#{command_receipt.fetch('state')})"
+        end
       end
 
       def run_stage_action(verb, target)
@@ -2433,6 +2569,8 @@ module Hive
           from: options[:from],
           json: options[:json]
         }
+        kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+        kwargs[:retry_horizon_expires_at] = options[:retry_horizon_expires_at] if options[:retry_horizon_expires_at]
 
         Hive::Commands::StageAction.new(
           verb,
@@ -2440,6 +2578,12 @@ module Hive
           **kwargs,
           durable: true
         ).call
+      end
+
+      def validate_retry_horizon_key!
+        if options[:retry_horizon_expires_at] && !options[:idempotency_key]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+        end
       end
     end
   end

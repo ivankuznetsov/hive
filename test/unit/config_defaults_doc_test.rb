@@ -3,6 +3,7 @@
 require "test_helper"
 require "hive/config"
 require "hive/config_defaults_doc"
+require "hive/command_receipt_capacity"
 
 class ConfigDefaultsDocTest < Minitest::Test
   include HiveTestHelper
@@ -210,6 +211,30 @@ class ConfigDefaultsDocTest < Minitest::Test
 
     assert_equal expected, committed
     assert_equal committed, File.binread(path)
+  end
+
+  def test_command_receipt_defaults_do_not_drift_across_runtime_and_templates
+    project = Hive::Config::DEFAULTS.fetch("command_receipts")
+    project_template = File.read(File.join(ROOT, "templates/project_config.yml.erb"))
+    global_template = File.read(File.join(ROOT, "templates/hive_config.yml.erb"))
+
+    {
+      "nonterminal_limit" => project.fetch("nonterminal_limit"),
+      "concurrency_limit" => project.fetch("concurrency_limit"),
+      "byte_admission_limit" => project.fetch("byte_admission_limit")
+    }.each do |key, value|
+      assert_match(/^  #{key}: #{value}$/, project_template)
+    end
+    {
+      "installation_nonterminal_limit" =>
+        Hive::CommandReceiptCapacity::DEFAULT_INSTALLATION_NONTERMINAL_LIMIT,
+      "installation_concurrency_limit" =>
+        Hive::CommandReceiptCapacity::DEFAULT_INSTALLATION_CONCURRENCY_LIMIT,
+      "installation_byte_admission_limit" =>
+        Hive::CommandReceiptCapacity::DEFAULT_INSTALLATION_BYTE_LIMIT
+    }.each do |key, value|
+      assert_match(/^#   #{key}: #{value}$/, global_template)
+    end
   end
 
   def test_maintainer_script_delegates_without_rendering_or_writing_policy

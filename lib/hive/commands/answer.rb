@@ -13,6 +13,8 @@ require "hive/task_meta"
 require "hive/task_resolver"
 require "hive/task_activity"
 require "hive/workflows"
+require "hive/command_operation"
+require "hive/command_error_kind"
 
 module Hive
   module Commands
@@ -52,17 +54,30 @@ module Hive
       end
 
       def initialize(target, project: nil, binding: nil, json: false,
-                     input: $stdin, output: $stdout)
+                     input: $stdin, output: $stdout, idempotency_key: nil,
+                     command_receipt_store: nil)
         @target = target.to_s
         @project_filter = project
         @binding_token = binding.to_s
         @json = json
         @input = input
         @output = output
+        @idempotency_key = idempotency_key
+        @command_receipt_store = command_receipt_store
       end
 
       def call
-        payload = @binding_token.empty? ? inventory_payload : mutation_payload
+        if @binding_token.empty?
+          raise InvalidBinding, "--idempotency-key is valid only with --binding" if @idempotency_key
+          payload = inventory_payload
+        elsif @idempotency_key
+          answer_text = read_answer!
+          payload = command_operation(answer_text).call do
+            mutation_payload(answer_text: answer_text)
+          end
+        else
+          payload = mutation_payload
+        end
         emit(payload)
         payload
       rescue Hive::Error => e
@@ -119,9 +134,9 @@ module Hive
         }
       end
 
-      def mutation_payload
+      def mutation_payload(answer_text: nil)
         binding = decode_binding(@binding_token)
-        answer_text = read_answer!
+        answer_text ||= read_answer!
         return write_outcome(binding, outcome: "stale", reason: "identity_changed") unless
           invocation_matches_binding?(binding)
 
@@ -140,45 +155,83 @@ module Hive
             mutate_under_lock(binding, answer_text, task)
           end
         rescue Hive::ConcurrentRunError
+          raise if @idempotency_key
+
           write_outcome(binding, outcome: "lock_busy", reason: "task_lock_busy")
         rescue Errno::ENOENT
           write_outcome(binding, outcome: "stale", reason: "task_moved")
         end
       end
 
-      def mutate_under_lock(binding, answer_text, observed_task)
-        current = observe_bound_task(binding)
-        return write_outcome(binding, **current) unless current.fetch(:task, nil)
-
-        task = current.fetch(:task)
-        return write_outcome(binding, outcome: "stale", reason: "task_moved") unless
-          same_task_path?(observed_task, task)
-
-        generation = task_generation(task, binding.fetch("project"))
-        unless generation == binding.fetch("task_generation")
-          return write_outcome(binding, outcome: "stale", reason: "generation_changed")
-        end
-
-        questions = Hive::BrainstormParser.parse_text(read_brainstorm!(task))
-        resolution = resolve_bound_slot(binding, questions, answer_text)
-        unless resolution.fetch(:write, false)
-          return write_outcome(
-            binding,
-            outcome: resolution.fetch(:outcome),
-            reason: resolution.fetch(:reason),
-            task: task,
-            generation: generation,
-            questions: questions,
-            slot: resolution[:slot],
-            ordinal: resolution[:ordinal],
-            relocated: resolution.fetch(:relocated, false),
-            answer_text: answer_text
-          )
-        end
-
-        @answer_operation = begin_answer_operation(
-          task, binding, resolution.fetch(:ordinal), answer_text
+      def command_operation(answer_text)
+        binding = decode_binding(@binding_token)
+        Hive::CommandOperation.new(
+          key: @idempotency_key,
+          command: "answer",
+          mode: "write",
+          target: @target,
+          request: {
+            "project" => @project_filter,
+            "binding" => binding,
+            "binding_sha256" => ::Digest::SHA256.hexdigest(@binding_token),
+            "answer_sha256" => answer_fingerprint(answer_text)
+          },
+          project_roots: lambda {
+            Hive::CommandOperation.registered_project_roots(
+              target: @target, project: binding.fetch("project")
+            )
+          },
+          project_root: -> { resolve_task(@target, binding.fetch("project")).project_root },
+          json: true,
+          structured: true,
+          display_json: @json,
+          failure_payload: lambda { |error|
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: SCHEMA, error: error, error_kind: error_kind(error)
+            )
+          },
+          store: @command_receipt_store || Hive::CommandReceiptStore.new
         )
+      end
+
+      def mutate_under_lock(binding, answer_text, observed_task)
+        begin
+          current = observe_bound_task(binding)
+          return write_outcome(binding, **current) unless current.fetch(:task, nil)
+
+          task = current.fetch(:task)
+          return write_outcome(binding, outcome: "stale", reason: "task_moved") unless
+            same_task_path?(observed_task, task)
+
+          generation = task_generation(task, binding.fetch("project"))
+          unless generation == binding.fetch("task_generation")
+            return write_outcome(binding, outcome: "stale", reason: "generation_changed")
+          end
+
+          questions = Hive::BrainstormParser.parse_text(read_brainstorm!(task))
+          resolution = resolve_bound_slot(binding, questions, answer_text)
+          unless resolution.fetch(:write, false)
+            return write_outcome(
+              binding,
+              outcome: resolution.fetch(:outcome),
+              reason: resolution.fetch(:reason),
+              task: task,
+              generation: generation,
+              questions: questions,
+              slot: resolution[:slot],
+              ordinal: resolution[:ordinal],
+              relocated: resolution.fetch(:relocated, false),
+              answer_text: answer_text
+            )
+          end
+
+          @answer_operation = begin_answer_operation(
+            task, binding, resolution.fetch(:ordinal), answer_text
+          )
+        rescue Hive::InvalidTaskPath
+          return write_outcome(binding, outcome: "stale", reason: "task_missing")
+        end
+
         result = Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
           brainstorm_path: task.state_file,
           ordinal: resolution.fetch(:ordinal),
@@ -207,8 +260,6 @@ module Hive
           relocated: resolution.fetch(:relocated),
           answer_text: answer_text
         )
-      rescue Hive::InvalidTaskPath
-        write_outcome(binding, outcome: "stale", reason: "task_missing")
       end
 
       def begin_answer_operation(task, binding, ordinal, answer_text)
@@ -676,6 +727,8 @@ module Hive
       end
 
       def error_kind(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
         when InvalidBinding then "invalid_binding"
         when InvalidAnswer then "invalid_answer"

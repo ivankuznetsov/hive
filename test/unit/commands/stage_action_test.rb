@@ -1,8 +1,22 @@
 require "test_helper"
 require "hive/commands/stage_action"
+require "hive/runtime_control_plane/command_schema_installation"
 
 class CommandsStageActionTest < Minitest::Test
   include HiveTestHelper
+
+  TEST_PACKAGE = {
+    version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "b" * 64
+  }.freeze
+
+  def test_success_text_renderer_emits_a_usable_non_noop_replay
+    command = Hive::Commands::StageAction.new("develop", "some-slug")
+    text = command.send(
+      :stage_action_text,
+      "noop" => false, "slug" => "some-slug", "phase" => "awaiting_delivery"
+    )
+    assert_equal "hive: develop some-slug — awaiting delivery\n", text
+  end
 
   def test_call_wraps_unexpected_errors_and_emits_json_error_envelope
     command = Hive::Commands::StageAction.new("plan", "some-slug", json: true)
@@ -35,6 +49,29 @@ class CommandsStageActionTest < Minitest::Test
 
     assert_empty out
     assert_match(/internal error: ArgumentError: bad argument/, @error.message)
+  end
+
+  def test_retry_horizon_requires_an_idempotency_key_before_dispatch
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    )
+
+    error = assert_raises(Hive::UsageError) { command.call }
+
+    assert_includes error.message, "requires --idempotency-key"
+  end
+
+  def test_keyed_durable_missing_horizon_is_rejected_before_receipt_reservation
+    store = Object.new
+    store.define_singleton_method(:reserve) { |**| flunk "receipt must not be reserved" }
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", durable: true, idempotency_key: "stable-key",
+      command_receipt_store: store
+    )
+
+    error = assert_raises(Hive::UsageError) { command.call }
+
+    assert_includes error.message, "requires an absolute --retry-horizon-expires-at"
   end
 
   def test_wrong_stage_reports_actual_stage_when_current_stage_is_not_source_or_target
@@ -150,6 +187,47 @@ class CommandsStageActionTest < Minitest::Test
     assert_equal "3-plan", calls.first.fetch(:intended_stage)
     assert_equal [ "hive", "plan", "/tmp/task-folder", "--from", "2-brainstorm", "--json" ],
                  calls.first.fetch(:argv)
+  end
+
+  def test_keyed_replay_after_task_move_preserves_payload_without_reexecuting_stage_verb
+    with_command_receipts do |project, store|
+      source = File.join(project, ".hive-state", "stages", "2-brainstorm", "task")
+      destination = File.join(project, ".hive-state", "stages", "3-plan", "task")
+      FileUtils.mkdir_p(source)
+      effects = 0
+      command = Hive::Commands::StageAction.new(
+        "plan", "task", from: "2-brainstorm", json: true,
+        idempotency_key: "stage-move", command_receipt_store: store
+      )
+      payload = {
+        "schema" => "hive-stage-action", "schema_version" => 1, "ok" => true,
+        "verb" => "plan", "phase" => "promoted_and_ran", "noop" => false,
+        "slug" => "task", "from_stage_dir" => "2-brainstorm",
+        "to_stage_dir" => "3-plan", "task_folder" => destination,
+        "marker_after" => "complete", "next_action" => { "kind" => "wait" }
+      }
+      command.define_singleton_method(:do_call) do
+        effects += 1
+        puts JSON.generate(payload)
+        payload
+      end
+      operation = Hive::CommandOperation.new(
+        key: "stage-move", command: "stage_action", mode: "plan", target: "task",
+        request: { "verb" => "plan", "from" => "2-brainstorm", "project" => nil },
+        project_root: project, principal: "owner", json: true,
+        failure_payload: ->(error) { command.send(:envelope_payload_for, error) },
+        text_renderer: ->(value) { command.send(:stage_action_text, value) }, store: store
+      )
+      command.define_singleton_method(:command_operation) { operation }
+
+      first, = capture_io { command.call }
+      FileUtils.mkdir_p(File.dirname(destination))
+      FileUtils.mv(source, destination)
+      replay, = capture_io { command.call }
+
+      assert_equal 1, effects
+      assert_equal JSON.parse(first), JSON.parse(replay)
+    end
   end
 
   def test_lost_durable_attempt_emits_versioned_json_error_envelope
@@ -327,5 +405,28 @@ class CommandsStageActionTest < Minitest::Test
       assert_equal 7, exit_error.status
     end
     assert_empty out
+  end
+
+  private
+
+  def with_command_receipts
+    Dir.mktmpdir("stage-command-receipts") do |dir|
+      project = File.join(dir, "project")
+      FileUtils.mkdir_p(File.join(project, ".hive-state"))
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        { "command_receipts" => { "keyed_intake_enabled" => true } }.to_yaml
+      )
+      system("git", "init", "--quiet", project, exception: true)
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime.sqlite3")
+      ).migrate!
+      Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+        database: database, package_coordinates: TEST_PACKAGE
+      )
+      yield project, Hive::CommandReceiptStore.new(database: database)
+    ensure
+      database&.disconnect
+    end
   end
 end

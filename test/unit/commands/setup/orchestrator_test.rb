@@ -338,6 +338,32 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal 0, exit_code, "clean diagnostics with no provisioning still exits via successful?"
   end
 
+  def test_no_bootstrap_with_receipt_installation_stays_diagnose_only
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+    fake_diag = Object.new
+    fake_diag.define_singleton_method(:run) { diagnostics }
+
+    exit_code = with_replaced_singleton_method(
+      Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }
+    ) do
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::Installation, :setup,
+        ->(**) { flunk "receipt schema must not be installed in --no-bootstrap mode" }
+      ) do
+        stub_web_config do
+          Hive::Commands::Setup.new(
+            json: true, no_bootstrap: true, install_command_receipts: true,
+            output: output
+          ).call
+        end
+      end
+    end
+
+    assert_equal 0, exit_code
+    assert_equal "diagnose_only", JSON.parse(output.string).fetch("mode")
+  end
+
   def test_no_bootstrap_exit_reflects_hard_diagnostic_failure
     output = StringIO.new
     hard = result(name: "git", status: "missing", fix_command: "brew install git", bootstrappable: false)
@@ -472,7 +498,25 @@ class SetupOrchestratorTest < Minitest::Test
       phase = setup.instance_variable_get(:@phases).last
       assert phase.fetch("ok")
       assert_equal "active", phase.fetch("phase")
+      database = Hive::RuntimeControlPlane::Database.new(path: path)
+      refute Hive::RuntimeControlPlane::CommandSchema.installed?(database)
+      database.disconnect
     end
+  end
+
+  def test_yes_does_not_imply_command_receipt_installation
+    setup = Hive::Commands::Setup.new(json: true, yes: true, output: StringIO.new)
+    received = nil
+    runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" } }
+
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::Installation, :setup,
+      ->(**kwargs) { received = kwargs; runtime }
+    ) do
+      setup.send(:bootstrap_runtime_control_plane)
+    end
+
+    assert_equal false, received.fetch(:install_command_receipts)
   end
 
   def test_setup_reuses_an_active_runtime_control_plane
@@ -491,6 +535,74 @@ class SetupOrchestratorTest < Minitest::Test
       assert phase.fetch("ok")
       assert_equal "active", phase.fetch("phase")
     end
+  end
+
+  def test_opt_in_receipt_installation_is_propagated_explicitly
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true, output: StringIO.new
+    )
+    received = nil
+    runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" } }
+
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::Installation, :setup,
+      ->(**kwargs) { received = kwargs; runtime }
+    ) do
+      setup.send(:bootstrap_runtime_control_plane)
+    end
+
+    assert_equal true, received.fetch(:install_command_receipts)
+  end
+
+  def test_failed_receipt_extension_phase_stops_downstream_service_provisioning
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+
+    exit_code = with_all_collaborators_ok(diagnostics: diagnostics) do
+      with_fake_init do
+        with_replaced_singleton_method(
+          Hive::RuntimeControlPlane::Installation, :setup,
+          ->(**) { raise Hive::ConfigError, "no published rollback package" }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Commands::Daemon::ServiceInstaller, :new,
+            ->(**) { flunk "daemon provisioning must stop after receipt extension failure" }
+          ) do
+            Hive::Commands::Setup.new(
+              json: true, yes: true, install_command_receipts: true, output: output,
+              rollback_package: {
+                version: "0.0.0-test", location: "https://example.invalid/compat.gem",
+                sha256: "f" * 64
+              },
+              command_schema_writer_guard: Struct.new(:unused) do
+                def verify!(**) = true
+              end.new
+            ).call
+          end
+        end
+      end
+    end
+
+    assert_equal 1, exit_code
+    phases = JSON.parse(output.string).fetch("phases")
+    runtime = phases.find { |phase| phase.fetch("name") == "runtime_control_plane" }
+    assert_equal false, runtime.fetch("ok")
+    refute_includes phases.map { |phase| phase.fetch("name") }, "daemon_service"
+  end
+
+  def test_receipt_installation_precondition_refusal_returns_config_status
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true,
+      rollback_package: nil, output: output
+    )
+
+    assert_equal Hive::ExitCodes::CONFIG, setup.call
+    payload = JSON.parse(output.string)
+    phase = payload.fetch("phases").find {
+      |entry| entry.fetch("name") == "command_receipts_preconditions"
+    }
+    assert_equal false, phase.fetch("ok")
   end
 
   # ── --service: web service installed ─────────────────────────────────

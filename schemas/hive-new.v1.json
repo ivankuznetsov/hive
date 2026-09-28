@@ -4,69 +4,249 @@
   "title": "hive new output (v1)",
   "description": "Machine-readable task creation with optional state-wide idempotency.",
   "oneOf": [
-    { "$ref": "#/$defs/SuccessPayload" },
-    { "$ref": "#/$defs/ErrorPayload" }
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
   ],
   "$defs": {
     "HumanOutcome": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "complete", "artifact", "to"],
+      "required": [
+        "name",
+        "complete",
+        "artifact",
+        "to"
+      ],
       "properties": {
-        "name": { "type": "string" },
-        "complete": { "type": "boolean" },
-        "artifact": { "type": ["string", "null"] },
-        "to": { "type": ["string", "null"] }
+        "name": {
+          "type": "string"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "artifact": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "NextAction": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "command", "outcomes"],
+      "required": [
+        "kind",
+        "command",
+        "outcomes"
+      ],
       "properties": {
-        "kind": { "type": "string" },
-        "command": { "type": ["string", "null"] },
-        "outcomes": { "type": "array", "items": { "$ref": "#/$defs/HumanOutcome" } }
+        "kind": {
+          "type": "string"
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HumanOutcome"
+          }
+        }
       }
     },
     "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema", "schema_version", "ok", "created", "slug", "workflow",
-        "current_stage", "task_folder", "next_action"
+        "schema",
+        "schema_version",
+        "ok",
+        "created",
+        "slug",
+        "workflow",
+        "current_stage",
+        "task_folder",
+        "next_action"
       ],
       "properties": {
-        "schema": { "const": "hive-new" },
-        "schema_version": { "const": 1 },
-        "ok": { "const": true },
-        "created": { "type": "boolean" },
-        "slug": { "type": "string" },
-        "workflow": { "type": "string" },
-        "current_stage": { "type": "string" },
-        "task_folder": { "type": "string" },
-        "next_action": { "$ref": "#/$defs/NextAction" }
+        "schema": {
+          "const": "hive-new"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "workflow": {
+          "type": "string"
+        },
+        "current_stage": {
+          "type": "string"
+        },
+        "task_folder": {
+          "type": "string"
+        },
+        "next_action": {
+          "$ref": "#/$defs/NextAction"
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
+        }
       }
     },
     "ErrorPayload": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema", "schema_version", "ok", "error_class", "error_kind",
-        "exit_code", "message"
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
       ],
       "properties": {
-        "schema": { "const": "hive-new" },
-        "schema_version": { "const": 1 },
-        "ok": { "const": false },
-        "error_class": { "type": "string" },
-        "error_kind": { "enum": ["usage", "config", "concurrent_run", "internal", "error"] },
-        "exit_code": { "type": "integer" },
-        "message": { "type": "string" },
-        "value": { "type": ["string", "integer"] },
-        "idempotency_key": { "type": "string" },
-        "holder": { "type": "object", "additionalProperties": true },
-        "lock_path": { "type": "string" }
+        "schema": {
+          "const": "hive-new"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_kind": {
+          "enum": [
+            "usage",
+            "config",
+            "concurrent_run",
+            "internal",
+            "error",
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
+          ]
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "idempotency_key_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "holder": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "lock_path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "namespace",
+            "installation"
+          ]
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
+        }
+      }
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "generation",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "prepared",
+            "executing",
+            "unresolved",
+            "succeeded",
+            "failed",
+            "settled",
+            "aborted"
+          ]
+        }
       }
     }
   }

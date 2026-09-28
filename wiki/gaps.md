@@ -3,17 +3,49 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-26
+updated: 2026-09-28
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
-## Incident timing calibration (2026-09-26)
+## Command-receipt external evidence gaps (2026-09-28)
 
-The 32-second aggregate advisory cap covers the observed 30.577-second hosted
-run while preserving the 16-second per-scenario ceiling. It does not yet
-establish a long-run percentile or separate budgets for each runner class.
-Revisit the aggregate cap after a representative nightly timing history exists;
-timing remains non-blocking and does not replace functional E2E coverage.
+Resolved for Tier A on 2026-09-28: the compatibility candidate was rebuilt
+from a clean archive of baseline `f3de2561` with the current patch
+(`82562752…`, whose 31-object inventory matches `CommandSchema::OBJECT_NAMES`
+including the installation-wide capacity aggregate). The rebuilt candidate is
+`ddc5ecca37a4fa67329ad022c546d03bee71bf6526f2180838ed32dc765971db`, and the
+isolated rollback/re-upgrade drill was repeated against a fresh database. The
+candidate read and wrote the extended base schema, the current runtime replayed
+its terminal receipt without re-executing, and an altered extension failed
+closed. The earlier `4ac48a4a…` candidate is superseded. Details are in
+`docs/implementation/command-receipt-compatibility-proof.md`. Publication
+remains a separate Tier B authorization boundary: no published coordinates
+exist, and the candidate is not a distribution.
+
+The producer checkout still has no concrete hivedev C4 request/response
+mapping, so local verification covers only the bounded Hive adapters. The
+bounded-search record in `docs/command-receipts-c4-comparison.md` is attached
+to the hivedev C4 consumer task `c4-implement-durable-command-operations-260923-9817`
+(`.hive-state/stages/1-inbox/c4-implement-durable-command-operations-260923-9817/idea.md`)
+by hivedev state commit `f54b9b998b4d9b83799283ef175d54e0cee5b2b2`. That
+commit is on the local `hive/state` branch and has not been pushed to the
+hivedev remote. The Hive follow-up tasks `hive:43362`, `hive:43363`, and
+`hive:43364` link the record from their bodies (hive state commit `3cbb2e5e62`).
+
+The project-filter history behavior has a passing real Playwright system test
+and an ordered storyboard in
+`docs/implementation/browser-history-project-proof.md`, but this execution
+context exposes no admitted video-capture channel. The absence of a recording
+does not imply a browser failure and is not represented as accepted video
+evidence.
+
+## Incident timing calibration (2026-09-27)
+
+The 32-second aggregate advisory cap covers observed hosted totals of 30.577
+and 30.643 seconds while preserving the 16-second per-scenario ceiling. These
+runs do not establish a long-run percentile or separate budgets for each runner
+class. Revisit the cap after representative hosted timing history exists;
+timing remains advisory and does not replace functional E2E coverage.
 
 ## Operator cancellation awaits live validation (2026-09-09)
 
@@ -1657,3 +1689,16 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
 - Browser regressions simulate document visibility and exercise real Cable
   subscriptions and feed scans. CPU and memory savings in the installed local
   service have not yet been measured for this change.
+
+## Command receipt activation boundaries (2026-09-27)
+
+- The compatibility rollback package remains a production-activation
+  dependency; source support does not prove a published, retained package can
+  be fetched.
+- Receipt maintenance is CLI-only in this increment. There is no shipped web
+  route for prune, retirement, pin release, batch abandonment, or enrollment.
+- Project identity and receipt continuity cover one intact host database plus
+  its bound marker. Multi-host continuity and decommission witnesses remain a
+  follow-up.
+- Terminal prune reclaims reusable SQLite pages. It does not guarantee that the
+  database or WAL files shrink on disk.

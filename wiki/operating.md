@@ -3,14 +3,167 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-09-25
-tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood]
+updated: 2026-09-28
+tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood, receipts]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
 Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist/pairing setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, community support, and how to disable automation mid-flight.
+
+## Durable command-receipt operating envelope
+
+Command receipts live in the host runtime control-plane SQLite database, not
+task folders. Project movement, archive, deletion, or registry removal cannot
+delete them. The project marker and complete database (including committed WAL
+state) must be preserved together. A complete copied/rolled-back pair and
+multi-host continuity remain outside this increment's guarantee.
+
+Planning defaults are namespace A=32 executing and N=1,000 non-terminal;
+installation A=3,200 and N=140,000. A is a subset of N. At 100 fully occupied
+workspaces that is 3,200 executing within 140,000 non-terminal rows. One noisy
+namespace stops itself at its limits; installation backstops can stop all
+namespaces. The preview marks 70% warning and 85% action bands.
+
+Local SQLite 3 measurement on 2026-09-27 used the real additive schema, FULL
+synchronous/WAL settings, and 4 KiB pages. The empty base plus extension
+occupied 360 KiB (398 KiB WAL immediately after installation). At 1,000
+terminal receipts carrying 2 KiB request and 2 KiB result payloads, occupied
+pages were 6,201,344 bytes: about 5.7 KiB incremental per receipt, with WAL at
+about 4.0 MiB after automatic checkpointing. A 50-row near-maximum sample with
+32 KiB requests and 220 KiB results added about 248.3 KiB per receipt. These
+are local allocation measurements, not universal filesystem guarantees.
+
+A second 1,000-row differential run measured the auxiliary tables after a
+truncate checkpoint. The receipt-only control occupied 970,752 bytes. One
+effect added 180 bytes/receipt, one active pin 225 bytes/receipt, one
+maintenance audit row 193 bytes/receipt, and one dispatch-intent context 397
+bytes/receipt (rounded page-allocation deltas). Four concurrent writer
+processes inserting the same 1,000-row control serialized successfully and
+peaked at a 4,140,632-byte WAL against 970,752 occupied main bytes, a 4.27x
+transient amplification. A maximum-result finalization qualification then
+measured 225,280 bytes of main-file growth plus 263,712 bytes of WAL growth,
+488,992 bytes total. Admission therefore uses main occupied pages plus the
+current WAL and a rounded-up 512 KiB next-operation allowance. At the default
+installation A=3,200, one such allowance per executing command is 1.5625 GiB,
+leaving roughly 4.69 GiB below the 6.25 GiB installation threshold for
+retained rows, auxiliary evidence, checkpoints, and filesystem variation. The
+threshold remains an admission backstop, not reserved disk or a finalization
+guarantee. The installation N=140,000 limit is independently derived from that
+remaining envelope at a conservative 33 KiB charged per non-terminal row
+(roughly 145,000 rows before rounding down); it is not the namespace limit
+multiplied by the supported namespace count.
+
+With retention W=30 days and weekly prune interval P=7, retained rows are:
+
+`100 * daily_rate * (W + P) + missed_prune_backlog + pinned_terminals_outside_window + nonterminal_rows + orphan_namespace_rows`
+
+The base terms are 370,000, 3,700,000, and 37,000,000 receipts at 100, 1,000,
+and 10,000 operations/workspace/day. At the measured small-row footprint their
+occupied-page estimates alone are roughly 2.0 GiB, 19.6 GiB, and 196 GiB;
+near-maximum payloads are much larger. Pins, missed prune, and removed-project
+namespaces are unbounded until owner maintenance. Prune makes pages reusable
+and may relieve byte admission, but does not shrink the file and does not lower
+N; only terminalizing one non-terminal receipt lowers N.
+
+Unresolved incident sensitivities of 0.1, 1, and 10 per 1,000 operations are
+assumptions, not observed probabilities. At 10,000 operations/day and 10 per
+1,000, one namespace gains about 100 unresolved rows/day: N reaches 70% in 7
+days, 85% in 8.5 days, and stops at 10 days. Across 100 workspaces that is
+10,000/day against the installation cap. Disable new intake if actual arrivals
+exceed settlement capacity; replay and maintenance remain available.
+
+Classify unresolved arrivals before choosing a remedy. A crash before an
+effect is submitted can be proven non-applying and may become a retry-eligible
+failed receipt. A crash mid-effect, a partially completed composite effect,
+provider-response uncertainty, a lost acknowledgement after application, or a
+failure while persisting the original response all remain unresolved until an
+authoritative domain/provider reconciliation accounts for every effect. Never
+infer non-application from process death, elapsed time, or a missing response.
+Task-activity and GitHub publication observations are copied into the owning
+receipt by those domain authorities. Evidence retirement accepts only the exact
+original replay envelope already persisted by the command boundary and exact
+stored observations; operator-supplied result bytes or labels cannot establish
+success. Identical retries may finalize from an exact original boundary result
+or resume only the bounded publication, attempt-dispatch, and task-activity
+state machines whose durable correlation can be authoritatively re-observed.
+An uncorrelated activity record never authorizes resumption. A proven-dead
+executing owner with no effect rows is aborted and reacquired automatically;
+other unknown effects remain unresolved.
+
+Bot enqueue, foreground durable Attempts dispatch, and Daemon consumption use
+one receipt-owned dispatch lifecycle. Before any keyed delivery can rely on
+replay protection, that lifecycle acquires the pin carrying the caller's
+absolute retry horizon. A restarted daemon reloads the receipt, principal,
+request fingerprint, effect identity, ordinal, and horizon from the private
+dispatch-context row and reacquires the same pin identity. Missing or changed
+context fails closed; it never becomes an unkeyed delivery. All three callers
+also request successors from the store's single cycle allocator. Concurrent
+handlers and redelivery of a cycle whose successor failed receive the same
+binding; a changed frozen request cannot claim that binding. A released or
+unresolvable pin rejects and removes the queued dispatch instead of retrying it
+forever. Active predecessor pins protect their bound successors from prune even
+though the transport source identity and caller intent identity are distinct.
+
+The default staffing assumption is one operator able to act within one business
+day. It is not a service guarantee or an allocated minutes/day value.
+Installations may override operator count and response business days. The
+reproducible 100-receipt qualification now measures a complete deterministic
+settlement workflow: read the exact persisted provider observation, correlate
+it to every effect, construct the evidence, run the read-only preview, and
+commit the single-receipt retirement. On Ruby 3.4.10 / SQLite 3.53.2 it measured
+4.148 ms p50 and 5.425 ms p95 (`t_lab = 0.00009041` minutes). This is a lower
+bound for incidents whose authoritative evidence is already available; human
+judgment, restoring provider authority, queue cancellation, and ambiguous
+evidence increase the installation's measured `t_actual`.
+
+Conditional capacity is `floor(T/t_actual)`, with headroom for backlog and
+orphan triage. The qualification shows the arithmetic without assigning an
+operator budget: absent T has no numeric ceiling, T=0 has ceiling 0, and an
+illustrative T=30 minutes with the lab-only p95 lower bound gives 331,814/day.
+That last number is not a production sustainable-rate claim. Configure and use
+the actual shared operator allocation; `operator_count` is not multiplied into
+T. The one-business-day response assumption alone never supplies T. Reproduce
+the measurements with `bundle exec ruby script/measure_command_receipts.rb`;
+the complete F/P and exhaustion receipt is in
+`docs/implementation/command-receipt-capacity-qualification.md`.
+
+At an N stop, consider all of: raise the namespace N config with matching
+installation/byte headroom; terminal-only prune for reusable pages (not N);
+settle one receipt with `hive receipt retire ... --settle-without-result`;
+abandon a stranded maintenance batch; or provision storage. Owner-only
+`hive receipt prune --namespace-id UUID --json` supplies bounded ids and
+generations. An A stop additionally names a live config concurrency increase
+and confirmed orphan-owner reclassification when PID/start-time evidence proves
+death. See [[commands/receipt]] for the trust, pin, audit, and confirmation
+boundaries.
+
+The loopback web boundary trusts access to the local socket after state-home
+custody validation; it does not authenticate the calling process with peer
+credentials. Any local process that can reach that socket receives the
+installation-owner maintenance authority. Receipt maintenance audit rows are
+write-only in this increment and ordinary eligible prune deletes them with
+their owning receipt, so they are not an independent post-hoc accountability
+record.
+
+For a removed project, use the installation-owner preview first:
+`hive receipt prune --json`, then select the orphan with
+`hive receipt prune --namespace-id UUID --json`. The bounded namespace result
+includes nonterminal receipt ids/generations, active pins, unfinished batches,
+and utilization needed to choose a single-receipt retirement, pin release, or
+batch abandonment. Restore the project identity and database together when
+possible; otherwise use only the owner-authorized namespace selector. Terminal
+prune makes pages reusable but deliberately retains the compact namespace,
+capacity, and enrollment metadata. That residual metadata is roughly one row
+in each table (about 1 KiB logical data before SQLite page overhead); no
+physical file shrink is promised.
+
+Prune excludes active pins and protected successor bindings before applying its
+candidate limit, then refreshes maintenance authority inside every bounded
+deletion transaction. A stranded batch can be abandoned after its
+administrative receipt has already become terminal or been pruned; the batch
+audit remains the recovery record.
 
 ## Worktree-first workflow
 

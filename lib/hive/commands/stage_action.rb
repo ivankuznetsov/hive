@@ -11,6 +11,7 @@ require "hive/attempts/context"
 require "hive/attempts/command_dispatch"
 require "hive/conditions/transition_guard"
 require "hive/modules/event_publisher"
+require "hive/command_operation"
 
 module Hive
   module Commands
@@ -37,7 +38,9 @@ module Hive
       def initialize(verb, target, project: nil, from: nil, json: false,
                      durable: false, attempt_entrypoint: nil, quiet: false,
                      observation_guard: nil,
-                     module_event_publisher: nil)
+                     module_event_publisher: nil, idempotency_key: nil,
+                     retry_horizon_expires_at: nil,
+                     command_receipt_store: nil)
         @verb = verb
         @target = target
         @project_filter = project
@@ -48,11 +51,22 @@ module Hive
         @quiet = quiet
         @observation_guard = observation_guard
         @module_event_publisher = module_event_publisher || Hive::Modules::EventPublisher.new
+        @idempotency_key = idempotency_key
+        @retry_horizon_expires_at = retry_horizon_expires_at
+        @command_receipt_store = command_receipt_store
       end
 
       def call
         call_with_envelope do
-          @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call
+          if @retry_horizon_expires_at && !@idempotency_key
+            raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+          end
+          if @durable && @idempotency_key && @retry_horizon_expires_at.to_s.empty?
+            raise Hive::UsageError,
+                  "keyed durable dispatch requires an absolute --retry-horizon-expires-at"
+          end
+          invoke = -> { @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call }
+          @idempotency_key ? command_operation.call(&invoke) : invoke.call
         end
       end
 
@@ -72,6 +86,30 @@ module Hive
 
       private
 
+      def command_operation
+        Hive::CommandOperation.new(
+          key: @idempotency_key,
+          command: "stage_action",
+          mode: @verb,
+          target: @target,
+          request: { "verb" => @verb, "from" => @from, "project" => @project_filter },
+          project_roots: lambda {
+            Hive::CommandOperation.registered_project_roots(
+              target: @target, project: @project_filter
+            )
+          },
+          # Receipt lookup must not evaluate the mutable --from assertion. A
+          # successful first call has already moved the task by the time an
+          # identical lost-response retry arrives.
+          project_root: -> { resolve_receipt_project_root },
+          json: @json,
+          failure_payload: ->(error) { envelope_payload_for(error) },
+          text_renderer: ->(payload) { stage_action_text(payload) },
+          retry_horizon_expires_at: @retry_horizon_expires_at,
+          store: @command_receipt_store || Hive::CommandReceiptStore.new
+        )
+      end
+
       def durable_intended_stage(_task)
         Hive::Workflows.for_verb(@verb).fetch(:target)
       end
@@ -79,7 +117,7 @@ module Hive
       def durable_worker_argv(task)
         argv = [ "hive", @verb, task.folder ]
         argv.concat([ "--from", @from ]) if @from
-        argv << "--json" if @json
+        argv << "--json" if @json || @idempotency_key
         argv
       end
 
@@ -137,6 +175,10 @@ module Hive
           current_stage: actual,
           target_stage: @from
         )
+      end
+
+      def resolve_receipt_project_root
+        Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve.project_root
       end
 
       # Archive on a task already at the terminal stage with :complete is a
@@ -213,21 +255,28 @@ module Hive
       # ── Reporting ───────────────────────────────────────────────────────
 
       def emit_phase(task, phase)
-        return unless @json && !@quiet
-
-        puts JSON.generate(success_payload(task, phase))
+        payload = success_payload(task, phase)
+        puts JSON.generate(payload) if @json && !@quiet
+        payload
       end
 
       def emit_archive_noop(task)
         marker = Hive::Markers.current(task.state_file)
+        payload = success_payload(task, "noop", noop: true,
+                                  reason: "already_archived", marker: marker)
         if @json && !@quiet
-          puts JSON.generate(success_payload(task, "noop",
-                                             noop: true,
-                                             reason: "already_archived",
-                                             marker: marker))
+          puts JSON.generate(payload)
         elsif !@quiet
-          puts "hive: noop — #{task.slug} is already at #{Hive::Stages::DIRS.last}"
+          print stage_action_text(payload)
         end
+        payload
+      end
+
+      def stage_action_text(payload)
+        if payload.fetch("noop")
+          return "hive: noop — #{payload.fetch('slug')} is already at #{payload.fetch('to_stage_dir')}\n"
+        end
+        "hive: #{@verb} #{payload.fetch('slug')} — #{payload.fetch('phase').tr('_', ' ')}\n"
       end
 
       def success_payload(task, phase, noop: false, reason: nil, marker: nil)

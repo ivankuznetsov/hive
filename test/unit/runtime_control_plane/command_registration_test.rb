@@ -190,6 +190,26 @@ class RuntimeControlPlaneCommandRegistrationTest < Minitest::Test
     assert_equal [ [ %w[hive generate-name task], { pgroup: true } ] ], calls
   end
 
+  def test_failed_child_registration_tolerates_a_closed_launch_gate
+    reservation = Struct.new(:id) do
+      def release_fence! = true
+    end.new("reservation")
+    registry = Object.new
+    registry.define_singleton_method(:reserve!) { |**_options| reservation }
+    registry.define_singleton_method(:register!) do |_id, pid:|
+      raise RuntimeError, "registration failed for #{pid}"
+    end
+    registration = Hive::RuntimeControlPlane::CommandRegistration.new(
+      database: Object.new, registry: registry, reservation_id: "parent"
+    )
+
+    assert_raises(RuntimeError) do
+      registration.spawn_registered_hive!(
+        "hive", "version", role: "probe", spawner: ->(*, **) { 12_345 }
+      )
+    end
+  end
+
   private
 
   def with_runtime

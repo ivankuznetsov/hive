@@ -2,6 +2,8 @@ require "time"
 require "securerandom"
 require "hive/paths"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/command_receipt_store"
+require "hive/command_dispatch_lifecycle"
 require "hive/attempts/api"
 require "hive/attempts/generation"
 require "hive/recovery/api"
@@ -28,9 +30,25 @@ module Hive
                  trigger: nil, request_id: nil,
                  task_generation: nil,
                  inherited_outputs: [], task_id: nil, expected_stage: nil,
-                 state_home: Hive::Paths.state_home, now: Time.now, repository: nil)
+                 state_home: Hive::Paths.state_home, now: Time.now, repository: nil,
+                 command_context: nil, command_lifecycle: nil)
         repository ||= repository_for(state_home)
-        request_id ||= repository.generate_request_id
+        command_context ||= current_command_context
+        request_id ||= command_context&.transport_request_id || repository.generate_request_id
+        if command_context
+          (command_lifecycle || Hive::CommandDispatchLifecycle.new(
+            repository: repository, state_home: state_home
+          )).protect_context!(command_context, project: project)
+        end
+        if command_context && defined?(Hive::CommandOperation)
+          Hive::CommandOperation.record_effect_submission(
+            kind: "dispatch_request",
+            identity: {
+              "request_id" => request_id.to_s, "project" => project.to_s,
+              "slug" => slug.to_s
+            }
+          )
+        end
         repository.write_request!(
           project: project,
           slug: slug,
@@ -44,6 +62,7 @@ module Hive
           inherited_outputs: inherited_outputs,
           task_id: task_id,
           expected_stage: expected_stage,
+          command_context: command_context,
           state_home: state_home,
           now: now
         )
@@ -60,6 +79,23 @@ module Hive
         )
       end
 
+      # Allocate the one durable successor identity for an automated delivery
+      # cycle. All receipt/principal/request bindings come from the persisted
+      # predecessor dispatch context; callers cannot substitute labels.
+      def allocate_successor!(predecessor_request_id:, intent_id:, intent_version:,
+                              delivery_cycle_id:, state_home: Hive::Paths.state_home,
+                              repository: nil, store: nil, command_lifecycle: nil)
+        repository ||= repository_for(state_home)
+        lifecycle = command_lifecycle || Hive::CommandDispatchLifecycle.new(
+          repository: repository, store: store, state_home: state_home
+        )
+        lifecycle.allocate_successor!(
+          predecessor_request_id: predecessor_request_id, intent_id: intent_id,
+          intent_version: intent_version,
+          delivery_cycle_id: delivery_cycle_id
+        )
+      end
+
       # Durable foreground delivery. The request row is written first and
       # remains the delivery record even when this process admits the attempt
       # immediately; a daemon can later correlate its receipt after restart.
@@ -67,15 +103,18 @@ module Hive
       def dispatch!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                     trigger: nil, request_id: nil,
                     state_home: Hive::Paths.state_home, now: Time.now,
-                    entrypoint: nil, repository: nil)
+                    entrypoint: nil, repository: nil, command_context: nil,
+                    command_lifecycle: nil)
         repository ||= repository_for(state_home)
-        request_id ||= repository.generate_request_id
+        command_context ||= current_command_context
+        request_id ||= command_context&.transport_request_id || repository.generate_request_id
         task, identity = resolve_task_identity(project: project, slug: slug, argv: argv)
         write!(
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
           request_id: request_id, state_home: state_home, now: now,
-          **identity, repository: repository
+          **identity, repository: repository, command_context: command_context,
+          command_lifecycle: command_lifecycle
         )
         unless task
           return DispatchReference.new(
@@ -120,6 +159,12 @@ module Hive
         )
         raise
       end
+
+      def current_command_context
+        return unless defined?(Hive::CommandOperation)
+        Hive::CommandOperation.current_context
+      end
+      private_class_method :current_command_context
 
       # All ERROR / REVIEW_ERROR callers cross this boundary. Surface-specific
       # rows are normalized once, then the coordinator owns cooldown, lock,

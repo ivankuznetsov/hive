@@ -797,11 +797,12 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     arguments = nil
     with_replaced_singleton_method(
       Hive::Daemon::ChildSupervisor, :terminate_pid,
-      lambda { |**options| arguments = options; status }
+      lambda { |**options| arguments = options; options.fetch(:sleeper).call(0); status }
     ) do
       assert sup.terminate_child(pid, grace_sec: 0)
     end
     assert_equal 4321, arguments.fetch(:pgid)
+    assert_kind_of Proc, arguments.fetch(:sleeper)
     assert_equal pid, sup.reap_all.first.pid
   end
 

@@ -52,7 +52,7 @@ module Hive
         marker = Hive::Markers.current(task.state_file)
         return result if %w[outcome_evidence_integrity_invalid outcome_evidence_reworks_exhausted].include?(marker.attrs["reason"]) ||
                          Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs) ||
-                         reviewer_rework_on_record?(task)
+                         (marker.attrs["reason"] == "outcome_evidence_invalid" && reviewer_rework_on_record?(task))
 
         Hive::Markers.set(
           task.state_file, :complete,
@@ -65,12 +65,13 @@ module Hive
         { commit: "artifacts_best_effort", status: :complete }
       end
 
-      # Best effort keeps evidence infrastructure failures from blocking
-      # delivery. It must not apply once a reviewer has already sent this task
-      # back for implementation rework: the next round has to be accepted, or a
-      # malformed package (for example a proof-kind mismatch) would let the
-      # task skip the gate that had just caught real gaps. The error stays
-      # retryable, and `hive evidence recover` remains the operator escape.
+      # Best effort keeps evidence infrastructure failures (quota, a blocked
+      # capture capability, exhausted recaptures) from blocking delivery, and
+      # still does after a rework. What it must not do once a reviewer has sent
+      # the task back for implementation rework is admit a malformed package
+      # (outcome_evidence_invalid): that would let the task skip the gate that
+      # had just caught real gaps. That error stays retryable, and
+      # `hive evidence recover` remains the operator escape.
       def reviewer_rework_on_record?(task)
         Dir.glob(File.join(task.folder, "outcome-evidence", "reworks", "rework-*.json")).any?
       end

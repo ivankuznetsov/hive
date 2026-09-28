@@ -75,6 +75,26 @@ class StagesArtifactsTest < Minitest::Test
     end
   end
 
+  # Infrastructure limits still fall back to best effort after a rework; only
+  # a malformed package is held back.
+  def test_infrastructure_limits_keep_best_effort_after_a_reviewer_rework
+    Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
+      task = make_artifacts_task(dir)
+      reworks = File.join(task.folder, "outcome-evidence", "reworks")
+      FileUtils.mkdir_p(reworks)
+      File.write(File.join(reworks, "rework-01.json"), "{}")
+      blocked = lambda do |*_|
+        Hive::Markers.set(task.state_file, :error, reason: "outcome_evidence_capability_blocked")
+        { status: :error, commit: "blocked" }
+      end
+      with_replaced_singleton_method(Hive::Stages::Artifacts, :run_outcome_evidence!, blocked) do
+        assert_equal :complete, Hive::Stages::Artifacts.run!(task, {}).fetch(:status)
+        assert_equal "outcome_evidence_capability_blocked",
+                     Hive::Markers.current(task.state_file).attrs.fetch("warning_reason")
+      end
+    end
+  end
+
   def test_best_effort_continues_after_capture_quota_or_a_blocked_capture
     Dir.mktmpdir("hive-artifacts-best-effort") do |dir|
       %w[limits_reached outcome_evidence_capability_blocked outcome_evidence_recaptures_exhausted].each do |reason|

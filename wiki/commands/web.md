@@ -348,7 +348,9 @@ Honeycomb projections.
   permanent composer before Turbo follows an unmodified in-tab link, so its
   typed text and staged files survive while new ideas retain the selected
   context. It reads the raw data attribute so JSON-looking project names stay
-  identifiers, and modified/new-tab clicks do not mutate the current tab.
+  identifiers, and modified/new-tab clicks do not mutate the current tab. On
+  Back/Forward it re-applies the URL filter after Turbo finishes restoring the
+  permanent composer, keeping the restored page and submission target aligned.
   Choosing
   All projects deliberately keeps that composer choice. There is no filter
   observer, animation-frame reconciliation, DOM hiding, or History API state

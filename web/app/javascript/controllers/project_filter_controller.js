@@ -4,10 +4,16 @@ import { Turbo } from "@hotwired/turbo-rails"
 // Turbo preserves the composer node across history visits. Keep that useful
 // draft preservation, but realign its project after Back/Forward restores a
 // filtered URL; otherwise the visible project and submission target diverge.
-window.addEventListener("popstate", () => {
+function alignComposerProjectWithUrl() {
   const selected = new URL(window.location.href).searchParams.get("project")
   if (selected) selectComposerProject(selected)
-})
+}
+
+window.addEventListener("popstate", alignComposerProjectWithUrl)
+// A restoration visit can move the permanent composer after popstate. Align
+// again once Turbo has completed that move so Back/Forward cannot retain the
+// project from the page being left.
+document.addEventListener("turbo:load", alignComposerProjectWithUrl)
 
 // Project filtering is an ordinary GET rendered by Rails. This one small
 // enhancement carries an explicit project choice into the permanent composer

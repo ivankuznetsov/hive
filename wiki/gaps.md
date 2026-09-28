@@ -700,6 +700,9 @@ teardown and proves the late handler removes itself, then forces deferred
 registration to raise and proves the lease releases before the transport
 reconnects.
 
+The filtered-history composer correction is locally Playwright-smoked; hosted
+system-test confirmation is still pending for that repair.
+
 Dedicated client ownership intentionally changes allocation from turbo-rails'
 shared consumer to one Cable connection per simultaneously live status source.
 Deterministic browser coverage proves one transport for one source, two

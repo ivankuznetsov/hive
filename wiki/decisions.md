@@ -966,6 +966,11 @@ partial or unknown additions fail closed. Migration 002 creates new tables,
 indexes, and aggregate-maintenance triggers only and changes no existing table,
 row, or `schema_info` value.
 
+Operator decision (2026-09-28, project owner): triggers that fire only on the
+extension's own new tables and maintain extension-owned aggregates are allowed
+under the additive rule for migration 002 (KTD2). The rule forbids altering,
+triggering on, or rewriting any base-schema object.
+
 The supported rollback target is a compatibility-patched prior runtime that
 validates the unchanged base separately and recognizes the exact extension
 manifest while otherwise ignoring its retained rows. Production opt-in remains

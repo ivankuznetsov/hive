@@ -26,6 +26,8 @@ hive babysit --once --all [--dry-run]
 Service lifecycle subcommands remain human-readable. Every `--once` invocation
 emits exactly one `hive-one-shot.v1` document, with or without an explicit
 `--json`, including `--all` when no project is enabled.
+The one-shot adapter loads at the adapter construction boundary, so direct
+command-adapter callers do not depend on an earlier `run_once` call.
 
 `install` writes and starts the supervised per-user service through
 `Hive::UserService`: `hive-babysitter.service` on Linux systemd-user or

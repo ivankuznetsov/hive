@@ -1,0 +1,16 @@
+● The plan's upstream prerequisites are missing from this checkout. Checking
+  whether the pin raise alone is feasible.
+  Ran 1 shell command
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Scope
+│ The plan's later units bind to tasks that do not exist yet. How should I
+│ proceed?
+❯ 1. Do the prerequisite-free units (Recommended)
+     Implement the units with no missing dependency and record the rest as gated.
+  2. Stop, no commits
+     Exit now with a blocker report.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

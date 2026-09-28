@@ -9,12 +9,18 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 
 ## Command-receipt external evidence gaps (2026-09-28)
 
-The retained compatibility candidate checksum predates the installation-wide
-capacity aggregate added during review. The current compatibility patch and
-31-object manifest are checked together in source, but the candidate must be
-rebuilt and the isolated rollback/re-upgrade drill repeated before the revised
-manifest can claim Tier A qualification. Publication remains a separate Tier B
-authorization boundary.
+Resolved for Tier A on 2026-09-28: the compatibility candidate was rebuilt
+from a clean archive of baseline `f3de2561` with the current patch
+(`82562752…`, whose 31-object inventory matches `CommandSchema::OBJECT_NAMES`
+including the installation-wide capacity aggregate). The rebuilt candidate is
+`ddc5ecca37a4fa67329ad022c546d03bee71bf6526f2180838ed32dc765971db`, and the
+isolated rollback/re-upgrade drill was repeated against a fresh database. The
+candidate read and wrote the extended base schema, the current runtime replayed
+its terminal receipt without re-executing, and an altered extension failed
+closed. The earlier `4ac48a4a…` candidate is superseded. Details are in
+`docs/implementation/command-receipt-compatibility-proof.md`. Publication
+remains a separate Tier B authorization boundary: no published coordinates
+exist, and the candidate is not a distribution.
 
 The producer checkout still has no concrete hivedev C4 request/response
 mapping, so local verification covers only the bounded Hive adapters. Durable

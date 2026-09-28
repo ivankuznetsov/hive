@@ -143,7 +143,7 @@ class RuntimeControlPlaneCommandSchemaTest < Minitest::Test
       assert_includes document, "schema v#{Hive::RuntimeControlPlane::SCHEMA_VERSION}"
       assert_includes document, schema_sha256
       assert_includes document, patch_sha256
-      assert_match(/4ac48a4adb50d3068df71ba204a10ab9839ad7827d8840bb63366d2732c18a9a/, document)
+      assert_match(/ddc5ecca37a4fa67329ad022c546d03bee71bf6526f2180838ed32dc765971db/, document)
       assert_match(/sha256sum --check --strict &&\s*gem install/m, document)
     end
     refute_includes proof, "docs/artifacts/"

@@ -45,7 +45,7 @@ Code-complete rollback handoff status for this checkout:
 - externally retained candidate output (not committed):
   `hive-cli-command-receipt-compat-candidate.gem`
 - candidate SHA-256:
-  `4ac48a4adb50d3068df71ba204a10ab9839ad7827d8840bb63366d2732c18a9a`
+  `ddc5ecca37a4fa67329ad022c546d03bee71bf6526f2180838ed32dc765971db`
 - isolated packaged rollback drill:
   `docs/implementation/command-receipt-compatibility-proof.md`
 - published version/location/SHA-256: pending maintainer release authorization
@@ -55,7 +55,7 @@ replaced with the local candidate. For the Tier A candidate drill, point to the
 retained build output, verify it before installation, and abort on any mismatch:
 
 ```sh
-candidate_sha256='4ac48a4adb50d3068df71ba204a10ab9839ad7827d8840bb63366d2732c18a9a'
+candidate_sha256='ddc5ecca37a4fa67329ad022c546d03bee71bf6526f2180838ed32dc765971db'
 candidate_gem=${HIVE_COMPAT_CANDIDATE_GEM:?set to the retained candidate path}
 printf '%s  %s\n' "$candidate_sha256" "$candidate_gem" | sha256sum --check --strict &&
   gem install --install-dir "$PWD/hive-compat-prefix" "$candidate_gem"

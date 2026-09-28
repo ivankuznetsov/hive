@@ -29,6 +29,57 @@ class CommandsWebTest < Minitest::Test
     end
   end
 
+  def test_foreground_web_replaces_a_dead_writer_identity
+    Dir.mktmpdir("foreground-web") do |state_home|
+      path = File.join(state_home, ".web.pid")
+      dead_pid = Process.spawn(RbConfig.ruby, "-e", "exit 0")
+      Process.wait(dead_pid)
+      File.write(path, { "pid" => dead_pid, "process_start_time" => "gone" }.to_yaml)
+
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state_home }) do
+        Hive::Commands::Web.new.send(:publish_foreground_writer_identity!)
+      end
+
+      assert_equal Process.pid, Hive::PidFile.parse_payload(File.read(path)).fetch("pid")
+    end
+  end
+
+  def test_foreground_web_refuses_a_live_or_unverifiable_writer
+    Dir.mktmpdir("foreground-web") do |state_home|
+      path = File.join(state_home, ".web.pid")
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state_home }) do
+        command = Hive::Commands::Web.new
+        command.send(:publish_foreground_writer_identity!)
+        live = assert_raises(Hive::ConcurrentRunError) do
+          command.send(:publish_foreground_writer_identity!)
+        end
+        assert_equal "hive web already has a live foreground writer", live.message
+
+        File.write(path, "not a process identity")
+        unverifiable = assert_raises(Hive::ConcurrentRunError) do
+          command.send(:publish_foreground_writer_identity!)
+        end
+        assert_equal "hive web already has a liveness-unverifiable foreground writer",
+                     unverifiable.message
+        assert_equal "not a process identity", File.read(path)
+      end
+    end
+  end
+
+  def test_foreground_web_reports_an_unwritable_writer_identity
+    Dir.mktmpdir("foreground-web") do |state_home|
+      File.chmod(0o500, state_home)
+      error = with_replaced_singleton_method(Hive::Paths, :state_home, -> { state_home }) do
+        assert_raises(Hive::ConfigError) do
+          Hive::Commands::Web.new.send(:publish_foreground_writer_identity!)
+        end
+      end
+      assert_includes error.message, "cannot publish foreground Hive web writer identity"
+    ensure
+      File.chmod(0o700, state_home)
+    end
+  end
+
   class FakeRuntime
     attr_reader :prepares, :lifecycle, :cleanups
 

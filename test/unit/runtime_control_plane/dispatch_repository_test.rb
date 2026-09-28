@@ -638,7 +638,111 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     end
   end
 
+  # A write that loses a unique race to a concurrent identical request adopts
+  # the winner only when the winner's command context is the same binding (or
+  # an advanced generation of it), never when the bindings disagree.
+  def test_identical_request_that_wins_a_race_is_adopted_only_with_a_matching_context
+    request_id = "command-dispatch:v1:#{'9' * 64}"
+    context = {
+      receipt_id: "receipt-1", effect_id: "effect-1", principal: "principal-1",
+      principal_source: "local_cli", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "c" * 64, transport_request_id: request_id
+    }
+
+    with_repository do |repository|
+      install_executing_receipt(repository.database)
+      assert_equal request_id, race_identical_request(
+        repository, request_id: request_id, winner_context: context, loser_context: context
+      )
+      assert_equal 1, repository.command_context(request_id).fetch("receipt_generation")
+    end
+
+    with_repository do |repository|
+      install_executing_receipt(repository.database)
+      advance_receipt = lambda do
+        repository.database.transaction do |db|
+          db[:command_receipts].where(receipt_id: "receipt-1").update(generation: 2)
+        end
+      end
+      assert_equal request_id, race_identical_request(
+        repository, request_id: request_id, winner_context: context,
+        loser_context: context.merge(receipt_generation: 2), after_win: advance_receipt
+      )
+      assert_equal 2, repository.command_context(request_id).fetch("receipt_generation")
+    end
+
+    with_repository do |repository|
+      assert_equal "untagged-race", race_identical_request(
+        repository, request_id: "untagged-race", winner_context: nil, loser_context: nil
+      )
+    end
+
+    with_repository do |repository|
+      install_executing_receipt(repository.database)
+      untagged = context.merge(transport_request_id: "untagged-race")
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        race_identical_request(
+          repository, request_id: "untagged-race", winner_context: nil, loser_context: untagged
+        )
+      end
+      assert_equal :dispatch_request_conflict, error.code
+    end
+  end
+
   private
+
+  # The loser's insert collides with an active holder of the same subject; before
+  # the loser re-reads, a concurrent writer replaces the holder with the identical
+  # request carrying +winner_context+; +after_win+ runs once the winner commits.
+  def race_identical_request(repository, request_id:, winner_context:, loser_context:, after_win: nil)
+    register_task(repository.database, task_id: "race-task")
+    attributes = {
+      project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+      task_id: "race-task", task_generation: "generation-1", now: NOW
+    }
+    repository.write_request!(**attributes, request_id: "race-holder")
+    database = repository.database
+    original_read = database.method(:read)
+    raced = false
+    database.define_singleton_method(:read) do |&block|
+      unless raced
+        raced = true
+        transaction { |db| db[:dispatch_requests].where(request_id: "race-holder").delete }
+        repository.write_request!(**attributes, request_id: request_id, command_context: winner_context)
+        after_win&.call
+      end
+      original_read.call(&block)
+    end
+    repository.write_request!(**attributes, request_id: request_id, command_context: loser_context)
+  ensure
+    database&.define_singleton_method(:read, original_read) if original_read
+  end
+
+  def install_executing_receipt(database)
+    Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+      database: database,
+      package_coordinates: {
+        version: "test", location: "https://example.invalid/compat.gem", sha256: "a" * 64
+      }
+    )
+    installation_id = database.installation_identity.fetch(:installation_id)
+    database.transaction do |db|
+      db[:command_namespaces].insert(
+        namespace_id: "namespace-1", installation_id: installation_id,
+        git_common_dir_digest: "d" * 64, enrollment_state: "active",
+        enrollment_generation: 1, keyed_intake_enabled: 1, policy_revision: 1,
+        created_at: NOW.iso8601(6), activated_at: NOW.iso8601(6), updated_at: NOW.iso8601(6)
+      )
+      db[:command_capacity].insert(namespace_id: "namespace-1", updated_at: NOW.iso8601(6))
+      db[:command_receipts].insert(
+        receipt_id: "receipt-1", namespace_id: "namespace-1", key_digest: "e" * 64,
+        principal: "principal-1", principal_source: "local_cli", command: "run",
+        original_target: "sqlite-cutover", request_fingerprint: "c" * 64,
+        frozen_request_json: "{}", state: "executing", generation: 1, retry_eligible: 0,
+        created_at: NOW.iso8601(6), updated_at: NOW.iso8601(6)
+      )
+    end
+  end
 
   def with_repository
     with_tmp_dir do |root|

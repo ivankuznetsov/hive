@@ -776,6 +776,23 @@ class TaskClosureTest < Minitest::Test
         JSON.parse(File.read(Hive::Schemas.schema_path(Hive::TaskClosure::SCHEMA)))
       )
       assert_empty schema.validate(receipt).to_a
+
+      [
+        "receipt-1",
+        { "id" => "receipt-1", "generation" => 8 },
+        { "id" => "", "generation" => 8, "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => 0, "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => "8", "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => 8, "state" => "executing" }
+      ].each do |malformed|
+        tampered = deep_copy(receipt)
+        tampered["command_receipt"] = malformed
+        refresh_receipt_digests!(tampered)
+        error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
+          service.send(:validate_receipt!, tampered, task: task, project: project)
+        end
+        assert_equal "closure command receipt is malformed", error.message
+      end
     ensure
       Thread.current[:hive_command_operation_context] = nil
     end

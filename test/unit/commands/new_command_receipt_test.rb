@@ -66,6 +66,21 @@ class NewCommandReceiptTest < Minitest::Test
     refute command.instance_variable_get(:@inside_command_operation)
   end
 
+  def test_path_like_attachment_has_the_same_request_identity_as_its_source_pair
+    with_tmp_dir do |root|
+      source = File.join(root, "diagram.png")
+      File.binwrite(source, "png-bytes")
+      command = Hive::Commands::New.new("demo", "idea", idempotency_key: "stable")
+      path_like = Struct.new(:path).new(source)
+
+      identity = command.send(:attachment_identity, path_like)
+
+      assert_equal({ "name" => "diagram.png", "sha256" => Digest::SHA256.hexdigest("png-bytes") }, identity)
+      assert_equal command.send(:attachment_identity, [ source, "diagram.png" ]), identity
+      assert_equal command.send(:attachment_identity, source), identity
+    end
+  end
+
   def test_idempotent_existing_task_text_includes_the_next_action
     task = Struct.new(:slug, :stage_index, :stage_name, :folder, :state_file).new(
       "task", 1, "inbox", "/tmp/task", "/tmp/task/task.md"

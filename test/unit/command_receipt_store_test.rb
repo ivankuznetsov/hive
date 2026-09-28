@@ -775,6 +775,84 @@ class CommandReceiptStoreTest < Minitest::Test
     refute store.send(:current_process_owner?, row)
   end
 
+  def test_applied_effect_without_a_verifiable_original_result_is_unresolved
+    store = Hive::CommandReceiptStore.new(database: Object.new)
+    missing = assert_raises(Hive::CommandUnresolved) do
+      store.send(:authoritative_result, { state: "applied", evidence_json: nil })
+    end
+    assert_equal "command_original_result_unavailable", missing.reason
+    assert_equal "the applied command effect has no recoverable original result", missing.message
+
+    result = { "format" => "text", "text" => "ok\n" }
+    evidence = {
+      "authoritative_result" => result, "authoritative_status" => 0,
+      "authoritative_result_sha256" => "0" * 64
+    }
+    tampered = assert_raises(Hive::CommandUnresolved) do
+      store.send(
+        :authoritative_result,
+        { state: "applied", evidence_json: Hive::RuntimeControlPlane::Codec.dump_json(evidence) }
+      )
+    end
+    assert_equal "command_original_result_unavailable", tampered.reason
+    assert_equal "the applied command effect's original result is unrecoverable", tampered.message
+  end
+
+  def test_unprovable_process_start_denies_current_operation_ownership
+    store = Hive::CommandReceiptStore.new(database: Object.new)
+    store.define_singleton_method(:process_start) { |_pid| raise IOError, "unavailable" }
+    row = {
+      receipt_id: "current-receipt", owner_host: Socket.gethostname,
+      owner_pid: Process.pid, owner_process_start: "same-start"
+    }
+    Thread.current[:hive_command_operation_context] = Hive::CommandOperation::Context.new(
+      receipt_id: "current-receipt", effect_id: "effect", principal: "owner",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'c' * 64}",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    )
+
+    refute store.send(:current_process_owner?, row)
+  ensure
+    Thread.current[:hive_command_operation_context] = nil
+  end
+
+  def test_installation_scope_reclamation_advances_the_installation_cursor
+    with_store do |project, database, store|
+      abandoned = store.reserve(
+        project_root: project, key: "installation-abandoned", command: "approve",
+        target: "task", request: {}, principal: "owner"
+      )
+      abandoned = store.mark_executing(
+        abandoned, owner_host: "test-host", owner_pid: 41_001, owner_process_start: "old-start"
+      )
+      trigger = store.reserve(
+        project_root: project, key: "installation-trigger", command: "approve",
+        target: "task-2", request: {}, principal: "owner"
+      )
+      authority = Hive::CommandMaintenanceAuthority.new(
+        principal: "owner", principal_source: "test", installation_owner: true
+      )
+      reclaiming = Hive::CommandReceiptStore.new(
+        database: database, maintenance_authority: authority, host: "test-host",
+        alive: ->(*) { true }, ownership: ->(*) { :reused }
+      )
+
+      assert_equal 1, reclaiming.send(:reclaim_dead_executing_owners, trigger, scope: "installation")
+
+      reclaimed = store.receipt(abandoned.receipt_id)
+      assert_equal "unresolved", reclaimed.fetch(:state)
+      assert_equal "command_orphaned_owner", reclaimed.fetch(:typed_reason)
+      installation, namespace = database.read do |connection|
+        [ connection[:command_installation_capacity][singleton_id: 1],
+          connection[:command_namespaces][namespace_id: trigger.namespace_id] ]
+      end
+      assert_equal abandoned.receipt_id, installation.fetch(:reclamation_cursor_receipt_id)
+      assert_nil namespace.fetch(:reclamation_cursor_receipt_id)
+    end
+  end
+
   def test_same_process_different_operation_cannot_claim_receipt_ownership
     store = Hive::CommandReceiptStore.new(database: Object.new)
     store.define_singleton_method(:process_start) { |_pid| "same-start" }

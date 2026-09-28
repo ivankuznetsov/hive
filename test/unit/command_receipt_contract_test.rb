@@ -1598,6 +1598,42 @@ class CommandReceiptContractTest < Minitest::Test
     assert_includes translated.message, "retry"
   end
 
+  def test_capacity_measurement_classifies_busy_and_exhausted_storage
+    policy = Hive::CommandReceiptCapacity::Policy.new(
+      keyed_intake_enabled: true, nonterminal_limit: 1, concurrency_limit: 1,
+      byte_admission_limit: 1, installation_nonterminal_limit: 1,
+      installation_concurrency_limit: 1, installation_byte_admission_limit: 1,
+      revision: "r", staffing: {}
+    )
+    {
+      SQLite3::BusyException.new("database is locked") => "command_prune_busy",
+      SQLite3::FullException.new("database or disk is full") => "command_prune_storage_unavailable"
+    }.each do |failure, reason|
+      database = Object.new
+      database.define_singleton_method(:read) { raise failure }
+      capacity = Hive::CommandReceiptCapacity.new(database: database, policy: policy)
+
+      error = assert_raises(Hive::CommandCapacityError) { capacity.occupied_installation_bytes }
+      assert_equal reason, error.reason
+      assert_equal "installation", error.scope
+    end
+  end
+
+  def test_pruner_preview_classifies_sqlite_storage_exhaustion
+    authority = Hive::CommandMaintenanceAuthority.new(
+      principal: "owner", principal_source: "test", installation_owner: true
+    )
+    database = Object.new
+    database.define_singleton_method(:read_only) do
+      raise SQLite3::FullException, "database or disk is full"
+    end
+    pruner = Hive::CommandReceiptPruner.new(database: database, authority: authority)
+
+    error = assert_raises(Hive::CommandCapacityError) { pruner.preview }
+    assert_equal "command_prune_storage_unavailable", error.reason
+    assert_includes error.message, "free disk, then rerun"
+  end
+
   def test_dispatch_repository_command_context_guards_and_comparison
     repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: Object.new)
     db = Object.new

@@ -789,6 +789,100 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_text_mode_json_output_is_rendered_through_the_text_renderer
+    with_operation do |_operation, store, project|
+      renderer = ->(payload) { "approved #{payload.fetch('slug')} (#{payload.dig('command_receipt', 'state')})\n" }
+      text_operation = Hive::CommandOperation.new(
+        key: "printed-json", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: false, store: store,
+        text_renderer: renderer
+      )
+      output, = capture_io do
+        text_operation.call do
+          puts JSON.generate("schema" => "hive-approve", "ok" => true, "slug" => "task")
+          nil
+        end
+      end
+      assert_equal "approved task (succeeded)\n", output
+
+      json_operation = Hive::CommandOperation.new(
+        key: "printed-json", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, store: store
+      )
+      replayed, = capture_io { json_operation.call { flunk "display replay executed" } }
+      assert_equal "task", JSON.parse(replayed).fetch("slug")
+    end
+  end
+
+  def test_text_mode_brace_prefixed_non_json_output_is_kept_verbatim
+    with_operation do |_operation, store, project|
+      operation = Hive::CommandOperation.new(
+        key: "brace-text", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: false, store: store,
+        text_renderer: ->(_payload) { flunk "non-JSON text must not be rendered" }
+      )
+      first, = capture_io { operation.call { puts "{approved task" } }
+      assert_equal "{approved task\n", first
+
+      replayed, = capture_io { operation.call { flunk "text replay executed" } }
+      assert_equal first, replayed
+    end
+  end
+
+  def test_structured_replay_of_a_text_mode_failure_raises_the_original_failure
+    with_operation do |_operation, store, project|
+      text_operation = Hive::CommandOperation.new(
+        key: "text-failure", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: false, store: store
+      )
+      assert_raises(Hive::UsageError) do
+        text_operation.call { raise Hive::UsageError, "invalid transition" }
+      end
+      structured = Hive::CommandOperation.new(
+        key: "text-failure", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true, store: store
+      )
+
+      error = assert_raises(Hive::CommandReplayFailure) do
+        structured.call { flunk "failed receipt replay must not execute" }
+      end
+      assert_equal "invalid transition", error.message
+      assert_equal Hive::ExitCodes::USAGE, error.exit_code
+    end
+  end
+
+  def test_unreadable_receipt_storage_is_a_configuration_error
+    database = Object.new
+    database.define_singleton_method(:read) { |_block = nil, &block| block&.call }
+    operation = Hive::CommandOperation.new(
+      key: nil, command: "approve", target: "task", request: {}, project_root: "/project",
+      principal: "owner", store: Struct.new(:database).new(database)
+    )
+    broken = ->(*) { raise Sequel::DatabaseError, "disk I/O error" }
+    error = with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::CommandSchema, :installed?, broken
+    ) do
+      assert_raises(Hive::ConfigError) { operation.send(:verify_receipt_extension!) }
+    end
+    assert_equal "cannot verify command receipt storage: disk I/O error", error.message
+  end
+
+  def test_unresolved_receipt_identity_falls_back_to_the_claim
+    store = Object.new
+    operation = Hive::CommandOperation.new(
+      key: nil, command: "approve", target: "task", request: {}, project_root: "/project",
+      principal: "owner", store: store
+    )
+    claim = Struct.new(:receipt_id, :generation, :state).new("receipt", 2, "executing")
+    expected = { "id" => "receipt", "generation" => 2, "state" => "executing" }
+
+    store.define_singleton_method(:receipt) { |_receipt_id| nil }
+    assert_equal expected, operation.send(:persisted_receipt_identity, claim)
+
+    store.define_singleton_method(:receipt) { |_receipt_id| raise Sequel::DatabaseError, "gone" }
+    assert_equal expected, operation.send(:persisted_receipt_identity, claim)
+  end
+
   private
 
   def with_operation(key: "stable")

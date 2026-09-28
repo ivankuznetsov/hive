@@ -5,37 +5,99 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "schema_version", "status", "reason", "authority", "task",
-    "observation", "task_repository", "evidence", "evidence_digest",
-    "successor", "attestation", "preview_digest", "confirmed_by",
-    "confirmed_at", "receipt_digest"
+    "schema",
+    "schema_version",
+    "status",
+    "reason",
+    "authority",
+    "task",
+    "observation",
+    "task_repository",
+    "evidence",
+    "evidence_digest",
+    "successor",
+    "attestation",
+    "preview_digest",
+    "confirmed_by",
+    "confirmed_at",
+    "receipt_digest"
   ],
   "properties": {
-    "schema": { "const": "hive-task-closure" },
-    "schema_version": { "const": 1 },
-    "status": { "const": "confirmed" },
-    "reason": { "type": "string", "enum": ["already_delivered", "superseded", "cancelled"] },
-    "authority": { "type": "string", "enum": ["remote_merge", "operator_attestation"] },
+    "schema": {
+      "const": "hive-task-closure"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "const": "confirmed"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "already_delivered",
+        "superseded",
+        "cancelled"
+      ]
+    },
+    "authority": {
+      "type": "string",
+      "enum": [
+        "remote_merge",
+        "operator_attestation"
+      ]
+    },
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project", "slug", "id", "workflow"],
+      "required": [
+        "project",
+        "slug",
+        "id",
+        "workflow"
+      ],
       "properties": {
-        "project": { "type": "string" },
-        "slug": { "type": "string" },
-        "id": { "type": ["integer", "null"] },
-        "workflow": { "type": "string" }
+        "project": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "workflow": {
+          "type": "string"
+        }
       }
     },
     "observation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["stage", "marker", "task_generation", "marker_generation"],
+      "required": [
+        "stage",
+        "marker",
+        "task_generation",
+        "marker_generation"
+      ],
       "properties": {
-        "stage": { "type": "string" },
-        "marker": { "type": "string" },
-        "task_generation": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "marker_generation": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "stage": {
+          "type": "string"
+        },
+        "marker": {
+          "type": "string"
+        },
+        "task_generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "marker_generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     },
     "task_repository": {
@@ -43,19 +105,39 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["host", "repository", "identity", "default_branch"],
+          "required": [
+            "host",
+            "repository",
+            "identity",
+            "default_branch"
+          ],
           "properties": {
-            "host": {"type": "string"},
-            "repository": {"type": "string"},
-            "identity": {"type": "string"},
-            "default_branch": {"type": "string"}
+            "host": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            },
+            "identity": {
+              "type": "string"
+            },
+            "default_branch": {
+              "type": "string"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["path"],
-          "properties": {"path": {"type": "string", "minLength": 1}}
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
         }
       ]
     },
@@ -63,56 +145,149 @@
       "type": "array",
       "minItems": 0,
       "maxItems": 16,
-      "items": { "$ref": "#/$defs/Evidence" }
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      }
     },
-    "evidence_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "evidence_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "successor": {
       "oneOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["project", "slug", "id", "stage"],
+          "required": [
+            "project",
+            "slug",
+            "id",
+            "stage"
+          ],
           "properties": {
-            "project": { "type": "string" },
-            "slug": { "type": "string" },
-            "id": { "type": ["integer", "null"] },
-            "stage": { "type": "string" }
+            "project": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "stage": {
+              "type": "string"
+            }
           }
         }
       ]
     },
-    "attestation": { "type": ["string", "null"], "maxLength": 2048 },
-    "preview_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "attestation": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 2048
+    },
+    "preview_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "confirmed_by": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["operator", "channel"],
+      "required": [
+        "operator",
+        "channel"
+      ],
       "properties": {
-        "operator": { "type": "string", "minLength": 1 },
-        "channel": { "type": "string", "enum": ["cli", "web", "bot", "daemon"] }
+        "operator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channel": {
+          "type": "string",
+          "enum": [
+            "cli",
+            "web",
+            "bot",
+            "daemon"
+          ]
+        }
       }
     },
-    "confirmed_at": { "type": "string", "format": "date-time" },
-    "receipt_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    "confirmed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "receipt_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "command_receipt": {
+      "$ref": "#/$defs/CommandReceipt"
+    }
   },
   "allOf": [
     {
-      "if": {"properties": {"reason": {"const": "cancelled"}}},
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "cancelled"
+          }
+        }
+      },
       "then": {
         "properties": {
-          "evidence": {"maxItems": 0},
-          "task_repository": {"required": ["path"]},
-          "authority": {"const": "operator_attestation"},
-          "successor": {"type": "null"},
-          "attestation": {"type": "string", "minLength": 1},
-          "confirmed_by": {"properties": {"channel": {"enum": ["cli", "web", "bot"]}}}
+          "evidence": {
+            "maxItems": 0
+          },
+          "task_repository": {
+            "required": [
+              "path"
+            ]
+          },
+          "authority": {
+            "const": "operator_attestation"
+          },
+          "successor": {
+            "type": "null"
+          },
+          "attestation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "confirmed_by": {
+            "properties": {
+              "channel": {
+                "enum": [
+                  "cli",
+                  "web",
+                  "bot"
+                ]
+              }
+            }
+          }
         }
       },
       "else": {
         "properties": {
-          "evidence": {"minItems": 1},
-          "task_repository": {"required": ["host", "repository", "identity", "default_branch"]}
+          "evidence": {
+            "minItems": 1
+          },
+          "task_repository": {
+            "required": [
+              "host",
+              "repository",
+              "identity",
+              "default_branch"
+            ]
+          }
         }
       }
     }
@@ -122,24 +297,105 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "kind", "host", "repository", "number", "oid", "head_oid", "url", "state",
-        "merged_at", "same_repository", "reachable_from_default"
+        "kind",
+        "host",
+        "repository",
+        "number",
+        "oid",
+        "head_oid",
+        "url",
+        "state",
+        "merged_at",
+        "same_repository",
+        "reachable_from_default"
       ],
       "properties": {
-        "kind": { "type": "string", "enum": ["pull_request", "commit"] },
-        "host": { "type": "string" },
-        "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
-        "number": { "type": ["integer", "null"], "minimum": 1 },
-        "oid": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
-        "head_oid": {
-          "type": ["string", "null"],
+        "kind": {
+          "type": "string",
+          "enum": [
+            "pull_request",
+            "commit"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+$"
+        },
+        "number": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "oid": {
+          "type": "string",
           "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
         },
-        "url": { "type": "string", "format": "uri" },
-        "state": { "type": "string", "enum": ["MERGED", "REACHABLE"] },
-        "merged_at": { "type": ["string", "null"] },
-        "same_repository": { "type": "boolean" },
-        "reachable_from_default": { "const": true }
+        "head_oid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "MERGED",
+            "REACHABLE"
+          ]
+        },
+        "merged_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "same_repository": {
+          "type": "boolean"
+        },
+        "reachable_from_default": {
+          "const": true
+        }
+      }
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "generation",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "prepared",
+            "executing",
+            "unresolved",
+            "succeeded",
+            "failed",
+            "settled",
+            "aborted"
+          ]
+        }
       }
     }
   }

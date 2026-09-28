@@ -3,8 +3,8 @@ title: hive setup
 type: command
 source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,babysit,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-08-30
-tags: [command, setup, install, agents, skills, consent, web, daemon, babysitter]
+updated: 2026-09-27
+tags: [command, setup, install, agents, skills, consent, web, daemon, babysitter, receipts]
 ---
 
 **TLDR**: `hive setup` is the normal native Linux/macOS first run. It checks
@@ -19,7 +19,15 @@ non-TTY setup requires `--yes` and otherwise performs no mutation. Human and
 
 ## Surface
 
-`hive setup [--json] [--service|--no-service] [--no-bootstrap] [--no-init] [--yes]`
+`hive setup [--json] [--service|--no-service] [--no-bootstrap] [--no-init] [--yes] [--install-command-receipts]`
+
+Ordinary setup creates or validates the current base schema v2 only. The default-false
+`--install-command-receipts` flag separately requests the additive command
+receipt extension. `--yes` never implies it, and enabling a namespace intake
+gate never implies it. Pre-publication builds have no pinned published rollback
+package and refuse this opt-in with CONFIG before any setup mutation; use
+`hive setup` or `hive setup --yes` without the flag for base-only installation
+or service refresh until the compatibility package is published.
 
 `--yes` accepts the revalidated plan for unattended operation. It does not
 bypass conflicts or let Hive replace user-owned agent skills. Without
@@ -62,6 +70,11 @@ Without `--no-bootstrap`, setup provisions in this order:
    Setup publishes a complete private database once; an existing healthy database
    is validated and retained. Unsupported, corrupt or wrong-identity storage is
    refused. There are no cutover manifests or automatic historical imports.
+   When and only when `--install-command-receipts` was explicitly accepted,
+   setup first proves daemon, babysitter, and web writers stopped under the
+   activation lock, validates the pinned published compatibility package, and
+   adds the receipt tables/indexes in one transaction. Failure stops all later
+   daemon/babysitter/web provisioning.
 6. Run `hive daemon install` semantics through
    `Hive::Commands::Daemon::ServiceInstaller` with autostart, forced template
    refresh, and the same `Hive::InvokedBinary.path` used to invoke setup. The
@@ -79,7 +92,8 @@ Without `--no-bootstrap`, setup provisions in this order:
 
 `--no-service` performs no web-service mutation: it may report a pre-existing
 unit read-only but never installs, enables, starts, stops, or disables it.
-`--no-bootstrap` is diagnose-only and wins over service flags: it skips agent
+`--no-bootstrap` is diagnose-only and wins over service and receipt-install
+flags: it skips agent
 skills, QMD/web-bundle provisioning, daemon/babysitter/web service installation, and
 project enrollment. It still appends the informational `web` phase with the
 configured URL. `--no-init` only suppresses project enrollment. Default
@@ -193,6 +207,14 @@ false `active_not_ready` install failure. This longer window does not make
 
 Use `hive setup --yes --json` for an unattended managed setup, or
 `hive setup --no-bootstrap --json` for a read-only diagnostic pass.
+
+After a compatibility package is published and pinned by the build,
+`hive setup --yes --install-command-receipts` explicitly changes the shared
+installation database. Even with all namespace intake gates disabled, every
+project/service using that database sees the added objects, and unmodified
+pre-compatibility binaries refuse it. Omitting the flag later retains both the
+extension and that compatibility consequence. See [[commands/receipt]] before
+enabling any project intake gate.
 
 ## Output exceptions and exit codes
 

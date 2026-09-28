@@ -23,6 +23,8 @@ require "hive/tui/text"
 require "hive/dependencies"
 require "hive/worktree"
 require "hive/daily_digest/task_creation_receipt"
+require "hive/command_operation"
+require "hive/command_error_kind"
 
 module Hive
   module Commands
@@ -86,7 +88,7 @@ module Hive
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
                      depends_on: nil, workflow: nil, idempotency_key: nil, json: false,
-                     task_capture_factory: nil)
+                     task_capture_factory: nil, command_receipt_store: nil)
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
@@ -97,6 +99,7 @@ module Hive
         @workflow_name = workflow
         @idempotency_key_raw = idempotency_key
         @task_capture_factory = task_capture_factory || ->(**options) { Hive::TaskCapture.new(**options) }
+        @command_receipt_store = command_receipt_store
         # Machine-readable creation was added for idempotent automation.
         # Preserve the legacy plain-text contract for a bare `hive new --json`
         # whose caller did not opt into that side-effect boundary.
@@ -123,7 +126,14 @@ module Hive
       # raising so they can rescue typed errors without losing the alt
       # screen.
       def call
-        call_with_envelope { call! }
+        call_with_envelope do
+          if @idempotency_key_raw.nil?
+            call!
+          else
+            @inside_command_operation = true
+            command_operation.call { perform_call! }
+          end
+        end
       rescue Hive::Error, SystemCallError, IOError => e
         warn "hive: #{e.message}" unless @json
         # Honor each typed error's contract exit code (e.g. UnknownWorkflow →
@@ -136,6 +146,8 @@ module Hive
       def envelope_schema = SCHEMA
 
       def envelope_error_kind(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
         when IdempotencyConflict, InvalidBaseError, InvalidDraftPrCombination,
              Hive::Workflows::UnknownWorkflow then "usage"
@@ -149,13 +161,72 @@ module Hive
       def envelope_extras_for(error)
         extras = {}
         extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
-        extras["idempotency_key"] = @idempotency_key if @idempotency_key
+        if @idempotency_key_raw
+          extras["idempotency_key_sha256"] = ::Digest::SHA256.hexdigest(@idempotency_key_raw.to_s)
+        end
         extras
       end
 
       def envelope_serialization_failure_policy = :raise
 
+      def command_operation
+        Hive::CommandOperation.new(
+          key: @idempotency_key_raw,
+          command: "new",
+          target: @project_name,
+          request: {
+            "text_sha256" => ::Digest::SHA256.hexdigest(@text),
+            "slug" => @slug_override,
+            "body_sha256" => @body_override && ::Digest::SHA256.hexdigest(@body_override.to_s),
+            "base" => @base,
+            "depends_on" => @depends_on,
+            "workflow" => @workflow_name,
+            "attachments" => @attachments.map { |attachment| attachment_identity(attachment) }
+          },
+          project_root: lambda {
+            project = Hive::Config.find_project(@project_name)
+            raise ProjectNotFound.new(
+              "project not initialized: #{@project_name} (run `hive init <path>` first)",
+              value: @project_name
+            ) unless project
+            project.fetch("path")
+          },
+          json: @json,
+          failure_payload: ->(error) { envelope_payload_for(error) },
+          text_renderer: ->(payload) { new_result_text(payload) },
+          store: receipt_store
+        )
+      end
+
+      def attachment_identity(attachment)
+        path, destination = if attachment.respond_to?(:path)
+          [ attachment.path, File.basename(attachment.path.to_s) ]
+        elsif attachment.is_a?(Array)
+          attachment
+        else
+          [ attachment, File.basename(attachment.to_s) ]
+        end
+        {
+          "name" => File.basename(destination.to_s),
+          "sha256" => File.file?(path.to_s) ? ::Digest::SHA256.file(path.to_s).hexdigest : nil
+        }
+      end
+
       def call!
+        if @idempotency_key_raw.nil? || @inside_command_operation
+          return perform_call!
+        end
+        @inside_command_operation = true
+        command_operation.call { perform_call! }
+      ensure
+        @inside_command_operation = false
+      end
+
+      def receipt_store
+        @command_receipt_store ||= Hive::CommandReceiptStore.new
+      end
+
+      def perform_call!
         project = Hive::Config.find_project(@project_name)
         unless project
           raise ProjectNotFound.new(
@@ -216,7 +287,11 @@ module Hive
             project: project
           ).call
           unless result.created
-            return emit_task_result(result.folder, workflow, created: false)
+            return emit_task_result(result.folder, workflow, created: false) unless @inside_command_operation
+
+            raise Hive::CommandUnresolved.new(
+              message: "legacy task creation matched, but its original caller response was not saved"
+            )
           end
 
           spawn_name_generator(task_dir)
@@ -362,6 +437,18 @@ module Hive
           puts "next: #{action.command}" if action.command
         end
         payload
+      end
+
+      def new_result_text(payload)
+        if payload.fetch("created")
+          task = Hive::Task.new(payload.fetch("task_folder"))
+          command = payload.dig("next_action", "command")
+          "hive: captured #{task.state_file}\n#{command ? "next: #{command}\n" : ''}"
+        else
+          command = payload.dig("next_action", "command")
+          "hive: idempotent task already exists at #{payload.fetch('task_folder')}\n" \
+            "#{command ? "next: #{command}\n" : ''}"
+        end
       end
 
       def resolve_workflow(project)

@@ -10,6 +10,9 @@ require "hive/web/loopback"
 require "hive/web/service_status"
 require "hive/invoked_binary"
 require "hive/runtime_control_plane"
+require "hive/atomic_file"
+require "hive/lock"
+require "hive/pid_file"
 
 module Hive
   module Commands
@@ -273,12 +276,38 @@ module Hive
                   "and that the web bundle is installed (cd #{app_dir} && bundle install)"
           end
           puts "hive web: listening on http://#{bind}:#{port}"
+          publish_foreground_writer_identity!
           # Replace this process with the Rails server (array form, env hash;
           # Kernel#exec never touches a shell when given an argv list).
           Hive::RuntimeControlPlane::ProcessGuard.exec(
             env, *rails_argv, "server", "-b", bind, "-p", port.to_s
           )
         end
+      end
+
+      def publish_foreground_writer_identity!
+        path = File.join(Hive::Paths.state_home, ".web.pid")
+        if File.exist?(path) || File.symlink?(path)
+          existing = Hive::PidFile.parse_payload(File.read(path))
+          pid = existing && existing["pid"]
+          classification = Hive::PidFile.death_classification(
+            pid: pid, recorded_start_time: existing && existing["process_start_time"]
+          )
+          unless %i[dead reused].include?(classification)
+            raise Hive::ConcurrentRunError,
+                  "hive web already has a #{classification == :live ? 'live' : 'liveness-unverifiable'} foreground writer"
+          end
+        end
+        start_time = Hive::Lock.process_start_time(Process.pid)
+        raise Hive::ConfigError, "cannot record foreground Hive web process identity" unless start_time
+
+        payload = {
+          "pid" => Process.pid, "process_start_time" => start_time,
+          "started_at" => Time.now.utc.iso8601
+        }
+        Hive::AtomicFile.write(path, payload.to_yaml, mode: 0o600)
+      rescue Psych::Exception, SystemCallError, IOError => error
+        raise Hive::ConfigError, "cannot publish foreground Hive web writer identity: #{error.message}"
       end
 
       def install_command

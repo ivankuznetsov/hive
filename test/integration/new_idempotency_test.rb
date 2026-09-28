@@ -7,9 +7,14 @@ require "hive/commands/new"
 require "hive/commands/workflow"
 require "hive/task_meta"
 require "hive/daily_digest/task_creation_receipt"
+require "hive/runtime_control_plane/command_schema_installation"
 
 class NewIdempotencyTest < Minitest::Test
   include HiveTestHelper
+
+  TEST_PACKAGE = {
+    version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "9" * 64
+  }.freeze
 
   def test_error_kind_maps_config_concurrency_and_internal_failures
     command = Hive::Commands::New.new("project", "task", idempotency_key: "key", json: true)
@@ -29,22 +34,26 @@ class NewIdempotencyTest < Minitest::Test
 
   def test_retry_returns_original_task_after_it_moves
     with_initialized_project do |project_root, project|
-      first = create_json(
+      first_bytes = create_json_bytes(
         project, "draft launch post", key: "workflow-creator:editorial:v1", slug: "editorial-task"
       )
+      first = JSON.parse(first_bytes)
       assert_equal true, first.fetch("created")
       folder = File.join(project_root, ".hive-state", "stages", "1-inbox", "editorial-task")
       Hive::Commands::Approve.new(
         folder, to: "2-brainstorm", from: "1-inbox", force: true, quiet: true
       ).call
 
-      retry_payload = create_json(
+      retry_bytes = create_json_bytes(
         project, "draft launch post", key: "workflow-creator:editorial:v1", slug: "editorial-task"
       )
+      retry_payload = JSON.parse(retry_bytes)
 
-      assert_equal false, retry_payload.fetch("created")
+      assert_equal first_bytes, retry_bytes
+      assert_equal first, retry_payload
+      assert_equal true, retry_payload.fetch("created")
       assert_equal "editorial-task", retry_payload.fetch("slug")
-      assert_equal "2-brainstorm", retry_payload.fetch("current_stage")
+      assert_equal "1-inbox", retry_payload.fetch("current_stage")
       assert_equal 1, idempotent_tasks(project_root).size
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
       assert_empty schemer.validate(retry_payload).to_a
@@ -55,14 +64,14 @@ class NewIdempotencyTest < Minitest::Test
     with_initialized_project do |project_root, project|
       create_json(project, "first request", key: "creator:stable", slug: "first-task")
 
-      error = assert_raises(Hive::Commands::New::IdempotencyConflict) do
+      error = assert_raises(Hive::CommandConflict) do
         Hive::Commands::New.new(
           project, "different request", slug_override: "second-task",
           idempotency_key: "creator:stable", json: true
         ).call!
       end
 
-      assert_includes error.message, "different input or workflow"
+      assert_includes error.message, "different request"
       assert_equal 1, idempotent_tasks(project_root).size
 
       out, err, status = with_captured_exit do
@@ -72,9 +81,9 @@ class NewIdempotencyTest < Minitest::Test
         ).call
       end
       payload = JSON.parse(out)
-      assert_equal Hive::ExitCodes::USAGE, status
+      assert_equal Hive::ExitCodes::COMMAND_CONFLICT, status
       assert_empty err
-      assert_equal "usage", payload.fetch("error_kind")
+      assert_equal "command_conflict", payload.fetch("error_kind")
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
       assert_empty schemer.validate(payload).to_a
       assert_equal 1, idempotent_tasks(project_root).size
@@ -84,13 +93,13 @@ class NewIdempotencyTest < Minitest::Test
   def test_invalid_idempotency_keys_are_rejected
     with_initialized_project do |_project_root, project|
       [ "", " ", "x" * 513 ].each do |key|
-        error = assert_raises(Hive::Commands::New::IdempotencyConflict) do
+        error = assert_raises(Hive::Error) do
           Hive::Commands::New.new(
             project, "task", slug_override: "invalid-key-task",
             idempotency_key: key, json: true
           ).call!
         end
-        assert_includes error.message, "idempotency key must be"
+        assert_match(/idempotency.key must be/, error.message)
       end
     end
   end
@@ -112,6 +121,28 @@ class NewIdempotencyTest < Minitest::Test
         assert_equal "png-bytes",
                      File.binread(File.join(project_root, ".hive-state", "stages", "1-inbox",
                                             "attachment-task", "assets", "source.png"))
+      end
+    end
+  end
+
+  def test_attachment_tuple_rejects_changed_source_bytes_for_the_same_key
+    with_initialized_project do |project_root, project|
+      with_tmp_dir do |dir|
+        source = File.join(dir, "source.png")
+        File.binwrite(source, "first-bytes")
+        create_json_with(
+          project, "task with mutable image", key: "creator:mutable-attachment",
+          slug: "mutable-attachment-task", attachments: [ [ source, "source.png" ] ]
+        )
+
+        File.binwrite(source, "changed-bytes")
+        assert_raises(Hive::CommandConflict) do
+          create_json_with(
+            project, "task with mutable image", key: "creator:mutable-attachment",
+            slug: "mutable-attachment-task", attachments: [ [ source, "source.png" ] ]
+          )
+        end
+        assert_equal 1, idempotent_tasks(project_root).size
       end
     end
   end
@@ -144,7 +175,8 @@ class NewIdempotencyTest < Minitest::Test
           project, "task with raced image", key: "creator:raced-attachment",
           slug: "raced-attachment-task", attachments: [ [ source, "source.png" ] ]
         )
-        assert_equal false, retry_payload.fetch("created")
+        assert_equal true, retry_payload.fetch("created")
+        assert_equal payload, retry_payload
         assert_equal 1, idempotent_tasks(project_root).size
       end
     end
@@ -303,14 +335,14 @@ class NewIdempotencyTest < Minitest::Test
       )
       Hive::Workflows::Project.reset!
 
-      error = assert_raises(Hive::Commands::New::IdempotencyConflict) do
+      error = assert_raises(Hive::CommandConflict) do
         Hive::Commands::New.new(
           project, "same request", slug_override: "second-authored",
           workflow: "editorial", idempotency_key: "creator:authored-content", json: true
         ).call!
       end
 
-      assert_includes error.message, "different input or workflow"
+      assert_includes error.message, "different request"
       assert_equal 1, idempotent_tasks(project_root).size
     end
   end
@@ -497,13 +529,28 @@ class NewIdempotencyTest < Minitest::Test
 
       out, = capture_io do
         Hive::Commands::New.new(
-          project, "plain retry", slug_override: "ignored-task",
+          project, "plain retry", slug_override: "plain-task",
           idempotency_key: "creator:plain"
         ).call!
       end
 
-      assert_includes out, "idempotent task already exists"
+      assert_includes out, "hive: captured"
       assert_includes out, "next: hive brainstorm"
+    end
+  end
+
+  def test_durable_boundary_refuses_legacy_duplicate_without_saved_response
+    with_initialized_project do |_project_root, project|
+      create_json(project, "legacy retry", key: "creator:legacy", slug: "legacy-task")
+      command = Hive::Commands::New.new(
+        project, "legacy retry", slug_override: "ignored-task",
+        idempotency_key: "creator:legacy", json: true
+      )
+      command.instance_variable_set(:@inside_command_operation, true)
+
+      error = assert_raises(Hive::CommandUnresolved) { command.send(:perform_call!) }
+
+      assert_includes error.message, "original caller response was not saved"
     end
   end
 
@@ -565,6 +612,7 @@ class NewIdempotencyTest < Minitest::Test
         capture_io do
           Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call
         end
+        enable_command_receipts!(project_root)
         yield project_root, File.basename(project_root)
       end
     end
@@ -572,11 +620,29 @@ class NewIdempotencyTest < Minitest::Test
     Hive::Workflows::Project.reset!
   end
 
+  def enable_command_receipts!(project_root)
+    database = Hive::RuntimeControlPlane.database.open!
+    Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+      database: database, package_coordinates: TEST_PACKAGE
+    )
+    path = File.join(project_root, ".hive-state", "config.yml")
+    config = YAML.safe_load_file(path) || {}
+    config["command_receipts"] ||= {}
+    config["command_receipts"]["keyed_intake_enabled"] = true
+    File.write(path, config.to_yaml)
+  end
+
   def create_json(project, text, key:, slug:)
     create_json_with(project, text, key: key, slug: slug)
   end
 
   def create_json_with(project, text, key:, slug:, attachments: [], workflow: nil)
+    JSON.parse(create_json_bytes(
+      project, text, key: key, slug: slug, attachments: attachments, workflow: workflow
+    ))
+  end
+
+  def create_json_bytes(project, text, key:, slug:, attachments: [], workflow: nil)
     out, err = capture_io do
       Hive::Commands::New.new(
         project, text, slug_override: slug, idempotency_key: key, json: true,
@@ -584,7 +650,7 @@ class NewIdempotencyTest < Minitest::Test
       ).call!
     end
     assert_empty err
-    JSON.parse(out)
+    out
   end
 
   def create_authored_workflow(project_root, id)

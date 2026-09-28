@@ -529,14 +529,64 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
     schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
 
-    producer_kinds = %w[
+    producer_kinds = (%w[
       ambiguous_slug destination_collision final_stage
       plan_review_blocked wrong_stage rollback_failed invalid_task_path dependency_wait
       admission_error error
-    ].sort
+    ] + Hive::CommandErrorKind::ALL).sort
 
     assert_equal producer_kinds, schema_kinds,
                  "schema/producer error_kind enum drift"
+  end
+
+  def test_all_bounded_command_error_kind_enums_match_their_producers
+    receipt_kinds = Hive::CommandErrorKind::ALL
+    producer_kinds = {
+      "hive-act" => %w[
+        usage stale_observation ambiguous_target concurrent_run dependency_wait
+        admission_error config internal error
+      ] + receipt_kinds,
+      "hive-approve" => %w[
+        ambiguous_slug destination_collision final_stage plan_review_blocked wrong_stage
+        rollback_failed invalid_task_path dependency_wait admission_error error
+      ] + receipt_kinds,
+      "hive-new" => %w[usage config concurrent_run internal error] + receipt_kinds,
+      "hive-answer" => %w[
+        invalid_binding invalid_answer wrong_stage stale ambiguous_slug invalid_task_path
+        config usage internal
+      ] + receipt_kinds,
+      "hive-stage-action" => %w[
+        ambiguous_slug destination_collision final_stage plan_review_blocked wrong_stage
+        rollback_failed invalid_task_path dependency_wait admission_error error
+      ] + receipt_kinds
+    }
+
+    producer_kinds.each do |schema, kinds|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(schema)))
+      actual = document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum")
+      assert_equal kinds.sort, actual.sort, "schema/producer error_kind drift in #{schema}"
+    end
+  end
+
+  def test_each_keyed_command_validates_emitted_conflict_progress_and_unresolved_errors
+    commands = %w[hive-act hive-approve hive-new hive-answer hive-stage-action]
+    errors = [ Hive::CommandConflict.new, Hive::CommandInProgress.new,
+              Hive::CommandUnresolved.new ]
+    commands.each do |name|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+      extras = case name
+      when "hive-act" then { "action_id" => "workflow.advance", "target" => "demo:task" }
+      when "hive-stage-action" then { "verb" => "develop" }
+      else {}
+      end
+      errors.each do |error|
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: name, error: error, error_kind: error.reason, extras: extras
+        )
+        assert_empty schemer.validate(payload).to_a,
+                     "#{name} must accept emitted exit #{error.exit_code}"
+      end
+    end
   end
 
   def test_hive_approve_next_action_kinds_match_closed_enum
@@ -545,6 +595,28 @@ class SchemaFilesTest < Minitest::Test
     enum_kinds = Hive::Schemas::NextActionKind::ALL.sort
     assert_equal enum_kinds, schema_kinds,
                  "schema NextAction.kind enum must mirror Hive::Schemas::NextActionKind::ALL"
+  end
+
+  def test_command_receipt_schemas_match_error_envelope_producer
+    kinds = (%w[usage config internal] + Hive::CommandErrorKind::ALL).sort
+
+    %w[hive-command-receipt hive-receipt-prune].each do |name|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(name)))
+      error = document.dig("$defs", "ErrorPayload")
+      required = error.fetch("required")
+      properties = error.fetch("properties")
+      assert_empty required - properties.keys,
+                   "#{name} requires undeclared ErrorPayload properties"
+      assert_equal kinds, properties.dig("error_kind", "enum").sort
+
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: name,
+        error: Hive::CommandIntakeDisabled.new("disabled"),
+        error_kind: "command_intake_disabled"
+      )
+      assert JSONSchemer.schema(document).valid?(payload),
+             "#{name} must validate its emitted intake-disabled envelope"
+    end
   end
 
   # ── hive-status ────────────────────────────────────────────────────────

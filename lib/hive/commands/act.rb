@@ -1,5 +1,8 @@
 require "json"
 require "hive/operational_action"
+require "hive/command_operation"
+require "hive/command_error_kind"
+require "hive/task_resolver"
 
 module Hive
   module Commands
@@ -7,23 +10,30 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
 
       def initialize(action_id, target, observation:, json: false,
-                     executor: Hive::OperationalAction::Executor.new)
+                     executor: Hive::OperationalAction::Executor.new,
+                     project: nil, idempotency_key: nil, command_receipt_store: nil)
         @action_id = action_id
         @target = target
         @observation = observation
         @json = json
         @executor = executor
+        @project_filter = project
+        @idempotency_key = idempotency_key
+        @command_receipt_store = command_receipt_store
       end
 
       def call
         call_with_envelope do
-          validate!
-          result = @executor.execute(
-            action_id: @action_id,
-            target: @target,
-            observation_token: @observation
-          )
-          emit_success(result)
+          invoke = lambda do
+            validate!
+            result = @executor.execute(
+              action_id: @action_id,
+              target: @target,
+              observation_token: @observation
+            )
+            emit_success(result)
+          end
+          @idempotency_key ? command_operation.call(&invoke) : invoke.call
         end
       end
 
@@ -34,6 +44,8 @@ module Hive
       end
 
       def envelope_error_kind(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
         when Hive::AmbiguousSlug then "ambiguous_target"
         when Hive::OperationalActionUsageError, Hive::InvalidTaskPath then "usage"
@@ -51,6 +63,33 @@ module Hive
 
       private
 
+      def command_operation
+        Hive::CommandOperation.new(
+          key: @idempotency_key,
+          command: "act",
+          target: @target,
+          request: {
+            "action_id" => @action_id,
+            "observation" => @observation,
+            "project" => @project_filter
+          },
+          project_roots: lambda {
+            project_name, = qualified_target
+            Hive::CommandOperation.registered_project_roots(
+              target: @target, project: project_name
+            )
+          },
+          project_root: lambda {
+            project_name, slug = qualified_target
+            Hive::TaskResolver.new(slug, project_filter: project_name).resolve.project_root
+          },
+          json: @json,
+          failure_payload: ->(error) { envelope_payload_for(error) },
+          text_renderer: ->(payload) { text_success(payload.fetch("result")) },
+          store: @command_receipt_store || Hive::CommandReceiptStore.new
+        )
+      end
+
       def validate!
         if @action_id.to_s.empty? || @target.to_s.empty?
           raise Hive::OperationalActionUsageError, "ACTION_ID and TARGET are required"
@@ -62,24 +101,43 @@ module Hive
       end
 
       def emit_success(result)
+        payload = {
+          "schema" => "hive-act",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-act"),
+          "ok" => true,
+          "action_id" => @action_id,
+          "target" => @target,
+          "observation_token" => @observation,
+          "result" => result
+        }
         if @json
-          puts JSON.generate(
-            "schema" => "hive-act",
-            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-act"),
-            "ok" => true,
-            "action_id" => @action_id,
-            "target" => @target,
-            "observation_token" => @observation,
-            "result" => result
-          )
-          @stdout_written = true
+          puts JSON.generate(payload)
+          @stdout_written = true unless @idempotency_key
         else
-          if (recovery = result["recovery"])
-            puts recovery_summary(recovery)
-          else
-            puts "advanced #{@target} — #{result.fetch('task_state')} at " \
-                 "#{result.fetch('stage')} (#{result.fetch('marker')})"
-          end
+          print text_success(result)
+        end
+        payload
+      end
+
+      def qualified_target
+        project, slug = @target.to_s.split(":", 2)
+        if project.to_s.empty? || slug.to_s.empty? || slug.include?(File::SEPARATOR)
+          raise Hive::OperationalActionUsageError,
+                "TARGET must be the exact project:slug emitted by operational status"
+        end
+        if @project_filter && @project_filter.to_s != project
+          raise Hive::OperationalActionUsageError,
+                "--project must match the project in TARGET"
+        end
+        [ project, slug ]
+      end
+
+      def text_success(result)
+        if (recovery = result["recovery"])
+          recovery_summary(recovery)
+        else
+          "advanced #{@target} — #{result.fetch('task_state')} at " \
+            "#{result.fetch('stage')} (#{result.fetch('marker')})\n"
         end
       end
 
@@ -97,7 +155,7 @@ require "hive/cli_usage_contracts"
 
 Hive::CliUsageContracts.declare("act") do |argv, command_index:, option_argv:|
   action_id, target = Hive::CliUsageContracts.positionals(
-    argv, command_index, value_options: %w[--observation]
+    argv, command_index, value_options: %w[--observation --idempotency-key]
   ).first(2)
   {
     schema: "hive-act",

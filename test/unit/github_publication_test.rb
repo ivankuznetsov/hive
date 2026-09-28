@@ -1,6 +1,7 @@
 require "test_helper"
 require "tmpdir"
 require "open3"
+require "hive/command_operation"
 require "hive/github_publication"
 
 class GithubPublicationTest < Minitest::Test
@@ -1121,6 +1122,27 @@ class GithubPublicationTest < Minitest::Test
         controller.send(:reconcile_create, request, branch_state, ->(*) { true })
       end
       assert_equal "create_not_observed", error.code
+    end
+  end
+
+  def test_controller_records_authoritative_push_and_pull_request_observations
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      observations = []
+      recorder = lambda do |source:, correlation_id:, evidence:|
+        observations << [ source, correlation_id, evidence ]
+      end
+      with_replaced_singleton_method(
+        Hive::CommandOperation, :record_effect_observation, recorder
+      ) do
+        controller = controller_for(repo, remote, FakeGithub.new)
+        controller.publish!(request, revalidate: ->(*) { true })
+      end
+
+      assert_equal %w[github_push github_pull_request], observations.map(&:first).uniq
+      assert observations.all? { |row| row[1] == request.publication_id }
+      assert_equal request.head_oid, observations.first.last.fetch("after_oid")
+      assert observations.last.last.fetch("number").positive?
     end
   end
 

@@ -356,6 +356,12 @@ class HiveCommandsAnswerTest < Minitest::Test
         assert_equal "task_lock_busy", rejected.fetch("reason")
         assert_nil Hive::BrainstormParser.parse(path).first.answer
         assert_schema(rejected)
+        keyed = Hive::Commands::Answer.new(
+          SLUG, project: "demo", binding: token, idempotency_key: "key"
+        )
+        assert_raises(Hive::ConcurrentRunError) do
+          keyed.send(:mutation_payload, answer_text: "still blocked")
+        end
       ensure
         Hive::Lock.release_task_lock(folder, lock_id: held.fetch("lock_id"))
       end
@@ -562,6 +568,26 @@ class HiveCommandsAnswerTest < Minitest::Test
       payload = command.call
       assert_equal "stale", payload.fetch("outcome")
       assert_equal "task_missing", payload.fetch("reason")
+    end
+  end
+
+  def test_post_write_read_failure_does_not_report_the_applied_answer_as_stale
+    with_project do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      command = Hive::Commands::Answer.new(
+        SLUG, project: "demo", binding: token,
+        input: StringIO.new("applied answer"), output: StringIO.new
+      )
+      original = command.method(:read_brainstorm!)
+      reads = 0
+      command.define_singleton_method(:read_brainstorm!) do |task|
+        reads += 1
+        raise Hive::InvalidTaskPath, "post-write read failed" if reads > 1
+        original.call(task)
+      end
+
+      assert_raises(Hive::InvalidTaskPath) { command.call }
+      assert_equal "applied answer", Hive::BrainstormParser.parse(path).first.answer
     end
   end
 

@@ -112,6 +112,9 @@ module Hive
                          recovery_source_attempt_id:)
         request_id = record["request_id"]
         return unless request_id
+        command_context = if defined?(Hive::CommandOperation)
+          Hive::CommandOperation.current_context
+        end
         row = db[:dispatch_requests].where(request_id: request_id).first
         unless row
           db[:dispatch_requests].insert(
@@ -129,6 +132,7 @@ module Hive
             created_at: record["accepted_at"], updated_at: record["accepted_at"],
             revision: 0
           )
+          bind_command_context!(db, request_id, command_context)
           return
         end
         unless %w[queued claimed].include?(row.fetch(:state)) && row.fetch(:project_id) == project_id
@@ -155,6 +159,58 @@ module Hive
           revision: Sequel[:revision] + 1
         )
         raise Attempts::CompareAndSwapFailed, "dispatch request claim raced" unless changed == 1
+        bind_command_context!(db, request_id, command_context)
+      end
+
+      def bind_command_context!(db, request_id, context)
+        tagged = request_id.to_s.start_with?("command-dispatch:v1:")
+        table_available = db.table_exists?(:command_dispatch_contexts)
+        existing = db[:command_dispatch_contexts][request_id: request_id.to_s] if table_available
+        if context.nil?
+          if tagged && existing.nil?
+            raise Attempts::RepositoryError, "tagged command dispatch is missing authenticated context"
+          end
+          return
+        end
+        unless tagged && request_id.to_s == context.transport_request_id
+          raise Attempts::RepositoryError, "command dispatch transport identity changed"
+        end
+        unless table_available
+          raise Hive::ConfigError,
+                "command dispatch context requires the installed command receipt schema"
+        end
+        payload = {
+          request_id: request_id.to_s, receipt_id: context.receipt_id,
+          effect_id: context.effect_id, principal: context.principal,
+          principal_source: context.principal_source, ordinal: context.ordinal,
+          receipt_generation: context.receipt_generation,
+          request_fingerprint: context.request_fingerprint,
+          source_identity: context.transport_request_id,
+          retry_horizon_expires_at: context.retry_horizon_expires_at&.to_s,
+          created_at: Time.now.utc.iso8601(6)
+        }
+        if existing
+          comparable = payload.except(:created_at)
+          unless comparable.all? { |key, value| existing[key] == value }
+            raise Attempts::RepositoryError, "command dispatch context conflicts with its receipt"
+          end
+          return
+        end
+        receipt = db[:command_receipts][receipt_id: context.receipt_id.to_s]
+        unless receipt && receipt.fetch(:state) == "executing" &&
+               receipt.fetch(:generation) == Integer(context.receipt_generation) &&
+               receipt.fetch(:principal) == context.principal.to_s &&
+               receipt.fetch(:request_fingerprint) == context.request_fingerprint.to_s
+          raise Attempts::RepositoryError,
+                "command dispatch context receipt ownership changed"
+        end
+        db[:command_dispatch_contexts].insert(payload)
+        changed = db[:command_capacity].where(namespace_id: receipt.fetch(:namespace_id)).update(
+          logical_bytes: Sequel[:logical_bytes] + 512,
+          revision: Sequel[:revision] + 1,
+          updated_at: payload.fetch(:created_at)
+        )
+        raise Attempts::RepositoryError, "command dispatch context capacity is unavailable" unless changed == 1
       end
 
       def admission_request_payload(record, recovery_source_attempt_id:)

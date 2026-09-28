@@ -30,7 +30,7 @@ module Hive
       RECOVERY_PROJECTION_LIMIT = 500
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
-      REQUEST_ID_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
+      REQUEST_ID_RE = /\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
 
       Request = Data.define(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
@@ -92,7 +92,8 @@ module Hive
                          task_generation: nil,
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
-                         expected_marker_id: nil, recovery: nil, now: @clock.call, **)
+                         expected_marker_id: nil, recovery: nil, now: @clock.call,
+                         command_context: nil, **)
         payload = request_payload(
           project: project, slug: slug, argv: argv, requestor: requestor,
           request_id: request_id, chat_id: chat_id, update_id: update_id, trigger: trigger,
@@ -103,6 +104,7 @@ module Hive
         )
         database.transaction do |db|
           insert_request!(db, payload)
+          bind_command_context!(db, request_id, command_context)
         end
         request_id.to_s
       rescue Sequel::UniqueConstraintViolation => error
@@ -119,7 +121,8 @@ module Hive
           end
           [ by_id, current ]
         end
-        return request_id.to_s if existing_by_id && same_request?(existing_by_id, payload)
+        return request_id.to_s if existing_by_id && same_request?(existing_by_id, payload) &&
+          rebind_existing_command_context?(request_id, command_context)
         raise IntegrityError.new(
           "dispatch request id is already bound", code: :dispatch_request_conflict
         ) if existing_by_id
@@ -179,6 +182,14 @@ module Hive
       def fetch(request_id, **)
         row = database.read { |db| db[:dispatch_requests].where(request_id: request_id.to_s).first }
         row && request_from(row)
+      end
+
+      def command_context(request_id)
+        database.read do |db|
+          next nil unless db.table_exists?(:command_dispatch_contexts)
+          row = db[:command_dispatch_contexts][request_id: request_id.to_s]
+          row && row.transform_keys(&:to_s)
+        end
       end
 
       def claim(request_id, pid:, process_start_time: nil, now: @clock.call,
@@ -491,12 +502,16 @@ module Hive
         return 0 if ids.empty?
 
         database.transaction do |db|
-          db[:dispatch_requests].where(
+          pending = db[:dispatch_requests].where(
             request_id: ids, result_state: "pending"
-          ).update(
+          )
+          acknowledged = pending.select_map(:request_id)
+          count = pending.update(
             result_state: "delivered", result_delivered_at: now.utc.iso8601(6),
             updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
           )
+          close_acknowledged_command_pins!(db, acknowledged, now: now) unless acknowledged.empty?
+          count
         end
       end
 
@@ -509,6 +524,139 @@ module Hive
       end
 
       private
+
+      def close_acknowledged_command_pins!(db, request_ids, now:)
+        return unless db.table_exists?(:command_dispatch_contexts) &&
+          db.table_exists?(:command_receipt_pins)
+
+        db[:command_dispatch_contexts].where(request_id: request_ids).all.each do |context|
+          db[:command_receipt_pins].where(
+            receipt_id: context.fetch(:receipt_id),
+            principal: context.fetch(:principal),
+            intent_id: context.fetch(:source_identity),
+            intent_generation: context.fetch(:ordinal),
+            lifecycle_status: "active"
+          ).update(
+            lifecycle_status: "closed", generation: Sequel[:generation] + 1,
+            released_at: now.utc.iso8601(6), updated_at: now.utc.iso8601(6)
+          )
+        end
+      end
+
+      def bind_command_context!(db, request_id, context)
+        tagged = request_id.to_s.start_with?("command-dispatch:v1:")
+        if context.nil?
+          raise IntegrityError.new(
+            "tagged dispatch request is missing command context", code: :dispatch_context_missing
+          ) if tagged
+          return
+        end
+        unless db.table_exists?(:command_dispatch_contexts)
+          raise Hive::ConfigError,
+                "command dispatch context requires the installed command receipt schema"
+        end
+        values = normalize_command_context(context).merge(
+          request_id: request_id.to_s, created_at: @clock.call.utc.iso8601(6)
+        )
+        unless tagged && request_id.to_s == values.delete(:transport_request_id)
+          raise IntegrityError.new(
+            "command dispatch transport identity changed", code: :dispatch_context_conflict
+          )
+        end
+        existing = db[:command_dispatch_contexts][request_id: request_id.to_s]
+        if existing
+          comparable = values.except(:created_at)
+          return if comparable.all? { |key, value| existing[key] == value }
+          return if advance_command_context_generation!(
+            db, request_id.to_s, existing, comparable
+          )
+          raise IntegrityError.new(
+            "command dispatch context conflicts", code: :dispatch_context_conflict
+          )
+        end
+        receipt = db[:command_receipts][receipt_id: values.fetch(:receipt_id)]
+        unless receipt && receipt.fetch(:state) == "executing" &&
+               receipt.fetch(:generation) == values.fetch(:receipt_generation) &&
+               receipt.fetch(:principal) == values.fetch(:principal) &&
+               receipt.fetch(:request_fingerprint) == values.fetch(:request_fingerprint)
+          raise IntegrityError.new(
+            "command dispatch context receipt ownership changed",
+            code: :dispatch_context_conflict
+          )
+        end
+        db[:command_dispatch_contexts].insert(values)
+        changed = db[:command_capacity].where(namespace_id: receipt.fetch(:namespace_id)).update(
+          logical_bytes: Sequel[:logical_bytes] + 512,
+          revision: Sequel[:revision] + 1,
+          updated_at: values.fetch(:created_at)
+        )
+        unless changed == 1
+          raise IntegrityError.new(
+            "command dispatch context capacity is unavailable",
+            code: :dispatch_context_conflict
+          )
+        end
+      end
+
+      def normalize_command_context(context)
+        source = context.respond_to?(:to_h) ? context.to_h : context
+        source = source.transform_keys(&:to_sym)
+        required = %i[
+          receipt_id effect_id principal principal_source ordinal receipt_generation
+          request_fingerprint transport_request_id
+        ]
+        missing = required.reject { |key| source.key?(key) }
+        raise ArgumentError, "command context is missing #{missing.join(', ')}" unless missing.empty?
+        {
+          receipt_id: source.fetch(:receipt_id).to_s,
+          effect_id: source.fetch(:effect_id).to_s,
+          principal: source.fetch(:principal).to_s,
+          principal_source: source.fetch(:principal_source).to_s,
+          ordinal: Integer(source.fetch(:ordinal)),
+          receipt_generation: Integer(source.fetch(:receipt_generation)),
+          request_fingerprint: source.fetch(:request_fingerprint).to_s,
+          source_identity: (source[:source_identity] || source.fetch(:transport_request_id)).to_s,
+          retry_horizon_expires_at: source[:retry_horizon_expires_at]&.to_s,
+          transport_request_id: source.fetch(:transport_request_id).to_s
+        }
+      end
+
+      def same_command_context?(request_id, context)
+        existing = command_context(request_id)
+        return existing.nil? if context.nil?
+        expected = normalize_command_context(context).transform_keys(&:to_s)
+          .except("transport_request_id")
+        existing && expected.all? { |key, value| existing[key] == value }
+      end
+
+      def rebind_existing_command_context?(request_id, context)
+        database.transaction do |db|
+          existing = if db.table_exists?(:command_dispatch_contexts)
+            db[:command_dispatch_contexts][request_id: request_id.to_s]
+          end
+          next existing.nil? if context.nil?
+          next false unless existing
+
+          expected = normalize_command_context(context).except(:transport_request_id)
+          next true if expected.all? { |key, value| existing[key] == value }
+          advance_command_context_generation!(db, request_id.to_s, existing, expected)
+        end
+      end
+
+      def advance_command_context_generation!(db, request_id, existing, expected)
+        immutable = expected.except(:receipt_generation)
+        return false unless immutable.all? { |key, value| existing[key] == value }
+        return false unless expected.fetch(:receipt_generation) > existing.fetch(:receipt_generation)
+
+        receipt = db[:command_receipts][receipt_id: expected.fetch(:receipt_id)]
+        return false unless receipt && receipt.fetch(:state) == "executing" &&
+                            receipt.fetch(:generation) == expected.fetch(:receipt_generation) &&
+                            receipt.fetch(:principal) == expected.fetch(:principal) &&
+                            receipt.fetch(:request_fingerprint) == expected.fetch(:request_fingerprint)
+        db[:command_dispatch_contexts].where(
+          request_id: request_id, receipt_generation: existing.fetch(:receipt_generation)
+        ).update(receipt_generation: expected.fetch(:receipt_generation)) == 1
+      end
 
       def request_payload(project:, slug:, argv:, requestor:, request_id:, now:, chat_id: nil,
                           update_id: nil, trigger: nil, task_generation: nil,

@@ -43,6 +43,17 @@ module Hive
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
       "permissions" => Hive::PermissionScope::YOLO,
+      "command_receipts" => {
+        "keyed_intake_enabled" => false,
+        "nonterminal_limit" => 1_000,
+        "concurrency_limit" => 32,
+        "byte_admission_limit" => 67_108_864,
+        "staffing" => {
+          "operator_count" => 1,
+          "response_business_days" => 1,
+          "minutes_per_namespace_per_day" => nil
+        }
+      },
       "claude" => {
         "mode" => "tmux",
         "permission_mode" => "bypassPermissions",
@@ -480,6 +491,7 @@ module Hive
         "local_loopback" => true,
         "github" => {
           "owner" => nil,
+          "owner_id" => nil,
           # The shared hivebox OAuth app (device flow only — public by
           # design, no client secret exists). Operators can override with
           # their own app's client_id; "Enable Device Flow" must be checked.
@@ -2145,6 +2157,7 @@ module Hive
       validate_model_routing_capabilities!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
+      validate_command_receipts!(cfg, source_path)
     end
 
     # Top-level keys that MUST be Hashes when present. A scalar override
@@ -2179,7 +2192,47 @@ module Hive
       daily_digest
       bot
       rebase
+      command_receipts
     ].freeze
+
+    COMMAND_RECEIPT_KEYS = %w[
+      keyed_intake_enabled nonterminal_limit concurrency_limit byte_admission_limit staffing
+    ].freeze
+    COMMAND_RECEIPT_STAFFING_KEYS = %w[
+      operator_count response_business_days minutes_per_namespace_per_day
+    ].freeze
+
+    def validate_command_receipts!(cfg, source_path)
+      receipts = cfg.fetch("command_receipts")
+      validate_closed_mapping!(receipts, COMMAND_RECEIPT_KEYS, "command_receipts", source_path)
+      unless [ true, false ].include?(receipts["keyed_intake_enabled"])
+        raise ConfigError,
+              "command_receipts.keyed_intake_enabled in #{describe_source(source_path)} must be true or false"
+      end
+      %w[nonterminal_limit concurrency_limit byte_admission_limit].each do |key|
+        validate_bounded_integer!(
+          receipts[key], "command_receipts.#{key}", 1, 1_000_000_000_000, source_path
+        )
+      end
+      staffing = receipts["staffing"]
+      unless staffing.is_a?(Hash)
+        raise ConfigError, "command_receipts.staffing in #{describe_source(source_path)} must be a Hash"
+      end
+      validate_closed_mapping!(
+        staffing, COMMAND_RECEIPT_STAFFING_KEYS, "command_receipts.staffing", source_path
+      )
+      %w[operator_count response_business_days].each do |key|
+        validate_bounded_integer!(
+          staffing[key], "command_receipts.staffing.#{key}", 1, 100_000, source_path
+        )
+      end
+      minutes = staffing["minutes_per_namespace_per_day"]
+      unless minutes.nil? || (minutes.is_a?(Numeric) && minutes >= 0 && minutes.finite?)
+        raise ConfigError,
+              "command_receipts.staffing.minutes_per_namespace_per_day in " \
+              "#{describe_source(source_path)} must be a nonnegative number or null"
+      end
+    end
 
     def validate_hash_shaped_keys!(cfg, source_path)
       HASH_SHAPED_KEYS.each do |key|
@@ -3564,6 +3617,12 @@ module Hive
 
         raise ConfigError,
               "web.github.#{key} in #{describe_source(source_path)} must be a non-empty String when set"
+      end
+
+      owner_id = github["owner_id"]
+      unless owner_id.nil? || (owner_id.is_a?(Integer) && owner_id.positive?)
+        raise ConfigError,
+              "web.github.owner_id in #{describe_source(source_path)} must be a positive integer when set"
       end
 
       secret_file = web["session_secret_file"]

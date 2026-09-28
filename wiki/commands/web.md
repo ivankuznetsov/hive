@@ -349,6 +349,10 @@ Honeycomb projections.
   typed text and staged files survive while new ideas retain the selected
   context. It reads the raw data attribute so JSON-looking project names stay
   identifiers, and modified/new-tab clicks do not mutate the current tab.
+  Back/Forward navigation reapplies the URL-owned project both at `popstate`
+  and after Turbo finishes rendering, so a restored permanent composer cannot
+  retain the project from the later history entry. A subsequent explicit visit
+  clears any abandoned history selection before rendering.
   Choosing
   All projects deliberately keeps that composer choice. There is no filter
   observer, animation-frame reconciliation, DOM hiding, or History API state

@@ -101,18 +101,21 @@ class SessionsController < ApplicationController
 
   def admit!(result)
     login = result[:login]
+    github_id = result[:id]
     unless local_loopback_request?
-      claim_ownership!(login) if github_auth.claimable?
+      claim_ownership!(login, github_id) if github_auth.claimable?
       unless github_auth.owner?(login)
         return render "errors/show", status: :forbidden,
                       locals: { heading: "Not allowed", message: "#{login} is not the configured owner." }
       end
+      enroll_owner_id!(login, github_id)
     end
 
     # Rotate the session at the auth boundary; carry the grant into the
     # fresh session so the Repos page can call the GitHub API.
     reset_session
     session[:github_login] = login
+    session[:github_id] = github_id
     session[:github_token] = result[:token]
     redirect_to root_path
   end
@@ -122,19 +125,43 @@ class SessionsController < ApplicationController
   # the race where two browsers finish the device flow simultaneously —
   # exactly one login wins; the loser falls through to the owner? 403.
   # Claiming is loud: it is Hive web's single most security-relevant event.
-  def claim_ownership!(login)
+  def claim_ownership!(login, github_id)
     claimed = Hive::Config.update_global_config! do |data|
       web = (data["web"] ||= {})
       github = (web["github"] ||= {})
       if github["owner"].to_s.strip.empty?
         github["owner"] = login
+        github["owner_id"] = github_id
         true
       else
         false
       end
     end
-    Rails.logger.warn("Hive web CLAIMED by GitHub user #{login.inspect} — web.github.owner written") if claimed
+    Rails.logger.warn(
+      "Hive web CLAIMED by GitHub user #{login.inspect} (id=#{github_id}) — owner identity written"
+    ) if claimed
     @github_auth = nil # reload so owner? sees the claim
+  end
+
+  # Existing login-only installations enroll the immutable id on the first
+  # authenticated admission for that still-matching owner. Never infer it
+  # from a legacy session label or overwrite a different recorded id.
+  def enroll_owner_id!(login, github_id)
+    enrolled = Hive::Config.update_global_config! do |data|
+      github = ((data["web"] ||= {})["github"] ||= {})
+      next false unless github["owner"].to_s.casecmp?(login.to_s)
+      next false unless github["owner_id"].nil?
+      github["owner_id"] = github_id
+      true
+    end
+    if enrolled
+      Rails.logger.warn(
+        "Hive web enrolled immutable owner id for GitHub login #{login.inspect} " \
+        "(id=#{github_id}) during authenticated admission"
+      )
+      @github_auth = nil
+    end
+    enrolled
   end
 
   def github_auth

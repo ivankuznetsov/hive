@@ -136,6 +136,15 @@ module Hive
       raise InvalidActivity, "unknown activity kind #{kind.inspect}" unless KINDS.include?(kind)
       source = source.to_s
       raise InvalidActivity, "unknown activity source #{source.inspect}" unless SOURCE_KINDS.include?(source)
+      if defined?(Hive::CommandOperation)
+        Hive::CommandOperation.record_effect_submission(
+          kind: "task_activity",
+          identity: {
+            "operation_id" => operation_id.to_s, "activity_kind" => kind,
+            "task_slug" => @task.fetch("slug"), "attempt_id" => @attempt_id
+          }
+        )
+      end
 
       Operation.begin!(
         activity: self,
@@ -589,6 +598,15 @@ module Hive
           )
         )
         update!("state" => "complete", "event_id" => result.event_id)
+        if defined?(Hive::CommandOperation)
+          Hive::CommandOperation.record_effect_observation(
+            source: "task_activity", correlation_id: operation_id,
+            evidence: {
+              "event_id" => result.event_id,
+              "result_fingerprint" => receipt.fetch("result_fingerprint")
+            }
+          )
+        end
         result
       end
 

@@ -748,6 +748,56 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  def test_closure_receipt_includes_the_keyed_command_receipt_identity
+    with_closure_project do |task, project|
+      service = service_for
+      preview = service.preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+      context = Hive::CommandOperation::Context.new(
+        receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
+        principal_source: "test", ordinal: 0, receipt_generation: 7,
+        request_fingerprint: "a" * 64,
+        transport_request_id: "command-dispatch:v1:#{'b' * 64}",
+        retry_horizon_expires_at: nil
+      )
+      Thread.current[:hive_command_operation_context] = context
+
+      receipt = service.send(
+        :build_receipt, preview, operator: "tester", channel: "cli"
+      )
+
+      assert_equal(
+        { "id" => "receipt-1", "generation" => 8, "state" => "succeeded" },
+        receipt.fetch("command_receipt")
+      )
+      service.send(:validate_receipt!, receipt, task: task, project: project)
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path(Hive::TaskClosure::SCHEMA)))
+      )
+      assert_empty schema.validate(receipt).to_a
+
+      [
+        "receipt-1",
+        { "id" => "receipt-1", "generation" => 8 },
+        { "id" => "", "generation" => 8, "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => 0, "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => "8", "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => 8, "state" => "executing" }
+      ].each do |malformed|
+        tampered = deep_copy(receipt)
+        tampered["command_receipt"] = malformed
+        refresh_receipt_digests!(tampered)
+        error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
+          service.send(:validate_receipt!, tampered, task: task, project: project)
+        end
+        assert_equal "closure command receipt is malformed", error.message
+      end
+    ensure
+      Thread.current[:hive_command_operation_context] = nil
+    end
+  end
+
   def test_receipt_written_before_transition_failure_resumes_to_archive
     with_closure_project do |task, project|
       input = input_for("acme/app#42")

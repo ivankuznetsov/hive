@@ -6,6 +6,7 @@ require "uri"
 require "hive/atomic_file"
 require "hive/attempts/repository"
 require "hive/config"
+require "hive/command_operation"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/lock"
@@ -42,6 +43,7 @@ module Hive
       task_repository evidence evidence_digest successor attestation
       preview_digest confirmed_by confirmed_at receipt_digest
     ].freeze
+    OPTIONAL_RECEIPT_KEYS = %w[command_receipt].freeze
     EVIDENCE_KEYS = %w[
       kind host repository number oid head_oid url state merged_at
       same_repository reachable_from_default
@@ -985,6 +987,13 @@ module Hive
         "confirmed_by" => { "operator" => operator.to_s, "channel" => channel.to_s },
         "confirmed_at" => @now.iso8601(6)
       }
+      if (context = Hive::CommandOperation.current_context)
+        body["command_receipt"] = {
+          "id" => context.receipt_id,
+          "generation" => context.receipt_generation + 1,
+          "state" => "succeeded"
+        }
+      end
       body.merge("receipt_digest" => self.class.digest(body))
     end
 
@@ -1005,7 +1014,9 @@ module Hive
 
     def validate_receipt!(receipt, task:, project:, task_projection: nil)
       raise InvalidReceipt, "closure receipt must be an object" unless receipt.is_a?(Hash)
-      unless receipt.keys.sort == RECEIPT_KEYS.sort
+      required_keys = receipt.keys - OPTIONAL_RECEIPT_KEYS
+      unless required_keys.sort == RECEIPT_KEYS.sort &&
+             (receipt.keys - RECEIPT_KEYS - OPTIONAL_RECEIPT_KEYS).empty?
         raise InvalidReceipt, "closure receipt fields do not match the v1 contract"
       end
       raise InvalidReceipt, "unsupported closure receipt schema" unless
@@ -1018,6 +1029,16 @@ module Hive
       unless expected_digest.match?(/\A[0-9a-f]{64}\z/) &&
              self.class.secure_compare(expected_digest, self.class.digest(unsigned))
         raise InvalidReceipt, "closure receipt digest does not match its canonical contents"
+      end
+      if (command_receipt = receipt["command_receipt"])
+        unless command_receipt.is_a?(Hash) &&
+               command_receipt.keys.sort == %w[generation id state] &&
+               !command_receipt.fetch("id").to_s.empty? &&
+               command_receipt.fetch("generation").is_a?(Integer) &&
+               command_receipt.fetch("generation").positive? &&
+               %w[succeeded failed settled].include?(command_receipt.fetch("state"))
+          raise InvalidReceipt, "closure command receipt is malformed"
+        end
       end
       identity = receipt.fetch("task")
       unless identity.is_a?(Hash) &&

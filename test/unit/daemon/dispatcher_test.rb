@@ -622,7 +622,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       plan_approval: Hive::Daemon::PlanApproval,
                       runtime_ready_callback: nil, clock: nil,
                       monotonic_clock: nil, one_shot_drain_timeout_sec: nil,
-                      dispatch_repository: nil, patrol_discovery_async: false,
+                      dispatch_repository: nil, command_dispatch_lifecycle: nil,
+                      patrol_discovery_async: false,
                       persistent_admission: nil, quiescence_lifecycle: nil,
                       monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                       boot_id_reader: nil)
@@ -685,6 +686,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatch_request_state_home: dispatch_request_state_home,
       dispatch_result_state_home: dispatch_result_state_home,
       dispatch_repository: dispatch_repository || Q,
+      command_dispatch_lifecycle: command_dispatch_lifecycle,
       attempt_dispatcher: attempt_dispatcher,
       attempt_reconciler: attempt_reconciler,
       operational_snapshot: operational_snapshot,
@@ -11523,6 +11525,73 @@ end
 
     assert_equal [ [ "invalid", "invalid_argv" ] ], rejected
     assert_equal [ "expired" ], expired
+  end
+
+  def test_keyed_daemon_same_cycle_handlers_and_failed_successor_redelivery_use_shared_lifecycle
+    context = { "receipt_id" => "receipt-1" }
+    repository = Object.new
+    repository.define_singleton_method(:command_context) { |_request_id| context }
+    lifecycle = Object.new
+    protected = []
+    allocations = []
+    mutex = Mutex.new
+    lifecycle.define_singleton_method(:protect_request!) do |request_id|
+      protected << request_id
+      "pin-1"
+    end
+    lifecycle.define_singleton_method(:allocate_successor!) do |**attributes|
+      mutex.synchronize { allocations << attributes }
+      { "allocation_id" => "stable-cycle" }
+    end
+    dispatcher, = make_dispatcher(
+      rows: [], dispatch_repository: repository,
+      command_dispatch_lifecycle: lifecycle
+    )
+    request_id = "command-dispatch:v1:#{'d' * 64}"
+    request = Q::Request.new(
+      request_id: request_id, created_at: T0, project: "p1", slug: "demo-task",
+      argv: %w[hive run demo-task], requestor: "daemon"
+    )
+
+    assert_equal context, dispatcher.send(:validate_command_dispatch_context!, request)
+    repository.define_singleton_method(:command_context) { |_request_id| nil }
+    assert_raises(Hive::ConfigError) do
+      dispatcher.send(:validate_command_dispatch_context!, request)
+    end
+    repository.define_singleton_method(:command_context) { |_request_id| context }
+    attributes = {
+      predecessor_request_id: request_id, intent_id: "intent-1",
+      intent_version: 4, delivery_cycle_id: "cycle-1"
+    }
+    concurrent = 4.times.map do
+      Thread.new { dispatcher.send(:allocate_command_successor!, **attributes) }
+    end.map(&:value)
+    repeated = dispatcher.send(
+      :allocate_command_successor!, **attributes
+    )
+
+    assert_equal [ request_id ], protected
+    assert_equal 1, (concurrent + [ repeated ]).uniq.length
+    assert_equal 5, allocations.length
+  end
+
+  def test_dispatch_rejects_an_unprotectable_command_context_once
+    dispatcher, = make_dispatcher(rows: [])
+    request = Q::Request.new(
+      request_id: "command-dispatch:v1:#{'e' * 64}", created_at: T0,
+      project: "p1", slug: "demo-task", argv: %w[hive run demo-task], requestor: "daemon"
+    )
+    dispatcher.define_singleton_method(:validate_command_dispatch_context!) do |_request|
+      raise Hive::CommandUnresolved.new(reason: "command_pin_horizon_elapsed")
+    end
+    rejected = []
+    dispatcher.define_singleton_method(:reject_request) do |candidate, reason:|
+      rejected << [ candidate.request_id, reason ]
+    end
+
+    assert_nil dispatcher.send(:dispatch_request!, request, now: T0)
+    assert_equal request.request_id, rejected.dig(0, 0)
+    assert_includes rejected.dig(0, 1), "CommandUnresolved"
   end
 
   def test_nondurable_request_releases_preclaim_when_shutdown_starts_after_claim

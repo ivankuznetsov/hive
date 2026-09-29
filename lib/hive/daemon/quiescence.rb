@@ -8,6 +8,7 @@ require "hive/attempts/reconciler"
 require "hive/attempts/repository"
 require "hive/daemon/finalization_proof"
 require "hive/daemon/quiescence_finalizer"
+require "hive/runtime_control_plane/sqlite_support"
 require "hive/daemon/quiescence_process_evidence"
 require "hive/daemon/quiescence_result"
 require "hive/paths"
@@ -104,7 +105,11 @@ module Hive
         raise
       rescue Hive::RuntimeControlPlane::Error, Hive::Attempts::RepositoryError,
              Sequel::Error, SystemCallError, IOError => error
-        reason = @budget && expired?(@budget.drain_cutoff) ? "deadline_exhausted" : "storage_error"
+        # A busy writer is contention, not storage failure. SQLite can report
+        # BUSY before the busy timeout elapses (lock upgrades are not waited),
+        # so the drain cutoff alone misclassified it depending on timing.
+        contention = Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
+        reason = contention || (@budget && expired?(@budget.drain_cutoff)) ? "deadline_exhausted" : "storage_error"
         nonpaused(reason, details: { "error" => "#{error.class}: #{error.message}" })
       ensure
         @database.disconnect unless @successful_disconnect

@@ -56,6 +56,8 @@ When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive:
 
 `status_mode: :output_file_exists` is critical: reviewer spawns own a per-pass output file, not the task marker — the orchestrator's `REVIEW_WORKING` marker must persist across each reviewer's spawn (per ADR-021).
 
+All branch-based reviewer prompts scope their work with `git diff <default_branch>...HEAD`. The three-dot range compares `HEAD` with the merge-base, so a reviewer sees only changes introduced by the task branch; the former two-dot tip comparison could show inverse changes that had already landed on the default branch.
+
 ## `AgentSupport::Codex::Reviewer`
 
 Native-`codex review` adapter (added 2026-06-10). The **patrol-default** reviewer: one cheap, tuned, read-only `codex review` pass instead of the multi-persona `ce-code-review` fan-out (6–18 subagents). `run!`:

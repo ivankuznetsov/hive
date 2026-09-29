@@ -182,6 +182,26 @@ class HiveDaemonQuiescenceTest < Minitest::Test
     end
   end
 
+  # SQLite can raise BUSY immediately (a lock upgrade is not waited on), well
+  # before the drain cutoff. That is contention and must not read as a
+  # storage failure; timing used to decide the reason.
+  def test_immediate_sqlite_busy_before_cutoff_reports_deadline_not_storage_error
+    with_runtime do |root, database|
+      busy = Object.new
+      busy.define_singleton_method(:call) do
+        raise SQLite3::BusyException, "database is locked"
+      rescue SQLite3::BusyException => error
+        raise Sequel::DatabaseError, "SQLite3::BusyException: #{error.message}"
+      end
+
+      result = coordinator(root, database, timeout_sec: 60, capability: busy).call
+
+      assert_equal "deadline_exhausted", result.reason
+      assert result.admission_open
+      assert_equal "running", lifecycle(database).phase
+    end
+  end
+
   def test_busy_sqlite_writer_is_bounded_before_closure_and_leaves_admission_open
     with_runtime do |root, database|
       blocker = SQLite3::Database.new(database.path)

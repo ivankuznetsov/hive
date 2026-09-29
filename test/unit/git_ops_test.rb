@@ -555,6 +555,52 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  # A dependent branch built on a dependency that was then squash-merged still
+  # starts with the dependency's original commits. Replaying those onto the
+  # squash conflicts; the prefix scan finds them so only the dependent's own
+  # work is replayed.
+  def test_squash_merged_prefix_lets_dependent_rebase_cleanly
+    with_tmp_git_repo do |dir|
+      git = ->(*args) { run!("git", "-C", dir, *args) }
+      File.write(File.join(dir, "dep.txt"), "base\n")
+      git.call("add", ".")
+      git.call("commit", "-m", "baseline", "--quiet")
+
+      git.call("checkout", "-q", "-b", "dep")
+      File.write(File.join(dir, "dep.txt"), "draft\n")
+      git.call("commit", "-qam", "dep draft")
+      File.write(File.join(dir, "dep.txt"), "final\n")
+      git.call("commit", "-qam", "dep final")
+      dep_tip = `git -C #{dir} rev-parse HEAD`.strip
+
+      git.call("checkout", "-q", "-b", "dependent")
+      File.write(File.join(dir, "own.txt"), "own work\n")
+      git.call("add", "own.txt")
+      git.call("commit", "-qm", "dependent work")
+
+      git.call("checkout", "-q", "master")
+      File.write(File.join(dir, "other.txt"), "unrelated\n")
+      git.call("add", "other.txt")
+      git.call("commit", "-qm", "unrelated main work")
+      git.call("merge", "-q", "--squash", "dep")
+      git.call("commit", "-qm", "squash dep")
+      git.call("checkout", "-q", "dependent")
+
+      ops = Hive::GitOps.new(dir)
+      assert_equal dep_tip, ops.squash_merged_prefix("master")
+      assert ops.rebase_onto("master", upstream: dep_tip)
+      assert_equal [ "dependent work" ], `git -C #{dir} log --format=%s master..HEAD`.lines.map(&:strip)
+      assert_equal "final\n", File.read(File.join(dir, "dep.txt"))
+      assert_equal "own work\n", File.read(File.join(dir, "own.txt"))
+    end
+  end
+
+  def test_squash_merged_prefix_is_nil_without_a_landed_squash
+    with_feature_branch_behind_master do |dir|
+      assert_nil Hive::GitOps.new(dir).squash_merged_prefix("master")
+    end
+  end
+
   def test_rebase_onto_raises_git_error_for_unknown_ref
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

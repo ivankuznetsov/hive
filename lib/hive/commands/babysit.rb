@@ -173,6 +173,7 @@ module Hive
       def one_shot_adapter(entry)
         return @one_shot_factory.call(entry) if @one_shot_factory
 
+        require "hive/one_shot/babysitter_adapter"
         Hive::OneShot::BabysitterAdapter.new(
           entry: entry, dry_run: @dry_run, admission_open: persistent_admission_probe
         )

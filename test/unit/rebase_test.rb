@@ -85,7 +85,8 @@ class HiveRebaseTest < Minitest::Test
                   :fetch_result, :commits_behind_value,
                   :rebase_onto_outcome, :rebase_continue_outcomes,
                   :unmerged_files_sequence, :head_sha_value, :default_branch_value,
-                  :current_branch_value, :ancestor_value, :project_root
+                  :current_branch_value, :ancestor_value, :project_root,
+                  :squash_prefix_value, :rebase_upstream
 
     def initialize(project_root)
       @project_root = project_root
@@ -116,7 +117,10 @@ class HiveRebaseTest < Minitest::Test
     def current_branch; @current_branch_value; end
     def ancestor?(_ancestor, _descendant); @ancestor_value; end
 
-    def rebase_onto(_ref)
+    def squash_merged_prefix(_ref); @squash_prefix_value; end
+
+    def rebase_onto(_ref, upstream: nil)
+      @rebase_upstream = upstream
       case @rebase_onto_outcome
       when :ok then true
       when :conflict
@@ -353,6 +357,24 @@ class HiveRebaseTest < Minitest::Test
       assert_equal 3, result.commits_behind
       assert_equal 0, result.agent_resolutions
       assert_empty result.resolved_files
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_squash_merged_dependency_prefix_is_skipped_with_a_note
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.squash_prefix_value = "82a0490948f9642d0adb351796c42336caadeea0"
+
+    stub_gitops!(git) do
+      result = nil
+      _out, err = capture_io { result = Hive::Rebase.perform(task, base_cfg) }
+      assert result.succeeded
+      assert_equal "82a0490948f9642d0adb351796c42336caadeea0", git.rebase_upstream
+      assert_match(/commits through 82a0490948f9 already landed/, err)
     end
   ensure
     teardown_dirs(worktree, folder)

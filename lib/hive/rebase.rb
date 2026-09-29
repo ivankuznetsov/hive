@@ -168,7 +168,12 @@ module Hive
       resolved_files = []
 
       begin
-        git.rebase_onto(ref)
+        upstream = git.squash_merged_prefix(ref)
+        if upstream
+          warn "[hive] rebase: commits through #{upstream[0, 12]} already landed on #{ref} " \
+               "(squash-merged dependency); replaying only the later commits"
+        end
+        git.rebase_onto(ref, upstream: upstream)
         warnings = []
         update_execute_base_head!(task, git, warnings)
         return Result.succeeded(commits_behind: commits_behind,

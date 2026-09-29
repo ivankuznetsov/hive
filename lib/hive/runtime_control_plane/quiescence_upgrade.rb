@@ -1,3 +1,4 @@
+require "time"
 require "hive/atomic_file"
 require "hive/paths"
 require "hive/runtime_control_plane/database"
@@ -17,6 +18,12 @@ module Hive
         "f31651456b27230ef802d910733887fcb5a64b65dead502a2752b1c183f592f3" =>
           "process-custody-v1"
       }.freeze
+      # A `running` attempt that heartbeat this recently may still have a
+      # supervisor with the old database open. Converting would swap the file
+      # under it, and its heartbeats and terminal result would land in the
+      # unlinked copy. The window covers the supervisor's SQLite-busy
+      # tolerance (600s) with margin.
+      LIVE_ATTEMPT_WINDOW_SEC = 900
 
       def initialize(state_home: Hive::Paths.state_home, timeout_sec: 600,
                      ownership_verifier: -> { false }, clock: -> { Time.now.utc })
@@ -32,6 +39,7 @@ module Hive
         database = Database.new(path: Hive::Paths.runtime_control_plane_path(@state_home))
         source = database.quiescence_upgrade_source
         validate_source!(source)
+        refuse_live_attempts!(database)
         unless @ownership_verifier.call
           raise Unavailable.new(
             "runtime ownership cannot be verified for the quiescence upgrade",
@@ -46,6 +54,7 @@ module Hive
             # source must not invalidate the existing paused proof.
             source = database.quiescence_upgrade_source
             source_kind = validate_source!(source)
+            refuse_live_attempts!(database)
             invalidate_proof!
             database.upgrade_quiescence!(
               authority: authority, expected_schema_version: source.fetch(:schema_version),
@@ -92,6 +101,24 @@ module Hive
           "runtime control-plane format is not a supported quiescence upgrade source",
           code: :unsupported_quiescence_upgrade_source, action: Database::MIGRATE_ACTION,
           details: source
+        )
+      end
+
+      def refuse_live_attempts!(database)
+        cutoff = @clock.call - LIVE_ATTEMPT_WINDOW_SEC
+        live = database.quiescence_upgrade_running_attempts.select do |attempt|
+          seen = attempt[:heartbeat_at] || attempt[:started_at]
+          seen && Time.iso8601(seen.to_s) >= cutoff
+        end
+        return if live.empty?
+
+        raise Unavailable.new(
+          "#{live.size} running attempt(s) heartbeat within the last " \
+            "#{LIVE_ATTEMPT_WINDOW_SEC}s; their supervisors may still hold the database",
+          code: :live_attempts_present,
+          action: "stop every Hive service and wait for (or stop) each listed attempt's " \
+            "`Hive durable attempt` unit, then retry",
+          details: { attempts: live.map { |attempt| attempt.slice(:attempt_id, :task_slug, :heartbeat_at) } }
         )
       end
 

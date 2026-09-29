@@ -109,7 +109,10 @@ Help me move this Hive installation to the current checkout's formats.
    `Hive::RuntimeControlPlane::QuiescenceUpgrade` in the target checkout and invoke
    its `#call` Ruby API directly under supervision, with an ownership verifier that
    returns true only after step 2 has proved every Hive service and legacy worker is
-   stopped. This helper is intentionally not a `bin/hive` action: it takes the
+   stopped. Durable attempts run in their own `Hive durable attempt` systemd
+   units, so stopping the services does not stop them. The helper refuses
+   (`live_attempts_present`) while any `running` attempt has heartbeat in the
+   last 15 minutes. This helper is intentionally not a `bin/hive` action: it takes the
    quiescence operation and writer fences, rechecks the exact fingerprint under
    those fences, and invalidates any old paused proof before its first schema write.
    A quiescence-era source must already be `quiescing` or `paused`; conversion

@@ -199,6 +199,23 @@ module Hive
         end
       end
 
+      # Read-only view of `running` attempts for QuiescenceUpgrade's live-owner
+      # refusal. Works on the pinned v1 layout and the quiescence revisions.
+      def quiescence_upgrade_running_attempts
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          return [] unless File.exist?(path)
+
+          validate_database_custody!
+          inspect_database do |database|
+            next [] unless table_has_columns?(database, :attempts, :state, :heartbeat_at, :started_at)
+
+            database[:attempts].where(state: "running")
+              .select(:attempt_id, :task_slug, :started_at, :heartbeat_at).all
+          end
+        end
+      end
+
       # Database-owned preserving conversion used only by QuiescenceUpgrade
       # while it holds operation ownership and the exclusive writer fence.
       def upgrade_quiescence!(authority:, expected_schema_version:, expected_fingerprint:,

@@ -627,7 +627,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       persistent_admission: nil, quiescence_lifecycle: nil,
                       monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                       boot_id_reader: nil)
-    dispatch_request_state_home ||= Dir.mktmpdir("hive-dispatch-test")
+    # Register the helper-owned dir for teardown; it used to leak one tmpdir
+    # per call (tens of thousands on a tmpfs /tmp over a week of runs).
+    dispatch_request_state_home ||= Dir.mktmpdir("hive-dispatch-test").tap { |dir| @row_dirs << dir }
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,

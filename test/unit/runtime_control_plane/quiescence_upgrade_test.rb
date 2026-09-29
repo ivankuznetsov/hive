@@ -104,6 +104,57 @@ class RuntimeControlPlaneQuiescenceUpgradeTest < Minitest::Test
     end
   end
 
+  # A supervisor started before the services stopped keeps the old database
+  # open; converting would swap the file under it and strand its writes.
+  def test_upgrade_refuses_running_attempt_with_recent_heartbeat
+    with_tmp_dir do |root|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
+      seed_attempt_and_payload(database)
+      database.transaction do |db|
+        db[:attempts].where(attempt_id: "attempt-1")
+          .update(started_at: "2026-09-25T11:50:00.000000Z", heartbeat_at: "2026-09-25T11:59:30.000000Z")
+      end
+      database.disconnect
+      convert_to_pinned_v1(path)
+      proof = Hive::Paths.runtime_quiescence_proof_path(root)
+      File.write(proof, "keep", perm: 0o600)
+
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        Hive::RuntimeControlPlane::QuiescenceUpgrade.new(
+          state_home: root, ownership_verifier: -> { true }, clock: -> { Time.iso8601(NOW) }
+        ).call
+      end
+
+      assert_equal :live_attempts_present, error.code
+      assert_equal [ "attempt-1" ], error.details.fetch(:attempts).map { |attempt| attempt.fetch(:attempt_id) }
+      assert_equal "keep", File.read(proof), "a refused upgrade leaves the proof alone"
+      source = Hive::RuntimeControlPlane::Database.new(path: path).quiescence_upgrade_source
+      assert_equal Hive::RuntimeControlPlane::QuiescenceUpgrade::PINNED_V1_SCHEMA_SHA256,
+                   source.fetch(:schema_fingerprint)
+    end
+  end
+
+  def test_upgrade_proceeds_past_running_attempt_with_stale_heartbeat
+    with_tmp_dir do |root|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
+      seed_attempt_and_payload(database)
+      database.transaction do |db|
+        db[:attempts].where(attempt_id: "attempt-1")
+          .update(started_at: "2026-09-25T10:00:00.000000Z", heartbeat_at: "2026-09-25T11:40:00.000000Z")
+      end
+      database.disconnect
+      convert_to_pinned_v1(path)
+
+      result = Hive::RuntimeControlPlane::QuiescenceUpgrade.new(
+        state_home: root, ownership_verifier: -> { true }, clock: -> { Time.iso8601(NOW) }
+      ).call
+
+      assert_equal "quiescing", result.fetch("lifecycle").fetch("phase")
+    end
+  end
+
   def test_upgrade_requires_verified_stopped_ownership
     with_tmp_dir do |root|
       path = Hive::Paths.runtime_control_plane_path(root)

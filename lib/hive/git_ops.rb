@@ -1,4 +1,5 @@
 require "open3"
+require "set"
 require "fileutils"
 require "hive/stages"
 require "hive/git_ref"
@@ -386,6 +387,25 @@ module Hive
       out
     end
 
+    def git_line(*args)
+      out, _err, status = Open3.capture3("git", "-C", @project_root, *args)
+      value = out.strip
+      status.success? && !value.empty? ? value : nil
+    end
+
+    def git_lines(*args)
+      out, _err, status = Open3.capture3("git", "-C", @project_root, *args)
+      status.success? ? out.split("\n").map(&:strip).reject(&:empty?) : []
+    end
+
+    def patch_id(from, to)
+      diff, _err, status = Open3.capture3("git", "-C", @project_root, "diff", "--binary", from, to)
+      return nil unless status.success? && !diff.empty?
+
+      out, _err, status = Open3.capture3("git", "-C", @project_root, "patch-id", "--stable", stdin_data: diff)
+      status.success? ? out.split.first : nil
+    end
+
     def run_git_quiet(*args)
       Open3.capture3("git", *args)
     end
@@ -504,8 +524,10 @@ module Hive
     # canonical conflict signal). Raises GitError for any other
     # non-zero exit (invalid ref, hook failure, etc.) including
     # timeout.
-    def rebase_onto(ref)
-      success, err, timed_out = run_git_with_timeout([ "git", "-C", @project_root, "rebase", ref ])
+    def rebase_onto(ref, upstream: nil)
+      cmd = [ "git", "-C", @project_root, "rebase" ]
+      cmd += upstream ? [ "--onto", ref, upstream ] : [ ref ]
+      success, err, timed_out = run_git_with_timeout(cmd)
       return true if success
 
       if rebase_in_progress?
@@ -520,6 +542,37 @@ module Hive
         err.strip
       end
       raise GitError, "git rebase #{ref} failed: #{detail}"
+    end
+
+    # Bounds for squash_merged_prefix's scan, so a long-lived branch or a
+    # far-behind base can't turn one rebase into thousands of diffs.
+    SQUASH_SCAN_LIMIT = 200
+
+    # When a dependency branch was squash-merged into `ref`, the dependent
+    # branch still starts with the dependency's original commits and a plain
+    # rebase conflicts on every one. Returns the newest branch commit C whose
+    # cumulative change since the merge base equals one commit that landed on
+    # `ref` (same tree, or same patch-id), so `rebase --onto ref C` replays
+    # only the dependent's own work. Nil when no such prefix exists or the
+    # scan would exceed SQUASH_SCAN_LIMIT on either side.
+    def squash_merged_prefix(ref)
+      base = git_line("merge-base", "HEAD", ref)
+      return nil unless base
+
+      landed = git_lines("rev-list", "--reverse", "#{base}..#{ref}")
+      branch = git_lines("rev-list", "--reverse", "#{base}..HEAD")
+      return nil if landed.empty? || branch.empty?
+      return nil if landed.size > SQUASH_SCAN_LIMIT || branch.size > SQUASH_SCAN_LIMIT
+
+      landed_trees = landed.to_h { |commit| [ git_line("rev-parse", "#{commit}^{tree}"), commit ] }
+      landed_patches = landed.filter_map { |commit| patch_id("#{commit}^", commit) }.to_set
+      branch.reverse_each do |commit|
+        return commit if landed_trees.key?(git_line("rev-parse", "#{commit}^{tree}"))
+
+        patch = patch_id(base, commit)
+        return commit if patch && landed_patches.include?(patch)
+      end
+      nil
     end
 
     # `git rebase --continue`. Returns true on clean continue (rebase

@@ -116,7 +116,9 @@ class HiveRebaseTest < Minitest::Test
     def current_branch; @current_branch_value; end
     def ancestor?(_ancestor, _descendant); @ancestor_value; end
 
-    def rebase_onto(_ref)
+    def squash_merged_prefix(_ref); nil; end
+
+    def rebase_onto(_ref, upstream: nil)
       case @rebase_onto_outcome
       when :ok then true
       when :conflict

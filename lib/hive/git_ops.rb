@@ -387,6 +387,9 @@ module Hive
       out
     end
 
+    # Merge base of HEAD and `ref`, or nil when git cannot compute one.
+    def merge_base(ref) = git_line("merge-base", "HEAD", ref)
+
     def git_line(*args)
       out, _err, status = Open3.capture3("git", "-C", @project_root, *args)
       value = out.strip

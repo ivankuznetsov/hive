@@ -86,7 +86,7 @@ class HiveRebaseTest < Minitest::Test
                   :rebase_onto_outcome, :rebase_continue_outcomes,
                   :unmerged_files_sequence, :head_sha_value, :default_branch_value,
                   :current_branch_value, :ancestor_value, :project_root,
-                  :squash_prefix_value, :rebase_upstream
+                  :squash_prefix_value, :rebase_upstream, :merge_base_value
 
     def initialize(project_root)
       @project_root = project_root
@@ -118,6 +118,7 @@ class HiveRebaseTest < Minitest::Test
     def ancestor?(_ancestor, _descendant); @ancestor_value; end
 
     def squash_merged_prefix(_ref); @squash_prefix_value; end
+    def merge_base(_ref); @merge_base_value; end
 
     def rebase_onto(_ref, upstream: nil)
       @rebase_upstream = upstream
@@ -895,6 +896,48 @@ class HiveRebaseTest < Minitest::Test
   end
 
   # ---- U8: execute_base_head rewrite after successful rebase ----
+
+  # hivedev C1: a stacked base (the squash-merged dependency's old head)
+  # dropped out of HEAD's history after the squash-aware rebase, and outcome
+  # evidence failed "controller base is not an ancestor". The no-op path
+  # heals a pointer an earlier rebase left stale.
+  def test_no_op_run_reconciles_stale_stacked_base
+    worktree, folder = make_worktree_and_folder
+    File.write(File.join(folder, "worktree.yml"),
+               YAML.dump({ "base_oid" => "olddepsha", "branch" => "feature/x" }))
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 0
+    git.ancestor_value = false
+    git.merge_base_value = "mainmergebase"
+
+    stub_gitops!(git) do
+      _out, err = capture_io { assert Hive::Rebase.perform(task, base_cfg).succeeded }
+      assert_match(/stacked base olddepsha is no longer in HEAD's history/, err)
+    end
+
+    data = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))
+    assert_equal "mainmergebase", data["base_oid"]
+    assert_equal "feature/x", data["branch"]
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_base_still_in_history_is_left_alone
+    worktree, folder = make_worktree_and_folder
+    File.write(File.join(folder, "worktree.yml"), YAML.dump({ "base_oid" => "goodbase" }))
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :ok
+    git.merge_base_value = "other"
+
+    stub_gitops!(git) { assert Hive::Rebase.perform(task, base_cfg).succeeded }
+
+    assert_equal "goodbase", YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["base_oid"]
+  ensure
+    teardown_dirs(worktree, folder)
+  end
 
   def test_update_execute_base_head_rewrites_yaml_on_success
     worktree, folder = make_worktree_and_folder

@@ -592,6 +592,8 @@ class GitOpsTest < Minitest::Test
       assert_equal [ "dependent work" ], `git -C #{dir} log --format=%s master..HEAD`.lines.map(&:strip)
       assert_equal "final\n", File.read(File.join(dir, "dep.txt"))
       assert_equal "own work\n", File.read(File.join(dir, "own.txt"))
+      refute ops.ancestor?(dep_tip, "HEAD"), "the dependency's old head left HEAD's history"
+      assert_equal `git -C #{dir} rev-parse master`.strip, ops.merge_base("master")
     end
   end
 

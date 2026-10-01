@@ -147,7 +147,7 @@ module Hive
             return
           end
 
-          @rebase_result = perform_rebase(task, cfg)
+          @rebase_result = perform_rebase(task, cfg, marker: marker)
           runner = pick_runner(task)
           terminal_snapshot = terminal_state_snapshot(task)
           archived_before_run = Hive::TaskAction.for(task, marker, config: cfg).key ==
@@ -216,7 +216,7 @@ module Hive
       # and we proceed to the stage runner against the (stale) base.
       # See lib/hive/rebase.rb and
       # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md.
-      def perform_rebase(task, cfg)
+      def perform_rebase(task, cfg, marker: nil)
         require "hive/rebase"
         # `--no-rebase` flag: one-off override of `cfg.rebase.enabled`.
         # Use the same shape as the cfg-disabled path so JSON consumers
@@ -232,6 +232,13 @@ module Hive
           # controller's already-scanned identity and could invoke a second
           # conflict-resolution agent on a one-agent workflow.
           result = Hive::Rebase::Result.skipped(:managed_draft_pr_handoff)
+        elsif head_bound_approval_pending?(marker)
+          # A fix_guardrail pause binds the operator's approval to the exact
+          # HEAD the guardrail scanned. Rewriting it here (even a content-
+          # preserving rebase) turns the ticked approval into
+          # approval_head_mismatch on resume. Rebase on the run after the
+          # approved pass advances instead.
+          result = Hive::Rebase::Result.skipped(:pending_head_bound_approval)
         elsif @no_rebase
           result = Hive::Rebase::Result.skipped(:cli_override)
         else
@@ -239,6 +246,12 @@ module Hive
         end
         log_rebase_outcome(task, result)
         result
+      end
+
+      def head_bound_approval_pending?(marker)
+        marker&.name == :review_waiting &&
+          marker.attrs["reason"] == "fix_guardrail" &&
+          !marker.attrs["head"].to_s.empty?
       end
 
       def log_rebase_outcome(task, result)

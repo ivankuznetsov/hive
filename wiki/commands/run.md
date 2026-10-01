@@ -92,12 +92,13 @@ second conflict-resolution agent into a one-agent workflow.
 **Pre-rebase guards (in order, before any fetch):**
 1. `task.workflow.controller?` → `Result.skipped(:controller_workflow)`.
 2. `task.workflow.draft_pr_handoff?` → `Result.skipped(:managed_draft_pr_handoff)`.
-3. `--no-rebase` → `Result.skipped(:cli_override)`.
-4. `cfg.rebase.enabled == false` → `Result.disabled`.
-5. `task.worktree_path` missing → `Result.skipped(:no_worktree)`.
-6. `.git/rebase-merge/` or `.git/rebase-apply/` directory exists (pre-existing half-rebase from a prior aborted run) → `Result.skipped(:pre_existing_rebase)`. Emits a louder stderr warning naming the manual recovery: `cd <worktree_path> && git rebase --abort`.
-7. Worktree dirty → `Result.skipped(:dirty_worktree)`.
-8. Detached HEAD → `Result.skipped(:detached_head)`.
+3. Marker `REVIEW_WAITING reason=fix_guardrail` with a `head=` binding → `Result.skipped(:pending_head_bound_approval)`. The operator's approval is tied to that exact HEAD, so a rebase here would turn the resume into `approval_head_mismatch`.
+4. `--no-rebase` → `Result.skipped(:cli_override)`.
+5. `cfg.rebase.enabled == false` → `Result.disabled`.
+6. `task.worktree_path` missing → `Result.skipped(:no_worktree)`.
+7. `.git/rebase-merge/` or `.git/rebase-apply/` directory exists (pre-existing half-rebase from a prior aborted run) → `Result.skipped(:pre_existing_rebase)`. Emits a louder stderr warning naming the manual recovery: `cd <worktree_path> && git rebase --abort`.
+8. Worktree dirty → `Result.skipped(:dirty_worktree)`.
+9. Detached HEAD → `Result.skipped(:detached_head)`.
 
 **Fetch:** `git fetch origin <default_branch>` runs with `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` set in the spawn environment, plus a Ruby-side wall-clock budget (`FETCH_TIMEOUT_SEC = 60`) enforced via `Process.spawn` + `Process.waitpid2` polling with SIGTERM→SIGKILL escalation. So both credential/host-key prompts and HTTPS network hangs fail immediately rather than blocking the run. Failure → `Result.skipped(:fetch_failed)`.
 

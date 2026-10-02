@@ -11,6 +11,19 @@ module Hive
     module Project
       module_function
 
+      class NestedProjectActivationError < Hive::Error
+        attr_reader :active_root, :requested_root
+
+        def initialize(active_root, requested_root)
+          @active_root = active_root
+          @requested_root = requested_root
+          super(
+            "cannot activate project #{requested_root} while project #{active_root} " \
+            "is active on this thread"
+          )
+        end
+      end
+
       # Serializes the per-project `load!` + downstream resolve so the
       # module-level overlay state (@active_root / @loaded_workflows and the
       # Registry's project_registrations + union caches) is never swapped out
@@ -23,6 +36,7 @@ module Hive
       # the eager Task#initialize → load! and the status call's own
       # `synchronize { load!; resolve }` can re-enter without deadlocking.
       LOCK = Monitor.new
+      ACTIVE_OPERATION_KEY = :hive_workflows_project_active_operation
 
       # Run a block with the project overlay held stable. Callers that load a
       # project then resolve against its overlay (e.g. `hive status`'s
@@ -30,6 +44,20 @@ module Hive
       # the active root between the load and the resolve.
       def synchronize(&block)
         LOCK.synchronize(&block)
+      end
+
+      # Establish one authoritative, block-scoped view of a project's accepted
+      # workflows. The Monitor stays held through the caller block, so another
+      # thread cannot replace the process-wide project overlay between a
+      # descriptor read and its corresponding stage-vocabulary read.
+      def with_active_workflows(project_root, config: nil, hive_state_path: nil)
+        project_root = normalize_project_root(project_root)
+        with_project_operation(project_root) do
+          activate_with_cleanup!(
+            project_root, config: config, hive_state_path: hive_state_path
+          )
+          yield Hive::Workflows::Registry, registered_stage_names
+        end
       end
 
       # Per-root memoized: once a project_root's overlay is active we
@@ -41,41 +69,11 @@ module Hive
       # clears the overlay so a LATER (separate) invocation discovers the new
       # descriptor; `call!` does not re-resolve in-process.
       def load!(project_root, config: nil, hive_state_path: nil)
-        LOCK.synchronize do
-          project_root = File.expand_path(project_root)
-          if config || hive_state_path
-            workflow_dir = workflow_dir_for(
-              project_root, config: config, hive_state_path: hive_state_path
-            )
-            return load_overlay!(project_root, workflow_dir)
-          end
-
-          source_path, data = project_config_source(project_root)
-          unless data
-            return load_overlay!(project_root, fallback_workflow_dir(project_root))
-          end
-          configured_path = data["hive_state_path"]
-          configured_path = Hive::Config::DEFAULTS.fetch("hive_state_path") unless configured_path.is_a?(String)
-          workflow_dir = begin
-            workflow_dir_for(project_root, hive_state_path: configured_path)
-          rescue ArgumentError
-            Hive::Config.validate_project_top_level_keys!(
-              data, source_path, project_root, stage_names: []
-            )
-            raise
-          end
-          load_overlay!(project_root, workflow_dir)
-
-          begin
-            Hive::Config.build_project_config(
-              project_root, source_path, data, stage_names: registered_stage_names
-            )
-          rescue Hive::UnsupportedProjectConfigError
-            raise
-          rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
-            warn_config_fallback(project_root, e)
-            load_overlay!(project_root, fallback_workflow_dir(project_root))
-          end
+        project_root = normalize_project_root(project_root)
+        with_project_operation(project_root) do
+          activate_with_cleanup!(
+            project_root, config: config, hive_state_path: hive_state_path
+          )
         end
       end
 
@@ -84,13 +82,95 @@ module Hive
       # otherwise load from the already-parsed hive_state_path, which never
       # calls Config.load and therefore cannot complete a reverse load cycle.
       def stage_names_for_config(project_root, hive_state_path:)
-        LOCK.synchronize do
-          project_root = File.expand_path(project_root)
-          workflow_dir = workflow_dir_for(project_root, hive_state_path: hive_state_path)
-          load_overlay!(project_root, workflow_dir) unless active_overlay?(project_root, workflow_dir)
+        project_root = normalize_project_root(project_root)
+        with_project_operation(project_root) do
+          activate_with_cleanup!(
+            project_root, hive_state_path: hive_state_path, reuse_active: true
+          )
           registered_stage_names
         end
       end
+
+      def activate_with_cleanup!(project_root, config: nil, hive_state_path: nil, reuse_active: false)
+        activation = { reused_active: false }
+        activate_project!(
+          project_root,
+          config: config,
+          hive_state_path: hive_state_path,
+          reuse_active: reuse_active || nested_project_operation?,
+          activation: activation
+        )
+      rescue StandardError
+        # A same-root nested validation may reuse the already-complete outer
+        # view without touching it. Preserve that view when validation raises;
+        # every attempted activation is cleared so no foreign or partial
+        # overlay survives the failed operation.
+        clear_incomplete_activation! unless activation[:reused_active] && nested_project_operation?
+        raise
+      end
+      private_class_method :activate_with_cleanup!
+
+      def activate_project!(project_root, config:, hive_state_path:, reuse_active:, activation:)
+        if config || hive_state_path
+          workflow_dir = workflow_dir_for(
+            project_root, config: config, hive_state_path: hive_state_path
+          )
+          return activate_overlay!(
+            project_root, workflow_dir, reuse_active: reuse_active, activation: activation
+          )
+        end
+
+        source_path, data = project_config_source(project_root)
+        unless data
+          return activate_overlay!(
+            project_root,
+            fallback_workflow_dir(project_root),
+            reuse_active: reuse_active,
+            activation: activation
+          )
+        end
+        configured_path = data["hive_state_path"]
+        configured_path = Hive::Config::DEFAULTS.fetch("hive_state_path") unless configured_path.is_a?(String)
+        workflow_dir = begin
+          workflow_dir_for(project_root, hive_state_path: configured_path)
+        rescue ArgumentError
+          Hive::Config.validate_project_top_level_keys!(
+            data, source_path, project_root, stage_names: []
+          )
+          raise
+        end
+        activate_overlay!(
+          project_root, workflow_dir, reuse_active: reuse_active, activation: activation
+        )
+
+        begin
+          Hive::Config.build_project_config(
+            project_root, source_path, data, stage_names: registered_stage_names
+          )
+        rescue Hive::UnsupportedProjectConfigError
+          raise
+        rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+          warn_config_fallback(project_root, e)
+          activate_overlay!(
+            project_root,
+            fallback_workflow_dir(project_root),
+            reuse_active: reuse_active,
+            activation: activation
+          )
+        end
+      end
+      private_class_method :activate_project!
+
+      def activate_overlay!(project_root, workflow_dir, reuse_active:, activation:)
+        if reuse_active && active_overlay?(project_root, workflow_dir)
+          activation[:reused_active] = true
+          return
+        end
+
+        activation[:reused_active] = false
+        load_overlay!(project_root, workflow_dir)
+      end
+      private_class_method :activate_overlay!
 
       # This file is intentionally loadable without the aggregate
       # `hive/workflows` entrypoint (for example, `hive markers clear` reaches
@@ -101,6 +181,53 @@ module Hive
         Hive::Workflows::Registry.all.flat_map(&:stage_names).uniq
       end
       private_class_method :registered_stage_names
+
+      def normalize_project_root(project_root)
+        if project_root.nil? || project_root.to_s.strip.empty?
+          raise ArgumentError, "project_root must not be nil or blank"
+        end
+
+        File.expand_path(project_root)
+      end
+      private_class_method :normalize_project_root
+
+      def with_project_operation(project_root)
+        LOCK.synchronize do
+          thread = Thread.current
+          operation = thread.thread_variable_get(ACTIVE_OPERATION_KEY)
+          if operation && operation.fetch(:root) != project_root
+            raise NestedProjectActivationError.new(operation.fetch(:root), project_root)
+          end
+
+          if operation
+            operation[:depth] += 1
+          else
+            operation = { root: project_root, depth: 1 }
+            thread.thread_variable_set(ACTIVE_OPERATION_KEY, operation)
+          end
+
+          begin
+            yield
+          ensure
+            operation[:depth] -= 1
+            thread.thread_variable_set(ACTIVE_OPERATION_KEY, nil) if operation[:depth].zero?
+          end
+        end
+      end
+      private_class_method :with_project_operation
+
+      def nested_project_operation?
+        operation = Thread.current.thread_variable_get(ACTIVE_OPERATION_KEY)
+        operation && operation.fetch(:depth) > 1
+      end
+      private_class_method :nested_project_operation?
+
+      def clear_incomplete_activation!
+        Hive::Workflows::Registry.reset_project_registrations!
+        @active_root = nil
+        @active_fingerprint = nil
+      end
+      private_class_method :clear_incomplete_activation!
 
       def load_overlay!(project_root, workflow_dir)
         # Include the resolved directory so changing hive_state_path cannot
@@ -116,6 +243,7 @@ module Hive
         # registry for the rest of a long-lived TUI/daemon session.
         Hive::Workflows::Registry.reset_project_registrations!
         @active_root = nil
+        @active_fingerprint = nil
 
         cached = loaded_workflows[project_root]
         workflows = if cached && cached.fetch(:fingerprint) == fingerprint

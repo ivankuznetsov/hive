@@ -59,6 +59,177 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_with_active_workflows_yields_registry_and_full_stage_union_and_returns_block_value
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "project-flow", stage_name: "project-stage")
+      File.write(
+        File.join(project_root, ".hive-state", "config.yml"),
+        { "research" => {}, "runtime-stage" => {}, "project-stage" => {} }.to_yaml
+      )
+      runtime = project_descriptor("runtime-flow", stage_name: "runtime-stage")
+
+      with_registered_workflow(runtime) do
+        result = Hive::Workflows::Project.with_active_workflows(project_root) do |registry, stage_names|
+          assert_same Hive::Workflows::Registry, registry
+          assert Hive::Workflows::Project::LOCK.mon_owned?, "the operation must hold the Monitor through the block"
+          assert_includes stage_names, "research", "built-in stages remain valid"
+          assert_includes stage_names, "runtime-stage", "runtime registrations remain valid"
+          assert_includes stage_names, "project-stage", "accepted project stages become valid"
+
+          :block_result
+        end
+
+        assert_equal :block_result, result
+      end
+    end
+  end
+
+  def test_rejected_builtin_collision_stage_is_not_part_of_strict_configuration_vocabulary
+    with_tmp_dir do |project_root|
+      path = write_project_workflow(project_root, "coding", stage_name: "collision-only")
+      config_path = File.join(project_root, ".hive-state", "config.yml")
+      File.write(config_path, { "collision-only" => { "agent" => "codex" } }.to_yaml)
+
+      error = nil
+      _out, err = capture_io do
+        error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(project_root) }
+      end
+      assert_includes err, path
+      assert_includes err, "collides with registered workflow :coding"
+      assert_includes error.message, "Unknown top-level key `collision-only`."
+
+      operation_error = assert_raises(Hive::UnsupportedProjectConfigError) do
+        Hive::Workflows::Project.with_active_workflows(project_root) { flunk "invalid config must not yield" }
+      end
+      assert_equal error.message, operation_error.message
+      refute_includes Hive::Workflows::Registry.project_registrations.keys, :coding
+    end
+  end
+
+  def test_with_active_workflows_rejects_nil_and_blank_roots_before_changing_the_overlay
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "stable-flow")
+      Hive::Workflows::Project.load!(project_root)
+      expected_ids = Hive::Workflows::Registry.ids
+
+      [ nil, "", "   " ].each do |invalid_root|
+        error = assert_raises(ArgumentError) do
+          Hive::Workflows::Project.with_active_workflows(invalid_root) { flunk "invalid roots must not yield" }
+        end
+        assert_includes error.message, "project_root"
+        assert_equal expected_ids, Hive::Workflows::Registry.ids
+      end
+    end
+  end
+
+  def test_same_root_nesting_reuses_the_view_and_different_root_adapter_entry_is_rejected_before_mutation
+    with_tmp_dir do |root_a|
+      with_tmp_dir do |root_b|
+        write_project_workflow(root_a, "flow-a", stage_name: "alpha")
+        write_project_workflow(root_b, "flow-b", stage_name: "beta")
+        original = Hive::Workflows::Loader.method(:fingerprint)
+        scans = 0
+
+        with_replaced_singleton_method(Hive::Workflows::Loader, :fingerprint, lambda { |dir|
+          scans += 1
+          original.call(dir)
+        }) do
+          Hive::Workflows::Project.with_active_workflows(root_a) do |_registry, outer_stages|
+            assert_equal 1, scans
+
+            Hive::Workflows::Project.with_active_workflows(File.join(root_a, ".")) do |_inner_registry, inner_stages|
+              assert_equal outer_stages, inner_stages
+              assert_equal 1, scans, "same-root nesting must reuse the active view"
+            end
+
+            error = assert_raises(Hive::Workflows::Project::NestedProjectActivationError) do
+              Hive::Workflows::Project.load!(root_b)
+            end
+            assert_includes error.message, File.expand_path(root_a)
+            assert_includes error.message, File.expand_path(root_b)
+            assert_includes Hive::Workflows::Registry.ids, :"flow-a"
+            refute_includes Hive::Workflows::Registry.ids, :"flow-b"
+            assert_includes outer_stages, "alpha"
+          end
+
+          Hive::Workflows::Project.with_active_workflows(root_b) do |_registry, stage_names|
+            assert_includes stage_names, "beta"
+            refute_includes stage_names, "alpha"
+          end
+        end
+      end
+    end
+  end
+
+  def test_with_active_workflows_clears_a_foreign_overlay_when_fingerprinting_aborts_and_retries_cleanly
+    with_tmp_dir do |root_a|
+      with_tmp_dir do |root_b|
+        write_project_workflow(root_a, "flow-a")
+        write_project_workflow(root_b, "flow-b")
+        Hive::Workflows::Project.load!(root_a)
+        failed_dir = File.join(root_b, ".hive-state", "workflows")
+        fail_once = true
+        yielded = false
+        original = Hive::Workflows::Loader.method(:fingerprint)
+
+        with_replaced_singleton_method(Hive::Workflows::Loader, :fingerprint, lambda { |dir|
+          if dir == failed_dir && fail_once
+            fail_once = false
+            raise IOError, "fingerprint interrupted"
+          end
+
+          original.call(dir)
+        }) do
+          error = assert_raises(IOError) do
+            Hive::Workflows::Project.with_active_workflows(root_b) { yielded = true }
+          end
+          assert_equal "fingerprint interrupted", error.message
+          refute yielded
+          refute_includes Hive::Workflows::Registry.ids, :"flow-a"
+          refute_includes Hive::Workflows::Registry.ids, :"flow-b"
+
+          Hive::Workflows::Project.with_active_workflows(root_b) do |_registry, stage_names|
+            assert_includes stage_names, "work"
+            assert_includes Hive::Workflows::Registry.ids, :"flow-b"
+          end
+        end
+      end
+    end
+  end
+
+  def test_with_active_workflows_clears_partial_registration_after_an_aborted_activation
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "first-flow", stage_name: "first")
+      write_project_workflow(project_root, "second-flow", stage_name: "second")
+      registrations = 0
+      yielded = false
+      original = Hive::Workflows::Registry.method(:register!)
+
+      with_replaced_singleton_method(
+        Hive::Workflows::Registry, :register!, lambda { |descriptor, **kwargs|
+          registrations += 1 if kwargs[:project]
+          raise RuntimeError, "registration interrupted" if registrations == 2
+
+          original.call(descriptor, **kwargs)
+        }
+      ) do
+        error = assert_raises(RuntimeError) do
+          Hive::Workflows::Project.with_active_workflows(project_root) { yielded = true }
+        end
+        assert_equal "registration interrupted", error.message
+      end
+
+      refute yielded
+      refute_includes Hive::Workflows::Registry.ids, :"first-flow"
+      refute_includes Hive::Workflows::Registry.ids, :"second-flow"
+
+      Hive::Workflows::Project.with_active_workflows(project_root) do
+        assert_includes Hive::Workflows::Registry.ids, :"first-flow"
+        assert_includes Hive::Workflows::Registry.ids, :"second-flow"
+      end
+    end
+  end
+
   def test_config_load_accepts_active_project_stage_override_and_rejects_lookalike
     with_tmp_dir do |project_root|
       write_project_workflow(project_root, "my-flow", stage_name: "assemble")
@@ -522,18 +693,18 @@ class WorkflowsProjectTest < Minitest::Test
       path
     end
 
-    def project_descriptor(id)
+    def project_descriptor(id, stage_name: "work")
       Hive::Workflow.new(
         id: id.to_sym,
         stages: [
           Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md", kind: :inert),
           Hive::Workflow::Stage.new(
-            name: "work",
+            name: stage_name,
             index: 2,
-            state_file: "work.md",
-            advance_verb: Hive::Workflow::AdvanceVerb.new(name: "work"),
+            state_file: "#{stage_name}.md",
+            advance_verb: Hive::Workflow::AdvanceVerb.new(name: stage_name),
             kind: :agent,
-            instruction: "/tmp/work.md"
+            instruction: "/tmp/#{stage_name}.md"
           )
         ]
       )

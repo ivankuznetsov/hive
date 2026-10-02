@@ -1753,6 +1753,34 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_advance_rejects_a_task_missing_before_observation
+    with_task(standard_plan) do |task, cfg|
+      FileUtils.rm_rf(task.folder)
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        orchestrator(task, cfg, adapter: success_adapter).advance!
+      end
+
+      assert_includes error.message, "stale or missing"
+    end
+  end
+
+  def test_advance_translates_stale_observation_errors
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) { runner.advance! }
+
+      assert_includes error.message, "plan review task is stale"
+    ensure
+      observation&.close
+    end
+  end
+
   def test_review_requirement_rejects_a_same_path_replacement_even_when_already_true
     with_task(standard_plan) do |task, cfg|
       Hive::TaskMeta.rewrite(task.folder, plan_review_required: true)

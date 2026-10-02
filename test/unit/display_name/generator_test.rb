@@ -181,6 +181,19 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_generation_skips_a_task_missing_before_observation
+    with_generator do |gen, task|
+      FileUtils.rm_rf(task.folder)
+
+      result = nil
+      _out, err = capture_io { result = gen.call }
+
+      assert_nil result
+      assert_includes err, "stale task"
+      refute File.exist?(task.folder)
+    end
+  end
+
   def test_generation_does_not_recreate_a_task_deleted_before_update_custody
     with_generator do |gen, task|
       committed = false

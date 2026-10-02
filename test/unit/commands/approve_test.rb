@@ -139,6 +139,31 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_restore_human_destination_skips_a_same_path_replacement
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      Hive::TaskMeta.write(source, id: 1, slug: "source", display_name: nil)
+      observation = Hive::TaskMeta.observe(source)
+      FileUtils.rm_rf(source)
+      Hive::TaskMeta.write(source, id: 1, slug: "source", display_name: nil)
+      File.write(File.join(source, "approval.md"), "replacement\n")
+      current = task(folder: source)
+
+      _out, err = capture_io do
+        assert_nil command.send(
+          :restore_human_destination!, current, nil,
+          { state_file: "approval.md", existed: true, body: "original\n" },
+          observation: observation
+        )
+      end
+
+      assert_includes err, "rollback skipped stale task"
+      assert_equal "replacement\n", File.read(File.join(source, "approval.md"))
+    ensure
+      observation&.close
+    end
+  end
+
   def test_initialize_human_destination_refuses_symlinked_state_file
     with_tmp_dir do |root|
       source = File.join(root, "source")
@@ -475,6 +500,66 @@ class HiveCommandsApproveTest < Minitest::Test
       refute File.exist?(source)
       assert_equal "keep\n", File.read(File.join(destination, "replacement.txt"))
       assert_equal metadata, File.binread(Hive::TaskMeta.path(destination))
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_terminal_rollback_rebinds_observation_after_cross_device_move
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      Hive::TaskMeta.write(destination, id: 1, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(destination)
+      current = task(folder: source, hive_state_path: root, project_root: root)
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      cross_device_move = lambda do |from, to, **|
+        FileUtils.cp_r(from, to)
+        FileUtils.rm_rf(from)
+      end
+
+      with_replaced_singleton_method(FileUtils, :mv, cross_device_move) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+          assert_raises(Hive::GitError) do
+            command.send(
+              :attempt_rollback!, current, destination, Hive::GitError.new("commit failed"),
+              observation: observation
+            )
+          end
+        end
+      end
+
+      assert Hive::TaskMeta.validate_observation!(source, observation)
+      refute File.exist?(destination)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_terminal_rollback_reports_a_stale_metadata_restore
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      Hive::TaskMeta.write(destination, id: 1, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(destination)
+      snapshot = Hive::TaskMeta.snapshot(destination)
+      current = task(folder: source, hive_state_path: root, project_root: root)
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+
+      with_replaced_singleton_method(Hive::TaskMeta, :restore, stale) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+          error = assert_raises(Hive::RollbackFailed) do
+            command.send(
+              :attempt_rollback!, current, destination, Hive::GitError.new("commit failed"),
+              completion_snapshot: snapshot, observation: observation
+            )
+          end
+          assert_includes error.message, "lost task custody"
+        end
+      end
     ensure
       observation&.close
     end

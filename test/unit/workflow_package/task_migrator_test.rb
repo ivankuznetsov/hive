@@ -138,6 +138,25 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
     end
   end
 
+  def test_task_disappearing_before_observation_aborts_migration_preparation
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      folder = task_folder(dir, "4-review", old_pin)
+      original = Hive::TaskMeta.method(:observe)
+      missing = ->(path) { path == folder ? nil : original.call(path) }
+
+      error = with_replaced_singleton_method(Hive::TaskMeta, :observe, missing) do
+        assert_raises(Hive::ConcurrentRunError) { migrator(dir, store).call }
+      end
+
+      assert_includes error.message, "disappeared while migration was being prepared"
+      assert File.directory?(folder)
+      assert_empty store.cleaned
+    end
+  end
+
   def test_rolls_back_every_task_when_a_later_metadata_rewrite_fails
     with_tmp_dir do |dir|
       old = workflow("review" => 4, state_files: { "review" => "review-v1.md" })
@@ -202,6 +221,85 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       assert_equal old_pin, Hive::TaskMeta.read(source).slice(
         :workflow_commit, :workflow_manifest_digest, :workflow_configuration_digest
       )
+      assert_empty store.cleaned
+    end
+  end
+
+  def test_cross_device_rollback_rebinds_observation_in_both_directions
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+      cross_device_move = lambda do |from, to, **|
+        FileUtils.cp_r(from, to)
+        FileUtils.rm_rf(from)
+      end
+
+      with_replaced_singleton_method(FileUtils, :mv, cross_device_move) do
+        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
+          assert_raises(Hive::TaskMeta::StaleTask) { migrator(dir, store).call }
+        end
+      end
+
+      assert File.directory?(source)
+      refute File.exist?(destination)
+      assert_equal old_pin, Hive::TaskMeta.read(source).slice(
+        :workflow_commit, :workflow_manifest_digest, :workflow_configuration_digest
+      )
+      assert_empty store.cleaned
+    end
+  end
+
+  def test_rollback_skips_a_source_path_that_reappeared_after_the_move
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      stale = lambda do |*, **|
+        FileUtils.mkdir_p(source)
+        File.write(File.join(source, "replacement.txt"), "keep\n")
+        Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil)
+      end
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
+          assert_raises(Hive::TaskMeta::StaleTask) { migrator(dir, store).call }
+        end
+      end
+
+      assert_includes err, "source path now belongs to another entry"
+      assert_equal "keep\n", File.read(File.join(source, "replacement.txt"))
+      assert File.directory?(destination)
+      assert_empty store.cleaned
+    end
+  end
+
+  def test_rollback_reports_a_stale_metadata_restore
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      stale_rewrite = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+      stale_restore = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale_rewrite) do
+          with_replaced_singleton_method(Hive::TaskMeta, :restore, stale_restore) do
+            assert_raises(Hive::TaskMeta::StaleTask) { migrator(dir, store).call }
+          end
+        end
+      end
+
+      assert_includes err, "rollback skipped stale task"
+      assert File.directory?(source)
+      refute File.exist?(destination)
       assert_empty store.cleaned
     end
   end

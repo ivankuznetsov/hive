@@ -2,6 +2,125 @@ require "test_helper"
 require "hive/task_meta"
 
 class TaskMetaTest < Minitest::Test
+  def test_observe_rejects_an_opened_non_directory
+    stat = Object.new
+    stat.define_singleton_method(:directory?) { false }
+    opened = Object.new
+    closed = false
+    opened.define_singleton_method(:stat) { stat }
+    opened.define_singleton_method(:close) { closed = true }
+    opened.define_singleton_method(:closed?) { closed }
+
+    with_replaced_singleton_method(File, :open, ->(*) { opened }) do
+      assert_nil Hive::TaskMeta.observe("/not-a-directory")
+    end
+
+    assert closed
+  end
+
+  def test_observation_validation_rejects_invalid_and_changed_identity_metadata
+    with_tmp_dir do |task|
+      Hive::TaskMeta.write(task, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(task)
+
+      File.write(Hive::TaskMeta.path(task), "[")
+      assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.validate_observation!(task, observation)
+      end
+
+      File.write(Hive::TaskMeta.path(task), "id: 8\nslug: task\n")
+      assert_raises(Hive::TaskMeta::StaleTask) do
+        Hive::TaskMeta.validate_observation!(task, observation)
+      end
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_observe_rejects_a_directory_replaced_after_metadata_read
+    with_tmp_dir do |task|
+      Hive::TaskMeta.write(task, id: 7, slug: "task", display_name: nil)
+      fake = Object.new
+      closed = false
+      fake.define_singleton_method(:same_directory?) { |_| false }
+      fake.define_singleton_method(:close) { closed = true }
+
+      with_replaced_singleton_method(Hive::TaskMeta::Observation, :new, ->(*) { fake }) do
+        assert_nil Hive::TaskMeta.observe(task)
+      end
+
+      assert closed
+    end
+  end
+
+  def test_relocation_rebinds_the_observation_and_rejects_unsafe_destinations
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      Hive::TaskMeta.write(source, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(source)
+
+      assert_raises(Hive::TaskMeta::StaleTask) do
+        Hive::TaskMeta.relocate_observation!(source, destination, observation)
+      end
+
+      FileUtils.cp_r(source, destination)
+      FileUtils.rm_rf(source)
+      assert Hive::TaskMeta.relocate_observation!(source, destination, observation)
+      assert Hive::TaskMeta.validate_observation!(destination, observation)
+
+      assert_raises(Errno::ENOENT) do
+        observation.rebind!(File.join(root, "missing"))
+      end
+
+      other_source = File.join(root, "other-source")
+      other_destination = File.join(root, "other-destination")
+      Hive::TaskMeta.write(other_source, id: 8, slug: "other", display_name: nil)
+      other_observation = Hive::TaskMeta.observe(other_source)
+      FileUtils.cp_r(other_source, other_destination)
+      FileUtils.rm_rf(other_source)
+      Hive::TaskMeta.update_id(other_destination, 9)
+
+      assert_raises(Hive::TaskMeta::StaleTask) do
+        Hive::TaskMeta.relocate_observation!(
+          other_source, other_destination, other_observation
+        )
+      end
+    ensure
+      observation&.close
+      other_observation&.close
+    end
+  end
+
+  def test_write_distinguishes_stale_updates_from_creation_failures
+    with_tmp_dir do |root|
+      missing = File.join(root, "missing")
+      stale = Hive::TaskMeta.write(
+        missing, id: 7, slug: "missing", display_name: nil,
+        create: false, observation: nil
+      )
+      assert stale.stale?
+
+      with_replaced_singleton_method(File, :write, ->(*) { raise Errno::ENOENT, missing }) do
+        assert_raises(Errno::ENOENT) do
+          Hive::TaskMeta.write(missing, id: 7, slug: "missing", display_name: nil)
+        end
+      end
+    end
+  end
+
+  def test_read_for_update_preserves_admission_errors_for_malformed_metadata
+    with_tmp_dir do |task|
+      File.write(Hive::TaskMeta.path(task), "[")
+
+      error = assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.read_for_update!(task)
+      end
+
+      assert_includes error.message, "refusing to rewrite invalid task metadata"
+    end
+  end
+
   def test_update_only_helpers_do_not_create_a_missing_task_folder
     with_tmp_dir do |root|
       task = File.join(root, "missing-task")

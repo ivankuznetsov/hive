@@ -120,6 +120,21 @@ class HiveStagesPlanTest < Minitest::Test
     end
   end
 
+  def test_dependency_adoption_skips_a_task_missing_before_observation
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      FileUtils.rm_rf(dir)
+
+      _out, err = capture_io do
+        assert_nil Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      end
+
+      refute File.exist?(dir)
+      assert_includes err, "stale task"
+    ensure
+      FileUtils.mkdir_p(dir) if dir && !File.exist?(dir)
+    end
+  end
+
   def test_dependency_adoption_does_not_recreate_a_task_deleted_after_metadata_read
     with_planned_task(plan_doc("rails-task")) do |task, dir|
       observation = Hive::TaskMeta.observe(dir)

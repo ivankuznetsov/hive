@@ -1,3 +1,5 @@
+require "etc"
+
 module Hive
   module E2E
     module Paths
@@ -37,6 +39,26 @@ module Hive
         # artifacts via `hive-e2e clean`. Cleanup validates this path before
         # deleting anything.
         ENV["HIVE_E2E_RUNS_DIR"] || default_runs_dir
+      end
+
+      def replay_control_dir(env: ENV, euid: Process.euid,
+                             account_lookup: Etc.method(:getpwuid))
+        configured = env["XDG_STATE_HOME"]
+        state_home = if configured&.start_with?(File::SEPARATOR)
+          File.expand_path(configured)
+        else
+          account_home = account_lookup.call(euid).dir
+          raise ArgumentError, "effective-user home must be absolute" unless
+            account_home.start_with?(File::SEPARATOR)
+
+          File.join(account_home, ".local", "state")
+        end
+        File.join(
+          state_home,
+          "hive-e2e",
+          "replay-#{euid}",
+          "locks-v1"
+        )
       end
 
       def fake_claude

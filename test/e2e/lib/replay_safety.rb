@@ -1,4 +1,7 @@
+require "digest"
+require "fileutils"
 require "hive/managed_directory"
+require_relative "paths"
 
 module Hive
   module E2E
@@ -8,6 +11,36 @@ module Hive
     # checked alias for the held script descriptor.
     class ReplaySafety
       DEFAULT_DESCRIPTOR_ALIAS_ROOTS = [ "/proc/self/fd", "/dev/fd" ].freeze
+      SHARD_COUNT = 256
+      CONTROL_DIRECTORY_MODE = 0o700
+      SHARD_MODE = 0o600
+
+      DEFAULT_SHARD_SELECTOR = lambda do |tuples|
+        tuples.map { |tuple| Digest::SHA256.digest(tuple).getbyte(0) }
+      end
+
+      class LockOperations
+        def mkdir_p(path, mode:)
+          FileUtils.mkdir_p(path, mode: mode)
+        end
+
+        def lstat(path)
+          File.lstat(path)
+        end
+
+        def stat(handle)
+          IO.for_fd(handle.fileno, autoclose: false).stat
+        end
+
+        def flock(handle, operation, _shard_index)
+          handle.flock(operation)
+        end
+
+        def euid
+          Process.euid
+        end
+      end
+      private_constant :LockOperations
 
       class Error < StandardError
         attr_reader :kind, :reason
@@ -40,14 +73,15 @@ module Hive
         attr_reader :canonical_root, :root_identity, :script_identity,
                     :descriptor_alias
 
-        def initialize(handles:, canonical_root:, root_identity:,
-                       script_identity:, descriptor_alias:)
+        def initialize(handles:, admission:, script:, canonical_root:,
+                       root_identity:, script_identity:, descriptor_alias:)
           @handles = handles
+          @admission = admission
           @canonical_root = canonical_root.freeze
           @root_identity = root_identity.freeze
           @script_identity = script_identity.freeze
           @descriptor_alias = descriptor_alias.freeze
-          @script = handles.last
+          @script = script
           @closed = false
         end
 
@@ -71,17 +105,56 @@ module Hive
             nil
           end
           @handles.clear
+          @admission.close
           nil
         end
       end
 
+      class Admission
+        def initialize(control:, shards:, lock_operations:)
+          @control = control
+          @shards = shards
+          @lock_operations = lock_operations
+          @closed = false
+        end
+
+        def close
+          return if @closed
+
+          @closed = true
+          @shards.reverse_each do |index, handle|
+            begin
+              @lock_operations.flock(handle, File::LOCK_UN, index)
+            rescue NotImplementedError, StandardError
+              nil
+            end
+            begin
+              handle.close
+            rescue StandardError
+              nil
+            end
+          end
+          @shards.clear
+          @control.close
+        rescue StandardError
+          nil
+        end
+      end
+      private_constant :Admission
+
       def initialize(runs_root:, native: nil,
                      native_factory: Hive::ManagedDirectory.method(:build_native_at_adapter),
                      filesystem: File,
+                     control_root: Paths.replay_control_dir,
+                     shard_selector: DEFAULT_SHARD_SELECTOR,
+                     lock_operations: LockOperations.new,
                      descriptor_alias_roots: DEFAULT_DESCRIPTOR_ALIAS_ROOTS,
                      on_event: nil)
         @runs_root = File.expand_path(runs_root).freeze
         @filesystem = filesystem
+        @control_root = File.expand_path(control_root).freeze
+        @shard_selector = shard_selector
+        @lock_operations = lock_operations
         @descriptor_alias_roots = Array(descriptor_alias_roots).map do |root|
           File.expand_path(root).freeze
         end.freeze
@@ -93,9 +166,19 @@ module Hive
 
       def select(run_id:, scenario:)
         handles = []
+        admission = nil
         root, root_stat, canonical_root = pin_root
         handles << root
         emit(:root_pinned)
+
+        root_identity = identity(root_stat)
+        admission = acquire_admission(
+          root_identity: root_identity,
+          canonical_root: canonical_root,
+          run_id: run_id,
+          scenario: scenario
+        )
+        emit(:admission_acquired)
 
         components = [
           [ run_id, "run" ],
@@ -126,18 +209,209 @@ module Hive
 
         custody = Custody.new(
           handles: handles,
+          admission: admission,
+          script: script,
           canonical_root: canonical_root,
-          root_identity: identity(root_stat),
+          root_identity: root_identity,
           script_identity: script_identity,
           descriptor_alias: descriptor_alias
         )
         handles = nil
+        admission = nil
         custody
       ensure
         close_handles(handles) if handles
+        admission&.close
       end
 
       private
+
+      def acquire_admission(root_identity:, canonical_root:, run_id:, scenario:)
+        control = prepare_control_directory
+        shards = []
+        shard_indices(
+          root_identity: root_identity,
+          canonical_root: canonical_root,
+          run_id: run_id,
+          scenario: scenario
+        ).each do |index|
+          shard = open_lock_shard(control, index)
+          shards << [ index, shard ]
+          acquired = @lock_operations.flock(
+            shard,
+            File::LOCK_EX | File::LOCK_NB,
+            index
+          )
+          failure!("replay_busy", "replay_busy") unless acquired
+
+          validate_shard_binding!(shard, index)
+        end
+        validate_control_binding!(control)
+
+        admission = Admission.new(
+          control: control,
+          shards: shards,
+          lock_operations: @lock_operations
+        )
+        control = nil
+        shards = nil
+        admission
+      rescue Error
+        raise
+      rescue NotImplementedError, StandardError
+        failure!("preflight", "replay_lock_unavailable")
+      ensure
+        release_lock_shards(shards) if shards
+        close_handle(control)
+      end
+
+      def prepare_control_directory
+        @lock_operations.mkdir_p(
+          @control_root,
+          mode: CONTROL_DIRECTORY_MODE
+        )
+        before = @lock_operations.lstat(@control_root)
+        control = @native.open_absolute_directory(@control_root)
+        emit(:control_directory_opened)
+        opened = @lock_operations.stat(control)
+        after = @lock_operations.lstat(@control_root)
+        unless usable_control_directory?(before) &&
+               usable_control_directory?(opened) &&
+               usable_control_directory?(after) &&
+               same_binding?(before, opened) &&
+               same_binding?(opened, after)
+          failure!("preflight", "replay_lock_unavailable")
+        end
+        complete = true
+        control
+      rescue Error
+        raise
+      rescue NotImplementedError, StandardError
+        failure!("preflight", "replay_lock_unavailable")
+      ensure
+        close_handle(control) unless complete
+      end
+
+      def shard_indices(root_identity:, canonical_root:, run_id:, scenario:)
+        tuples = [
+          length_prefixed_tuple(
+            "configured-root-v1", @runs_root, run_id, scenario
+          ),
+          length_prefixed_tuple(
+            "canonical-root-v1", canonical_root, run_id, scenario
+          ),
+          length_prefixed_tuple(
+            "root-identity-v1",
+            root_identity.fetch(0),
+            root_identity.fetch(1),
+            run_id,
+            scenario
+          )
+        ].freeze
+        indices = Array(@shard_selector.call(tuples)).map { |index| Integer(index) }
+        unless indices.any? && indices.all? { |index| index.between?(0, SHARD_COUNT - 1) }
+          failure!("preflight", "replay_lock_unavailable")
+        end
+        indices.uniq.sort.freeze
+      rescue Error
+        raise
+      rescue StandardError
+        failure!("preflight", "replay_lock_unavailable")
+      end
+
+      def length_prefixed_tuple(*fields)
+        fields.map do |field|
+          value = field.to_s.b
+          [ value.bytesize ].pack("N") + value
+        end.join.b.freeze
+      end
+
+      def open_lock_shard(control, index)
+        name = shard_name(index)
+        begin
+          shard = @native.open_file(
+            control,
+            name,
+            File::RDWR | File::CREAT | File::EXCL | File::NONBLOCK,
+            mode: SHARD_MODE
+          )
+        rescue Errno::EEXIST
+          shard = @native.open_file(
+            control,
+            name,
+            File::RDWR | File::NONBLOCK
+          )
+        end
+        emit([ :lock_shard_opened, index ])
+        validate_shard_binding!(shard, index)
+        complete = true
+        shard
+      rescue Error
+        raise
+      rescue NotImplementedError, StandardError
+        failure!("preflight", "replay_lock_unavailable")
+      ensure
+        close_handle(shard) unless complete
+      end
+
+      def validate_control_binding!(control)
+        opened = @lock_operations.stat(control)
+        bound = @lock_operations.lstat(@control_root)
+        return if usable_control_directory?(opened) &&
+          usable_control_directory?(bound) &&
+          same_binding?(opened, bound)
+
+        failure!("preflight", "replay_lock_unavailable")
+      end
+
+      def validate_shard_binding!(shard, index)
+        opened = @lock_operations.stat(shard)
+        bound = @lock_operations.lstat(File.join(@control_root, shard_name(index)))
+        return if usable_lock_shard?(opened) && usable_lock_shard?(bound) &&
+          same_binding?(opened, bound)
+
+        failure!("preflight", "replay_lock_unavailable")
+      end
+
+      def usable_control_directory?(stat)
+        stat.directory? && !stat.symlink? &&
+          stat.uid == @lock_operations.euid &&
+          (stat.mode & 0o7777) == CONTROL_DIRECTORY_MODE &&
+          stat.nlink == 2
+      end
+
+      def usable_lock_shard?(stat)
+        stat.file? && !stat.symlink? &&
+          stat.uid == @lock_operations.euid &&
+          (stat.mode & 0o7777) == SHARD_MODE &&
+          stat.nlink == 1 && stat.size.zero?
+      end
+
+      def same_binding?(left, right)
+        left.dev == right.dev && left.ino == right.ino
+      end
+
+      def shard_name(index)
+        format("replay-%02x.lock", index)
+      end
+
+      def release_lock_shards(shards)
+        shards.reverse_each do |index, shard|
+          begin
+            @lock_operations.flock(shard, File::LOCK_UN, index)
+          rescue NotImplementedError, StandardError
+            nil
+          end
+          close_handle(shard)
+        end
+        shards.clear
+      end
+
+      def close_handle(handle)
+        handle&.close
+      rescue SystemCallError, IOError
+        nil
+      end
 
       def pin_root
         before = initial_root_stat

@@ -365,14 +365,16 @@ class E2EReplayPortabilityTest < Minitest::Test
 
       launcher = Hive::E2E.const_get(:ReplayLauncher).new
       command, spawn_options = launcher.send(:launch_command, custody)
-      assert_equal [ "/bin/bash", "bash" ], command.first
-      assert_equal [ "-p", "-c", 'exec -a repro.sh "$1"', "hive-replay" ], command[1...-1]
-      assert_equal "/dev/fd/9", command.last
+      native_launch_alias = custody.native_launch_alias
+      assert_equal Hive::E2E::Paths.replay_control_dir(
+        env: replay_env(runs_dir, state_home)
+      ), File.dirname(native_launch_alias)
+      expected = File.stat(script)
+      linked = File.stat(native_launch_alias)
+      assert_equal [ expected.dev, expected.ino ], [ linked.dev, linked.ino ]
+      assert_equal [ [ native_launch_alias, "repro.sh" ] ], command
       assert IO.for_fd(custody.executable_script_fd, autoclose: false).close_on_exec?
-      assert_equal(
-        { 9 => custody.executable_script_fd, close_others: true },
-        spawn_options
-      )
+      assert_equal({ close_others: true }, spawn_options)
 
       spawned_command = nil
       spawned_options = nil
@@ -395,6 +397,8 @@ class E2EReplayPortabilityTest < Minitest::Test
       end
       assert_equal 23, status.exitstatus, err
       assert_equal "argv0=repro.sh\n", out
+      custody.close
+      refute_path_exists native_launch_alias
     ensure
       custody&.close
     end

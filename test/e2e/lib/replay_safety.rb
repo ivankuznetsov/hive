@@ -71,11 +71,13 @@ module Hive
       # it after the supervised child reaches a terminal state.
       class Custody
         attr_reader :canonical_root, :root_identity, :script_identity,
-                    :descriptor_alias, :executable_descriptor_alias
+                    :descriptor_alias, :executable_descriptor_alias,
+                    :native_launch_alias
 
         def initialize(handles:, admission:, script:, canonical_root:,
                        root_identity:, script_identity:, descriptor_alias:,
-                       executable_script: nil, executable_descriptor_alias: nil)
+                       executable_script: nil, executable_descriptor_alias: nil,
+                       native_launch_alias: nil)
           @handles = handles
           @admission = admission
           @canonical_root = canonical_root.freeze
@@ -85,6 +87,7 @@ module Hive
           @script = script
           @executable_script = executable_script
           @executable_descriptor_alias = executable_descriptor_alias&.freeze
+          @native_launch_alias = native_launch_alias&.freeze
           @closed = false
         end
 
@@ -108,6 +111,11 @@ module Hive
           return if closed?
 
           @closed = true
+          begin
+            File.unlink(@native_launch_alias) if @native_launch_alias
+          rescue SystemCallError
+            nil
+          end
           @handles.reverse_each do |handle|
             handle.close
           rescue IOError, SystemCallError
@@ -178,6 +186,7 @@ module Hive
       def select(run_id:, scenario:)
         handles = []
         admission = nil
+        native_launch_alias = nil
         root, root_stat, canonical_root = pin_root
         handles << root
         emit(:root_pinned)
@@ -222,6 +231,14 @@ module Hive
           entries: held_entries,
           script_identity: script_identity
         )
+        native_launch_alias = create_native_launch_alias(
+          script: script,
+          run_id: run_id,
+          scenario: scenario,
+          canonical_root: canonical_root,
+          root_identity: root_identity,
+          script_identity: script_identity
+        )
         emit(:final_fence_passed)
         descriptor_alias = verified_descriptor_alias(script, script_identity)
 
@@ -234,12 +251,15 @@ module Hive
           script_identity: script_identity,
           descriptor_alias: descriptor_alias,
           executable_script: executable_script,
-          executable_descriptor_alias: executable_descriptor_alias
+          executable_descriptor_alias: executable_descriptor_alias,
+          native_launch_alias: native_launch_alias
         )
         handles = nil
         admission = nil
+        native_launch_alias = nil
         custody
       ensure
+        cleanup_native_launch_alias(native_launch_alias)
         close_handles(handles) if handles
         admission&.close
       end
@@ -720,6 +740,47 @@ module Hive
           end
         end
         failure!("preflight", "descriptor_exec_unavailable")
+      end
+
+      def create_native_launch_alias(script:, run_id:, scenario:, canonical_root:,
+                                     root_identity:, script_identity:)
+        return unless @platform.include?("darwin") &&
+          script.pread(4096, 0).include?("\0")
+
+        key = length_prefixed_tuple(
+          "native-launch-v1", @runs_root, canonical_root,
+          root_identity.fetch(0), root_identity.fetch(1), run_id, scenario
+        )
+        candidate = File.join(
+          @control_root,
+          "launch-#{Digest::SHA256.hexdigest(key)}"
+        )
+        cleanup_native_launch_alias(candidate)
+        source = File.join(
+          @runs_root, run_id, "scenarios", scenario, "repro.sh"
+        )
+        File.link(source, candidate)
+        linked = @filesystem.lstat(candidate)
+        failure!("unusable_repro", "repro_changed") unless
+          linked.file? && identity(linked) == script_identity
+        complete = true
+        candidate
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        failure!("unusable_repro", "repro_changed")
+      rescue Error
+        raise
+      rescue SystemCallError, IOError, ArgumentError, TypeError
+        failure!("preflight", "descriptor_exec_unavailable")
+      ensure
+        cleanup_native_launch_alias(candidate) unless complete
+      end
+
+      def cleanup_native_launch_alias(path)
+        File.unlink(path) if path
+      rescue Errno::ENOENT
+        nil
+      rescue SystemCallError
+        nil
       end
 
       def usable_script?(stat)

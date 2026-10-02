@@ -42,11 +42,13 @@ then left the handle close-on-exec, but Ruby closes such descriptors regardless
 of `close_others: false`, so the next hosted run again lost the alias before
 native image lookup. Making either a duplicate or the original handle
 inheritable still left native image lookup unable to execute the parent alias.
-Native launch now starts fixed `/bin/bash -p`, maps the pinned `O_EXEC` handle
-onto child descriptor 9 (or 8), and has that child immediately replace itself
-through the now-live alias with `argv[0]` set to `repro.sh`. It still has no
+A fixed Bash trampoline then proved the child mapping existed, but Darwin's
+kernel still rejected native `execve` through `/dev/fd/9`. Native launch now
+creates a verified hard link to the exact pinned inode in the owner-private
+replay control directory after the final fence and launches only that stable
+alias; scripts retain their readable descriptor launch. It still has no
 observed green hosted run URL and commit SHA. Local Linux evidence cannot
-establish Darwin `/dev/fd` behavior.
+establish Darwin launch behavior.
 Do not mark
 cross-platform replay qualification complete until that exact job and commit
 are observed green.

@@ -942,8 +942,8 @@ Replay descriptor custody is split into focused layers:
   inheritance, late public-script replacement, Linux alias mismatch, Darwin
   readable-alias opened-duplicate verification despite synthetic pathname
   metadata, Darwin's fixed `/dev/fd` mapping plus separate readable-script and
-  `O_EXEC` native-binary launch descriptors, the privileged fixed-shell
-  trampoline that execs only after child descriptor inheritance, missing
+  `O_EXEC` native-binary validation descriptors, the exact-inode private
+  hard-link used for native launch and removed with custody, missing
   executable-alias refusal, owner-class execute-bit loss, offset, and FD
   lifecycle behavior.
   The ordinary `e2e:lib_test` glob runs this on Linux.

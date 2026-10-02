@@ -86,7 +86,6 @@ module Hive
       # Keep inherited scripts clear of spawn's low process-control descriptors
       # and Bash's internal descriptor range above 9.
       INHERITED_DESCRIPTOR_FD = 9
-      NATIVE_DESCRIPTOR_TRAMPOLINE = 'exec -a repro.sh "$1"'.freeze
 
       class LaunchError < StandardError; end
       class SupervisionError < StandardError; end
@@ -153,19 +152,16 @@ module Hive
             { child_fd => script_fd, close_others: true }
           ]
         else
-          alias_path, script_fd, child_fd = inherited_descriptor(
-            executable_alias,
-            custody.executable_script_fd
-          )
-          # Darwin resolves a spawn target before applying child descriptor
-          # actions. Start a fixed shell first, then replace it with the pinned
-          # native image after the executable descriptor has been inherited.
+          launch_alias = custody.native_launch_alias
+          raise LaunchError unless launch_alias
+
+          # Darwin refuses native image lookup through /dev/fd even when the
+          # underlying handle was opened O_EXEC. ReplaySafety therefore creates
+          # a private hard-link alias for the exact pinned inode after the final
+          # binding fence.
           [
-            [
-              [ "/bin/bash", "bash" ], "-p", "-c",
-              NATIVE_DESCRIPTOR_TRAMPOLINE, "hive-replay", alias_path
-            ],
-            { child_fd => script_fd, close_others: true }
+            [ [ launch_alias, "repro.sh" ] ],
+            { close_others: true }
           ]
         end
       rescue SystemCallError, IOError, ArgumentError

@@ -96,9 +96,11 @@ the descendant chain. Every observed device/inode/type or required-mode
 mismatch rejects the attempt. This final binding fence is a logical decision,
 not an atomic namespace snapshot: a move-and-restore that presents the same
 held identities at the fence is the prior consistent state. Once the fence
-passes, later pathname replacement cannot redirect launch because replay uses
-only an identity-checked alias for the pinned script descriptor. It never falls
-back to the public runs-tree pathname.
+passes, replay creates any Darwin native launch alias and then publishes the
+decision event. Later pathname replacement cannot redirect launch because
+scripts use an identity-checked alias for the pinned descriptor and Darwin
+native binaries use a verified private hard link to the same inode. Replay
+never falls back to the public runs-tree pathname as a launch target.
 
 Linux launch uses `/proc/self/fd/<fd>` and macOS launch uses `/dev/fd/<fd>`.
 Linux requires the alias pathname to stat as the held script object. Darwin's
@@ -106,25 +108,25 @@ synthetic descriptor filesystem is instead verified by opening the alias, which
 duplicates the numbered descriptor, and requiring that duplicate's descriptor
 stat to match the held script. Darwin also holds a separately identity-checked
 `O_EXEC` descriptor: its `/dev/fd` implementation exposes execute permission
-only for descriptors opened in that mode. Native binaries launch through that
-executable alias after requiring the exact Darwin `/dev/fd/<held-fd>` mapping
-to exist; it does not reopen an execute-only descriptor through the synthetic
-filesystem. Launch-time execute-mode validation uses the held descriptor's
-`fstat` metadata, including the current process's owner/group permission class,
-rather than the synthetic alias pathname metadata. Because an
+only for descriptors opened in that mode. Launch-time execute-mode validation
+uses that held descriptor's `fstat` metadata, including the current process's
+owner/group permission class, rather than synthetic alias pathname metadata.
+Because an
 `O_EXEC` descriptor is not readable by a shebang interpreter, scripts launch
 through their readable alias after replay parses the pinned shebang; text
 without a shebang uses `/bin/sh`, matching Ruby's ENOEXEC fallback. The selected
 readable script descriptor is duplicated onto child descriptor 9 (or 8 when 9
 is the source), above spawn's process-control slots but below Bash's internal
-descriptor range. Native binaries use the same child-descriptor mapping for the
-held `O_EXEC` handle. Darwin resolves the initial spawn image before applying
-that mapping, so replay starts fixed `/bin/bash -p` as a non-configurable
-trampoline; after the mapping exists, its single static command replaces itself
-with the executable descriptor alias and sets `argv[0]` to `repro.sh`. Privileged
-mode prevents shell-startup environment hooks from running in the trampoline
-while preserving the original environment for the replay artifact. The artifact
-inherits only that selected descriptor. Other root, component, verification,
+descriptor range. Darwin's kernel refuses native image lookup through
+`/dev/fd` even for an inherited `O_EXEC` handle. Immediately after the final
+binding fence, replay therefore hard-links the public script name into its
+validated owner-private control directory and requires the link's
+device/inode/type identity to equal the pinned descriptor before publishing the
+fence event. The deterministic per-selection name is admission-serialized,
+replaces crash debris on retry, and is unlinked when custody closes. Native
+launch uses only that protected alias, retains `repro.sh` as `argv[0]`, and
+fails closed with `descriptor_exec_unavailable` when a hard link cannot be
+created, including across filesystems. Other root, component, verification,
 and admission handles stay close-on-exec and do not survive image replacement.
 A generated shebang
 script consequently observes the readable descriptor alias as `$0`; the native
@@ -178,7 +180,7 @@ continue to forbid `reason`. The stable replay outcomes are:
 | unsafe, unreadable, changed, or unusable selected entry | `unusable_repro` | 78 | `runs_root_symlink`, `runs_root_unusable`, `runs_root_changed`, `runs_root_missing`, `run_unusable`, `run_changed`, `scenarios_unusable`, `scenarios_changed`, `scenario_unusable`, `scenario_changed`, `repro_unreadable`, `repro_unusable`, or `repro_changed` |
 | admission shard is held, including a shard collision | `replay_busy` | 75 | `replay_busy` |
 | safe admission cannot be established | `preflight` | 78 | `replay_lock_unavailable` |
-| no identity-matching descriptor alias is available | `preflight` | 78 | `descriptor_exec_unavailable` |
+| no identity-matching descriptor alias or Darwin native hard-link alias is available | `preflight` | 78 | `descriptor_exec_unavailable` |
 | descriptor spawn fails before execution | `preflight` | 78 | `descriptor_exec_failed` |
 | terminal child state cannot be established | `error` | 1 | `replay_supervision_failed` |
 

@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-09-02
+updated: 2026-10-02
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
@@ -169,10 +169,11 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 `post_rebase_warnings` is always an array. Empty on clean success; populated when a successful rebase's post-step (e.g., `worktree.yml execute_base_head` rewrite) hit a non-fatal warning. The rebase itself still counts as `succeeded: true` — the warnings record exactly which downstream step failed.
 
 When this run first enters archived state, the final commit writes the current
-UTC `completed_at` clock in the same transaction. A legacy task that was
-already archived before the run keeps a missing clock unchanged; only the
-explicit [[commands/migrate]] command may discover and persist its historical
-completion time.
+UTC `completed_at` clock in the same transaction. The write is update-only and
+bound to the task observation held by the run: deletion or same-path replacement
+raises a stale-task failure before a completion commit can be attributed to it.
+A legacy task that was already archived before the run keeps a missing clock
+unchanged; Hive does not backfill its historical completion time automatically.
 
 ## next: hints (by marker)
 

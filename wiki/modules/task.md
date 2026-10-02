@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-10-02
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -25,11 +25,12 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
    managed configuration failures to `InvalidTaskPath` but never converts an
    unsupported project root key to exit 64.
    A managed task must match the workflow's selected source, manifest, and
-   configuration digests. Historical pins are not executable: Hive raises an
-   `InvalidTaskPath` instruction to run `hive migrate`, whose dedicated
-   migration boundary reads the old descriptor and moves/repins the task to
-   the selected semantic stage. Loading the selected immutable snapshot for
-   status, history, or task inspection does not resolve or compare its saved
+   configuration digests. Historical pins are not executable: Hive raises a
+   `ConfigError` that points to the current-format migration guide. Managed
+   workflow install/update owns the retained-task move and repin transaction;
+   there is no standalone `hive migrate` command. Loading the selected
+   immutable snapshot for status, history, or task inspection does not resolve
+   or compare its saved
    agent profile against the current process: a later agent rename, capability
    change, or compatible upgrade must not make a retained task unreadable.
    Launch-time context repeats the selection check and verifies the current
@@ -88,16 +89,39 @@ For stages 4 and later:
   `plan_review_required: true`; it is total over missing, malformed, or
   non-Hash YAML.
 - `read_for_admission(task_folder)` returns a result-bearing strict read. It distinguishes an absent legacy sidecar from unreadable YAML, a non-mapping document, and an invalid dependency reference; admission code must use this path rather than interpreting tolerant-read nil as “no dependency.”
-- `write(..., plan_review_required: nil)` preserves the ordinary identity and
+- `write(..., plan_review_required: nil)` is the explicit creation-capable
+  writer. It preserves the ordinary identity and
   workflow fields, accepts only literal `true` for the plan-review flag, and
   writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`. It has no second
   metadata mutex: supported mutations already hold the shared task lease;
-  identity creation and explicit legacy migration are bootstrap boundaries.
-- `plan_review_required?(task_folder)` strictly distinguishes migrated/new
-  pre-execute coding tasks from legacy execute tasks. Absence is the durable
-  compatibility shape; malformed values fail closed.
-- `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` only when the sidecar is absent. It refuses corrupt input.
-- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; explicit migration cannot sanitize dependency evidence by replacing a damaged mapping.
+  identity creation is the bootstrap boundary.
+- `observe(task_folder)` retains a process-local directory handle and its
+  device/inode together with stable metadata identity. Update callers validate
+  that observation under lifecycle custody. A same-path replacement is stale
+  even when it copies every metadata byte; an authorized managed-workflow move
+  can explicitly rebind the same observation.
+- `rewrite(...)` and the display-name/id setters are update-only. They return
+  an `UpdateResult` with `applied?` or `stale?`, never create a missing task
+  directory, preserve unrelated fields, and keep invalid metadata or real I/O
+  failures distinct from staleness. An absent sidecar inside the still-observed
+  directory remains a valid legacy update shape.
+- `write_completed_at_once(...)` uses the same observation boundary while
+  retaining its timestamp return value and first-writer-wins contract. A stale
+  task raises `StaleTask`; it cannot masquerade as a successful completion.
+- `restore(...)` remains creation-capable by default for explicit restoration.
+  Automatic rollback passes `create: false` plus the original observation and
+  receives an applied/stale result, so it neither recreates a dropped task nor
+  deletes or overwrites replacement metadata.
+- `plan_review_required?(task_folder)` strictly distinguishes new or manually
+  converted pre-execute coding tasks from legacy execute tasks. Absence is the
+  durable compatibility shape; malformed values fail closed.
+- `update_display_name(task_folder, name)` preserves the existing id, slug,
+  `depends_on`, and `workflow`, defaulting slug to
+  `File.basename(task_folder)` only when the sidecar is absent. It refuses
+  corrupt input.
+- `update_id(task_folder, id)` is a compatibility setter with no production
+  repair caller. It preserves slug, display name, `depends_on`, and `workflow`
+  and likewise refuses corrupt input.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns the installation-scoped
 `installations.next_task_id` SQLite column:
@@ -105,14 +129,18 @@ For stages 4 and later:
 - `next!` returns the current value and increments it in one immediate
   transaction, so competing processes cannot duplicate an id.
 - `next_or_nil` returns nil only when the typed runtime-control-plane mutation
-  is unavailable, for capture paths repairable by `hive migrate`.
+  is unavailable. Consumed ids are not reserved, reused, or rolled back by a
+  metadata repair path.
 - `peek` returns the stored next value, inferring a floor above numeric task subject IDs before first use.
 - `seed_at_least!(next_id)` advances the counter floor without moving it backwards.
 
 ## Tests
 
 - `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers. `test/integration/honeycomb_workflow_lifecycle_test.rb` proves a saved managed task remains readable after agent-profile drift while runtime preparation still rejects that actor.
-- `test/unit/task_meta_test.rb` — tolerant and strict sidecar reads, dependency validation, workflow selector preservation, corrupt-input mutation refusal, display-name updates, and id backfill.
+- `test/unit/task_meta_test.rb` — tolerant and strict sidecar reads, dependency
+  validation, workflow selector preservation, corrupt-input mutation refusal,
+  update-only stale results, replacement identity, guarded restoration,
+  completion clocks, and compatibility id updates.
 - `test/unit/task_counter_test.rb` — first/sequential ids, seeding, fail-soft
   unavailability, and real forked contention.
 

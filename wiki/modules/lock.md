@@ -3,7 +3,7 @@ title: Hive::Lock
 type: module
 source: lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/runtime_control_plane/task_lease_repository.rb, lib/hive/runtime_control_plane/process_guard.rb
 created: 2026-04-25
-updated: 2026-09-02
+updated: 2026-10-02
 tags: [lock, concurrency, sqlite, sequel, lease, fencing, flock, commit-lock, fork]
 ---
 
@@ -18,6 +18,14 @@ the short-lived per-project `.commit-lock` around hive-state Git mutations.
 Sequel transaction, runs the block, then clears only the row whose random
 `holder_id` still matches. There is no task-folder `.lock`, tempfile guard,
 filesystem compatibility reader, or runtime backfill.
+
+Update-only callers pass `create: false` and a `TaskMeta::Observation` captured
+before deferred work. Acquisition validates the observed directory and stable
+metadata identity before `subject_for(..., observe: true)` can register or
+refresh a subject, and validates it again while resolving the subject. Missing
+folders and same-path replacements therefore fail without creating a directory
+or leaving a stale registry observation. Identity creators retain the explicit
+`create: true` path.
 
 The row contains typed holder identity, monotonic `lease_version`, and a bounded JSON
 payload. The payload projects operation detail plus runner and optional agent
@@ -40,7 +48,8 @@ ownership. Folder moves remain safe because metadata id is authoritative and
 the subject's observed path is updated under that id. A missing moved source
 can still release by its unguessable holder nonce without recreating a folder.
 A recreated path with a different id never binds to the historical subject,
-and an id cannot move across registered projects. Custom state roots resolve
+and an observed same-id copy at the same path is rejected before registration.
+An id cannot move across registered projects. Custom state roots resolve
 against `projects.state_root_path`, not a hard-coded `.hive-state` basename.
 
 Supported task mutators take this shared lease. Multi-task destructive work

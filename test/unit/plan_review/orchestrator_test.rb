@@ -1781,6 +1781,56 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_review_requirement_rejects_a_task_deleted_before_update_custody
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.send(:ensure_review_requirement!)
+      end
+
+      assert_includes error.message, "stale task"
+      refute File.exist?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_rejects_deletion_after_metadata_read
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+      boundary_reached = false
+      original = Hive::TaskMeta.method(:read_for_update!)
+      delete_after_read = lambda do |folder|
+        result = original.call(folder)
+        boundary_reached = true
+        FileUtils.rm_rf(folder)
+        result
+      end
+
+      error = with_replaced_singleton_method(
+        Hive::TaskMeta, :read_for_update!, delete_after_read
+      ) do
+        assert_raises(Hive::PlanReview::InvalidRecord) do
+          runner.send(:ensure_review_requirement!)
+        end
+      end
+
+      assert boundary_reached, "metadata-read boundary must be exercised"
+      assert_includes error.message, "stale task"
+      refute File.exist?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
   def test_stale_review_requirement_rewrite_fails_closed
     with_task(standard_plan) do |task, cfg|
       runner = orchestrator(task, cfg, adapter: success_adapter)

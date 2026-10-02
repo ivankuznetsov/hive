@@ -206,6 +206,114 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
     end
   end
 
+  def test_deletion_before_update_custody_aborts_without_recreating_the_task
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old: old, current: current)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      boundary_reached = false
+      committed = false
+      original = Hive::Lock.method(:acquire_task_lock)
+      delete_before_lock = lambda do |folder, **kwargs|
+        boundary_reached = true
+        FileUtils.rm_rf(folder)
+        original.call(folder, **kwargs)
+      end
+
+      with_replaced_singleton_method(Hive::Lock, :acquire_task_lock, delete_before_lock) do
+        assert_raises(Hive::TaskMeta::StaleTask) do
+          migrator(dir, store).call { committed = true }
+        end
+      end
+
+      assert boundary_reached, "pre-custody boundary must be exercised"
+      refute committed
+      refute File.exist?(source)
+      refute File.exist?(destination)
+      assert_empty store.cleaned
+    end
+  end
+
+  def test_deletion_after_pin_metadata_read_aborts_without_recreating_the_task
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old: old, current: current)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      boundary_reached = false
+      committed = false
+      original = Hive::TaskMeta.method(:read_for_update!)
+      delete_after_read = lambda do |folder|
+        result = original.call(folder)
+        boundary_reached = true
+        FileUtils.rm_rf(folder)
+        result
+      end
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :read_for_update!, delete_after_read) do
+          assert_raises(Hive::TaskMeta::StaleTask) do
+            migrator(dir, store).call { committed = true }
+          end
+        end
+      end
+
+      assert boundary_reached, "metadata-read boundary must be exercised"
+      refute committed
+      refute File.exist?(source)
+      refute File.exist?(destination)
+      assert_includes err, "rollback skipped stale task"
+      assert_empty store.cleaned
+    end
+  end
+
+  def test_replacement_before_pin_write_is_not_mutated_or_rolled_back
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old: old, current: current)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      boundary_reached = false
+      committed = false
+      original = Hive::TaskMeta.method(:rewrite)
+      replace_before_write = lambda do |folder, attrs, **kwargs|
+        files = Dir.children(folder).filter_map do |name|
+          candidate = File.join(folder, name)
+          [ name, File.binread(candidate) ] if File.file?(candidate)
+        end.to_h
+        FileUtils.rm_rf(folder)
+        FileUtils.mkdir_p(folder)
+        files.each { |name, bytes| File.binwrite(File.join(folder, name), bytes) }
+        File.write(File.join(folder, "replacement.txt"), "untouched\n")
+        boundary_reached = true
+        original.call(folder, attrs, **kwargs)
+      end
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, replace_before_write) do
+          assert_raises(Hive::TaskMeta::StaleTask) do
+            migrator(dir, store).call { committed = true }
+          end
+        end
+      end
+
+      assert boundary_reached, "replacement boundary must be exercised"
+      refute committed
+      refute File.exist?(source)
+      assert File.directory?(destination)
+      assert_equal old_pin, Hive::TaskMeta.read(destination).slice(
+        :workflow_commit, :workflow_manifest_digest, :workflow_configuration_digest
+      )
+      assert_equal "untouched\n", File.read(File.join(destination, "replacement.txt"))
+      assert_includes err, "rollback skipped stale task"
+      assert_empty store.cleaned
+    end
+  end
+
   def test_scoped_migration_ignores_incomplete_provenance_owned_by_another_workflow
     with_tmp_dir do |dir|
       current = workflow("review" => 6)

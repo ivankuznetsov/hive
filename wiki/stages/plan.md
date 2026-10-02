@@ -3,7 +3,7 @@ title: 3-plan stage
 type: stage
 source: lib/hive/stages/plan.rb, templates/plan_prompt.md.erb
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-10-02
 tags: [stage, plan, llm-wiki, ce-plan, critique, dependencies]
 ---
 
@@ -57,6 +57,13 @@ second scheduling edge: it may be absent even when metadata has a dependency,
 but when present it must exactly match metadata after normalization. A
 plan-only, mismatched, or malformed declaration becomes an admission error at
 status/run/forward-approve. Hive does not inspect plan prose for ordering.
+
+When a complete plan declares a dependency and metadata has none, the plan
+stage attempts the optional adoption through the task observation captured
+before the planner ran. A missing task, same-path replacement, or deletion
+between metadata read and persistence produces a concise stale-task diagnostic
+and leaves dependency admission active. Metadata corruption and write failures
+use a distinct diagnostic; unexpected programming failures still propagate.
 
 If a daemon stop or killed agent leaves a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` shows the plan agent started, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. A freshly promoted plan folder with no `plan.md` and no plan-run log still remains `Needs your input` because it is valid and runnable. `PLAN_MISSING_OUTPUT` is a synthetic markerless error, so recovery is a direct rerun: `hive plan ... --from 3-plan`; there is no `ERROR` marker to clear.
 

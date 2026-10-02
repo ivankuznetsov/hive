@@ -181,6 +181,54 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_generation_does_not_recreate_a_task_deleted_before_update_custody
+    with_generator do |gen, task|
+      committed = false
+      gen.define_singleton_method(:generate_name) do
+        FileUtils.rm_rf(task.folder)
+        "A Stale Name"
+      end
+      gen.define_singleton_method(:commit_name) { committed = true }
+
+      result = nil
+      _out, err = capture_io { result = gen.call }
+
+      assert_nil result
+      refute committed
+      refute File.exist?(task.folder)
+      assert_includes err, "stale task"
+    end
+  end
+
+  def test_generation_does_not_recreate_a_task_deleted_after_metadata_read
+    with_generator do |gen, task|
+      committed = false
+      boundary_reached = false
+      gen.define_singleton_method(:generate_name) { "A Stale Name" }
+      gen.define_singleton_method(:commit_name) { committed = true }
+      original = Hive::TaskMeta.method(:read_for_update!)
+      delete_after_read = lambda do |folder|
+        result = original.call(folder)
+        boundary_reached = true
+        FileUtils.rm_rf(folder)
+        result
+      end
+
+      result = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :read_for_update!, delete_after_read) do
+          result = gen.call
+        end
+      end
+
+      assert boundary_reached, "metadata-read boundary must be exercised"
+      assert_nil result
+      refute committed
+      refute File.exist?(task.folder)
+      assert_includes err, "stale task"
+    end
+  end
+
   def test_metadata_persistence_failure_is_reported_separately
     with_generator(commit: false) do |gen|
       gen.define_singleton_method(:generate_name) { "A Readable Name" }

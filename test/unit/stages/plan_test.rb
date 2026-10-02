@@ -101,6 +101,79 @@ class HiveStagesPlanTest < Minitest::Test
     end
   end
 
+  def test_dependency_adoption_does_not_recreate_a_task_deleted_before_update
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      observation = Hive::TaskMeta.observe(dir)
+      FileUtils.rm_rf(dir)
+
+      _out, err = capture_io do
+        assert_nil Hive::Stages::Plan.adopt_plan_dependency!(
+          task, Marker.new(:complete), observation: observation
+        )
+      end
+
+      refute File.exist?(dir)
+      assert_includes err, "stale task"
+    ensure
+      observation&.close
+      FileUtils.mkdir_p(dir) if dir && !File.exist?(dir)
+    end
+  end
+
+  def test_dependency_adoption_does_not_recreate_a_task_deleted_after_metadata_read
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      observation = Hive::TaskMeta.observe(dir)
+      boundary_reached = false
+      original = Hive::TaskMeta.method(:read_for_update!)
+      delete_after_read = lambda do |folder|
+        result = original.call(folder)
+        boundary_reached = true
+        FileUtils.rm_rf(folder)
+        result
+      end
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :read_for_update!, delete_after_read) do
+          assert_nil Hive::Stages::Plan.adopt_plan_dependency!(
+            task, Marker.new(:complete), observation: observation
+          )
+        end
+      end
+
+      assert boundary_reached, "metadata-read boundary must be exercised"
+      refute File.exist?(dir)
+      assert_includes err, "stale task"
+    ensure
+      observation&.close
+      FileUtils.mkdir_p(dir) if dir && !File.exist?(dir)
+    end
+  end
+
+  def test_dependency_adoption_does_not_mutate_a_same_path_replacement
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      observation = Hive::TaskMeta.observe(dir)
+      copied_meta = File.binread(Hive::TaskMeta.path(dir))
+      copied_plan = File.binread(File.join(dir, "plan.md"))
+      FileUtils.rm_rf(dir)
+      FileUtils.mkdir_p(dir)
+      File.binwrite(Hive::TaskMeta.path(dir), copied_meta)
+      File.binwrite(File.join(dir, "plan.md"), copied_plan)
+      File.write(File.join(dir, "replacement.txt"), "untouched\n")
+
+      _out, err = capture_io do
+        assert_nil Hive::Stages::Plan.adopt_plan_dependency!(
+          task, Marker.new(:complete), observation: observation
+        )
+      end
+
+      assert_nil Hive::TaskMeta.read(dir)[:depends_on]
+      assert_equal "untouched\n", File.read(File.join(dir, "replacement.txt"))
+      assert_includes err, "stale task"
+    ensure
+      observation&.close
+    end
+  end
+
   def test_unexpected_dependency_adoption_failure_is_not_swallowed
     with_planned_task(plan_doc("rails-task")) do |task, _dir|
       failing = ->(*, **) { raise RuntimeError, "programmer error" }

@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-09-09
+updated: 2026-10-02
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -53,6 +53,12 @@ without that requirement and without a review root to receive a private
 Hive does not automatically add the requirement to historical tasks. An offline
 conversion must preserve metadata and rerun required review rather than invent
 approval evidence.
+
+Persisting `plan_review_required: true` is a mandatory, identity-fenced update.
+The orchestrator validates the task observation under the existing
+project-then-task lock order even when the bit is already present. Deletion, a
+same-path copied replacement, or an unapplied rewrite raises `InvalidRecord`;
+stale metadata can never satisfy or bypass the review gate.
 
 ## Deterministic policy
 

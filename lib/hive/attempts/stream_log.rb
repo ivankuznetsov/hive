@@ -68,7 +68,6 @@ module Hive
           size = @io.stat.size
           @sequence = strict_frames(size).last&.sequence.to_i
           @observed_size = size
-          @snapshot_valid = true
         end
       rescue Errno::ELOOP
         cleanup_failed_initialization
@@ -90,7 +89,7 @@ module Hive
               size = @io.stat.size
               sealed = seal_torn_tail(size)
               size = @io.stat.size if sealed
-              reconcile_sequence(size) if sealed || !@snapshot_valid || size != @observed_size
+              reconcile_sequence(size) if sealed || @observed_size.nil? || size != @observed_size
 
               next_sequence = @sequence + 1
               frame = JSON.generate(
@@ -103,11 +102,10 @@ module Hive
               @io.flush
               @sequence = next_sequence
               @observed_size = @io.stat.size
-              @snapshot_valid = true
               next_sequence
             end
           rescue StandardError
-            @snapshot_valid = false
+            @observed_size = nil
             raise
           end
         end
@@ -199,7 +197,6 @@ module Hive
       def reconcile_sequence(size)
         @sequence = strict_frames(size).last&.sequence.to_i
         @observed_size = size
-        @snapshot_valid = true
       end
 
       def strict_frames(size)

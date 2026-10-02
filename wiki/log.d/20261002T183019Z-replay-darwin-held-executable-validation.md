@@ -9,3 +9,5 @@
   synthetic pathname metadata.
 - Native-adapter tests directly cover executable open success and cleanup on
   missing or invalid components. A green hosted macOS run remains outstanding.
+- Portability tests reject a missing fixed Darwin executable alias and prevent
+  launch from querying synthetic pathname metadata.

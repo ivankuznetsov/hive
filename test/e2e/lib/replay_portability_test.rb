@@ -46,6 +46,14 @@ class E2EReplayPortabilityTest < Minitest::Test
     end
   end
 
+  class MissingExecutableAliasFilesystem < PathStatMismatchFilesystem
+    def lstat(path)
+      raise Errno::ENOENT, path if path.match?(%r{\A/dev/fd/\d+\z})
+
+      super
+    end
+  end
+
   class DarwinExecutableNative
     def initialize
       @delegate = Hive::ManagedDirectory.build_native_at_adapter
@@ -238,6 +246,28 @@ class E2EReplayPortabilityTest < Minitest::Test
             env: replay_env(runs_dir, state_home)
           ),
           descriptor_alias_roots: []
+        ).select(run_id: "run-1", scenario: "scenario-1")
+      end
+
+      assert_equal "preflight", error.error_kind
+      assert_equal "descriptor_exec_unavailable", error.reason
+    end
+  end
+
+  def test_missing_darwin_executable_descriptor_alias_fails_closed
+    Dir.mktmpdir("replay-portability") do |tmp|
+      runs_dir, state_home, scenario_dir = replay_layout(tmp)
+      write_marker_script(File.join(scenario_dir, "repro.sh"), File.join(tmp, "marker"))
+
+      error = assert_raises(Hive::E2E::ReplaySafety::Error) do
+        Hive::E2E::ReplaySafety.new(
+          runs_root: runs_dir,
+          control_root: Hive::E2E::Paths.replay_control_dir(
+            env: replay_env(runs_dir, state_home)
+          ),
+          filesystem: MissingExecutableAliasFilesystem.new,
+          native: DarwinExecutableNative.new,
+          platform: "arm64-darwin"
         ).select(run_id: "run-1", scenario: "scenario-1")
       end
 
@@ -457,7 +487,9 @@ class E2EReplayPortabilityTest < Minitest::Test
     replacement = lambda do |path|
       flunk "descriptor launch queried synthetic path metadata: #{path}"
     end
-    with_replaced_singleton_method(File, :executable?, replacement, &block)
+    with_replaced_singleton_method(File, :executable?, replacement) do
+      with_replaced_singleton_method(File, :stat, replacement, &block)
+    end
   end
 
   def capture_subprocess_io(env)

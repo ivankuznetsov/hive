@@ -252,10 +252,9 @@ via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
 The immediate SQLite transaction makes read-plus-increment atomic across
 processes; there is no counter YAML or counter lock file. `peek` returns the
 stored next value (or infers a floor above numeric task subject IDs), and `seed_at_least!`
-advances without moving backwards. Capture paths use `next_or_nil` so a typed
-runtime-control-plane outage can preserve an already-created task with a nil id
-for explicit migration. `hive migrate` strictly seeds above existing metadata
-ids before assigning missing ones.
+advances without moving backwards. Capture paths use strict `next!` allocation:
+a runtime-control-plane failure aborts and rolls back the candidate instead of
+publishing an id-less task that durable attempt admission cannot accept.
 
 ## Slug grammar
 

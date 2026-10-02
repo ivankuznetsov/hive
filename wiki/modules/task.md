@@ -128,9 +128,8 @@ For stages 4 and later:
 
 - `next!` returns the current value and increments it in one immediate
   transaction, so competing processes cannot duplicate an id.
-- `next_or_nil` returns nil only when the typed runtime-control-plane mutation
-  is unavailable. Consumed ids are not reserved, reused, or rolled back by a
-  metadata repair path.
+- Current-format task capture calls `next!` strictly. Allocation failure rolls
+  back the uncommitted candidate; consumed ids are not reused or rolled back.
 - `peek` returns the stored next value, inferring a floor above numeric task subject IDs before first use.
 - `seed_at_least!(next_id)` advances the counter floor without moving it backwards.
 
@@ -141,8 +140,8 @@ For stages 4 and later:
   validation, workflow selector preservation, corrupt-input mutation refusal,
   update-only stale results, replacement identity, guarded restoration,
   completion clocks, and compatibility id updates.
-- `test/unit/task_counter_test.rb` — first/sequential ids, seeding, fail-soft
-  unavailability, and real forked contention.
+- `test/unit/task_counter_test.rb` — first/sequential ids, seeding, strict
+  allocation, and real forked contention.
 
 ## Backlinks
 

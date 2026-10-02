@@ -340,7 +340,7 @@ module Hive
         end
         copy_attachments!(task_dir)
         validate_stable_authored_workflow!(workflow_info, hive_state)
-        id = Hive::TaskCounter.next_or_nil
+        id = Hive::TaskCounter.next!
         metadata = write_task_meta(
           task_dir, id: id, slug: slug, depends_on: depends_on,
           base_branch: base_branch, workflow: workflow,

@@ -106,6 +106,23 @@ class TaskCaptureTest < Minitest::Test
     end
   end
 
+  def test_counter_failure_rolls_back_the_uncommitted_candidate
+    with_initialized_project do |project_root|
+      unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+        "database busy", code: :database_busy
+      )
+      with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise unavailable }) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+          build_capture(project_root).call
+        end
+      end
+
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "patrol-fix-task")
+      )
+    end
+  end
+
   def test_managed_selection_drift_is_rejected
     with_tmp_dir do |dir|
       managed = {

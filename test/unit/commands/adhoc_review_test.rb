@@ -258,10 +258,7 @@ class AdhocReviewCommandTest < Minitest::Test
     end
   end
 
-  def test_enqueue_tolerates_task_counter_unavailability_and_proceeds_with_null_id
-    # A typed control-plane failure from TaskCounter.next! must NOT discard
-    # the completed fetch + worktree —
-    # proceed with id: nil (the daemon backfills a real id later).
+  def test_enqueue_rolls_back_when_task_id_allocation_is_unavailable
     with_registered_project do |_repo, hive_state, _worktree_root|
       pr_metadata = metadata
       with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(_number, **_kwargs) { pr_metadata }) do
@@ -273,12 +270,12 @@ class AdhocReviewCommandTest < Minitest::Test
             "database busy", code: :database_busy
           )
           with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise unavailable }) do
-            result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
+            assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+              Hive::Commands::AdhocReview.new(pr: "197").enqueue
+            end
 
-            assert_equal "adhoc-review-pr-197", result.fetch(:slug)
             folder = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")
-            assert_nil Hive::TaskMeta.read(folder)[:id],
-                       "lock contention must fall back to id: nil, not discard the completed task"
+            refute Dir.exist?(folder)
           end
         end
       end

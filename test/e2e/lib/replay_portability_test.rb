@@ -12,6 +12,25 @@ unless Hive::E2E.const_defined?(:ReplayLauncher, false)
 end
 
 class E2EReplayPortabilityTest < Minitest::Test
+  AliasStat = Data.define(:dev, :ino, :mode)
+
+  class AliasMismatchFilesystem
+    def lstat(path)
+      File.lstat(path)
+    end
+
+    def realpath(path)
+      File.realpath(path)
+    end
+
+    def stat(path)
+      stat = File.stat(path)
+      return stat unless path.match?(%r{\A/(?:proc/self|dev)/fd/\d+\z})
+
+      AliasStat.new(dev: stat.dev, ino: stat.ino + 1, mode: stat.mode)
+    end
+  end
+
   def test_generated_shebang_script_launches_from_its_inherited_descriptor
     Dir.mktmpdir("replay-portability") do |tmp|
       runs_dir, state_home, scenario_dir = replay_layout(tmp)
@@ -190,6 +209,26 @@ class E2EReplayPortabilityTest < Minitest::Test
     end
   end
 
+  def test_identity_mismatched_descriptor_alias_fails_closed
+    Dir.mktmpdir("replay-portability") do |tmp|
+      runs_dir, state_home, scenario_dir = replay_layout(tmp)
+      write_marker_script(File.join(scenario_dir, "repro.sh"), File.join(tmp, "marker"))
+
+      error = assert_raises(Hive::E2E::ReplaySafety::Error) do
+        Hive::E2E::ReplaySafety.new(
+          runs_root: runs_dir,
+          control_root: Hive::E2E::Paths.replay_control_dir(
+            env: replay_env(runs_dir, state_home)
+          ),
+          filesystem: AliasMismatchFilesystem.new
+        ).select(run_id: "run-1", scenario: "scenario-1")
+      end
+
+      assert_equal "preflight", error.error_kind
+      assert_equal "descriptor_exec_unavailable", error.reason
+    end
+  end
+
   def test_execute_bit_loss_after_fence_is_a_descriptor_launch_failure_and_retry_is_clean
     Dir.mktmpdir("replay-portability") do |tmp|
       runs_dir, state_home, scenario_dir = replay_layout(tmp)
@@ -244,6 +283,7 @@ class E2EReplayPortabilityTest < Minitest::Test
         end
       )
       custody = safety.select(run_id: "run-1", scenario: "scenario-1")
+      assert_equal 0, IO.for_fd(custody.script_fd, autoclose: false).pos
 
       status = Hive::E2E.const_get(:ReplayLauncher).new.run(custody)
 

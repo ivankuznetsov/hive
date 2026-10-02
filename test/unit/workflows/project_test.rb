@@ -519,6 +519,161 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_active_workflow_blocks_serialize_different_roots_for_the_full_reader_lifetime
+    with_tmp_dir do |root_a|
+      with_tmp_dir do |root_b|
+        write_project_workflow(root_a, "flow-a", stage_name: "alpha")
+        write_project_workflow(root_b, "flow-b", stage_name: "beta")
+        entered_a = Queue.new
+        attempted_b = Queue.new
+        entered_b = Queue.new
+        release_a = Queue.new
+
+        reader_a = Thread.new do
+          Hive::Workflows::Project.with_active_workflows(root_a) do |registry, stages|
+            entered_a << true
+            release_a.pop
+            [ registry.ids, stages ]
+          end
+        end
+        entered_a.pop
+        reader_b = Thread.new do
+          attempted_b << true
+          Hive::Workflows::Project.with_active_workflows(root_b) do |registry, stages|
+            entered_b << true
+            [ registry.ids, stages ]
+          end
+        end
+        attempted_b.pop
+
+        assert_nil reader_b.join(0.1),
+                   "root B must not enter while root A's reader block is active"
+        assert entered_b.empty?
+        release_a << true
+        assert reader_a.join(2), "root A reader did not finish"
+        assert reader_b.join(2), "root B reader did not finish"
+
+        ids_a, stages_a = reader_a.value
+        ids_b, stages_b = reader_b.value
+        assert_includes ids_a, :"flow-a"
+        refute_includes ids_a, :"flow-b"
+        assert_includes stages_a, "alpha"
+        refute_includes stages_a, "beta"
+        assert_includes ids_b, :"flow-b"
+        refute_includes ids_b, :"flow-a"
+        assert_includes stages_b, "beta"
+        refute_includes stages_b, "alpha"
+      ensure
+        release_a << true if release_a&.empty?
+        reader_a&.kill if reader_a&.alive?
+        reader_b&.kill if reader_b&.alive?
+      end
+    end
+  end
+
+  def test_consumer_exception_releases_the_operation_for_another_root
+    with_tmp_dir do |root_a|
+      with_tmp_dir do |root_b|
+        write_project_workflow(root_a, "flow-a", stage_name: "alpha")
+        write_project_workflow(root_b, "flow-b", stage_name: "beta")
+
+        error = assert_raises(RuntimeError) do
+          Hive::Workflows::Project.with_active_workflows(root_a) { raise "consumer failed" }
+        end
+        assert_equal "consumer failed", error.message
+
+        reader_b = Thread.new do
+          Hive::Workflows::Project.with_active_workflows(root_b) do |registry, stages|
+            [ registry.ids, stages ]
+          end
+        end
+        assert reader_b.join(2), "root B remained blocked after root A's consumer raised"
+        ids, stages = reader_b.value
+        assert_includes ids, :"flow-b"
+        assert_includes stages, "beta"
+      ensure
+        reader_b&.kill if reader_b&.alive?
+      end
+    end
+  end
+
+  def test_outer_activation_reloads_descriptor_edits_deletions_and_empty_directory_switches
+    with_tmp_dir do |project_root|
+      descriptor_path = write_project_workflow(project_root, "mutable-flow", stage_name: "alpha")
+
+      first_names = Hive::Workflows::Project.with_active_workflows(project_root) do |registry, stages|
+        [ registry.ids, stages ]
+      end
+      assert_includes first_names.first, :"mutable-flow"
+      assert_includes first_names.last, "alpha"
+
+      write_project_workflow(project_root, "mutable-flow", stage_name: "bravo")
+      edited_names = Hive::Workflows::Project.with_active_workflows(project_root) do |registry, stages|
+        [ registry.ids, stages ]
+      end
+      assert_includes edited_names.first, :"mutable-flow"
+      assert_includes edited_names.last, "bravo"
+      refute_includes edited_names.last, "alpha"
+
+      File.delete(descriptor_path)
+      deleted_names = Hive::Workflows::Project.with_active_workflows(project_root) do |registry, stages|
+        [ registry.ids, stages ]
+      end
+      refute_includes deleted_names.first, :"mutable-flow"
+      refute_includes deleted_names.last, "bravo"
+
+      state_a = File.join(project_root, ".empty-a")
+      state_b = File.join(project_root, ".empty-b")
+      FileUtils.mkdir_p(File.join(state_a, "workflows"))
+      FileUtils.mkdir_p(File.join(state_b, "workflows"))
+      config_path = File.join(project_root, ".hive-state", "config.yml")
+      loaded_dirs = []
+      original = Hive::Workflows::Loader.method(:load_dir)
+
+      with_replaced_singleton_method(Hive::Workflows::Loader, :load_dir, lambda { |dir|
+        loaded_dirs << dir
+        original.call(dir)
+      }) do
+        File.write(config_path, { "hive_state_path" => ".empty-a" }.to_yaml)
+        Hive::Workflows::Project.with_active_workflows(project_root) { nil }
+        File.write(config_path, { "hive_state_path" => ".empty-b" }.to_yaml)
+        Hive::Workflows::Project.with_active_workflows(project_root) { nil }
+      end
+
+      assert_equal [ File.join(state_a, "workflows"), File.join(state_b, "workflows") ],
+                   loaded_dirs.last(2)
+    end
+  end
+
+  def test_rejected_collision_keeps_siblings_and_becomes_accepted_after_repair
+    with_tmp_dir do |project_root|
+      rejected_path = write_project_workflow(project_root, "coding", stage_name: "collision-only")
+      write_project_workflow(project_root, "sibling-flow", stage_name: "sibling")
+
+      _out, warning = capture_io do
+        Hive::Workflows::Project.with_active_workflows(project_root) do |registry, stages|
+          assert_equal :coding, registry.fetch(:coding).id
+          assert_includes registry.ids, :"sibling-flow"
+          assert_includes stages, "sibling"
+          refute_includes stages, "collision-only"
+        end
+      end
+      assert_includes warning, "collides with registered workflow :coding"
+
+      repaired_path = File.join(File.dirname(rejected_path), "repaired-flow.yml")
+      repaired = File.read(rejected_path).sub("id: coding\n", "id: repaired-flow\n")
+      File.write(rejected_path, repaired)
+      File.rename(rejected_path, repaired_path)
+
+      Hive::Workflows::Project.with_active_workflows(project_root) do |registry, stages|
+        assert_includes registry.ids, :"sibling-flow"
+        assert_includes registry.ids, :"repaired-flow"
+        assert_includes stages, "sibling"
+        assert_includes stages, "collision-only"
+      end
+    end
+  end
+
   # The collision/parse skip warning is deduped per source_path: only the parse
   # result is cached, so register_descriptor re-runs on every load! that swaps
   # @active_root — without dedup a multi-project daemon alternating roots would

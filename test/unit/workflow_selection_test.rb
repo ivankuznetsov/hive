@@ -108,6 +108,66 @@ class WorkflowSelectionTest < Minitest::Test
     assert_equal [ true ], lock_states
   end
 
+  def test_project_valid_names_keeps_one_root_active_during_a_competing_switch
+    with_tmp_dir do |root_a|
+      with_tmp_dir do |root_b|
+        write_project_workflow(root_a, "flow-a")
+        write_project_workflow(root_b, "flow-b")
+        ids_entered = Queue.new
+        release_ids = Queue.new
+        start_reader = Queue.new
+        original = Hive::Workflows::Registry.method(:ids)
+        reader = nil
+        switcher = nil
+
+        names = with_replaced_singleton_method(
+          Hive::Workflows::Registry, :ids, lambda {
+            if Thread.current == reader
+              ids_entered << true
+              release_ids.pop
+            end
+            original.call
+          }
+        ) do
+          reader = Thread.new do
+            start_reader.pop
+            Hive::WorkflowSelection.valid_names(project_root: root_a)
+          end
+          start_reader << true
+          ids_entered.pop
+          switcher = Thread.new do
+            Hive::Workflows::Project.with_active_workflows(root_b) { nil }
+          end
+
+          assert_nil switcher.join(0.1),
+                     "root B must not replace the overlay while valid_names reads root A"
+          release_ids << true
+          assert reader.join(2), "root A valid_names reader did not finish"
+          assert switcher.join(2), "root B activation did not finish"
+          reader.value
+        ensure
+          release_ids << true if release_ids.empty?
+          reader&.kill if reader&.alive?
+          switcher&.kill if switcher&.alive?
+        end
+
+        assert_includes names, "flow-a"
+        refute_includes names, "flow-b"
+        assert_includes Hive::Workflows::Registry.ids, :"flow-b",
+                        "an escaped live read observes the later root B overlay"
+        refute_includes Hive::Workflows::Registry.ids, :"flow-a"
+
+        error = assert_raises(Hive::Workflows::UnknownWorkflow) do
+          Hive::WorkflowSelection.fetch!("missing", project_root: root_a)
+        end
+        assert_includes error.valid, "flow-a"
+        refute_includes error.valid, "flow-b"
+        assert_includes error.message, "flow-a"
+        refute_includes error.message, "flow-b"
+      end
+    end
+  end
+
   private
 
   def write_project_workflow(project_root, id)

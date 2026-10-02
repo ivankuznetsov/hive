@@ -15,6 +15,7 @@ class E2EReplayPortabilityTest < Minitest::Test
   include HiveTestHelper
 
   AliasStat = Data.define(:dev, :ino, :mode)
+  AliasHandle = Data.define(:stat)
 
   class PathStatMismatchFilesystem
     def lstat(path)
@@ -41,7 +42,8 @@ class E2EReplayPortabilityTest < Minitest::Test
     def open(path, flags)
       File.open(path, flags) do |file|
         stat = file.stat
-        yield AliasStat.new(dev: stat.dev, ino: stat.ino + 1, mode: stat.mode)
+        mismatch = AliasStat.new(dev: stat.dev, ino: stat.ino + 1, mode: stat.mode)
+        yield AliasHandle.new(stat: mismatch)
       end
     end
   end
@@ -73,6 +75,32 @@ class E2EReplayPortabilityTest < Minitest::Test
 
     def respond_to_missing?(name, include_private = false)
       @delegate.respond_to?(name, include_private) || super
+    end
+  end
+
+  def test_launcher_maps_the_pinned_descriptor_to_a_distinct_child_fd
+    launcher = Hive::E2E.const_get(:ReplayLauncher).new
+
+    [ [ 12, 3 ], [ 3, 4 ] ].each do |source_fd, child_fd|
+      custody = Struct.new(
+        :descriptor_alias,
+        :script_fd,
+        :executable_descriptor_alias,
+        keyword_init: true
+      ).new(
+        descriptor_alias: "/dev/fd/#{source_fd}",
+        script_fd: source_fd,
+        executable_descriptor_alias: nil
+      )
+      arguments = nil
+
+      replacement = ->(*values) { arguments = values; 123 }
+      with_replaced_singleton_method(Process, :spawn, replacement) do
+        assert_equal 123, launcher.send(:spawn_child, custody)
+      end
+
+      assert_equal [ "/dev/fd/#{child_fd}", "repro.sh" ], arguments.first
+      assert_equal({ child_fd => source_fd, close_others: true }, arguments.last)
     end
   end
 
@@ -359,7 +387,7 @@ class E2EReplayPortabilityTest < Minitest::Test
             env: replay_env(runs_dir, state_home)
           ),
           filesystem: AliasMismatchFilesystem.new,
-          platform: RUBY_PLATFORM
+          platform: "arm64-darwin"
         ).select(run_id: "run-1", scenario: "scenario-1")
       end
 

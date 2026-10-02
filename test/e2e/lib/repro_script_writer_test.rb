@@ -62,6 +62,8 @@ class E2EReproScriptWriterTest < Minitest::Test
           # Script-level teardown trap reaps any survivors.
           assert_match(/trap _hive_repro_cleanup EXIT/, body,
                        "the harness teardown trap must be installed at script entry")
+          assert_equal 2, body.scan("\${HIVE_REPRO_BG_PIDS[@]-}").size,
+                       "empty PID cleanup must remain safe under Bash 3.2 nounset"
         end
       end
     end

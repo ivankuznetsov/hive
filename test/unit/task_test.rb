@@ -625,6 +625,19 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_depends_on_reader_preserves_array_shape
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")
+      FileUtils.mkdir_p(folder)
+      File.write(
+        File.join(folder, "meta.yml"),
+        { "id" => 42, "slug" => "add-foo", "depends_on" => [ "base-task" ] }.to_yaml
+      )
+
+      assert_equal [ "base-task" ], Hive::Task.new(folder).depends_on
+    end
+  end
+
   def test_meta_readers_fall_back_when_sidecar_absent_or_malformed
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")

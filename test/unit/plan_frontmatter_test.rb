@@ -31,6 +31,21 @@ class PlanFrontmatterTest < Minitest::Test
     assert_equal "analytics:base-task", result.depends_on.to_s
   end
 
+  def test_dependency_arrays_preserve_shape_and_order
+    result = read_plan(<<~MARKDOWN)
+      ---
+      depends_on:
+        - base-task
+        - analytics:other-task
+        - base-task
+      ---
+      # Plan
+    MARKDOWN
+
+    assert_equal :ok, result.status
+    assert_equal [ "base-task", "analytics:other-task" ], result.depends_on.map(&:to_s)
+  end
+
   def test_duplicate_dependency_assertions_are_invalid
     result = read_plan(<<~MARKDOWN)
       ---
@@ -60,7 +75,7 @@ class PlanFrontmatterTest < Minitest::Test
     malformed = read_plan("---\ndepends_on: [unterminated\n---\n")
     unterminated = read_plan("---\ndepends_on: base-task\n")
     non_mapping = read_plan("---\n- depends_on: base-task\n---\n")
-    invalid_dependency = read_plan("---\ndepends_on:\n  - one\n  - two\n---\n")
+    invalid_dependency = read_plan("---\ndepends_on:\n  - one\n  -\n---\n")
 
     assert_equal :invalid, malformed.status
     assert_equal :invalid, unterminated.status

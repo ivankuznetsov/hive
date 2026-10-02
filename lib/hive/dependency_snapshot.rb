@@ -682,7 +682,7 @@ module Hive
         metadata_status: metadata_status,
         metadata_error: metadata.error,
         plan_status: plan.status,
-        plan_dependency: plan.depends_on&.to_s,
+        plan_dependency: Hive::Dependencies.serialize_declaration(plan.depends_on),
         plan_error: plan.error,
         folder: folder,
         validation_error: validation_error,

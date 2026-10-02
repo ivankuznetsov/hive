@@ -37,6 +37,39 @@ class DependenciesTest < Minitest::Test
     end
   end
 
+  def test_parse_declaration_preserves_scalar_and_array_shape
+    scalar = Hive::Dependencies.parse_declaration("base-task")
+    singleton = Hive::Dependencies.parse_declaration([ "base-task" ])
+    multiple = Hive::Dependencies.parse_declaration([ "base-task", 42, "api:other-task" ])
+
+    assert_instance_of Hive::Dependencies::Reference, scalar
+    assert_equal "base-task", scalar.to_s
+    assert_equal [ "base-task" ], singleton.map(&:to_s)
+    assert_equal [ "base-task", "42", "api:other-task" ], multiple.map(&:to_s)
+  end
+
+  def test_normalize_declaration_deduplicates_without_collapsing_array_shape
+    assert_equal "42", Hive::Dependencies.normalize_declaration(42)
+    assert_equal [ "base-task" ],
+                 Hive::Dependencies.normalize_declaration([ "base-task", "base-task" ])
+  end
+
+  def test_parse_declaration_rejects_invalid_elements_with_their_indexes
+    invalid = [ [], [ "base-task", nil ], [ [ "base-task" ] ], [ {} ], { "task" => "base-task" } ]
+
+    invalid.each do |value|
+      error = assert_raises(Hive::Dependencies::InvalidReference) do
+        Hive::Dependencies.parse_declaration(value)
+      end
+      assert_match(/depends_on/, error.message)
+    end
+
+    error = assert_raises(Hive::Dependencies::InvalidReference) do
+      Hive::Dependencies.parse_declaration([ "base-task", "BAD TASK" ])
+    end
+    assert_match(/element 2/, error.message)
+  end
+
   Task = Struct.new(:slug, :id, :stage_index, :stage, keyword_init: true)
 
   def test_resolve_blocks_when_prerequisite_is_before_threshold

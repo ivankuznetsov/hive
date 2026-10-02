@@ -160,14 +160,39 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
-  def test_read_for_admission_rejects_invalid_dependency_shape
+  def test_read_for_admission_accepts_dependency_arrays_without_collapsing_shape
     Dir.mktmpdir do |dir|
       File.write(File.join(dir, "meta.yml"), { "depends_on" => [ "base-task" ] }.to_yaml)
 
       result = Hive::TaskMeta.read_for_admission(dir)
 
+      assert_equal :ok, result.status
+      assert_equal [ "base-task" ], result.data[:depends_on]
+    end
+  end
+
+  def test_read_for_admission_rejects_invalid_dependency_array_and_preserves_evidence
+    Dir.mktmpdir do |dir|
+      value = [ "base-task", nil ]
+      File.write(File.join(dir, "meta.yml"), { "depends_on" => value }.to_yaml)
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
       assert_equal :invalid, result.status
-      assert_match(/depends_on/, result.error)
+      assert_equal value, result.data[:depends_on]
+      assert_match(/element 2/, result.error)
+    end
+  end
+
+  def test_read_for_admission_rejects_explicit_null_dependency
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "depends_on:\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/one scalar task reference/, result.error)
+      assert_equal :reference_invalid, result.reason
     end
   end
 
@@ -283,6 +308,33 @@ class TaskMetaTest < Minitest::Test
         Hive::TaskMeta.read(dir)
       )
       assert_includes File.read(File.join(dir, "meta.yml")), "depends_on: base-task"
+    end
+  end
+
+  def test_write_read_and_rewrite_preserve_dependency_array_shape
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 42, slug: "add-foo", display_name: "Add Foo",
+        depends_on: [ "base-task", "api:other-task", "base-task" ]
+      )
+
+      assert_equal [ "base-task", "api:other-task" ], Hive::TaskMeta.read(dir)[:depends_on]
+      Hive::TaskMeta.update_display_name(dir, "Updated")
+      assert_equal [ "base-task", "api:other-task" ], Hive::TaskMeta.read(dir)[:depends_on]
+      assert_equal [ "base-task", "api:other-task" ],
+                   YAML.safe_load(File.read(File.join(dir, "meta.yml"))).fetch("depends_on")
+    end
+  end
+
+  def test_write_rejects_empty_nested_and_null_dependency_arrays
+    with_tmp_dir do |dir|
+      [ [], [ [ "base-task" ] ], [ "base-task", nil ] ].each do |value|
+        assert_raises(Hive::Dependencies::InvalidReference) do
+          Hive::TaskMeta.write(
+            dir, id: 42, slug: "add-foo", display_name: nil, depends_on: value
+          )
+        end
+      end
     end
   end
 

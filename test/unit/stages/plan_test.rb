@@ -33,6 +33,15 @@ class HiveStagesPlanTest < Minitest::Test
     end
   end
 
+  def test_complete_plan_dependency_array_is_adopted_without_collapsing_singleton_shape
+    document = "---\ndepends_on:\n  - rails-task\n---\n\n# Plan\n"
+    with_planned_task(document) do |task, dir|
+      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+
+      assert_equal [ "rails-task" ], Hive::TaskMeta.read(dir)[:depends_on]
+    end
+  end
+
   # Conflict still blocks: adoption must never overwrite an operator's value,
   # so plan_dependency_mismatch stays a human decision.
   def test_existing_meta_dependency_is_never_overwritten

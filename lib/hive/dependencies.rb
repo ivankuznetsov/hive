@@ -68,6 +68,59 @@ module Hive
       parse_reference(value)
     end
 
+    # Parse the authoritative dependency declaration without erasing whether
+    # the author supplied one scalar edge or a scheduling-only list. Arrays
+    # are deliberately not collapsed when they contain only one unique item.
+    def parse_declaration(value)
+      return parse_reference(value) unless value.is_a?(Array)
+
+      raise InvalidReference.new(value, "depends_on list must not be empty") if value.empty?
+
+      references = value.each_with_index.map do |element, index|
+        if element.is_a?(Array) || element.is_a?(Hash) || element.nil?
+          raise InvalidReference.new(
+            value,
+            "depends_on element #{index + 1} must be a scalar task reference"
+          )
+        end
+
+        parse_reference(element)
+      rescue InvalidReference => e
+        raise e if e.value.equal?(value)
+
+        raise InvalidReference.new(value, "depends_on element #{index + 1} is invalid: #{e.message}")
+      end
+
+      references.uniq { |reference| reference.to_s }
+    end
+
+    def parse_optional_declaration(value)
+      return nil if value.nil?
+
+      parse_declaration(value)
+    end
+
+    def normalize_declaration(value)
+      parsed = parse_optional_declaration(value)
+      serialize_declaration(parsed)
+    end
+
+    def serialize_declaration(value)
+      return nil if value.nil?
+      return value.map(&:to_s) if value.is_a?(Array)
+
+      value.to_s
+    end
+
+    def declaration_references(value)
+      parsed = parse_optional_declaration(value)
+      parsed.is_a?(Array) ? parsed : Array(parsed)
+    end
+
+    def list_declaration?(value)
+      value.is_a?(Array)
+    end
+
     # Psych accepts duplicate mapping keys and silently keeps the last value.
     # Dependency declarations are policy evidence, so two top-level copies are
     # ambiguous and must fail closed instead of depending on parser ordering.

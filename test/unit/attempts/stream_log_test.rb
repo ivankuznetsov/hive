@@ -11,11 +11,13 @@ class AttemptsStreamLogTest < Minitest::Test
     attr_reader :writes
 
     def initialize(io, limit: nil, separator_outcome: nil, frame_prefix_before_error: nil,
-                   unlock_result: true, close_error: nil, error: Errno::EINTR.new)
+                   lock_error: nil, unlock_result: true, close_error: nil,
+                   error: Errno::EINTR.new)
       @io = io
       @limit = limit
       @separator_outcome = separator_outcome
       @frame_prefix_before_error = frame_prefix_before_error
+      @lock_error = lock_error
       @unlock_result = unlock_result
       @close_error = close_error
       @error = error
@@ -68,6 +70,8 @@ class AttemptsStreamLogTest < Minitest::Test
     end
 
     def flock(operation)
+      raise @lock_error if operation == File::LOCK_EX && @lock_error
+
       if operation == File::LOCK_UN && @unlock_result != true
         result = @unlock_result
         @unlock_result = true
@@ -79,6 +83,7 @@ class AttemptsStreamLogTest < Minitest::Test
 
     def stat = @io.stat
     def fsync = @io.fsync
+    def chmod(mode) = @io.chmod(mode)
 
     def close
       @io.close
@@ -157,6 +162,25 @@ class AttemptsStreamLogTest < Minitest::Test
 
     def syswrite(chunk)
       if chunk.start_with?("{".b) && !@gated
+        @gated = true
+        @entered << true
+        @release.pop
+      end
+
+      super
+    end
+  end
+
+  class GatedSeparatorWriter < FileWriter
+    def initialize(io, entered:, release:, **options)
+      super(io, **options)
+      @entered = entered
+      @release = release
+      @gated = false
+    end
+
+    def syswrite(chunk)
+      if chunk == "#\n".b && !@gated
         @gated = true
         @entered << true
         @release.pop
@@ -533,6 +557,171 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_open_instances_serialize_torn_tail_recovery_and_keep_cursor_visibility
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      seed = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      seed.append(:stdout, "seed")
+      seed.close
+      File.open(path, "ab") { |file| file.write("torn") }
+
+      first_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      second_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      entered = Queue.new
+      release = Queue.new
+      results = Queue.new
+      writer = GatedWriter.new(first_log.instance_variable_get(:@io), entered: entered, release: release)
+      first_log.instance_variable_set(:@io, writer)
+
+      first = Thread.new { results << [ "first", first_log.append(:stdout, "first") ] }
+      Timeout.timeout(2) { entered.pop }
+      second_started = Queue.new
+      second = Thread.new do
+        second_started << true
+        results << [ "second", second_log.append(:stdout, "second") ]
+      end
+      Timeout.timeout(2) { second_started.pop }
+      assert_raises(Timeout::Error) { Timeout.timeout(0.05) { results.pop } }
+
+      release << true
+      Timeout.timeout(2) { first.value }
+      Timeout.timeout(2) { second.value }
+      returned = 2.times.to_h { results.pop }
+      assert_equal [ 2, 3 ], returned.values.sort
+
+      frames = Hive::Attempts::StreamLog.read(path)
+      assert_equal [ 1, 2, 3 ], frames.map(&:sequence)
+      assert_equal %w[first second], frames.drop(1).map(&:bytes).sort
+      lower_sequence, higher_sequence = returned.values.sort
+      assert_equal [ higher_sequence ],
+                   Hive::Attempts::StreamLog.read(path, after_sequence: lower_sequence).map(&:sequence)
+    ensure
+      release << true if release
+      first&.join(0.1)
+      second&.join(0.1)
+      first_log&.close unless first_log&.closed?
+      second_log&.close unless second_log&.closed?
+      seed&.close unless seed&.closed?
+    end
+  end
+
+  def test_separator_failure_releases_the_lock_for_another_instance
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      seed = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      seed.append(:stdout, "seed")
+      seed.close
+      File.open(path, "ab") { |file| file.write("torn") }
+
+      failing_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      recovering_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      entered = Queue.new
+      release = Queue.new
+      failed = Queue.new
+      recovered = Queue.new
+      error = Errno::EINTR.new("separator")
+      writer = GatedSeparatorWriter.new(
+        failing_log.instance_variable_get(:@io), entered: entered, release: release,
+        separator_outcome: :write_error, error: error
+      )
+      failing_log.instance_variable_set(:@io, writer)
+
+      failing = Thread.new do
+        failing_log.append(:stdout, "not published")
+      rescue StandardError => raised
+        failed << raised
+      end
+      Timeout.timeout(2) { entered.pop }
+      recovering_started = Queue.new
+      recovering = Thread.new do
+        recovering_started << true
+        recovered << recovering_log.append(:stdout, "recovered")
+      end
+      Timeout.timeout(2) { recovering_started.pop }
+      assert_raises(Timeout::Error) { Timeout.timeout(0.05) { recovered.pop } }
+
+      release << true
+      Timeout.timeout(2) { failing.value }
+      Timeout.timeout(2) { recovering.value }
+      assert_same error, failed.pop
+      assert_equal 2, recovered.pop
+      frames = Hive::Attempts::StreamLog.read(path)
+      assert_equal [ 1, 2 ], frames.map(&:sequence)
+      assert_equal [ "seed", "recovered" ], frames.map(&:bytes)
+    ensure
+      release << true if release
+      failing&.join(0.1)
+      recovering&.join(0.1)
+      failing_log&.close unless failing_log&.closed?
+      recovering_log&.close unless recovering_log&.closed?
+      seed&.close unless seed&.closed?
+    end
+  end
+
+  def test_frame_failure_releases_the_lock_for_another_instance
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      first_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      first_log.append(:stdout, "seed")
+      second_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      error = IOError.new("mid-frame")
+      writer = FileWriter.new(
+        first_log.instance_variable_get(:@io), frame_prefix_before_error: 20, error: error
+      )
+      first_log.instance_variable_set(:@io, writer)
+
+      assert_same error, assert_raises(IOError) { first_log.append(:stdout, "not published") }
+      assert_equal 2, Timeout.timeout(2) { second_log.append(:stdout, "recovered") }
+      frames = Hive::Attempts::StreamLog.read(path)
+      assert_equal [ 1, 2 ], frames.map(&:sequence)
+      assert_equal [ "seed", "recovered" ], frames.map(&:bytes)
+    ensure
+      first_log&.close unless first_log&.closed?
+      second_log&.close unless second_log&.closed?
+    end
+  end
+
+  def test_healthy_appends_use_the_snapshot_until_external_progress_or_an_error
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      read_file = ReadFile.new(log.instance_variable_get(:@read_io))
+      log.instance_variable_set(:@read_io, read_file)
+      original_open = File.method(:open)
+      path_opens = 0
+      replacement = lambda do |candidate, *args, **kwargs, &block|
+        path_opens += 1 if File.expand_path(candidate) == path
+        original_open.call(candidate, *args, **kwargs, &block)
+      end
+
+      with_replaced_singleton_method(File, :open, replacement) do
+        assert_equal 1, log.append(:stdout, "one")
+        assert_equal 2, log.append(:stdout, "two")
+      end
+      assert_equal 0, path_opens
+      assert_equal 0, read_file.full_reads
+
+      other = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      assert_equal 3, other.append(:stdout, "three")
+      other.close
+      assert_equal 4, log.append(:stdout, "four")
+      assert_equal 1, read_file.full_reads
+
+      clock_error = IOError.new("clock failed")
+      log.instance_variable_set(:@clock, -> { raise clock_error })
+      assert_same clock_error, assert_raises(IOError) { log.append(:stdout, "blocked") }
+      assert_equal 1, read_file.full_reads
+
+      log.instance_variable_set(:@clock, -> { NOW })
+      assert_equal 5, log.append(:stdout, "five")
+      assert_equal 2, read_file.full_reads
+      assert_equal [ 1, 2, 3, 4, 5 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+    ensure
+      other&.close unless other&.closed?
+      log&.close unless log&.closed?
+    end
+  end
+
   def test_constructor_strict_read_failure_closes_both_descriptors_and_releases_lock
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
@@ -547,8 +736,11 @@ class AttemptsStreamLogTest < Minitest::Test
         next io unless candidate == path && args.first.is_a?(Integer)
 
         if (args.first & File::WRONLY) == File::WRONLY
-          opened << io
-          io
+          writer = FileWriter.new(
+            io, unlock_result: false, close_error: IOError.new("append close failed")
+          )
+          opened << writer
+          writer
         else
           reader = ReadFile.new(io, error: error, close_error: IOError.new("close failed"))
           opened << reader
@@ -558,6 +750,41 @@ class AttemptsStreamLogTest < Minitest::Test
 
       with_replaced_singleton_method(File, :open, replacement) do
         raised = assert_raises(IOError) { Hive::Attempts::StreamLog.new(path) }
+        assert_same error, raised
+      end
+      assert_equal 2, opened.length
+      assert opened.all?(&:closed?)
+      Timeout.timeout(2) { Hive::Attempts::StreamLog.new(path).close }
+    end
+  end
+
+  def test_constructor_lock_acquisition_failure_closes_descriptors_without_masking_the_error
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.binwrite(path, "")
+      original_open = File.method(:open)
+      opened = []
+      error = Errno::ENOLCK.new("append lock")
+      replacement = lambda do |candidate, *args, **kwargs, &block|
+        io = original_open.call(candidate, *args, **kwargs, &block)
+        next io unless candidate == path && args.first.is_a?(Integer)
+
+        if (args.first & File::WRONLY) == File::WRONLY
+          writer = FileWriter.new(
+            io, lock_error: error, close_error: IOError.new("append close failed")
+          )
+          opened << writer
+          writer
+        else
+          reader = ReadFile.new(io, close_error: IOError.new("read close failed"))
+          opened << reader
+          reader
+        end
+      end
+
+      with_replaced_singleton_method(File, :open, replacement) do
+        raised = assert_raises(Errno::ENOLCK) { Hive::Attempts::StreamLog.new(path) }
         assert_same error, raised
       end
       assert_equal 2, opened.length

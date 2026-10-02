@@ -145,6 +145,29 @@ module Hive
       Hive::DependencyAdmission::Context.new(projects: projects, fallback: fallback_context)
     end
 
+    def proposed_task_verdict(project:, slug:, depends_on:, workflow:, folder:,
+                              registry_entries: Hive::Config.registered_projects)
+      context = admission_context(registry_entries)
+      proposed = Hive::DependencyAdmission::TaskSnapshot.new(
+        project: project.fetch("name"),
+        slug: slug,
+        id: nil,
+        stage: workflow.stages.first.dir,
+        workflow_stages: workflow.stage_dirs,
+        depends_on: Hive::Dependencies.normalize_declaration(depends_on),
+        metadata_status: :ok,
+        metadata_error: nil,
+        plan_status: :absent,
+        plan_dependency: nil,
+        plan_error: nil,
+        folder: folder,
+        validation_error: nil,
+        cancelled: false
+      )
+      context.with_task(project: project.fetch("name"), task: proposed)
+             .verdict(project: project.fetch("name"), slug: slug)
+    end
+
     # Builds the routine dependency view without reparsing terminal history.
     # Active tasks are scanned normally. When one names a prerequisite absent
     # from that active set, only exact matching task folders are loaded, then
@@ -254,10 +277,14 @@ module Hive
       return verdict if verdict.clear?
 
       if verdict.wait?
-        ref = verdict.blocked_by.to_s
-        correction = "Wait for #{ref} to reach the configured dependency gate; it is currently at #{verdict.dependency_stage}."
+        unmet = verdict.unmet_dependencies.first
+        ref = (verdict.blocked_by || unmet&.blocked_by).to_s
+        stage = verdict.dependency_stage || unmet&.dependency_stage
+        required_gate = unmet&.required_gate
+        gate_label = required_gate ? required_gate : "the configured dependency gate"
+        correction = "Wait for #{ref} to reach #{gate_label}; it is currently at #{stage}."
         raise Hive::DependencyWaitError.new(
-          "dependency wait: #{task.slug} is blocked by #{ref} at #{verdict.dependency_stage}",
+          "dependency wait: #{task.slug} is blocked by #{ref} at #{stage}",
           offending_ref: ref,
           safe_correction: correction
         )
@@ -386,8 +413,9 @@ module Hive
     def cross_project_identity_targets(projects)
       projects.each_with_object({}) do |project, targets|
         project.tasks.each do |task|
-          reference = Hive::Dependencies.parse_optional_reference(task.depends_on)
-          targets[reference.project] = true if reference&.explicit_project
+          Hive::Dependencies.declaration_references(task.depends_on).each do |reference|
+            targets[reference.project] = true if reference.explicit_project
+          end
         rescue Hive::Dependencies::InvalidReference
           next
         end
@@ -405,8 +433,8 @@ module Hive
       end
       errors = {}
       queue = projects.flat_map do |project|
-        project.tasks.filter_map do |task|
-          [ task.project, task.depends_on ] if task.depends_on
+        project.tasks.flat_map do |task|
+          dependency_queue_entries(task.project, task.depends_on)
         end
       end
       seen = {}
@@ -415,10 +443,8 @@ module Hive
       while cursor < queue.length
         target_name = nil
         begin
-          source_project, raw_reference = queue[cursor]
+          source_project, reference = queue[cursor]
           cursor += 1
-          reference = Hive::Dependencies.parse_optional_reference(raw_reference)
-          next unless reference
 
           target_name = reference.explicit_project ? reference.project : source_project
           lookup_key = dependency_lookup_key(reference)
@@ -441,7 +467,7 @@ module Hive
           fallback[target_name].concat(tasks)
           tasks.each do |task|
             add_dependency_task_to_indexes(fallback_indexes[target_name], task)
-            queue << [ task.project, task.depends_on ] if task.depends_on
+            queue.concat(dependency_queue_entries(task.project, task.depends_on))
           end
         rescue StandardError => e
           errors[target_name] ||= "targeted dependency scan failed: #{e.class}: #{e.message}"
@@ -449,6 +475,14 @@ module Hive
       end
 
       [ fallback, errors ]
+    end
+
+    def dependency_queue_entries(source_project, declaration)
+      Hive::Dependencies.declaration_references(declaration).map do |reference|
+        [ source_project, reference ]
+      end
+    rescue Hive::Dependencies::InvalidReference
+      []
     end
 
     def dependency_tasks_for_reference(entry, reference, workflow_generation: nil, project_configs: nil)

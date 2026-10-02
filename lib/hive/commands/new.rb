@@ -21,10 +21,12 @@ require "hive/workflow_package/managed_store"
 require "hive/workflow_package/mutation_lock"
 require "hive/tui/text"
 require "hive/dependencies"
+require "hive/dependency_snapshot"
 require "hive/worktree"
 require "hive/daily_digest/task_creation_receipt"
 require "hive/command_operation"
 require "hive/command_error_kind"
+require "hive/runtime_control_plane/command_registration"
 
 module Hive
   module Commands
@@ -287,6 +289,12 @@ module Hive
               name: :waiting,
               attrs: { "decision_id" => SecureRandom.hex(8) }
             } : nil,
+            candidate_validator: lambda do |candidate_folder|
+              validate_creation_dependency_cycle!(
+                project: project, slug: slug, depends_on: depends_on,
+                workflow: workflow, task_dir: candidate_folder
+              )
+            end,
             git_ops: ops,
             project: project
           ).call
@@ -302,6 +310,10 @@ module Hive
           return emit_task_result(task_dir, workflow, created: true)
         end
 
+        validate_creation_dependency_cycle!(
+          project: project, slug: slug, depends_on: depends_on,
+          workflow: workflow, task_dir: task_dir
+        )
         create_task_candidate!(
           task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
           depends_on: depends_on, base_branch: base_branch,
@@ -676,6 +688,31 @@ module Hive
           "invalid dependency #{value.inspect} — #{e.message}; expected a prerequisite task id, " \
           "slug, explicit project:slug reference, or a nonempty flat list of those references",
           value: value
+        )
+      end
+
+      def validate_creation_dependency_cycle!(project:, slug:, depends_on:, workflow:, task_dir:)
+        return unless depends_on
+
+        verdict = Hive::DependencySnapshot.proposed_task_verdict(
+          project: project,
+          slug: slug,
+          depends_on: depends_on,
+          workflow: workflow,
+          folder: task_dir
+        )
+        error = verdict.admission_error
+        return unless error && %w[dependency_cycle dependency_self_reference].include?(error.reason_code)
+
+        path = if error.reason_code == "dependency_self_reference"
+          qualified = "#{project.fetch("name")}:#{slug}"
+          "#{qualified} -> #{qualified}"
+        else
+          error.offending_ref
+        end
+        raise InvalidDependencyError.new(
+          "invalid dependency cycle: #{path}",
+          value: path
         )
       end
 

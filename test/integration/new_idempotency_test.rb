@@ -116,6 +116,37 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_creation_cycle_error_keeps_the_path_in_the_json_envelope
+    with_initialized_project do |project_root, project|
+      existing = File.join(project_root, ".hive-state", "stages", "1-inbox", "existing-task")
+      FileUtils.mkdir_p(existing)
+      Hive::TaskMeta.write(
+        existing, id: 40, slug: "existing-task", display_name: nil,
+        depends_on: "proposed-task"
+      )
+
+      out, err, status = with_captured_exit do
+        Hive::Commands::New.new(
+          project, "proposed task", slug_override: "proposed-task",
+          depends_on: "existing-task", idempotency_key: "creator:cycle",
+          json: true
+        ).call
+      end
+      payload = JSON.parse(out)
+      path = "#{project}:proposed-task -> #{project}:existing-task -> #{project}:proposed-task"
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
+
+      assert_empty err
+      assert_equal Hive::ExitCodes::GENERIC, status
+      assert_equal "error", payload.fetch("error_kind")
+      assert_equal path, payload.fetch("value")
+      assert_empty schemer.validate(payload).to_a
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "proposed-task")
+      )
+    end
+  end
+
   def test_repeated_cli_dependency_notice_stays_on_stderr_for_json
     with_initialized_project do |_project_root, project|
       out, err = capture_io do

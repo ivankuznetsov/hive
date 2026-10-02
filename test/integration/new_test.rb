@@ -376,6 +376,56 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_creation_rejects_a_resolvable_cycle_before_publishing_or_allocating_an_id
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        existing = File.join(dir, ".hive-state", "stages", "1-inbox", "existing-task")
+        FileUtils.mkdir_p(existing)
+        Hive::TaskMeta.write(
+          existing, id: 40, slug: "existing-task", display_name: nil,
+          depends_on: "proposed-task"
+        )
+        next_id = Hive::TaskCounter.peek
+
+        error = assert_raises(Hive::Commands::New::InvalidDependencyError) do
+          Hive::Commands::New.new(
+            project, "proposed task", slug_override: "proposed-task",
+            depends_on: "existing-task"
+          ).call!
+        end
+
+        path = "#{project}:proposed-task -> #{project}:existing-task -> #{project}:proposed-task"
+        assert_equal path, error.value
+        assert_includes error.message, path
+        refute Dir.exist?(
+          File.join(dir, ".hive-state", "stages", "1-inbox", "proposed-task")
+        )
+        assert_equal next_id, Hive::TaskCounter.peek
+      end
+    end
+  end
+
+  def test_creation_keeps_unresolved_future_dependencies_captureable
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io do
+          Hive::Commands::New.new(
+            project, "future dependent", slug_override: "future-dependent",
+            depends_on: %w[future-one future-two]
+          ).call!
+        end
+
+        folder = File.join(dir, ".hive-state", "stages", "1-inbox", "future-dependent")
+        assert_equal %w[future-one future-two], Hive::TaskMeta.read(folder)[:depends_on]
+      end
+    end
+  end
+
   def test_cli_invalid_later_dependency_fails_before_publishing_task
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

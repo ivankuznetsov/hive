@@ -251,10 +251,34 @@ last recognized JSON boolean flag, matching the main CLI wrapper. Successful
 contracts: `list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
 `hive-e2e-clean`.
 
-The replay subcommand stays a config-gated harness action: a missing stored
-`repro.sh` and an existing but non-regular or non-executable `repro.sh` both
-exit `78`; JSON mode distinguishes them as `missing_repro` and
-`unusable_repro`, respectively.
+The replay subcommand stays a config-gated harness action, but it no longer
+checks a pathname and asks `exec` to resolve that pathname again. It pins the
+runs-root generation and every selected entry by descriptor, performs one
+final public-binding fence, and launches only through an identity-checked
+`/proc/self/fd/<fd>` (Linux) or `/dev/fd/<fd>` (macOS) alias. A symlinked root
+or selected descendant, a replaced binding, an unreadable artifact, a
+non-regular artifact, and execute-mode loss all fail closed without pathname
+fallback. See [[e2e]] for the complete reason table and residual boundaries.
+
+Admission uses persistent per-user shards under the stable XDG state root, not
+the runs tree, `HIVE_HOME`, or a temporary directory. A live replay for the
+same configured path, canonical/identity root, run and scenario makes a
+contender exit `75` with `error_kind: replay_busy` and
+`reason: replay_busy`. Because the namespace has 256 shards, an unrelated
+selection can collide and receive the same retryable result. Missing and
+unsafe entries, lock/descriptor preflight failure, launch failure, and
+supervision failure use the condition-specific exit/kind/reason pairs in
+[[e2e]]. Every replay JSON failure sets `command: replay`; usage alone has
+`reason: null`, while other replay reasons use the closed vocabulary.
+
+The caller-visible supervisor preserves inherited stdio, foreground job
+control, child exit status, and signal termination while retaining admission
+through the top-level artifact's terminal state. Generated shebang scripts see
+the descriptor alias as `$0`; native executables retain `repro.sh` as
+`argv[0]`. After abrupt supervisor death or `replay_supervision_failed`, the
+artifact may survive and retry is not known safe. Follow the process-identity
+recovery procedure in [[e2e]] first. `bin/hive-e2e clean` never removes replay
+control metadata or persistent lock shards.
 
 ## Backlinks
 

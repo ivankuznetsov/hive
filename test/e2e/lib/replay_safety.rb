@@ -377,7 +377,7 @@ module Hive
         stat.directory? && !stat.symlink? &&
           stat.uid == @lock_operations.euid &&
           (stat.mode & 0o7777) == CONTROL_DIRECTORY_MODE &&
-          stat.nlink == 2
+          [ 1, 2 ].include?(stat.nlink)
       end
 
       def usable_lock_shard?(stat)

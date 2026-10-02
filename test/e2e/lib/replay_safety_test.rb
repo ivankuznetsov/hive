@@ -368,25 +368,57 @@ class E2EReplaySafetyTest < Minitest::Test
     end
   end
 
-  def test_public_replacement_after_final_fence_cannot_redirect_descriptor_alias
-    with_replay_tree do |runs_root, script|
-      original = File.stat(script)
-      parked = "#{script}.original"
-      observer = lambda do |event|
-        next unless event == :final_fence_passed
-
-        File.rename(script, parked)
+  def test_public_mutations_after_final_fence_cannot_redirect_descriptor_alias
+    mutations = {
+      root_outside_symlink: lambda do |root, _script|
+        parked = "#{root}.original"
+        outside = "#{root}.outside"
+        File.rename(root, parked)
+        create_replay_tree(outside)
+        File.symlink(outside, root)
+      end,
+      root_original_symlink: lambda do |root, _script|
+        parked = "#{root}.original"
+        File.rename(root, parked)
+        File.symlink(parked, root)
+      end,
+      root_replacement: lambda do |root, _script|
+        File.rename(root, "#{root}.original")
+        create_replay_tree(root)
+      end,
+      root_missing: lambda do |root, _script|
+        File.rename(root, "#{root}.original")
+      end,
+      run_replacement: ->(root, _script) { replace_component_after_fence(root, "run") },
+      scenarios_replacement: ->(root, _script) { replace_component_after_fence(root, "scenarios") },
+      scenario_symlink: lambda do |root, _script|
+        path = component_path(root, "scenario")
+        parked = "#{path}.original"
+        File.rename(path, parked)
+        File.symlink(parked, path)
+      end,
+      script_replacement: lambda do |_root, script|
+        File.rename(script, "#{script}.original")
         File.write(script, "#!/bin/sh\nexit 99\n")
         File.chmod(0o755, script)
       end
+    }
 
-      custody = replay_safety(runs_root, on_event: observer).select(
-        run_id: RUN_ID, scenario: SCENARIO
-      )
-      alias_stat = File.stat(custody.descriptor_alias)
-      assert_equal [ original.dev, original.ino ], [ alias_stat.dev, alias_stat.ino ]
-      refute_equal File.stat(script).ino, alias_stat.ino
-      custody.close
+    mutations.each do |name, mutation|
+      with_replay_tree do |runs_root, script|
+        original = File.stat(script)
+        observer = lambda do |event|
+          mutation.call(runs_root, script) if event == :final_fence_passed
+        end
+
+        custody = replay_safety(runs_root, on_event: observer).select(
+          run_id: RUN_ID, scenario: SCENARIO
+        )
+        alias_stat = File.stat(custody.descriptor_alias)
+        assert_equal [ original.dev, original.ino ],
+                     [ alias_stat.dev, alias_stat.ino ], name.inspect
+        custody.close
+      end
     end
   end
 
@@ -409,6 +441,31 @@ class E2EReplaySafetyTest < Minitest::Test
         assert_lock_unavailable do
           replay_safety(runs_root).select(run_id: RUN_ID, scenario: SCENARIO)
         end
+      end
+    end
+  end
+
+  def test_control_directory_accepts_filesystems_reporting_one_link_but_rejects_three
+    with_replay_tree do |runs_root, _script|
+      one_link = LockOperationsProxy.new(
+        stat_transform: lambda do |_source, _target, stat|
+          stat.directory? ? StatProxy.new(stat, nlink: 1) : stat
+        end
+      )
+      custody = replay_safety(runs_root, lock_operations: one_link).select(
+        run_id: RUN_ID, scenario: SCENARIO
+      )
+      custody.close
+
+      three_links = LockOperationsProxy.new(
+        stat_transform: lambda do |_source, _target, stat|
+          stat.directory? ? StatProxy.new(stat, nlink: 3) : stat
+        end
+      )
+      assert_lock_unavailable do
+        replay_safety(runs_root, lock_operations: three_links).select(
+          run_id: RUN_ID, scenario: SCENARIO
+        )
       end
     end
   end
@@ -963,6 +1020,12 @@ class E2EReplaySafetyTest < Minitest::Test
     else
       raise "unknown component #{entry.inspect}"
     end
+  end
+
+  def replace_component_after_fence(runs_root, entry)
+    path = component_path(runs_root, entry)
+    File.rename(path, "#{path}.original")
+    FileUtils.mkdir_p(path)
   end
 
   def replace_script_with_kind(script, kind)

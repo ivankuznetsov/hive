@@ -110,10 +110,6 @@ class E2EReplaySafetyTest < Minitest::Test
       remember(@delegate.open_executable(parent, name))
     end
 
-    def open_executable_alias(path)
-      @delegate.open_executable_alias(path)
-    end
-
     private
 
     def remember(handle)

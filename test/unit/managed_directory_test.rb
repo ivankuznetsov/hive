@@ -1386,6 +1386,28 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_native_adapter_opens_executable_without_following_components
+    with_tmp_dir do |root|
+      script = File.join(root, "repro.sh")
+      File.write(script, "#!/bin/sh\n")
+      File.chmod(0o755, script)
+      native = Hive::ManagedDirectory.build_native_at_adapter
+      directory = native.open_absolute_directory(root)
+      executable = native.open_executable(directory, "repro.sh")
+
+      assert_equal File.stat(script).ino, executable.stat.ino
+      assert_raises(Errno::ENOENT) do
+        native.open_executable(directory, "missing.sh")
+      end
+      assert_raises(ArgumentError) do
+        native.open_executable(directory, "../repro.sh")
+      end
+    ensure
+      executable&.close
+      directory&.close
+    end
+  end
+
   def test_native_adapter_declares_and_dispatches_openat_mode_as_variadic
     native_class = Hive::ManagedDirectory.const_get(:NativeAt, false)
     native = native_class.new

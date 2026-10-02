@@ -107,17 +107,21 @@ duplicates the numbered descriptor, and requiring that duplicate's descriptor
 stat to match the held script. Darwin also holds a separately identity-checked
 `O_EXEC` descriptor: its `/dev/fd` implementation exposes execute permission
 only for descriptors opened in that mode. Native binaries launch through that
-executable alias. Because an `O_EXEC` descriptor is not readable by a shebang
-interpreter, scripts launch through their readable alias after replay parses the
-pinned shebang; text without a shebang uses `/bin/sh`, matching Ruby's ENOEXEC
-fallback. Only the selected readable or executable script descriptor is
-inherited by the artifact. Other root, component, verification, and admission
-descriptors stay in the supervising parent and are closed in the child. A
-generated shebang script consequently observes the readable descriptor alias as
-`$0`; the native executable compatibility fixture observes `repro.sh` as
-`argv[0]`. The interpreter named by a shebang, `/usr/bin/env` and its `PATH`
-lookup, and the no-shebang fallback shell remain ordinary pathname-resolved
-program images outside script custody.
+executable alias after requiring the exact Darwin `/dev/fd/<held-fd>` mapping
+to exist; it does not reopen an execute-only descriptor through the synthetic
+filesystem. Launch-time execute-mode validation uses the held descriptor's
+`fstat` metadata rather than the synthetic alias pathname metadata. Because an
+`O_EXEC` descriptor is not readable by a shebang interpreter, scripts launch
+through their readable alias after replay parses the pinned shebang; text
+without a shebang uses `/bin/sh`, matching Ruby's ENOEXEC fallback. Only the
+selected readable or executable script descriptor is inherited by the
+artifact. Other root, component, verification, and admission descriptors stay
+in the supervising parent and are closed in the child. A generated shebang
+script consequently observes the readable descriptor alias as `$0`; the native
+executable compatibility fixture observes `repro.sh` as `argv[0]`. The
+interpreter named by a shebang, `/usr/bin/env` and its `PATH` lookup, and the
+no-shebang fallback shell remain ordinary pathname-resolved program images
+outside script custody.
 
 Replay admission lives outside the mutable runs tree at
 `$XDG_STATE_HOME/hive-e2e/replay-<effective-uid>/locks-v1`, provided

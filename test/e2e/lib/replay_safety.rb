@@ -212,8 +212,7 @@ module Hive
         handles << executable_script if executable_script
         executable_descriptor_alias = if executable_script
                                         verified_executable_descriptor_alias(
-                                          executable_script,
-                                          script_identity
+                                          executable_script
                                         )
         end
         emit(:artifact_pinned)
@@ -708,16 +707,16 @@ module Hive
         @filesystem.open(candidate, File::RDONLY, &:stat)
       end
 
-      def verified_executable_descriptor_alias(script, expected)
+      def verified_executable_descriptor_alias(script)
         @descriptor_alias_roots.each do |root|
+          next unless root == "/dev/fd"
+
           candidate = File.join(root, script.fileno.to_s)
           begin
-            duplicate = @native.open_executable_alias(candidate)
-            return candidate if identity(duplicate.stat) == expected
+            @filesystem.lstat(candidate)
+            return candidate
           rescue SystemCallError, IOError, ArgumentError, TypeError
             next
-          ensure
-            duplicate&.close
           end
         end
         failure!("preflight", "descriptor_exec_unavailable")

@@ -12,6 +12,8 @@ unless Hive::E2E.const_defined?(:ReplayLauncher, false)
 end
 
 class E2EReplayPortabilityTest < Minitest::Test
+  include HiveTestHelper
+
   AliasStat = Data.define(:dev, :ino, :mode)
 
   class PathStatMismatchFilesystem
@@ -54,7 +56,7 @@ class E2EReplayPortabilityTest < Minitest::Test
     end
 
     def open_executable_alias(path)
-      File.open(path, File::RDONLY)
+      raise Errno::EACCES, path
     end
 
     def method_missing(name, *arguments, **keywords, &block)
@@ -283,7 +285,9 @@ class E2EReplayPortabilityTest < Minitest::Test
       ).select(run_id: "run-1", scenario: "scenario-1")
 
       refute_equal custody.descriptor_alias, custody.executable_descriptor_alias
-      status = Hive::E2E.const_get(:ReplayLauncher).new.run(custody)
+      status = without_path_executability_query do
+        Hive::E2E.const_get(:ReplayLauncher).new.run(custody)
+      end
       assert status.success?
       assert_path_exists marker
       custody.close
@@ -302,7 +306,9 @@ class E2EReplayPortabilityTest < Minitest::Test
       ).select(run_id: "run-1", scenario: "scenario-1")
 
       out, err = capture_subprocess_io("BASH_ENV" => hook) do
-        status = Hive::E2E.const_get(:ReplayLauncher).new.run(custody)
+        status = without_path_executability_query do
+          Hive::E2E.const_get(:ReplayLauncher).new.run(custody)
+        end
       end
       assert_equal 23, status.exitstatus, err
       assert_equal "argv0=repro.sh\n", out
@@ -418,6 +424,13 @@ class E2EReplayPortabilityTest < Minitest::Test
   end
 
   private
+
+  def without_path_executability_query(&block)
+    replacement = lambda do |path|
+      flunk "descriptor launch queried synthetic path metadata: #{path}"
+    end
+    with_replaced_singleton_method(File, :executable?, replacement, &block)
+  end
 
   def capture_subprocess_io(env)
     out_r, out_w = IO.pipe

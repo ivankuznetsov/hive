@@ -110,7 +110,11 @@ module Hive
       def launch_command(custody)
         executable_alias = custody.executable_descriptor_alias
         return [ [ [ custody.descriptor_alias, "repro.sh" ] ], custody.script_fd ] unless executable_alias
-        raise LaunchError unless File.executable?(executable_alias)
+        executable = IO.for_fd(
+          custody.executable_script_fd,
+          autoclose: false
+        ).stat
+        raise LaunchError unless executable.file? && (executable.mode & 0o111).positive?
 
         # Darwin's /dev/fd exposes execute access only for O_EXEC descriptors,
         # which are not readable by a shebang interpreter. Scripts therefore

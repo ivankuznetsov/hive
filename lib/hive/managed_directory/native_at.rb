@@ -115,14 +115,6 @@ module Hive
         raise
       end
 
-      def open_executable_alias(path)
-        fd = IO.sysopen(path, (@executable || File::RDONLY) | @cloexec)
-        file_from_fd(fd)
-      rescue SystemCallError, IOError, ArgumentError, TypeError
-        close_fd(fd)
-        raise
-      end
-
       def mkdirat(directory, name, mode)
         component!(name)
         call(@mkdirat, directory.fileno, name, Integer(mode), operation: "mkdirat")

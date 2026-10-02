@@ -101,12 +101,8 @@ module Hive
       private
 
       def spawn_child(custody)
-        command, script_fd, child_fd = launch_command(custody)
-        Process.spawn(
-          *command,
-          child_fd => script_fd,
-          close_others: true
-        )
+        command, spawn_options = launch_command(custody)
+        Process.spawn(*command, spawn_options)
       rescue SystemCallError, ArgumentError
         raise LaunchError
       end
@@ -118,7 +114,10 @@ module Hive
             custody.descriptor_alias,
             custody.script_fd
           )
-          return [ [ [ alias_path, "repro.sh" ] ], script_fd, child_fd ]
+          return [
+            [ [ alias_path, "repro.sh" ] ],
+            { child_fd => script_fd, close_others: true }
+          ]
         end
         executable = IO.for_fd(
           custody.executable_script_fd,
@@ -142,16 +141,20 @@ module Hive
           argv = [ [ interpreter, File.basename(interpreter) ] ]
           argv << argument if argument
           argv << alias_path
-          [ argv, script_fd, child_fd ]
+          [ argv, { child_fd => script_fd, close_others: true } ]
         elsif !prefix.include?("\0")
           alias_path, script_fd, child_fd = inherited_descriptor(
             custody.descriptor_alias,
             custody.script_fd
           )
-          [ [ [ "/bin/sh", "sh" ], alias_path ], script_fd, child_fd ]
+          [
+            [ [ "/bin/sh", "sh" ], alias_path ],
+            { child_fd => script_fd, close_others: true }
+          ]
         else
-          script_fd = custody.executable_script_fd
-          [ [ [ executable_alias, "repro.sh" ] ], script_fd, script_fd ]
+          # Keep the O_EXEC handle close-on-exec so Darwin can resolve its
+          # already-live alias without Ruby clearing descriptor flags first.
+          [ [ [ executable_alias, "repro.sh" ] ], { close_others: false } ]
         end
       rescue SystemCallError, IOError, ArgumentError
         raise LaunchError

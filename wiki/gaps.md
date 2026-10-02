@@ -35,9 +35,13 @@ showed that descriptor 198 falls in Bash's internal range, that native Darwin
 image lookup cannot use an alias created later by a spawn file action, and that
 the portability probes had repeated the already-rejected pathname-stat check
 against `/dev/fd`. Native launch now keeps the already-live `O_EXEC` alias,
-while the probes verify identity through opened alias handles. It still has no
-observed green hosted run URL and commit SHA. Local Linux evidence cannot
-establish Darwin `/dev/fd` behavior. Do not mark
+while the probes verify identity through opened alias handles. The latest run
+proved the script mapping through child descriptor 9, but native launch still
+failed while Ruby prepared a same-number `O_EXEC` redirection. Native launch
+now leaves that handle close-on-exec and lets Darwin resolve its already-live
+alias before image replacement closes it. It still has no observed green hosted
+run URL and commit SHA. Local Linux evidence cannot establish Darwin `/dev/fd`
+behavior. Do not mark
 cross-platform replay qualification complete until that exact job and commit
 are observed green.
 

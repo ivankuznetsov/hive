@@ -364,10 +364,10 @@ class E2EReplayPortabilityTest < Minitest::Test
       ).select(run_id: "run-1", scenario: "scenario-1")
 
       launcher = Hive::E2E.const_get(:ReplayLauncher).new
-      command, source_fd, child_fd = launcher.send(:launch_command, custody)
+      command, spawn_options = launcher.send(:launch_command, custody)
       assert_equal custody.executable_descriptor_alias, command.first.first
-      assert_equal custody.executable_script_fd, source_fd
-      assert_equal source_fd, child_fd
+      assert IO.for_fd(custody.executable_script_fd, autoclose: false).close_on_exec?
+      assert_equal({ close_others: false }, spawn_options)
 
       out, err = capture_subprocess_io("BASH_ENV" => hook) do
         status = without_path_executability_query do

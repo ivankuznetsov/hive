@@ -943,7 +943,8 @@ Replay descriptor custody is split into focused layers:
 - `test/e2e/lib/schemas_test.rb` pins the closed replay kind/reason vocabulary,
   allowed pairs, replay-only required/null rules, and unchanged non-replay
   shapes. `test/unit/managed_directory_test.rb` pins the native-adapter factory
-  and normalized unavailable-capability branch.
+  and normalized unavailable-capability branch, plus the true variadic
+  `openat` mode dispatch required by Apple Silicon.
 
 Run the focused layers directly with:
 

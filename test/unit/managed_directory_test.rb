@@ -1382,6 +1382,39 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_native_adapter_declares_and_dispatches_openat_mode_as_variadic
+    native_class = Hive::ManagedDirectory.const_get(:NativeAt, false)
+    native = native_class.new
+    openat_with_mode = native.instance_variable_get(:@openat_with_mode)
+
+    assert_equal [
+      Fiddle::TYPE_INT,
+      Fiddle::TYPE_VOIDP,
+      Fiddle::TYPE_INT
+    ], openat_with_mode.instance_variable_get(:@argument_types)
+    assert openat_with_mode.instance_variable_get(:@is_variadic)
+
+    arguments = nil
+    native.instance_variable_set(
+      :@openat_with_mode,
+      ->(*values) { arguments = values; 23 }
+    )
+    assert_equal 23, native.send(
+      :call_openat,
+      17,
+      "record",
+      File::WRONLY | File::CREAT,
+      mode: 0o600
+    )
+    assert_equal [
+      17,
+      "record",
+      File::WRONLY | File::CREAT,
+      Fiddle::TYPE_INT,
+      0o600
+    ], arguments
+  end
+
   def test_public_native_adapter_factory_returns_the_private_adapter
     adapter = Hive::ManagedDirectory.build_native_at_adapter
     native_class = Hive::ManagedDirectory.const_get(:NativeAt, false)

@@ -118,7 +118,10 @@ home from the OS account database at
 `TMP`, `TEMP`, and sandbox `HIVE_HOME` do not affect this location, and
 cooperating callers must use the same stable XDG state configuration. Hive
 validates the owned mode-`0700` directory and persistent, zero-byte,
-mode-`0600` shard files without following symlinks.
+mode-`0600` shard files without following symlinks. Native shard creation calls
+the variadic `openat` interface as variadic, preserving the requested mode on
+both Linux and Apple Silicon rather than relying on their different fixed-call
+argument conventions.
 
 For one root/run/scenario selection, replay nonblockingly acquires the sorted
 unique shards derived from its normalized configured-root path, sandwiched

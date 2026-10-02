@@ -10,11 +10,12 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ## Replay descriptor custody awaits hosted macOS evidence (2026-10-02)
 
 The existing advisory `launchd-macos` job now runs the focused replay
-portability suite on macOS 15, but this implementation checkout has no observed
-green hosted run URL and commit SHA yet. Local Linux evidence cannot establish
-Darwin `/dev/fd` behavior. Do not mark cross-platform replay qualification
-complete until that exact job and commit are observed green; this does not
-weaken the local implementation or block recording it for the CI/review stage.
+portability suite on macOS 15. Its first hosted run against `7c1fee92e9` exposed
+a fixed-versus-variadic `openat` ABI mismatch during mode-bearing shard creation
+on Apple Silicon; the CI-fix checkout now uses Fiddle's real variadic dispatch,
+but has no observed green hosted run URL and commit SHA yet. Local Linux evidence
+cannot establish Darwin `/dev/fd` behavior. Do not mark cross-platform replay
+qualification complete until that exact job and commit are observed green.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 

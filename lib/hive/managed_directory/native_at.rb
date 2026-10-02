@@ -37,7 +37,7 @@ module Hive
         @openat_with_mode = function(
           handle,
           "openat",
-          [ integer, pointer, integer, integer ]
+          [ integer, pointer, integer, Fiddle::TYPE_VARIADIC ]
         )
         @mkdirat = function(
           handle,
@@ -182,6 +182,7 @@ module Hive
             directory_fd,
             name,
             flags,
+            Fiddle::TYPE_INT,
             Integer(mode),
             operation: "openat"
           )

@@ -409,6 +409,23 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  # hivedev C2: after its replacement PR was published, the branch still
+  # carried the closed #7/#8, and every revision push failed
+  # revision_identity_conflict.
+  def test_revision_push_ignores_a_closed_foreign_pr_on_the_branch
+    with_published_revision do |repo, remote, _original, revised, controller, github|
+      github.records << github.owned_pr(
+        revised, number: 7, state: "CLOSED",
+        overrides: { "base_branch" => "old-stacked-base", "body" => "old body\n" }
+      )
+
+      publication = controller.publish!(revised, revalidate: ->(*) { true })
+
+      assert_equal revised.head_oid, publication.fetch("head_oid")
+      assert_equal revised.head_oid, remote_oid(remote, revised.branch)
+    end
+  end
+
   def test_controller_owned_draft_refuses_a_non_fast_forward_revision
     with_local_remote do |repo, remote, head|
       github = FakeGithub.new

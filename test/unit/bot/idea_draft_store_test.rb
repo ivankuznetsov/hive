@@ -251,7 +251,7 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
     snapshot = @store.commit_snapshot(chat_id: 1)
     assert_equal "hive", snapshot.project
     assert_equal "idea", snapshot.text
-    assert_equal [{ staging_path: "/tmp/bug-1.jpg", dest_name: "bug-1.jpg", ext: "jpg" }], snapshot.attachments
+    assert_equal [ { staging_path: "/tmp/bug-1.jpg", dest_name: "bug-1.jpg", ext: "jpg" } ], snapshot.attachments
 
     # The snapshot is a frozen execution view: mutating the live draft (or the
     # snapshot) afterwards must not change what was already handed to commit.

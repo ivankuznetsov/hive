@@ -1408,6 +1408,29 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_path_projection_and_missing_enumeration_cover_the_factory_file_contract
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(root: root, label: "test state")
+
+      assert_equal ".", directory.relative_path(root)
+      assert_equal "nested/record", directory.relative_path(
+        File.join(root, "nested", "record")
+      )
+      assert_raises(Hive::ConfigError) do
+        directory.relative_path(File.join(File.dirname(root), "outside"))
+      end
+      assert_empty directory.each_child("missing/nested", missing: true).to_a
+
+      File.write(File.join(root, "record"), "data")
+      error = assert_raises(Hive::ConfigError) do
+        directory.each_child(".") do
+          raise Hive::ConfigError, "caller config failure"
+        end
+      end
+      assert_equal "caller config failure", error.message
+    end
+  end
+
   private
 
   def close_failure_proxy(handle)

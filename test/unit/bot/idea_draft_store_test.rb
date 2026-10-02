@@ -264,4 +264,44 @@ class HiveBotIdeaDraftStoreTest < Minitest::Test
 
     assert_nil @store.commit_snapshot(chat_id: 999), "no draft means no snapshot"
   end
+
+  def test_commit_snapshot_string_leaves_survive_live_draft_mutation
+    @store.start(chat_id: 1, phase: :awaiting_project, text: "idea", token: "tok", origin: :voice)
+    @store.set_project(chat_id: 1, project: "hive")
+    @store.append_attachment(chat_id: 1, label: "bug-1", dest_name: "bug-1.jpg",
+                             staging_path: "/tmp/bug-1.jpg", ext: "jpg")
+
+    snapshot = @store.commit_snapshot(chat_id: 1)
+
+    # Frozen containers alone are not an independent view: freeze does not
+    # deep-freeze, so the String leaves must each be duplicated and frozen,
+    # or in-place edits on the live draft rewrite what execution received.
+    draft = @store.get(chat_id: 1)
+    draft.text << "-mutated"
+    draft.project.replace("hive-mutated")
+    attachment = draft.attachments.first
+    attachment[:staging_path] << "-moved"
+    attachment[:dest_name].replace("evil.jpg")
+
+    assert_equal "idea", snapshot.text, "snapshot text must not alias the live draft's text"
+    assert snapshot.text.frozen?
+    assert_equal "hive", snapshot.project, "snapshot project must not alias the live draft's project"
+    assert snapshot.project.frozen?
+    attachment_view = snapshot.attachments.first
+    assert_equal "/tmp/bug-1.jpg", attachment_view[:staging_path]
+    assert attachment_view[:staging_path].frozen?
+    assert_equal "bug-1.jpg", attachment_view[:dest_name]
+    assert attachment_view[:dest_name].frozen?
+    assert_equal "jpg", attachment_view[:ext]
+    assert attachment_view[:ext].frozen?
+  end
+
+  def test_commit_snapshot_passes_nil_text_and_project_through
+    @store.start(chat_id: 1, phase: :awaiting_text, token: "tok")
+
+    snapshot = @store.commit_snapshot(chat_id: 1)
+
+    assert_nil snapshot.text
+    assert_nil snapshot.project
+  end
 end

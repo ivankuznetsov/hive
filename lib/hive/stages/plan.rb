@@ -190,12 +190,14 @@ module Hive
 
         # PlanFrontmatter already parsed and validated this into a Reference
         # or an array of References; malformed declarations never reach here.
-        declaration = Hive::Dependencies.serialize_declaration(declared)
-        return if Hive::Dependencies.declaration_references(declaration).any? do |reference|
+        return if Array(declared).any? do |reference|
           !reference.explicit_project && reference.task == task.slug
         end
 
-        Hive::TaskMeta.rewrite(task.folder, depends_on: declaration)
+        Hive::TaskMeta.rewrite(
+          task.folder,
+          depends_on: Hive::Dependencies.serialize_declaration(declared)
+        )
       rescue StandardError
         # Adoption is a convenience over an existing admission check. If it
         # fails we must not fail the plan stage: admission still catches the

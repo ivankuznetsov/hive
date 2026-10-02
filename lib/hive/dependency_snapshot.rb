@@ -98,7 +98,8 @@ module Hive
     # only via the fail-closed daemon gate. Lives here (the disk-reading
     # layer) rather than in the pure `Hive::Dependencies` resolver so the
     # resolver stays free of disk I/O.
-    def base_selection(task, default_branch, warn_on_fallback: true)
+    def base_selection(task, default_branch, warn_on_fallback: true,
+                       admission_context: nil, project_name: nil)
       dependency = depends_on(task)
       return BaseSelection.new(branch: nil, mode: "default") if dependency.nil?
       if Hive::Dependencies.list_declaration?(dependency)
@@ -114,12 +115,25 @@ module Hive
         return BaseSelection.new(branch: nil, mode: "default")
       end
 
-      base = Hive::Dependencies.base_branch_for(
-        depends_on: dependency,
-        tasks: tasks(task.project_root),
-        default_branch: default_branch,
-        task: current_task(task)
-      )
+      base = if admission_context && project_name
+        prerequisite = if Hive::Dependencies.numeric?(reference.task)
+          admission_context.task_snapshot(project: project_name, id: Integer(reference.task))
+        else
+          admission_context.task_snapshot(project: project_name, slug: reference.task)
+        end
+        if prerequisite.nil? || Hive::Dependencies.same_task?(prerequisite, current_task(task))
+          default_branch
+        else
+          prerequisite.slug || default_branch
+        end
+      else
+        Hive::Dependencies.base_branch_for(
+          depends_on: dependency,
+          tasks: tasks(task.project_root),
+          default_branch: default_branch,
+          task: current_task(task)
+        )
+      end
       if base == default_branch
         if warn_on_fallback
           warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} " \
@@ -353,8 +367,10 @@ module Hive
       admission_context ||= self.admission_context(registry_entries)
       verdict = admission_context.verdict(project: project, slug: task.slug)
       error = verdict.admission_error
-      default_branch = Hive::Config.load(task.project_root)["default_branch"]
-      base_mode = base_selection(task, default_branch, warn_on_fallback: false).mode
+      base_mode = base_selection(
+        task, nil, warn_on_fallback: false,
+        admission_context: admission_context, project_name: project
+      ).mode
       unmet = verdict.unmet_dependencies.map do |dependency|
         [ dependency.reference, dependency.blocked_by, dependency.dependency_stage,
           dependency.required_gate ]

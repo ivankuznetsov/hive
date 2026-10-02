@@ -31,7 +31,16 @@ module Hive
       end
     end
 
-    UnmetDependency = Data.define(:reference, :blocked_by, :dependency_stage, :required_gate)
+    UnmetDependency = Data.define(:reference, :blocked_by, :dependency_stage, :required_gate) do
+      def to_h
+        {
+          "reference" => reference,
+          "blocked_by" => blocked_by,
+          "dependency_stage" => dependency_stage,
+          "required_gate" => required_gate
+        }
+      end
+    end
 
     Verdict = Data.define(
       :state, :blocked_by, :dependency_stage, :unmet_dependencies, :admission_error
@@ -108,6 +117,17 @@ module Hive
 
       def project_path_match_count(path)
         (@projects_by_path[File.expand_path(path)] || []).length
+      end
+
+      # Resolve one task through the same active-before-fallback indexes used
+      # by admission. Presentation consumers use this to derive related policy
+      # without re-reading task metadata from disk.
+      def task_snapshot(project:, slug: nil, id: nil)
+        source_project = unique_project(project)
+        return unless source_project
+
+        matches = task_matches(source_project, slug: slug, id: id)
+        matches.first if matches.one?
       end
 
       # Read-only presentation inventory. Active snapshots precede fallback

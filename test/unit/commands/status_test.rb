@@ -1004,9 +1004,14 @@ class CommandsStatusTest < Minitest::Test
       checkpoint_status_task(bs)
       checkpoint_status_task(ex)
 
-      tasks = Hive::Commands::Status.new.json_payload([
-        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
-      ]).fetch("projects").first.fetch("tasks")
+      tasks = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :tasks,
+        ->(*) { raise "status base-mode projection must reuse its admission context" }
+      ) do
+        Hive::Commands::Status.new.json_payload([
+          { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        ]).fetch("projects").first.fetch("tasks")
+      end
       brainstorm = tasks.find { |t| t.fetch("slug") == "bs-task-260525-cccc" }
       execute = tasks.find { |t| t.fetch("slug") == "ex-task-260525-dddd" }
 
@@ -1093,9 +1098,14 @@ class CommandsStatusTest < Minitest::Test
       )
       project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
 
-      row = Hive::Commands::Status.new.json_payload([ project ])
-        .dig("projects", 0, "tasks")
-        .find { |task| task.fetch("slug") == File.basename(dependent) }
+      row = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :tasks,
+        ->(*) { raise "status base-mode projection must reuse its admission context" }
+      ) do
+        Hive::Commands::Status.new.json_payload([ project ])
+          .dig("projects", 0, "tasks")
+          .find { |task| task.fetch("slug") == File.basename(dependent) }
+      end
 
       assert_nil row.fetch("blocked_by")
       assert_nil row.fetch("dependency_stage")

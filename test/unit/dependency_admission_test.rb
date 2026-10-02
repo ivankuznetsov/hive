@@ -28,6 +28,18 @@ class DependencyAdmissionTest < Minitest::Test
     assert_error context(app, other).verdict(project: "app", slug: "dependent"), "dependency_task_missing"
   end
 
+  def test_task_snapshot_reuses_active_then_fallback_indexes
+    archived = context(project(tasks: [ task("app", "archived", id: 7) ]))
+    active = D::Context.new(
+      projects: [ project(tasks: [ task("app", "active", id: 1) ]) ],
+      fallback: archived
+    )
+
+    assert_equal "active", active.task_snapshot(project: "app", slug: "active").slug
+    assert_equal "archived", active.task_snapshot(project: "app", id: 7).slug
+    assert_nil active.task_snapshot(project: "app", slug: "missing")
+  end
+
   def test_cross_project_reference_requires_exact_project_and_repository_identity
     app = project(tasks: [ task("app", "dependent", depends_on: "data:base") ])
     data = project(name: "data", stored: "github.com/acme/data", live: "github.com/acme/data",

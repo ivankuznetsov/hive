@@ -514,14 +514,7 @@ module Hive
           "state" => verdict.state.to_s,
           "blocked_by" => verdict.blocked_by,
           "dependency_stage" => verdict.dependency_stage,
-          "unmet_dependencies" => verdict.unmet_dependencies.map do |dependency|
-            {
-              "reference" => dependency.reference,
-              "blocked_by" => dependency.blocked_by,
-              "dependency_stage" => dependency.dependency_stage,
-              "required_gate" => dependency.required_gate
-            }
-          end,
+          "unmet_dependencies" => verdict.unmet_dependencies.map(&:to_h),
           "error" => error && {
             "reason_code" => error.reason_code,
             "offending_ref" => safe_offending_ref(error.offending_ref)

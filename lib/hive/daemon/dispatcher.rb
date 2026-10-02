@@ -3794,7 +3794,7 @@ module Hive
 
       def dependency_blockers(row)
         blockers = Array(row&.unmet_dependencies).filter_map do |entry|
-          value = entry.respond_to?(:[]) ? (entry["blocked_by"] || entry[:blocked_by]) : nil
+          value = Hive::Dependencies.field(entry, :blocked_by)
           value.to_s unless value.to_s.empty?
         end
         blockers << row.blocked_by.to_s if blockers.empty? && !row&.blocked_by.to_s.empty?

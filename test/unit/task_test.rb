@@ -47,6 +47,11 @@ class TaskTest < Minitest::Test
       with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
         error = assert_raises(Hive::UnsupportedProjectConfigError) { task.send(:resolve_workflow) }
         assert_includes error.message, "Unknown top-level key `reviewres`"
+
+        direct_error = assert_raises(Hive::UnsupportedProjectConfigError) do
+          task.send(:resolve_workflow_from, Object.new)
+        end
+        assert_includes direct_error.message, "Unknown top-level key `reviewres`"
       end
     end
   end

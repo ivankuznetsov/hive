@@ -445,6 +445,41 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_terminal_rollback_does_not_move_or_restore_a_same_path_replacement
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      destination = File.join(state, "stages", "2-done", "slug-260522-abcd")
+      Hive::TaskMeta.write(destination, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      original_snapshot = Hive::TaskMeta.snapshot(destination)
+      metadata = File.binread(Hive::TaskMeta.path(destination))
+      observation = Hive::TaskMeta.observe(destination)
+      FileUtils.rm_rf(destination)
+      FileUtils.mkdir_p(destination)
+      File.binwrite(Hive::TaskMeta.path(destination), metadata)
+      File.write(File.join(destination, "replacement.txt"), "keep\n")
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+
+      error = assert_raises(Hive::RollbackFailed) do
+        command.send(
+          :attempt_rollback!, current, destination, Hive::GitError.new("commit failed"),
+          completion_snapshot: original_snapshot, observation: observation
+        )
+      end
+
+      assert_includes error.message, "commit failed"
+      assert_includes error.message, "changed identity"
+      refute File.exist?(source)
+      assert_equal "keep\n", File.read(File.join(destination, "replacement.txt"))
+      assert_equal metadata, File.binread(Hive::TaskMeta.path(destination))
+    ensure
+      observation&.close
+    end
+  end
+
   def task(folder: "/tmp/task", hive_state_path: "/tmp/state", project_root: "/tmp/project",
            stage_index: 2, stage_name: "brainstorm", workflow: Hive::Workflows::Registry.default)
     FakeTask.new(

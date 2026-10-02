@@ -153,11 +153,11 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       calls = 0
 
       error = assert_raises(Errno::ENOSPC) do
-        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, lambda { |folder, attrs|
+        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, lambda { |folder, attrs, **kwargs|
           calls += 1
           raise Errno::ENOSPC, folder if calls == 2
 
-          original.call(folder, attrs)
+          original.call(folder, attrs, **kwargs)
         }) do
           migrator(dir, store, pruner: ->(project, slug) { pruned << [ project, slug ] }).call
         end
@@ -175,6 +175,33 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       refute File.exist?(File.join(dir, "stages", "6-review", File.basename(first)))
       refute File.exist?(File.join(dir, "stages", "6-review", File.basename(second)))
       assert_empty pruned
+      assert_empty store.cleaned
+    end
+  end
+
+  def test_stale_pin_rewrite_aborts_before_commit_and_success_accounting
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      committed = false
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+
+      error = with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
+        assert_raises(Hive::TaskMeta::StaleTask) do
+          migrator(dir, store).call { committed = true }
+        end
+      end
+
+      assert_includes error.message, "workflow pin"
+      refute committed
+      assert File.directory?(source)
+      refute File.exist?(destination)
+      assert_equal old_pin, Hive::TaskMeta.read(source).slice(
+        :workflow_commit, :workflow_manifest_digest, :workflow_configuration_digest
+      )
       assert_empty store.cleaned
     end
   end
@@ -335,19 +362,25 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
 
   def test_rollback_warning_preserves_the_original_failure
     with_tmp_dir do |dir|
+      source = File.join(dir, "stages", "4-review", "task")
+      Hive::TaskMeta.write(source, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(source)
       operation = operation_for(
-        source: File.join(dir, "stages", "4-review", "task"),
-        destination: File.join(dir, "stages", "4-review", "task")
+        source: source,
+        destination: source,
+        observation: observation
       )
       command = migrator(dir, store_for(old: workflow("review" => 4), current: workflow("review" => 6)))
 
       _out, err = capture_io do
-        with_replaced_singleton_method(Hive::TaskMeta, :restore, ->(*) { raise Errno::EIO, "restore" }) do
+        with_replaced_singleton_method(Hive::TaskMeta, :restore, ->(*, **) { raise Errno::EIO, "restore" }) do
           command.send(:rollback!, [ { operation: operation, snapshot: {}, artifact_moved: false } ])
         end
       end
 
       assert_includes err, "rollback failed for task"
+    ensure
+      observation&.close
     end
   end
 
@@ -434,7 +467,7 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
     }
   end
 
-  def operation_for(source:, destination:)
+  def operation_for(source:, destination:, observation: nil)
     Hive::WorkflowPackage::TaskMigrator::Operation.new(
       source: source,
       destination: destination,
@@ -443,7 +476,8 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       from_pin: old_pin,
       to_pin: current_pin,
       from_state_file: "review.md",
-      to_state_file: "review.md"
+      to_state_file: "review.md",
+      observation: observation
     )
   end
 end

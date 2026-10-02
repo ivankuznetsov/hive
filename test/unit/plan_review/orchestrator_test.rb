@@ -1753,16 +1753,62 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_review_requirement_rejects_a_same_path_replacement_even_when_already_true
+    with_task(standard_plan) do |task, cfg|
+      Hive::TaskMeta.rewrite(task.folder, plan_review_required: true)
+      copied = Dir.children(task.folder).to_h do |name|
+        path = File.join(task.folder, name)
+        [ name, File.file?(path) ? File.binread(path) : nil ]
+      end
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      FileUtils.mkdir_p(task.folder)
+      copied.each do |name, bytes|
+        File.binwrite(File.join(task.folder, name), bytes) if bytes
+      end
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.send(:ensure_review_requirement!)
+      end
+
+      assert_includes error.message, "stale task"
+      assert_equal true, Hive::TaskMeta.read(task.folder)[:plan_review_required]
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_stale_review_requirement_rewrite_fails_closed
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+
+      error = with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
+        assert_raises(Hive::PlanReview::InvalidRecord) do
+          runner.send(:ensure_review_requirement!)
+        end
+      end
+
+      assert_includes error.message, "stale task"
+      refute Hive::TaskMeta.plan_review_required?(task.folder)
+    end
+  end
+
   private
 
   def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan),
                    route_resolver: method(:resolve_route),
-                   clock: -> { Time.utc(2026, 8, 12, 12) })
-    Hive::PlanReview::Orchestrator.new(
+                   clock: -> { Time.utc(2026, 8, 12, 12) }, task_observation: nil)
+    options = {
       task:, cfg:, planner_identity: planner_identity, adapter:,
       planner_revision:, route_resolver:,
       clock:
-    )
+    }
+    options[:task_observation] = task_observation if task_observation
+    Hive::PlanReview::Orchestrator.new(**options)
   end
 
   def resolve_route(role:, **)

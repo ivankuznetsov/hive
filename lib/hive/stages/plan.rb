@@ -43,11 +43,18 @@ module Hive
       module_function
 
       def run!(task, cfg)
+        observation = Hive::TaskMeta.observe(task.folder)
+        raise Hive::TaskMeta::StaleTask, "plan task is missing before execution" unless observation
+
         if cleared_plan_ready?(task, cfg)
           return { commit: action_for(:complete), status: :complete, plan_review: nil }
         end
 
-        with_source_checkout(task) { |source| run_with_source!(task, cfg, source) }
+        with_source_checkout(task) do |source|
+          run_with_source!(task, cfg, source, observation: observation)
+        end
+      ensure
+        observation&.close
       end
 
       # A complete plan whose review cleared and is still current is ready to
@@ -81,7 +88,7 @@ module Hive
         yield nil
       end
 
-      def run_with_source!(task, cfg, source_checkout)
+      def run_with_source!(task, cfg, source_checkout, observation: nil)
         brainstorm_path = File.join(task.folder, "brainstorm.md")
         brainstorm_text = File.exist?(brainstorm_path) ? File.read(brainstorm_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "plan")
@@ -105,8 +112,10 @@ module Hive
         ensure_durable_checkpoint!(task)
         result = spawn_plan_agent(task, cfg, prompt, profile, source_checkout: source_checkout)
         marker = Hive::Markers.current(task.state_file)
-        adopt_plan_dependency!(task, marker)
-        review = start_plan_review(task, cfg, profile, result, marker)
+        adopt_plan_dependency!(task, marker, observation: observation)
+        review = start_plan_review(
+          task, cfg, profile, result, marker, observation: observation
+        )
         Hive::PlanReview::MarkerSync.hold_until_cleared!(task:, projection: review)
         marker = Hive::Markers.current(task.state_file)
         {
@@ -178,7 +187,14 @@ module Hive
       # dependency adopted here is not trusted blindly either — admission still
       # resolves the target and still reports `dependency_cycle` with the
       # offending path, which is a far better error than a copy instruction.
-      def adopt_plan_dependency!(task, marker)
+      def adopt_plan_dependency!(task, marker, observation: nil)
+        owned_observation = observation.nil?
+        observation ||= Hive::TaskMeta.observe(task.folder)
+        unless observation
+          warn "[hive] plan: stale task; dependency adoption skipped for #{task.slug}"
+          return nil
+        end
+        Hive::TaskMeta.validate_observation!(task.folder, observation)
         return unless marker.name == :complete
 
         plan = Hive::PlanFrontmatter.read(File.join(task.folder, "plan.md"))
@@ -193,12 +209,22 @@ module Hive
         reference = declared.to_s
         return if reference == task.slug
 
-        Hive::TaskMeta.rewrite(task.folder, depends_on: reference)
-      rescue StandardError
-        # Adoption is a convenience over an existing admission check. If it
-        # fails we must not fail the plan stage: admission still catches the
-        # mismatch and tells the operator exactly what to do.
+        result = Hive::TaskMeta.rewrite(
+          task.folder, { depends_on: reference }, observation: observation
+        )
+        if result.stale?
+          warn "[hive] plan: stale task; dependency adoption skipped for #{task.slug}"
+        end
         nil
+      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR
+        warn "[hive] plan: stale task; dependency adoption skipped for #{task.slug}"
+        nil
+      rescue Hive::TaskMeta::InvalidMetadata, SystemCallError, IOError, ArgumentError => error
+        warn "[hive] plan: dependency adoption failed for #{task.slug} " \
+             "(#{error.class}: #{error.message.to_s.byteslice(0, 240)})"
+        nil
+      ensure
+        observation&.close if owned_observation
       end
 
       def spawn_plan_agent(task, cfg, prompt, profile, source_checkout: nil)
@@ -242,12 +268,13 @@ module Hive
         end
       end
 
-      def start_plan_review(task, cfg, profile, result, marker)
+      def start_plan_review(task, cfg, profile, result, marker, observation: nil)
         return nil unless %i[waiting complete].include?(marker.name)
         return nil unless task.respond_to?(:workflow) && task.respond_to?(:meta_yml_path)
 
         Hive::PlanReview::Orchestrator.run!(
-          task:, cfg:, planner_identity: planner_identity(profile, cfg, result)
+          task:, cfg:, planner_identity: planner_identity(profile, cfg, result),
+          task_observation: observation
         )
       end
 

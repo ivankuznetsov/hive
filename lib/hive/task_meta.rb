@@ -45,6 +45,24 @@ module Hive
       def close
         @directory.close unless @directory.closed?
       end
+
+      def rebind!(task_folder)
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        flags |= File::DIRECTORY if File.const_defined?(:DIRECTORY)
+        replacement = File.open(File.expand_path(task_folder), flags)
+        stat = replacement.stat
+        raise StaleTask, "replacement observation is not a directory" unless stat.directory?
+
+        @directory.close unless @directory.closed?
+        @directory = replacement
+        @device = stat.dev
+        @inode = stat.ino
+        true
+      rescue Exception
+        replacement&.close unless replacement&.closed?
+        raise
+      end
     end
 
     AdmissionRead = Data.define(:status, :data, :error, :reason) do
@@ -101,6 +119,20 @@ module Hive
       return true if stable_identity(result.data) == observation.identity
 
       raise StaleTask, "task metadata identity changed at #{folder}"
+    end
+
+    # Cross-device workflow moves cannot retain a directory inode. Callers may
+    # rebind only after they created the destination under lifecycle custody,
+    # the source is gone, and the copied stable metadata still matches.
+    def relocate_observation!(source, destination, observation)
+      raise StaleTask, "original task path still exists after relocation" if File.exist?(source)
+
+      result = read_for_admission(destination)
+      unless result.ok? && stable_identity(result.data) == observation.identity
+        raise StaleTask, "relocated task metadata identity changed at #{destination}"
+      end
+      observation.rebind!(destination)
+      validate_observation!(destination, observation)
     end
 
     def read(task_folder)

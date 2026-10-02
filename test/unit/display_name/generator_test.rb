@@ -128,7 +128,7 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
-  def test_call_preserves_generated_name_when_commit_lock_is_contended
+  def test_call_reports_commit_lock_contention_without_persisting_a_name
     with_generator do |gen, task|
       gen.define_singleton_method(:generate_name) { "A Readable Name" }
       original_lock = Hive::Lock.singleton_class.instance_method(:with_commit_lock)
@@ -137,22 +137,65 @@ class DisplayNameGeneratorTest < Minitest::Test
       end
 
       begin
-        assert_equal "A Readable Name", gen.call,
-                     "commit-lock contention must preserve best-effort generation success"
+        result = nil
+        _out, err = capture_io { result = gen.call }
+        assert_nil result
+        assert_includes err, "task lease contention"
       ensure
         Hive::Lock.singleton_class.define_method(:with_commit_lock, original_lock)
       end
-      assert_equal "A Readable Name", Hive::TaskMeta.read(task.folder)[:display_name]
+      assert_nil Hive::TaskMeta.read(task.folder)[:display_name]
     end
   end
 
-  def test_call_swallows_unexpected_errors
+  def test_call_does_not_hide_unexpected_errors
     with_generator do |gen, task|
       FileUtils.mkdir_p(task.folder)
       gen.define_singleton_method(:generate_name) { "A Readable Name" }
       gen.define_singleton_method(:commit_name) { raise "boom from commit" }
 
-      assert_nil gen.call, "an unexpected StandardError in call must be swallowed"
+      error = assert_raises(RuntimeError) { gen.call }
+      assert_equal "boom from commit", error.message
+    end
+  end
+
+  def test_generation_does_not_update_or_commit_a_same_path_replacement
+    with_generator do |gen, task|
+      replacement_bytes = File.binread(task.meta_yml_path)
+      committed = false
+      gen.define_singleton_method(:generate_name) do
+        FileUtils.rm_rf(task.folder)
+        FileUtils.mkdir_p(task.folder)
+        File.binwrite(task.meta_yml_path, replacement_bytes)
+        "A Stale Name"
+      end
+      gen.define_singleton_method(:commit_name) { committed = true }
+
+      result = nil
+      _out, err = capture_io { result = gen.call }
+
+      assert_nil result
+      refute committed
+      assert_nil Hive::TaskMeta.read(task.folder)[:display_name]
+      assert_includes err, "stale task"
+    end
+  end
+
+  def test_metadata_persistence_failure_is_reported_separately
+    with_generator(commit: false) do |gen|
+      gen.define_singleton_method(:generate_name) { "A Readable Name" }
+      failing = ->(*, **) { raise Errno::EIO, "metadata write" }
+
+      result = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :update_display_name, failing) do
+          result = gen.call
+        end
+      end
+
+      assert_nil result
+      assert_includes err, "metadata update failed"
+      refute_includes err, "stale task"
     end
   end
 

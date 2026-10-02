@@ -499,6 +499,40 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_approve_commit_failure_does_not_restore_or_restage_a_replacement
+    with_editorial_task do |_dir, approval, slug|
+      metadata = File.binread(Hive::TaskMeta.path(approval))
+      replacement_state = "replacement decision state\n"
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        FileUtils.rm_rf(approval)
+        FileUtils.mkdir_p(approval)
+        File.binwrite(Hive::TaskMeta.path(approval), metadata)
+        File.write(File.join(approval, "approval.md"), replacement_state)
+        File.write(File.join(approval, "replacement.txt"), "keep\n")
+        raise Hive::GitError, "commit failed"
+      end
+      fake_ops.define_singleton_method(:run_git!) { |*| raise "replacement must not be restaged" }
+
+      error = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+          error = assert_raises(Hive::GitError) do
+            Hive::Commands::Decide.new(
+              slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+            ).send(:do_call)
+          end
+        end
+      end
+
+      assert_includes error.message, "commit failed"
+      assert_includes err, "rollback skipped stale task files"
+      assert_equal replacement_state, File.read(File.join(approval, "approval.md"))
+      assert_equal "keep\n", File.read(File.join(approval, "replacement.txt"))
+      assert_equal metadata, File.binread(Hive::TaskMeta.path(approval))
+    end
+  end
+
   def test_approve_rolls_back_decision_and_completion_time_when_commit_is_interrupted
     with_editorial_task do |_dir, approval, slug|
       state = File.join(approval, "approval.md")

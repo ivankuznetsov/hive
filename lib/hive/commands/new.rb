@@ -242,8 +242,7 @@ module Hive
 
         @idempotency_key = validate_idempotency_key!
         prepare_idempotent_attachments! if @idempotency_key
-        depends_on = normalize_optional(@depends_on)
-        depends_on = validate_dependency!(depends_on) if depends_on
+        depends_on = validate_dependency!(@depends_on) unless @depends_on.nil?
         workflow_info = resolve_workflow(project)
         workflow = workflow_info.fetch(:descriptor)
         draft_pr = workflow.draft_pr_handoff?
@@ -666,16 +665,16 @@ module Hive
       end
 
       def validate_dependency!(value)
-        Hive::Dependencies.parse_reference(value).to_s
-      rescue Hive::Dependencies::InvalidReference
+        Hive::Dependencies.normalize_declaration(value)
+      rescue Hive::Dependencies::InvalidReference => e
 
         # Describe the accepted shape in plain English for humans and
         # agents; the raw offending value stays in the structured `value:`
         # field for machine consumers (the regex source is an
         # implementation detail, not an operator-facing format).
         raise InvalidDependencyError.new(
-          "invalid dependency '#{value}' — expected one prerequisite task id, " \
-          "slug, or explicit project:slug reference",
+          "invalid dependency #{value.inspect} — #{e.message}; expected a prerequisite task id, " \
+          "slug, explicit project:slug reference, or a nonempty flat list of those references",
           value: value
         )
       end

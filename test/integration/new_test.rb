@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/commands/new"
+require "hive/cli"
 require "hive/task"
 require "hive/task_counter"
 require "hive/task_meta"
@@ -314,6 +315,83 @@ class NewTest < Minitest::Test
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "dependent-task-*")].first
         assert_equal "base-task", Hive::TaskMeta.read(folder)[:depends_on]
         assert_includes File.read(File.join(folder, "meta.yml")), "depends_on: base-task"
+      end
+    end
+  end
+
+  def test_cli_repeated_dependency_flags_persist_all_references_and_emit_notice
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        out, err = capture_io do
+          Hive::CLI.start([
+            "new", project, "--depends-on", "first-task", "dependent task",
+            "--depends-on", "second-task"
+          ])
+        end
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "dependent-task-*")].first
+        assert_equal [ "first-task", "second-task" ], Hive::TaskMeta.read(folder)[:depends_on]
+        assert_includes out, "hive: captured"
+        assert_includes err, "branches from the project default"
+        assert_includes err, "require 9-done"
+      end
+    end
+  end
+
+  def test_cli_duplicate_dependency_flags_preserve_list_shape_after_deduplication
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io do
+          Hive::CLI.start([
+            "new", project, "--depends-on", "base-task", "--depends-on", "base-task",
+            "duplicate prerequisites"
+          ])
+        end
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "duplicate-prerequisites-*")].first
+        assert_equal [ "base-task" ], Hive::TaskMeta.read(folder)[:depends_on]
+      end
+    end
+  end
+
+  def test_programmatic_dependency_array_preserves_singleton_shape
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io do
+          Hive::Commands::New.new(project, "array dependency", depends_on: [ "base-task" ]).call
+        end
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "array-dependency-*")].first
+        assert_equal [ "base-task" ], Hive::TaskMeta.read(folder)[:depends_on]
+      end
+    end
+  end
+
+  def test_cli_invalid_later_dependency_fails_before_publishing_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        _out, err, status = with_captured_exit do
+          Hive::CLI.start([
+            "new", project, "--depends-on", "base-task", "--depends-on", "BAD TASK",
+            "invalid dependency list"
+          ])
+        end
+
+        assert_equal Hive::ExitCodes::GENERIC, status
+        assert_includes err, "element 2"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "invalid-dependency-list-*")]
       end
     end
   end

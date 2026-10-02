@@ -563,6 +563,41 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  # hivedev C2: GitHub closed its stacked PR when C1's branch was deleted at
+  # merge; a closed foreign PR on the branch must not block republishing.
+  def test_closed_foreign_pr_on_the_branch_does_not_block_a_new_publication
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      github = FakeGithub.new
+      github.records << github.owned_pr(
+        request, number: 7, state: "CLOSED",
+        overrides: { "base_branch" => "old-stacked-base", "body" => "old body\n" }
+      )
+      controller = controller_for(repo, remote, github)
+
+      result = controller.publish!(request, revalidate: ->(*) { true })
+
+      assert_equal 1, github.creates
+      assert_equal 41, result.fetch("number")
+    end
+  end
+
+  def test_open_foreign_pr_on_the_branch_still_conflicts
+    with_local_remote do |repo, remote, head|
+      request = request_for(repo, head)
+      github = FakeGithub.new
+      github.records << github.owned_pr(request, number: 7, overrides: { "body" => "someone else's PR\n" })
+      capture("git", "-C", repo, "push", "origin", "HEAD:#{request.branch}")
+      controller = controller_for(repo, remote, github)
+
+      error = assert_raises(Hive::GithubPublication::Blocked) do
+        controller.publish!(request, revalidate: ->(*) { true })
+      end
+      assert_equal "pr_identity_conflict", error.code
+      assert_equal 0, github.creates
+    end
+  end
+
   def test_recorded_pr_adoption_rejects_foreign_urls_and_divergent_history
     with_local_remote do |repo, remote, head|
       request = request_for(repo, head)

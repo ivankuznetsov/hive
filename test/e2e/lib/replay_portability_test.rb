@@ -78,10 +78,10 @@ class E2EReplayPortabilityTest < Minitest::Test
     end
   end
 
-  def test_launcher_maps_the_pinned_descriptor_to_a_distinct_child_fd
+  def test_launcher_maps_the_pinned_descriptor_away_from_low_child_fds
     launcher = Hive::E2E.const_get(:ReplayLauncher).new
 
-    [ [ 12, 3 ], [ 3, 4 ] ].each do |source_fd, child_fd|
+    [ [ 12, 198 ], [ 198, 197 ] ].each do |source_fd, child_fd|
       custody = Struct.new(
         :descriptor_alias,
         :script_fd,

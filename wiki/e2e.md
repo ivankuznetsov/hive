@@ -116,7 +116,8 @@ rather than the synthetic alias pathname metadata. Because an
 through their readable alias after replay parses the pinned shebang; text
 without a shebang uses `/bin/sh`, matching Ruby's ENOEXEC fallback. The selected
 readable or executable script descriptor is duplicated onto a distinct child
-descriptor before launch so macOS clears its close-on-exec flag; only that
+descriptor outside the low process-control range before launch so macOS clears
+its close-on-exec flag without the interpreter reusing the alias; only that
 duplicate is inherited by the artifact. Other root, component, verification,
 and admission descriptors stay in the supervising parent and are closed in the
 child. A generated shebang

@@ -27,8 +27,12 @@ through Darwin's synthetic filesystem fails preflight and that querying
 synthetic pathname execute metadata rejects otherwise valid aliases. The
 checkout now validates the fixed `/dev/fd/<held-fd>` mapping without reopening
 it and derives launch-time execute mode from the held descriptor's `fstat`
-metadata. It still has no observed green hosted run URL and commit SHA. Local
-Linux evidence cannot establish Darwin `/dev/fd` behavior. Do not mark
+metadata. The next run showed that duplicating custody onto child descriptor 3
+let Darwin spawn and Bash 3.2 consume or reuse the low descriptor, breaking
+native execution and leaving scripts with a stale `$0` alias. The checkout now
+uses a reserved high child descriptor outside that process-control range. It
+still has no observed green hosted run URL and commit SHA. Local Linux evidence
+cannot establish Darwin `/dev/fd` behavior. Do not mark
 cross-platform replay qualification complete until that exact job and commit
 are observed green.
 

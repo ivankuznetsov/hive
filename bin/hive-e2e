@@ -83,6 +83,9 @@ module Hive
     # and admission custody. Only the verified descriptor alias is ever used as
     # an executable name; every other held descriptor is closed in the child.
     class ReplayLauncher
+      # Darwin spawn and Bash 3.2 use low descriptors for process control.
+      INHERITED_DESCRIPTOR_FD = 198
+
       class LaunchError < StandardError; end
       class SupervisionError < StandardError; end
 
@@ -157,7 +160,12 @@ module Hive
       end
 
       def inherited_descriptor(alias_path, source_fd)
-        child_fd = source_fd == 3 ? 4 : 3
+        child_fd =
+          if source_fd == INHERITED_DESCRIPTOR_FD
+            INHERITED_DESCRIPTOR_FD - 1
+          else
+            INHERITED_DESCRIPTOR_FD
+          end
         [ File.join(File.dirname(alias_path), child_fd.to_s), source_fd, child_fd ]
       end
 

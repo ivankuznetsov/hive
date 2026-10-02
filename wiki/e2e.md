@@ -110,7 +110,8 @@ only for descriptors opened in that mode. Native binaries launch through that
 executable alias after requiring the exact Darwin `/dev/fd/<held-fd>` mapping
 to exist; it does not reopen an execute-only descriptor through the synthetic
 filesystem. Launch-time execute-mode validation uses the held descriptor's
-`fstat` metadata rather than the synthetic alias pathname metadata. Because an
+`fstat` metadata, including the current process's owner/group permission class,
+rather than the synthetic alias pathname metadata. Because an
 `O_EXEC` descriptor is not readable by a shebang interpreter, scripts launch
 through their readable alias after replay parses the pinned shebang; text
 without a shebang uses `/bin/sh`, matching Ruby's ENOEXEC fallback. Only the

@@ -374,6 +374,34 @@ class E2EReplayPortabilityTest < Minitest::Test
     end
   end
 
+  def test_darwin_owner_execute_bit_loss_is_rejected_from_the_held_descriptor
+    Dir.mktmpdir("replay-portability") do |tmp|
+      runs_dir, state_home, scenario_dir = replay_layout(tmp)
+      marker = File.join(tmp, "marker")
+      script = File.join(scenario_dir, "repro.sh")
+      write_marker_script(script, marker)
+      custody = Hive::E2E::ReplaySafety.new(
+        runs_root: runs_dir,
+        control_root: Hive::E2E::Paths.replay_control_dir(
+          env: replay_env(runs_dir, state_home)
+        ),
+        native: DarwinExecutableNative.new,
+        platform: "arm64-darwin",
+        on_event: lambda do |event|
+          File.chmod(0o655, script) if event == :final_fence_passed
+        end
+      ).select(run_id: "run-1", scenario: "scenario-1")
+
+      launcher = Hive::E2E.const_get(:ReplayLauncher).new
+      assert_raises(Hive::E2E.const_get(:ReplayLauncher).const_get(:LaunchError)) do
+        without_path_executability_query { launcher.run(custody) }
+      end
+      refute_path_exists marker
+    ensure
+      custody&.close
+    end
+  end
+
   def test_same_inode_content_rewrite_remains_outside_descriptor_custody
     Dir.mktmpdir("replay-portability") do |tmp|
       runs_dir, state_home, scenario_dir = replay_layout(tmp)

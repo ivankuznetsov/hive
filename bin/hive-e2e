@@ -114,7 +114,7 @@ module Hive
           custody.executable_script_fd,
           autoclose: false
         ).stat
-        raise LaunchError unless executable.file? && (executable.mode & 0o111).positive?
+        raise LaunchError unless executable.file? && executable.executable?
 
         # Darwin's /dev/fd exposes execute access only for O_EXEC descriptors,
         # which are not readable by a shebang interpreter. Scripts therefore

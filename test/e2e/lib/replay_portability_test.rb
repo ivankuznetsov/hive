@@ -365,25 +365,27 @@ class E2EReplayPortabilityTest < Minitest::Test
 
       launcher = Hive::E2E.const_get(:ReplayLauncher).new
       command, spawn_options = launcher.send(:launch_command, custody)
-      assert_equal custody.executable_descriptor_alias, command.first.first
+      assert_equal [ "/bin/bash", "bash" ], command.first
+      assert_equal [ "-p", "-c", 'exec -a repro.sh "$1"', "hive-replay" ], command[1...-1]
+      assert_equal "/dev/fd/9", command.last
       assert IO.for_fd(custody.executable_script_fd, autoclose: false).close_on_exec?
-      assert_equal({ close_others: false }, spawn_options)
+      assert_equal(
+        { 9 => custody.executable_script_fd, close_others: true },
+        spawn_options
+      )
 
-      spawned_alias = nil
-      spawned_close_on_exec = nil
+      spawned_command = nil
+      spawned_options = nil
       replacement = lambda do |*arguments|
-        spawned_alias = arguments.first.first
-        spawned_close_on_exec = IO.for_fd(
-          custody.executable_script_fd,
-          autoclose: false
-        ).close_on_exec?
+        spawned_command = arguments[0...-1]
+        spawned_options = arguments.last
         123
       end
       with_replaced_singleton_method(Process, :spawn, replacement) do
         assert_equal 123, launcher.send(:spawn_child, custody)
       end
-      assert_equal custody.executable_descriptor_alias, spawned_alias
-      refute spawned_close_on_exec
+      assert_equal command, spawned_command
+      assert_equal spawn_options, spawned_options
       assert IO.for_fd(custody.executable_script_fd, autoclose: false).close_on_exec?
 
       out, err = capture_subprocess_io("BASH_ENV" => hook) do

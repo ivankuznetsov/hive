@@ -86,6 +86,7 @@ module Hive
       # Keep inherited scripts clear of spawn's low process-control descriptors
       # and Bash's internal descriptor range above 9.
       INHERITED_DESCRIPTOR_FD = 9
+      NATIVE_DESCRIPTOR_TRAMPOLINE = 'exec -a repro.sh "$1"'.freeze
 
       class LaunchError < StandardError; end
       class SupervisionError < StandardError; end
@@ -102,13 +103,9 @@ module Hive
 
       def spawn_child(custody)
         command, spawn_options = launch_command(custody)
-        launch_handle = inheritable_executable_handle(command, custody)
-        launch_handle.close_on_exec = false if launch_handle
         Process.spawn(*command, spawn_options)
       rescue SystemCallError, IOError, ArgumentError
         raise LaunchError
-      ensure
-        launch_handle.close_on_exec = true if launch_handle
       end
 
       def launch_command(custody)
@@ -156,25 +153,23 @@ module Hive
             { child_fd => script_fd, close_others: true }
           ]
         else
-          # spawn_child temporarily clears close-on-exec on the already-live
-          # O_EXEC handle so Darwin can resolve this alias during native image
-          # lookup, then restores descriptor isolation after spawn returns.
-          [ [ [ executable_alias, "repro.sh" ] ], { close_others: false } ]
+          alias_path, script_fd, child_fd = inherited_descriptor(
+            executable_alias,
+            custody.executable_script_fd
+          )
+          # Darwin resolves a spawn target before applying child descriptor
+          # actions. Start a fixed shell first, then replace it with the pinned
+          # native image after the executable descriptor has been inherited.
+          [
+            [
+              [ "/bin/bash", "bash" ], "-p", "-c",
+              NATIVE_DESCRIPTOR_TRAMPOLINE, "hive-replay", alias_path
+            ],
+            { child_fd => script_fd, close_others: true }
+          ]
         end
       rescue SystemCallError, IOError, ArgumentError
         raise LaunchError
-      end
-
-      def inheritable_executable_handle(command, custody)
-        return unless command.first.first == custody.executable_descriptor_alias
-
-        handle = IO.for_fd(
-          custody.executable_script_fd,
-          autoclose: false
-        )
-        raise LaunchError unless handle.close_on_exec?
-
-        handle
       end
 
       def inherited_descriptor(alias_path, source_fd)

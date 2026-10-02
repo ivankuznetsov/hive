@@ -83,8 +83,9 @@ module Hive
     # and admission custody. Only the verified descriptor alias is ever used as
     # an executable name; every other held descriptor is closed in the child.
     class ReplayLauncher
-      # Darwin spawn and Bash 3.2 use low descriptors for process control.
-      INHERITED_DESCRIPTOR_FD = 198
+      # Keep inherited scripts clear of spawn's low process-control descriptors
+      # and Bash's internal descriptor range above 9.
+      INHERITED_DESCRIPTOR_FD = 9
 
       class LaunchError < StandardError; end
       class SupervisionError < StandardError; end
@@ -149,11 +150,8 @@ module Hive
           )
           [ [ [ "/bin/sh", "sh" ], alias_path ], script_fd, child_fd ]
         else
-          alias_path, script_fd, child_fd = inherited_descriptor(
-            executable_alias,
-            custody.executable_script_fd
-          )
-          [ [ [ alias_path, "repro.sh" ] ], script_fd, child_fd ]
+          script_fd = custody.executable_script_fd
+          [ [ [ executable_alias, "repro.sh" ] ], script_fd, script_fd ]
         end
       rescue SystemCallError, IOError, ArgumentError
         raise LaunchError

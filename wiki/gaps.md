@@ -30,9 +30,14 @@ it and derives launch-time execute mode from the held descriptor's `fstat`
 metadata. The next run showed that duplicating custody onto child descriptor 3
 let Darwin spawn and Bash 3.2 consume or reuse the low descriptor, breaking
 native execution and leaving scripts with a stale `$0` alias. The checkout now
-uses a reserved high child descriptor outside that process-control range. It
-still has no observed green hosted run URL and commit SHA. Local Linux evidence
-cannot establish Darwin `/dev/fd` behavior. Do not mark
+uses child descriptor 9 (or 8 on collision) for scripts. The following run
+showed that descriptor 198 falls in Bash's internal range, that native Darwin
+image lookup cannot use an alias created later by a spawn file action, and that
+the portability probes had repeated the already-rejected pathname-stat check
+against `/dev/fd`. Native launch now keeps the already-live `O_EXEC` alias,
+while the probes verify identity through opened alias handles. It still has no
+observed green hosted run URL and commit SHA. Local Linux evidence cannot
+establish Darwin `/dev/fd` behavior. Do not mark
 cross-platform replay qualification complete until that exact job and commit
 are observed green.
 

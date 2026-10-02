@@ -81,7 +81,7 @@ class E2EReplayPortabilityTest < Minitest::Test
   def test_launcher_maps_the_pinned_descriptor_away_from_low_child_fds
     launcher = Hive::E2E.const_get(:ReplayLauncher).new
 
-    [ [ 12, 198 ], [ 198, 197 ] ].each do |source_fd, child_fd|
+    [ [ 12, 9 ], [ 9, 8 ] ].each do |source_fd, child_fd|
       custody = Struct.new(
         :descriptor_alias,
         :script_fd,
@@ -122,7 +122,7 @@ class E2EReplayPortabilityTest < Minitest::Test
         file.puts <<~'BASH'
           ruby -rjson -e '
             path = ARGV.fetch(0)
-            stat = File.stat(path)
+            stat = File.open(path, &:stat)
             puts JSON.generate(alias_path: path, fd: File.basename(path), dev: stat.dev, ino: stat.ino)
           ' "$0"
         BASH
@@ -219,7 +219,7 @@ class E2EReplayPortabilityTest < Minitest::Test
           fds = (3..255).filter_map do |fd|
             path = "/dev/fd/#{fd}"
             begin
-              stat = File.stat(path)
+              stat = File.open(path, &:stat)
               { fd: fd, dev: stat.dev, ino: stat.ino }
             rescue SystemCallError
               nil
@@ -363,9 +363,15 @@ class E2EReplayPortabilityTest < Minitest::Test
         platform: "arm64-darwin"
       ).select(run_id: "run-1", scenario: "scenario-1")
 
+      launcher = Hive::E2E.const_get(:ReplayLauncher).new
+      command, source_fd, child_fd = launcher.send(:launch_command, custody)
+      assert_equal custody.executable_descriptor_alias, command.first.first
+      assert_equal custody.executable_script_fd, source_fd
+      assert_equal source_fd, child_fd
+
       out, err = capture_subprocess_io("BASH_ENV" => hook) do
         status = without_path_executability_query do
-          Hive::E2E.const_get(:ReplayLauncher).new.run(custody)
+          launcher.run(custody)
         end
       end
       assert_equal 23, status.exitstatus, err

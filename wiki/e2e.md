@@ -115,12 +115,13 @@ rather than the synthetic alias pathname metadata. Because an
 `O_EXEC` descriptor is not readable by a shebang interpreter, scripts launch
 through their readable alias after replay parses the pinned shebang; text
 without a shebang uses `/bin/sh`, matching Ruby's ENOEXEC fallback. The selected
-readable or executable script descriptor is duplicated onto a distinct child
-descriptor outside the low process-control range before launch so macOS clears
-its close-on-exec flag without the interpreter reusing the alias; only that
-duplicate is inherited by the artifact. Other root, component, verification,
-and admission descriptors stay in the supervising parent and are closed in the
-child. A generated shebang
+readable script descriptor is duplicated onto child descriptor 9 (or 8 when 9
+is the source), above spawn's process-control slots but below Bash's internal
+descriptor range. Native binaries instead execute through the already-live
+`O_EXEC` alias because a spawn file action cannot create the executable pathname
+early enough for Darwin's native image lookup. Other root, component,
+verification, and admission descriptors stay in the supervising parent and are
+closed in the child. A generated shebang
 script consequently observes the readable descriptor alias as `$0`; the native
 executable compatibility fixture observes `repro.sh` as `argv[0]`. The
 interpreter named by a shebang, `/usr/bin/env` and its `PATH` lookup, and the

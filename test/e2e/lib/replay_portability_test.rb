@@ -369,6 +369,27 @@ class E2EReplayPortabilityTest < Minitest::Test
       assert IO.for_fd(custody.executable_script_fd, autoclose: false).close_on_exec?
       assert_equal({ close_others: false }, spawn_options)
 
+      spawned_alias = nil
+      spawned_fd = nil
+      spawned_close_on_exec = nil
+      replacement = lambda do |*arguments|
+        spawned_alias = arguments.first.first
+        spawned_fd = File.basename(spawned_alias).to_i
+        spawned_close_on_exec = IO.for_fd(
+          spawned_fd,
+          autoclose: false
+        ).close_on_exec?
+        123
+      end
+      with_replaced_singleton_method(Process, :spawn, replacement) do
+        assert_equal 123, launcher.send(:spawn_child, custody)
+      end
+      refute_equal custody.executable_descriptor_alias, spawned_alias
+      refute spawned_close_on_exec
+      assert_raises(Errno::EBADF) do
+        IO.for_fd(spawned_fd, autoclose: false).stat
+      end
+
       out, err = capture_subprocess_io("BASH_ENV" => hook) do
         status = without_path_executability_query do
           launcher.run(custody)

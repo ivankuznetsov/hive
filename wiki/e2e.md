@@ -119,11 +119,12 @@ readable script descriptor is duplicated onto child descriptor 9 (or 8 when 9
 is the source), above spawn's process-control slots but below Bash's internal
 descriptor range. Native binaries instead execute through the already-live
 `O_EXEC` alias because a spawn file action cannot create the executable pathname
-early enough for Darwin's native image lookup. The executable handle stays
-close-on-exec and native spawn does not run Ruby's pre-exec close-others pass;
-Darwin can therefore resolve the live alias before image replacement closes the
-handle. Other root, component, verification, and admission handles are also
-close-on-exec and do not survive image replacement. A generated shebang
+early enough for Darwin's native image lookup. Immediately before spawn, replay
+duplicates the pinned `O_EXEC` handle, clears close-on-exec only on that launch
+duplicate, and executes its already-live alias. The parent closes the duplicate
+after spawn; the artifact inherits only that selected descriptor. Other root,
+component, verification, and admission handles stay close-on-exec and do not
+survive image replacement. A generated shebang
 script consequently observes the readable descriptor alias as `$0`; the native
 executable compatibility fixture observes `repro.sh` as `argv[0]`. The
 interpreter named by a shebang, `/usr/bin/env` and its `PATH` lookup, and the

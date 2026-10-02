@@ -102,9 +102,23 @@ module Hive
 
       def spawn_child(custody)
         command, spawn_options = launch_command(custody)
+        launch_handle = inheritable_executable_handle(command, custody)
+        if launch_handle
+          command = [
+            [
+              File.join(
+                File.dirname(custody.executable_descriptor_alias),
+                launch_handle.fileno.to_s
+              ),
+              command.first.last
+            ]
+          ]
+        end
         Process.spawn(*command, spawn_options)
-      rescue SystemCallError, ArgumentError
+      rescue SystemCallError, IOError, ArgumentError
         raise LaunchError
+      ensure
+        launch_handle&.close
       end
 
       def launch_command(custody)
@@ -152,12 +166,24 @@ module Hive
             { child_fd => script_fd, close_others: true }
           ]
         else
-          # Keep the O_EXEC handle close-on-exec so Darwin can resolve its
-          # already-live alias without Ruby clearing descriptor flags first.
+          # spawn_child duplicates the O_EXEC handle before launch because Ruby
+          # closes descriptors already marked close-on-exec even when
+          # close_others is false.
           [ [ [ executable_alias, "repro.sh" ] ], { close_others: false } ]
         end
       rescue SystemCallError, IOError, ArgumentError
         raise LaunchError
+      end
+
+      def inheritable_executable_handle(command, custody)
+        return unless command.first.first == custody.executable_descriptor_alias
+
+        handle = IO.for_fd(
+          custody.executable_script_fd,
+          autoclose: false
+        ).dup
+        handle.close_on_exec = false
+        handle
       end
 
       def inherited_descriptor(alias_path, source_fd)

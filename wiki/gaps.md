@@ -38,10 +38,13 @@ against `/dev/fd`. Native launch now keeps the already-live `O_EXEC` alias,
 while the probes verify identity through opened alias handles. The latest run
 proved the script mapping through child descriptor 9, but native launch still
 failed while Ruby prepared a same-number `O_EXEC` redirection. Native launch
-now leaves that handle close-on-exec and lets Darwin resolve its already-live
-alias before image replacement closes it. It still has no observed green hosted
-run URL and commit SHA. Local Linux evidence cannot establish Darwin `/dev/fd`
-behavior. Do not mark
+then left the handle close-on-exec, but Ruby closes such descriptors regardless
+of `close_others: false`, so the next hosted run again lost the alias before
+native image lookup. Native launch now creates a pre-spawn duplicate of the
+pinned handle, clears close-on-exec on only that duplicate, and closes the
+parent's duplicate after spawn. It still has no observed green hosted run URL
+and commit SHA. Local Linux evidence cannot establish Darwin `/dev/fd` behavior.
+Do not mark
 cross-platform replay qualification complete until that exact job and commit
 are observed green.
 

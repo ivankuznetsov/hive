@@ -118,10 +118,12 @@ home from the OS account database at
 `TMP`, `TEMP`, and sandbox `HIVE_HOME` do not affect this location, and
 cooperating callers must use the same stable XDG state configuration. Hive
 validates the owned mode-`0700` directory and persistent, zero-byte,
-mode-`0600` shard files without following symlinks. Native shard creation calls
-the variadic `openat` interface as variadic, preserving the requested mode on
-both Linux and Apple Silicon rather than relying on their different fixed-call
-argument conventions.
+mode-`0600` shard files without following symlinks. Directory-link validation
+keeps the strict one-or-two-link rule on non-Darwin hosts and accepts Darwin's
+bounded APFS entry-count semantics up to the 256-shard namespace plus its two
+special entries. Native shard creation calls the variadic `openat` interface as
+variadic, preserving the requested mode on both Linux and Apple Silicon rather
+than relying on their different fixed-call argument conventions.
 
 For one root/run/scenario selection, replay nonblockingly acquires the sorted
 unique shards derived from its normalized configured-root path, sandwiched

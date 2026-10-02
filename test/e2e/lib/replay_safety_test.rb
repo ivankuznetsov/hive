@@ -470,6 +470,39 @@ class E2EReplaySafetyTest < Minitest::Test
     end
   end
 
+  def test_control_directory_accepts_bounded_apfs_entry_count_links
+    with_replay_tree do |runs_root, _script|
+      control_root = control_root_for(runs_root)
+      apfs_links = LockOperationsProxy.new(
+        stat_transform: lambda do |_source, _target, stat|
+          next stat unless stat.directory?
+
+          StatProxy.new(stat, nlink: Dir.children(control_root).length + 2)
+        end
+      )
+      custody = replay_safety(
+        runs_root,
+        lock_operations: apfs_links,
+        platform: "arm64-darwin"
+      ).select(run_id: RUN_ID, scenario: SCENARIO)
+
+      custody.close
+
+      excessive_links = LockOperationsProxy.new(
+        stat_transform: lambda do |_source, _target, stat|
+          stat.directory? ? StatProxy.new(stat, nlink: 259) : stat
+        end
+      )
+      assert_lock_unavailable do
+        replay_safety(
+          runs_root,
+          lock_operations: excessive_links,
+          platform: "arm64-darwin"
+        ).select(run_id: RUN_ID, scenario: SCENARIO)
+      end
+    end
+  end
+
   def test_shard_symlink_mode_and_link_count_fail_closed_without_repair
     %i[symlink mode links contents].each do |unsafe|
       with_replay_tree do |runs_root, _script|

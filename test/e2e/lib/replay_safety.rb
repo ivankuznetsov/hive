@@ -149,6 +149,7 @@ module Hive
                      shard_selector: DEFAULT_SHARD_SELECTOR,
                      lock_operations: LockOperations.new,
                      descriptor_alias_roots: DEFAULT_DESCRIPTOR_ALIAS_ROOTS,
+                     platform: RUBY_PLATFORM,
                      on_event: nil)
         @runs_root = File.expand_path(runs_root).freeze
         @filesystem = filesystem
@@ -158,6 +159,7 @@ module Hive
         @descriptor_alias_roots = Array(descriptor_alias_roots).map do |root|
           File.expand_path(root).freeze
         end.freeze
+        @platform = platform.to_s.freeze
         @on_event = on_event
         @native = native || native_factory.call
       rescue Hive::ManagedDirectory::NativeAdapterUnavailable
@@ -377,7 +379,13 @@ module Hive
         stat.directory? && !stat.symlink? &&
           stat.uid == @lock_operations.euid &&
           (stat.mode & 0o7777) == CONTROL_DIRECTORY_MODE &&
-          [ 1, 2 ].include?(stat.nlink)
+          usable_control_link_count?(stat.nlink)
+      end
+
+      def usable_control_link_count?(count)
+        return count.between?(1, SHARD_COUNT + 2) if @platform.include?("darwin")
+
+        [ 1, 2 ].include?(count)
       end
 
       def usable_lock_shard?(stat)

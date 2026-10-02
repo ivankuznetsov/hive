@@ -932,7 +932,8 @@ Replay descriptor custody is split into focused layers:
 - `test/e2e/lib/replay_safety_test.rb` deterministically pins root and
   descendant identity/type classification, final-fence races, descriptor-alias
   verification, lock-directory/shard custody, bounded sorted admission,
-  contention, cleanup, and retry behavior without timing sleeps.
+  contention, cleanup, retry behavior, and bounded APFS directory-link
+  semantics without timing sleeps.
 - `test/e2e/lib/hive_e2e_binary_test.rb` pins the executable mapping and
   supervision contract: all typed replay reason pairs, JSON/prose and exit
   behavior, real contention, stdio/status/signal behavior, and custody release.

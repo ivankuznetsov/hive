@@ -2,6 +2,149 @@ require "test_helper"
 require "hive/task_meta"
 
 class TaskMetaTest < Minitest::Test
+  def test_update_only_helpers_do_not_create_a_missing_task_folder
+    with_tmp_dir do |root|
+      task = File.join(root, "missing-task")
+
+      rewrite = Hive::TaskMeta.rewrite(task, display_name: "Do not recreate")
+      name = Hive::TaskMeta.update_display_name(task, "Do not recreate")
+      id = Hive::TaskMeta.update_id(task, 99)
+
+      assert rewrite.stale?
+      assert name.stale?
+      assert id.stale?
+      refute File.exist?(task)
+      assert_raises(Hive::TaskMeta::StaleTask) do
+        Hive::TaskMeta.write_completed_at_once(task, Time.utc(2026, 10, 2, 12))
+      end
+      refute File.exist?(task)
+    end
+  end
+
+  def test_update_rejects_a_same_path_replacement_with_copied_metadata
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      Hive::TaskMeta.write(task, id: 7, slug: "task", display_name: nil)
+      copied_metadata = File.binread(Hive::TaskMeta.path(task))
+      observation = Hive::TaskMeta.observe(task)
+
+      FileUtils.rm_rf(task)
+      FileUtils.mkdir_p(task)
+      File.binwrite(Hive::TaskMeta.path(task), copied_metadata)
+
+      result = Hive::TaskMeta.update_display_name(
+        task, "Replacement must remain untouched", observation: observation
+      )
+
+      assert result.stale?
+      assert_nil Hive::TaskMeta.read(task)[:display_name]
+      assert_raises(Hive::TaskMeta::StaleTask) do
+        Hive::TaskMeta.write_completed_at_once(
+          task, Time.utc(2026, 10, 2, 12), observation: observation
+        )
+      end
+      assert_nil Hive::TaskMeta.read(task)[:completed_at]
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_observation_follows_the_original_directory_through_a_move
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      Hive::TaskMeta.write(source, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(source)
+      File.rename(source, destination)
+
+      result = Hive::TaskMeta.update_display_name(
+        destination, "Moved task", observation: observation
+      )
+
+      assert result.applied?
+      assert_equal "Moved task", result.value[:display_name]
+      assert_equal "Moved task", Hive::TaskMeta.read(destination)[:display_name]
+      refute File.exist?(source)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_deletion_after_metadata_read_does_not_recreate_the_task
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      Hive::TaskMeta.write(task, id: 7, slug: "task", display_name: nil)
+      original = Hive::TaskMeta.method(:read_for_update!)
+      replacement = lambda do |folder|
+        value = original.call(folder)
+        FileUtils.rm_rf(folder)
+        value
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::TaskMeta, :read_for_update!, replacement
+      ) do
+        Hive::TaskMeta.update_display_name(task, "Do not recreate")
+      end
+
+      assert result.stale?
+      refute File.exist?(task)
+      assert_empty Dir.glob(File.join(root, "**", ".meta.yml.tmp.*"))
+    end
+  end
+
+  def test_missing_sidecar_in_an_existing_directory_can_be_updated
+    with_tmp_dir do |task|
+      result = Hive::TaskMeta.rewrite(task, display_name: "Legacy task")
+
+      assert result.applied?
+      assert_equal File.basename(task), Hive::TaskMeta.read(task)[:slug]
+      assert_equal "Legacy task", Hive::TaskMeta.read(task)[:display_name]
+    end
+  end
+
+  def test_guarded_restore_never_recreates_or_mutates_a_replacement
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      Hive::TaskMeta.write(task, id: 7, slug: "task", display_name: "Original")
+      snapshot = Hive::TaskMeta.snapshot(task)
+      copied_metadata = File.binread(Hive::TaskMeta.path(task))
+      observation = Hive::TaskMeta.observe(task)
+
+      FileUtils.rm_rf(task)
+      missing = Hive::TaskMeta.restore(
+        task, snapshot, observation: observation, create: false
+      )
+      assert missing.stale?
+      refute File.exist?(task)
+
+      FileUtils.mkdir_p(task)
+      File.binwrite(Hive::TaskMeta.path(task), copied_metadata.sub("Original", "Replacement"))
+      replacement = Hive::TaskMeta.restore(
+        task, snapshot, observation: observation, create: false
+      )
+
+      assert replacement.stale?
+      assert_equal "Replacement", Hive::TaskMeta.read(task)[:display_name]
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_explicit_restore_retains_creation_semantics
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      Hive::TaskMeta.write(task, id: 7, slug: "task", display_name: "Original")
+      snapshot = Hive::TaskMeta.snapshot(task)
+      FileUtils.rm_rf(task)
+
+      result = Hive::TaskMeta.restore(task, snapshot)
+
+      assert result.applied?
+      assert_equal "Original", Hive::TaskMeta.read(task)[:display_name]
+    end
+  end
+
   def test_writes_and_restores_signal_the_containing_stage_directory
     with_tmp_dir do |root|
       stage = File.join(root, ".hive-state", "stages", "9-done")

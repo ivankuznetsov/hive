@@ -8,9 +8,9 @@ module Hive
 
     PS_LSTART_TIMEOUT_SECONDS = 0.25
 
-    def with_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
+    def with_task_lock(task_folder, payload = nil, create: true, observation: nil, **payload_keywords)
       payload = (payload || {}).merge(payload_keywords)
-      lock_key = task_lease_repository.lease_key(task_folder)
+      lock_key = task_lease_repository.lease_key(task_folder, observation: observation)
       held = (Thread.current[:hive_task_locks] ||= {})
       if held.dig(lock_key, :pid) == Process.pid
         entry = held.fetch(lock_key)
@@ -23,9 +23,12 @@ module Hive
       end
 
       held.delete(lock_key)
-      lock_data = acquire_task_lock(task_folder, payload, create: create)
+      lock_data = acquire_task_lock(
+        task_folder, payload, create: create, observation: observation
+      )
       held[lock_key] = { depth: 1, lock_id: lock_data.fetch("lock_id"), pid: Process.pid }
       begin
+        Hive::TaskMeta.validate_observation!(task_folder, observation) if observation
         yield
       ensure
         entry = held.fetch(lock_key)
@@ -44,14 +47,16 @@ module Hive
       false
     end
 
-    def acquire_task_lock(task_folder, payload = nil, create: true, **payload_keywords)
+    def acquire_task_lock(task_folder, payload = nil, create: true, observation: nil, **payload_keywords)
       require "hive/attempts/context"
 
       payload = (payload || {}).merge(payload_keywords)
       data = base_payload
              .merge(payload.transform_keys(&:to_s))
              .merge(Hive::Attempts::Context.projection)
-      task_lease_repository.acquire(task_folder, data, create: create)
+      task_lease_repository.acquire(
+        task_folder, data, create: create, observation: observation
+      )
     end
 
     def release_task_lock(task_folder, lock_id:)

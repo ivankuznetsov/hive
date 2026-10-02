@@ -771,7 +771,9 @@ module Hive
 
       def fieldless_in_flight_tasks(ops)
         stages_root = File.join(ops.hive_state_path, "stages")
-        terminal_dirs = Hive::Workflows.all_terminal_stage_dirs
+        terminal_dirs = Hive::Workflows::Project.with_active_workflows(@project_path) do
+          Hive::Workflows.all_terminal_stage_dirs.dup.freeze
+        end
         Dir.glob(File.join(stages_root, "*", "*")).sort.filter_map do |path|
           next unless File.directory?(path)
           next unless Hive::Stages.task_slug?(File.basename(path))

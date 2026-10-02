@@ -796,12 +796,13 @@ module Hive
         # Hold the project overlay stable while loading and classifying rows.
         # StatusFeed runs this on poller and request threads, so every prepared
         # row must capture its own project's workflow generation before unlock.
-        Hive::Workflows::Project.synchronize do
-          raise workflow_generation if workflow_generation.is_a?(Exception)
-          Hive::Workflows::Project.load!(path) unless workflow_generation
-          config = workflow_generation&.config || task_action_config(path)
-          workflow_generation ||= Hive::Task.capture_workflow_generation(path, config: config)
-          rows = annotate_implementation_identities(
+        raise workflow_generation if workflow_generation.is_a?(Exception)
+        workflow_generation ||= Hive::Workflows::Project.with_active_workflows(path) do
+          config = task_action_config(path)
+          Hive::Task.capture_workflow_generation(path, config: config)
+        end
+        config = workflow_generation.config
+        rows = annotate_implementation_identities(
             collect_rows(
               hive_state,
               stages: stages,
@@ -817,18 +818,17 @@ module Hive
             rows,
             project, project_count, config: config, with_diagnostic: true
           )
-          PreparedProject.new(
-            project: project,
-            base: base,
-            config: config,
-            rows: rows,
-            hive_state: hive_state,
-            workflow_generation: workflow_generation,
-            incremental: !task_slugs.nil?,
-            exclude_archived: exclude_archived,
-            include_archive_index: include_archive_index
-          )
-        end
+        PreparedProject.new(
+          project: project,
+          base: base,
+          config: config,
+          rows: rows,
+          hive_state: hive_state,
+          workflow_generation: workflow_generation,
+          incremental: !task_slugs.nil?,
+          exclude_archived: exclude_archived,
+          include_archive_index: include_archive_index
+        )
       end
 
       def complete_project_payload(prepared, admission_context:, now: Time.now.utc,
@@ -1243,17 +1243,17 @@ module Hive
           return
         end
 
-        projection = nil
-        Hive::Workflows::Project.synchronize do
-          raise workflow_generation if workflow_generation.is_a?(Exception)
-          Hive::Workflows::Project.load!(path) unless workflow_generation
+        raise workflow_generation if workflow_generation.is_a?(Exception)
+        workflow_generation ||= Hive::Workflows::Project.with_active_workflows(path) do
           # Text-mode renders icon / state_label / suggested_command / age
           # only — `diagnostic` is unused here, so skip the bounded file-
           # I/O that TaskAction#diagnostic performs per red row. JSON path
           # still pays the full cost via project_payload.
-          config = workflow_generation&.config || task_action_config(path)
-          workflow_generation ||= Hive::Task.capture_workflow_generation(path, config: config)
-          rows = annotate_implementation_identities(
+          config = task_action_config(path)
+          Hive::Task.capture_workflow_generation(path, config: config)
+        end
+        config = workflow_generation.config
+        rows = annotate_implementation_identities(
             collect_rows(
               hive_state, now: now, workflow_generation: workflow_generation,
               project_name: project["name"]
@@ -1265,11 +1265,10 @@ module Hive
             config: config, with_diagnostic: false
           )
           rows = annotate_dependencies(rows, project, admission_context: admission_context)
-          projection = Hive::ArchiveFilter.project(
-            rows, now: now,
-            apply_retention: !@archive
-          )
-        end
+        projection = Hive::ArchiveFilter.project(
+          rows, now: now,
+          apply_retention: !@archive
+        )
         if @archive
           render_archive_project(project, projection.archive_rows)
           return
@@ -1899,8 +1898,7 @@ module Hive
           next unless path && File.directory?(path) && File.directory?(project["hive_state_path"])
 
           key = File.expand_path(path)
-          generations[key] = Hive::Workflows::Project.synchronize do
-            Hive::Workflows::Project.load!(path)
+          generations[key] = Hive::Workflows::Project.with_active_workflows(path) do
             config = task_action_config(path)
             admission_config, admission_config_error =
               Hive::DependencySnapshot.admission_project_config(path)

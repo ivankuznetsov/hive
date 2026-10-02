@@ -246,8 +246,7 @@ module Hive
       # read the active project overlay, so a concurrent `load!(otherProject)`
       # between the load and the read would scan THIS project against another
       # project's stage set. Project::LOCK is reentrant, so the nested load! is fine.
-      Hive::Workflows::Project.synchronize do
-        Hive::Workflows::Project.load!(project["path"])
+      Hive::Workflows::Project.with_active_workflows(project["path"]) do
         return all_stage_dirs if stage_filter.nil? || stage_filter.to_s.strip.empty?
 
         resolved = resolve_stage_ref_across_workflows(stage_filter)
@@ -272,9 +271,10 @@ module Hive
     def assert_known_stage_filter!(stage_filter, projects)
       return if stage_filter.nil? || stage_filter.to_s.strip.empty?
 
+      valid_hint = nil
       known = Array(projects).any? do |project|
-        Hive::Workflows::Project.synchronize do
-          Hive::Workflows::Project.load!(project["path"])
+        Hive::Workflows::Project.with_active_workflows(project["path"]) do
+          valid_hint = stage_ref_hint
           !resolve_stage_ref_across_workflows(stage_filter).nil?
         rescue Hive::Workflows::AmbiguousStageRef
           raise
@@ -284,7 +284,8 @@ module Hive
       end
       return if known
 
-      raise Hive::InvalidTaskPath, "unknown stage '#{stage_filter}'; valid: #{stage_ref_hint}"
+      valid_hint ||= Hive::Workflows::Project.synchronize { stage_ref_hint }
+      raise Hive::InvalidTaskPath, "unknown stage '#{stage_filter}'; valid: #{valid_hint}"
     end
   end
 end

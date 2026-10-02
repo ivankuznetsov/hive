@@ -3944,7 +3944,7 @@ class CommandsStatusTest < Minitest::Test
       project = status_project(project_root, hive_state)
 
       generations = with_replaced_singleton_method(
-        Hive::Workflows::Project, :synchronize, ->(&) { raise RuntimeError, "generation failed" }
+        Hive::Workflows::Project, :with_active_workflows, ->(*) { raise RuntimeError, "generation failed" }
       ) do
         Hive::Commands::Status.new.send(:capture_workflow_generations, [ project ])
       end

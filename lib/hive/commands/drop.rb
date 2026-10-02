@@ -122,8 +122,7 @@ module Hive
         # closes the window where a concurrent overlay swap could change which
         # dirs count as archived between the find and guard_archived!'s check —
         # which would hard-delete a completed task instead of refusing it.
-        active_dirs, archive_dirs = Hive::Workflows::Project.synchronize do
-          Hive::Workflows::Project.load!(task.project_root)
+        active_dirs, archive_dirs = Hive::Workflows::Project.with_active_workflows(task.project_root) do
           [ active_stage_dirs, archive_stage_dirs ]
         end
         folders = collect_stage_folders(task.hive_state_path, task.slug, active_dirs)
@@ -202,8 +201,7 @@ module Hive
         # a completed custom-workflow task instead of refusing it. The captured
         # set travels in TaskContext and is the ONLY archive-dir source the rest
         # of the drop consults (no live recomputation downstream).
-        archive_dirs = Hive::Workflows::Project.synchronize do
-          Hive::Workflows::Project.load!(project["path"])
+        archive_dirs = Hive::Workflows::Project.with_active_workflows(project["path"]) do
           archive_stage_dirs
         end
         if @stage_filter.nil?
@@ -243,8 +241,10 @@ module Hive
         projects = Hive::Config.registered_projects
         projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
         all_matches = projects.flat_map do |project|
-          Hive::Workflows::Project.load!(project["path"])
-          collect_stage_folders(project["hive_state_path"], @target, Hive::Workflows.all_stage_dirs).map do |folder|
+          stages = Hive::Workflows::Project.with_active_workflows(project["path"]) do
+            Hive::Workflows.all_stage_dirs.dup.freeze
+          end
+          collect_stage_folders(project["hive_state_path"], @target, stages).map do |folder|
             [ project, folder ]
           end
         end
@@ -258,13 +258,13 @@ module Hive
         # doesn't resolve in the matched project degrades to the raw ref rather
         # than raising mid-message. (No-op when the matched project was scanned
         # last: load! short-circuits on unchanged @active_root.)
-        Hive::Workflows::Project.load!(matched_project["path"])
-        expected_stage =
+        expected_stage = Hive::Workflows::Project.with_active_workflows(matched_project["path"]) do
           begin
             Hive::Workflows.resolve_stage_ref_across_workflows(@stage_filter)
           rescue Hive::InvalidTaskPath
             @stage_filter
           end
+        end
         raise Hive::WrongStage.new(
           "task is at #{actual_stage} but --from expected #{expected_stage}",
           current_stage: actual_stage,

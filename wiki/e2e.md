@@ -100,15 +100,18 @@ passes, later pathname replacement cannot redirect launch because replay uses
 only an identity-checked alias for the pinned script descriptor. It never falls
 back to the public runs-tree pathname.
 
-Linux launch uses `/proc/self/fd/<fd>` and macOS launch uses `/dev/fd/<fd>`;
-the alias must stat as the held script object. Only that same-number script
-descriptor is inherited by the artifact. Other root, component, and admission
-descriptors stay in the supervising parent and are closed in the child. A
-generated shebang script consequently observes the descriptor alias as `$0`;
-the native executable compatibility fixture continues to observe `repro.sh` as
-`argv[0]`. The interpreter named by a shebang, `/usr/bin/env` and its `PATH`
-lookup, and Ruby's `ENOEXEC` fallback shell remain ordinary pathname-resolved
-program images outside script custody.
+Linux launch uses `/proc/self/fd/<fd>` and macOS launch uses `/dev/fd/<fd>`.
+Linux requires the alias pathname to stat as the held script object. Darwin's
+synthetic descriptor filesystem is instead verified by opening the alias, which
+duplicates the numbered descriptor, and requiring that duplicate's descriptor
+stat to match the held script. Only the original same-number script descriptor
+is inherited by the artifact; the verification duplicate is closed first.
+Other root, component, and admission descriptors stay in the supervising parent
+and are closed in the child. A generated shebang script consequently observes
+the descriptor alias as `$0`; the native executable compatibility fixture
+continues to observe `repro.sh` as `argv[0]`. The interpreter named by a shebang,
+`/usr/bin/env` and its `PATH` lookup, and Ruby's `ENOEXEC` fallback shell remain
+ordinary pathname-resolved program images outside script custody.
 
 Replay admission lives outside the mutable runs tree at
 `$XDG_STATE_HOME/hive-e2e/replay-<effective-uid>/locks-v1`, provided

@@ -15,10 +15,13 @@ a fixed-versus-variadic `openat` ABI mismatch during mode-bearing shard creation
 on Apple Silicon. The next run reached correctly created shards but exposed
 APFS's entry-count-based control-directory link count during final admission
 validation. The CI-fix checkout now uses Fiddle's real variadic dispatch and a
-Darwin-specific bounded link-count policy, but has no observed green hosted run
-URL and commit SHA yet. Local Linux evidence cannot establish Darwin `/dev/fd`
-behavior. Do not mark cross-platform replay qualification complete until that
-exact job and commit are observed green.
+Darwin-specific bounded link-count policy. The following run reached alias
+selection but showed that pathname stat metadata from Darwin's synthetic
+`/dev/fd` entries is not a reliable identity check; the checkout now verifies
+the opened alias duplicate's descriptor identity instead. It still has no
+observed green hosted run URL and commit SHA. Local Linux evidence cannot
+establish Darwin `/dev/fd` behavior. Do not mark cross-platform replay
+qualification complete until that exact job and commit are observed green.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 

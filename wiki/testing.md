@@ -939,8 +939,9 @@ Replay descriptor custody is split into focused layers:
   behavior, real contention, stdio/status/signal behavior, and custody release.
 - `test/e2e/lib/replay_portability_test.rb` runs real descriptor launches:
   generated shebang `$0`, native `argv[0]`, child-side descriptor identity and
-  inheritance, late public-script replacement, alias mismatch, offset and FD
-  lifecycle behavior. The ordinary `e2e:lib_test` glob runs this on Linux.
+  inheritance, late public-script replacement, Linux alias mismatch, Darwin
+  opened-duplicate verification despite synthetic pathname metadata, offset and
+  FD lifecycle behavior. The ordinary `e2e:lib_test` glob runs this on Linux.
 - `test/e2e/lib/schemas_test.rb` pins the closed replay kind/reason vocabulary,
   allowed pairs, replay-only required/null rules, and unchanged non-replay
   shapes. `test/unit/managed_directory_test.rb` pins the native-adapter factory

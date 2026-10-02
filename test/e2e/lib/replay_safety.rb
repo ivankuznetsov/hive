@@ -656,13 +656,19 @@ module Hive
         @descriptor_alias_roots.each do |root|
           candidate = File.join(root, script.fileno.to_s)
           begin
-            stat = @filesystem.stat(candidate)
+            stat = descriptor_alias_stat(candidate)
             return candidate if identity(stat) == expected
           rescue SystemCallError, IOError, ArgumentError, TypeError
             next
           end
         end
         failure!("preflight", "descriptor_exec_unavailable")
+      end
+
+      def descriptor_alias_stat(candidate)
+        return @filesystem.stat(candidate) unless @platform.include?("darwin")
+
+        @filesystem.open(candidate, File::RDONLY, &:stat)
       end
 
       def usable_script?(stat)

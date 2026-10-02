@@ -944,6 +944,7 @@ class E2EReplaySafetyTest < Minitest::Test
             runs_root,
             native: native,
             descriptor_alias_roots: [ alias_root ],
+            platform: "arm64-darwin",
             on_event: observer
           ).select(run_id: RUN_ID, scenario: SCENARIO)
         end

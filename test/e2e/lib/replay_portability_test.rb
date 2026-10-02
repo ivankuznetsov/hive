@@ -29,6 +29,10 @@ class E2EReplayPortabilityTest < Minitest::Test
 
       AliasStat.new(dev: stat.dev, ino: stat.ino + 1, mode: stat.mode)
     end
+
+    def open(path, flags, &block)
+      File.open(path, flags, &block)
+    end
   end
 
   def test_generated_shebang_script_launches_from_its_inherited_descriptor
@@ -209,6 +213,29 @@ class E2EReplayPortabilityTest < Minitest::Test
     end
   end
 
+  def test_darwin_descriptor_alias_is_verified_through_its_opened_duplicate
+    Dir.mktmpdir("replay-portability") do |tmp|
+      runs_dir, state_home, scenario_dir = replay_layout(tmp)
+      script = File.join(scenario_dir, "repro.sh")
+      write_marker_script(script, File.join(tmp, "marker"))
+      custody = Hive::E2E::ReplaySafety.new(
+        runs_root: runs_dir,
+        control_root: Hive::E2E::Paths.replay_control_dir(
+          env: replay_env(runs_dir, state_home)
+        ),
+        filesystem: AliasMismatchFilesystem.new,
+        platform: "arm64-darwin"
+      ).select(run_id: "run-1", scenario: "scenario-1")
+
+      expected = File.stat(script)
+      actual = File.open(custody.descriptor_alias, File::RDONLY, &:stat)
+      assert_equal [ expected.dev, expected.ino, expected.mode & 0o170000 ],
+                   [ actual.dev, actual.ino, actual.mode & 0o170000 ]
+    ensure
+      custody&.close
+    end
+  end
+
   def test_identity_mismatched_descriptor_alias_fails_closed
     Dir.mktmpdir("replay-portability") do |tmp|
       runs_dir, state_home, scenario_dir = replay_layout(tmp)
@@ -220,7 +247,8 @@ class E2EReplayPortabilityTest < Minitest::Test
           control_root: Hive::E2E::Paths.replay_control_dir(
             env: replay_env(runs_dir, state_home)
           ),
-          filesystem: AliasMismatchFilesystem.new
+          filesystem: AliasMismatchFilesystem.new,
+          platform: "x86_64-linux"
         ).select(run_id: "run-1", scenario: "scenario-1")
       end
 

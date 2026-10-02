@@ -1382,6 +1382,32 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_public_native_adapter_factory_returns_the_private_adapter
+    adapter = Hive::ManagedDirectory.build_native_at_adapter
+    native_class = Hive::ManagedDirectory.const_get(:NativeAt, false)
+
+    assert_instance_of native_class, adapter
+    assert_raises(NameError) { Hive::ManagedDirectory::NativeAt }
+  end
+
+  def test_public_native_adapter_factory_normalizes_capability_unavailability
+    native_class = Hive::ManagedDirectory.const_get(:NativeAt, false)
+    unavailable = native_class.const_get(:Unavailable, false)
+
+    with_replaced_singleton_method(
+      native_class,
+      :new,
+      -> { raise unavailable, "platform-specific detail" }
+    ) do
+      error = assert_raises(Hive::ManagedDirectory::NativeAdapterUnavailable) do
+        Hive::ManagedDirectory.build_native_at_adapter
+      end
+
+      assert_equal "required descriptor capability is unavailable", error.message
+      refute_includes error.message, "platform-specific"
+    end
+  end
+
   private
 
   def close_failure_proxy(handle)

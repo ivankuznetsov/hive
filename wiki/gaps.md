@@ -18,10 +18,14 @@ validation. The CI-fix checkout now uses Fiddle's real variadic dispatch and a
 Darwin-specific bounded link-count policy. The following run reached alias
 selection but showed that pathname stat metadata from Darwin's synthetic
 `/dev/fd` entries is not a reliable identity check; the checkout now verifies
-the opened alias duplicate's descriptor identity instead. It still has no
-observed green hosted run URL and commit SHA. Local Linux evidence cannot
-establish Darwin `/dev/fd` behavior. Do not mark cross-platform replay
-qualification complete until that exact job and commit are observed green.
+the opened alias duplicate's descriptor identity instead. The next run reached
+spawn but showed that Darwin strips execute access from a synthetic alias for a
+read-only descriptor. The checkout now retains a separate identity-matched
+`O_EXEC` descriptor for native launch while shebang and fallback scripts keep a
+readable alias. It still has no observed green hosted run URL and commit SHA.
+Local Linux evidence cannot establish Darwin `/dev/fd` behavior. Do not mark
+cross-platform replay qualification complete until that exact job and commit
+are observed green.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 

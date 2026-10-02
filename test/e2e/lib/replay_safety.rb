@@ -71,10 +71,11 @@ module Hive
       # it after the supervised child reaches a terminal state.
       class Custody
         attr_reader :canonical_root, :root_identity, :script_identity,
-                    :descriptor_alias
+                    :descriptor_alias, :executable_descriptor_alias
 
         def initialize(handles:, admission:, script:, canonical_root:,
-                       root_identity:, script_identity:, descriptor_alias:)
+                       root_identity:, script_identity:, descriptor_alias:,
+                       executable_script: nil, executable_descriptor_alias: nil)
           @handles = handles
           @admission = admission
           @canonical_root = canonical_root.freeze
@@ -82,6 +83,8 @@ module Hive
           @script_identity = script_identity.freeze
           @descriptor_alias = descriptor_alias.freeze
           @script = script
+          @executable_script = executable_script
+          @executable_descriptor_alias = executable_descriptor_alias&.freeze
           @closed = false
         end
 
@@ -89,6 +92,12 @@ module Hive
           raise IOError, "replay custody is closed" if closed?
 
           @script.fileno
+        end
+
+        def executable_script_fd
+          raise IOError, "replay custody is closed" if closed?
+
+          @executable_script&.fileno
         end
 
         def closed?
@@ -199,6 +208,14 @@ module Hive
         script, script_stat = open_initial_script(parent)
         handles << script
         script_identity = identity(script_stat)
+        executable_script = open_executable_script(parent, script_identity)
+        handles << executable_script if executable_script
+        executable_descriptor_alias = if executable_script
+                                        verified_executable_descriptor_alias(
+                                          executable_script,
+                                          script_identity
+                                        )
+        end
         emit(:artifact_pinned)
 
         final_binding_fence!(
@@ -216,7 +233,9 @@ module Hive
           canonical_root: canonical_root,
           root_identity: root_identity,
           script_identity: script_identity,
-          descriptor_alias: descriptor_alias
+          descriptor_alias: descriptor_alias,
+          executable_script: executable_script,
+          executable_descriptor_alias: executable_descriptor_alias
         )
         handles = nil
         admission = nil
@@ -554,6 +573,24 @@ module Hive
         script&.close unless complete
       end
 
+      def open_executable_script(parent, expected)
+        return unless @platform.include?("darwin")
+
+        script = @native.open_executable(parent, "repro.sh")
+        failure!("unusable_repro", "repro_changed") unless
+          identity(script.stat) == expected
+        complete = true
+        script
+      rescue Errno::EACCES
+        failure!("unusable_repro", "repro_unusable")
+      rescue Error
+        raise
+      rescue SystemCallError, IOError, ArgumentError, TypeError
+        failure!("preflight", "descriptor_exec_unavailable")
+      ensure
+        script&.close unless complete
+      end
+
       def final_binding_fence!(root_identity:, entries:, script_identity:)
         opened = []
         root = open_root_for_fence(root_identity)
@@ -669,6 +706,21 @@ module Hive
         return @filesystem.stat(candidate) unless @platform.include?("darwin")
 
         @filesystem.open(candidate, File::RDONLY, &:stat)
+      end
+
+      def verified_executable_descriptor_alias(script, expected)
+        @descriptor_alias_roots.each do |root|
+          candidate = File.join(root, script.fileno.to_s)
+          begin
+            duplicate = @native.open_executable_alias(candidate)
+            return candidate if identity(duplicate.stat) == expected
+          rescue SystemCallError, IOError, ArgumentError, TypeError
+            next
+          ensure
+            duplicate&.close
+          end
+        end
+        failure!("preflight", "descriptor_exec_unavailable")
       end
 
       def usable_script?(stat)

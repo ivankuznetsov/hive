@@ -104,6 +104,16 @@ class E2EReplaySafetyTest < Minitest::Test
       remember(@delegate.open_file(parent, name, flags, mode: mode))
     end
 
+    def open_executable(parent, name)
+      raise Errno::EACCES, name if @error_for == name
+
+      remember(@delegate.open_executable(parent, name))
+    end
+
+    def open_executable_alias(path)
+      @delegate.open_executable_alias(path)
+    end
+
     private
 
     def remember(handle)

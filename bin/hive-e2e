@@ -97,13 +97,40 @@ module Hive
       private
 
       def spawn_child(custody)
-        script_fd = custody.script_fd
+        command, script_fd = launch_command(custody)
         Process.spawn(
-          [ custody.descriptor_alias, "repro.sh" ],
+          *command,
           script_fd => script_fd,
           close_others: true
         )
       rescue SystemCallError, ArgumentError
+        raise LaunchError
+      end
+
+      def launch_command(custody)
+        executable_alias = custody.executable_descriptor_alias
+        return [ [ [ custody.descriptor_alias, "repro.sh" ] ], custody.script_fd ] unless executable_alias
+        raise LaunchError unless File.executable?(executable_alias)
+
+        # Darwin's /dev/fd exposes execute access only for O_EXEC descriptors,
+        # which are not readable by a shebang interpreter. Scripts therefore
+        # use the separately held readable descriptor; native binaries use the
+        # executable descriptor directly.
+        prefix = IO.for_fd(custody.script_fd, autoclose: false).pread(4096, 0)
+        if prefix.start_with?("#!")
+          interpreter, argument = prefix.lines.first.delete_prefix("#!").strip.split(/\s+/, 2)
+          raise LaunchError if interpreter.nil? || interpreter.empty?
+
+          argv = [ [ interpreter, File.basename(interpreter) ] ]
+          argv << argument if argument
+          argv << custody.descriptor_alias
+          [ argv, custody.script_fd ]
+        elsif !prefix.include?("\0")
+          [ [ [ "/bin/sh", "sh" ], custody.descriptor_alias ], custody.script_fd ]
+        else
+          [ [ [ executable_alias, "repro.sh" ] ], custody.executable_script_fd ]
+        end
+      rescue SystemCallError, IOError, ArgumentError
         raise LaunchError
       end
 

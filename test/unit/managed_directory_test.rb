@@ -1375,7 +1375,11 @@ class ManagedDirectoryTest < Minitest::Test
         native.class.platform_flags("aarch64-linux")
       )
       assert_equal(
-        { directory: 0x00100000, cloexec: 0x01000000 },
+        {
+          directory: 0x00100000,
+          cloexec: 0x01000000,
+          executable: 0x40000000
+        },
         native.class.platform_flags("arm64-darwin")
       )
       assert_nil native.class.platform_flags("java")

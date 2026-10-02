@@ -14,7 +14,7 @@ end
 class E2EReplayPortabilityTest < Minitest::Test
   AliasStat = Data.define(:dev, :ino, :mode)
 
-  class AliasMismatchFilesystem
+  class PathStatMismatchFilesystem
     def lstat(path)
       File.lstat(path)
     end
@@ -32,6 +32,37 @@ class E2EReplayPortabilityTest < Minitest::Test
 
     def open(path, flags, &block)
       File.open(path, flags, &block)
+    end
+  end
+
+  class AliasMismatchFilesystem < PathStatMismatchFilesystem
+    def open(path, flags)
+      File.open(path, flags) do |file|
+        stat = file.stat
+        yield AliasStat.new(dev: stat.dev, ino: stat.ino + 1, mode: stat.mode)
+      end
+    end
+  end
+
+  class DarwinExecutableNative
+    def initialize
+      @delegate = Hive::ManagedDirectory.build_native_at_adapter
+    end
+
+    def open_executable(directory, name)
+      @delegate.open_file(directory, name, File::RDONLY | File::NONBLOCK)
+    end
+
+    def open_executable_alias(path)
+      File.open(path, File::RDONLY)
+    end
+
+    def method_missing(name, *arguments, **keywords, &block)
+      @delegate.public_send(name, *arguments, **keywords, &block)
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @delegate.respond_to?(name, include_private) || super
     end
   end
 
@@ -223,7 +254,7 @@ class E2EReplayPortabilityTest < Minitest::Test
         control_root: Hive::E2E::Paths.replay_control_dir(
           env: replay_env(runs_dir, state_home)
         ),
-        filesystem: AliasMismatchFilesystem.new,
+        filesystem: PathStatMismatchFilesystem.new,
         platform: "arm64-darwin"
       ).select(run_id: "run-1", scenario: "scenario-1")
 
@@ -231,6 +262,50 @@ class E2EReplayPortabilityTest < Minitest::Test
       actual = File.open(custody.descriptor_alias, File::RDONLY, &:stat)
       assert_equal [ expected.dev, expected.ino, expected.mode & 0o170000 ],
                    [ actual.dev, actual.ino, actual.mode & 0o170000 ]
+    ensure
+      custody&.close
+    end
+  end
+
+  def test_darwin_launch_uses_a_readable_alias_for_scripts_and_an_executable_alias_for_binaries
+    Dir.mktmpdir("replay-portability") do |tmp|
+      runs_dir, state_home, scenario_dir = replay_layout(tmp)
+      script = File.join(scenario_dir, "repro.sh")
+      marker = File.join(tmp, "script-marker")
+      write_marker_script(script, marker)
+      custody = Hive::E2E::ReplaySafety.new(
+        runs_root: runs_dir,
+        control_root: Hive::E2E::Paths.replay_control_dir(
+          env: replay_env(runs_dir, state_home)
+        ),
+        native: DarwinExecutableNative.new,
+        platform: "arm64-darwin"
+      ).select(run_id: "run-1", scenario: "scenario-1")
+
+      refute_equal custody.descriptor_alias, custody.executable_descriptor_alias
+      status = Hive::E2E.const_get(:ReplayLauncher).new.run(custody)
+      assert status.success?
+      assert_path_exists marker
+      custody.close
+
+      FileUtils.cp("/bin/bash", script)
+      File.chmod(0o755, script)
+      hook = File.join(tmp, "darwin-argv0-hook")
+      File.write(hook, "printf 'argv0=%s\\n' \"$0\"\nexit 23\n")
+      custody = Hive::E2E::ReplaySafety.new(
+        runs_root: runs_dir,
+        control_root: Hive::E2E::Paths.replay_control_dir(
+          env: replay_env(runs_dir, state_home)
+        ),
+        native: DarwinExecutableNative.new,
+        platform: "arm64-darwin"
+      ).select(run_id: "run-1", scenario: "scenario-1")
+
+      out, err = capture_subprocess_io("BASH_ENV" => hook) do
+        status = Hive::E2E.const_get(:ReplayLauncher).new.run(custody)
+      end
+      assert_equal 23, status.exitstatus, err
+      assert_equal "argv0=repro.sh\n", out
     ensure
       custody&.close
     end
@@ -248,7 +323,7 @@ class E2EReplayPortabilityTest < Minitest::Test
             env: replay_env(runs_dir, state_home)
           ),
           filesystem: AliasMismatchFilesystem.new,
-          platform: "x86_64-linux"
+          platform: RUBY_PLATFORM
         ).select(run_id: "run-1", scenario: "scenario-1")
       end
 
@@ -343,6 +418,31 @@ class E2EReplayPortabilityTest < Minitest::Test
   end
 
   private
+
+  def capture_subprocess_io(env)
+    out_r, out_w = IO.pipe
+    err_r, err_w = IO.pipe
+    old = env.to_h { |key, value| [ key, ENV[key] ] }
+    env.each { |key, value| ENV[key] = value }
+    original_out = STDOUT.dup
+    original_err = STDERR.dup
+    begin
+      STDOUT.reopen(out_w)
+      STDERR.reopen(err_w)
+      status = yield
+    ensure
+      STDOUT.reopen(original_out)
+      STDERR.reopen(original_err)
+      out_w.close
+      err_w.close
+      env.each_key { |key| old[key] ? ENV[key] = old[key] : ENV.delete(key) }
+    end
+    [ out_r.read, err_r.read, status ]
+  ensure
+    [ out_r, err_r, out_w, err_w, original_out, original_err ].compact.each do |io|
+      io.close unless io.closed?
+    end
+  end
 
   def hive_e2e
     File.join(Hive::E2E::Paths.repo_root, "bin", "hive-e2e")

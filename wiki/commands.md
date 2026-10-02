@@ -274,8 +274,9 @@ supervision failure use the condition-specific exit/kind/reason pairs in
 The caller-visible supervisor preserves inherited stdio, foreground job
 control, child exit status, and signal termination while retaining admission
 through the top-level artifact's terminal state. Generated shebang scripts see
-the descriptor alias as `$0`; native executables retain `repro.sh` as
-`argv[0]`. After abrupt supervisor death or `replay_supervision_failed`, the
+the readable descriptor alias as `$0`; on Darwin, native executables use a
+separate `O_EXEC` alias and retain `repro.sh` as `argv[0]`. After abrupt
+supervisor death or `replay_supervision_failed`, the
 artifact may survive and retry is not known safe. Follow the process-identity
 recovery procedure in [[e2e]] first. `bin/hive-e2e clean` never removes replay
 control metadata or persistent lock shards.

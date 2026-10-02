@@ -7,9 +7,9 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 8,
+      "hive-status" => 9,
       "hive-running-status" => 2,
-      "hive-operational-status" => 4,
+      "hive-operational-status" => 5,
       "hive-runtime-maintenance" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,

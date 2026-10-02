@@ -344,7 +344,7 @@ module Hive
       end
       unless project
         payload = [
-          "hive-dependency-admission-v1", "project_enrollment",
+          "hive-dependency-admission-v2", "project_enrollment",
           match_count, root, task.slug.to_s
         ]
         return ::Digest::SHA256.hexdigest(JSON.generate(payload))
@@ -353,15 +353,22 @@ module Hive
       admission_context ||= self.admission_context(registry_entries)
       verdict = admission_context.verdict(project: project, slug: task.slug)
       error = verdict.admission_error
+      default_branch = Hive::Config.load(task.project_root)["default_branch"]
+      base_mode = base_selection(task, default_branch, warn_on_fallback: false).mode
+      unmet = verdict.unmet_dependencies.map do |dependency|
+        [ dependency.reference, dependency.blocked_by, dependency.dependency_stage,
+          dependency.required_gate ]
+      end
       payload = [
-        "hive-dependency-admission-v1", project, task.slug.to_s,
+        "hive-dependency-admission-v2", project, task.slug.to_s,
         verdict.state.to_s, verdict.blocked_by.to_s, verdict.dependency_stage.to_s,
+        unmet, base_mode,
         error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s
       ]
       ::Digest::SHA256.hexdigest(JSON.generate(payload))
     rescue StandardError => e
       ::Digest::SHA256.hexdigest(
-        JSON.generate([ "hive-dependency-admission-v1", "unreadable", e.class.name, e.message.to_s ])
+        JSON.generate([ "hive-dependency-admission-v2", "unreadable", e.class.name, e.message.to_s ])
       )
     end
 

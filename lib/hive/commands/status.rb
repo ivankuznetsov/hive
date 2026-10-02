@@ -840,7 +840,10 @@ module Hive
             config: prepared.config, workflow_generation: prepared.workflow_generation
           )
         else
-          annotate_dependencies(rows, prepared.project, admission_context: admission_context)
+          annotate_dependencies(
+            rows, prepared.project, admission_context: admission_context,
+            config: prepared.config
+          )
         end
         projection = Hive::ArchiveFilter.project(
           rows, now: now,
@@ -967,6 +970,8 @@ module Hive
           "depends_on" => row[:depends_on],
           "blocked_by" => row[:blocked_by],
           "dependency_stage" => row[:dependency_stage],
+          "unmet_dependencies" => row[:unmet_dependencies] || [],
+          "dependency_base_mode" => row[:dependency_base_mode] || "default",
           "blocked" => row[:blocked] == true,
           "admission_error" => row[:admission_error]&.to_h,
           "folder" => row[:folder],
@@ -1264,7 +1269,9 @@ module Hive
             rows, project, project_count,
             config: config, with_diagnostic: false
           )
-          rows = annotate_dependencies(rows, project, admission_context: admission_context)
+          rows = annotate_dependencies(
+            rows, project, admission_context: admission_context, config: config
+          )
           projection = Hive::ArchiveFilter.project(
             rows, now: now,
             apply_retention: !@archive
@@ -1382,7 +1389,8 @@ module Hive
         Hive::Dependencies.blocked_label(
           depends_on: row[:depends_on],
           blocked_by: row[:blocked_by],
-          dependency_stage: row[:dependency_stage]
+          dependency_stage: row[:dependency_stage],
+          unmet_dependencies: row[:unmet_dependencies]
         )
       end
 
@@ -1794,9 +1802,9 @@ module Hive
         true
       end
 
-      def annotate_dependencies(rows, project, admission_context: nil)
+      def annotate_dependencies(rows, project, admission_context: nil, config: nil)
         context = admission_context || build_admission_context([ project ])
-        rows.each { |row| apply_dependency_verdict(row, context, project) }
+        rows.each { |row| apply_dependency_verdict(row, context, project, config: config) }
         rows
       end
 
@@ -1822,18 +1830,18 @@ module Hive
         )
         context = Hive::DependencyAdmission::Context.new(projects: [ project_snapshot ])
         rows.each do |row|
-          apply_dependency_verdict(row, context, project)
-          hold_incremental_dependency(row, project) if row[:depends_on]
+          apply_dependency_verdict(row, context, project, config: config)
+          hold_incremental_dependency(row, project, config: config) if row[:depends_on]
         end
         rows
       rescue StandardError => e
         warn "hive: status: bounded dependency admission failed " \
              "(#{e.class}: #{e.message}); holding changed rows until the next full scan"
-        rows.each { |row| hold_incremental_dependency(row, project) }
+        rows.each { |row| hold_incremental_dependency(row, project, config: config) }
         rows
       end
 
-      def hold_incremental_dependency(row, project)
+      def hold_incremental_dependency(row, project, config: nil)
         error = Hive::DependencyAdmission::AdmissionError.new(
           reason_code: "dependency_validation_failed",
           offending_ref: "#{project['name']}:#{row[:slug]}",
@@ -1841,6 +1849,8 @@ module Hive
         )
         row[:blocked_by] = nil
         row[:dependency_stage] = nil
+        row[:unmet_dependencies] = []
+        row[:dependency_base_mode] = dependency_base_mode(row, config: config)
         row[:blocked] = true
         row[:admission_error] = error
         row[:action_key] = Hive::Schemas::TaskActionKind::ADMISSION_ERROR
@@ -1945,11 +1955,20 @@ module Hive
         @next_retention_boundary = [ @next_retention_boundary, boundary ].compact.min
       end
 
-      def apply_dependency_verdict(row, context, project)
+      def apply_dependency_verdict(row, context, project, config: nil)
         row[:archive_member] = Hive::ArchiveFilter.archived_action?(row) unless row.key?(:archive_member)
         verdict = context.verdict(project: project["name"], slug: row[:slug])
         row[:blocked_by] = verdict.wait? ? verdict.blocked_by : nil
         row[:dependency_stage] = verdict.wait? ? verdict.dependency_stage : nil
+        row[:unmet_dependencies] = verdict.unmet_dependencies.map do |dependency|
+          {
+            "reference" => dependency.reference,
+            "blocked_by" => dependency.blocked_by,
+            "dependency_stage" => dependency.dependency_stage,
+            "required_gate" => dependency.required_gate
+          }
+        end
+        row[:dependency_base_mode] = dependency_base_mode(row, config: config)
         row[:blocked] = verdict.blocked?
         row[:admission_error] = verdict.admission_error
         return unless verdict.error?
@@ -1968,12 +1987,27 @@ module Hive
         )
         row[:blocked_by] = nil
         row[:dependency_stage] = nil
+        row[:unmet_dependencies] = []
+        row[:dependency_base_mode] = dependency_base_mode(row, config: config)
         row[:blocked] = true
         row[:admission_error] = error
         row[:action_key] = Hive::Schemas::TaskActionKind::ADMISSION_ERROR
         row[:action_label] = "Admission error"
         row[:suggested_command] = nil
         row[:next_action] = nil
+      end
+
+      def dependency_base_mode(row, config: nil)
+        task = row[:task]
+        return "default" unless task
+
+        default_branch = config&.fetch("default_branch", nil)
+        default_branch ||= Hive::Config.load(task.project_root)["default_branch"]
+        Hive::DependencySnapshot.base_selection(
+          task, default_branch, warn_on_fallback: false
+        ).mode
+      rescue StandardError
+        "default"
       end
 
       def pr_url_for(task)

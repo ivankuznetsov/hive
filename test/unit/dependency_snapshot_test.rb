@@ -178,8 +178,8 @@ class DependencySnapshotTest < Minitest::Test
         task, registry_entries: registry_entries
       )
       expected_payload = [
-        "hive-dependency-admission-v1", project, slug,
-        "clear", "", "", "", "", ""
+        "hive-dependency-admission-v2", project, slug,
+        "clear", "", "", [], "default", "", "", ""
       ]
 
       assert_equal Digest::SHA256.hexdigest(JSON.generate(expected_payload)), fingerprint
@@ -207,8 +207,8 @@ class DependencySnapshotTest < Minitest::Test
         )
       end
       expected_payload = [
-        "hive-dependency-admission-v1", project, slug,
-        "clear", "", "", "", "", ""
+        "hive-dependency-admission-v2", project, slug,
+        "clear", "", "", [], "default", "", "", ""
       ]
 
       assert_equal Digest::SHA256.hexdigest(JSON.generate(expected_payload)), fingerprint

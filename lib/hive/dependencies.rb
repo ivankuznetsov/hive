@@ -168,12 +168,21 @@ module Hive
     # `resolve`'s resolved⟹slug guard makes a resolved prerequisite always
     # carry its slug and an unresolved one (missing / self-reference) always
     # nil — so the two renderers can never diverge on the predicate.
-    def blocked_label(depends_on:, blocked_by:, dependency_stage:)
-      if blocked_by.to_s.strip.empty?
-        "⏸ blocked by #{depends_on} (unresolved)"
-      else
-        "⏸ blocked by #{blocked_by} (#{dependency_stage})"
+    def blocked_label(depends_on:, blocked_by:, dependency_stage:, unmet_dependencies: [])
+      blockers = Array(unmet_dependencies).map do |entry|
+        reference = field(entry, :reference)
+        target = field(entry, :blocked_by)
+        stage = field(entry, :dependency_stage)
+        target.to_s.strip.empty? ? "#{reference} (unresolved)" : "#{target} (#{stage})"
       end
+      if blockers.empty?
+        blockers << if blocked_by.to_s.strip.empty?
+          "#{Array(depends_on).first || depends_on} (unresolved)"
+        else
+          "#{blocked_by} (#{dependency_stage})"
+        end
+      end
+      "⏸ blocked by #{blockers.join(', ')}"
     end
 
     def base_branch_for(depends_on:, tasks:, default_branch:, task: nil)

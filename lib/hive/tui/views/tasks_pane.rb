@@ -288,7 +288,8 @@ module Hive
           Hive::Dependencies.blocked_label(
             depends_on: row.depends_on,
             blocked_by: row.blocked_by,
-            dependency_stage: row.dependency_stage
+            dependency_stage: row.dependency_stage,
+            unmet_dependencies: row.unmet_dependencies
           )
         end
 

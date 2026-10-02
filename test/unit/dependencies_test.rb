@@ -255,6 +255,22 @@ class DependenciesTest < Minitest::Test
     assert_equal "⏸ blocked by typo-task (unresolved)", unresolved
   end
 
+  def test_blocked_label_renders_every_unmet_dependency_without_array_inspection
+    unmet = [
+      { "reference" => "first", "blocked_by" => "first", "dependency_stage" => "7-artifacts" },
+      { "reference" => "other:second", "blocked_by" => "other:second",
+        "dependency_stage" => "8-finalize" }
+    ]
+
+    label = Hive::Dependencies.blocked_label(
+      depends_on: %w[first other:second], blocked_by: nil, dependency_stage: nil,
+      unmet_dependencies: unmet
+    )
+
+    assert_equal "⏸ blocked by first (7-artifacts), other:second (8-finalize)", label
+    refute_includes label, "[\""
+  end
+
   # A numeric self-reference where the current task and its snapshot entry
   # share an id but NOT a slug (absent on the task-under-eval) must be
   # recognised via same_task?'s id-equality arm — the slug arm short-

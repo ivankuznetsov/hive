@@ -17,7 +17,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     :project, :slug, :folder, :workflow, :stage, :marker, :marker_attrs,
     :task_generation, :condition_task_generation, :commit_generation,
     :attempt_id, :status_payload_mtime, :state_file_mtime, :action, :depends_on, :blocked_by,
-    :dependency_stage, :blocked, :admission_error,
+    :dependency_stage, :unmet_dependencies, :dependency_base_mode, :blocked, :admission_error,
     keyword_init: true
   )
 
@@ -25,6 +25,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
           slug: "ship-it", marker_attrs: { "marker_id" => "marker-1" },
           status_payload_mtime: nil, state_file_mtime: T0, action: "ready_to_run", depends_on: nil,
           blocked_by: nil, dependency_stage: nil, blocked: false, admission_error: nil,
+          unmet_dependencies: [], dependency_base_mode: "default",
           folder: nil)
     folder ||= "/tmp/#{slug}"
     Row.new(
@@ -36,8 +37,32 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       status_payload_mtime: status_payload_mtime,
       state_file_mtime: state_file_mtime,
       action: action, depends_on: depends_on, blocked_by: blocked_by,
-      dependency_stage: dependency_stage, blocked: blocked, admission_error: admission_error
+      dependency_stage: dependency_stage, unmet_dependencies: unmet_dependencies,
+      dependency_base_mode: dependency_base_mode,
+      blocked: blocked, admission_error: admission_error
     )
+  end
+
+  def test_snapshot_serializes_dependency_lists_and_full_blocker_records_natively
+    with_tmp_dir do |dir|
+      _store, assembler, reader = build(File.join(dir, "private", "operational-snapshot.json"))
+      unmet = [
+        { "reference" => "base", "blocked_by" => "base",
+          "dependency_stage" => "8-finalize", "required_gate" => "9-done" }
+      ]
+      observed = row(
+        depends_on: %w[base second], blocked: true,
+        unmet_dependencies: unmet, dependency_base_mode: "default"
+      )
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(rows: [ observed ], controller: {}, queue: {}, recoveries: {}, now: T0 + 1)
+
+      task = reader.read(now: T0 + 2).fetch("tasks").first
+      assert_equal %w[base second], task.fetch("depends_on")
+      assert_equal unmet, task.fetch("unmet_dependencies")
+      assert_equal "default", task.fetch("dependency_base_mode")
+    end
   end
 
   def test_scheduler_identity_uses_status_payload_mtime_for_controller_rows
@@ -76,6 +101,30 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       repository: repository
     )
     [ repository, assembler, reader, cache_reader ]
+  end
+
+  def test_reader_rejects_retired_v1_snapshot_records
+    record = {
+      "schema" => Hive::Daemon::OperationalSnapshot::SCHEMA,
+      "schema_version" => 1,
+      "phase" => "complete",
+      "tick_sequence" => 1,
+      "daemon" => IDENTITY,
+      "observed_at" => T0.iso8601(6),
+      "valid_until" => (T0 + 30).iso8601(6),
+      "source_window" => {
+        "started_at" => T0.iso8601(6), "completed_at" => (T0 + 1).iso8601(6)
+      }
+    }
+    repository = Struct.new(:record) { def snapshot = record }.new(record)
+    reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+      repository: repository, expected_daemon: IDENTITY
+    )
+
+    result = reader.read(now: T0 + 2)
+
+    assert_equal "invalid", result.fetch("status")
+    assert_equal "snapshot_invalid", result.fetch("reason")
   end
 
   def database_for(path)

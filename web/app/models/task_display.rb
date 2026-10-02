@@ -22,7 +22,9 @@ class TaskDisplay
     if task["action"] == "admission_error"
       return task.dig("admission_error", "safe_correction").presence || "Repair the task dependency before it can continue."
     end
-    return "Waiting for #{task['blocked_by']}." if task["blocked_by"].present?
+    blockers = Array(task["unmet_dependencies"]).filter_map { |entry| entry["blocked_by"].presence }
+    blockers << task["blocked_by"] if blockers.empty? && task["blocked_by"].present?
+    return "Waiting for #{blockers.to_sentence}." if blockers.any?
 
     return "An agent is working on this step." if state == "running"
 

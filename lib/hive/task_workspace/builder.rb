@@ -257,7 +257,7 @@ module Hive
         capabilities = @native_task.workflow.result.capabilities.map(&:to_s)
         actual_worktree = actual_worktree_evidence?
         actual_publication = !task_value("pr_url").to_s.empty?
-        actual_dependencies = !task_value("depends_on").to_s.empty?
+        actual_dependencies = dependency_present?
         supporting = result.fetch("supporting").any?
         {
           "worktree" => capabilities.include?("worktree") || actual_worktree,
@@ -401,7 +401,7 @@ module Hive
             "current"
           elsif %w[worktree diff].include?(name) && actual_worktree_evidence?
             "current"
-          elsif name == "dependencies" && !task_value("depends_on").to_s.empty?
+          elsif name == "dependencies" && dependency_present?
             "current"
           else
             "missing"
@@ -870,6 +870,11 @@ module Hive
 
       def task_value(key)
         @task.respond_to?(:[]) ? @task[key] : nil
+      end
+
+      def dependency_present?
+        value = task_value("depends_on")
+        value.is_a?(Array) ? !value.empty? : !value.to_s.empty?
       end
 
       def now

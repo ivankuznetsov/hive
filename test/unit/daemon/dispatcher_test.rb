@@ -2795,6 +2795,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
+          unmet_dependencies: [], dependency_base_mode: "default",
           blocked: false, workflow: nil, admission_error: nil,
           attempt_id: nil, task_generation: nil,
           condition_task_generation: nil, task_history_invalid: false, id: 1)
@@ -2807,7 +2808,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       suggested_command: command, claude_pid_alive: claude_pid_alive,
       live_task_lock: live_task_lock, marker_attrs: marker_attrs,
       depends_on: depends_on, blocked_by: blocked_by,
-      dependency_stage: dependency_stage, blocked: blocked,
+      dependency_stage: dependency_stage, unmet_dependencies: unmet_dependencies,
+      dependency_base_mode: dependency_base_mode, blocked: blocked,
       admission_error: admission_error,
       attempt_id: attempt_id, task_generation: task_generation,
       condition_task_generation: condition_task_generation,
@@ -4008,6 +4010,28 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "7-artifacts", attrs[:dependency_stage]
     assert_equal false, attrs[:unresolved],
                  "a resolved prerequisite (blocked_by present) is a real below-gate wait, not unresolved"
+  end
+
+  def test_blocked_dependency_list_is_an_external_wait_and_logs_every_blocker
+    unmet = [
+      { "reference" => "first", "blocked_by" => "first",
+        "dependency_stage" => "7-artifacts", "required_gate" => "9-done" },
+      { "reference" => "second", "blocked_by" => "second",
+        "dependency_stage" => "8-finalize", "required_gate" => "9-done" }
+    ]
+    rows = [ row(
+      action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm",
+      depends_on: %w[first second], blocked: true, unmet_dependencies: unmet
+    ) ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "dependency_unmet" }
+    refute_nil event
+    assert_equal false, event.last.fetch(:unresolved)
+    assert_equal unmet, event.last.fetch(:unmet_dependencies)
   end
 
   # An unresolved block (mistyped/unknown depends_on → blocked_by nil) must

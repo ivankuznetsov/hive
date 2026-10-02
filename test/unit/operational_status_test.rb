@@ -70,6 +70,29 @@ class OperationalStatusTest < Minitest::Test
     assert_equal diagnostic, projected.dig("evidence", "diagnostic")
   end
 
+  def test_projects_all_unmet_dependencies_and_base_mode_with_complete_reason
+    unmet = [
+      { "reference" => "first", "blocked_by" => "first",
+        "dependency_stage" => "7-artifacts", "required_gate" => "9-done" },
+      { "reference" => "other:second", "blocked_by" => "other:second",
+        "dependency_stage" => "8-finalize", "required_gate" => "9-done" }
+    ]
+    row = task(
+      action: "ready_to_run", slug: "fan-in", blocked: true,
+      depends_on: %w[first other:second], unmet_dependencies: unmet,
+      dependency_base_mode: "default"
+    )
+
+    projected = project(status_payload(row)).fetch("tasks").first
+
+    assert_nil projected.dig("dependency", "blocked_by")
+    assert_nil projected.dig("dependency", "dependency_stage")
+    assert_equal unmet, projected.dig("dependency", "unmet_dependencies")
+    assert_equal "default", projected.dig("dependency", "dependency_base_mode")
+    assert_equal "blocked by first (7-artifacts), other:second (8-finalize)",
+                 projected.fetch("reason")
+  end
+
   def test_publication_secret_park_remains_operator_owned_without_action_when_daemon_enabled
     row = task(
       action: "patrol_fix_publication_blocked", slug: "publication-block",
@@ -648,7 +671,7 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status v8 payload", error.message
+    assert_equal "operational status requires a successful hive-status v9 payload", error.message
   end
 
   def test_rejects_an_older_status_schema
@@ -657,7 +680,7 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status v8 payload", error.message
+    assert_equal "operational status requires a successful hive-status v9 payload", error.message
   end
 
   def test_noncurrent_scheduler_snapshot_propagates_its_freshness
@@ -1718,6 +1741,7 @@ class OperationalStatusTest < Minitest::Test
   def task(action:, slug:, stage: "1-inbox", marker: "waiting", attrs: {}, held: nil,
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
+           unmet_dependencies: [], dependency_base_mode: "default",
            admission_error: nil, closure: nil, plan_review: nil,
            task_history_invalid: false)
     attrs = attrs.dup
@@ -1733,6 +1757,8 @@ class OperationalStatusTest < Minitest::Test
       "depends_on" => depends_on,
       "blocked_by" => blocked_by,
       "dependency_stage" => dependency_stage,
+      "unmet_dependencies" => unmet_dependencies,
+      "dependency_base_mode" => dependency_base_mode,
       "blocked" => blocked,
       "admission_error" => admission_error,
       "folder" => "/tmp/demo/.hive-state/stages/#{stage}/#{slug}",

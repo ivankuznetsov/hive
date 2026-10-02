@@ -18,7 +18,7 @@ module Hive
     # `complete`, and has not passed its short validity deadline.
     module OperationalSnapshot
       SCHEMA = "hive-daemon-operational-snapshot".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
       PHASES = %w[started failed complete].freeze
       MAX_VALIDITY_MULTIPLIER = 3
 
@@ -44,7 +44,7 @@ module Hive
       # Complete full-graph generation stored alongside the scheduler record.
       module StatusCache
         SCHEMA = "hive-daemon-status-cache".freeze
-        SCHEMA_VERSION = 1
+        SCHEMA_VERSION = 2
 
         class Reader
           def initialize(database: nil, repository: nil)
@@ -360,9 +360,11 @@ module Hive
             "status_payload_mtime" => time_string(value(row, :status_payload_mtime)),
             "state_file_mtime" => time_string(value(row, :state_file_mtime)),
             "action" => nullable_string(value(row, :action)),
-            "depends_on" => nullable_string(value(row, :depends_on)),
+            "depends_on" => canonical(value(row, :depends_on)),
             "blocked_by" => nullable_string(value(row, :blocked_by)),
             "dependency_stage" => nullable_string(value(row, :dependency_stage)),
+            "unmet_dependencies" => canonical(Array(value(row, :unmet_dependencies))),
+            "dependency_base_mode" => (value(row, :dependency_base_mode) || "default").to_s,
             "blocked" => value(row, :blocked) == true,
             "admission_error" => canonical_record(value(row, :admission_error))
           }

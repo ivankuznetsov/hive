@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-09-25
+updated: 2026-10-02
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -169,6 +169,58 @@ dispatch-request row and is at-least-once across an external send boundary.
 After all acknowledgements, the row remains active until log archival finishes
 and the daemon durably marks promotion.
 
+## Attempt frame log and tail recovery
+
+`lib/hive/attempts/stream_log.rb` owns append-time recovery for the binary
+JSON-lines attempt log. Construction never mutates existing log bytes for
+recovery: it securely opens an append descriptor and a retained read
+descriptor, verifies that both reference the same regular inode, and captures
+the replayable sequence and physical size as one lock-held snapshot. Strict
+reads through the retained descriptor are the sequence authority, so an I/O
+error during construction or reconciliation fails closed instead of becoming
+an empty sequence-zero log. Public `StreamLog.read` remains tolerant of
+filesystem errors and malformed records. Constructor failure releases any
+acquired log lock and closes both log descriptors and an owned custody
+descriptor without replacing the initiating error.
+
+Every append takes the per-instance mutex and then the log's exclusive advisory
+lock. While holding both, it inspects the physical last byte, optionally seals
+the tail, reconciles the sequence when its coherent sequence/size snapshot is
+stale, writes and flushes the complete frame, and only then publishes the new
+sequence and size snapshot. An unchanged healthy snapshot avoids a full replay
+scan, but does not skip physical tail inspection. The same mutex serializes
+`close`; a forked child must independently open its own `StreamLog`. This
+contract coordinates `StreamLog` writers only—direct writers that ignore the
+advisory lock remain outside its scope.
+
+An unterminated tail is isolated by completely appending the fixed invalidating
+separator `"#\n".b` and defensively flushing it before sequence selection or
+frame writing. Recovery preserves every existing byte: it never truncates,
+rewrites, parses, or generally repairs the damaged fragment. The `#` keeps even
+a syntactically valid JSON value without its newline unreadable after the
+separator establishes the next boundary; a newline-terminated malformed record
+is already bounded and remains untouched.
+
+A separator write or flush error, including `Errno::EINTR`, escapes unchanged
+without an internal retry or sequence advance. A caller-controlled retry on the
+same or a reopened instance re-inspects the physical tail, so no separator, a
+partial separator, and a complete separator before a write or flush raises all
+converge safely. `syswrite` bypasses Ruby buffering, so the separator flush is a
+defensive assertion rather than an additional durability barrier. A successful
+append establishes independently replayable bytes and their line boundary in
+the kernel page cache for process-crash recovery; it does not promise survival
+of power loss or kernel panic. `close` retains the existing `fsync` behavior.
+
+A separator `SystemCallError` during Supervisor output drain remains fatal: the
+outer handler stops the worker group and returns `ExitCodes::SOFTWARE`; the
+failed chunk has no successful frame, and the drain path neither silently
+discards it nor retries inside `StreamLog`. For a one-shot fault, the diagnostic
+append can re-inspect and recover the tail, and the attempt terminalizes as
+failed with a readable log reference. If the fault persists into the
+diagnostic append, no success or terminal receipt is manufactured; the running
+row remains for lost recovery, and cleanup releases the log and custody
+handles.
+
 ## Maintenance
 
 Only the daemon schedules periodic attempt maintenance. Its timer is
@@ -180,6 +232,11 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 ## Tests
 
 - `test/unit/attempts/`
+- `test/unit/attempts/stream_log_test.rb`
+- `test/integration/attempts_stream_log_recovery_test.rb`
+- `test/unit/attempts/client_test.rb`
+- `test/unit/attempts/log_archive_test.rb`
+- `test/unit/attempts/supervisor_test.rb`
 - `test/unit/runtime_control_plane/admission_transition_test.rb`
 - `test/unit/daemon/attempt_loss_healer_test.rb`
 - `test/integration/provider_routing_admission_test.rb`

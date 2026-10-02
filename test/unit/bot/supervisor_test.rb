@@ -1164,6 +1164,20 @@ class HiveBotSupervisorTest < Minitest::Test
     @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
   end
 
+  def test_commit_idea_replies_when_draft_expires_between_validation_and_snapshot
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix", token: "tok")
+    @idea_draft_store.set_project(chat_id: 42, project: "hive")
+    @idea_draft_store.define_singleton_method(:commit_snapshot) { |chat_id:| nil }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :commit_idea, attachment: { chat_id: 42 }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    assert_match(/idea draft expired/, @telegram.messages.last.fetch(:text))
+  ensure
+    @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
   def test_commit_idea_handles_command_failure_without_clearing_draft
     @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix", token: "tok")
     @idea_draft_store.set_project(chat_id: 42, project: "missing-project")

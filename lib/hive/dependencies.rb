@@ -177,6 +177,8 @@ module Hive
     end
 
     def base_branch_for(depends_on:, tasks:, default_branch:, task: nil)
+      return default_branch if list_declaration?(depends_on)
+
       dependency = normalize_depends_on(depends_on)
       return default_branch unless dependency
 

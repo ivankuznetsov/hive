@@ -26,6 +26,7 @@ module Hive
     module_function
 
     ActiveProjectInput = Data.define(:task_folders)
+    BaseSelection = Data.define(:branch, :mode)
 
     def semantic_fingerprint(context)
       projects = context.project_snapshot_layers.each_with_index.flat_map do |layer_projects, layer|
@@ -89,21 +90,28 @@ module Hive
     # the read-depends_on → load-snapshot → resolve → null-out-when-default
     # scaffolding lives in one place. Returns nil when the task has no
     # dependency, or when a set dependency does not resolve to a stacked
-    # base (typo / prereq transiently absent from the snapshot /
-    # self-reference) — and warns in that latter case so a silently
+    # base. Lists are scheduling-only by declaration shape, including a
+    # singleton list, and use the default branch without a warning. Scalar
+    # fallbacks (typo / prereq transiently absent from the snapshot /
+    # self-reference) warn so a silently
     # collapsed stack is observable at execute/open-pr time rather than
     # only via the fail-closed daemon gate. Lives here (the disk-reading
     # layer) rather than in the pure `Hive::Dependencies` resolver so the
     # resolver stays free of disk I/O.
-    def stacked_base(task, default_branch)
+    def base_selection(task, default_branch, warn_on_fallback: true)
       dependency = depends_on(task)
-      return nil if dependency.to_s.strip.empty?
+      return BaseSelection.new(branch: nil, mode: "default") if dependency.nil?
+      if Hive::Dependencies.list_declaration?(dependency)
+        return BaseSelection.new(branch: nil, mode: "default")
+      end
 
       reference = Hive::Dependencies.parse_reference(dependency)
       if reference.explicit_project
-        warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} is " \
-             "cross-project and scheduling-only; branching from #{default_branch}"
-        return nil
+        if warn_on_fallback
+          warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} is " \
+               "cross-project and scheduling-only; branching from #{default_branch}"
+        end
+        return BaseSelection.new(branch: nil, mode: "default")
       end
 
       base = Hive::Dependencies.base_branch_for(
@@ -113,17 +121,25 @@ module Hive
         task: current_task(task)
       )
       if base == default_branch
-        warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} " \
-             "but it did not resolve to a stacked base (prerequisite missing " \
-             "from the snapshot or self-reference); branching from #{default_branch}"
-        return nil
+        if warn_on_fallback
+          warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} " \
+               "but it did not resolve to a stacked base (prerequisite missing " \
+               "from the snapshot or self-reference); branching from #{default_branch}"
+        end
+        return BaseSelection.new(branch: nil, mode: "default")
       end
 
-      base
+      BaseSelection.new(branch: base, mode: "stacked")
     rescue Hive::Dependencies::InvalidReference => e
-      warn "[hive] dependency: #{task.slug} has invalid depends_on #{dependency.inspect} " \
-           "(#{e.message}); branching from #{default_branch}"
-      nil
+      if warn_on_fallback
+        warn "[hive] dependency: #{task.slug} has invalid depends_on #{dependency.inspect} " \
+             "(#{e.message}); branching from #{default_branch}"
+      end
+      BaseSelection.new(branch: nil, mode: "default")
+    end
+
+    def stacked_base(task, default_branch)
+      base_selection(task, default_branch).branch
     end
 
     def admission_context(registry_entries = Hive::Config.registered_projects,

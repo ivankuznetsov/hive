@@ -82,6 +82,43 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_list_dependencies_use_default_base_without_invalid_reference_warning
+    with_tmp_dir do |root|
+      write_task_meta(root, "9-done", "base-task", id: 1)
+
+      [ [ "base-task" ], %w[base-task other-task] ].each do |declaration|
+        task = FakeTask.new(
+          slug: "dependent", id: 2, depends_on: declaration,
+          folder: execute_folder(root, "dependent"), project_root: root
+        )
+        selection = nil
+        _out, err = capture_io do
+          selection = Hive::DependencySnapshot.base_selection(task, "main")
+        end
+
+        assert_nil selection.branch
+        assert_equal "default", selection.mode
+        assert_empty err
+        assert_nil Hive::DependencySnapshot.stacked_base(task, "main")
+      end
+    end
+  end
+
+  def test_base_selection_reports_stacked_only_for_resolved_same_project_scalar
+    with_tmp_dir do |root|
+      write_task_meta(root, "8-finalize", "base-task", id: 1)
+      task = FakeTask.new(
+        slug: "dependent", id: 2, depends_on: "base-task",
+        folder: execute_folder(root, "dependent"), project_root: root
+      )
+
+      selection = Hive::DependencySnapshot.base_selection(task, "main")
+
+      assert_equal "base-task", selection.branch
+      assert_equal "stacked", selection.mode
+    end
+  end
+
   def test_stacked_base_warns_and_returns_nil_for_unresolvable_dependency
     with_tmp_dir do |root|
       task = FakeTask.new(slug: "dependent", id: 2, depends_on: "ghost-task",

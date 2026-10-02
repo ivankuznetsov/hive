@@ -165,6 +165,17 @@ class DependenciesTest < Minitest::Test
     assert_equal "base-task", branch
   end
 
+  def test_base_branch_for_lists_always_returns_the_default_branch
+    tasks = [ task("base-task", stage_index: 9), task("other-task", stage_index: 9) ]
+
+    assert_equal "main", Hive::Dependencies.base_branch_for(
+      depends_on: [ "base-task" ], tasks: tasks, default_branch: "main"
+    )
+    assert_equal "main", Hive::Dependencies.base_branch_for(
+      depends_on: %w[base-task other-task], tasks: tasks, default_branch: "main"
+    )
+  end
+
   # Stacking is threshold-blind by design: base_branch_for returns the
   # prerequisite slug regardless of how far the prereq has progressed, so a
   # dependent worktree branches off the prereq even while the gate still

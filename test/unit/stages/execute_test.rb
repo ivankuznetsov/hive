@@ -1412,6 +1412,49 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_init_pass_uses_default_branch_for_dependency_lists
+    [ [ "base-task" ], %w[base-task other-task] ].each do |declaration|
+      with_tmp_dir do |dir|
+        task = build_task(dir, depends_on: declaration)
+        write_plan(task)
+        Hive::TaskMeta.write(
+          task.folder, id: 2, slug: task.slug, display_name: nil,
+          depends_on: declaration
+        )
+        declaration.each_with_index do |slug, index|
+          folder = File.join(dir, ".hive-state", "stages", "9-done", slug)
+          FileUtils.mkdir_p(folder)
+          Hive::TaskMeta.write(folder, id: index + 1, slug: slug, display_name: nil)
+        end
+
+        fake_wt = FakeWorktree.new(path: File.join(dir, "worktrees", task.slug), create_calls: [])
+        project_git = Struct.new(:default_branch).new("master")
+        worktree_git = Struct.new(:head_sha).new("default-head")
+
+        with_replaced_singleton_method(
+          Hive::GitOps, :new, ->(path) { path == dir ? project_git : worktree_git }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Worktree, :new, ->(_root, _slug, worktree_root:) { fake_wt }
+          ) do
+            with_replaced_singleton_method(
+              Hive::Stages::Execute, :run_pass,
+              ->(_task, _cfg, _path, _identity, **) { { commit: nil, status: :ok } }
+            ) do
+              Hive::Stages::Execute.run_init_pass(
+                task, { "worktree_root" => File.join(dir, "worktrees") }
+              )
+            end
+          end
+        end
+
+        assert_equal [
+          { branch_name: task.slug, default_branch: "master", base_override: nil }
+        ], fake_wt.create_calls
+      end
+    end
+  end
+
   def test_append_implementation_output_inserts_before_terminal_marker
     with_tmp_dir do |dir|
       task = build_task(dir)

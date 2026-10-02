@@ -12,6 +12,32 @@ class AttemptsSupervisorTest < Minitest::Test
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
   CLAIM_CAPABILITY = "c" * 64
 
+  class SeparatorFaultWriter
+    attr_reader :separator_attempts
+
+    def initialize(io, persistent:)
+      @io = io
+      @persistent = persistent
+      @separator_attempts = 0
+    end
+
+    def syswrite(bytes)
+      if bytes == "#\n".b
+        @separator_attempts += 1
+        raise Errno::EINTR, "separator" if @persistent || @separator_attempts == 1
+      end
+
+      @io.syswrite(bytes)
+    end
+
+    def flush = @io.flush
+    def flock(operation) = @io.flock(operation)
+    def stat = @io.stat
+    def fsync = @io.fsync
+    def close = @io.close
+    def closed? = @io.closed?
+  end
+
   def test_wrapper_registration_is_released_and_cleanup_errors_are_bounded
     calls = []
     registry = Object.new
@@ -1056,6 +1082,71 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_one_shot_separator_error_during_drain_is_fatal_and_diagnostic_recovers
+    worker_argv = [ "/bin/sh", "-c", "printf worker-output; sleep 10" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      injection = inject_torn_log_separator_failure(store.log_archive, persistent: false)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.05
+      )
+      terminations = observe_worker_termination(supervisor)
+
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(3) { supervisor.run }
+
+      terminal = store.fetch(attempt.attempt_id)
+      frames = Hive::Attempts::StreamLog.read(
+        File.join(store.root, terminal.receipt.dig("log_reference", "path"))
+      )
+      assert_equal "terminal", terminal.state
+      assert_equal "failed", terminal.outcome
+      assert_equal Hive::ExitCodes::SOFTWARE, terminal.receipt.fetch("exit_status")
+      assert_operator terminations.call, :>=, 1
+      refute supervisor.send(:recorded_worker_group_alive?)
+      assert_equal [ 1, 2 ], frames.map(&:sequence)
+      assert_equal %w[supervisor supervisor], frames.map(&:channel)
+      assert_equal "existing\n", frames.first.bytes
+      assert_match(/hive attempt supervisor failed: Errno::EINTR/, frames.last.bytes)
+      refute_includes frames.map(&:bytes).join, "worker-output"
+      assert_equal 2, injection.fetch(:fault).separator_attempts
+      assert injection.fetch(:log).closed?
+    end
+  end
+
+  def test_persistent_separator_error_during_drain_leaves_running_attempt_for_lost_recovery
+    worker_argv = [ "/bin/sh", "-c", "printf worker-output; sleep 10" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      archive = store.log_archive
+      injection = inject_torn_log_separator_failure(archive, persistent: true)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.05
+      )
+      terminations = observe_worker_termination(supervisor)
+
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(3) { supervisor.run }
+
+      current = store.fetch(attempt.attempt_id)
+      frames = Hive::Attempts::StreamLog.read(archive.hot_path(attempt.attempt_id))
+      assert_equal "running", current.state
+      assert_nil current.receipt
+      assert_nil current["log_reference"]
+      assert_empty current["current_outputs"]
+      assert_operator terminations.call, :>=, 1
+      refute supervisor.send(:recorded_worker_group_alive?)
+      assert_equal [ "existing\n" ], frames.map(&:bytes)
+      refute_includes frames.map(&:bytes).join, "worker-output"
+      assert_equal 2, injection.fetch(:fault).separator_attempts
+      assert injection.fetch(:log).closed?
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        archive.archive(attempt.attempt_id)
+      end
+      assert_match(/only final attempt payloads/, error.message)
+    end
+  end
+
   def test_unexpected_patrol_supervisor_failure_still_binds_synthetic_diagnostic
     with_attempt(
       worker_argv: [ "hive", "run", "durable-task" ], intended_stage: "4-review",
@@ -1191,6 +1282,34 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   private
+
+  def inject_torn_log_separator_failure(archive, persistent:)
+    original = archive.method(:open_writer)
+    injection = {}
+    archive.define_singleton_method(:open_writer) do |attempt_id, clock:|
+      log = original.call(attempt_id, clock: clock)
+      log.append(:supervisor, "existing\n")
+      File.open(log.path, "ab") { |file| file.write("torn") }
+      fault = AttemptsSupervisorTest::SeparatorFaultWriter.new(
+        log.instance_variable_get(:@io), persistent: persistent
+      )
+      log.instance_variable_set(:@io, fault)
+      injection[:log] = log
+      injection[:fault] = fault
+      log
+    end
+    injection
+  end
+
+  def observe_worker_termination(supervisor)
+    calls = 0
+    original = supervisor.method(:terminate_worker_group)
+    supervisor.define_singleton_method(:terminate_worker_group) do
+      calls += 1
+      original.call
+    end
+    -> { calls }
+  end
 
   def diagnostic_from_terminal(store, terminal)
     reference = terminal.receipt.fetch("output_references").find do |candidate|

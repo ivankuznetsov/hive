@@ -195,6 +195,45 @@ class AttemptsClientTest < Minitest::Test
     end
   end
 
+  def test_client_and_repository_replay_the_successful_frame_after_a_torn_tail
+    with_repository do |store|
+      attempt_id = "attempt-recovered-tail"
+      writer = store.log_archive.open_writer(attempt_id)
+      first_sequence = writer.append(:stdout, "before")
+      File.open(writer.path, "ab") { |file| file.write('{"sequence":2') }
+      recovered_sequence = writer.append(:stderr, "after")
+      writer.close
+      terminal = Struct.new(:state, :receipt).new(
+        "terminal", { "exit_status" => 0, "outcome" => "succeeded" }
+      )
+      store.define_singleton_method(:fetch) { |_id| terminal }
+
+      direct = Hive::Attempts::StreamLog.read(writer.path)
+      archived = store.log_archive.read(attempt_id)
+      tail = store.read_log(attempt_id, after_sequence: first_sequence)
+      exhausted = store.read_log(attempt_id, after_sequence: recovered_sequence)
+      stdout = StringIO.new
+      stderr = StringIO.new
+      result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach(
+        attempt_id, stdout: stdout, stderr: stderr
+      )
+
+      assert_equal [ 1, 2 ], direct.map(&:sequence)
+      assert_equal %w[stdout stderr], direct.map(&:channel)
+      assert_equal %w[before after], direct.map(&:bytes)
+      assert_equal direct, archived.frames
+      assert_equal [ recovered_sequence ], tail.frames.map(&:sequence)
+      assert_equal [ "after" ], tail.frames.map(&:bytes)
+      assert_empty exhausted.frames
+      assert_equal "before", stdout.string
+      assert_equal "after", stderr.string
+      assert_equal :terminal, result.status
+      assert_includes File.binread(writer.path), "#\n"
+    ensure
+      writer&.close unless writer&.closed?
+    end
+  end
+
   private
 
   # A store that satisfies only the repository read contract the client is

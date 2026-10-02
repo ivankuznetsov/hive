@@ -35,13 +35,10 @@ class InitSetup
       # (built-ins only) rather than Registry.ids: it needs no lock and is immune
       # to a process-wide project overlay, so a fresh /repos/new can't leak
       # another project's authored workflows (plan U3/Risk-1). The project arm
-      # holds the overlay stable under Project.synchronize while it resolves
-      # valid_names.
+      # delegates activation and lock ownership to WorkflowSelection.
       return Hive::Workflows::Registry::WORKFLOWS.keys.map(&:to_s) unless project_root
 
-      Hive::Workflows::Project.synchronize do
-        Hive::WorkflowSelection.valid_names(project_root: project_root)
-      end
+      Hive::WorkflowSelection.valid_names(project_root: project_root)
     end
 
     # Form-facing enumeration for the /repos/new workflow select: every

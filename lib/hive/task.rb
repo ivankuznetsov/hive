@@ -224,16 +224,22 @@ module Hive
       @meta ||= Hive::TaskMeta.read(@folder)
     end
 
-    # Self-locking: the per-project overlay load and the subsequent registry
-    # fetch are held together under Project::LOCK (a reentrant Monitor), so a
-    # concurrent `load!(otherProject)` on another thread — the web tier runs
-    # this on both a StatusFeed poller and per-request Puma threads — can't
-    # swap the overlay between the load and the fetch and make a custom-workflow
-    # task resolve as UnknownWorkflow / against the wrong descriptor. The lock
-    # being reentrant lets callers that already hold it (Status#json_payload)
-    # re-enter without deadlock, and `Task.new` (a widely-reused constructor)
-    # needs no caller-side lock.
+    # Generation-backed tasks are already detached from the live overlay.
+    # Otherwise capture the request's bounded workflow union while Project owns
+    # the active view; later membership validation consumes that copy rather
+    # than consulting whichever project overlay happens to be live then.
     def resolve_workflow
+      return resolve_workflow_from(@workflow_generation) if @workflow_generation
+
+      Hive::Workflows::Project.with_active_workflows(@project_root) do |registry, _stage_names|
+        @workflow_view = registry.workflows.dup.freeze
+        resolve_workflow_from(registry)
+      end
+    rescue Hive::Workflows::UnknownWorkflow => e
+      raise InvalidTaskPath, e.message
+    end
+
+    def resolve_workflow_from(source)
       if meta[:workflow_commit] || meta[:workflow_manifest_digest] || meta[:workflow_configuration_digest]
         unless meta[:workflow] && meta[:workflow_commit] && meta[:workflow_manifest_digest]
           raise InvalidTaskPath, "managed workflow task provenance is incomplete"
@@ -254,30 +260,25 @@ module Hive
         end
       end
 
-      Hive::Workflows::Project.synchronize do
-        Hive::Workflows::Project.load!(@project_root) unless @workflow_generation
-        selector = meta[:workflow]
-        # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
-        # always nil here (no .empty? branch needed).
-        if selector.nil? && @workflow_generation
-          selector = @workflow_generation.default_workflow
-        end
-        selector ||= project_default_workflow
-        # A per-task `workflow:` pin to a descriptor that was SKIPPED at load
-        # (bad YAML, invalid stage, id collision) must surface its REAL
-        # ConfigError instead of a misleading UnknownWorkflow — the same
-        # boundary rule the `--workflow` / `hive init` path uses (U9-3). Scoped
-        # to the explicit pin; a typo'd project default keeps its
-        # warn-and-continue behavior (warn_if_unregistered_project_default).
-        unless @workflow_generation
-          Hive::Workflows::Project.assert_descriptor_loadable!(
-            meta[:workflow]&.to_sym, project_root: @project_root
-          )
-        end
-        @workflow_generation ? @workflow_generation.fetch(selector) : Hive::Workflows::Registry.fetch(selector.to_sym)
+      selector = meta[:workflow]
+      # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
+      # always nil here (no .empty? branch needed).
+      if selector.nil? && @workflow_generation
+        selector = @workflow_generation.default_workflow
       end
-    rescue Hive::Workflows::UnknownWorkflow => e
-      raise InvalidTaskPath, e.message
+      selector ||= project_default_workflow
+      # A per-task `workflow:` pin to a descriptor that was SKIPPED at load
+      # (bad YAML, invalid stage, id collision) must surface its REAL
+      # ConfigError instead of a misleading UnknownWorkflow — the same
+      # boundary rule the `--workflow` / `hive init` path uses (U9-3). Scoped
+      # to the explicit pin; a typo'd project default keeps its
+      # warn-and-continue behavior (warn_if_unregistered_project_default).
+      unless @workflow_generation
+        Hive::Workflows::Project.assert_descriptor_loadable!(
+          meta[:workflow]&.to_sym, project_root: @project_root
+        )
+      end
+      source.fetch(selector.to_sym)
     end
 
     def current_managed_selection!(store, cfg)
@@ -404,7 +405,7 @@ module Hive
     def membership_workflows
       return @workflow_generation.workflows.values if @workflow_generation
 
-      Hive::Workflows::Registry.all
+      @workflow_view.values
     end
   end
 end

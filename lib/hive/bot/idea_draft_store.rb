@@ -152,6 +152,12 @@ module Hive
       # tuples execution needs (staging_path, dest_name, ext). Execution must
       # not depend on the live mutable Draft, which transition methods keep
       # mutating; this snapshot cannot drift under it.
+      #
+      # Freezing the containers alone is not enough: freezing an object does
+      # not deep-freeze its contents, so every String leaf is also duplicated
+      # and frozen here. Without that the snapshot would still alias the live
+      # draft's mutable String values and in-place edits (<<, replace) on the
+      # live draft would rewrite what was already handed to execution.
       CommitSnapshot = Struct.new(:project, :text, :attachments, keyword_init: true)
 
       def commit_snapshot(chat_id:)
@@ -159,13 +165,13 @@ module Hive
         return nil unless draft
 
         CommitSnapshot.new(
-          project: draft.project,
-          text: draft.text,
+          project: frozen_string(draft.project),
+          text: frozen_string(draft.text),
           attachments: draft.attachments.map do |attachment|
             {
-              staging_path: attachment.fetch(:staging_path),
-              dest_name: attachment.fetch(:dest_name),
-              ext: attachment.fetch(:ext)
+              staging_path: frozen_string(attachment.fetch(:staging_path)),
+              dest_name: frozen_string(attachment.fetch(:dest_name)),
+              ext: frozen_string(attachment.fetch(:ext))
             }.freeze
           end.freeze
         ).freeze
@@ -254,6 +260,13 @@ module Hive
       end
 
       private
+
+      # Deep-freeze helper for snapshot leaves: freeze does not apply to a
+      # container's contents, so every String handed into a frozen snapshot
+      # container is duplicated and frozen individually (nil passes through).
+      def frozen_string(value)
+        value.nil? ? nil : value.dup.freeze
+      end
 
       def assign_phase!(draft, phase)
         validate_phase!(phase)

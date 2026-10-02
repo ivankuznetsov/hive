@@ -579,6 +579,29 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  # A task's own red CI is not something a Hive deploy can fix. Before this,
+  # each deploy reset the series and the healer re-ran hivedev F2's
+  # deterministic smoke failure for days (three CI-fix agents per retry).
+  def test_task_owned_ci_stale_keeps_its_series_across_runtime_changes
+    attrs = { "gate" => "local", "attempts" => "3", "pass" => "1", "marker_id" => "marker-ci", "attempt_id" => "attempt-3" }
+    with_fixture(marker_attrs: attrs, marker_name: "REVIEW_CI_STALE", mtime: NOW - 3600) do |coordinator, row, state_home|
+      fingerprint = coordinator.send(:failure_fingerprint, row, attrs)
+      old_runtime = Hive::RuntimeIdentity.source_digest == "a" * 64 ? "b" * 64 : "a" * 64
+      write_terminal_recovery_history(
+        row:, state_home:,
+        retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: fingerprint, identical_failure_count: 2,
+        failure_attempt_history: %w[attempt-1 attempt-2], runtime_digest: old_runtime
+      )
+
+      receipt = coordinator.request(row:, requestor: "healer", request_id: "ci-stale", now: NOW)
+
+      assert_equal "blocked", receipt.status
+      assert_equal "deterministic_failure", receipt.reason
+      assert_equal 3, Q.fetch("ci-stale", state_home: state_home).recovery.fetch("identical_failure_count")
+    end
+  end
+
   def test_dirty_worktree_progress_starts_a_fresh_failure_series
     attrs = {
       "reason" => "dirty_worktree", "marker_id" => "marker-progress",

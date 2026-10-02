@@ -1137,15 +1137,27 @@ module Hive
       def durable_retry_count(row)
         durable_retry_count_for(
           project: value(row, :project), slug: value(row, :slug),
-          expected_stage: value(row, :stage)
+          expected_stage: value(row, :stage),
+          runtime_scoped: runtime_scoped_failure?(row)
         )
       end
 
-      def durable_retry_count_for(project:, slug:, expected_stage:)
+      def durable_retry_count_for(project:, slug:, expected_stage:, runtime_scoped: true)
         request_queue.recovery_retry_count(
           project: project, slug: slug, expected_stage: expected_stage,
-          runtime_digest: @runtime_digest, state_home: @state_home
+          runtime_digest: runtime_scoped ? @runtime_digest : nil, state_home: @state_home
         )
+      end
+
+      # Task-owned failures that no Hive build can fix. The retry ladder and
+      # identical-failure count normally reset on a new runtime digest, since
+      # a Hive deploy may cure a Hive-caused failure. A task's own red CI
+      # (REVIEW_CI_STALE) is not that. Resetting on every deploy re-armed the
+      # deterministic-failure guard and retried hivedev F2's red CI for days.
+      TASK_OWNED_FAILURE_MARKERS = %w[review_ci_stale].freeze
+
+      def runtime_scoped_failure?(row)
+        !TASK_OWNED_FAILURE_MARKERS.include?(value(row, :marker).to_s)
       end
 
       def retry_count_for_failure(row, attrs)
@@ -1170,7 +1182,9 @@ module Hive
           expected_stage: value(row, :stage), state_home: @state_home
         )
         previous_recovery = previous&.recovery || {}
-        repeated = previous_recovery["runtime_digest"] == @runtime_digest &&
+        same_runtime = !runtime_scoped_failure?(row) ||
+          previous_recovery["runtime_digest"] == @runtime_digest
+        repeated = same_runtime &&
           previous_recovery["failure_fingerprint"].to_s == fingerprint
         count = repeated ? previous_recovery["identical_failure_count"].to_i + 1 : 1
         attempts = repeated ? Array(previous_recovery["failure_attempt_history"]).dup : []

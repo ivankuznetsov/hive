@@ -407,6 +407,29 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_creation_rejects_a_direct_self_reference_with_a_complete_cycle_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        error = assert_raises(Hive::Commands::New::InvalidDependencyError) do
+          Hive::Commands::New.new(
+            project, "self dependent", slug_override: "self-dependent",
+            depends_on: "self-dependent"
+          ).call!
+        end
+
+        path = "#{project}:self-dependent -> #{project}:self-dependent"
+        assert_equal path, error.value
+        assert_includes error.message, path
+        refute Dir.exist?(
+          File.join(dir, ".hive-state", "stages", "1-inbox", "self-dependent")
+        )
+      end
+    end
+  end
+
   def test_creation_keeps_unresolved_future_dependencies_captureable
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

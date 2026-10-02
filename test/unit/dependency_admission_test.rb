@@ -104,6 +104,17 @@ class DependencyAdmissionTest < Minitest::Test
 
     unreachable = project(gate: "8-finalize", tasks: [ root, base ])
     assert_error context(unreachable).verdict(project: "app", slug: "dependent"), "dependency_gate_unreachable"
+
+    invalid_stage = project(tasks: [
+      root,
+      task(
+        "app", "base", stage: "3-plan",
+        workflow_stages: %w[1-inbox 8-finalize 9-done]
+      )
+    ])
+    verdict = context(invalid_stage).verdict(project: "app", slug: "dependent")
+    assert_error verdict, "dependency_gate_unreachable"
+    assert_match(/current-stage metadata/, verdict.admission_error.safe_correction)
   end
 
   def test_configured_done_gate_waits_through_finalize

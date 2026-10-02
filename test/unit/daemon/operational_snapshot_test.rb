@@ -333,6 +333,32 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_status_cache_reader_rejects_a_schema_valid_record_with_an_invalid_payload
+    snapshot = {
+      "status" => "current",
+      "tick_sequence" => 1,
+      "daemon" => IDENTITY,
+      "observed_at" => T0.iso8601(6),
+      "valid_until" => (T0 + 30).iso8601(6)
+    }
+    record = {
+      "schema" => Hive::Daemon::OperationalSnapshot::StatusCache::SCHEMA,
+      "schema_version" => Hive::Daemon::OperationalSnapshot::StatusCache::SCHEMA_VERSION,
+      "daemon" => IDENTITY,
+      "tick_sequence" => 1,
+      "published_at" => T0.iso8601(6),
+      "valid_until" => (T0 + 30).iso8601(6),
+      "payload" => {
+        "schema" => "hive-status", "schema_version" => 9, "ok" => true,
+        "generated_at" => T0.iso8601(6), "projects" => "not-an-array"
+      }
+    }
+    repository = Struct.new(:record) { def status_projection = record }.new(record)
+    reader = Hive::Daemon::OperationalSnapshot::StatusCache::Reader.new(repository: repository)
+
+    assert_nil reader.read(snapshot: snapshot, now: T0 + 1)
+  end
+
   def test_repository_rejects_a_status_projection_from_a_future_tick
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

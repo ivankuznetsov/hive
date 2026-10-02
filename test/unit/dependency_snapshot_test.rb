@@ -119,6 +119,27 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_base_selection_resolves_a_numeric_reference_from_a_supplied_context
+    with_tmp_dir do |root|
+      write_task_meta(root, "8-finalize", "base-task", id: 1)
+      project = File.basename(root)
+      task = FakeTask.new(
+        slug: "dependent", id: 2, depends_on: "1",
+        folder: execute_folder(root, "dependent"), project_root: root
+      )
+      context = Hive::DependencySnapshot.admission_context([
+        { "name" => project, "path" => root, "repository_identity" => nil }
+      ])
+
+      selection = Hive::DependencySnapshot.base_selection(
+        task, "main", admission_context: context, project_name: project
+      )
+
+      assert_equal "base-task", selection.branch
+      assert_equal "stacked", selection.mode
+    end
+  end
+
   def test_stacked_base_warns_and_returns_nil_for_unresolvable_dependency
     with_tmp_dir do |root|
       task = FakeTask.new(slug: "dependent", id: 2, depends_on: "ghost-task",
@@ -209,6 +230,34 @@ class DependencySnapshotTest < Minitest::Test
       expected_payload = [
         "hive-dependency-admission-v2", project, slug,
         "clear", "", "", [], "default", "", "", ""
+      ]
+
+      assert_equal Digest::SHA256.hexdigest(JSON.generate(expected_payload)), fingerprint
+    end
+  end
+
+  def test_admission_fingerprint_includes_every_unmet_list_dependency
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: [ "base-task" ]
+      )
+      write_task_meta(root, "8-finalize", "base-task", id: 1)
+      project = File.basename(root)
+      task = FakeTask.new(
+        slug: "dependent-task", id: 2, depends_on: [ "base-task" ],
+        folder: dependent, project_root: root, project_name: project
+      )
+      registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
+
+      fingerprint = Hive::DependencySnapshot.admission_fingerprint(
+        task, registry_entries: registry
+      )
+      expected_payload = [
+        "hive-dependency-admission-v2", project, "dependent-task",
+        "wait", "", "", [ [ "base-task", "base-task", "8-finalize", "9-done" ] ],
+        "default", "", "", ""
       ]
 
       assert_equal Digest::SHA256.hexdigest(JSON.generate(expected_payload)), fingerprint
@@ -956,6 +1005,12 @@ class DependencySnapshotTest < Minitest::Test
 
     assert_empty Hive::DependencySnapshot.cross_project_identity_targets([ project ])
     assert_nil Hive::DependencySnapshot.folder_identity("/definitely/missing/hive-task")
+  end
+
+  def test_invalid_dependency_declarations_add_no_targeted_scan_queue_entries
+    assert_empty Hive::DependencySnapshot.send(
+      :dependency_queue_entries, "app", "too:many:parts"
+    )
   end
 
   def test_cross_project_target_scan_flattens_list_declarations

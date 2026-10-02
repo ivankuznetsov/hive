@@ -552,9 +552,23 @@ module Hive
         end
       end
 
+      # PRs on the task branch that can compete for its identity. A closed,
+      # unmerged PR this publication does not own is history, not a competing
+      # identity: GitHub closes a stacked PR when its base branch is deleted at
+      # merge, and that PR cannot be reopened once the head is rebased.
+      # Counting it blocked both first publication and every later revision
+      # push (hivedev C2). Open and merged PRs still conflict.
+      def branch_candidates(records, request)
+        records.select do |record|
+          next false unless record.fetch("head_branch") == request.branch
+
+          record.fetch("state") != "CLOSED" || yield(record)
+        end
+      end
+
       def revision_pull_request(request, state)
         records = complete_inventory(request)
-        candidates = records.select { |record| record.fetch("head_branch") == request.branch }
+        candidates = branch_candidates(records, request) { |record| revision_owned?(record, state, request) }
         exact = candidates.select { |record| revision_owned?(record, state, request) }
         return exact.first if candidates.one? && exact.one?
 
@@ -748,16 +762,7 @@ module Hive
 
       def reconcile_pull_requests(request)
         records = complete_inventory(request)
-        candidates = records.select do |record|
-          next false unless record.fetch("head_branch") == request.branch
-
-          # A closed, unmerged PR this publication does not own is history,
-          # not a competing identity. GitHub closes a stacked PR when its base
-          # branch is deleted at merge, and that PR cannot be reopened once
-          # the head is rebased. Counting it here blocked republishing the
-          # task forever (hivedev C2). Open and merged PRs still conflict.
-          record.fetch("state") != "CLOSED" || exact_owned?(record, request)
-        end
+        candidates = branch_candidates(records, request) { |record| exact_owned?(record, request) }
         return nil if candidates.empty?
         exact = candidates.select { |record| exact_owned?(record, request) }
         return exact.first if candidates.one? && exact.one?

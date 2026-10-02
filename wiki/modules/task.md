@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-08-13
+updated: 2026-10-02
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -64,7 +64,7 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
 | `#meta_yml_path` | `Hive::TaskMeta.path(folder)` |
 | `#id` | Numeric id from `meta.yml`, or nil when absent/malformed/unallocated |
 | `#display_name` | `display_name` from `meta.yml`, or nil |
-| `#depends_on` | Single same-project id/slug or explicit `project:slug` prerequisite from `meta.yml`, or nil |
+| `#depends_on` | One same-project id/slug or explicit `project:slug`, a shape-preserved nonempty flat array of those references, or nil |
 | `#log_dir` | `File.join(@hive_state_path, "logs", @slug)` |
 | `#commit_lock_file` | `File.join(@hive_state_path, ".commit-lock")` |
 

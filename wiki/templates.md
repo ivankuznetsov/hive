@@ -3,7 +3,7 @@ title: Templates
 type: reference
 source: templates/, lib/hive/llm_wiki_bootstrap/scripts.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-10-02
 tags: [template, erb, prompt, llm-wiki]
 ---
 
@@ -188,16 +188,19 @@ All templates use `trim_mode: "-"` so `<%- … -%>` lines don't add stray newlin
 - [[commands/init]] · [[commands/new]] · [[commands/bot]]
 - [[architecture]]
 
-<!-- updated: 2026-07-22 -->
+<!-- updated: 2026-10-02 -->
 
 ## Execution safeguards and evidence limitations
 
 The planner identifies concrete prerequisite paths, symbols, and contracts,
 inspecting them where its allowed context permits. Unverified assumptions are
 checked by the executor in its actual checkout before editing, without treating
-unavailable planner source access as a missing dependency. The planner declares known unfinished
-prerequisites through the existing scalar `depends_on`; the controller adopts
-that value into empty task metadata. The planner must not edit `meta.yml`.
+unavailable planner source access as a missing dependency. The planner declares
+known unfinished prerequisites through scalar-or-list `depends_on`; the
+controller adopts that exact declaration shape into empty task metadata. Lists
+are nonempty and flat, remain lists even with one entry, branch from the
+project default, and require every prerequisite at `9-done`. The planner must
+not edit `meta.yml`.
 
 Plan review, execution, and code-review triage treat unavailable screenshots,
 recordings, historical captures, and current collection limitations as

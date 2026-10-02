@@ -1504,7 +1504,7 @@ module Hive
     option :force, type: :boolean, default: false,
                    desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
     option :operational, type: :boolean, default: false,
-                         desc: "emit the agent-first operational status view (combine with --json for its v4 envelope)"
+                         desc: "emit the agent-first operational status view (combine with --json for its v5 envelope)"
     option :internal_task_graph, type: :boolean, default: false, hide: true,
                                  desc: "internal: emit the scheduler task graph"
     option :daemon_task, type: :array,

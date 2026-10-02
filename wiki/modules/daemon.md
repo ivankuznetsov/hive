@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-09-25
+updated: 2026-10-02
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -670,10 +670,22 @@ wait context and never spawns for either hold. The coding
 `workflow == "coding"` (nil workflow remains coding for old test doubles), so a
 generic stage whose dir happens to be `3-plan` uses the normal edit/mtime path.
 
+Fan-in uses the same immutable admission context as every other scheduler
+decision. Daemon rows retain scalar-or-array `depends_on`, the complete ordered
+`unmet_dependencies` set with each edge's `required_gate`, and
+`dependency_base_mode`; list rows deliberately keep `blocked_by` and
+`dependency_stage` null. A list stays held until every prerequisite reaches
+`9-done`, even when project `dependency_gate_stage` is `8-finalize`, and no
+force flag or cached earlier verdict can release it. The coherent operational
+snapshot/status-cache format is v2 so these fields survive the fast path.
+Upgrade all readers first, restart the daemon to discard v1 caches, and only
+then create dependency arrays; never downgrade a running installation while
+array metadata exists.
+
 ## Plan-review automation boundary
 
 Coding `3-plan` rows carry the shared [[modules/plan_review]] projection from
-`hive-status.v8`. `plan_reviewing` and a due `plan_review_retry` dispatch the
+`hive-status.v9`. `plan_reviewing` and a due `plan_review_retry` dispatch the
 non-authority `hive plan-review-run` verb. It may initialize/retry review,
 perform a revision whose decisions already exist, and verify; it cannot approve
 a gated finding, answer a manual finding, waive coverage, or downgrade

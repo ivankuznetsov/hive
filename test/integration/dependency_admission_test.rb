@@ -5,6 +5,7 @@ require "hive/commands/new"
 require "hive/commands/run"
 require "hive/commands/approve"
 require "hive/commands/stage_action"
+require "hive/dependency_snapshot"
 require "hive/repository_identity"
 require "hive/task_meta"
 require "json_schemer"
@@ -140,6 +141,104 @@ class DependencyAdmissionIntegrationTest < Minitest::Test
         refute File.exist?(File.join(dir, ".hive-state", "stages", "3-plan", "dependent-task"))
         assert_equal head_before,
                      run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD").strip
+      end
+    end
+  end
+
+  def test_nine_way_fan_in_uses_done_gate_while_scalar_keeps_configured_gate
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project_name = File.basename(dir)
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        config = YAML.safe_load(File.read(config_path))
+        File.write(config_path, config.merge("dependency_gate_stage" => "8-finalize").to_yaml)
+
+        prerequisites = (1..9).map { |index| "prerequisite-#{index}" }
+        capture_io do
+          prerequisites.each do |slug|
+            Hive::Commands::New.new(project_name, slug, slug_override: slug).call
+          end
+          Hive::Commands::New.new(
+            project_name,
+            "scalar dependent",
+            slug_override: "scalar-dependent",
+            depends_on: prerequisites.first
+          ).call
+          Hive::Commands::New.new(
+            project_name,
+            "fan in dependent",
+            slug_override: "fan-in-dependent",
+            depends_on: prerequisites
+          ).call
+        end
+
+        stages = File.join(dir, ".hive-state", "stages")
+        prerequisites.each do |slug|
+          FileUtils.mv(
+            File.join(stages, "1-inbox", slug),
+            File.join(stages, "8-finalize", slug)
+          )
+        end
+        %w[scalar-dependent fan-in-dependent].each do |slug|
+          folder = File.join(stages, "2-brainstorm", slug)
+          FileUtils.mv(File.join(stages, "1-inbox", slug), folder)
+          File.write(File.join(folder, "brainstorm.md"), "# Done\n<!-- COMPLETE -->\n")
+        end
+
+        context = Hive::DependencySnapshot.admission_context
+        scalar = context.verdict(project: project_name, slug: "scalar-dependent")
+        fan_in = context.verdict(project: project_name, slug: "fan-in-dependent")
+
+        assert scalar.clear?, "a scalar edge must retain the configured 8-finalize gate"
+        assert fan_in.wait?
+        assert_nil fan_in.blocked_by
+        assert_nil fan_in.dependency_stage
+        assert_equal prerequisites.map { |slug| [ slug, slug, "8-finalize", "9-done" ] },
+                     fan_in.unmet_dependencies.map { |unmet|
+                       [ unmet.reference, unmet.blocked_by, unmet.dependency_stage, unmet.required_gate ]
+                     }
+
+        scalar_folder = File.join(stages, "2-brainstorm", "scalar-dependent")
+        capture_io { Hive::Commands::Approve.new(scalar_folder, force: true).call }
+        assert File.directory?(File.join(stages, "3-plan", "scalar-dependent"))
+
+        fan_in_folder = File.join(stages, "2-brainstorm", "fan-in-dependent")
+        head_before = run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD").strip
+        out, = capture_io do
+          assert_raises(Hive::DependencyWaitError) do
+            Hive::Commands::Approve.new(fan_in_folder, force: true, json: true).call
+          end
+        end
+        payload = JSON.parse(out)
+        assert_equal "dependency_wait", payload.fetch("reason_code")
+        assert_equal prerequisites.first, payload.fetch("offending_ref")
+        assert File.directory?(fan_in_folder), "--force must not bypass dependency admission"
+        assert_equal head_before,
+                     run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD").strip
+
+        prerequisites.first(3).each do |slug|
+          FileUtils.mv(
+            File.join(stages, "8-finalize", slug),
+            File.join(stages, "9-done", slug)
+          )
+        end
+        remaining = Hive::DependencySnapshot.admission_context
+          .verdict(project: project_name, slug: "fan-in-dependent")
+        assert_equal prerequisites.drop(3), remaining.unmet_dependencies.map(&:blocked_by)
+        assert_equal [ "9-done" ] * 6, remaining.unmet_dependencies.map(&:required_gate)
+
+        prerequisites.drop(3).each do |slug|
+          FileUtils.mv(
+            File.join(stages, "8-finalize", slug),
+            File.join(stages, "9-done", slug)
+          )
+        end
+        assert Hive::DependencySnapshot.admission_context
+          .verdict(project: project_name, slug: "fan-in-dependent").clear?
+
+        capture_io { Hive::Commands::Approve.new(fan_in_folder, force: true).call }
+        assert File.directory?(File.join(stages, "3-plan", "fan-in-dependent"))
       end
     end
   end

@@ -500,7 +500,7 @@ module Hive
         depending_project = unique_project(depending_task.project)
         return validation_failure("depending project snapshot is ambiguous", depending_task.project) unless depending_project
 
-        gate = list_declaration ? "9-done" : depending_project.dependency_gate_stage
+        gate = list_declaration ? "9-done" : depending_project.dependency_gate_stage # not-a-stage-ref: fixed list dependency gate policy
         unless Hive::Config::DEPENDENCY_GATE_STAGES.include?(gate)
           return admission_error(
             "dependency_gate_unknown",

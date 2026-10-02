@@ -3,7 +3,7 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-10-02
 tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow, dependencies, base-branch]
 ---
 
@@ -12,7 +12,7 @@ tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow
 ## Usage
 
 ```
-hive new PROJECT [--workflow NAME] [--base BRANCH] [--depends-on ID_OR_SLUG_OR_PROJECT_SLUG] TEXT...
+hive new PROJECT [--workflow NAME] [--base BRANCH] [--depends-on TASK]... TEXT...
 ```
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
@@ -22,11 +22,23 @@ loading preserve `UnsupportedProjectConfigError` as a configuration failure
 (exit 78). They do not reclassify strict root-key failures as the generic
 `ProjectConfigUnreadable` exit-1 path, and no task directory is seeded.
 
-`--depends-on` accepts exactly one scalar reference. A bare slug or numeric id
-is scoped to the new task's project; `other-project:task-slug` is the only
-cross-project form. Lists, mappings, blanks, malformed separators, and
-`project:<numeric-id>` are rejected. Creation validates syntax and stores the
-normalized value; existence, repository identity, cycles, plan agreement, and
+One `--depends-on` accepts one scalar reference. Repeat the flag to require
+every named prerequisite. A bare slug or numeric id is scoped to the new
+task's project; `other-project:task-slug` is the only cross-project form.
+Mappings, blanks, malformed separators, and `project:<numeric-id>` are
+rejected. Programmatic callers may pass the same declaration as a nonempty
+flat array, and a singleton array remains an array rather than silently
+becoming a scalar.
+
+Declaration shape is policy. One scalar keeps same-project branch stacking and
+the project's configured dependency gate. Adding a second flag changes the
+whole declaration—including the first edge—to scheduling-only list policy:
+the task branches from the project default and every prerequisite must reach
+`9-done`. The CLI writes a notice to stderr spelling out that base/gate
+transition. Exact duplicates are removed while preserving list shape and
+first-seen order. Creation validates syntax and rejects a cycle or
+self-reference that is resolvable from the current snapshot before publishing
+the task. Existence, repository identity, cycle freedom, plan agreement, and
 gate reachability are revalidated at status/dispatch boundaries.
 
 `--base BRANCH` is structured input for a workflow whose terminal agent
@@ -39,7 +51,8 @@ reject `--base`, and draft-PR workflows reject `--depends-on` stacking in v1.
 The executable wrapper lifts standalone allow-listed `new` options from anywhere
 outside an explicit `--`: `--workflow NAME`, `--workflow=NAME`, `--base BRANCH`,
 `--base=BRANCH`,
-`--depends-on VALUE`, `--depends-on=VALUE`, and Thor-style JSON booleans. The
+repeated `--depends-on VALUE` / `--depends-on=VALUE`, and Thor-style JSON
+booleans. The
 first remaining positional is `PROJECT`; the rest remains literal task text
 behind a `--` sentinel. That makes the canonical workflow-authoring hint work:
 `hive new PROJECT --workflow my-flow "<your idea>"` pins the task instead of
@@ -90,7 +103,7 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
 
 1. `Hive::Config.find_project(name)` → resolve `hive_state_path`. Exits 1 if not found.
 2. Validate slug → exits 1 with `"invalid slug"` or `"reserved or unsafe slug"` on failure.
-3. Parse `--depends-on` through `Hive::Dependencies.parse_reference`, then resolve the effective workflow. A CLI override wins over project `default_workflow`, which wins over `coding`. Draft-PR workflows reject dependency stacking and resolve an explicit or project-default `base_branch` before creating the task folder.
+3. Normalize all `--depends-on` occurrences through `Hive::Dependencies.normalize_declaration`, preserving scalar-versus-list shape, then resolve the effective workflow. A CLI override wins over project `default_workflow`, which wins over `coding`. Validate the proposed node against the current dependency graph and reject a resolvable cycle or self-reference before folder publication or id allocation. Draft-PR workflows reject dependency stacking and resolve an explicit or project-default `base_branch` before creating the task folder.
 4. `mkdir -p <hive_state_path>/stages/<entry-stage>/<slug>` — exits 1 with `"slug collision"` if the directory already exists (rare; user retries to regenerate the random suffix).
 5. Write the entry state from `templates/idea.md.erb`. Frontmatter:
    ```
@@ -132,14 +145,19 @@ input_fingerprint: 3f...
 immediate transaction; no counter file or counter lock remains. `display_name`
 starts nil; status surfaces use the slug until name generation succeeds.
 `depends_on` is omitted when not supplied and remains the authoritative
-scheduling declaration when present. `workflow:` is omitted for plain coding
+scheduling declaration when present. Multiple prerequisites serialize as a
+YAML sequence; even `[one-task]` retains list policy. `workflow:` is omitted for plain coding
 captures, but set for explicit overrides and non-coding project defaults.
 `base_branch:` is omitted outside draft-PR workflows and is authoritative when
 present.
 
 ## Tests
 
-- `test/integration/new_test.rb` covers slug derivation, dependency slug/numeric/`project:slug` grammar, reserved-slug rejection, collisions, rich capture, workflow pinning, counter-lock fallback, commit locking, and the captured commit.
+- `test/integration/new_test.rb` covers slug derivation, dependency
+  slug/numeric/`project:slug` grammar, repeated flags, singleton arrays, the
+  list-policy stderr notice, cycle rejection, reserved-slug rejection,
+  collisions, rich capture, workflow pinning, counter-lock fallback, commit
+  locking, and the captured commit.
 - `test/integration/new_wrapper_argv_test.rb` drives the real `bin/hive` subprocess and pins wrapper-only argv behavior: canonical `PROJECT --workflow ID "text"`, before-project and trailing options, `--workflow=ID`, combined dependency/workflow flags, literal `--workflow` substrings, lifted-but-plain `--json`, missing text after lifted options, and unrecognized options as task text.
 - `test/integration/tui_new_idea_attachments_test.rb` covers the TUI-internal rich submit path.
 

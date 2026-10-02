@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-28
+updated: 2026-10-02
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -435,8 +435,8 @@ is advisory while the deterministic scale gate remains required.
 - The dependency workspace view projects the connected subset of the reused
   bounded status snapshot. If that snapshot lacks other projects or exhausts a
   cap, the component remains partial rather than starting a new fleet scan.
-  This is an operator explanation of the existing scalar `depends_on` model,
-  not a durable DAG or publication authority.
+  This is an operator explanation of the existing scalar-or-list `depends_on`
+  model, not a separate durable DAG or publication authority.
 
 See [[modules/task_workspace]].
 

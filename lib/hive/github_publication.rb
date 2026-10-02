@@ -748,7 +748,16 @@ module Hive
 
       def reconcile_pull_requests(request)
         records = complete_inventory(request)
-        candidates = records.select { |record| record.fetch("head_branch") == request.branch }
+        candidates = records.select do |record|
+          next false unless record.fetch("head_branch") == request.branch
+
+          # A closed, unmerged PR this publication does not own is history,
+          # not a competing identity. GitHub closes a stacked PR when its base
+          # branch is deleted at merge, and that PR cannot be reopened once
+          # the head is rebased. Counting it here blocked republishing the
+          # task forever (hivedev C2). Open and merged PRs still conflict.
+          record.fetch("state") != "CLOSED" || exact_owned?(record, request)
+        end
         return nil if candidates.empty?
         exact = candidates.select { |record| exact_owned?(record, request) }
         return exact.first if candidates.one? && exact.one?

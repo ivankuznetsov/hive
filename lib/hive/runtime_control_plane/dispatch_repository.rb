@@ -517,9 +517,21 @@ module Hive
 
       def prune_results(now: @clock.call, **)
         database.transaction do |db|
-          db[:dispatch_requests].where(
+          expired = db[:dispatch_requests].where(
             state: "completed", result_state: "delivered"
-          ).where { retain_until < now.utc.iso8601(6) }.delete
+          ).where { retain_until < now.utc.iso8601(6) }
+          # A recovery request is also the task's failure history: the retry
+          # ladder and identical-failure count read the latest terminal
+          # recovery. Deleting it with its delivered result after an hour reset
+          # every series, so a slow deterministic loop never parked (hivedev
+          # F2). Drop only the result payload; the row then ages out under
+          # TERMINAL_RECOVERY_RETENTION_SEC like any terminal recovery.
+          kept = expired.where(recovery_request: 1).update(
+            result_state: nil, result_json: nil, result_digest: nil,
+            result_available_at: nil, result_delivered_at: nil, retain_until: nil,
+            updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
+          )
+          kept + expired.exclude(recovery_request: 1).delete
         end
       end
 

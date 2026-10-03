@@ -104,6 +104,30 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  # A host without the runtime control plane (fresh workspace, sandbox) used
+  # to report a malformed key as a config error (78), because
+  # CommandOperation opened receipt storage before the key was checked.
+  def test_malformed_key_is_a_usage_error_before_receipt_storage_is_touched
+    with_initialized_project do |project_root, project|
+      untouchable = Object.new
+      untouchable.define_singleton_method(:method_missing) { |*| raise "receipt store must not be touched" }
+      untouchable.define_singleton_method(:respond_to_missing?) { |*| true }
+
+      [ "", " ", "x" * 513 ].each do |key|
+        out, _err, status = with_captured_exit do
+          Hive::Commands::New.new(
+            project, "task", slug_override: "invalid-key-task",
+            idempotency_key: key, json: true, command_receipt_store: untouchable
+          ).call
+        end
+        payload = JSON.parse(out)
+        assert_equal 64, status, "key #{key.inspect[0, 20]} must be a usage error"
+        assert_equal "usage", payload.fetch("error_kind")
+      end
+      assert_empty idempotent_tasks(project_root)
+    end
+  end
+
   def test_attachment_content_participates_in_the_fingerprint
     with_initialized_project do |project_root, project|
       with_tmp_dir do |dir|

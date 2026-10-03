@@ -184,7 +184,30 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       )
       refute lexical_only.confirmed_read_only_storage?,
              "mount matching must use the resolved storage path"
+
+      unreadable_mountinfo = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(real, "runtime.sqlite3")
+      )
+      unreadable_mountinfo.define_singleton_method(:storage_mount_status) do
+        raise IOError, "mountinfo unreadable"
+      end
+      refute unreadable_mountinfo.confirmed_read_only_storage?
     end
+  end
+
+  def test_mountinfo_parser_fails_closed_if_a_validated_field_disappears
+    fields = Array.new(10, "field")
+    fields[6] = "-"
+    fields.define_singleton_method(:fetch) do |index|
+      raise IndexError, "field disappeared" if index == 4
+
+      super(index)
+    end
+    line = Object.new
+    line.define_singleton_method(:split) { fields }
+    database = Hive::RuntimeControlPlane::Database.new(path: "/tmp/runtime.sqlite3")
+
+    assert_nil database.send(:parse_mountinfo_line, line)
   end
 
   def test_storage_errors_are_typed_from_direct_and_wrapped_causes
@@ -211,6 +234,13 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       inaccessible = database.storage_error_for(Errno::EACCES.new(path))
       assert_equal :state_storage_inaccessible, inaccessible.code
       assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, inaccessible.action
+
+      writable = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(root, options: "rw", super_options: "rw")
+      )
+      direct_readonly = writable.storage_error_for(Errno::EROFS.new(path))
+      assert_match(/storage is read-only/, direct_readonly.message)
+      refute_match(/mounted read-only/, direct_readonly.message)
 
       assert_nil database.storage_error_for(SQLite3::BusyException.new("busy"))
     end
@@ -250,7 +280,9 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       end
 
       count = with_replaced_singleton_method(Sequel, :connect, replacement) do
-        database.operational_read { |connection| connection[:installations].count }
+        database.operational_read(timeout_sec: 1) do |connection|
+          connection[:installations].count
+        end
       end
 
       assert_equal 1, count
@@ -440,6 +472,51 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
       assert database.disconnected?
     end
+  end
+
+  def test_non_storage_query_and_connection_errors_keep_their_existing_types
+    with_database do |database|
+      database.define_singleton_method(:inspect_database) do |**|
+        raise SQLite3::BusyException, "busy status"
+      end
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        database.quiescence_status_snapshot
+      end
+      assert_equal :database_corrupt, error.code
+      assert_match(/busy status/, error.message)
+    end
+
+    with_database do |database|
+      database.disconnect
+      database.define_singleton_method(:validate_database_custody!) { true }
+      source = SQLite3::BusyException.new("busy connection")
+      replacement = ->(**) { raise source }
+
+      error = with_replaced_singleton_method(Sequel, :connect, replacement) do
+        assert_raises(SQLite3::BusyException) { database.send(:connect!) }
+      end
+      assert_same source, error
+      assert database.disconnected?
+    end
+  end
+
+  def test_cleanup_errors_surface_without_an_active_error
+    database = Hive::RuntimeControlPlane::Database.new(path: "/tmp/runtime.sqlite3")
+    inspection_error = RuntimeError.new("inspection disconnect failed")
+    inspection = Object.new
+    inspection.define_singleton_method(:disconnect) { raise inspection_error }
+
+    assert_same inspection_error, assert_raises(RuntimeError) {
+      database.send(:disconnect_inspection, inspection)
+    }
+
+    connection_error = RuntimeError.new("connection disconnect failed")
+    replacement = -> { raise connection_error }
+    error = with_replaced_singleton_method(database, :disconnect, replacement) do
+      assert_raises(RuntimeError) { database.send(:disconnect_preserving_error) }
+    end
+    assert_same connection_error, error
   end
 
   def test_migration_creates_owner_private_database_and_sidecars_under_permissive_umask
@@ -815,6 +892,18 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       end
       assert_equal :state_storage_inaccessible, error.code
       assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
+    end
+
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "missing", "runtime.sqlite3")
+      )
+      database.define_singleton_method(:storage_error_for) { |_| nil }
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        database.send(:validate_database_custody!)
+      end
+      assert_equal :database_custody_invalid, error.code
     end
   end
 

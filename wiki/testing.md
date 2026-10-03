@@ -3,8 +3,8 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-09-01
-tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest]
+updated: 2026-10-03
+tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
 **TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
@@ -272,7 +272,7 @@ not the full Hive runtime. A `--disable-gems` regression keeps candidate source
 exports buildable before the candidate gem and its runtime dependencies are
 installed.
 
-The default suite excludes four expensive outer-proof selections, which CI
+The default suite excludes five expensive outer-proof selections, which CI
 runs through the named expensive-gate matrix. A separate required
 `systemd-user-gate` provisions a real user session and runs the exhaustive
 template parser plus offline/reconnect scenario without skips. Exhaustive
@@ -307,6 +307,7 @@ a corresponding CI failure, use:
 bundle exec rake test:packaged_web_bootstrap
 bundle exec rake test:tui_reactivity_perf
 bundle exec rake test:setup_agents_integration
+bundle exec rake test:status_read_only
 bundle exec rake test:babysitter_dry_run_security_matrix
 XDG_RUNTIME_DIR=/run/user/$(id -u) \
   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus \
@@ -325,6 +326,34 @@ executes the real binary, allowing unchanged and busy replays to prove zero
 manager mutation without replacing production behavior.
 Within the declared task, a missing manager, cgroup v2, executable, or runtime
 directory is a failure, not a skip.
+
+`test:status_read_only` is a separate required Docker gate for operational
+status on real Linux read-only mounts. It is excluded from the default suite
+and all six coverage shards; its focused product branches remain covered by
+the ordinary unit and integration suites. The gate builds the candidate from
+`ruby:3.4-slim`, runs as the state-owning uid with a read-only container root,
+and fails rather than skips when Docker, mount enforcement, or any required
+scenario is unavailable. Run it locally with:
+
+```bash
+bundle exec rake test:status_read_only
+```
+
+The proof runs both `hive runtime status --json` and `hive status
+--operational --json`. AE1 covers clean no-sidecar storage and AE4 covers
+retained paired WAL/SHM storage, each with valid, absent, and expired cache
+variants. The recorded real-mount run returned the nonempty operational task
+list and successful runtime status in all six variants, including committed
+WAL-only task data. Separate WAL-only and SHM-only fixtures returned the exact
+`state_storage_read_only` guidance without creating the missing sidecar. Every
+scenario proves the state bytes, inventory, modes, and ownership are unchanged.
+CI retains the candidate revision, source digest, Docker/image identity, mount
+proof, exit outcomes, and unchanged-state result in
+`tmp/status-read-only-evidence.json` as the
+`operational-status-read-only-evidence` artifact. A paired-sidecar host that
+requires WAL-index recovery may instead satisfy AE4 only through the bounded
+general-action storage error with no backup advice; this is an asserted outcome,
+not a skip, and does not relax AE1 or the unpaired-sidecar checks.
 
 The required TUI reactivity gate enforces row completeness and archive-size
 scaling without host-speed thresholds. A separate
@@ -554,9 +583,10 @@ branch-protection contract.
 
 `bundle exec rake coverage` remains the exhaustive single-process local
 coverage-report path, not an after-every-commit agent loop. Hosted CI uses the
-equivalent split `coverage:collect` / `coverage:report` path. Both instrument the default suite; three
-outer-proof files and the large babysitter command-classification matrix run in
-their dedicated CI jobs instead. Coverage fails when an executable source file
+equivalent split `coverage:collect` / `coverage:report` path. Both instrument
+the default suite; four outer-proof files and the large babysitter
+command-classification matrix run in their dedicated CI jobs instead. Coverage
+fails when an executable source file
 was never loaded, when a subprocess result file cannot be read, or when line
 coverage drops below the default 100% threshold.
 At a 100% minimum, the gate compares the exact covered and executable line
@@ -610,6 +640,7 @@ HIVE_CI_GATE_TESTS = {
   "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
   "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
   "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
+  "test:status_read_only" => "test/integration/status_read_only_test.rb",
   "test:babysitter_dry_run_security_matrix" =>
     "test/unit/babysitter/dry_run_security_matrix_test.rb"
 }.freeze

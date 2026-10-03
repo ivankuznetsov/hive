@@ -1,10 +1,10 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
+source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-09-09
-tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal]
+updated: 2026-10-03
+tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
 **TLDR**: `hive status` answers the ordinary operational question—whether the
@@ -159,6 +159,55 @@ payload timestamp.
 The operational human heading reports the projected graph's age. The operational
 JSON source reports `provenance` (`fresh_scan` or `daemon_cache`) and
 `age_seconds` separately from the projection timestamp.
+
+## Operational audit on read-only state
+
+`hive status --operational --json` normally follows the same writable startup
+path as other commands: Hive validates the installation, opens its WAL
+connection, registers the process, and reconciles the scheduler before
+dispatch. Only the one-shot CLI operational observation may fall back to
+inspection, and only after that ordinary path raises a typed read-only storage
+error before registration is completed. Other status modes, inherited launch
+reservations, mutating option combinations, daemons, Web, and in-process status
+callers do not acquire this exemption.
+
+The fallback is Linux-only. Hive must resolve the actual state path and find an
+available, unambiguous read-only mount in `/proc/self/mountinfo`; mode bits,
+ownership, `File.writable?`, and write probes are not confirmation. Missing or
+ambiguous procfs metadata, and non-Linux platforms such as macOS, leave the
+mount unconfirmed. A typed read-only failure then returns
+`state_storage_read_only` with `Use a writable, accessible state root
+(HIVE_HOME).` rather than a task list. The audit must run as the uid that owns
+the state. Cross-uid auditing is outside this contract; an actual custody
+predicate violation remains `database_custody_invalid` with the established
+backup action.
+
+After confirmation, every installation and task read uses one database-owned
+inspection policy:
+
+- With neither `-wal` nor `-shm`, Hive uses an immutable read-only connection
+  and checks again after opening that no sidecar appeared.
+- A readable WAL/SHM pair uses plain read-only SQLite inspection so committed
+  WAL rows remain visible. If SQLite needs WAL-index recovery that the mount
+  forbids, the command returns `state_storage_read_only` with `Use a writable,
+  accessible state root (HIVE_HOME).`
+- Either sidecar alone returns `state_storage_read_only` with `Use a writable
+  state root (HIVE_HOME), or safely restore a matching WAL/SHM pair or remove
+  the stray sidecar after verifying no committed data will be lost.`
+
+Inspection never checkpoints, removes, repairs, or creates sidecars. An
+inaccessible database or sidecar returns `state_storage_inaccessible` with
+`Use a writable, accessible state root (HIVE_HOME).` Storage access failures
+never prescribe backup recovery; confirmed corruption and custody violations
+retain their existing codes and backup guidance. Do not suggest `hive runtime
+status` as a remedy when it is failing under this same inspection policy.
+
+A failure before command dispatch uses the existing
+`hive-runtime-maintenance.v1` envelope and exposes `runtime_code` plus
+`next_action`. A failure reached after operational dispatch uses the additive
+optional `code` and `next_action` fields in `hive-operational-status.v4`.
+Those fields are not added to plain, running, full/archive, daemon-task, or
+diagnostic status errors. Successful operational v4 documents are unchanged.
 
 The operational document projects every non-archived task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,
@@ -703,6 +752,9 @@ task/commit locks and committed before the clock can hide a row.
 
 ## Tests
 
+- `test/integration/status_read_only_test.rb` — real Linux read-only mounts,
+  clean and retained-WAL inspection across cache variants, exact unpaired
+  sidecar errors, and unchanged-state evidence.
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration, and v5 admission fields.
 - `test/integration/dependency_admission_test.rb` — plan-only ordering drift and cross-project repository identity mismatch.
 - `test/unit/commands/status_test.rb` — status row collection, per-project `project_load_failed` degradation, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, workflow-aware retention/count projection, strict boundaries, and lossless archive-mode listing.

@@ -38,6 +38,7 @@ module HiveBench
         abort("require_successful_execution must be true or false")
       end
       validate_isolation!(data.fetch("isolation", {}))
+      generation_environment(data, repo_root: repo_root)
       validate_matrix!(data)
 
       timeouts = data["timeouts"]
@@ -47,10 +48,7 @@ module HiveBench
         abort("timeouts.hive_seconds must be a positive integer when set")
       end
 
-      load_candidates
-      known = HiveBench::Candidates.all.map(&:id)
-      unknown = data["candidates"].map(&:to_s) - known
-      abort("unknown candidate id(s): #{unknown.join(", ")}") unless unknown.empty?
+      candidates(data)
       unknown_tasks = data["tasks"].map(&:to_s).reject do |slug|
         File.file?(File.join(repo_root, "corpus", slug, "manifest.yml"))
       end
@@ -95,6 +93,51 @@ module HiveBench
       return if missing.empty?
 
       abort("source does not contain the campaign marker runtime: #{missing.join(", ")}")
+    end
+
+    # Source remains the historical target checkout. Only an explicit runtime
+    # pin also selects its Hive executable; unpinned campaigns use active Hive.
+    def generation_environment(data, repo_root:, image_inspector: nil)
+      env = {}
+      if data.key?("runtime_commit")
+        sha = data["runtime_commit"]
+        abort("runtime_commit must be an exact 40-character commit SHA") unless
+          sha.is_a?(String) && sha.match?(/\A[0-9a-f]{40}\z/)
+        root = source(data, repo_root: repo_root)
+        out, _err, status = Open3.capture3("git", "-C", root, "rev-parse", "--verify", "HEAD^{commit}")
+        abort("runtime_commit does not match source HEAD") unless status.success? && out.strip == sha
+        bin = File.join(root, "bin", "hive")
+        unless File.file?(bin) && File.executable?(bin) && File.file?(File.join(root, "lib", "hive.rb"))
+          abort("runtime_commit source does not contain a complete Hive runtime")
+        end
+        env["HB_HIVE_BIN"] = bin
+      end
+      if data.key?("runner_image")
+        image = data["runner_image"]
+        unless image.is_a?(String) && image.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._:\/@-]*\z/)
+          abort("runner_image must be a non-empty Docker image reference")
+        end
+        if data.key?("runner_image_digest")
+          digest = data["runner_image_digest"]
+          unless digest.is_a?(String) && digest.match?(/\Asha256:[0-9a-f]{64}\z/)
+            abort("runner_image_digest must be an exact sha256 Docker image ID")
+          end
+          actual = if image_inspector
+            image_inspector.call(image)
+          else
+            out, err, status = Open3.capture3("docker", "image", "inspect", "--format", "{{.Id}}", image)
+            abort("cannot inspect registered runner_image: #{err.strip}") unless status.success?
+            out.strip
+          end
+          abort("runner_image_digest does not match registered runner_image") unless actual == digest
+          image = digest # launch immutable bytes, not a tag that can change later
+        end
+        env["HB_RUNNER_IMAGE"] = image
+        env["HB_OPENCODE_RUNNER_IMAGE"] = image
+      elsif data.key?("runner_image_digest")
+        abort("runner_image_digest requires runner_image")
+      end
+      env
     end
 
     def enabled_judges(judges)
@@ -161,11 +204,15 @@ module HiveBench
     def campaign_requires_openrouter?(data)
       return true if judges_require_openrouter?(data.fetch("judges"))
 
+      require_relative "hive_config"
+      candidates(data).any? { |candidate| HiveConfig.openrouter?(candidate) }
+    end
+
+    def candidates(data)
       load_candidates
-      data.fetch("candidates").any? do |id|
-        candidate = HiveBench::Candidates.by_id(id.to_s)
-        candidate && (candidate.pi_models || candidate.opencode_models)
-      end
+      HiveBench::Candidates.for_campaign(data)
+    rescue ArgumentError => e
+      abort(e.message)
     end
 
     def judge_name(backend, config)
@@ -195,6 +242,13 @@ module HiveBench
       abort("isolation.docker_network must contain only proxy #{proxy_host}; found #{peers.sort.inspect}")
     end
 
+    def prepare_generation_network!(data)
+      require_relative "generation_network"
+      GenerationNetwork.prepare!(data)
+    rescue ArgumentError => e
+      abort(e.message)
+    end
+
     def validate_codex!(config)
       effort = config["reasoning_effort"]
       unless effort.is_a?(String) && !effort.include?("\n") && !effort.strip.empty?
@@ -215,6 +269,9 @@ module HiveBench
 
     def validate_isolation!(isolation)
       abort("isolation must be a mapping") unless isolation.is_a?(Hash)
+      if isolation.key?("managed_network") && ![true, false].include?(isolation["managed_network"])
+        abort("isolation.managed_network must be true or false")
+      end
       if isolation.key?("sealed_agent_runtime") &&
          ![ true, false ].include?(isolation["sealed_agent_runtime"])
         abort("isolation.sealed_agent_runtime must be true or false")

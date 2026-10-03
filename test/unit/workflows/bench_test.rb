@@ -160,6 +160,53 @@ class WorkflowsBenchTest < Minitest::Test
     end
   end
 
+  def test_usage_export_loader_does_not_require_unmounted_pricing_dependencies
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+    Dir.mktmpdir("bench-export-loader") do |dir|
+      FileUtils.cp(File.join(runtime, "harness/lib/token_report.rb"), dir)
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{dir}", "-rtoken_report", "-e", "puts HiveBench::TokenReport::EXPORT_SCHEMA"
+      )
+      assert status.success?, out + err
+      assert_equal "hive-bench-opencode-usage.v1", out.strip
+    end
+  end
+
+  def test_usage_failure_preserves_stage_failure_context_without_inventing_tokens
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "lib/hive_driver"
+      require "profiles/candidates"
+      work = ARGV.fetch(0)
+      FileUtils.mkdir_p(File.join(File.dirname(work), "usage-export"))
+      FileUtils.mkdir_p(File.join(work, ".hb"))
+      File.write(File.join(work, ".hb", "stage.err"), "hive: attempt project identity is not registered for the task path\n")
+      File.write(File.join(work, "candidate.patch"), "paid patch\n") if ARGV[1] == "paid"
+      stdout = ARGV[1] == "paid" ? "HB_STAGE plan rc=0\nHB_STAGE develop rc=0\nHB_EXIT rc=0\n" : "HB_STAGE plan rc=1\nHB_EXIT rc=4\n"
+      driver = HiveBench::HiveDriver.new(reuse_existing: false, reuse_unverified: false)
+      begin
+        driver.send(:build_cell, { "task_id" => "task" }, HiveBench::Candidates.by_id("all-ox-alpha-opencode@high"),
+                    work, stdout, 1)
+        abort "missing usage was incorrectly accepted"
+      rescue HiveBench::TokenReport::UsageUnavailable => error
+        puts error.message
+      end
+    RUBY
+    Dir.mktmpdir("bench-usage-failure") do |dir|
+      out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script, File.join(dir, "target"))
+      assert status.success?, out + err
+      assert_includes out, "hive stage runner exited 4"
+      assert_includes out, "HB_STAGE plan rc=1"
+      assert_includes out, File.join(dir, "target/.hb/stage.err")
+      assert_includes out, "controller OpenCode usage receipt missing"
+      out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script, File.join(dir, "target"), "paid")
+      assert status.success?, out + err
+      assert_includes out, "generated: generation completed"
+      assert_includes out, "controller OpenCode usage receipt missing"
+      assert_equal "paid patch\n", File.read(File.join(dir, "target/candidate.patch"))
+    end
+  end
+
   def test_packaged_runtime_gives_opencode_the_same_shell_capability_as_pi
     harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
     script = <<~'RUBY'
@@ -252,6 +299,7 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes dockerfile, "chmod -R go-rwx /opt/hb/control-bundle"
     assert_includes dockerfile, "rm -rf /usr/local/bundle/gems/hive-cli-*"
     assert_includes dockerfile, "gem build agent-cli-runtime.gemspec"
+    assert_includes dockerfile, "ruby packaging/betterleaks.rb"
     assert_includes dockerfile, "gem install ./agent-cli-runtime-*.gem --no-document"
     assert_includes dockerfile, "AgentCliRuntime.respond_to?(:extract_provider_error)"
     assert_includes dockerfile, "defined?(AgentCliRuntime::OpenCode::Permissions)"
@@ -261,6 +309,7 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes stages, "HB_ERROR hive_runtime_visible_to_candidate"
     assert_includes stages, "CONTROLLER_BIN=/opt/hb/controller-bin"
     assert_includes controller_git, "--reuid=1000"
+    assert_includes controller_git, "chown -R 1000:1000 /work"
     assert_includes controller_git, 'args[position]="$HB_CONTROLLER_ORIGIN"'
     assert_includes stages, 'cat >"$CONTROLLER_BIN/gh"'
     [ pi_launcher, opencode_launcher ].each do |launcher|
@@ -1170,6 +1219,71 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes instruction, "profile.codex_models"
     assert_includes instruction, 'start_with?("gpt-5.6-")'
     assert_includes instruction, "HB_RUNNER_IMAGE=hive-bench-runner:sol"
+  end
+
+  def test_generate_honors_registered_image_and_runtime_pins_over_inherited_defaults
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    compiler = instruction.match(/ruby -ryaml -rshellwords -rjson -e '\n(?<code>.*?)\n' "\$REPO_ROOT" "\$BENCH_ROOT" >\.generate-commands/m)
+    refute_nil compiler
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+    source = File.expand_path("../../..", __dir__)
+    sha, = Open3.capture2("git", "-C", source, "rev-parse", "HEAD")
+    Dir.mktmpdir("bench-pinned-runtime") do |dir|
+      data = {
+        "campaign_id" => "pinned-runtime", "source" => source,
+        "runtime_commit" => sha.strip, "runner_image" => "hive-bench-runner:registered",
+        "tasks" => [ "one" ], "candidates" => [ "all-ox-alpha-opencode@high" ],
+        "seeds" => 1, "corpus_version" => "v3",
+        "judges" => { "claude" => { "model" => "claude-fable-5" },
+                      "codex" => { "model" => "gpt-5.6-sol", "reasoning_effort" => "high" } }
+      }
+      File.write(File.join(dir, "campaign.yml"), data.to_yaml)
+      out, err, status = Open3.capture3(
+        { "HB_HIVE_BIN" => "/wrong/hive", "HB_OPENCODE_RUNNER_IMAGE" => "wrong:image" },
+        RbConfig.ruby, "-ryaml", "-rshellwords", "-rjson", "-e", compiler[:code], dir, runtime,
+        chdir: dir
+      )
+      assert status.success?, out + err
+      args = Shellwords.split(out)
+      assert_includes args, "HB_HIVE_BIN=#{source}/bin/hive"
+      assert_includes args, "HB_RUNNER_IMAGE=hive-bench-runner:registered"
+      assert_includes args, "HB_OPENCODE_RUNNER_IMAGE=hive-bench-runner:registered"
+
+      data["runtime_commit"] = "0" * 40
+      File.write(File.join(dir, "campaign.yml"), data.to_yaml)
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-ryaml", "-rshellwords", "-rjson", "-e", compiler[:code], dir, runtime,
+        chdir: dir
+      )
+      refute status.success?, "mismatched runtime pin must fail before emitting cells"
+      assert_empty out
+      assert_includes err, "runtime_commit does not match source HEAD"
+    end
+  end
+
+  def test_campaign_runner_digest_selects_immutable_bytes_and_rejects_mismatches
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    script = <<~'RUBY'
+      require "lib/campaign_contract"
+      digest = "sha256:" + "a" * 64
+      data = { "runner_image" => "bench:registered", "runner_image_digest" => digest }
+      env = HiveBench::CampaignContract.generation_environment(
+        data, repo_root: Dir.pwd, image_inspector: ->(image) {
+          raise "wrong image" unless image == "bench:registered"
+          ARGV.empty? ? digest : "sha256:" + "b" * 64
+        }
+      )
+      puts JSON.generate(env)
+    RUBY
+    out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script)
+    assert status.success?, out + err
+    env = JSON.parse(out)
+    assert_equal "sha256:#{'a' * 64}", env.fetch("HB_RUNNER_IMAGE")
+    assert_equal env.fetch("HB_RUNNER_IMAGE"), env.fetch("HB_OPENCODE_RUNNER_IMAGE")
+    out, err, status = Open3.capture3(RbConfig.ruby, "-I#{harness}", "-e", script, "mismatch")
+    refute status.success?
+    assert_empty out
+    assert_includes err, "runner_image_digest does not match registered runner_image"
   end
 
   def test_generate_surfaces_provider_only_pending_cells_as_daemon_retryable_limits

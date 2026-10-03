@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "yaml"
+require_relative "../profiles/candidates"
 
 module HiveBench
   # Renders a benchmark CANDIDATE (which agent/model drives each REAL hive stage)
@@ -67,7 +68,7 @@ module HiveBench
         # worker can claim its already-admitted attempt.
         "attempt_launch_timeout_sec" => PARALLEL_ATTEMPT_STARTUP_TIMEOUT_SEC,
         "attempt_first_heartbeat_timeout_sec" => PARALLEL_ATTEMPT_STARTUP_TIMEOUT_SEC,
-        "plan_review" => { "enabled" => false },
+        "plan_review" => candidate.plan_review || { "enabled" => false },
         "plan" => { "agent" => candidate.plan },
         "execute" => { "agent" => candidate.execute },
         # Without this, hive's built-in default (claude) would open the PR even
@@ -86,7 +87,7 @@ module HiveBench
                 }
               }
             },
-            "credential_env" => ["OPENROUTER_API_KEY"],
+            "credential_env" => credentials(candidate),
             "plugins" => [OPENCODE_PLUGIN]
           }
         }
@@ -112,6 +113,11 @@ module HiveBench
     end
 
     def route_for(candidate, agent, stage)
+      if candidate.stage_routes
+        route = candidate.stage_routes[stage]
+        route = candidate.stage_routes.values.find { |value| value["agent"] == agent } unless route && route["agent"] == agent
+        return route ? route.reject { |key, _| key == "agent" } : {}
+      end
       case agent
       when "claude"
         { "model" => candidate.claude_model, "effort" => candidate.claude_effort }.compact
@@ -135,11 +141,29 @@ module HiveBench
     end
 
     def uses?(candidate, agent)
-      stage_agents = [candidate.plan, candidate.execute, candidate.review]
-      reviewer_agents = Array(candidate.reviewers).filter_map do |reviewer|
-        reviewer.is_a?(Hash) ? (reviewer["agent"] || reviewer[:agent]) : nil
+      Candidates.agent_ids(candidate).include?(agent)
+    end
+
+    def openrouter?(candidate, agent: nil)
+      routes = if candidate.stage_routes
+                 candidate.stage_routes.values
+               else
+                 %w[pi opencode].flat_map do |harness|
+                   (candidate.public_send("#{harness}_models") || {}).values.map do |model|
+                     { "agent" => harness, "model" => model }
+                   end
+                 end
+               end
+      routes += Array(candidate.reviewers)
+      routes += (candidate.plan_review || {}).fetch("routes", {}).values.flatten
+      routes.any? do |route|
+        route.is_a?(Hash) && (!agent || route["agent"] == agent) &&
+          route["model"].to_s.start_with?("openrouter/")
       end
-      (stage_agents + reviewer_agents).include?(agent)
+    end
+
+    def credentials(candidate)
+      (Array(candidate.credential_env) + (openrouter?(candidate) ? ["OPENROUTER_API_KEY"] : [])).uniq
     end
 
     # Hive's built-in reviewer identity is one routing key for the whole panel.
@@ -204,7 +228,7 @@ module HiveBench
       explicit = Array(candidate.reviewers)
       return explicit unless explicit.empty?
 
-      agents = [candidate.plan, candidate.execute, candidate.review].uniq
+      agents = candidate.stage_routes ? [candidate.review] : [candidate.plan, candidate.execute, candidate.review].uniq
       set = agents.map do |agent|
         { "name" => "#{agent}-ce-code-review", "kind" => "agent", "agent" => agent,
           "skill" => "ce-code-review", "output_basename" => "#{agent}-ce-code-review",

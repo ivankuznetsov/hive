@@ -2,7 +2,7 @@
 
 require "json"
 require "sqlite3"
-require "lib/pricing"
+require "securerandom"
 
 module HiveBench
   # Per-MODEL token accounting for one cell, from the agent stream logs. Every
@@ -22,10 +22,14 @@ module HiveBench
   #           (+ reasoning_output_tokens as a detail of output); NO model id.
   #           input_tokens INCLUDES cached_input_tokens (OpenAI convention).
   #   OpenCode: raw events are deliberately redacted from Hive logs; the
-  #             normalized per-session values live in .hb/hive-home/usage.db.
+  #             normalized sessions live in the controller runtime database.
+  #             The controller exports only model/token aggregates to receipts;
+  #             historical cells can still use .hb/hive-home/usage.db.
   module TokenReport
     module_function
 
+    class UsageUnavailable < StandardError; end
+    EXPORT_SCHEMA = "hive-bench-opencode-usage.v1"
     BUCKETS = %w[input output cache_read cache_write].freeze
 
     # Stage prefix of a log filename -> which candidate stage ran it.
@@ -67,14 +71,18 @@ module HiveBench
         end
       end
       # The database is authoritative for OpenCode because Hive intentionally
-      # omits the provider event payloads from persisted logs. Replace a bucket
-      # with the DB aggregate instead of adding it, so a future unredacted log
-      # cannot double-count the same OpenCode sessions.
-      scan_usage_db(target_dir).each { |model, usage| per_model[model] = usage }
+      # omits the provider event payloads from persisted logs. Other harnesses
+      # can use that same model, so preserve their stream usage when merging.
+      scan_usage_db(target_dir).each do |model, usage|
+        BUCKETS.each { |key| per_model[model][key] += usage.fetch(key, 0) }
+      end
       per_model
     end
 
     def scan_usage_db(target_dir)
+      exported = scan_usage_export(target_dir)
+      return exported unless exported.nil?
+
       path = File.join(target_dir, ".hb", "hive-home", "usage.db")
       return {} unless File.file?(path)
 
@@ -104,6 +112,79 @@ module HiveBench
       database&.close
     end
 
+    # Runs in the controller, while its private runtime database is accessible.
+    # Export only billing buckets and model attribution, never session payloads,
+    # task text, credentials, or the database itself. Each retry emits a new
+    # cumulative receipt; readers select one receipt rather than summing them.
+    def export_opencode_usage(directory, task_slug:)
+      require "hive/usage_db"
+      rows = Hive::UsageDb.database.read do |db|
+        db[:token_usage].where(agent: "opencode", project_slug: "work", task_slug: task_slug)
+          .select(:model, :actual_backend, :actual_model, :input, :output, :cached,
+                  :cache_read, :cache_write, :input_available, :output_available,
+                  :cached_available, :cache_read_available, :cache_write_available,
+                  :input_includes_cache_read, :input_includes_cache_write).all
+      end
+      models = Hash.new { |hash, model| hash[model] = BUCKETS.to_h { |key| [key, 0] } }
+      rows.each do |record|
+        row = record.transform_keys(&:to_s)
+        raise UsageUnavailable, "OpenCode token buckets unavailable" unless available?(row, "input") && available?(row, "output")
+
+        cache_read = available?(row, "cache_read") ? available_value(row, "cache_read") : available_value(row, "cached")
+        cache_write = available_value(row, "cache_write")
+        input = available_value(row, "input")
+        input -= cache_read if row["input_includes_cache_read"] == true || row["input_includes_cache_read"] == 1
+        input -= cache_write if row["input_includes_cache_write"] == true || row["input_includes_cache_write"] == 1
+        values = { "input" => [input, 0].max, "output" => available_value(row, "output"),
+                   "cache_read" => cache_read, "cache_write" => cache_write }
+        values.each { |key, value| models[usage_model(row)][key] += value }
+      end
+      write_usage_export(directory, "schema" => EXPORT_SCHEMA, "status" => "available", "models" => models)
+    rescue StandardError => error
+      write_usage_export(directory, "schema" => EXPORT_SCHEMA, "status" => "unavailable", "reason" => error.class.name)
+      raise UsageUnavailable, "controller OpenCode usage export unavailable (#{error.class})"
+    end
+
+    def write_usage_export(directory, payload)
+      name = "opencode-usage-%020d-%s.json" % [Process.clock_gettime(Process::CLOCK_REALTIME, :nanosecond), SecureRandom.uuid]
+      path = File.join(directory, name)
+      temporary = "#{path}.tmp"
+      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+        file.write(JSON.generate(payload))
+        file.flush
+        file.fsync
+        file.chmod(0o444)
+      end
+      File.rename(temporary, path)
+      path
+    ensure
+      File.unlink(temporary) if temporary && File.exist?(temporary)
+    end
+    private_class_method :write_usage_export
+
+    def scan_usage_export(target_dir)
+      directory = File.join(File.dirname(File.expand_path(target_dir)), "usage-export")
+      return nil unless File.directory?(directory)
+
+      path = Dir.glob(File.join(directory, "opencode-usage-*.json")).max
+      raise UsageUnavailable, "controller OpenCode usage receipt missing" unless path
+
+      receipt = JSON.parse(File.read(path))
+      unless receipt["schema"] == EXPORT_SCHEMA && receipt["status"] == "available" && receipt["models"].is_a?(Hash)
+        raise UsageUnavailable, "controller OpenCode usage receipt unavailable"
+      end
+      receipt["models"].each do |model, buckets|
+        unless model.is_a?(String) && buckets.is_a?(Hash) && buckets.keys.sort == BUCKETS.sort &&
+               buckets.values.all? { |value| value.is_a?(Integer) && value >= 0 }
+          raise UsageUnavailable, "controller OpenCode usage receipt invalid"
+        end
+      end
+      receipt["models"]
+    rescue JSON::ParserError
+      raise UsageUnavailable, "controller OpenCode usage receipt malformed"
+    end
+    private_class_method :scan_usage_export
+
     def usage_model(row)
       model = row["model"].to_s
       return model unless model.empty?
@@ -117,7 +198,7 @@ module HiveBench
 
     def available?(row, bucket)
       availability = "#{bucket}_available"
-      !row.key?(availability) || row[availability].to_i == 1
+      row.key?(bucket) && (!row.key?(availability) || row[availability].to_i == 1)
     end
     private_class_method :available?
 
@@ -149,6 +230,9 @@ module HiveBench
     # plus "_total". An unpriceable model keeps its tokens with cost nil, and
     # makes the cell total nil too — a partial total would read as complete.
     def price(per_model)
+      # The sealed controller mounts this exporter without pricing's model
+      # catalog. Exporting native token buckets must not depend on that catalog.
+      require "lib/pricing"
       out = per_model.to_h do |model, t|
         cost = Pricing.estimate_usd(model_strings: [model], input: t["input"], output: t["output"],
                                     cached: t["cache_read"], cache_creation: t["cache_write"])

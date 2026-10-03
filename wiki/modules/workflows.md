@@ -93,6 +93,73 @@ descriptors may omit it and receive the same value.
 
 ## Workflow result contract
 
+### Benchmark campaign portability
+
+The built-in `bench` workflow snapshots its runner into
+`.hive-state/bench-runtime` through `hive init --workflow bench`. Create campaigns
+with `hive new --workflow bench` and use normal Hive progression/status/recovery;
+the installed stage scripts own parallel matrix generation and judging. Do not
+maintain a second scheduler or run a modified checkout's harness behind a task's
+recorded workflow.
+
+Campaigns may pin `runner_image` for every harness, including OpenCode, instead
+of the inferred image defaults. Optional `runner_image_digest` is the local
+Docker image ID: generation checks the named image against that ID and launches
+the immutable ID. Optional `runtime_commit` must match `source` HEAD exactly and
+requires a complete `source/bin/hive` runtime; only then does generation override
+the inherited active Hive executable. Without this field, `source` remains only
+the historical target checkout, preserving existing campaigns. The sealed-image
+build-SHA and visibility checks still apply; neither pin bypasses isolation.
+
+The committed `campaign.yml` may declare `candidate_profiles` keyed by new IDs.
+Each profile specifies `model_version` and `stages.plan`, `stages.execute`, and
+`stages.review` with native `agent`, `model`, and optional `effort` fields.
+Historical IDs remain available and cannot be overridden. Explicit `reviewers`
+use native Hive reviewer specifications; otherwise the declared review stage
+supplies the code reviewer. Plan review defaults off for these benchmark profiles.
+Enabling it requires explicit primary, adversarial, and verification routes so a
+production default model cannot enter the experiment unnoticed.
+
+`credential_env` contains environment names only. Resolve credentials outside the
+candidate container using the operator's normal secret manager, then export only
+the selected provider keys to the workflow process. A custom Pi `pi_catalog`
+uses native public `models.json` metadata, HTTPS endpoints, and declared `$ENV`
+references; never put tokens or secret-manager shell commands in the campaign.
+Native Pi provider routes do not mount the packaged OpenRouter catalog or
+require its credential. That catalog is selected only for Pi OpenRouter routes;
+an OpenCode OpenRouter route alone does not enable it for Pi. Explicit custom
+Pi catalogs retain their declared provider credential references.
+OpenCode receives the same scoped Bash capability as Pi. Both use the runner's
+pinned CE package; Pi no longer needs a workstation-specific skill checkout.
+Build the runner with explicit `HIVE_SRC` pointing to the exact campaign runtime
+commit; record image and harness identities with the result.
+
+For a fresh provider-only network, opt into `isolation.managed_network: true`,
+choose unique `docker_network` and proxy hostname values, and declare
+`provider_hosts` plus an immutable `proxy_image` ID/digest from the built runner.
+Generate creates and verifies the internal network and dual-homed CONNECT proxy
+before launching any cells. Existing names must have matching campaign ownership
+and configuration; setup never replaces or disconnects shared resources. Only
+the listed provider DNS hosts on TLS port 443 are reachable by candidates.
+Existing manually provisioned networks remain supported when this opt-in is off.
+
+Each cell keeps private controller storage beside, not inside, the candidate
+target. The pinned controller initializes its native runtime database before
+provider launches, then registers `/work` through `Config.register_project` so
+the YAML enrollment and native attempt project identity agree. Repeated setup
+preserves that identity. Resumes retain the database; fresh generations archive it.
+The sealed controller Git shim hands controller-created protected receipts back
+to the benchmark UID before invoking Git, avoiding a root-owned activity receipt
+blocking the state commit. Runner image builds package the pinned Betterleaks
+binary before installing the Hive gem; source archives alone do not contain the
+release asset.
+OpenCode usage is exported at controller exit as cumulative, read-only,
+model-attributed token receipts outside the candidate workspace. The latest
+receipt replaces earlier OpenCode snapshots and is added to other harnesses'
+stream totals, including when they use the same model ID; missing or
+unavailable evidence is not reported as zero usage. Legacy usage DB artifacts
+remain readable for historical cells.
+
 `Hive::Workflow::Result` is the workflow-owned description of what the task is
 trying to deliver. It is independent of stage names and Web panels:
 

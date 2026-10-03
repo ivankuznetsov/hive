@@ -62,6 +62,24 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_missing_task_identity_defers_without_crashing_or_blocking_other_tasks
+    with_dispatcher do |dispatcher, launcher, task, store|
+      original_id = task.id
+      task.id = nil
+      result = dispatch(dispatcher, task, request_id: "incomplete-task")
+
+      assert_equal :deferred, result.status
+      assert_equal "missing_task_identity", result.reason
+      assert_nil result.attempt
+      assert_empty launcher.launched
+      assert_empty store.active_attempts
+
+      task.id = original_id
+      assert_equal :accepted, dispatch(dispatcher, task, request_id: "valid-task").status
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
   def test_request_identity_replays_a_live_attempt_across_task_generations
     with_dispatcher do |dispatcher, launcher, task|
       first = dispatch(dispatcher, task, request_id: "shared-request")

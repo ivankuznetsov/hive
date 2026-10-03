@@ -147,7 +147,6 @@ module Hive
       end
 
       def run_once
-        require "hive/one_shot/babysitter_adapter"
         resolve_once_project_name
         entries = if @all
           Hive::Config.registered_project_entries(preserve_invalid: true)

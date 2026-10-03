@@ -130,6 +130,11 @@ module Hive
           if @idempotency_key_raw.nil?
             call!
           else
+            # Reject a malformed key before CommandOperation opens receipt
+            # storage. Otherwise a host without the runtime control plane
+            # (a fresh workspace, a sandbox) reports a config error (78)
+            # instead of the usage error (64) the key itself deserves.
+            validate_idempotency_key!
             @inside_command_operation = true
             command_operation.call { perform_call! }
           end

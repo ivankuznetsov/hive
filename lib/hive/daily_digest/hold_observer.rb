@@ -18,6 +18,12 @@ module Hive
       def record(row, decision:, owner:, reason:, **details)
         folder = value(row, :folder).to_s
         return if folder.empty? || !File.directory?(folder)
+        # A live task lock means an agent may be inside its artifact custody
+        # window, which snapshots task-journal.jsonl and treats any append as
+        # agent tampering (failing the stage and rolling the entry back). Defer:
+        # @states keeps the prior value, so the transition is recorded on the
+        # first tick after the lock is released.
+        return if value(row, :live_task_lock) == true
 
         task = Hive::Task.new(folder)
         key = File.expand_path(folder)

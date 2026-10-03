@@ -42,6 +42,28 @@ class DailyDigestHoldObserverTest < Minitest::Test
     end
   end
 
+  # The daemon appended "hold cleared" activity to a task's journal while its
+  # review CI-fix and plan-revision agents ran; custody blamed the agent and
+  # rolled the entry back. Holds are deferred while the task lock is live.
+  def test_hold_transitions_wait_while_the_task_lock_is_live
+    with_tmp_dir do |root|
+      records = []
+      activity = Object.new
+      activity.define_singleton_method(:record) { |**values| records << values }
+      observer = Hive::DailyDigest::HoldObserver.new(activity_factory: ->(_task) { activity })
+      folder = File.join(root, ".hive-state", "stages", "6-review", "task")
+      FileUtils.mkdir_p(folder)
+      row = Row.new(folder: folder, stage: "6-review", marker_attrs: {}, live_task_lock: true)
+
+      observer.record(row, decision: :global_cap, owner: "scheduler", reason: "held")
+      assert_empty records, "no journal write while an agent may hold custody"
+
+      row.live_task_lock = false
+      observer.record(row, decision: :global_cap, owner: "scheduler", reason: "held")
+      assert_equal [ "active" ], records.map { |record| record.dig(:payload, "state") }
+    end
+  end
+
   def test_seeded_hold_state_uses_the_bounded_journal_tail
     with_tmp_dir do |root|
       folder = File.join(root, ".hive-state", "stages", "4-execute", "task")

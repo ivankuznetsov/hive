@@ -1,5 +1,4 @@
 require "hive/paths"
-require "hive/runtime_control_plane/activation_gate"
 
 module Hive
   module RuntimeControlPlane
@@ -15,7 +14,7 @@ module Hive
                                 database: nil)
         return false if inherited_reservation
         return false unless error.is_a?(Unavailable) && error.code == :state_storage_read_only
-        return false unless ActivationGate.operational_inspection_route?(argv)
+        return false unless eligible_route?(argv)
 
         root = File.expand_path(state_home)
         database ||= Database.new(path: Hive::Paths.runtime_control_plane_path(root))
@@ -27,6 +26,22 @@ module Hive
           database_path: File.expand_path(database.path)
         }.freeze
         true
+      end
+
+      # Kept here rather than on ActivationGate so loading the low-level
+      # runtime-control-plane entrypoint does not pull CLI activation and its
+      # higher-level agent/work-ledger dependencies into every database user.
+      def eligible_route?(argv)
+        words = Array(argv).map(&:to_s)
+        return false unless words.find { |argument| !argument.start_with?("-") } == "status"
+        return false unless boolean_option_value(words, "operational") == true
+        return false if %w[diagnose daemon-task].any? do |name|
+          words.any? { |argument| argument == "--#{name}" || argument.start_with?("--#{name}=") }
+        end
+
+        %w[write force internal-task-graph].none? do |name|
+          boolean_option_value(words, name) == true
+        end
       end
 
       def active?
@@ -46,6 +61,19 @@ module Hive
 
       def current = Thread.current[THREAD_KEY]
       private_class_method :current
+
+      def boolean_option_value(words, name)
+        Array(words).map do |argument|
+          case argument
+          when "--#{name}", "--#{name}=true", "--#{name}=TRUE", "--#{name}=t", "--#{name}=T"
+            true
+          when "--no-#{name}", "--skip-#{name}", "--#{name}=false", "--#{name}=FALSE",
+               "--#{name}=f", "--#{name}=F"
+            false
+          end
+        end.compact.last
+      end
+      private_class_method :boolean_option_value
     end
   end
 end

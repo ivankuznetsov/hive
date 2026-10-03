@@ -109,10 +109,11 @@ class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
       end
 
       database.define_singleton_method(:diagnostics_uncoordinated) { raise IOError, "broken" }
-      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
         database.quiescence_status_snapshot
       end
-      assert_equal :database_corrupt, error.code
+      assert_equal :state_storage_inaccessible, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
     end
   end
 

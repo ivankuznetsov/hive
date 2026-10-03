@@ -72,31 +72,8 @@ module Hive
       # path. This predicate only recognizes the CLI shape that may fall back
       # after a typed storage failure; it does not itself exempt registration.
       def operational_inspection_route?(argv)
-        words = Array(argv).map(&:to_s)
-        return false unless command(words) == "status"
-
-        return false unless boolean_option_value(words, "operational") == true
-        return false if %w[diagnose daemon-task].any? do |name|
-          words.any? { |argument| argument == "--#{name}" || argument.start_with?("--#{name}=") }
-        end
-
-        %w[write force internal-task-graph].none? do |name|
-          boolean_option_value(words, name) == true
-        end
+        OperationalInspection.eligible_route?(argv)
       end
-
-      def boolean_option_value(words, name)
-        Array(words).map do |argument|
-          case argument
-          when "--#{name}", "--#{name}=true", "--#{name}=TRUE", "--#{name}=t", "--#{name}=T"
-            true
-          when "--no-#{name}", "--skip-#{name}", "--#{name}=false", "--#{name}=FALSE",
-               "--#{name}=f", "--#{name}=F"
-            false
-          end
-        end.compact.last
-      end
-      private_class_method :boolean_option_value
 
       def runtime_status(state_home) = Installation.status(state_home: state_home)
     end

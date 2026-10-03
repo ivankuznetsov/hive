@@ -23,6 +23,32 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
     )
   end
 
+  def test_operational_inspection_route_recognizes_boolean_forms_without_widening_status
+    [
+      %w[status --operational],
+      %w[status --operational=true --json],
+      %w[--json status --operational=TRUE],
+      %w[status --operational=t],
+      %w[status --operational --write=false --force=FALSE --internal-task-graph=f]
+    ].each do |argv|
+      assert Hive::RuntimeControlPlane::ActivationGate.operational_inspection_route?(argv), argv.inspect
+    end
+
+    [
+      %w[status],
+      %w[status --operational=false],
+      %w[status --operational --no-operational],
+      %w[status --operational --diagnose task],
+      %w[status --operational --write],
+      %w[status --operational --force],
+      %w[status --operational --internal-task-graph],
+      %w[status --operational --daemon-task demo:task],
+      %w[new demo --operational task]
+    ].each do |argv|
+      refute Hive::RuntimeControlPlane::ActivationGate.operational_inspection_route?(argv), argv.inspect
+    end
+  end
+
   def test_existing_invalid_database_blocks_startup_but_allows_diagnosis
     with_tmp_dir do |root|
       path = Hive::Paths.runtime_control_plane_path(root)

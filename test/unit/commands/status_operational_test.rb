@@ -5,6 +5,12 @@ require "hive/commands/status"
 class CommandsStatusOperationalTest < Minitest::Test
   include HiveTestHelper
 
+  def teardown
+    Hive::RuntimeControlPlane::OperationalInspection.clear! if
+      defined?(Hive::RuntimeControlPlane::OperationalInspection)
+    super
+  end
+
   def test_operational_payload_is_additive_and_keeps_current_status_v8_unchanged
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -39,6 +45,37 @@ class CommandsStatusOperationalTest < Minitest::Test
 
         assert_equal "hive-operational-status", payload.fetch("schema")
         assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
+      end
+    end
+  end
+
+  def test_inspection_context_carries_through_uncached_operational_task_and_attempt_reads
+    with_tmp_global_config do |state_home|
+      with_tmp_dir do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        slug = "read-only-audit-261003-abcd"
+        folder = File.join(hive_state, "stages", "2-brainstorm", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "brainstorm.md"), "# Brainstorm\n<!-- COMPLETE -->\n")
+        project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        database = Struct.new(:path) do
+          def confirmed_read_only_storage? = true
+        end.new(Hive::Paths.runtime_control_plane_path(state_home))
+        error = Hive::RuntimeControlPlane::Unavailable.new(
+          "read only", code: :state_storage_read_only,
+          action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+        )
+        assert Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+          error: error, argv: %w[status --operational --json], state_home: state_home,
+          database: database
+        )
+
+        with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
+          stdout, = capture_io { Hive::Commands::Status.new(json: true, operational: true).call }
+          payload = JSON.parse(stdout)
+          assert_equal true, payload.fetch("ok")
+          assert_equal [ slug ], payload.fetch("tasks").map { |row| row.dig("identity", "slug") }
+        end
       end
     end
   end
@@ -122,6 +159,56 @@ class CommandsStatusOperationalTest < Minitest::Test
 
     assert_equal "hive-operational-status", command.status_schema_for_call
     assert_equal "hive-running-status", Hive::Commands::Status.new(json: true).status_schema_for_call
+  end
+
+  def test_operational_storage_error_exposes_code_and_next_action_additively
+    command = Hive::Commands::Status.new(json: true, operational: true)
+    error = Hive::RuntimeControlPlane::Unavailable.new(
+      "Hive state is mounted read-only",
+      code: :state_storage_read_only,
+      action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+    )
+    command.define_singleton_method(:do_call) { raise error }
+
+    stdout, _stderr, status = with_captured_exit { command.call }
+    payload = JSON.parse(stdout)
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+
+    assert_equal Hive::ExitCodes::UNAVAILABLE, status
+    assert_equal false, payload.fetch("ok")
+    assert_equal "state_storage_read_only", payload.fetch("code")
+    assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION,
+                 payload.fetch("next_action")
+    assert schema.valid?(payload), schema.validate(payload).map { |entry| entry.fetch("error") }.inspect
+  end
+
+  def test_storage_extras_do_not_leak_to_other_status_error_schemas
+    error = Hive::RuntimeControlPlane::Unavailable.new(
+      "Hive state is mounted read-only",
+      code: :state_storage_read_only,
+      action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+    )
+    cases = [
+      [ Hive::Commands::Status.new(json: true), "hive-running-status" ],
+      [ Hive::Commands::Status.new(json: true, full: true), "hive-status" ],
+      [ Hive::Commands::Status.new(json: true, archive: true), "hive-status" ],
+      [ Hive::Commands::Status.new(json: true, daemon_tasks: [ "demo:task" ], full: true), "hive-status" ],
+      [ Hive::Commands::Status.new(json: true, diagnose: "task"), "hive-status-diagnose" ]
+    ]
+
+    cases.each do |command, schema_name|
+      command.define_singleton_method(:do_call) { raise error }
+      command.define_singleton_method(:diagnose_call) { raise error }
+      stdout, _stderr, status = with_captured_exit { command.call }
+      payload = JSON.parse(stdout)
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(schema_name))))
+
+      assert_equal Hive::ExitCodes::UNAVAILABLE, status, schema_name
+      refute payload.key?("code"), schema_name
+      refute payload.key?("next_action"), schema_name
+      assert schema.valid?(payload),
+             "#{schema_name}: #{schema.validate(payload).map { |entry| entry.fetch('error') }.inspect}"
+    end
   end
 
   def test_degraded_attempt_storage_renders_one_concise_warning

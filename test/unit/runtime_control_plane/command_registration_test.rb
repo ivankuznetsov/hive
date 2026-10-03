@@ -174,6 +174,63 @@ class RuntimeControlPlaneCommandRegistrationTest < Minitest::Test
     end
   end
 
+  def test_read_only_failure_before_a_durable_reservation_is_safe_for_operational_fallback
+    unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+      "read only", code: :state_storage_read_only,
+      action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+    )
+    database = Object.new
+    database.define_singleton_method(:diagnostics) { raise unavailable }
+    database.define_singleton_method(:disconnect) { true }
+
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**) { database }) do
+      assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[status --operational])
+      end
+    end
+
+    assert Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure?
+  end
+
+  def test_inherited_or_durably_reserved_registration_is_never_fallback_safe
+    unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+      "read only", code: :state_storage_read_only,
+      action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+    )
+    database = Object.new
+    database.define_singleton_method(:diagnostics) { raise unavailable }
+    database.define_singleton_method(:disconnect) { true }
+    with_env(Hive::RuntimeControlPlane::CommandRegistration::CHILD_RESERVATION_ENV => "reserved") do
+      with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**) { database }) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+          Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[status --operational])
+        end
+      end
+    end
+    refute Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure?
+
+    diagnosis = Struct.new(:ok?).new(true)
+    database = Object.new
+    database.define_singleton_method(:diagnostics) { diagnosis }
+    database.define_singleton_method(:open!) { self }
+    database.define_singleton_method(:disconnect) { true }
+    reservation = Struct.new(:id) do
+      def release_fence! = true
+    end.new("reservation")
+    registry = Object.new
+    registry.define_singleton_method(:reserve!) { |**| reservation }
+    registry.define_singleton_method(:register!) { |*, **| raise unavailable }
+
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**) { database }) do
+      with_replaced_singleton_method(Hive::RuntimeControlPlane::ProcessRegistry, :new, ->(**) { registry }) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+          Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[status --operational])
+        end
+      end
+    end
+    refute Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure?
+  end
+
   def test_class_spawn_helper_preserves_direct_in_process_callers_without_registration
     calls = []
     spawner = lambda do |*argv, **options|

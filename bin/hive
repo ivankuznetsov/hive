@@ -27,10 +27,9 @@ end
 require "hive"
 require "hive/runtime_control_plane/activation_gate"
 require "hive/runtime_control_plane/command_registration"
+require "hive/runtime_control_plane/operational_inspection"
 
-begin
-  Hive::RuntimeControlPlane::ActivationGate.check!(argv: ARGV)
-rescue Hive::RuntimeControlPlane::Error => e
+runtime_startup_error = lambda do |e|
   if ARGV.include?("--json")
     require "json"
     require "hive/schemas"
@@ -48,24 +47,33 @@ rescue Hive::RuntimeControlPlane::Error => e
   exit e.exit_code
 end
 
+inherited_runtime_reservation = ENV.key?(
+  Hive::RuntimeControlPlane::CommandRegistration::CHILD_RESERVATION_ENV
+)
+operational_inspection = false
+
 begin
-  Hive::RuntimeControlPlane::CommandRegistration.start!(argv: ARGV)
+  Hive::RuntimeControlPlane::ActivationGate.check!(argv: ARGV)
 rescue Hive::RuntimeControlPlane::Error => e
-  if ARGV.include?("--json")
-    require "json"
-    require "hive/schemas"
-    puts JSON.generate(Hive::Schemas::ErrorEnvelope.build(
-      schema: "hive-runtime-maintenance", error: e, error_kind: "runtime",
-      extras: {
-        "action" => Hive::RuntimeControlPlane::ActivationGate.command(ARGV).to_s,
-        "runtime_code" => e.code.to_s, "next_action" => e.action,
-        "details" => Hive::RuntimeControlPlane::Codec.normalize(e.details)
-      }
-    ))
+  operational_inspection = Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+    error: e, argv: ARGV, state_home: Hive::Paths.state_home,
+    inherited_reservation: inherited_runtime_reservation
+  )
+  runtime_startup_error.call(e) unless operational_inspection
+end
+
+unless operational_inspection
+  begin
+    Hive::RuntimeControlPlane::CommandRegistration.start!(argv: ARGV)
+  rescue Hive::RuntimeControlPlane::Error => e
+    operational_inspection =
+      Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure? &&
+      Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+        error: e, argv: ARGV, state_home: Hive::Paths.state_home,
+        inherited_reservation: inherited_runtime_reservation
+      )
+    runtime_startup_error.call(e) unless operational_inspection
   end
-  warn "hive: #{e.message}"
-  warn "hive: next action: #{e.action}" if e.action
-  exit e.exit_code
 end
 
 at_exit do
@@ -73,6 +81,8 @@ at_exit do
     Hive::RuntimeControlPlane::CommandRegistration.current&.finish!
   rescue Hive::RuntimeControlPlane::Error, Sequel::Error
     nil
+  ensure
+    Hive::RuntimeControlPlane::OperationalInspection.clear!
   end
 end
 
@@ -81,7 +91,8 @@ require "hive/llm_wiki_bootstrap"
 # The workflow creator owns two strict observation routes. They must stay
 # byte-for-byte no-write even when an upgraded binary would otherwise repair
 # scheduler units during process startup.
-strict_no_write_route = Hive::RuntimeControlPlane::ActivationGate.strict_no_write_route?(ARGV)
+strict_no_write_route = Hive::RuntimeControlPlane::ActivationGate.strict_no_write_route?(ARGV) ||
+  Hive::RuntimeControlPlane::OperationalInspection.active?
 
 # Repair legacy path-keyed LLM-wiki timers as soon as an upgraded Hive binary
 # is invoked, including `hive --version`. The reconciliation is idempotent and

@@ -17,6 +17,7 @@ module Hive
 
         def start!(argv:, state_home: Hive::Paths.state_home)
           inherited_reservation_id = ENV.delete(CHILD_RESERVATION_ENV)
+          @fallback_safe_after_failure = inherited_reservation_id.nil?
           return nil if inherited_reservation_id.nil? && exempt?(argv)
 
           database = Database.new(path: Hive::Paths.runtime_control_plane_path(state_home))
@@ -39,17 +40,35 @@ module Hive
             reservation = registry.reserve!(
               origin: "direct_cli", role: command_role(argv), timeout_sec: 30
             )
+            @fallback_safe_after_failure = false
             registration = registry.register!(reservation.id, pid: Process.pid)
             reservation.release_fence!
           end
+          @fallback_safe_after_failure = false
           @current = new(
             database: database, registry: registry,
             reservation_id: registration.reservation_id
           )
-        rescue StandardError
-          reservation&.release_fence!
-          database&.disconnect
+        rescue StandardError => error
+          begin
+            reservation&.release_fence!
+          rescue StandardError
+            nil
+          end
+          begin
+            database&.disconnect
+          rescue StandardError
+            nil
+          end
+          if database&.respond_to?(:storage_error_for) &&
+             (storage_error = database.storage_error_for(error))
+            raise storage_error
+          end
           raise
+        end
+
+        def fallback_safe_after_failure?
+          @current.nil? && @fallback_safe_after_failure == true
         end
 
         def rebind_after_daemonize!
@@ -67,6 +86,7 @@ module Hive
         def reset!
           @current&.disconnect
           @current = nil
+          @fallback_safe_after_failure = nil
         end
 
         def exempt?(argv)

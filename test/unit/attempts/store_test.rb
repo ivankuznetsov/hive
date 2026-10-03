@@ -224,6 +224,23 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_operational_storage_errors_keep_their_runtime_code_through_attempt_reads
+    with_repository do |repository|
+      unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+        "Hive state is mounted read-only",
+        code: :state_storage_read_only,
+        action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+      )
+      repository.database.define_singleton_method(:read) { |**| raise unavailable }
+
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        repository.live_attempt_for(task_id: "42")
+      end
+      assert_equal :state_storage_read_only, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
+    end
+  end
+
   def test_immediate_transaction_does_not_over_reserve_the_final_global_slot
     with_repository do |repository|
       limits = { max_global: 1, max_per_project: 2, max_daily: 10 }

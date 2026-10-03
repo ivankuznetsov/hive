@@ -269,6 +269,31 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     end
   end
 
+  # hivedev F2: a recovery request is also the failure history. Deleting it
+  # with its delivered result an hour later reset the deterministic-failure
+  # series, so a slow loop never parked.
+  def test_expired_recovery_result_keeps_the_recovery_row
+    with_repository do |repository|
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "recovery-result", recovery: { "phase" => "admitted", "retry_count" => 4 }, now: NOW
+      )
+      repository.write_result!(
+        chat_id: 42, project: "hive", slug: "sqlite-cutover",
+        request_id: id, exit_code: 1, command: "hive run sqlite-cutover", now: NOW
+      )
+      assert repository.remove(id)
+      assert repository.acknowledge_result(id, now: NOW + 7200)
+
+      assert_equal 1, repository.prune_results(now: NOW + 7200)
+
+      kept = repository.fetch(id)
+      refute_nil kept, "the recovery row outlives its delivered result"
+      assert_equal 4, repository.recovery_retry_count(project: "hive", slug: "sqlite-cutover")
+      assert_empty repository.pending_results(now: NOW + 7200).map(&:request_id)
+    end
+  end
+
   def test_concurrent_result_acknowledgement_has_one_winner
     with_repository do |repository|
       id = repository.write_request!(

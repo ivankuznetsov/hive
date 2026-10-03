@@ -144,11 +144,14 @@ module Hive
           diff.each_line do |line|
             chomped = line.chomp
 
-            # Reset current_file at the start of every file pair so a
+            # Re-seed current_file at the start of every file pair so a
             # subsequent +++ /dev/null (deletion) doesn't carry the
-            # previous file's path forward.
+            # previous file's path forward. Seed it from the header's own
+            # paths: mode lines (`new file mode 100755`) come BEFORE the
+            # ---/+++ pair, and a pure chmod emits no pair at all, so
+            # without this every permission_change finding had no file.
             if chomped.start_with?("diff --git ")
-              current_file = nil
+              current_file = diff_git_path(chomped.delete_prefix("diff --git "))
               # Don't `next` — fall through so other targets (e.g.
               # raw_diff_header for permission_change) can still match
               # on the diff-git header line.
@@ -212,6 +215,7 @@ module Hive
             patterns.each do |name, spec|
               next unless spec[:targets] == :raw_diff_header
               next unless spec[:regex] =~ chomped
+              next if exempt_new_file?(spec, chomped, current_file)
 
               matches << build_match(
                 pattern_name: name.to_s,
@@ -289,6 +293,28 @@ module Hive
           end
         end
 
+        # Path of a `diff --git a/<old> b/<new>` header, preferring the new
+        # side. Each side is C-quoted independently when it holds control
+        # characters. Unquoted paths may contain spaces, so an unchanged
+        # path is split symmetrically (backreference) before falling back
+        # to the last ` b/` for renames.
+        def diff_git_path(paths)
+          match = paths.match(%r{\A"[aciow]/.+" "[bciow]/(.+)"\z}) ||
+                  paths.match(%r{\A[aciow]/(.+) [bciow]/\1\z}) ||
+                  paths.match(%r{.* "?[bciow]/(.+?)"?\z})
+          match && decode_git_path(match[1])
+        end
+
+        # A pattern may exempt NEW files under matching paths (e.g. a fake
+        # CLI stub under test/ must be executable to shadow the real one
+        # on PATH). Mode flips on existing files are never exempt.
+        def exempt_new_file?(spec, header, path)
+          exempt = spec[:exempt_new_file_paths]
+          return false unless exempt && path && header.start_with?("new file mode ")
+
+          exempt.match?(path)
+        end
+
         # Git C-quotes a path containing control characters (tab, newline,
         # quote, …) as `"path\tname"` regardless of core.quotePath, which
         # only covers non-ASCII bytes. Strip the surrounding double quotes
@@ -318,7 +344,8 @@ module Hive
                         match_sha256: Digest::SHA256.hexdigest(snippet.to_s))
           Match.new(pattern_name:, file:, line:, snippet:, severity:, match_sha256:)
         end
-        private_class_method :add_file_path_matches, :decode_git_path, :build_match
+        private_class_method :add_file_path_matches, :diff_git_path, :exempt_new_file?,
+                             :decode_git_path, :build_match
       end
     end
   end

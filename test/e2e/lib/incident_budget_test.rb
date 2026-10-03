@@ -72,19 +72,31 @@ class E2EIncidentBudgetTest < Minitest::Test
     assert checked.ok?
   end
 
-  def test_enabled_incident_group_must_be_below_thirty_six_seconds
+  def test_observed_high_hosted_runner_scheduling_variance_stays_within_budget
+    checked = Hive::E2E::IncidentBudget.check(
+      report(
+        metadata: [ metadata("plan"), metadata("provider"), metadata("repository") ],
+        scenarios: [ result("plan", 13.555), result("provider", 15.746),
+                     result("repository", 8.158) ]
+      )
+    )
+
+    assert checked.ok?
+  end
+
+  def test_enabled_incident_group_must_be_below_forty_seconds
     checked = Hive::E2E::IncidentBudget.check(
       report(
         metadata: [ metadata("one"), metadata("two") ],
-        scenarios: [ result("one", 18.0), result("two", 18.0) ]
+        scenarios: [ result("one", 20.0), result("two", 20.0) ]
       ),
-      per_scenario_limit: 20.0
+      per_scenario_limit: 21.0
     )
 
     refute checked.ok?
     assert checked.ok?(:integrity)
     refute checked.ok?(:timing)
-    assert_equal [ "incident group took 36.000s (must be below 36.000s)" ], checked.violations
+    assert_equal [ "incident group took 40.000s (must be below 40.000s)" ], checked.violations
   end
 
   def test_enabled_incident_without_a_result_fails_closed

@@ -11,8 +11,24 @@ module Hive
   # daemon (gating auto-resume until every question is answered) need it.
   # `Hive::Bot::BrainstormParser` remains as a back-compat alias.
   module BrainstormParser
+    # Document location fields:
+    #
+    # - `question_line_index` — 0-based index of the `### Q{n}.` header line
+    #   in the parser's newline-normalized line array (see `document_lines`).
+    # - `block_end_index` — 0-based index of the first block-boundary line
+    #   (next `### Q`, `## Round`, or `<!-- MARKER -->`) at-or-after the Q
+    #   header, or the line count at EOF. This is the exclusive end of the
+    #   Q-block span and the position where a writer may insert a new A slot.
+    # - `answer_line_index` — 0-based index of the `### A{n}.` header line,
+    #   or nil when the question has no A header on disk.
+    #
+    # These are the single source of truth for "where is this question in
+    # the document". Mutation callers (BrainstormAnswerWriter) must use
+    # them instead of re-scanning raw lines, so location rules cannot
+    # drift between the parser and writers.
     Question = Struct.new(
       :round, :n, :text, :answer, :answer_encoding,
+      :question_line_index, :block_end_index, :answer_line_index,
       keyword_init: true
     ) do
       def answered?
@@ -56,9 +72,9 @@ module Hive
       current = nil
       mode = nil
 
-      normalize_newlines(text).each_line(chomp: true) do |line|
+      document_lines(text).each_with_index do |line, line_index|
         if (match = ROUND_RE.match(line))
-          finalize(questions, current)
+          finalize(questions, current, line_index)
           current = nil
           mode = nil
           current_round = match[1].to_i
@@ -66,12 +82,15 @@ module Hive
         end
 
         if (match = QUESTION_RE.match(line))
-          finalize(questions, current)
+          finalize(questions, current, line_index)
           current = {
             round: current_round,
             n: match[1].to_i,
             question_lines: [ match[2] ],
-            answer_lines: nil
+            answer_lines: nil,
+            question_line_index: line_index,
+            block_end_index: nil,
+            answer_line_index: nil
           }
           mode = :question
           next
@@ -94,6 +113,7 @@ module Hive
           if current && current[:answer_lines].nil?
             current[:answer_lines] = []
             current[:answer_encoding] = :v1 if match[2]
+            current[:answer_line_index] = line_index
             mode = :answer
           end
           next
@@ -103,7 +123,15 @@ module Hive
         # question presented to an operator or its fingerprint. In particular,
         # a final question with no A-header must keep the same fingerprint after
         # the writer repairs its slot immediately before `<!-- WAITING -->`.
-        next if MARKER_RE.match?(line)
+        if MARKER_RE.match?(line)
+          # A marker is a physical block boundary (same rule the writer's
+          # `block_boundary?` used to re-derive): a created A slot must
+          # land before it, never after. Record it once as the current
+          # block's end so downstream mutation callers get the identical
+          # span without duplicating the boundary rule.
+          current[:block_end_index] ||= line_index if current
+          next
+        end
 
         case mode
         when :question
@@ -113,12 +141,22 @@ module Hive
         end
       end
 
-      finalize(questions, current)
+      finalize(questions, current, document_lines(text).length)
       # Preserve the file's physical order. Question numbers restart between
       # rounds and malformed-but-recoverable files can contain non-monotonic
       # numbering; callers that bind a user reply need the actual document
       # position rather than a synthetic sort order.
       questions
+    end
+
+    # The newline-normalized line array that `parse_text` indexes its
+    # location fields (`question_line_index`, `block_end_index`,
+    # `answer_line_index`) against. Mutation callers must do line surgery
+    # on THIS array — not on `content.lines` — so parser indices and raw
+    # lines can never disagree about what a "line" is (notably for files
+    # containing lone `\r` line breaks).
+    def document_lines(text)
+      normalize_newlines(text).each_line(chomp: true).to_a
     end
 
     def next_unanswered_question(parsed)
@@ -156,7 +194,7 @@ module Hive
       "#{answer_header(n)} #{ANSWER_ENCODING_V1}"
     end
 
-    def finalize(out, current)
+    def finalize(out, current, block_end_index = nil)
       return unless current
 
       out << Question.new(
@@ -164,7 +202,10 @@ module Hive
         n: current[:n],
         text: clean_body(current[:question_lines]),
         answer: clean_answer(current[:answer_lines], encoding: current[:answer_encoding]),
-        answer_encoding: current[:answer_encoding]
+        answer_encoding: current[:answer_encoding],
+        question_line_index: current[:question_line_index],
+        block_end_index: current[:block_end_index] || block_end_index,
+        answer_line_index: current[:answer_line_index]
       )
     end
     private_class_method :finalize

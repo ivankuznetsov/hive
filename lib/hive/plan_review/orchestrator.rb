@@ -295,7 +295,7 @@ module Hive
           return terminal(
             record, state: "blocked", outcome: "blocked", findings:,
             blockers: verification_blockers,
-            required_action: "resolve verification blockers with a new linked plan"
+            required_action: verification_blocked_action(verification_blockers)
           )
         end
         clearance = Clearance.evaluate(
@@ -1121,6 +1121,17 @@ module Hive
       # widening cooldown. Standard reviews retain their degraded fallback;
       # verification retries and successful planner-revision rounds retain
       # their separate caps.
+      # A provider quota is the only blocker: the plan itself is fine and the
+      # operator `retry` action resumes verification once the quota resets.
+      # "New linked plan" sent operators to a needless replan.
+      def verification_blocked_action(blockers)
+        quota_only = blockers.reject { |blocker| blocker["reason"] == "verification_finding" }
+                             .all? { |blocker| blocker["reason"] == "candidate_verification_provider_limit" }
+        return "retry plan review after the provider limit resets (plan-review retry)" if quota_only
+
+        "resolve verification blockers with a new linked plan"
+      end
+
       def automatic_transient_series_recovery?(record, role, route)
         return false if role == "decision_triage" && route["diagnostic_source"] == "parser"
 

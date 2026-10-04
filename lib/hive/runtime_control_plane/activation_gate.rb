@@ -68,6 +68,13 @@ module Hive
         workflow_subcommand == "validate"
       end
 
+      # Operational status normally follows the ordinary writable startup
+      # path. This predicate only recognizes the CLI shape that may fall back
+      # after a typed storage failure; it does not itself exempt registration.
+      def operational_inspection_route?(argv)
+        OperationalInspection.eligible_route?(argv)
+      end
+
       def runtime_status(state_home) = Installation.status(state_home: state_home)
     end
   end

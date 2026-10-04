@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/workflows/loader"
 require "hive/workflows/project"
+require "hive/runtime_control_plane/operational_inspection"
 
 class WorkflowsLoaderTest < Minitest::Test
   include HiveTestHelper
@@ -12,6 +13,7 @@ class WorkflowsLoaderTest < Minitest::Test
 
   def teardown
     Hive::Workflows::Project.reset!
+    Hive::RuntimeControlPlane::OperationalInspection.clear!
     super
   end
 
@@ -175,6 +177,36 @@ class WorkflowsLoaderTest < Minitest::Test
       _out, err = capture_io { loaded = Hive::Workflows::Loader.load_managed("/tmp/workflows") }
       assert_empty loaded
       assert_includes err, "tampered"
+    end
+  end
+
+  def test_operational_inspection_loads_managed_selections_without_mutation_lock_path
+    lock = {
+      "name" => "demo", "source_commit" => "a" * 40,
+      "manifest_digest" => "b" * 64, "configuration_digest" => "c" * 64
+    }
+    workflow = Struct.new(:id).new(:demo)
+    store = Object.new
+    store.define_singleton_method(:selections) { raise "mutation-backed selection must not run" }
+    store.define_singleton_method(:inspect_selections) { [ lock ] }
+    store.define_singleton_method(:workflow) { |*| workflow }
+
+    with_tmp_dir do |root|
+      database = Struct.new(:path) do
+        def confirmed_read_only_storage? = true
+      end.new(Hive::Paths.runtime_control_plane_path(root))
+      error = Hive::RuntimeControlPlane::Unavailable.new(
+        "read only", code: :state_storage_read_only,
+        action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+      )
+      assert Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+        error: error, argv: %w[status --operational], state_home: root,
+        database: database
+      )
+
+      with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
+        assert_equal({ demo: workflow }, Hive::Workflows::Loader.load_managed("/tmp/workflows"))
+      end
     end
   end
 

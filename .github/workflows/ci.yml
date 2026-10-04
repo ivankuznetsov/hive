@@ -138,6 +138,8 @@ jobs:
             task: test:tui_reactivity_perf
           - name: multi-agent setup integration
             task: test:setup_agents_integration
+          - name: operational status read-only mounts
+            task: test:status_read_only
           - name: babysitter dry-run security matrix
             task: test:babysitter_dry_run_security_matrix
     steps:
@@ -152,6 +154,14 @@ jobs:
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
+      - name: Retain read-only mount evidence
+        if: ${{ always() && matrix.task == 'test:status_read_only' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: operational-status-read-only-evidence
+          path: tmp/status-read-only-evidence.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

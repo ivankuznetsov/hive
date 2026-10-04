@@ -137,6 +137,27 @@ class LockTest < Minitest::Test
     assert_nil @database.read { |db| db[:task_leases].where(task_id: "11").first }
   end
 
+  def test_observed_replacement_is_rejected_before_subject_registration
+    folder = task_folder(17)
+    metadata = File.binread(File.join(folder, "meta.yml"))
+    subject_before = @database.read { |db| db[:task_subjects].where(task_id: "17").first }
+    observation = Hive::TaskMeta.observe(folder)
+    FileUtils.rm_rf(folder)
+    FileUtils.mkdir_p(folder)
+    File.binwrite(File.join(folder, "meta.yml"), metadata)
+
+    error = assert_raises(Hive::TaskMeta::StaleTask) do
+      Hive::Lock.acquire_task_lock(folder, create: false, observation: observation)
+    end
+
+    assert_includes error.message, "changed identity"
+    assert_equal subject_before,
+                 @database.read { |db| db[:task_subjects].where(task_id: "17").first }
+    assert_nil @database.read { |db| db[:task_leases].where(task_id: "17").first }
+  ensure
+    observation&.close
+  end
+
   def test_task_id_cannot_move_between_registered_projects
     folder = task_folder(12)
     other_root = File.join(@root, "other")

@@ -17,7 +17,7 @@ module Hive
       Result = Data.define(:task_count, :moved_count, :pathspecs, :warnings)
       Operation = Data.define(
         :source, :destination, :slug, :workflow, :from_pin, :to_pin,
-        :from_state_file, :to_state_file
+        :from_state_file, :to_state_file, :observation
       )
 
       class Prepared
@@ -51,7 +51,11 @@ module Hive
           return if @closed
 
           @closed = true
-          @migrator.send(:release_locks, @locks, @operations)
+          begin
+            @migrator.send(:release_locks, @locks, @operations)
+          ensure
+            @migrator.send(:close_observations, @operations)
+          end
         end
       end
 
@@ -83,7 +87,11 @@ module Hive
         revalidate_tasks!(operations)
         Prepared.new(self, operations.freeze, locks)
       rescue StandardError
-        release_locks(locks || {}, operations || [])
+        begin
+          release_locks(locks || {}, operations || [])
+        ensure
+          close_observations(operations || [])
+        end
         raise
       end
 
@@ -100,7 +108,8 @@ module Hive
       def build_plan
         selections = {}
         workflows = {}
-        task_folders.filter_map do |folder|
+        operations = []
+        task_folders.each do |folder|
           read = Hive::TaskMeta.read_for_admission(folder)
           unless read.status == :ok
             raise Hive::ConfigError,
@@ -151,7 +160,14 @@ module Hive
                   "restore that stage name or archive/reset the task, then retry the workflow install or update"
           end
 
-          Operation.new(
+          observation = Hive::TaskMeta.observe(folder)
+          unless observation
+            raise Hive::ConcurrentRunError.new(
+              "managed task #{File.basename(folder)} disappeared while migration was being prepared"
+            )
+          end
+          Hive::TaskMeta.validate_observation!(folder, observation)
+          operations << Operation.new(
             source: folder,
             destination: File.join(@stages_path, current_stage.dir, File.basename(folder)),
             slug: File.basename(folder),
@@ -159,9 +175,14 @@ module Hive
             from_pin: from_pin.freeze,
             to_pin: to_pin.freeze,
             from_state_file: old_stage.state_file,
-            to_state_file: current_stage.state_file
+            to_state_file: current_stage.state_file,
+            observation: observation
           )
         end
+        operations
+      rescue StandardError
+        close_observations(operations || [])
+        raise
       end
 
       def target_selection(name)
@@ -225,7 +246,8 @@ module Hive
           locks[operation.source] = Hive::Lock.acquire_task_lock(
             operation.source,
             operation: "managed_workflow_migration",
-            create: false
+            create: false,
+            observation: operation.observation
           )
         end
         locks
@@ -236,6 +258,9 @@ module Hive
 
       def revalidate_tasks!(operations)
         operations.each do |operation|
+          Hive::TaskMeta.validate_observation!(
+            operation.source, operation.observation
+          ) if operation.observation
           meta = Hive::TaskMeta.read_for_admission(operation.source)
           unless meta.status == :ok && pin_from_meta(meta.data) == operation.from_pin
             raise Hive::ConcurrentRunError.new(
@@ -265,9 +290,17 @@ module Hive
         revalidate_selections!(operations)
         mutated = []
         operations.each do |operation|
+          Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
           snapshot = Hive::TaskMeta.snapshot(operation.source)
           FileUtils.mkdir_p(File.dirname(operation.destination))
-          FileUtils.mv(operation.source, operation.destination) if operation.source != operation.destination
+          if operation.source != operation.destination
+            FileUtils.mv(operation.source, operation.destination)
+            unless operation.observation.same_directory?(operation.destination)
+              Hive::TaskMeta.relocate_observation!(
+                operation.source, operation.destination, operation.observation
+              )
+            end
+          end
           mutation = { operation: operation, snapshot: snapshot, artifact_moved: false }
           mutated << mutation
           if operation.from_state_file != operation.to_state_file
@@ -279,7 +312,14 @@ module Hive
               mutation[:artifact_moved] = true
             end
           end
-          Hive::TaskMeta.rewrite(operation.destination, operation.to_pin)
+          result = Hive::TaskMeta.rewrite(
+            operation.destination, operation.to_pin,
+            observation: operation.observation
+          )
+          if result.stale?
+            raise Hive::TaskMeta::StaleTask,
+                  "managed workflow pin update lost task custody for #{operation.slug}"
+          end
         end
 
         result = result_for(operations)
@@ -304,14 +344,37 @@ module Hive
         mutated.reverse_each do |mutation|
           operation = mutation.fetch(:operation)
           begin
+            current = operation.destination
+            Hive::TaskMeta.validate_observation!(current, operation.observation)
+            if operation.source != operation.destination && File.exist?(operation.source)
+              warn "hive: managed workflow migration rollback skipped stale task #{operation.slug}: " \
+                   "source path now belongs to another entry"
+              next
+            end
             if mutation[:artifact_moved]
               from = File.join(operation.destination, operation.to_state_file)
               to = File.join(operation.destination, operation.from_state_file)
               FileUtils.mv(from, to) if File.exist?(from)
             end
-            FileUtils.mv(operation.destination, operation.source) if
-              operation.source != operation.destination && File.exist?(operation.destination)
-            Hive::TaskMeta.restore(operation.source, mutation.fetch(:snapshot))
+            if operation.source != operation.destination && File.exist?(operation.destination)
+              FileUtils.mv(operation.destination, operation.source)
+              unless operation.observation.same_directory?(operation.source)
+                Hive::TaskMeta.relocate_observation!(
+                  operation.destination, operation.source, operation.observation
+                )
+              end
+            end
+            Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
+            restored = Hive::TaskMeta.restore(
+              operation.source, mutation.fetch(:snapshot),
+              observation: operation.observation, create: false
+            )
+            if restored.stale?
+              warn "hive: managed workflow migration rollback skipped stale task #{operation.slug}"
+            end
+          rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
+            warn "hive: managed workflow migration rollback skipped stale task #{operation.slug}: " \
+                 "#{error.class}: #{error.message}"
           rescue StandardError => error
             warn "hive: managed workflow migration rollback failed for #{operation.slug}: " \
                  "#{error.class}: #{error.message}"
@@ -327,6 +390,10 @@ module Hive
           folder = File.directory?(operation.destination) ? operation.destination : operation.source
           Hive::Lock.release_task_lock(folder, lock_id: lock.fetch("lock_id"))
         end
+      end
+
+      def close_observations(operations)
+        operations.each { |operation| operation.observation&.close }
       end
 
       def prune_recovery_requests(operations)

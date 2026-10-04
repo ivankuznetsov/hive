@@ -55,7 +55,7 @@ module Hive
       @base_branch = base_branch
       @initial_marker = initial_marker
       @git_ops = git_ops || Hive::GitOps.new(@project_root)
-      @task_id_provider = task_id_provider || -> { Hive::TaskCounter.next_or_nil }
+      @task_id_provider = task_id_provider || -> { Hive::TaskCounter.next! }
       @before_lookup = before_lookup
       @before_candidate = before_candidate
       @candidate_writer = candidate_writer

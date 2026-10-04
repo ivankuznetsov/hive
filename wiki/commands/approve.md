@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-09-02
+updated: 2026-10-02
 tags: [command, approval, json, dependencies, admission]
 ---
 
@@ -46,7 +46,11 @@ hive approve <slug> --json                 # machine-readable result (success AN
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
 10. For a forward move, build a fresh all-project dependency snapshot and enforce admission inside both locks, after the read-only destination collision check and immediately before `File.rename`. A benign dependency wait raises `DependencyWaitError` (exit 75); an admission error raises `DependencyAdmissionError` (exit 78). `--force` bypasses only step 7's marker check. Backward moves skip admission so corrupt metadata can be repaired by moving to an earlier stage.
 11. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. Cross-device fallback uses `cp_r` + `rm_rf`.
-12. Cleanup the moved `.lock`, record the slug-scoped commit, and roll the move back if commit fails.
+12. Record the slug-scoped commit and roll the move back if commit fails.
+    Terminal completion and automatic rollback use the original task
+    observation. Rollback validates it before undoing a move or restoring
+    metadata, so a dropped task is not recreated and a copied replacement is
+    not moved or overwritten.
 13. Report human prose or one `hive-approve` JSON document.
 
 ## JSON contract (`schema = "hive-approve"`, version 2)

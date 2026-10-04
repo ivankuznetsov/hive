@@ -387,7 +387,7 @@ module Hive
       def write_meta(task_folder, slug, pr_number)
         Hive::TaskMeta.write(
           task_folder,
-          id: Hive::TaskCounter.next_or_nil,
+          id: Hive::TaskCounter.next!,
           slug: slug,
           display_name: "Ad-hoc review: PR ##{pr_number}",
           workflow: Hive::Workflows::CODING_ID.to_s

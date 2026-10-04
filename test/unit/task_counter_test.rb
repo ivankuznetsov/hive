@@ -46,7 +46,7 @@ class TaskCounterTest < Minitest::Test
   end
 
   def test_allocation_uses_no_legacy_counter_files
-    assert_equal 1, Hive::TaskCounter.next_or_nil
+    assert_equal 1, Hive::TaskCounter.next!
     refute File.exist?(File.join(Hive::Paths.state_home, "task-counter.yml"))
   end
 

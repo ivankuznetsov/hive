@@ -61,7 +61,10 @@ hive: captured <task>/idea.md
 next: mv <task> <hive-state>/stages/<next-stage>/ && hive run <id-or-task>
 ```
 
-When `Hive::TaskCounter.next_or_nil` allocates an id, the final token in the next-step hint is that numeric id. If the counter lock stays busy through its timeout, capture still succeeds and the hint falls back to `<task>`.
+The final token in the next-step hint is the numeric id allocated by
+`Hive::TaskCounter.next!`. If the runtime control plane cannot allocate an id,
+capture fails and rolls back the uncommitted candidate instead of publishing an
+id-less task that cannot enter durable attempt admission.
 
 The CLI argv surface is unchanged. Internally, `Hive::Commands::New.new(project, text, body_override: nil, attachments: [[abs_path, dest_name], …])` also supports the TUI rich composer (the `attachments:` argument is an array of `[src_abs_path, dest_filename]` tuples, not a flat array of paths):
 
@@ -103,7 +106,11 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
    ```
    Body is the original text, or `body_override:` for programmatic rich-input callers, plus a trailing marker. Coding keeps `<!-- WAITING -->` for the historical inbox path. Non-coding workflows remove the waiting marker; if the entry stage is `kind: :inert`, capture writes `<!-- COMPLETE -->` so the real `hive approve` safety gate can move it forward.
 6. If attachments were supplied, copy them into `assets/` beside the state file.
-7. Allocate a monotonic task id via `Hive::TaskCounter.next_or_nil` and write `meta.yml` via `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil, workflow: ...)`. Counter lock contention is fail-soft: id becomes null, but `meta.yml` is still written and the capture continues.
+7. Allocate a monotonic task id via `Hive::TaskCounter.next!` and write
+   `meta.yml` via
+   `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil, workflow: ...)`.
+   Allocation failure aborts capture and removes the uncommitted candidate; a
+   current-format task is never published with a null id.
 8. Leave task history absent. The first authoritative event creates `task-journal.jsonl`; until then the absent journal is an empty history stream.
 
 Managed selection is resolved once under the store's stable-read lock. Project

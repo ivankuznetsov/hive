@@ -495,18 +495,22 @@ class NewTest < Minitest::Test
     end
   end
 
-  def test_unavailable_counter_writes_null_id_and_still_captures
+  def test_unavailable_counter_fails_without_persisting_an_idless_task
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         setup_project { initialize_project(dir) }
         project = File.basename(dir)
-        with_replaced_singleton_method(Hive::TaskCounter, :next_or_nil, -> { nil }) do
-          capture_io { Hive::Commands::New.new(project, "counter busy").call }
+        unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+          "database busy", code: :database_busy
+        )
+        with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise unavailable }) do
+          assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+            capture_io { Hive::Commands::New.new(project, "counter busy").call! }
+          end
         end
 
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "counter-busy-*")].first
-        assert_nil Hive::TaskMeta.read(folder)[:id]
-        assert File.exist?(File.join(folder, "idea.md"))
+        assert_nil folder
       end
     end
   end

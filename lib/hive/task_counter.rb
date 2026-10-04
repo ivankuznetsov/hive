@@ -12,12 +12,6 @@ module Hive
       end
     end
 
-    def next_or_nil
-      next!
-    rescue RuntimeControlPlane::Error, Sequel::DatabaseError
-      nil
-    end
-
     def peek
       database.read { |db| db[:installations].get(:next_task_id) || inferred_next(db) }
     end

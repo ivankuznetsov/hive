@@ -297,6 +297,8 @@ module Hive
       end
 
       def complete!(task, stage, outcome, decision_id)
+        observation = Hive::TaskMeta.observe(task.folder)
+        raise Hive::TaskMeta::StaleTask, "decision task is missing before completion" unless observation
         record = nil
         snapshot = nil
         meta_snapshot = nil
@@ -304,7 +306,10 @@ module Hive
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
           begin
-            Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "decide") do
+            Hive::Lock.with_task_lock(
+              task.folder, slug: task.slug, op: "decide",
+              create: false, observation: observation
+            ) do
               locked = Hive::Task.new(task.folder)
               locked_record = self.class.latest_record(File.join(locked.folder, stage.state_file))
               return emit_same_or_conflicting!(locked, stage, outcome, locked_record) if
@@ -320,19 +325,34 @@ module Hive
               snapshot = snapshot_files(locked.folder, [ stage.state_file ])
               meta_snapshot = Hive::TaskMeta.snapshot(locked.folder)
               record["decided_at"] = Hive::TaskMeta.write_completed_at_once(
-                locked.folder, Time.iso8601(record.fetch("decided_at"))
+                locked.folder, Time.iso8601(record.fetch("decided_at")),
+                observation: observation
               )
               write_decision_record(File.join(locked.folder, stage.state_file), record)
             end
+            Hive::TaskMeta.validate_observation!(task.folder, observation)
             ops.hive_commit(stage_name: stage.dir, slug: task.slug,
                             action: "decide #{stage.name} #{outcome.name}")
           rescue StandardError, Interrupt
             if snapshot
-              restore_files(task.folder, snapshot)
-              Hive::TaskMeta.restore(task.folder, meta_snapshot) if meta_snapshot
-              restage_restored_files(
-                task, snapshot, extra_names: meta_snapshot ? [ Hive::TaskMeta::FILENAME ] : []
+              restored_files = restore_files(
+                task.folder, snapshot, observation: observation
               )
+              restored_meta = if restored_files && meta_snapshot
+                Hive::TaskMeta.restore(
+                  task.folder, meta_snapshot,
+                  observation: observation, create: false
+                )
+              end
+              if restored_files && (!meta_snapshot || restored_meta&.applied?)
+                restage_restored_files(
+                  task, snapshot,
+                  extra_names: meta_snapshot ? [ Hive::TaskMeta::FILENAME ] : [],
+                  observation: observation
+                )
+              elsif restored_meta&.stale?
+                warn "hive: decide rollback skipped stale task metadata for #{task.slug}"
+              end
             end
             raise
           end
@@ -341,6 +361,8 @@ module Hive
         current = Hive::Task.new(task.folder)
         complete_decision_operation(@decision_operation, current, record)
         emit_success(current, stage, outcome, record, applied: true)
+      ensure
+        observation&.close
       end
 
       def validate_publishable_artifact!(artifact_path, task_folder, stage, outcome)
@@ -510,7 +532,8 @@ module Hive
         end
       end
 
-      def restore_files(folder, snapshots)
+      def restore_files(folder, snapshots, observation: nil)
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         snapshots.each do |name, snapshot|
           path = File.join(folder, name)
           if snapshot.fetch(:existed)
@@ -519,15 +542,25 @@ module Hive
             File.delete(path) if File.exist?(path) || File.symlink?(path)
           end
         end
+        true
+      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
+        warn "hive: decide rollback skipped stale task files " \
+             "(#{error.class}: #{error.message})"
+        false
       end
 
-      def restage_restored_files(task, snapshots, extra_names: [])
+      def restage_restored_files(task, snapshots, extra_names: [], observation: nil)
+        Hive::TaskMeta.validate_observation!(task.folder, observation) if observation
         ops = Hive::GitOps.new(task.project_root)
         (snapshots.keys + extra_names).uniq.each do |name|
           rel = File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug, name)
           ops.run_git!("-C", task.hive_state_path, "add", "-A", "--", rel)
         end
       rescue Hive::GitError
+        nil
+      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
+        warn "hive: decide rollback skipped stale task restaging " \
+             "(#{error.class}: #{error.message})"
         nil
       end
 

@@ -25,26 +25,54 @@ module Hive
       end
 
       def call
-        name = generate_name
-        return nil unless name
-        # The agent runs detached for ~60s; in the folder-as-agent pipeline the
-        # task may be `mv`'d to the next stage in that window. Bail if the
-        # original folder no longer exists so `update_display_name` (which
-        # mkdir_p's the path) can't resurrect a stale, idea.md-less stub.
-        return nil unless File.directory?(@task.folder)
-
-        Hive::Lock.with_task_lock(
-          @task.folder, slug: @task.slug, op: "display-name"
-        ) do
-          Hive::TaskMeta.update_display_name(@task.folder, name)
+        observation = Hive::TaskMeta.observe(@task.folder)
+        unless observation
+          warn "[hive] display-name: stale task; skipping #{@task.slug}"
+          return nil
         end
-        commit_name if @commit
+
+        name = generate_name_safely
+        return nil unless name
+
+        Hive::Lock.with_commit_lock(@task.hive_state_path) do
+          Hive::TaskMeta.validate_observation!(@task.folder, observation)
+          Hive::Lock.with_task_lock(
+            @task.folder, slug: @task.slug, op: "display-name",
+            create: false, observation: observation
+          ) do
+            result = Hive::TaskMeta.update_display_name(
+              @task.folder, name, observation: observation
+            )
+            raise Hive::TaskMeta::StaleTask, "display-name update lost task custody" if result.stale?
+          end
+          commit_name if @commit
+        end
         name
-      rescue StandardError
+      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
+        warn "[hive] display-name: stale task; skipping #{@task.slug} (#{bounded_error(error)})"
         nil
+      rescue Hive::ConcurrentRunError => error
+        warn "[hive] display-name: task lease contention for #{@task.slug} (#{bounded_error(error)})"
+        nil
+      rescue Hive::TaskMeta::InvalidMetadata, SystemCallError, IOError, ArgumentError => error
+        warn "[hive] display-name: metadata update failed for #{@task.slug} (#{bounded_error(error)})"
+        nil
+      ensure
+        observation&.close
       end
 
       private
+
+      def generate_name_safely
+        generate_name
+      rescue SystemCallError, IOError, ArgumentError => error
+        warn "[hive] display-name: generation failed for #{@task.slug} (#{bounded_error(error)})"
+        nil
+      end
+
+      def bounded_error(error)
+        "#{error.class}: #{error.message.to_s.byteslice(0, 240)}"
+      end
 
       def generate_name
         profile = Hive::Stages::Base.stage_profile(@cfg, "execute")

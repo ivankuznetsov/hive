@@ -35,14 +35,15 @@ module Hive
         end
       end
 
-      def acquire(task_folder, payload, create: true)
+      def acquire(task_folder, payload, create: true, observation: nil)
         folder = File.expand_path(task_folder)
-        if create
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
+        if create && !observation
           FileUtils.mkdir_p(folder)
         elsif !File.directory?(folder)
           raise Errno::ENOENT, folder
         end
-        subject = subject_for(folder, observe: true)
+        subject = subject_for(folder, observe: true, observation: observation)
         data = { "started_at" => Codec.dump_time(@clock.call) }.merge(payload.transform_keys(&:to_s))
         data["pid"] = Process.pid
         data["process_start_time"] = @process_start_time.call(Process.pid)
@@ -142,9 +143,11 @@ module Hive
         end
       end
 
-      def lease_key(task_folder)
+      def lease_key(task_folder, observation: nil)
         require "hive/task_meta"
-        task_id = Hive::TaskMeta.read(File.expand_path(task_folder))[:id]&.to_s
+        folder = File.expand_path(task_folder)
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
+        task_id = Hive::TaskMeta.read(folder)[:id]&.to_s
         raise IdentityError.new(
           "task metadata has no stable id", code: :missing_task_identity
         ) if task_id.to_s.empty?
@@ -154,8 +157,9 @@ module Hive
 
       private
 
-      def subject_for(folder, observe: false)
+      def subject_for(folder, observe: false, observation: nil)
         require "hive/task_meta"
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         metadata = Hive::TaskMeta.read(folder)
         task_id = metadata[:id]&.to_s
         raise IdentityError.new("task metadata has no stable id", code: :missing_task_identity) if task_id.to_s.empty?
@@ -182,6 +186,7 @@ module Hive
             code: :task_identity_conflict
           )
         end
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         if observe && row.fetch(:observed_path) != folder
           timestamp = Codec.dump_time(@clock.call)
           @database.transaction do |db|

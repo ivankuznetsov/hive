@@ -664,11 +664,13 @@ module Hive
       returns the original task after it moves stages, and rejects reuse for
       different input. Pair it with --json for the hive-new.v1 result.
 
-      --depends-on stacks this task on a prerequisite: the daemon holds
-      auto-advance until the prerequisite reaches the project's dependency
-      gate stage (8-finalize by default, configurable via
-      `dependency_gate_stage`). Use a prerequisite task id or slug for the
-      same project, or project:slug for an explicit cross-project dependency.
+      One --depends-on stacks this task on a prerequisite: the daemon holds
+      auto-advance until it reaches the project's configured dependency gate.
+      Repeat --depends-on to require every prerequisite. A repeated declaration
+      is scheduling-only, branches from the project default branch instead of
+      stacking, and requires every prerequisite to reach 9-done. Adding a
+      second occurrence changes the first edge to that list policy too. Use a
+      task id or slug, or project:slug for an explicit cross-project dependency.
 
       --base selects the GitHub base branch for a workflow whose terminal agent
       declares workspace: worktree and handoff: draft_pr. When omitted, Hive
@@ -685,12 +687,13 @@ module Hive
 
         hive new myproj --depends-on api:add-export-endpoint-260618-ab12 "wire up export UI"
 
+        hive new myproj --depends-on api-task --depends-on ui-task "release export"
+
         hive new myproj --workflow content --idempotency-key creator:launch:v1 --json "write the launch post"
     DESC
-    option :depends_on, type: :string,
-                        desc: "depend on a same-project id/slug or explicit project:slug; hold daemon " \
-                              "auto-advance until it reaches the dependency gate stage " \
-                              "(8-finalize by default)"
+    option :depends_on, type: :string, repeatable: true,
+                        desc: "repeat for scheduling-only prerequisites at 9-done; one occurrence " \
+                              "retains scalar stacking and the configured gate"
     option :base, type: :string,
                   desc: "base branch for a worktree/draft-PR workflow"
     option :workflow, type: :string, desc: workflow_option_desc
@@ -701,15 +704,23 @@ module Hive
       text = text_parts.join(" ")
       raise Hive::Error, "missing task text" if text.strip.empty?
 
-      Hive::Commands::New.new(
+      occurrences = Array(options[:depends_on])
+      declaration = occurrences.length == 1 ? occurrences.first : occurrences
+      declaration = nil if occurrences.empty?
+      result = Hive::Commands::New.new(
         project,
         text,
         base: options[:base],
-        depends_on: options[:depends_on],
+        depends_on: declaration,
         workflow: options[:workflow],
         idempotency_key: options[:idempotency_key],
         json: options[:json]
       ).call
+      if occurrences.length >= 2
+        warn "hive: note: multiple --depends-on values are scheduling-only, require 9-done, " \
+             "and this task branches from the project default without stacking on a prerequisite"
+      end
+      result
     end
     map "new" => :new_task
 
@@ -1493,7 +1504,7 @@ module Hive
     option :force, type: :boolean, default: false,
                    desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
     option :operational, type: :boolean, default: false,
-                         desc: "emit the agent-first operational status view (combine with --json for its v4 envelope)"
+                         desc: "emit the agent-first operational status view (combine with --json for its v5 envelope)"
     option :internal_task_graph, type: :boolean, default: false, hide: true,
                                  desc: "internal: emit the scheduler task graph"
     option :daemon_task, type: :array,

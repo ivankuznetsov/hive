@@ -128,7 +128,7 @@ class SchemaFilesTest < Minitest::Test
       "incomplete_attestation_retry" => true
     }
 
-    %w[hive-status.v8.json hive-operational-status.v4.json].each do |name|
+    %w[hive-status.v9.json hive-operational-status.v5.json].each do |name|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
       %w[PlanReviewBlocker PlanReviewRoute].zip([ blocker, route ]).each do |definition, value|
         schemer = JSONSchemer.schema({
@@ -157,7 +157,7 @@ class SchemaFilesTest < Minitest::Test
     expected = Hive::ProviderRouting::EXCLUSION_REASONS.sort
     %w[
       hive-dispatch-request.v5.json
-      hive-operational-status.v4.json
+      hive-operational-status.v5.json
     ].each do |name|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
       assert_equal expected,
@@ -217,7 +217,7 @@ class SchemaFilesTest < Minitest::Test
   def test_provider_routing_public_schemas_bound_candidate_diagnostics
     {
       "hive-dispatch-request.v5.json" => [ "AdmissionCandidate", "AdmissionObservation" ],
-      "hive-operational-status.v4.json" => [ "RoutingCandidate", "RoutingDecision" ]
+      "hive-operational-status.v5.json" => [ "RoutingCandidate", "RoutingDecision" ]
     }.each do |name, (candidate_name, decision_name)|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
       assert_equal 4,
@@ -3021,8 +3021,8 @@ class SchemaFilesTest < Minitest::Test
 
   def test_recovery_status_contracts_keep_only_the_current_schema
     {
-      "hive-status" => 8,
-      "hive-operational-status" => 4,
+      "hive-status" => 9,
+      "hive-operational-status" => 5,
       "hive-act" => 2
     }.each do |name, expected_version|
       path = Hive::Schemas.schema_path(name)

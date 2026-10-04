@@ -15,8 +15,8 @@ epoch, preserves the last verified manual block, and fences token reuse.
 Provider administration remains absent from `hive act` and cannot touch task
 markers, recovery receipts, charges, deadlines, successors, or dispatch.
 
-Operational status advanced to `hive-operational-status.v4` with a required
-nullable exact routing decision. The daemon records the decision at admission
+Operational status advanced to its then-current schema with a required nullable
+exact routing decision. The daemon records the decision at admission
 and carries it through its coherent snapshot; status never recomputes it, and
 legacy rows retain their prior text. Component boundaries now distinguish the
 pure routing policy from the read-only routing-operations projection.

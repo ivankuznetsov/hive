@@ -3,11 +3,40 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-10-02
 tags: [decisions, adr, plan-review, daily-digest]
 ---
 
 **TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — producers now submit SQLite dispatch rows that the daemon consumes, making it the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision.
+
+## ADR-053: Dependency declaration shape selects stacking policy
+
+**Status:** Active
+
+**Context:** One prerequisite serves two coupled purposes: scheduling and a
+same-project stacked Git base. Fan-in needs multiple scheduling edges, but no
+single prerequisite is a truthful branch base. Collapsing a singleton array to
+a scalar would also make a retry or generated declaration silently change
+policy.
+
+**Decision:** `depends_on` accepts either one reference or a nonempty flat list
+of references and preserves that declaration shape. A scalar keeps the
+depending project's configured `8-finalize`/`9-done` gate and, when it is a
+resolvable same-project task, stacked branch/PR behavior. Every list—including
+a singleton array—is scheduling-only, branches from the project default, and
+requires every edge to reach `9-done`. Repeating `hive new --depends-on`
+constructs the list; the second occurrence changes the first edge to list
+policy and emits a stderr notice. Creation rejects resolvable cycles, and the
+shared admission walk rechecks cycles plus unreachable workflow gates at every
+status/dispatch boundary. Status v9 and operational status v5 publish the full
+ordered `unmet_dependencies` set, per-edge `required_gate`, null list
+singulars, and `dependency_base_mode`.
+
+**Consequences:** Upgrade all CLIs, daemon/Web readers, validators, and skills,
+restart long-lived processes and clear their superseded caches through normal
+startup, then create list metadata. Array metadata is a no-downgrade boundary:
+older processes must fail closed and operators preserve every listed edge
+rather than rewriting it to a scalar for compatibility.
 
 ## ADR-038: Reusable components stay in the monorepo and earn packaging after Hive-first boundaries
 
@@ -665,9 +694,11 @@ shapes. The universal recovery and evidence-closure rollout needs one truthful
 projection, not another compatibility layer beside the earlier mechanisms.
 
 **Decision:** Migrate every in-repository producer and consumer in one change,
-then publish only the current `hive-status.v8`,
-`hive-operational-status.v4`, and `hive-act.v2` contracts. Operational-status
-v4 adds the coordinated required nullable exact-routing projection. Remove their
+then publish only the current `hive-status.v9`,
+`hive-operational-status.v5`, and `hive-act.v2` contracts. Status v9 and
+operational-status v5 add scalar-or-array dependency declarations, complete
+`unmet_dependencies`, and `dependency_base_mode` while retaining the
+coordinated required nullable exact-routing projection. Remove their
 superseded schema files and compatibility assertions instead of accepting or
 translating older recovery/status documents. Older persisted task state is
 migrated at the task/state layer; wire-schema compatibility is not a second

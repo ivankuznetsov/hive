@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-10-02
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal]
 ---
 
@@ -22,7 +22,7 @@ terminal history. The former public full-fleet status surface is removed.
 | `hive status` | Bounded human daemon/liveness snapshot. |
 | `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
 | `hive status --operational` | Concise human active-work and blocker view. |
-| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable stateless routing decision; superseded v1-v3 are removed. |
+| `hive status --operational --json` | `hive-operational-status.v5` agent document. It includes required active runtime identity, the nullable stateless routing decision, and complete dependency fan-in state; superseded v1-v4 are removed. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |
@@ -53,7 +53,7 @@ stale or invented action is refused.
 ## Output exceptions, serialization, and exit codes
 
 Status uses `hive-running-status.v2`, `hive-status-diagnose.v2`, or
-`hive-operational-status.v4` according to the selected mode; act uses
+`hive-operational-status.v5` according to the selected mode; act uses
 `hive-act.v2`. Invalid arguments and stale/refused actions emit the selected
 typed error surface. Status suppresses a `JSON::GeneratorError` while encoding
 an error so the original typed error controls the exit, while act propagates
@@ -65,7 +65,7 @@ errors exit `78`.
 
 | Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
 |---|---|---|---|---|---|---|
-| `hive status` | Options: `--json`, `--operational`, `--diagnose`, and the mode-specific filters documented below. | Reads bounded liveness, operational, diagnostic, or archive projections without mutating tasks. | The selected JSON schema is `hive-running-status.v2`, `hive-status-diagnose.v2`, or `hive-operational-status.v4`. | Invalid arguments and projection failures use the selected typed error surface. | Error-envelope `JSON::GeneratorError` is suppressed so the original typed status error controls the exit. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
+| `hive status` | Options: `--json`, `--operational`, `--diagnose`, and the mode-specific filters documented below. | Reads bounded liveness, operational, diagnostic, or archive projections without mutating tasks. | The selected JSON schema is `hive-running-status.v2`, `hive-status-diagnose.v2`, or `hive-operational-status.v5`. | Invalid arguments and projection failures use the selected typed error surface. | Error-envelope `JSON::GeneratorError` is suppressed so the original typed status error controls the exit. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
 | `hive act` | Options: required `--observation` and optional `--json`. | Revalidates and executes one current routine action; stale or invented actions are refused. | JSON uses schema `hive-act.v2`. | Invalid arguments and stale/refused actions use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
 
 ## Bounded running-task contract
@@ -78,7 +78,7 @@ at most 64 KiB of `meta.yml` is read after a live process is established.
 Task and daemon PID files are opened nonblocking and no-follow; daemon health
 reads at most 4 KiB through `Hive::Daemon::StatusReport#running_state`. The
 producer does not instantiate `Task`, open the attempts store, read conditions
-or history, project actions, inspect git, build `hive-status.v8`, or run daemon
+or history, project actions, inspect git, build `hive-status.v9`, or run daemon
 service/binary-drift subprocess probes.
 Bounded JSON/YAML parsing treats parser recursion and allocation failures as
 malformed input, so corrupt leases, metadata, or daemon PID documents
@@ -285,7 +285,7 @@ an idle verdict. Unclassifiable rows remain `unknown`; a partial snapshot may
 still report a stronger directly observed active state, but never claims idle
 from missing evidence.
 
-`hive-operational-status.v4` includes the task-graph producer's `runtime`
+`hive-operational-status.v5` includes the task-graph producer's `runtime`
 identity (the daemon-recorded identity for a cache hit, or the CLI identity
 for a fresh scan),
 summary/state counts, daemon identity and
@@ -342,7 +342,7 @@ suppressed, and no fallback JSON document is emitted.
 
 Status pre-dispatch errors retain the requested surface. Bare JSON errors use
 `hive-running-status.v2`, `--diagnose` uses `hive-status-diagnose.v2`, and
-`--operational` uses `hive-operational-status.v4`, each with
+`--operational` uses `hive-operational-status.v5`, each with
 `error_kind: "error"`. Status itself suppresses a
 `JSON::GeneratorError` while serializing an error envelope so the original
 typed status error continues to control the exit boundary.
@@ -445,13 +445,35 @@ summary with `commits`, `path_count`, up to 20 paths, and the latest
 head/reason/time. Bot and TUI consume this producer field rather than reading
 `events.jsonl` independently.
 
-Every task row has `depends_on`, `blocked_by`, `dependency_stage`, `blocked`, and required nullable `admission_error`. The correlations are closed:
+Every task row has `depends_on`, `blocked_by`, `dependency_stage`,
+`unmet_dependencies`, `dependency_base_mode`, `blocked`, and required nullable
+`admission_error`. `depends_on` is a string, an ordered string array, or null.
+`dependency_base_mode` is `stacked` only for a resolvable same-project scalar;
+lists, cross-project scalars, invalid fallbacks, and dependency-free tasks use
+`default`. The correlations are closed:
 
-- clear: `blocked: false`, ordinary wait fields null, `admission_error: null`;
-- benign wait: `blocked: true`, `blocked_by`/`dependency_stage` populated, `admission_error: null`;
-- admission error: `blocked: true`, ordinary wait fields null, action `admission_error`, `suggested_command: null`, and an object containing exactly `reason_code`, `offending_ref`, `safe_correction`.
+- clear: `blocked: false`, singular wait fields null,
+  `unmet_dependencies: []`, `admission_error: null`;
+- scalar wait: `blocked: true`, `blocked_by`/`dependency_stage` populated and
+  the same blocker present in `unmet_dependencies`, `admission_error: null`;
+- list wait: `blocked: true`, singular wait fields null, and every remaining
+  blocker present in declaration order in `unmet_dependencies`;
+- admission error: `blocked: true`, singular wait fields null, action
+  `admission_error`, `suggested_command: null`, and an object containing
+  exactly `reason_code`, `offending_ref`, `safe_correction`; any independently
+  observed wait entries remain in `unmet_dependencies`.
 
-Text/TUI render a benign wait as `⏸ blocked by <task> (<stage>)`. Admission errors render the stable reason and safe correction ahead of ordinary waits and are never described as waiting on an in-flight task. An unexpected validator exception becomes `dependency_validation_failed`, never an unblocked row.
+Each unmet entry requires `reference`, resolved `blocked_by`, observed
+`dependency_stage`, and `required_gate`. Scalar gates follow project
+`dependency_gate_stage`; list entries always report `required_gate: 9-done`.
+The singular fields are compatibility projections, not a lossy summary for
+fan-in.
+
+Text/TUI render all benign blockers from `unmet_dependencies`; scalar rows keep
+the familiar `⏸ blocked by <task> (<stage>)` form. Admission errors render the
+stable reason and safe correction ahead of ordinary waits and are never
+described as waiting on an in-flight task. An unexpected validator exception
+becomes `dependency_validation_failed`, never an unblocked row.
 
 ### Implementation ownership
 
@@ -551,7 +573,14 @@ When the field is non-empty, the text output prints a warning under the project 
 
 The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. The Telegram bot also sends a proactive project-level notification on the clean-to-legacy transition, deduped by the bot alert store while the project remains legacy-dirty, even if the hidden task count changes. Bot messages include a project-path-scoped `hive migrate <project_path>` command because the bot is global. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
 
-The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` / `display_name` fields produced v3; dependency waits produced v4. Fail-closed admission is `hive-status` v5, with required nullable `admission_error` and closed reason/action enums; condition fields and isolated projection failures produce v6. Historical v4/v5 schemas remain available. An older daemon safely ignores an admission-error row because it is both `blocked: true` and carries the unknown inert `admission_error` action with no command.
+The `legacy_stage_dirs` field was an additive extension of status v2. Task
+`id` / `display_name` fields produced v3; dependency waits produced v4;
+fail-closed admission produced v5; condition fields and isolated projection
+failures produced v6. The current `hive-status.v9` changes dependency shape to
+admit scalar-or-array `depends_on` and adds required `unmet_dependencies` plus
+`dependency_base_mode`. Pre-1.0 policy publishes only the current schema, so
+upgrade every CLI/daemon/Web consumer and restart long-lived readers before
+creating list metadata. Do not downgrade while arrays exist.
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 
@@ -704,7 +733,9 @@ task/commit locks and committed before the clock can hide a row.
 ## Tests
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration, and v5 admission fields.
-- `test/integration/dependency_admission_test.rb` — plan-only ordering drift and cross-project repository identity mismatch.
+- `test/integration/dependency_admission_test.rb` — plan-only ordering drift,
+  cross-project repository identity mismatch, and nine-way fan-in release with
+  exact remaining blockers and force non-bypass.
 - `test/unit/commands/status_test.rb` — status row collection, per-project `project_load_failed` degradation, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, workflow-aware retention/count projection, strict boundaries, and lossless archive-mode listing.
 - `test/integration/archive_visibility_retention_test.rb` — one fixed-clock
   mixed legacy/`7`/`never` project drives ordinary status, operational

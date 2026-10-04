@@ -1004,9 +1004,14 @@ class CommandsStatusTest < Minitest::Test
       checkpoint_status_task(bs)
       checkpoint_status_task(ex)
 
-      tasks = Hive::Commands::Status.new.json_payload([
-        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
-      ]).fetch("projects").first.fetch("tasks")
+      tasks = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :tasks,
+        ->(*) { raise "status base-mode projection must reuse its admission context" }
+      ) do
+        Hive::Commands::Status.new.json_payload([
+          { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        ]).fetch("projects").first.fetch("tasks")
+      end
       brainstorm = tasks.find { |t| t.fetch("slug") == "bs-task-260525-cccc" }
       execute = tasks.find { |t| t.fetch("slug") == "ex-task-260525-dddd" }
 
@@ -1067,7 +1072,55 @@ class CommandsStatusTest < Minitest::Test
       assert_equal File.basename(base), row.fetch("depends_on")
       assert_equal File.basename(base), row.fetch("blocked_by")
       assert_equal "7-artifacts", row.fetch("dependency_stage")
+      assert_equal [ {
+        "reference" => File.basename(base), "blocked_by" => File.basename(base),
+        "dependency_stage" => "7-artifacts", "required_gate" => "8-finalize"
+      } ], row.fetch("unmet_dependencies")
+      assert_equal "stacked", row.fetch("dependency_base_mode")
       assert_equal true, row.fetch("blocked")
+    end
+  end
+
+  def test_json_and_text_status_emit_every_list_blocker_with_null_singulars
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      first = write_status_task(hive_state, "7-artifacts", "first-task-260618-aaaa",
+                                state_file: "artifact.md", marker: "COMPLETE")
+      second = write_status_task(hive_state, "8-finalize", "second-task-260618-bbbb",
+                                 state_file: "pr.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-cccc",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(first, id: 1, slug: File.basename(first), display_name: nil)
+      Hive::TaskMeta.write(second, id: 2, slug: File.basename(second), display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 3, slug: File.basename(dependent), display_name: nil,
+        depends_on: [ File.basename(first), File.basename(second) ]
+      )
+      project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+
+      row = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :tasks,
+        ->(*) { raise "status base-mode projection must reuse its admission context" }
+      ) do
+        Hive::Commands::Status.new.json_payload([ project ])
+          .dig("projects", 0, "tasks")
+          .find { |task| task.fetch("slug") == File.basename(dependent) }
+      end
+
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
+      assert_equal [ File.basename(first), File.basename(second) ],
+                   row.fetch("unmet_dependencies").map { |entry| entry.fetch("blocked_by") }
+      assert_equal [ "9-done", "9-done" ],
+                   row.fetch("unmet_dependencies").map { |entry| entry.fetch("required_gate") }
+      assert_equal "default", row.fetch("dependency_base_mode")
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
+      end
+      assert_includes out, "#{File.basename(first)} (7-artifacts)"
+      assert_includes out, "#{File.basename(second)} (8-finalize)"
+      refute_includes out, "[\""
     end
   end
 

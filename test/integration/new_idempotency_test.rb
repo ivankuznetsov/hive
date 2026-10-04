@@ -5,6 +5,7 @@ require "hive/commands/approve"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/workflow"
+require "hive/cli"
 require "hive/task_meta"
 require "hive/daily_digest/task_creation_receipt"
 require "hive/runtime_control_plane/command_schema_installation"
@@ -87,6 +88,80 @@ class NewIdempotencyTest < Minitest::Test
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
       assert_empty schemer.validate(payload).to_a
       assert_equal 1, idempotent_tasks(project_root).size
+    end
+  end
+
+  def test_dependency_list_shape_and_all_entries_participate_in_idempotency
+    with_initialized_project do |project_root, project|
+      create_json_with(
+        project, "dependency identity", key: "creator:dependencies", slug: "dependency-identity",
+        depends_on: [ "base-task", "other-task" ]
+      )
+
+      replay = create_json_with(
+        project, "dependency identity", key: "creator:dependencies", slug: "dependency-identity",
+        depends_on: [ "base-task", "other-task" ]
+      )
+      assert_equal true, replay.fetch("created")
+
+      [ "base-task", [ "base-task" ], [ "base-task", "changed-task" ] ].each do |declaration|
+        assert_raises(Hive::CommandConflict) do
+          Hive::Commands::New.new(
+            project, "dependency identity", slug_override: "dependency-identity",
+            idempotency_key: "creator:dependencies", json: true, depends_on: declaration
+          ).call!
+        end
+      end
+      assert_equal 1, idempotent_tasks(project_root).size
+    end
+  end
+
+  def test_creation_cycle_error_keeps_the_path_in_the_json_envelope
+    with_initialized_project do |project_root, project|
+      existing = File.join(project_root, ".hive-state", "stages", "1-inbox", "existing-task")
+      FileUtils.mkdir_p(existing)
+      Hive::TaskMeta.write(
+        existing, id: 40, slug: "existing-task", display_name: nil,
+        depends_on: "proposed-task"
+      )
+
+      out, err, status = with_captured_exit do
+        Hive::Commands::New.new(
+          project, "proposed task", slug_override: "proposed-task",
+          depends_on: "existing-task", idempotency_key: "creator:cycle",
+          json: true
+        ).call
+      end
+      payload = JSON.parse(out)
+      path = "#{project}:proposed-task -> #{project}:existing-task -> #{project}:proposed-task"
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
+
+      assert_empty err
+      assert_equal Hive::ExitCodes::GENERIC, status
+      assert_equal "error", payload.fetch("error_kind")
+      assert_equal path, payload.fetch("value")
+      assert_empty schemer.validate(payload).to_a
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "proposed-task")
+      )
+    end
+  end
+
+  def test_repeated_cli_dependency_notice_stays_on_stderr_for_json
+    with_initialized_project do |_project_root, project|
+      out, err = capture_io do
+        Hive::CLI.start([
+          "new", project, "--idempotency-key", "creator:json-list", "--json",
+          "--depends-on", "base-task", "--depends-on", "other-task",
+          "json dependency list"
+        ])
+      end
+
+      payload = JSON.parse(out)
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
+      assert_empty schemer.validate(payload).to_a
+      assert_includes err, "branches from the project default"
+      assert_includes err, "require 9-done"
     end
   end
 
@@ -660,17 +735,18 @@ class NewIdempotencyTest < Minitest::Test
     create_json_with(project, text, key: key, slug: slug)
   end
 
-  def create_json_with(project, text, key:, slug:, attachments: [], workflow: nil)
+  def create_json_with(project, text, key:, slug:, attachments: [], workflow: nil, depends_on: nil)
     JSON.parse(create_json_bytes(
-      project, text, key: key, slug: slug, attachments: attachments, workflow: workflow
+      project, text, key: key, slug: slug, attachments: attachments, workflow: workflow,
+      depends_on: depends_on
     ))
   end
 
-  def create_json_bytes(project, text, key:, slug:, attachments: [], workflow: nil)
+  def create_json_bytes(project, text, key:, slug:, attachments: [], workflow: nil, depends_on: nil)
     out, err = capture_io do
       Hive::Commands::New.new(
         project, text, slug_override: slug, idempotency_key: key, json: true,
-        attachments: attachments, workflow: workflow
+        attachments: attachments, workflow: workflow, depends_on: depends_on
       ).call!
     end
     assert_empty err

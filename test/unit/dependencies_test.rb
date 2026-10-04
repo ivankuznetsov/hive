@@ -37,6 +37,39 @@ class DependenciesTest < Minitest::Test
     end
   end
 
+  def test_parse_declaration_preserves_scalar_and_array_shape
+    scalar = Hive::Dependencies.parse_declaration("base-task")
+    singleton = Hive::Dependencies.parse_declaration([ "base-task" ])
+    multiple = Hive::Dependencies.parse_declaration([ "base-task", 42, "api:other-task" ])
+
+    assert_instance_of Hive::Dependencies::Reference, scalar
+    assert_equal "base-task", scalar.to_s
+    assert_equal [ "base-task" ], singleton.map(&:to_s)
+    assert_equal [ "base-task", "42", "api:other-task" ], multiple.map(&:to_s)
+  end
+
+  def test_normalize_declaration_deduplicates_without_collapsing_array_shape
+    assert_equal "42", Hive::Dependencies.normalize_declaration(42)
+    assert_equal [ "base-task" ],
+                 Hive::Dependencies.normalize_declaration([ "base-task", "base-task" ])
+  end
+
+  def test_parse_declaration_rejects_invalid_elements_with_their_indexes
+    invalid = [ [], [ "base-task", nil ], [ [ "base-task" ] ], [ {} ], { "task" => "base-task" } ]
+
+    invalid.each do |value|
+      error = assert_raises(Hive::Dependencies::InvalidReference) do
+        Hive::Dependencies.parse_declaration(value)
+      end
+      assert_match(/depends_on/, error.message)
+    end
+
+    error = assert_raises(Hive::Dependencies::InvalidReference) do
+      Hive::Dependencies.parse_declaration([ "base-task", "BAD TASK" ])
+    end
+    assert_match(/element 2/, error.message)
+  end
+
   Task = Struct.new(:slug, :id, :stage_index, :stage, keyword_init: true)
 
   def test_resolve_blocks_when_prerequisite_is_before_threshold
@@ -132,6 +165,17 @@ class DependenciesTest < Minitest::Test
     assert_equal "base-task", branch
   end
 
+  def test_base_branch_for_lists_always_returns_the_default_branch
+    tasks = [ task("base-task", stage_index: 9), task("other-task", stage_index: 9) ]
+
+    assert_equal "main", Hive::Dependencies.base_branch_for(
+      depends_on: [ "base-task" ], tasks: tasks, default_branch: "main"
+    )
+    assert_equal "main", Hive::Dependencies.base_branch_for(
+      depends_on: %w[base-task other-task], tasks: tasks, default_branch: "main"
+    )
+  end
+
   # Stacking is threshold-blind by design: base_branch_for returns the
   # prerequisite slug regardless of how far the prereq has progressed, so a
   # dependent worktree branches off the prereq even while the gate still
@@ -209,6 +253,22 @@ class DependenciesTest < Minitest::Test
 
     assert_equal "⏸ blocked by base-task (7-artifacts)", resolved
     assert_equal "⏸ blocked by typo-task (unresolved)", unresolved
+  end
+
+  def test_blocked_label_renders_every_unmet_dependency_without_array_inspection
+    unmet = [
+      { "reference" => "first", "blocked_by" => "first", "dependency_stage" => "7-artifacts" },
+      { "reference" => "other:second", "blocked_by" => "other:second",
+        "dependency_stage" => "8-finalize" }
+    ]
+
+    label = Hive::Dependencies.blocked_label(
+      depends_on: %w[first other:second], blocked_by: nil, dependency_stage: nil,
+      unmet_dependencies: unmet
+    )
+
+    assert_equal "⏸ blocked by first (7-artifacts), other:second (8-finalize)", label
+    refute_includes label, "[\""
   end
 
   # A numeric self-reference where the current task and its snapshot entry

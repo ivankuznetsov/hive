@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hive:schema:operational-status:v4",
-  "title": "hive operational status output (v4)",
+  "$id": "urn:hive:schema:operational-status:v5",
+  "title": "hive operational status output (v5)",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -16,7 +16,7 @@
       ],
       "properties": {
     "schema": { "const": "hive-operational-status" },
-    "schema_version": { "const": 4 },
+    "schema_version": { "const": 5 },
     "ok": { "const": true },
     "runtime": { "$ref": "#/$defs/RuntimeIdentity" },
     "generated_at": { "type": "string", "format": "date-time" },
@@ -169,7 +169,7 @@
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-operational-status" },
-        "schema_version": { "const": 4 },
+        "schema_version": { "const": 5 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
@@ -405,11 +405,19 @@
         "dependency": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["blocked", "blocked_by", "dependency_stage", "admission_error"],
+          "required": [
+            "blocked", "blocked_by", "dependency_stage", "unmet_dependencies",
+            "dependency_base_mode", "admission_error"
+          ],
           "properties": {
             "blocked": { "type": "boolean" },
             "blocked_by": { "type": ["string", "null"] },
             "dependency_stage": { "type": ["string", "null"] },
+            "unmet_dependencies": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/UnmetDependency" }
+            },
+            "dependency_base_mode": { "type": "string", "enum": ["stacked", "default"] },
             "admission_error": { "type": ["object", "null"], "additionalProperties": true }
           }
         },
@@ -441,6 +449,17 @@
             { "$ref": "#/$defs/Action" }
           ]
         }
+      }
+    },
+    "UnmetDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "blocked_by", "dependency_stage", "required_gate"],
+      "properties": {
+        "reference": { "type": "string" },
+        "blocked_by": { "type": ["string", "null"] },
+        "dependency_stage": { "type": ["string", "null"] },
+        "required_gate": { "type": "string", "enum": ["8-finalize", "9-done"] }
       }
     },
     "RoutingIdentifier": {

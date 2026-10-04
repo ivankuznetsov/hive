@@ -26,6 +26,7 @@ module Hive
     module_function
 
     ActiveProjectInput = Data.define(:task_folders)
+    BaseSelection = Data.define(:branch, :mode)
 
     def semantic_fingerprint(context)
       projects = context.project_snapshot_layers.each_with_index.flat_map do |layer_projects, layer|
@@ -89,41 +90,70 @@ module Hive
     # the read-depends_on → load-snapshot → resolve → null-out-when-default
     # scaffolding lives in one place. Returns nil when the task has no
     # dependency, or when a set dependency does not resolve to a stacked
-    # base (typo / prereq transiently absent from the snapshot /
-    # self-reference) — and warns in that latter case so a silently
+    # base. Lists are scheduling-only by declaration shape, including a
+    # singleton list, and use the default branch without a warning. Scalar
+    # fallbacks (typo / prereq transiently absent from the snapshot /
+    # self-reference) warn so a silently
     # collapsed stack is observable at execute/open-pr time rather than
     # only via the fail-closed daemon gate. Lives here (the disk-reading
     # layer) rather than in the pure `Hive::Dependencies` resolver so the
     # resolver stays free of disk I/O.
-    def stacked_base(task, default_branch)
+    def base_selection(task, default_branch, warn_on_fallback: true,
+                       admission_context: nil, project_name: nil)
       dependency = depends_on(task)
-      return nil if dependency.to_s.strip.empty?
+      return BaseSelection.new(branch: nil, mode: "default") if dependency.nil?
+      if Hive::Dependencies.list_declaration?(dependency)
+        return BaseSelection.new(branch: nil, mode: "default")
+      end
 
       reference = Hive::Dependencies.parse_reference(dependency)
       if reference.explicit_project
-        warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} is " \
-             "cross-project and scheduling-only; branching from #{default_branch}"
-        return nil
+        if warn_on_fallback
+          warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} is " \
+               "cross-project and scheduling-only; branching from #{default_branch}"
+        end
+        return BaseSelection.new(branch: nil, mode: "default")
       end
 
-      base = Hive::Dependencies.base_branch_for(
-        depends_on: dependency,
-        tasks: tasks(task.project_root),
-        default_branch: default_branch,
-        task: current_task(task)
-      )
+      base = if admission_context && project_name
+        prerequisite = if Hive::Dependencies.numeric?(reference.task)
+          admission_context.task_snapshot(project: project_name, id: Integer(reference.task))
+        else
+          admission_context.task_snapshot(project: project_name, slug: reference.task)
+        end
+        if prerequisite.nil? || Hive::Dependencies.same_task?(prerequisite, current_task(task))
+          default_branch
+        else
+          prerequisite.slug || default_branch
+        end
+      else
+        Hive::Dependencies.base_branch_for(
+          depends_on: dependency,
+          tasks: tasks(task.project_root),
+          default_branch: default_branch,
+          task: current_task(task)
+        )
+      end
       if base == default_branch
-        warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} " \
-             "but it did not resolve to a stacked base (prerequisite missing " \
-             "from the snapshot or self-reference); branching from #{default_branch}"
-        return nil
+        if warn_on_fallback
+          warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} " \
+               "but it did not resolve to a stacked base (prerequisite missing " \
+               "from the snapshot or self-reference); branching from #{default_branch}"
+        end
+        return BaseSelection.new(branch: nil, mode: "default")
       end
 
-      base
+      BaseSelection.new(branch: base, mode: "stacked")
     rescue Hive::Dependencies::InvalidReference => e
-      warn "[hive] dependency: #{task.slug} has invalid depends_on #{dependency.inspect} " \
-           "(#{e.message}); branching from #{default_branch}"
-      nil
+      if warn_on_fallback
+        warn "[hive] dependency: #{task.slug} has invalid depends_on #{dependency.inspect} " \
+             "(#{e.message}); branching from #{default_branch}"
+      end
+      BaseSelection.new(branch: nil, mode: "default")
+    end
+
+    def stacked_base(task, default_branch)
+      base_selection(task, default_branch).branch
     end
 
     def admission_context(registry_entries = Hive::Config.registered_projects,
@@ -143,6 +173,29 @@ module Hive
         project.with(live_repository_identity: Hive::RepositoryIdentity.current(project.path))
       end
       Hive::DependencyAdmission::Context.new(projects: projects, fallback: fallback_context)
+    end
+
+    def proposed_task_verdict(project:, slug:, depends_on:, workflow:, folder:,
+                              registry_entries: Hive::Config.registered_projects)
+      context = admission_context(registry_entries)
+      proposed = Hive::DependencyAdmission::TaskSnapshot.new(
+        project: project.fetch("name"),
+        slug: slug,
+        id: nil,
+        stage: workflow.stages.first.dir,
+        workflow_stages: workflow.stage_dirs,
+        depends_on: Hive::Dependencies.normalize_declaration(depends_on),
+        metadata_status: :ok,
+        metadata_error: nil,
+        plan_status: :absent,
+        plan_dependency: nil,
+        plan_error: nil,
+        folder: folder,
+        validation_error: nil,
+        cancelled: false
+      )
+      context.with_task(project: project.fetch("name"), task: proposed)
+             .verdict(project: project.fetch("name"), slug: slug)
     end
 
     # Builds the routine dependency view without reparsing terminal history.
@@ -254,10 +307,14 @@ module Hive
       return verdict if verdict.clear?
 
       if verdict.wait?
-        ref = verdict.blocked_by.to_s
-        correction = "Wait for #{ref} to reach the configured dependency gate; it is currently at #{verdict.dependency_stage}."
+        unmet = verdict.unmet_dependencies.first
+        ref = (verdict.blocked_by || unmet&.blocked_by).to_s
+        stage = verdict.dependency_stage || unmet&.dependency_stage
+        required_gate = unmet&.required_gate
+        gate_label = required_gate ? required_gate : "the configured dependency gate"
+        correction = "Wait for #{ref} to reach #{gate_label}; it is currently at #{stage}."
         raise Hive::DependencyWaitError.new(
-          "dependency wait: #{task.slug} is blocked by #{ref} at #{verdict.dependency_stage}",
+          "dependency wait: #{task.slug} is blocked by #{ref} at #{stage}",
           offending_ref: ref,
           safe_correction: correction
         )
@@ -301,7 +358,7 @@ module Hive
       end
       unless project
         payload = [
-          "hive-dependency-admission-v1", "project_enrollment",
+          "hive-dependency-admission-v2", "project_enrollment",
           match_count, root, task.slug.to_s
         ]
         return ::Digest::SHA256.hexdigest(JSON.generate(payload))
@@ -310,15 +367,24 @@ module Hive
       admission_context ||= self.admission_context(registry_entries)
       verdict = admission_context.verdict(project: project, slug: task.slug)
       error = verdict.admission_error
+      base_mode = base_selection(
+        task, nil, warn_on_fallback: false,
+        admission_context: admission_context, project_name: project
+      ).mode
+      unmet = verdict.unmet_dependencies.map do |dependency|
+        [ dependency.reference, dependency.blocked_by, dependency.dependency_stage,
+          dependency.required_gate ]
+      end
       payload = [
-        "hive-dependency-admission-v1", project, task.slug.to_s,
+        "hive-dependency-admission-v2", project, task.slug.to_s,
         verdict.state.to_s, verdict.blocked_by.to_s, verdict.dependency_stage.to_s,
+        unmet, base_mode,
         error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s
       ]
       ::Digest::SHA256.hexdigest(JSON.generate(payload))
     rescue StandardError => e
       ::Digest::SHA256.hexdigest(
-        JSON.generate([ "hive-dependency-admission-v1", "unreadable", e.class.name, e.message.to_s ])
+        JSON.generate([ "hive-dependency-admission-v2", "unreadable", e.class.name, e.message.to_s ])
       )
     end
 
@@ -386,8 +452,9 @@ module Hive
     def cross_project_identity_targets(projects)
       projects.each_with_object({}) do |project, targets|
         project.tasks.each do |task|
-          reference = Hive::Dependencies.parse_optional_reference(task.depends_on)
-          targets[reference.project] = true if reference&.explicit_project
+          Hive::Dependencies.declaration_references(task.depends_on).each do |reference|
+            targets[reference.project] = true if reference.explicit_project
+          end
         rescue Hive::Dependencies::InvalidReference
           next
         end
@@ -405,8 +472,8 @@ module Hive
       end
       errors = {}
       queue = projects.flat_map do |project|
-        project.tasks.filter_map do |task|
-          [ task.project, task.depends_on ] if task.depends_on
+        project.tasks.flat_map do |task|
+          dependency_queue_entries(task.project, task.depends_on)
         end
       end
       seen = {}
@@ -415,10 +482,8 @@ module Hive
       while cursor < queue.length
         target_name = nil
         begin
-          source_project, raw_reference = queue[cursor]
+          source_project, reference = queue[cursor]
           cursor += 1
-          reference = Hive::Dependencies.parse_optional_reference(raw_reference)
-          next unless reference
 
           target_name = reference.explicit_project ? reference.project : source_project
           lookup_key = dependency_lookup_key(reference)
@@ -441,7 +506,7 @@ module Hive
           fallback[target_name].concat(tasks)
           tasks.each do |task|
             add_dependency_task_to_indexes(fallback_indexes[target_name], task)
-            queue << [ task.project, task.depends_on ] if task.depends_on
+            queue.concat(dependency_queue_entries(task.project, task.depends_on))
           end
         rescue StandardError => e
           errors[target_name] ||= "targeted dependency scan failed: #{e.class}: #{e.message}"
@@ -449,6 +514,14 @@ module Hive
       end
 
       [ fallback, errors ]
+    end
+
+    def dependency_queue_entries(source_project, declaration)
+      Hive::Dependencies.declaration_references(declaration).map do |reference|
+        [ source_project, reference ]
+      end
+    rescue Hive::Dependencies::InvalidReference
+      []
     end
 
     def dependency_tasks_for_reference(entry, reference, workflow_generation: nil, project_configs: nil)
@@ -682,7 +755,7 @@ module Hive
         metadata_status: metadata_status,
         metadata_error: metadata.error,
         plan_status: plan.status,
-        plan_dependency: plan.depends_on&.to_s,
+        plan_dependency: Hive::Dependencies.serialize_declaration(plan.depends_on),
         plan_error: plan.error,
         folder: folder,
         validation_error: validation_error,

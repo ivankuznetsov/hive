@@ -81,6 +81,24 @@ class TaskWorkspaceDependencyComponentTest < Minitest::Test
                  panel.fetch("edges").map { |edge| [ edge["from"], edge["to"] ] }
   end
 
+  def test_list_fan_in_emits_one_scheduling_edge_with_per_edge_state
+    indexed = context(project(tasks: [
+      task("ready", stage: "9-done"),
+      task("waiting", stage: "8-finalize"),
+      task("child", depends_on: %w[ready waiting])
+    ]))
+
+    panel = component(indexed, slug: "child").call
+    edges = panel.fetch("edges").select { |edge| edge["from"] == "app:child" }
+
+    assert_equal %w[ready waiting], edges.map { |edge| edge.fetch("reference") }
+    assert_equal [ "scheduling" ], edges.map { |edge| edge.fetch("relationship") }.uniq
+    assert_equal "clear", edges.find { |edge| edge["reference"] == "ready" }.fetch("state")
+    waiting = edges.find { |edge| edge["reference"] == "waiting" }
+    assert_equal "blocking", waiting.fetch("state")
+    assert_equal "9-done", waiting.fetch("required_gate")
+  end
+
   def test_connected_nodes_receive_individual_stack_and_publication_observations
     indexed = context(project(tasks: [ task("base"), task("child", depends_on: "base") ]))
     observed = []

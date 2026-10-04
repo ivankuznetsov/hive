@@ -5,7 +5,9 @@
 - Use `hive status` for bounded daemon health and currently live tasks.
 - Use `hive status --json` for the same bounded `hive-running-status.v2`
   projection in machine-readable form.
-- Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v4`.
+- Use `hive status --operational --json` for agent decisions. It emits
+  `hive-operational-status.v5`; dependency fan-in is in `unmet_dependencies`,
+  while list rows keep singular `blocked_by`/`dependency_stage` null.
 - Use `hive task TARGET --project NAME --json` for one task's semantic result,
   primary artifact, applicable evidence, exact usage, API-equivalent estimate,
   and receipt-correlated diagnostic-log reference.

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-28
+updated: 2026-10-02
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -39,11 +39,11 @@ context exposes no admitted video-capture channel. The absence of a recording
 does not imply a browser failure and is not represented as accepted video
 evidence.
 
-## Incident timing calibration (2026-09-27)
+## Incident timing calibration (updated 2026-10-03)
 
-The 32-second aggregate advisory cap covers observed hosted totals of 30.577
-and 30.643 seconds while preserving the 16-second per-scenario ceiling. These
-runs do not establish a long-run percentile or separate budgets for each runner
+The 36-second aggregate advisory cap covers observed hosted totals through
+34.015 seconds while preserving the 16-second per-scenario ceiling. These runs
+do not establish a long-run percentile or separate budgets for each runner
 class. Revisit the cap after representative hosted timing history exists;
 timing remains advisory and does not replace functional E2E coverage.
 
@@ -435,8 +435,8 @@ is advisory while the deterministic scale gate remains required.
 - The dependency workspace view projects the connected subset of the reused
   bounded status snapshot. If that snapshot lacks other projects or exhausts a
   cap, the component remains partial rather than starting a new fleet scan.
-  This is an operator explanation of the existing scalar `depends_on` model,
-  not a durable DAG or publication authority.
+  This is an operator explanation of the existing scalar-or-list `depends_on`
+  model, not a separate durable DAG or publication authority.
 
 See [[modules/task_workspace]].
 

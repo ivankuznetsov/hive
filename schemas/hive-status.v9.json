@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hive:schema:status:v8",
-  "title": "hive status output (v8)",
+  "$id": "urn:hive:schema:status:v9",
+  "title": "hive status output (v9)",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -13,7 +13,7 @@
       "required": ["schema", "schema_version", "ok", "generated_at", "projects"],
       "properties": {
         "schema": { "const": "hive-status" },
-        "schema_version": { "const": 8 },
+        "schema_version": { "const": 9 },
         "ok": { "const": true },
         "generated_at": { "type": "string", "format": "date-time" },
         "projection": {
@@ -30,7 +30,7 @@
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-status" },
-        "schema_version": { "const": 8 },
+        "schema_version": { "const": 9 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
@@ -126,12 +126,24 @@
         "safe_correction": { "type": "string" }
       }
     },
+    "UnmetDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "blocked_by", "dependency_stage", "required_gate"],
+      "properties": {
+        "reference": { "type": "string" },
+        "blocked_by": { "type": ["string", "null"] },
+        "dependency_stage": { "type": ["string", "null"] },
+        "required_gate": { "type": "string", "enum": ["8-finalize", "9-done"] }
+      }
+    },
     "Task": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "stage", "slug", "id", "display_name", "depends_on", "blocked_by",
-        "dependency_stage", "blocked", "admission_error", "folder", "state_file",
+        "dependency_stage", "unmet_dependencies", "dependency_base_mode",
+        "blocked", "admission_error", "folder", "state_file",
         "worktree_path", "pr_url", "marker", "attrs", "task_history_invalid", "mtime", "observation_mtime", "folder_mtime",
         "age_seconds", "claude_pid", "claude_pid_alive", "live_task_lock",
         "attempt_id", "task_generation",
@@ -149,12 +161,23 @@
         "id": { "type": ["integer", "null"] },
         "display_name": { "type": ["string", "null"] },
         "workflow": { "type": ["string", "null"] },
-        "depends_on": { "type": ["string", "null"] },
+        "depends_on": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "minItems": 1, "items": { "type": "string" } },
+            { "type": "null" }
+          ]
+        },
         "blocked_by": { "type": ["string", "null"] },
         "dependency_stage": {
           "type": ["string", "null"],
           "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
         },
+        "unmet_dependencies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/UnmetDependency" }
+        },
+        "dependency_base_mode": { "type": "string", "enum": ["stacked", "default"] },
         "blocked": { "type": "boolean" },
         "admission_error": {
           "oneOf": [

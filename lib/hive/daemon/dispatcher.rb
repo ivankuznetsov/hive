@@ -978,10 +978,10 @@ module Hive
                               condition: operator_condition(row))
         end
         if dependency_gated_request?(request) && row&.blocked == true
-          bucket = row.blocked_by ? "waiting_external" : "waiting_operator"
-          condition = if row.blocked_by
-            { "kind" => "dependency_completed", "task" => row.slug,
-              "dependency" => row.blocked_by }
+          blockers = dependency_blockers(row)
+          bucket = blockers.empty? ? "waiting_operator" : "waiting_external"
+          condition = if blockers.any?
+            dependency_condition(row, blockers)
           else
             operator_condition(row)
           end
@@ -1077,11 +1077,16 @@ module Hive
           pending_item("waiting_external", "dispatch:task:#{row.slug}", "edit_debounce",
                        next_check_at: due, condition: time_condition(due))
         when :blocked_on_dependency
-          bucket = row.blocked_by ? "waiting_external" : "waiting_operator"
-          kind = row.blocked_by ? "dependency_completed" : "operator_action"
+          blockers = dependency_blockers(row)
+          bucket = blockers.empty? ? "waiting_operator" : "waiting_external"
+          condition = if blockers.any?
+            dependency_condition(row, blockers)
+          else
+            { "kind" => "operator_action", "task" => row.slug,
+              "dependency" => row.depends_on }.compact
+          end
           pending_item(bucket, "dispatch:task:#{row.slug}", "dependency_blocked",
-                       condition: { "kind" => kind, "task" => row.slug,
-                                    "dependency" => row.blocked_by || row.depends_on }.compact)
+                       condition: condition)
         when :poll_for_merge
           pending_item("waiting_external", "dispatch:task:#{row.slug}", "pull_request_pending",
                        next_check_at: @merge_watcher&.next_poll_at(now: now),
@@ -2355,18 +2360,17 @@ module Hive
                                   reason: "answers_pending")
           observe_policy_disposition(row, decision)
         when :blocked_on_dependency
-          # `unresolved` distinguishes a real waiting-on-prereq block
-          # (blocked_by names the prerequisite) from a mistyped/unknown
-          # depends_on (blocked_by nil — a config error, not a wait). The
-          # hive-status JSON carries no `unresolved` field, so derive it
-          # from blocked_by presence — the same discriminator the status
-          # and TUI renderers use (see Dependencies.blocked_label).
+          # `unresolved` distinguishes a real waiting-on-prereq block from a
+          # mistyped/unknown declaration. Lists intentionally keep the legacy
+          # singular blocked_by field nil, so the complete unmet collection is
+          # authoritative and the singular remains only a scalar fallback.
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "dependency_unmet",
-                                  unresolved: row.blocked_by.nil?,
+                                  unresolved: dependency_blockers(row).empty?,
                                   depends_on: row.depends_on,
                                   blocked_by: row.blocked_by,
+                                  unmet_dependencies: row.unmet_dependencies,
                                   dependency_stage: row.dependency_stage)
           observe_policy_disposition(row, decision)
         when :poll_for_merge
@@ -3743,7 +3747,8 @@ module Hive
             log_dispatch_request_once(
               :dispatch_request_blocked,
               request_id: req.request_id, project: req.project, slug: req.slug,
-              reason: "dependency_unmet", blocked_by: row.blocked_by
+              reason: "dependency_unmet", blocked_by: row.blocked_by,
+              unmet_dependencies: row.unmet_dependencies
             )
             return
           end
@@ -3785,6 +3790,25 @@ module Hive
       # must honor the same status-row hold as automatic dispatch.
       def dependency_gated_request?(req)
         req.argv[1] != "markers"
+      end
+
+      def dependency_blockers(row)
+        blockers = Array(row&.unmet_dependencies).filter_map do |entry|
+          value = Hive::Dependencies.field(entry, :blocked_by)
+          value.to_s unless value.to_s.empty?
+        end
+        blockers << row.blocked_by.to_s if blockers.empty? && !row&.blocked_by.to_s.empty?
+        blockers.uniq
+      end
+
+      def dependency_condition(row, blockers)
+        condition = {
+          "kind" => "dependency_completed",
+          "task" => row.slug,
+          "dependency" => blockers.first
+        }
+        condition["dependencies"] = blockers if blockers.length > 1
+        condition
       end
 
       def explicit_action_recovery?(request)

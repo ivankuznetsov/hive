@@ -28,6 +28,18 @@ class DependencyAdmissionTest < Minitest::Test
     assert_error context(app, other).verdict(project: "app", slug: "dependent"), "dependency_task_missing"
   end
 
+  def test_task_snapshot_reuses_active_then_fallback_indexes
+    archived = context(project(tasks: [ task("app", "archived", id: 7) ]))
+    active = D::Context.new(
+      projects: [ project(tasks: [ task("app", "active", id: 1) ]) ],
+      fallback: archived
+    )
+
+    assert_equal "active", active.task_snapshot(project: "app", slug: "active").slug
+    assert_equal "archived", active.task_snapshot(project: "app", id: 7).slug
+    assert_nil active.task_snapshot(project: "app", slug: "missing")
+  end
+
   def test_cross_project_reference_requires_exact_project_and_repository_identity
     app = project(tasks: [ task("app", "dependent", depends_on: "data:base") ])
     data = project(name: "data", stored: "github.com/acme/data", live: "github.com/acme/data",
@@ -92,6 +104,17 @@ class DependencyAdmissionTest < Minitest::Test
 
     unreachable = project(gate: "8-finalize", tasks: [ root, base ])
     assert_error context(unreachable).verdict(project: "app", slug: "dependent"), "dependency_gate_unreachable"
+
+    invalid_stage = project(tasks: [
+      root,
+      task(
+        "app", "base", stage: "3-plan",
+        workflow_stages: %w[1-inbox 8-finalize 9-done]
+      )
+    ])
+    verdict = context(invalid_stage).verdict(project: "app", slug: "dependent")
+    assert_error verdict, "dependency_gate_unreachable"
+    assert_match(/current-stage metadata/, verdict.admission_error.safe_correction)
   end
 
   def test_configured_done_gate_waits_through_finalize
@@ -101,6 +124,149 @@ class DependencyAdmissionTest < Minitest::Test
 
     assert context(finalize).verdict(project: "app", slug: "dependent").wait?
     assert context(done).verdict(project: "app", slug: "dependent").clear?
+  end
+
+  def test_list_dependencies_require_every_direct_edge_at_done_and_report_them_in_order
+    root = task("app", "dependent", depends_on: %w[first second third])
+    indexed = context(project(gate: "8-finalize", tasks: [
+      root,
+      task("app", "first", stage: "8-finalize"),
+      task("app", "second", stage: "7-artifacts"),
+      task("app", "third", stage: "9-done")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "dependent")
+
+    assert verdict.wait?
+    assert_nil verdict.blocked_by
+    assert_nil verdict.dependency_stage
+    assert_equal %w[first second], verdict.unmet_dependencies.map(&:blocked_by)
+    assert_equal %w[9-done 9-done], verdict.unmet_dependencies.map(&:required_gate)
+  end
+
+  def test_later_invalid_sibling_outranks_an_earlier_wait
+    indexed = context(project(tasks: [
+      task("app", "dependent", depends_on: %w[waiting missing]),
+      task("app", "waiting", stage: "7-artifacts")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "dependent")
+
+    assert_error verdict, "dependency_task_missing"
+    assert_equal [ "waiting" ], verdict.unmet_dependencies.map(&:blocked_by)
+  end
+
+  def test_cycle_reachable_through_second_list_edge_has_complete_path
+    indexed = context(project(tasks: [
+      task("app", "a", depends_on: %w[clear b]),
+      task("app", "clear", stage: "9-done"),
+      task("app", "b", depends_on: "a", stage: "9-done")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "a")
+
+    assert_error verdict, "dependency_cycle"
+    assert_equal "app:a -> app:b -> app:a", verdict.admission_error.offending_ref
+  end
+
+  def test_list_gate_unreachable_has_list_specific_remediation
+    indexed = context(project(gate: "8-finalize", tasks: [
+      task("app", "dependent", depends_on: [ "fix" ]),
+      task("app", "fix", workflow_stages: %w[1-inbox 6-done], stage: "6-done")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "dependent")
+
+    assert_error verdict, "dependency_gate_unreachable"
+    assert_match(/lists require 9-done regardless of project configuration/i,
+                 verdict.admission_error.safe_correction)
+    refute_match(/dependency_gate_stage/, verdict.admission_error.safe_correction)
+  end
+
+  def test_shared_tail_is_not_a_cycle_and_strongest_gate_wins_deduplication
+    indexed = context(project(gate: "8-finalize", tasks: [
+      task("app", "root", depends_on: %w[left right]),
+      task("app", "left", depends_on: "tail", stage: "9-done"),
+      task("app", "right", depends_on: [ "tail" ], stage: "9-done"),
+      task("app", "tail", stage: "7-artifacts")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "root")
+
+    assert verdict.wait?
+    assert_equal [ "tail" ], verdict.unmet_dependencies.map(&:blocked_by)
+    assert_equal [ "9-done" ], verdict.unmet_dependencies.map(&:required_gate)
+  end
+
+  def test_nine_way_fan_in_reports_the_eight_remaining_prerequisites
+    references = %w[c1 c2 c3 c4 c5 c6 c9 f5 hive-pin]
+    prerequisites = references.map.with_index do |slug, index|
+      task("app", slug, stage: index.zero? ? "9-done" : "8-finalize")
+    end
+    indexed = context(project(tasks: [
+      task("app", "c7", depends_on: references), *prerequisites
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "c7")
+
+    assert verdict.wait?
+    assert_equal references.drop(1), verdict.unmet_dependencies.map(&:blocked_by)
+  end
+
+  def test_cycle_results_are_recomputed_for_each_root_path
+    indexed = context(project(tasks: [
+      task("app", "a", depends_on: "b"),
+      task("app", "b", depends_on: "a")
+    ]))
+
+    from_a = indexed.verdict(project: "app", slug: "a")
+    from_b = indexed.verdict(project: "app", slug: "b")
+
+    assert_equal "app:a -> app:b -> app:a", from_a.admission_error.offending_ref
+    assert_equal "app:b -> app:a -> app:b", from_b.admission_error.offending_ref
+  end
+
+  def test_deep_dependency_chain_is_evaluated_without_ruby_recursion
+    tasks = (0...1_500).map do |index|
+      dependency = index == 1_499 ? nil : "node-#{index + 1}"
+      task("app", "node-#{index}", depends_on: dependency, stage: "9-done")
+    end
+
+    assert context(project(tasks: tasks)).verdict(project: "app", slug: "node-0").clear?
+  end
+
+  def test_format_skew_and_malformed_array_references_have_distinct_remediation
+    newer = task(
+      "app", "newer", depends_on: %w[first second], metadata_status: :invalid_reference
+    )
+    malformed = task(
+      "app", "malformed", depends_on: [ nil ], metadata_status: :invalid_reference
+    )
+    indexed = context(project(tasks: [ newer, malformed ]))
+
+    upgrade = indexed.verdict(project: "app", slug: "newer").admission_error.safe_correction
+    repair = indexed.verdict(project: "app", slug: "malformed").admission_error.safe_correction
+    assert_match(/Upgrade Hive/, upgrade)
+    assert_match(/preserve every listed prerequisite/, upgrade)
+    assert_match(/Repair depends_on/, repair)
+    refute_match(/Upgrade Hive/, repair)
+  end
+
+  def test_context_copies_nested_declarations_and_freezes_blocker_collections
+    declaration = [ "base" ]
+    indexed = context(project(tasks: [
+      task("app", "dependent", depends_on: declaration),
+      task("app", "base", stage: "8-finalize")
+    ]))
+    declaration << "late-mutation"
+
+    verdict = indexed.verdict(project: "app", slug: "dependent")
+
+    assert_equal [ "base" ], indexed.projects.first.tasks.first.depends_on
+    assert_predicate indexed.projects.first.tasks.first.depends_on, :frozen?
+    assert_predicate verdict, :frozen?
+    assert_predicate verdict.unmet_dependencies, :frozen?
+    assert_predicate verdict.unmet_dependencies.first, :frozen?
   end
 
   def test_indexed_fallback_preserves_archived_transitive_waits_and_workflows
@@ -118,8 +284,10 @@ class DependencyAdmissionTest < Minitest::Test
 
     wait = combined.verdict(project: "app", slug: "dependent")
     assert wait.wait?
-    assert_equal "upstream", wait.blocked_by
-    assert_equal "7-artifacts", wait.dependency_stage
+    assert_nil wait.blocked_by
+    assert_nil wait.dependency_stage
+    assert_equal [ "upstream" ], wait.unmet_dependencies.map(&:blocked_by)
+    assert_equal [ "7-artifacts" ], wait.unmet_dependencies.map(&:dependency_stage)
     assert_error combined.verdict(project: "app", slug: "custom-dependent"),
                  "dependency_gate_unreachable"
   end

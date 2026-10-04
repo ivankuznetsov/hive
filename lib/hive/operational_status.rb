@@ -7,6 +7,7 @@ require "hive/task_closure"
 require "hive/task_projection"
 require "hive/terminal_outcome"
 require "hive/patrol_fix/publication_block_receipt"
+require "hive/dependencies"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -441,6 +442,8 @@ module Hive
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
           "dependency_stage" => row["dependency_stage"],
+          "unmet_dependencies" => Array(row["unmet_dependencies"]),
+          "dependency_base_mode" => row["dependency_base_mode"] || "default",
           "admission_error" => row["admission_error"]
         },
         "freshness" => {
@@ -510,6 +513,8 @@ module Hive
         "depends_on" => row["depends_on"],
         "blocked_by" => row["blocked_by"],
         "dependency_stage" => row["dependency_stage"],
+        "unmet_dependencies" => Array(row["unmet_dependencies"]),
+        "dependency_base_mode" => row["dependency_base_mode"] || "default",
         "blocked" => row["blocked"] == true,
         "admission_error" => row["admission_error"]
       }
@@ -529,6 +534,8 @@ module Hive
         "depends_on" => observed["depends_on"],
         "blocked_by" => observed["blocked_by"],
         "dependency_stage" => observed["dependency_stage"],
+        "unmet_dependencies" => Array(observed["unmet_dependencies"]),
+        "dependency_base_mode" => observed["dependency_base_mode"] || "default",
         "blocked" => observed["blocked"],
         "admission_error" => observed["admission_error"]
       }
@@ -997,7 +1004,7 @@ module Hive
         message = unanswered.positive? ? "#{unanswered} unanswered questions" : row["action_label"]
         reasons << reason("human_input", message || "task requires an operator decision", "task")
       elsif row["blocked"] == true
-        message = row["blocked_by"] ? "blocked by #{row.fetch('blocked_by')}" : "blocked by a task dependency"
+        message = dependency_wait_message(row)
         reasons << reason("dependency_wait", message, "dependency")
       elsif COMPLETION_ACTIONS.include?(row["action"])
         reasons << reason("completion_ready", row["action_label"] || "task is ready to complete", "task")
@@ -1009,13 +1016,26 @@ module Hive
         held = row.fetch("held")
         reasons << reason("provider_quota", "#{held['provider'] || 'provider'} quota hold", "provider")
       end
-      if row["blocked_by"] && reasons.none? { |entry| entry["code"] == "dependency_wait" }
-        reasons << reason("dependency_wait", "blocked by #{row.fetch('blocked_by')}", "dependency")
+      if dependency_wait?(row) && reasons.none? { |entry| entry["code"] == "dependency_wait" }
+        reasons << reason("dependency_wait", dependency_wait_message(row), "dependency")
       end
       if row["condition_warning"]
         reasons << reason("condition_warning", row.fetch("condition_warning"), "condition")
       end
       reasons
+    end
+
+    def dependency_wait?(row)
+      row["blocked_by"] || Array(row["unmet_dependencies"]).any?
+    end
+
+    def dependency_wait_message(row)
+      Hive::Dependencies.blocked_label(
+        depends_on: row["depends_on"],
+        blocked_by: row["blocked_by"],
+        dependency_stage: row["dependency_stage"],
+        unmet_dependencies: row["unmet_dependencies"]
+      ).delete_prefix("⏸ ")
     end
 
     def typed_attempt_diagnostic(row)

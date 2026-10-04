@@ -969,7 +969,7 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  def test_active_reparse_preserves_archived_transitive_dependency_wait
+  def test_active_reparse_preserves_archived_transitive_dependency_wait_collection
     with_direct_project do |_project, hive_state|
       write_state_task(hive_state, "7-artifacts", "upstream-task-260626-abcd",
                        marker: "ARTIFACTS_COMPLETE", id: 1)
@@ -987,8 +987,16 @@ class TuiStateSourceTest < Minitest::Test
       row = source.current.rows.find { |candidate| candidate.slug == "dependent-task-260626-abcd" }
 
       assert_equal true, row.blocked
-      assert_equal "upstream-task-260626-abcd", row.blocked_by
-      assert_equal "7-artifacts", row.dependency_stage
+      assert_nil row.blocked_by
+      assert_nil row.dependency_stage
+      assert_equal [
+        {
+          "reference" => "upstream-task-260626-abcd",
+          "blocked_by" => "upstream-task-260626-abcd",
+          "dependency_stage" => "7-artifacts",
+          "required_gate" => "8-finalize"
+        }
+      ], row.unmet_dependencies
       assert_nil row.admission_error
     ensure
       source&.stop

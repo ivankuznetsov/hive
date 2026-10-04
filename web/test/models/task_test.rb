@@ -463,6 +463,27 @@ class TaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "captures workflow details from its own project before another overlay activates" do
+    root_a = Pathname(Dir.mktmpdir("hive-web-task-a"))
+    root_b = Pathname(Dir.mktmpdir("hive-web-task-b"))
+    write_project_workflow(root_a, "task-a", stage_name: "alpha", state_file: "alpha.md")
+    write_project_workflow(root_b, "task-b", stage_name: "beta", state_file: "beta.md")
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => root_a.to_s),
+      attributes: { "stage" => "3-done", "workflow" => "task-a" }
+    )
+
+    assert_equal [ "done.md", "idea.md", "alpha.md" ], task.send(:generic_artifact_order)
+    Hive::Workflows::Project.load!(root_b.to_s)
+
+    assert task.terminal?
+    assert_equal [ "done.md", "idea.md", "alpha.md" ], task.send(:generic_artifact_order)
+  ensure
+    Hive::Workflows::Project.reset!
+    FileUtils.remove_entry(root_a) if root_a&.exist?
+    FileUtils.remove_entry(root_b) if root_b&.exist?
+  end
+
   test "queues a run through the task resource instead of a web dispatcher" do
     dispatched = nil
     task = Task.new(
@@ -606,6 +627,27 @@ class TaskTest < ActiveSupport::TestCase
   end
 
   private
+
+  def write_project_workflow(project_root, id, stage_name:, state_file:)
+    workflows_dir = project_root.join(".hive-state", "workflows")
+    instruction_dir = workflows_dir.join(id)
+    instruction_dir.mkpath
+    instruction_dir.join("#{stage_name}.md").write("Do #{stage_name}.\n")
+    workflows_dir.join("#{id}.yml").write(<<~YAML)
+      id: #{id}
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+        - name: #{stage_name}
+          kind: agent
+          state_file: #{state_file}
+          instruction: ./#{id}/#{stage_name}.md
+        - name: done
+          kind: terminal
+          state_file: done.md
+    YAML
+  end
 
   def seed_plan_review_store(folder)
     store = Hive::PlanReview::Store.new(task_folder: folder.to_s)

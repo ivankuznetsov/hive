@@ -47,6 +47,11 @@ class TaskTest < Minitest::Test
       with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
         error = assert_raises(Hive::UnsupportedProjectConfigError) { task.send(:resolve_workflow) }
         assert_includes error.message, "Unknown top-level key `reviewres`"
+
+        direct_error = assert_raises(Hive::UnsupportedProjectConfigError) do
+          task.send(:resolve_workflow_from, Object.new)
+        end
+        assert_includes direct_error.message, "Unknown top-level key `reviewres`"
       end
     end
   end
@@ -96,6 +101,57 @@ class TaskTest < Minitest::Test
       assert_equal 2, task.stage_index
       assert_equal File.join(folder, "brainstorm.md"), task.state_file
       assert_equal dir, task.project_root
+    end
+  end
+
+  def test_live_workflow_membership_reads_stay_inside_the_active_project_view
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "active-view-261002-abcd")
+      FileUtils.mkdir_p(folder)
+      lock_states = []
+      original = Hive::Workflows::Registry.method(:all)
+
+      task = with_replaced_singleton_method(
+        Hive::Workflows::Registry, :all, lambda {
+          lock_states << Hive::Workflows::Project::LOCK.mon_owned?
+          original.call
+        }
+      ) do
+        Hive::Task.new(folder)
+      end
+
+      assert_equal :coding, task.workflow.id
+      refute_empty lock_states
+      assert lock_states.all?, "Task must not read the live Registry after its project view closes"
+    end
+  end
+
+  def test_generation_backed_task_does_not_activate_or_read_the_live_registry
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "captured-view-261002-abcd")
+      FileUtils.mkdir_p(folder)
+      generation = Hive::Task.capture_workflow_generation(
+        dir, config: Hive::Config::DEFAULTS.merge("project_root" => dir)
+      )
+
+      task = with_replaced_singleton_method(
+        Hive::Workflows::Project, :with_active_workflows,
+        ->(*) { flunk "a captured generation must not activate a live project overlay" }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Workflows::Registry, :fetch,
+          ->(*) { flunk "a captured generation must not fetch from the live Registry" }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Workflows::Registry, :all,
+            -> { flunk "a captured generation must not enumerate the live Registry" }
+          ) do
+            Hive::Task.new(folder, workflow_generation: generation)
+          end
+        end
+      end
+
+      assert_equal :coding, task.workflow.id
     end
   end
 

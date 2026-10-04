@@ -41,4 +41,22 @@ class InitSetupTest < ActiveSupport::TestCase
   ensure
     Hive::Workflows::Project.reset!
   end
+
+  test "project workflow enumeration delegates locking to the authoritative operation" do
+    name = create_hive_project!("initsetup-operation-app")
+    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", name)
+    Hive::Workflows::Project.reset!
+    test_case = self
+
+    names = with_replaced_singleton_method(
+      Hive::Workflows::Project, :synchronize,
+      ->(&) { test_case.flunk "InitSetup must not add caller-owned workflow locking" }
+    ) do
+      InitSetup.workflows(dir)
+    end
+
+    assert_includes names, "coding"
+  ensure
+    Hive::Workflows::Project.reset!
+  end
 end

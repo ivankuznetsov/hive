@@ -160,7 +160,7 @@ module Hive
       def do_call_for(task, patrol_transition: nil)
         activity = Hive::TaskActivity.for_task(task, clock: @clock)
         reconcile_approval_operations(activity, task)
-        validate_stage_refs!
+        validate_stage_refs!(task)
         validate_from!(task) if @from
         next_stage_dir = resolve_destination(task)
 
@@ -261,7 +261,13 @@ module Hive
       # resolve_explicit_to) to the task's own descriptor — which keeps --from's
       # idempotency contract (a ref that's valid but not the current stage still
       # reaches validate_from!'s WRONG_STAGE path).
-      def validate_stage_refs!
+      def validate_stage_refs!(task)
+        Hive::Workflows::Project.with_active_workflows(task.project_root) do
+          validate_stage_refs_from_active_view!
+        end
+      end
+
+      def validate_stage_refs_from_active_view!
         # Mirror each downstream handler's own wording so the early check is a
         # pure relocation, not a message change: --from matches validate_from!
         # ("unknown --from stage"), --to matches resolve_explicit_to

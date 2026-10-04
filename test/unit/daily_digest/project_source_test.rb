@@ -4,6 +4,36 @@ require "hive/daily_digest/project_source"
 class DailyDigestProjectSourceTest < Minitest::Test
   include HiveTestHelper
 
+  def teardown
+    Hive::Workflows::Project.reset!
+    super
+  end
+
+  def test_default_factory_captures_its_projects_workflow_view_before_another_root_activates
+    with_tmp_dir do |root_a|
+      with_tmp_dir do |root_b|
+        write_project_workflow(root_a, "digest-a", stage_name: "alpha", state_file: "alpha.md")
+        write_project_workflow(root_b, "digest-b", stage_name: "beta", state_file: "beta.md")
+        task = File.join(root_a, ".hive-state", "stages", "2-alpha", "waiting-task")
+        FileUtils.mkdir_p(task)
+        File.write(File.join(task, "alpha.md"), "# Alpha\n\n<!-- WAITING -->\n")
+
+        source = Hive::DailyDigest::ProjectSource.new(
+          project: project_entry(root_a),
+          starts_at: Time.iso8601("2026-08-30T00:00:00Z"),
+          ends_at: Time.iso8601("2026-08-31T00:00:00Z")
+        )
+        Hive::Workflows::Project.load!(root_b)
+
+        result = source.collect
+
+        assert_empty result.gaps.select { |gap| gap.fetch("reason_code") == "unknown_stage" }
+        assert_equal [ "boundary_history_missing" ],
+                     result.gaps.map { |gap| gap.fetch("reason_code") }
+      end
+    end
+  end
+
   def test_collects_creation_and_material_journal_activity_once
     with_tmp_dir do |project|
       hive_state = File.join(project, ".hive-state")
@@ -769,6 +799,28 @@ class DailyDigestProjectSourceTest < Minitest::Test
   end
 
   private
+
+  def write_project_workflow(project_root, id, stage_name:, state_file:)
+    workflows_dir = File.join(project_root, ".hive-state", "workflows")
+    instruction_dir = File.join(workflows_dir, id)
+    FileUtils.mkdir_p(instruction_dir)
+    FileUtils.mkdir_p(File.join(project_root, ".hive-state", "stages"))
+    File.write(File.join(instruction_dir, "#{stage_name}.md"), "Do #{stage_name}.\n")
+    File.write(File.join(workflows_dir, "#{id}.yml"), <<~YAML)
+      id: #{id}
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+        - name: #{stage_name}
+          kind: agent
+          state_file: #{state_file}
+          instruction: ./#{id}/#{stage_name}.md
+        - name: done
+          kind: terminal
+          state_file: done.md
+    YAML
+  end
 
   def project_entry(project)
     {

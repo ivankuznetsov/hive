@@ -106,15 +106,21 @@ class Board
   end
 
   def workflows_for(project, workflow_ids)
-    Hive::Workflows::Project.synchronize do
-      Hive::Workflows::Project.load!(project.path, config: project.config) if project["path"].present?
+    fetch = lambda do |registry|
       workflow_ids.to_h do |workflow_id|
-        workflow = Hive::Workflows::Registry.fetch(workflow_id.to_sym)
+        workflow = registry.fetch(workflow_id.to_sym)
         [ workflow_id, workflow ]
-      rescue Hive::Workflows::UnknownWorkflow => e
+      rescue Hive::Workflows::UnknownWorkflow, KeyError => e
         log_unavailable_workflow(project, workflow_id, e)
         [ workflow_id, nil ]
       end
+    end
+    if project["path"].present?
+      Hive::Workflows::Project.with_active_workflows(project.path, config: project.config) do |registry, _stage_names|
+        fetch.call(registry)
+      end
+    else
+      fetch.call(Hive::Workflows::Registry::WORKFLOWS)
     end
   rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
     workflow_ids.each { |workflow_id| log_unavailable_workflow(project, workflow_id, e) }

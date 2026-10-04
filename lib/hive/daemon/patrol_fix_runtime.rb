@@ -82,7 +82,7 @@ module Hive
           project_root: entry.fetch("path"),
           hive_state: entry.fetch("hive_state_path"), store: store,
           workflow_info: {
-            descriptor: Hive::Workflows::Registry.fetch(:"patrol-fix"),
+            descriptor: Hive::Workflows::Registry::WORKFLOWS.fetch(:"patrol-fix"),
             pin: true, managed: nil, managed_cfg: {}, authored_digest: nil
           },
           candidate_provider: candidate_provider(source),

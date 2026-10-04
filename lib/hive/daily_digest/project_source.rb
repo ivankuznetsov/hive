@@ -9,6 +9,7 @@ require "hive/daily_digest/task_creation_receipt"
 require "hive/task_journal"
 require "hive/markers"
 require "hive/workflows/registry"
+require "hive/workflows/project"
 require "hive/gh"
 
 module Hive
@@ -36,7 +37,13 @@ module Hive
         @membership_ends_at = normalize_time(membership_ends_at)
         @membership_end_exclusive = membership_end_exclusive
         @attention_ends_at = normalize_time(attention_ends_at)
-        @known_stage_dirs = Array(known_stage_dirs || default_stage_dirs).map(&:to_s).uniq.freeze
+        workflows = Hive::Workflows::Project.with_active_workflows(@project.fetch("path")) do |registry, _stage_names|
+          registry.workflows.dup.freeze
+        end
+        @stages_by_dir = workflows.values.flat_map(&:stages).each_with_object({}) do |stage, by_dir|
+          by_dir[stage.dir] ||= stage
+        end.freeze
+        @known_stage_dirs = Array(known_stage_dirs || default_stage_dirs(workflows)).map(&:to_s).uniq.freeze
         @observed_at = observed_at
         @prior_fingerprints = stringify(prior_frontier || {}).fetch("fingerprints", {})
         @prior_fingerprints = {} unless @prior_fingerprints.is_a?(Hash)
@@ -111,8 +118,8 @@ module Hive
         raise SourceUnavailable, "registered project state is unavailable"
       end
 
-      def default_stage_dirs
-        Hive::Workflows::Registry.workflows.values.flat_map(&:stage_dirs).uniq
+      def default_stage_dirs(workflows)
+        workflows.values.flat_map(&:stage_dirs).uniq
       end
 
       def verified_stages_root!(state_root)
@@ -505,9 +512,7 @@ module Hive
 
       def boundary_marker?(task_folder)
         stage_dir = File.basename(File.dirname(task_folder))
-        stage = Hive::Workflows::Registry.workflows.values.flat_map(&:stages).find do |candidate|
-          candidate.dir == stage_dir
-        end
+        stage = @stages_by_dir[stage_dir]
         return false unless stage
 
         marker = Hive::Markers.current(File.join(task_folder, stage.state_file))

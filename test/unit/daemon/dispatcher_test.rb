@@ -4593,6 +4593,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "stable within the same stage and action class"
   end
 
+  def test_stage_rank_uses_the_synchronized_current_union_without_captured_dirs
+    dispatcher, = make_dispatcher
+    union_reads = 0
+    lock_states = []
+
+    rank = with_replaced_singleton_method(
+      Hive::Workflows, :all_stage_dirs, lambda {
+        union_reads += 1
+        lock_states << Hive::Workflows::Project::LOCK.mon_owned?
+        %w[1-inbox custom-stage 9-done]
+      }
+    ) do
+      dispatcher.send(:stage_rank, "custom-stage")
+    end
+
+    assert_equal 1, rank
+    assert_equal 1, union_reads
+    assert_equal [ true ], lock_states,
+                 "the compatibility read must hold the project workflow lock"
+  end
+
   def test_terminal_advance_claims_a_scarce_slot_before_new_work_in_the_same_stage
     rows = [
       row(

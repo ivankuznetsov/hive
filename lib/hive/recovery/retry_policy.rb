@@ -35,24 +35,29 @@ module Hive
       end
 
       def resolve_descriptor(workflow, project: nil)
-        Hive::Workflows::Project.synchronize do
-          load_project_overlay(project)
-          Hive::Workflows::Registry.fetch(workflow.to_s.to_sym)
+        match = registered_project(project)
+        if match
+          Hive::Workflows::Project.with_active_workflows(match.fetch("path")) do |registry, _stage_names|
+            registry.fetch(workflow.to_s.to_sym)
+          end
+        else
+          Hive::Workflows::Project.synchronize do
+            Hive::Workflows::Registry.fetch(workflow.to_s.to_sym)
+          end
         end
       rescue Hive::Workflows::UnknownWorkflow
         nil
       end
       private_class_method :resolve_descriptor
 
-      def load_project_overlay(project_name)
+      def registered_project(project_name)
         return if project_name.nil? || project_name.to_s.empty?
 
-        match = Hive::Config.registered_projects.find do |project|
+        Hive::Config.registered_projects.find do |project|
           project["name"] == project_name.to_s
         end
-        Hive::Workflows::Project.load!(match["path"]) if match
       end
-      private_class_method :load_project_overlay
+      private_class_method :registered_project
     end
   end
 end

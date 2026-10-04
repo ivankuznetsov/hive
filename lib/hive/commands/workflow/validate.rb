@@ -147,7 +147,7 @@ module Hive
           id = @id.to_sym
           if Hive::Workflows::Registry::WORKFLOWS.key?(id)
             @origin = "built_in"
-            return Hive::Workflows::Registry.fetch(id)
+            return Hive::Workflows::Registry::WORKFLOWS.fetch(id)
           end
 
           store = Hive::WorkflowPackage::ManagedStore.new(File.dirname(workflows_dir))

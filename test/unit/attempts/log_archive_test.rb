@@ -7,6 +7,31 @@ class AttemptsLogArchiveTest < Minitest::Test
   NOW = Time.utc(2026, 8, 10, 12, 0, 0)
   CAPABILITY = "c" * 64
 
+  class SeparatorFaultWriter
+    attr_reader :separator_attempts
+
+    def initialize(io)
+      @io = io
+      @separator_attempts = 0
+    end
+
+    def syswrite(bytes)
+      if bytes == "#\n".b
+        @separator_attempts += 1
+        raise Errno::EINTR, "separator" if @separator_attempts == 1
+      end
+
+      @io.syswrite(bytes)
+    end
+
+    def flush = @io.flush
+    def flock(operation) = @io.flock(operation)
+    def stat = @io.stat
+    def fsync = @io.fsync
+    def close = @io.close
+    def closed? = @io.closed?
+  end
+
   def test_writer_and_reader_custody_block_content_addressed_publication
     with_repository do |store|
       running = running_attempt(store)
@@ -70,6 +95,64 @@ class AttemptsLogArchiveTest < Minitest::Test
       end
       refute File.exist?(output_path)
       assert_equal "{\"ok\":true}", store.read_output(output_reference, max_bytes: 64)
+    end
+  end
+
+  def test_open_writer_recovers_a_torn_hot_log_before_content_addressed_publication
+    with_repository do |store|
+      running = running_attempt(store)
+      archive = store.log_archive
+      writer = archive.open_writer(running.attempt_id, clock: -> { NOW })
+      writer.append(:stdout, "before")
+      File.open(writer.path, "ab") { |file| file.write('{"sequence":2') }
+      assert_equal 2, writer.append(:stderr, "after")
+      writer.close
+
+      hot_bytes = File.binread(writer.path)
+      direct = Hive::Attempts::StreamLog.read(writer.path)
+      terminal = terminalize(
+        store, running,
+        log_reference: Hive::OutputReference.build(writer.path, root: store.root)
+      )
+      assert_equal :archived, archive.archive(terminal.attempt_id)
+
+      resolution = archive.resolve(terminal.attempt_id)
+      archived = archive.read(terminal.attempt_id)
+      assert_equal hot_bytes, File.binread(resolution.path)
+      assert_equal direct, archived.frames
+      assert_equal [ 1, 2 ], archived.frames.map(&:sequence)
+      assert_equal %w[before after], archived.frames.map(&:bytes)
+      assert_includes hot_bytes, "#\n"
+    ensure
+      writer&.close unless writer&.closed?
+    end
+  end
+
+  def test_separator_failure_from_an_archive_writer_keeps_custody_until_caller_close
+    with_repository do |store|
+      running = running_attempt(store)
+      archive = store.log_archive
+      writer = archive.open_writer(running.attempt_id, clock: -> { NOW })
+      writer.append(:stdout, "before")
+      File.open(writer.path, "ab") { |file| file.write("torn") }
+      fault = SeparatorFaultWriter.new(writer.instance_variable_get(:@io))
+      writer.instance_variable_set(:@io, fault)
+
+      assert_raises(Errno::EINTR) { writer.append(:stderr, "not published") }
+      refute writer.closed?
+      assert_equal :busy, archive.archive(running.attempt_id)
+      assert_equal 2, writer.append(:stderr, "after")
+      writer.close
+
+      terminal = terminalize(
+        store, running,
+        log_reference: Hive::OutputReference.build(writer.path, root: store.root)
+      )
+      assert_equal :archived, archive.archive(terminal.attempt_id)
+      assert_equal [ "before", "after" ], archive.read(terminal.attempt_id).frames.map(&:bytes)
+      assert_equal 2, fault.separator_attempts
+    ensure
+      writer&.close unless writer&.closed?
     end
   end
 

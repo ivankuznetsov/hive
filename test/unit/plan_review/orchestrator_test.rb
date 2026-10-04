@@ -602,6 +602,8 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal "blocked", blocked.record.state
       assert_equal 1, blocked.summary.dig("finding_counts", "open_manual")
       assert blocked.record["blockers"].any? { |entry| entry["reason"] == "candidate_verification_provider_limit" }
+      assert_match(/plan-review retry/, blocked.record["required_action"],
+                   "a quota-only block points at retry, not a new linked plan")
       refute blocked.record.execution_allowed?
       calls = adapter.calls.size
       assert_equal "blocked", runner.advance!.record.state

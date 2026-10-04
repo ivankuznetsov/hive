@@ -879,7 +879,8 @@ class ReviewersAgentTest < Minitest::Test
       # The rendered prompt is the last positional argv arg.
       assert_includes argv, "/ce-code-review", "prompt must invoke /ce-code-review skill"
       assert_includes argv, ctx.task_folder, "prompt must mention the task folder"
-      assert_includes argv, "git diff main..HEAD", "prompt must invoke the diff against the default branch"
+      assert_includes argv, "git diff main...HEAD",
+                      "prompt must invoke the merge-base diff against the default branch"
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end

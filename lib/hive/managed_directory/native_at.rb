@@ -3,9 +3,9 @@ require "fiddle"
 module Hive
   class ManagedDirectory
     # Minimal libc adapter for descriptor-relative managed-directory operations.
-    # Ruby exposes neither the *at family nor O_DIRECTORY, so the two supported
-    # POSIX platforms supply only their open flag values here; syscall numbers
-    # and descriptor paths are deliberately not used.
+    # Ruby exposes neither the *at family nor Darwin's O_DIRECTORY/O_EXEC, so
+    # the two supported POSIX platforms supply their open flag values here;
+    # syscall numbers and descriptor paths are deliberately not used.
     class NativeAt
       class Unavailable < StandardError; end
 
@@ -18,7 +18,11 @@ module Hive
           end
           { directory: directory, cloexec: 0o2000000 }.freeze
         elsif platform.include?("darwin")
-          { directory: 0x00100000, cloexec: 0x01000000 }.freeze
+          {
+            directory: 0x00100000,
+            cloexec: 0x01000000,
+            executable: 0x40000000
+          }.freeze
         end
       end
 
@@ -30,6 +34,7 @@ module Hive
         @nofollow = file_constant(:NOFOLLOW)
         @cloexec = PLATFORM_FLAGS.fetch(:cloexec)
         @directory = PLATFORM_FLAGS.fetch(:directory)
+        @executable = PLATFORM_FLAGS[:executable]
         handle = Fiddle::Handle::DEFAULT
         integer = Fiddle::TYPE_INT
         pointer = Fiddle::TYPE_VOIDP
@@ -37,7 +42,7 @@ module Hive
         @openat_with_mode = function(
           handle,
           "openat",
-          [ integer, pointer, integer, integer ]
+          [ integer, pointer, integer, Fiddle::TYPE_VARIADIC ]
         )
         @mkdirat = function(
           handle,
@@ -91,6 +96,19 @@ module Hive
         component!(name)
         native_flags = Integer(flags) | @nofollow | @cloexec
         fd = call_openat(directory.fileno, name, native_flags, mode: mode)
+        file_from_fd(fd)
+      rescue SystemCallError, IOError, ArgumentError, TypeError
+        close_fd(fd)
+        raise
+      end
+
+      def open_executable(directory, name)
+        component!(name)
+        fd = call_openat(
+          directory.fileno,
+          name,
+          (@executable || File::RDONLY) | @nofollow | @cloexec
+        )
         file_from_fd(fd)
       rescue SystemCallError, IOError, ArgumentError, TypeError
         close_fd(fd)
@@ -182,6 +200,7 @@ module Hive
             directory_fd,
             name,
             flags,
+            Fiddle::TYPE_INT,
             Integer(mode),
             operation: "openat"
           )

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-09-01
+updated: 2026-10-02
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest]
 ---
 
@@ -899,7 +899,7 @@ duplicate metadata/results, and invalid durations as functional failures. A
 separate `continue-on-error` job downloads the retained report and runs only
 the timing mode of `test/e2e/check_incident_budget.rb`, flagging enabled
 incidents at or above sixteen seconds (including sandbox bootstrap) or a group
-total at or above thirty-two seconds without blocking the merge. The #9771
+total at or above thirty-six seconds without blocking the merge. The #9771
 dependency-gate and repository-routing incidents are enabled; four
 sibling-gated fixtures remain pending. The incident index and activation rules
 live in `test/e2e/scenarios/README.md`.
@@ -927,7 +927,44 @@ or has moved to permanent proof. Focused attempt unit suites cover claim/expiry 
 framed logs, restart adoption, legacy backfill, dirty capture, and unbounded
 successor healing paced by the shared cooldown.
 
-`test/e2e/lib/hive_e2e_binary_test.rb` pins the harness binary contract:
+Replay descriptor custody is split into focused layers:
+
+- `test/e2e/lib/replay_safety_test.rb` deterministically pins root and
+  descendant identity/type classification, final-fence races, descriptor-alias
+  verification, lock-directory/shard custody, bounded sorted admission,
+  contention, cleanup, retry behavior, and bounded APFS directory-link
+  semantics without timing sleeps.
+- `test/e2e/lib/hive_e2e_binary_test.rb` pins the executable mapping and
+  supervision contract: all typed replay reason pairs, JSON/prose and exit
+  behavior, real contention, stdio/status/signal behavior, and custody release.
+- `test/e2e/lib/replay_portability_test.rb` runs real descriptor launches:
+  generated shebang `$0`, native `argv[0]`, child-side descriptor identity and
+  inheritance, late public-script replacement, Linux alias mismatch, Darwin
+  readable-alias opened-duplicate verification despite synthetic pathname
+  metadata, Darwin's fixed `/dev/fd` mapping plus separate readable-script and
+  `O_EXEC` native-binary validation descriptors, the exact-inode private
+  hard-link used for native launch and removed with custody, missing
+  executable-alias refusal, owner-class execute-bit loss, offset, and FD
+  lifecycle behavior.
+  The ordinary `e2e:lib_test` glob runs this on Linux.
+- `test/e2e/lib/schemas_test.rb` pins the closed replay kind/reason vocabulary,
+  allowed pairs, replay-only required/null rules, and unchanged non-replay
+  shapes. `test/unit/managed_directory_test.rb` pins the native-adapter factory
+  and normalized unavailable-capability branch, direct executable opens and
+  their cleanup failures, plus the true variadic `openat` mode dispatch required
+  by Apple Silicon.
+
+Run the focused layers directly with:
+
+```bash
+bundle exec ruby -Itest -Ilib test/e2e/lib/replay_safety_test.rb
+bundle exec ruby -Itest -Ilib test/e2e/lib/hive_e2e_binary_test.rb
+bundle exec ruby -Itest -Ilib test/e2e/lib/replay_portability_test.rb
+bundle exec ruby -Itest -Ilib test/e2e/lib/schemas_test.rb
+bundle exec ruby -Itest test/unit/managed_directory_test.rb
+```
+
+More generally, `test/e2e/lib/hive_e2e_binary_test.rb` pins the harness binary contract:
 scenario inventory JSON, cleanup JSON, the single-document stdout invariant for
 successful `list --json` / `clean --json` calls, unknown-command JSON errors,
 missing argument errors, top-level version output, command-local help after
@@ -935,9 +972,8 @@ command options (`run --filter tui --help`), leading JSON option normalization
 for commands and top-level help/version flags, leading `--json --help run` /
 `--json -h run` preserving human command help,
 malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
-replay path safety, missing, non-executable, symlinked runs-root, and symlinked
-replay artifact validation, cleanup retention validation, and the single-dispatch invariant for
-successful JSON commands.
+descriptor-backed replay path safety and error mapping, cleanup retention
+validation, and the single-dispatch invariant for successful JSON commands.
 The cleanup cases also pin the namespaced
 `HIVE_E2E_RUNS_RETAIN_DAYS` / `HIVE_E2E_RUNS_RETAIN_FAILED_DAYS`
 defaults and prove the old generic environment names no longer affect deletion.
@@ -967,7 +1003,16 @@ uses a real `git archive HEAD:web`, checks its members against the tracked web
 tree, and verifies setup preserves every tracked file's bytes and executable
 bit after extraction and asset preparation.
 
-The macOS `launchd service install` CI job keeps its scope on real service
+The advisory macOS `launchd service install` CI job also runs
+`test/e2e/lib/replay_portability_test.rb` under Ruby 3.4. That focused step is
+the Darwin proof for `/dev/fd` generated-shebang and native-binary launch,
+late-swap resistance, descriptor identity/same-number inheritance, mismatch
+refusal, offsets, and FD cleanup. It does not change the required-job graph;
+completion evidence therefore names the specific green `launchd-macos` run URL
+and tested commit SHA instead of inferring Darwin behavior from Linux or an
+aggregate gate.
+
+The same job keeps its existing service-install scope on real service
 installation mechanics while preserving the web command's readiness contract.
 It runs `hive web install --no-bootstrap --json`, requires the versioned
 envelope to report a written macOS plist plus an available manager and an
@@ -1075,7 +1120,7 @@ credentials inside a running box.
 
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 
-`test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, duplicate JSON boolean handling where a final false flag chooses prose, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, leading `--json --help run` / `--json -h run` command-help rendering, replay path validation, missing/non-executable/symlinked runs-root and replay artifact errors (`missing_repro` / `unusable_repro`, exit `78`), and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
+`test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, duplicate JSON boolean handling where a final false flag chooses prose, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, leading `--json --help run` / `--json -h run` command-help rendering, descriptor-backed replay reason/exit mapping, real contention and supervision, and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
 
 ## Plan-review lifecycle and authenticated route smoke
 

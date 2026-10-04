@@ -4,8 +4,12 @@ require "json"
 require "open3"
 require "psych"
 require "rbconfig"
+require "timeout"
 require "json_schemer"
 require_relative "paths"
+unless Hive::E2E.const_defined?(:ReplayLauncher, false)
+  load File.join(Hive::E2E::Paths.repo_root, "bin", "hive-e2e")
+end
 
 class E2EBinaryTest < Minitest::Test
   def hive_e2e
@@ -58,6 +62,20 @@ class E2EBinaryTest < Minitest::Test
     old = Time.now - (age_days * 86_400)
     File.utime(old, old, run_dir)
     run_dir
+  end
+
+  def capture_replay(runs_dir, *arguments, env: {})
+    Dir.mktmpdir("e2e-replay-state") do |state_home|
+      Open3.capture3(
+        env.merge(
+          "HIVE_E2E_RUNS_DIR" => runs_dir,
+          "XDG_STATE_HOME" => state_home
+        ),
+        hive_e2e,
+        "replay",
+        *arguments
+      )
+    end
   end
 
   def test_list_json_emits_parseable_envelope_with_schema_version_1
@@ -560,6 +578,7 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "hive-e2e-error", payload["schema"]
     assert_equal false, payload["ok"]
     assert_equal "missing_repro", payload["error_kind"]
+    assert_equal "run_missing", payload["reason"]
     assert_equal 78, payload["exit_code"]
     assert_equal "replay", payload["command"]
   end
@@ -626,8 +645,10 @@ class E2EBinaryTest < Minitest::Test
       assert_equal "hive-e2e-error", payload["schema"]
       assert_equal false, payload["ok"]
       assert_equal "unusable_repro", payload["error_kind"]
+      assert_equal "repro_unusable", payload["reason"]
+      assert_equal "replay", payload["command"]
       assert_equal 78, payload["exit_code"]
-      assert_match(/not executable/, payload["message"])
+      assert_match(/repro_unusable/, payload["message"])
     end
   end
 
@@ -647,9 +668,9 @@ class E2EBinaryTest < Minitest::Test
         exit 23
       BASH
 
-      out, err, status = Open3.capture3(
-        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir, "BASH_ENV" => hook },
-        hive_e2e, "replay", "run-1", "scenario-1"
+      out, err, status = capture_replay(
+        tmp_runs_dir, "run-1", "scenario-1",
+        env: { "BASH_ENV" => hook }
       )
 
       assert_equal 23, status.exitstatus
@@ -680,8 +701,9 @@ class E2EBinaryTest < Minitest::Test
       assert_equal "hive-e2e-error", payload["schema"]
       assert_equal false, payload["ok"]
       assert_equal "unusable_repro", payload["error_kind"]
+      assert_equal "repro_unusable", payload["reason"]
       assert_equal 78, payload["exit_code"]
-      assert_match(/not executable/, payload["message"])
+      assert_match(/repro_unusable/, payload["message"])
     end
   end
 
@@ -709,8 +731,9 @@ class E2EBinaryTest < Minitest::Test
       assert_equal "hive-e2e-error", payload["schema"]
       assert_equal false, payload["ok"]
       assert_equal "unusable_repro", payload["error_kind"]
+      assert_equal "scenario_unusable", payload["reason"]
       assert_equal 78, payload["exit_code"]
-      assert_match(/not executable/, payload["message"])
+      assert_match(/scenario_unusable/, payload["message"])
     end
   end
 
@@ -737,8 +760,9 @@ class E2EBinaryTest < Minitest::Test
         assert_equal "hive-e2e-error", payload["schema"]
         assert_equal false, payload["ok"]
         assert_equal "unusable_repro", payload["error_kind"]
+        assert_equal "runs_root_symlink", payload["reason"]
         assert_equal 78, payload["exit_code"]
-        assert_match(/not executable/, payload["message"])
+        assert_match(/runs_root_symlink/, payload["message"])
       end
     end
   end
@@ -765,8 +789,9 @@ class E2EBinaryTest < Minitest::Test
       assert_equal false, payload["ok"]
       assert_equal "unusable_repro", payload["error_kind"],
                    "a dangling symlink is a present-but-unusable repro entry, not a missing one"
+      assert_equal "repro_unusable", payload["reason"]
       assert_equal 78, payload["exit_code"]
-      assert_match(/not executable/, payload["message"])
+      assert_match(/repro_unusable/, payload["message"])
     end
   end
 
@@ -778,6 +803,8 @@ class E2EBinaryTest < Minitest::Test
     payload = JSON.parse(out)
     assert_equal "hive-e2e-error", payload["schema"]
     assert_equal "missing_repro", payload["error_kind"]
+    assert_equal "run_missing", payload["reason"]
+    assert_equal "replay", payload["command"]
   end
 
   def test_leading_json_unknown_token_still_uses_default_run_pattern
@@ -904,7 +931,392 @@ class E2EBinaryTest < Minitest::Test
 
     payload = JSON.parse(out)
     assert_equal "usage", payload["error_kind"]
+    assert_nil payload["reason"]
+    assert_equal "replay", payload["command"]
     assert_match(/run_id must be a safe basename/, payload["message"])
+  end
+
+  def test_replay_transports_every_custody_reason_with_its_typed_kind_and_exit
+    custody_failures = {
+      "missing_repro" => %w[
+        repro_missing run_missing runs_root_missing scenario_missing scenarios_missing
+      ],
+      "unusable_repro" => %w[
+        repro_changed repro_unreadable repro_unusable run_changed run_unusable
+        runs_root_changed runs_root_missing runs_root_symlink runs_root_unusable
+        scenario_changed scenario_unusable scenarios_changed scenarios_unusable
+      ],
+      "replay_busy" => %w[replay_busy],
+      "preflight" => %w[descriptor_exec_unavailable replay_lock_unavailable]
+    }
+
+    custody_failures.each do |kind, reasons|
+      reasons.each do |reason|
+        error = Hive::E2E::ReplaySafety::Error.new(kind: kind, reason: reason)
+        payload, status, err = invoke_injected_replay(error: error)
+
+        assert_empty err
+        assert_equal kind, payload.fetch("error_kind")
+        assert_equal reason, payload.fetch("reason")
+        assert_equal "replay", payload.fetch("command")
+        expected_exit = kind == "replay_busy" ? Hive::ExitCodes::TEMPFAIL : Hive::ExitCodes::CONFIG
+        assert_equal expected_exit, status
+        if reason == "replay_lock_unavailable"
+          assert_includes payload.fetch("message"), Hive::E2E::Paths.replay_control_dir
+          assert_match(/replay recovery procedure/, payload.fetch("message"))
+        end
+      end
+    end
+  end
+
+  def test_replay_human_diagnostic_includes_the_stable_reason
+    error = Hive::E2E::ReplaySafety::Error.new(
+      kind: "unusable_repro",
+      reason: "runs_root_symlink"
+    )
+    safety = Object.new
+    safety.define_singleton_method(:select) { |run_id:, scenario:| raise error }
+    binary = Hive::E2E::Binary.new([], { json: false }, {})
+    binary.define_singleton_method(:build_replay_safety) { |runs_root:| safety }
+
+    out, err = capture_io do
+      exit_error = assert_raises(SystemExit) do
+        binary.replay("run-1", "scenario-1")
+      end
+      assert_equal Hive::ExitCodes::CONFIG, exit_error.status
+    end
+
+    assert_empty out
+    assert_match(/runs_root_symlink/, err)
+  end
+
+  def test_replay_malformed_input_fails_before_custody_construction
+    binary = Hive::E2E::Binary.new([], { json: true }, {})
+    binary.define_singleton_method(:build_replay_safety) do |runs_root:|
+      flunk "malformed replay input must not begin filesystem custody"
+    end
+
+    out, err = capture_io do
+      exit_error = assert_raises(SystemExit) do
+        binary.replay("../escape", "scenario-1")
+      end
+      assert_equal Hive::ExitCodes::USAGE, exit_error.status
+    end
+    payload = JSON.parse(out)
+
+    assert_empty err
+    assert_equal "usage", payload.fetch("error_kind")
+    assert_nil payload.fetch("reason")
+    assert_equal "replay", payload.fetch("command")
+  end
+
+  def test_replay_control_root_resolution_failure_is_a_typed_lock_error
+    binary = Hive::E2E::Binary.new([], { json: true }, {})
+    original = Hive::E2E::Paths.method(:replay_control_dir)
+    Hive::E2E::Paths.define_singleton_method(:replay_control_dir) do |**|
+      raise ArgumentError, "account database unavailable"
+    end
+
+    out, err = capture_io do
+      exit_error = assert_raises(SystemExit) do
+        binary.replay("run-1", "scenario-1")
+      end
+      assert_equal Hive::ExitCodes::CONFIG, exit_error.status
+    end
+    payload = JSON.parse(out)
+
+    assert_empty err
+    assert_equal "preflight", payload.fetch("error_kind")
+    assert_equal "replay_lock_unavailable", payload.fetch("reason")
+    assert_equal "replay", payload.fetch("command")
+    refute_match(/account database unavailable/, payload.fetch("message"))
+  ensure
+    Hive::E2E::Paths.define_singleton_method(:replay_control_dir, original)
+  end
+
+  def test_replay_launch_and_supervision_failures_are_typed_and_close_custody
+    launch_error = Hive::E2E.const_get(:ReplayLauncher).const_get(:LaunchError)
+    supervision_error = Hive::E2E.const_get(:ReplayLauncher).const_get(:SupervisionError)
+
+    [
+      [ launch_error.new, "preflight", "descriptor_exec_failed", 78 ],
+      [ supervision_error.new, "error", "replay_supervision_failed", 1 ]
+    ].each do |failure, kind, reason, expected_exit|
+      custody = Struct.new(:close_calls) do
+        def close
+          self.close_calls += 1
+        end
+      end.new(0)
+      payload, status, err = invoke_injected_replay(custody: custody, launch_error: failure)
+
+      assert_empty err
+      assert_equal expected_exit, status
+      assert_equal kind, payload.fetch("error_kind")
+      assert_equal reason, payload.fetch("reason")
+      assert_equal "replay", payload.fetch("command")
+      assert_equal 1, custody.close_calls
+      if reason == "replay_supervision_failed"
+        assert_match(/artifact may still be running/, payload.fetch("message"))
+        assert_match(/wiki\/e2e\.md/, payload.fetch("message"))
+      end
+    end
+  end
+
+  def test_replay_busy_is_retryable_while_the_first_artifact_is_supervised
+    Dir.mktmpdir("e2e-replay-contention") do |tmp|
+      runs_dir = File.join(tmp, "runs")
+      state_home = File.join(tmp, "state")
+      marker = File.join(tmp, "contender-executed")
+      script = File.join(runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+      FileUtils.mkdir_p(File.dirname(script))
+      File.write(script, <<~BASH)
+        #!/usr/bin/env bash
+        printf 'ready\\n'
+        if ! IFS= read -r release; then
+          printf 'executed\\n' > #{marker.inspect}
+          exit 99
+        fi
+        printf 'finished\\n'
+      BASH
+      File.chmod(0o755, script)
+      env = {
+        "HIVE_E2E_RUNS_DIR" => runs_dir,
+        "XDG_STATE_HOME" => state_home
+      }
+
+      Open3.popen3(env, hive_e2e, "replay", "run-1", "scenario-1") do |stdin, stdout, stderr, waiter|
+        Timeout.timeout(10) { assert_equal "ready\n", stdout.gets }
+
+        out, contender_err, contender_status = Open3.capture3(
+          env,
+          hive_e2e,
+          "replay",
+          "--json",
+          "run-1",
+          "scenario-1"
+        )
+        assert_equal Hive::ExitCodes::TEMPFAIL, contender_status.exitstatus
+        assert_empty contender_err
+        payload = JSON.parse(out)
+        assert_equal "replay_busy", payload.fetch("error_kind")
+        assert_equal "replay_busy", payload.fetch("reason")
+        assert_equal "replay", payload.fetch("command")
+        refute_path_exists marker
+
+        stdin.puts("release")
+        stdin.close
+        assert_equal "finished\n", Timeout.timeout(10) { stdout.gets }
+        assert Timeout.timeout(10) { waiter.value.success? }, stderr.read
+        refute_path_exists marker
+      end
+    end
+  end
+
+  def test_background_descendant_does_not_prolong_admission_after_top_level_exit
+    Dir.mktmpdir("e2e-replay-background") do |tmp|
+      runs_dir = File.join(tmp, "runs")
+      state_home = File.join(tmp, "state")
+      state = File.join(tmp, "first-started")
+      sync = File.join(tmp, "sync")
+      hold = File.join(tmp, "hold")
+      descendant_pid_file = File.join(tmp, "descendant-pid")
+      retry_marker = File.join(tmp, "retry-marker")
+      system("mkfifo", sync, hold, exception: true)
+      script = File.join(runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+      FileUtils.mkdir_p(File.dirname(script))
+      File.write(script, <<~BASH)
+        #!/usr/bin/env bash
+        if [[ ! -e #{state.inspect} ]]; then
+          : > #{state.inspect}
+          (
+            printf '%s\n' "$BASHPID" > #{descendant_pid_file.inspect}
+            printf 'ready\n' > #{sync.inspect}
+            IFS= read -r _ < #{hold.inspect}
+          ) >/dev/null 2>&1 &
+          IFS= read -r _ < #{sync.inspect}
+          exit 0
+        fi
+        printf 'retry\n' > #{retry_marker.inspect}
+      BASH
+      File.chmod(0o755, script)
+      env = { "HIVE_E2E_RUNS_DIR" => runs_dir, "XDG_STATE_HOME" => state_home }
+
+      out, err, first_status = Open3.capture3(
+        env, hive_e2e, "replay", "run-1", "scenario-1"
+      )
+      assert first_status.success?, [ out, err ].join("\n")
+      descendant_pid = Integer(File.read(descendant_pid_file), 10)
+      Process.kill(0, descendant_pid)
+
+      retry_out, retry_err, retry_status = Open3.capture3(
+        env, hive_e2e, "replay", "run-1", "scenario-1"
+      )
+      assert retry_status.success?, [ retry_out, retry_err ].join("\n")
+      assert_equal "retry\n", File.read(retry_marker)
+
+      File.open(hold, "w") { |pipe| pipe.puts("release") }
+      wait_for_process_exit(descendant_pid)
+    ensure
+      begin
+        Process.kill("KILL", descendant_pid) if descendant_pid
+      rescue Errno::ESRCH
+        nil
+      end
+    end
+  end
+
+  def test_abrupt_supervisor_death_releases_lock_without_proving_artifact_exit
+    Dir.mktmpdir("e2e-replay-supervisor-death") do |tmp|
+      runs_dir = File.join(tmp, "runs")
+      state_home = File.join(tmp, "state")
+      marker = File.join(tmp, "replacement-marker")
+      script = File.join(runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+      FileUtils.mkdir_p(File.dirname(script))
+      File.write(script, <<~'BASH')
+        #!/usr/bin/env bash
+        printf 'artifact=%s\n' "$$"
+        exec /bin/cat >/dev/null
+      BASH
+      File.chmod(0o755, script)
+      env = { "HIVE_E2E_RUNS_DIR" => runs_dir, "XDG_STATE_HOME" => state_home }
+
+      Open3.popen3(env, hive_e2e, "replay", "run-1", "scenario-1") do |stdin, stdout, _stderr, waiter|
+        artifact_line = Timeout.timeout(10) { stdout.gets }
+        assert_match(/\Aartifact=\d+\n\z/, artifact_line)
+        artifact_pid = Integer(artifact_line.split("=", 2).last, 10)
+
+        Process.kill("KILL", waiter.pid)
+        supervisor_status = Timeout.timeout(10) { waiter.value }
+        assert_predicate supervisor_status, :signaled?
+        Process.kill(0, artifact_pid)
+
+        File.rename(script, "#{script}.running")
+        File.write(script, "#!/usr/bin/env bash\nprintf 'replacement\\n' > #{marker.inspect}\n")
+        File.chmod(0o755, script)
+        out, err, retry_status = Open3.capture3(
+          env, hive_e2e, "replay", "run-1", "scenario-1"
+        )
+        assert retry_status.success?, [ out, err ].join("\n")
+        assert_equal "replacement\n", File.read(marker)
+
+        Process.kill("KILL", artifact_pid)
+        stdin.close
+        wait_for_process_exit(artifact_pid)
+      ensure
+        begin
+          Process.kill("KILL", artifact_pid) if artifact_pid
+        rescue Errno::ESRCH
+          nil
+        end
+      end
+    end
+  end
+
+  def test_replay_mirrors_artifact_signal_termination
+    Dir.mktmpdir("e2e-replay-signal") do |tmp|
+      runs_dir = File.join(tmp, "runs")
+      state_home = File.join(tmp, "state")
+      script = File.join(runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+      FileUtils.mkdir_p(File.dirname(script))
+      File.write(script, "#!/usr/bin/env bash\nkill -TERM \"$$\"\n")
+      File.chmod(0o755, script)
+
+      _out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => runs_dir,
+          "XDG_STATE_HOME" => state_home
+        },
+        hive_e2e,
+        "replay",
+        "run-1",
+        "scenario-1"
+      )
+
+      assert_predicate status, :signaled?, err
+      assert_equal Signal.list.fetch("TERM"), status.termsig
+    end
+  end
+
+  def test_direct_term_and_hup_to_replay_supervisor_reach_the_artifact
+    skip "Linux /proc signal masks are required for the deterministic trap barrier" unless
+      File.directory?("/proc/self")
+
+    %w[TERM HUP].each do |signal|
+      Dir.mktmpdir("e2e-replay-forward") do |tmp|
+        runs_dir = File.join(tmp, "runs")
+        state_home = File.join(tmp, "state")
+        script = File.join(runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+        FileUtils.mkdir_p(File.dirname(script))
+        File.write(script, <<~'BASH')
+          #!/usr/bin/env bash
+          printf 'child=%s\n' "$$"
+          exec /bin/cat >/dev/null
+        BASH
+        File.chmod(0o755, script)
+        env = {
+          "HIVE_E2E_RUNS_DIR" => runs_dir,
+          "XDG_STATE_HOME" => state_home
+        }
+
+        Open3.popen3(env, hive_e2e, "replay", "run-1", "scenario-1") do |stdin, stdout, stderr, waiter|
+          child_line = Timeout.timeout(10) { stdout.gets }
+          assert_match(/\Achild=\d+\n\z/, child_line)
+          wait_for_replay_signal_handlers(waiter.pid)
+          Process.kill(signal, waiter.pid)
+          stdin.close
+
+          status = Timeout.timeout(10) { waiter.value }
+          diagnostic = stderr.read
+          assert_predicate status, :signaled?, "#{signal}: #{diagnostic}"
+          assert_equal Signal.list.fetch(signal), status.termsig
+        end
+      end
+    end
+  end
+
+  def test_foreground_int_and_quit_reach_the_artifact_once_while_parent_is_quiesced
+    skip "Linux /proc signal masks are required for the deterministic trap barrier" unless
+      File.directory?("/proc/self")
+
+    %w[INT QUIT].each do |signal|
+      Dir.mktmpdir("e2e-replay-foreground-signal") do |tmp|
+        runs_dir = File.join(tmp, "runs")
+        state_home = File.join(tmp, "state")
+        script = File.join(runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+        FileUtils.mkdir_p(File.dirname(script))
+        File.write(script, <<~'BASH')
+          #!/usr/bin/env bash
+          printf 'child=%s\n' "$$"
+          exec /bin/cat >/dev/null
+        BASH
+        File.chmod(0o755, script)
+        env = {
+          "HIVE_E2E_RUNS_DIR" => runs_dir,
+          "XDG_STATE_HOME" => state_home
+        }
+
+        Open3.popen3(
+          env,
+          hive_e2e,
+          "replay",
+          "run-1",
+          "scenario-1",
+          pgroup: true,
+          rlimit_core: 0
+        ) do |stdin, stdout, stderr, waiter|
+          child_line = Timeout.timeout(10) { stdout.gets }
+          assert_match(/\Achild=\d+\n\z/, child_line)
+          wait_for_replay_signal_handlers(waiter.pid)
+          Process.kill(signal, -waiter.pid)
+          stdin.close
+
+          status = Timeout.timeout(10) { waiter.value }
+          diagnostic = stderr.read
+          assert_predicate status, :signaled?, "#{signal}: #{diagnostic}"
+          assert_equal Signal.list.fetch(signal), status.termsig
+        end
+      end
+    end
   end
 
   def test_run_invalid_byte_pattern_emits_usage_error_in_c_locale
@@ -1075,6 +1487,8 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "hive-e2e-error", payload["schema"]
     assert_equal false, payload["ok"]
     assert_equal "usage", payload["error_kind"]
+    assert_nil payload["reason"]
+    assert_equal "replay", payload["command"]
     assert_equal 64, payload["exit_code"]
   end
 
@@ -1103,6 +1517,8 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "hive-e2e-error", payload["schema"]
     assert_equal false, payload["ok"]
     assert_equal "usage", payload["error_kind"]
+    assert_nil payload["reason"]
+    assert_equal "replay", payload["command"]
     assert_equal 64, payload["exit_code"]
   end
 
@@ -1116,5 +1532,66 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "no_scenarios", payload["error_kind"]
     assert_equal 64, payload["exit_code"]
     assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
+  end
+
+  def invoke_injected_replay(error: nil, custody: nil, launch_error: nil)
+    safety = Object.new
+    safety.define_singleton_method(:select) do |run_id:, scenario:|
+      raise error if error
+
+      custody
+    end
+    binary = Hive::E2E::Binary.new([], { json: true }, {})
+    binary.define_singleton_method(:build_replay_safety) do |runs_root:|
+      safety
+    end
+    binary.define_singleton_method(:launch_replay) do |_selected|
+      raise launch_error
+    end if launch_error
+
+    system_exit = nil
+    out, err = capture_io do
+      system_exit = assert_raises(SystemExit) do
+        binary.replay("run-1", "scenario-1")
+      end
+    end
+    payload = JSON.parse(out)
+    schema = JSONSchemer.schema(JSON.parse(File.read(
+      Hive::E2E::Schemas.schema_path("hive-e2e-error")
+    )))
+    assert_empty schema.validate(payload).to_a
+    [ payload, system_exit.status, err ]
+  end
+
+  def wait_for_replay_signal_handlers(pid)
+    Timeout.timeout(10) do
+      loop do
+        status = File.read("/proc/#{pid}/status")
+        ignored = status[/^SigIgn:\s+([0-9a-f]+)/, 1].to_i(16)
+        caught = status[/^SigCgt:\s+([0-9a-f]+)/, 1].to_i(16)
+        int_ignored = signal_masked?(ignored, "INT")
+        quit_ignored = signal_masked?(ignored, "QUIT")
+        term_caught = signal_masked?(caught, "TERM")
+        hup_caught = signal_masked?(caught, "HUP")
+        break if int_ignored && quit_ignored && term_caught && hup_caught
+
+        Thread.pass
+      end
+    end
+  end
+
+  def wait_for_process_exit(pid)
+    Timeout.timeout(10) do
+      loop do
+        Process.kill(0, pid)
+        Thread.pass
+      rescue Errno::ESRCH
+        break
+      end
+    end
+  end
+
+  def signal_masked?(mask, signal)
+    (mask & (1 << (Signal.list.fetch(signal) - 1))).positive?
   end
 end

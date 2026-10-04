@@ -3,9 +3,55 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-28
+updated: 2026-10-02
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Replay descriptor custody awaits hosted macOS evidence (2026-10-02)
+
+The existing advisory `launchd-macos` job now runs the focused replay
+portability suite on macOS 15. Its first hosted run against `7c1fee92e9` exposed
+a fixed-versus-variadic `openat` ABI mismatch during mode-bearing shard creation
+on Apple Silicon. The next run reached correctly created shards but exposed
+APFS's entry-count-based control-directory link count during final admission
+validation. The CI-fix checkout now uses Fiddle's real variadic dispatch and a
+Darwin-specific bounded link-count policy. The following run reached alias
+selection but showed that pathname stat metadata from Darwin's synthetic
+`/dev/fd` entries is not a reliable identity check; the checkout now verifies
+the opened alias duplicate's descriptor identity instead. The next run reached
+spawn but showed that Darwin strips execute access from a synthetic alias for a
+read-only descriptor. The checkout now retains a separate identity-matched
+`O_EXEC` descriptor for native launch while shebang and fallback scripts keep a
+readable alias. That run then showed that reopening the execute-only descriptor
+through Darwin's synthetic filesystem fails preflight and that querying
+synthetic pathname execute metadata rejects otherwise valid aliases. The
+checkout now validates the fixed `/dev/fd/<held-fd>` mapping without reopening
+it and derives launch-time execute mode from the held descriptor's `fstat`
+metadata. The next run showed that duplicating custody onto child descriptor 3
+let Darwin spawn and Bash 3.2 consume or reuse the low descriptor, breaking
+native execution and leaving scripts with a stale `$0` alias. The checkout now
+uses child descriptor 9 (or 8 on collision) for scripts. The following run
+showed that descriptor 198 falls in Bash's internal range, that native Darwin
+image lookup cannot use an alias created later by a spawn file action, and that
+the portability probes had repeated the already-rejected pathname-stat check
+against `/dev/fd`. Native launch now keeps the already-live `O_EXEC` alias,
+while the probes verify identity through opened alias handles. The latest run
+proved the script mapping through child descriptor 9, but native launch still
+failed while Ruby prepared a same-number `O_EXEC` redirection. Native launch
+then left the handle close-on-exec, but Ruby closes such descriptors regardless
+of `close_others: false`, so the next hosted run again lost the alias before
+native image lookup. Making either a duplicate or the original handle
+inheritable still left native image lookup unable to execute the parent alias.
+A fixed Bash trampoline then proved the child mapping existed, but Darwin's
+kernel still rejected native `execve` through `/dev/fd/9`. Native launch now
+creates a verified hard link to the exact pinned inode in the owner-private
+replay control directory after the final fence and launches only that stable
+alias; scripts retain their readable descriptor launch. It still has no
+observed green hosted run URL and commit SHA. Local Linux evidence cannot
+establish Darwin launch behavior.
+Do not mark
+cross-platform replay qualification complete until that exact job and commit
+are observed green.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 
@@ -39,11 +85,11 @@ context exposes no admitted video-capture channel. The absence of a recording
 does not imply a browser failure and is not represented as accepted video
 evidence.
 
-## Incident timing calibration (2026-09-27)
+## Incident timing calibration (updated 2026-10-02)
 
-The 32-second aggregate advisory cap covers observed hosted totals of 30.577
-and 30.643 seconds while preserving the 16-second per-scenario ceiling. These
-runs do not establish a long-run percentile or separate budgets for each runner
+The 36-second aggregate advisory cap covers observed hosted totals through
+34.015 seconds while preserving the 16-second per-scenario ceiling. These runs
+do not establish a long-run percentile or separate budgets for each runner
 class. Revisit the cap after representative hosted timing history exists;
 timing remains advisory and does not replace functional E2E coverage.
 
@@ -707,7 +753,7 @@ Residual audits of commits `6a6cf990`, `2d15e9ee`, and `5e8723fa` carried this b
 24. **Provider-limit recovery is unit/integration-pinned but not post-fix live-smoked.** `Hive::AgentLimit` and the headless/tmux/review writers classify quota/rate/usage-credit walls as `limits_reached` while filtering healthy UI-limit text. Provider reset dates remain visible estimates, but the daemon schedules readiness solely from the latest quota marker mtime, submits after the default one-hour interval even when the provider advertises a later date, and never exhausts a recovery budget. `test/unit/agent_limit_test.rb`, `test/unit/daemon/{stale_agent_healer,recovery_coordinator}_test.rb`, and `test/integration/daemon_auto_retry_test.rb` pin the display/scheduling split, shared cooldown, durable-history retry count, and repeated unbounded retries. No in-tree live artifact yet shows an installed daemon observing a real July-25-style hold, retrying after a user resets usage/switches account/tops up credits, and advancing the task while status/TUI retains the provider estimate. A large cohort limited at the same time can also become eligible in the same daemon tick; normal concurrency caps still bound dispatch, but that synchronized recovery shape has not been live load-smoked.
 25. **Babysitter stale-runtime restart was live-smoked and exposed a restart argv bug.** On 2026-06-07, a live detached babysitter started before the current checkout correctly printed the stale-runtime restart recommendation, but `hive babysit restart --detach` daemonized after running through the `restart` code path and left the long-lived process recorded as `ruby bin/hive babysit restart --detach`. A second restart then blocked while waiting on that same process. The fix re-execs detached restart as the canonical `hive babysit start --detach` command before daemonizing, resolves the stable installed wrapper through `Hive::InvokedBinary.path`, aborts restart if stop leaves a potentially live PID behind, keeps the 600-second stop drain for active PR repair agents, and removes stopped/stale PID files only when the current payload still matches the one being stopped; `test/unit/commands/babysit_test.rb` covers the detached re-exec, wrapper resolution failure, refused-stop abort, re-exec failure, post-grace exit race, and replacement-PID preservation contracts. The branch was live-smoked locally by replacing the stale process and verifying the long-lived argv became `ruby bin/hive babysit start --detach`.
 26. **Babysitter dirty-priority selection and pre-fix residue snapshots are test-pinned but not live-smoked.** The dirty-priority change has `Hive::Gh.list_open_prs` request `mergeStateStatus`, sorts `DIRTY` / `BLOCKED` / `UNSTABLE` PRs ahead of `BEHIND` / `UNKNOWN` and neutral states before applying `babysitter.max_concurrent_prs`, and changes the 6-review pre-fix `CleanExit` path so `reason: :pre_fix_dirty_worktree` snapshots all residue even when it is outside `review.fix.auto_commit.scope_check`. `test/unit/babysitter/project_tick_test.rb`, `test/unit/gh_test.rb`, and `test/integration/run_review_test.rb` cover the selector and in/out-of-scope pre-fix residue commits. No in-tree artifact was found showing a live `hive babysit PROJECT` run recovering a newer `DIRTY` PR from a large open-PR backlog, nor a live Claude/Codex-backed 6-review run where an out-of-scope pre-fix residue snapshot is inspected/reverted by an operator.
-27. **`bin/hive-e2e` executable JSON/usage contract is focused-test pinned but not live-wrapper smoked.** Commit `d51455e6` starts Thor in `debug: true` and maps `Thor::Error` through the outer rescue so human unknown-command and missing-argument invocations exit `64`, matching the JSON envelope path. Commit `96242e97` removes a duplicate `Hive::E2E::Binary.start` call so successful `list --json`, `clean --json`, and `clean --json --dry-run` invocations emit exactly one top-level JSON document on stdout. Commit `cb986b33` changes `hive-e2e replay` so an existing `repro.sh` must be a regular executable file before `exec`; non-executable repro scripts now exit `78` with JSON `error_kind: unusable_repro` instead of falling through to a generic process failure. Branch HEAD keeps `--json --help run` / `--json -h run` on the human command-help path while preserving JSON envelopes for non-command help trailers such as `--json --help missing` and option trailers such as `--json --help --filter tui`. `test/e2e/lib/hive_e2e_binary_test.rb` covers the source-tree executable, including a temp-run `repro.sh` with mode `0644` and the recognized-command help variants. This refresh did not find an in-tree artifact showing a live patrol/babysitter wrapper consuming those `bin/hive-e2e` JSON surfaces, the `unusable_repro` replay path, or the leading-JSON command-help path; `bin/hive-e2e` is a checkout-only harness rather than a packaged `hive-cli` executable.
+27. **`bin/hive-e2e` is checkout-pinned but not live-wrapper consumed.** The executable retains its single-dispatch JSON/usage/help contracts and now launches replay only from a descriptor-pinned artifact after typed admission and a final binding fence. Focused safety, binary, schema, and Linux portability suites cover the closed replay reason vocabulary, root/component/script races, contention, supervision, descriptor hygiene, and real shebang/native execution. The hosted macOS `/dev/fd` result remains the separate gap recorded above. No in-tree artifact shows a patrol/babysitter wrapper consuming these `bin/hive-e2e` replay envelopes; the executable remains a checkout-only harness rather than a packaged `hive-cli` surface.
 28. **Finalize unpushed-commit auto-retry is unit-pinned but not live-smoked.** `Hive::Daemon::StaleAgentHealer` submits an `8-finalize` `ERROR reason=unpushed_commits` row after the universal cooldown when no task lock is live. `RecoveryCoordinator` then owns the identity-guarded transition and workflow-derived `hive finalize` retry, preserving normal clean-exit, auth, and push checks. `test/unit/daemon/{stale_agent_healer,recovery_coordinator}_test.rb` covers live-lock refusal, marker identity, safety, and unbounded retry; `test/integration/run_finalize_test.rb` covers finalize writing the marker on persistent push failure. This refresh did not find an in-tree artifact showing a live daemon observing such a finalized red row, coordinating the retry, and eventually succeeding after the underlying push failure is repaired.
 29. **Wrapper help/JSON/new-text grammar is checkout-pinned but not release-install-smoked.** The PR #427 wrapper work keeps `bin/hive` and `bin/hive-e2e` aligned with Thor's boolean grammar: option-bearing help requests like `hive approve --from 2-brainstorm --help` / `bin/hive-e2e run --filter tui --help` stay non-mutating, leading accepted JSON booleans like `--json=true status` dispatch as command-local options, malformed JSON assignments such as `--json=1` / `--json=yes` fail before Thor treats the value as a command argument, task target, or e2e run pattern, and duplicate wrapper booleans use the last recognized flag so a final `--no-json` or `--json=false` chooses prose. Commit `36f7499a` expands `bin/hive`'s pre-dispatch JSON usage-error mapping beyond the original `run` / `approve` / `markers` cases to the required-argument workflow, drop, findings, and rebase-status surfaces; commit `25082ee4` adds the missing patrol mapping so `hive patrol --json` without `PROJECT` emits the `hive-patrol` envelope with `error_kind: "error"` instead of prose-only stderr. Registered schemas use `Hive::Schemas::ErrorEnvelope`, while `hive-rebase-status` remains an unversioned sibling payload. PR #478 added the `hive new PROJECT` text-tail boundary, later superseded by the lift-and-rebuild contract in `bin/hive`'s `lift_new_options!`: allow-listed `--workflow`/`--depends-on` (and their `=VALUE` and JSON-boolean forms) are lifted from anywhere outside an explicit `--`, the remaining `PROJECT TEXT...` tail is rebuilt with a protective `--`, and a trailing/value-less value option stays literal text instead of eating PROJECT; `test/integration/new_wrapper_argv_test.rb` pins this argv behavior. `test/integration/cli_version_test.rb`, `test/integration/cli_usage_error_json_test.rb`, and `test/e2e/lib/hive_e2e_binary_test.rb` cover the checkout binaries and representative schema/new-text mappings. This refresh did not find an in-tree artifact showing the packaged `hive` executable generated by RubyGems/Homebrew/AUR exercising the expanded wrapper path; `bin/hive-e2e` is intentionally excluded from the gem payload and remains a checkout harness only.
 30. **Bot Codex draft-assist retirement is source/unit-pinned but not live-smoked.** Commit `723906be` deletes `Hive::Bot::CodexConversation` and `templates/bot_brainstorm_codex_prompt.md.erb`, removes the `codex_write:` / `codex_edit:` / `codex_cancel:` callback parser branches, removes `start_codex` / `confirm_codex_draft` router actions, drops `bot.codex_budget_usd` / `bot.codex_timeout_sec`, and bumps bot structured logs to `hive-bot-log.v2` without the three `codex_*` events. Commit `c680ac29` then removes the leftover `ConversationStore` draft/confirm fields (`history`, `draft`, `awaiting_confirm`), deletes `pending_confirm_count`, and drops the unreachable `/done` pending-draft guard. Focused source-tree tests cover deterministic `:path_a` answer writes, legacy `path_a_yes` / `path_a_type` retirement replies, retired `codex_*` callback-data classification as `:unknown`, config-key removal, schema v2 validation, the smaller conversation-state shape, and `/done` dispatching directly from the active conversation. This refresh did not find an in-tree live Telegram artifact showing old Path-A buttons in a real chat steering to the deterministic answer flow, retired `codex_*` buttons degrading through the unknown-callback path, a live `:path_a` conversation writing an answer and sending the next question, or an installed log consumer accepting `hive-bot-log.v2`.

@@ -13,10 +13,12 @@ require "coverage_catalog"
 require "runner"
 require "schemas"
 require "path_safety"
+require "replay_safety"
 
 # Mirror bin/hive: intercept `--version`/`-v` BEFORE Thor dispatch so the
 # default_task `:run_scenarios` doesn't swallow it as a positional pattern.
-if ARGV == [ "--version" ] || ARGV == [ "-v" ]
+if File.expand_path($PROGRAM_NAME) == File.expand_path(__FILE__) &&
+   (ARGV == [ "--version" ] || ARGV == [ "-v" ])
   puts Hive::VERSION
   exit 0
 end
@@ -30,11 +32,13 @@ module Hive
     #   0   = all scenarios passed
     #   1   = one or more scenarios failed
     #   64  = usage error (bad args, no matching scenarios)
+    #   75  = retryable temporary failure (replay admission busy)
     #   78  = preflight failure (missing tooling, bad config, missing repro)
     module BinaryExit
       SUCCESS = 0
       FAILURE = 1
       USAGE  = Hive::ExitCodes::USAGE # 64
+      TEMPFAIL = Hive::ExitCodes::TEMPFAIL # 75
       CONFIG  = Hive::ExitCodes::CONFIG # 78
     end
 
@@ -55,10 +59,13 @@ module Hive
     end
 
     module JsonError
+      OMIT = Object.new.freeze
+      private_constant :OMIT
+
       module_function
 
-      def payload(error_kind:, message:, exit_code:, command: nil)
-        {
+      def payload(error_kind:, message:, exit_code:, command: nil, reason: OMIT)
+        payload = {
           "schema" => "hive-e2e-error",
           "schema_version" => Hive::E2E::Schemas.version_for("hive-e2e-error"),
           "ok" => false,
@@ -67,8 +74,156 @@ module Hive
           "exit_code" => exit_code,
           "command" => command
         }.compact
+        payload["reason"] = reason unless reason.equal?(OMIT)
+        payload
       end
     end
+
+    # Launches one fenced replay artifact while the caller retains descriptor
+    # and admission custody. Only the verified descriptor alias is ever used as
+    # an executable name; every other held descriptor is closed in the child.
+    class ReplayLauncher
+      # Keep inherited scripts clear of spawn's low process-control descriptors
+      # and Bash's internal descriptor range above 9.
+      INHERITED_DESCRIPTOR_FD = 9
+
+      class LaunchError < StandardError; end
+      class SupervisionError < StandardError; end
+
+      def run(custody)
+        pid = spawn_child(custody)
+        status = supervise_child(pid)
+        raise SupervisionError unless status.exited? || status.signaled?
+
+        status
+      end
+
+      private
+
+      def spawn_child(custody)
+        command, spawn_options = launch_command(custody)
+        Process.spawn(*command, spawn_options)
+      rescue SystemCallError, IOError, ArgumentError
+        raise LaunchError
+      end
+
+      def launch_command(custody)
+        executable_alias = custody.executable_descriptor_alias
+        unless executable_alias
+          alias_path, script_fd, child_fd = inherited_descriptor(
+            custody.descriptor_alias,
+            custody.script_fd
+          )
+          return [
+            [ [ alias_path, "repro.sh" ] ],
+            { child_fd => script_fd, close_others: true }
+          ]
+        end
+        executable = IO.for_fd(
+          custody.executable_script_fd,
+          autoclose: false
+        ).stat
+        raise LaunchError unless executable.file? && executable.executable?
+
+        # Darwin's /dev/fd exposes execute access only for O_EXEC descriptors,
+        # which are not readable by a shebang interpreter. Scripts therefore
+        # use the separately held readable descriptor; native binaries use the
+        # executable descriptor directly.
+        prefix = IO.for_fd(custody.script_fd, autoclose: false).pread(4096, 0)
+        if prefix.start_with?("#!")
+          alias_path, script_fd, child_fd = inherited_descriptor(
+            custody.descriptor_alias,
+            custody.script_fd
+          )
+          interpreter, argument = prefix.lines.first.delete_prefix("#!").strip.split(/\s+/, 2)
+          raise LaunchError if interpreter.nil? || interpreter.empty?
+
+          argv = [ [ interpreter, File.basename(interpreter) ] ]
+          argv << argument if argument
+          argv << alias_path
+          [ argv, { child_fd => script_fd, close_others: true } ]
+        elsif !prefix.include?("\0")
+          alias_path, script_fd, child_fd = inherited_descriptor(
+            custody.descriptor_alias,
+            custody.script_fd
+          )
+          [
+            [ [ "/bin/sh", "sh" ], alias_path ],
+            { child_fd => script_fd, close_others: true }
+          ]
+        else
+          launch_alias = custody.native_launch_alias
+          raise LaunchError unless launch_alias
+
+          # Darwin refuses native image lookup through /dev/fd even when the
+          # underlying handle was opened O_EXEC. ReplaySafety therefore creates
+          # a private hard-link alias for the exact pinned inode after the final
+          # binding fence.
+          [
+            [ [ launch_alias, "repro.sh" ] ],
+            { close_others: true }
+          ]
+        end
+      rescue SystemCallError, IOError, ArgumentError
+        raise LaunchError
+      end
+
+      def inherited_descriptor(alias_path, source_fd)
+        child_fd =
+          if source_fd == INHERITED_DESCRIPTOR_FD
+            INHERITED_DESCRIPTOR_FD - 1
+          else
+            INHERITED_DESCRIPTOR_FD
+          end
+        [ File.join(File.dirname(alias_path), child_fd.to_s), source_fd, child_fd ]
+      end
+
+      def supervise_child(pid)
+        with_parent_terminal_signals_quiesced(pid) do
+          wait_for_child(pid)
+        end
+      rescue SystemCallError, ArgumentError, ThreadError
+        raise SupervisionError
+      end
+
+      def wait_for_child(pid)
+        loop do
+          waited_pid, status = Process.wait2(pid)
+          raise SupervisionError unless waited_pid == pid && status
+
+          return status
+        rescue Errno::EINTR
+          next
+        end
+      end
+
+      # Install after spawn so the child starts with the caller's signal
+      # dispositions. Keyboard INT/QUIT still reaches the foreground child;
+      # direct TERM/HUP sent only to the supervisor is forwarded explicitly.
+      def with_parent_terminal_signals_quiesced(pid)
+        previous = {}
+        previous["INT"] = Signal.trap("INT", "IGNORE")
+        previous["QUIT"] = Signal.trap("QUIT", "IGNORE")
+        previous["TSTP"] = Signal.trap("TSTP", "DEFAULT")
+        %w[TERM HUP].each do |signal|
+          previous[signal] = Signal.trap(signal) { forward_signal(signal, pid) }
+        end
+        yield
+      ensure
+        previous&.reverse_each do |signal, handler|
+          Signal.trap(signal, handler) if handler
+        rescue ArgumentError
+          nil
+        end
+      end
+
+      def forward_signal(signal, pid)
+        Process.kill(signal, pid)
+      rescue Errno::ESRCH
+        nil
+      end
+    end
+    private_constant :ReplayLauncher
 
     class Binary < Thor
       class_option :json, type: :boolean, default: false,
@@ -205,29 +360,50 @@ module Hive
         run_id = PathSafety.safe_basename!(run_id, "run_id")
         scenario = PathSafety.safe_basename!(scenario, "scenario")
         runs_root = File.expand_path(Paths.runs_dir)
-        run_dir = PathSafety.contained_path!(runs_root, run_id, "run dir")
-        scenario_root = PathSafety.contained_path!(run_dir, "scenarios", "scenario root")
-        scenario_dir = PathSafety.contained_path!(scenario_root, scenario, "scenario dir")
-        script = PathSafety.contained_path!(scenario_dir, "repro.sh", "repro script")
-        unless File.exist?(script) || File.symlink?(script)
-          exit_with_error(
-            "Run ##{run_id} scenario #{scenario} has no repro.sh; the run may have completed successfully (#{script})",
-            error_kind: "missing_repro",
-            exit_code: BinaryExit::CONFIG
-          )
-        end
-        unless artifact_path_without_symlinks?(runs_root, run_dir, scenario_root, scenario_dir, script) &&
-               File.lstat(script).file? && File.executable?(script)
-          exit_with_error(
-            "Run ##{run_id} scenario #{scenario} repro.sh is not executable (#{script})",
-            error_kind: "unusable_repro",
-            exit_code: BinaryExit::CONFIG
-          )
-        end
-
-        exec([ script, File.basename(script) ])
+        custody = build_replay_safety(runs_root: runs_root).select(
+          run_id: run_id,
+          scenario: scenario
+        )
+        status = launch_replay(custody)
+        custody.close
+        custody = nil
+        mirror_replay_status(status)
+      rescue ReplaySafety::Error => e
+        exit_with_error(
+          replay_error_message(e),
+          error_kind: e.error_kind,
+          reason: e.reason,
+          exit_code: replay_exit_code(e.error_kind),
+          command: "replay"
+        )
+      rescue ReplayLauncher::LaunchError
+        exit_with_error(
+          "replay descriptor launch failed (descriptor_exec_failed)",
+          error_kind: "preflight",
+          reason: "descriptor_exec_failed",
+          exit_code: BinaryExit::CONFIG,
+          command: "replay"
+        )
+      rescue ReplayLauncher::SupervisionError
+        exit_with_error(
+          "replay supervision failed; the artifact may still be running; " \
+          "follow the replay recovery procedure in wiki/e2e.md before retrying " \
+          "(replay_supervision_failed)",
+          error_kind: "error",
+          reason: "replay_supervision_failed",
+          exit_code: BinaryExit::FAILURE,
+          command: "replay"
+        )
       rescue ArgumentError => e
-        exit_with_error(e, error_kind: "usage", exit_code: BinaryExit::USAGE)
+        exit_with_error(
+          e,
+          error_kind: "usage",
+          reason: nil,
+          exit_code: BinaryExit::USAGE,
+          command: "replay"
+        )
+      ensure
+        custody&.close
       end
 
       desc "clean", "Remove old e2e run artifacts"
@@ -331,17 +507,54 @@ module Hive
         !scenario.pending && scenario.steps.any? { |step| ScenarioParser::TMUX_STEP_KINDS.include?(step.kind) }
       end
 
-      def artifact_path_without_symlinks?(*paths)
-        paths.none? { |path| File.lstat(path).symlink? }
-      rescue Errno::ENOENT
-        false
+      def build_replay_safety(runs_root:)
+        ReplaySafety.new(runs_root: runs_root)
+      rescue SystemCallError, ArgumentError, TypeError
+        raise ReplaySafety::Error.new(
+          kind: "preflight",
+          reason: "replay_lock_unavailable"
+        )
       end
 
-      def exit_with_error(error, error_kind:, exit_code:)
+      def launch_replay(custody)
+        ReplayLauncher.new.run(custody)
+      end
+
+      def mirror_replay_status(status)
+        exit(status.exitstatus) if status.exited?
+
+        signal = status.termsig
+        begin
+          Signal.trap(signal, "DEFAULT")
+        rescue ArgumentError
+          nil
+        end
+        Process.kill(signal, Process.pid)
+        exit(128 + signal)
+      end
+
+      def replay_exit_code(error_kind)
+        error_kind == "replay_busy" ? BinaryExit::TEMPFAIL : BinaryExit::CONFIG
+      end
+
+      def replay_error_message(error)
+        return error.message unless error.reason == "replay_lock_unavailable"
+
+        "replay admission lock is unavailable at #{Paths.replay_control_dir}; " \
+          "follow the replay recovery procedure in wiki/e2e.md before retrying " \
+          "(replay_lock_unavailable)"
+      rescue SystemCallError, ArgumentError, TypeError
+        "replay admission lock is unavailable; follow the replay recovery " \
+          "procedure in wiki/e2e.md before retrying (replay_lock_unavailable)"
+      end
+
+      def exit_with_error(error, error_kind:, exit_code:, reason: JsonError.const_get(:OMIT),
+                          command: invoked_command)
         message = error.respond_to?(:message) ? error.message : error.to_s
         if options[:json]
           puts JSON.pretty_generate(JsonError.payload(error_kind: error_kind, message: message,
-                                                     exit_code: exit_code, command: invoked_command))
+                                                     exit_code: exit_code, command: command,
+                                                     reason: reason))
         else
           warn "hive-e2e: #{message}"
         end
@@ -415,50 +628,79 @@ HELP_FLAGS = %w[--help -h].freeze
 # flag follows the class option). If Thor later raises a usage error, the rescue
 # blocks below would otherwise consult a mutated ARGV that no longer carries the
 # flag and emit prose on stderr instead of honoring the JSON-envelope contract.
-json_mode = json_requested?(ARGV)
+def run_hive_e2e(argv)
+  json_mode = json_requested?(argv)
+  command_context = nil
 
-begin
-  ARGV.replace(Hive::CliArgvPolicy.validate_encoding(ARGV))
-  ARGV.replace(Hive::CliArgvPolicy.reject_unsupported_json_assignments(ARGV))
-  commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
-  ARGV.replace(
-    Hive::CliArgvPolicy.normalize_leading_json_options(
-      ARGV, commands: commands, top_level_flags: TOP_LEVEL_FLAGS, help_flags: HELP_FLAGS
+  begin
+    argv.replace(Hive::CliArgvPolicy.validate_encoding(argv))
+    argv.replace(Hive::CliArgvPolicy.reject_unsupported_json_assignments(argv))
+    commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
+    argv.replace(
+      Hive::CliArgvPolicy.normalize_leading_json_options(
+        argv, commands: commands, top_level_flags: TOP_LEVEL_FLAGS, help_flags: HELP_FLAGS
+      )
     )
-  )
-  if ARGV == [ "--version" ] || ARGV == [ "-v" ]
-    puts Hive::VERSION
-    exit 0
+    if argv == [ "--version" ] || argv == [ "-v" ]
+      puts Hive::VERSION
+      exit 0
+    end
+    argv.replace(Hive::CliArgvPolicy.rewrite_help(argv, known_commands: commands, fallback_command: "run"))
+    reject_missing_retention_values!(argv)
+    command_context = "replay" if argv.first == "replay"
+    # Thor::Base#start rescues Thor::Error internally and exits 1 when
+    # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise
+    # instead so the rescue below can preserve human/JSON formatting while
+    # mapping usage failures to BinaryExit::USAGE.
+    Hive::E2E::Binary.start(argv, debug: true)
+  rescue Hive::E2E::PreflightError => e
+    if json_mode
+      puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
+                                                            exit_code: Hive::E2E::BinaryExit::CONFIG))
+    else
+      warn "hive-e2e: #{e.message}"
+    end
+    exit Hive::E2E::BinaryExit::CONFIG
+  rescue Thor::Error => e
+    if json_mode
+      payload_options = {
+        error_kind: "usage",
+        message: e.message,
+        exit_code: Hive::E2E::BinaryExit::USAGE,
+        command: command_context
+      }
+      payload_options[:reason] = nil if command_context == "replay"
+      puts JSON.pretty_generate(Hive::E2E::JsonError.payload(**payload_options))
+    else
+      warn "hive-e2e: #{e.message}"
+    end
+    exit Hive::E2E::BinaryExit::USAGE
+  rescue StandardError => e
+    if command_context == "replay"
+      message = "replay supervision failed; the artifact may still be running; " \
+                "follow the replay recovery procedure in wiki/e2e.md before retrying " \
+                "(replay_supervision_failed)"
+      if json_mode
+        puts JSON.pretty_generate(
+          Hive::E2E::JsonError.payload(
+            error_kind: "error",
+            message: message,
+            exit_code: Hive::E2E::BinaryExit::FAILURE,
+            command: "replay",
+            reason: "replay_supervision_failed"
+          )
+        )
+      else
+        warn "hive-e2e: #{message}"
+      end
+    elsif json_mode
+      puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,
+                                                            exit_code: Hive::E2E::BinaryExit::FAILURE))
+    else
+      warn "hive-e2e: #{e.message}"
+    end
+    exit Hive::E2E::BinaryExit::FAILURE
   end
-  ARGV.replace(Hive::CliArgvPolicy.rewrite_help(ARGV, known_commands: commands, fallback_command: "run"))
-  reject_missing_retention_values!(ARGV)
-  # Thor::Base#start rescues Thor::Error internally and exits 1 when
-  # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise
-  # instead so the rescue below can preserve human/JSON formatting while
-  # mapping usage failures to BinaryExit::USAGE.
-  Hive::E2E::Binary.start(ARGV, debug: true)
-rescue Hive::E2E::PreflightError => e
-  if json_mode
-    puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
-                                                          exit_code: Hive::E2E::BinaryExit::CONFIG))
-  else
-    warn "hive-e2e: #{e.message}"
-  end
-  exit Hive::E2E::BinaryExit::CONFIG
-rescue Thor::Error => e
-  if json_mode
-    puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
-                                                          exit_code: Hive::E2E::BinaryExit::USAGE))
-  else
-    warn "hive-e2e: #{e.message}"
-  end
-  exit Hive::E2E::BinaryExit::USAGE
-rescue StandardError => e
-  if json_mode
-    puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,
-                                                          exit_code: Hive::E2E::BinaryExit::FAILURE))
-  else
-    warn "hive-e2e: #{e.message}"
-  end
-  exit Hive::E2E::BinaryExit::FAILURE
 end
+
+run_hive_e2e(ARGV) if File.expand_path($PROGRAM_NAME) == File.expand_path(__FILE__)

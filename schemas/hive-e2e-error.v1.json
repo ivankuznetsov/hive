@@ -11,10 +11,119 @@
     "ok": { "const": false },
     "error_kind": {
       "type": "string",
-      "enum": ["usage", "no_scenarios", "preflight", "run_failed", "missing_repro", "unusable_repro", "error"]
+      "enum": ["usage", "no_scenarios", "preflight", "run_failed", "missing_repro", "unusable_repro", "replay_busy", "error"]
     },
     "message": { "type": "string" },
     "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
-    "command": { "type": ["string", "null"] }
-  }
+    "command": { "type": ["string", "null"] },
+    "reason": {
+      "enum": [
+        null,
+        "descriptor_exec_failed",
+        "descriptor_exec_unavailable",
+        "replay_busy",
+        "replay_lock_unavailable",
+        "replay_supervision_failed",
+        "repro_changed",
+        "repro_missing",
+        "repro_unreadable",
+        "repro_unusable",
+        "run_changed",
+        "run_missing",
+        "run_unusable",
+        "runs_root_changed",
+        "runs_root_missing",
+        "runs_root_symlink",
+        "runs_root_unusable",
+        "scenario_changed",
+        "scenario_missing",
+        "scenario_unusable",
+        "scenarios_changed",
+        "scenarios_missing",
+        "scenarios_unusable"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "command": { "const": "replay" } },
+        "required": ["command"]
+      },
+      "then": {
+        "required": ["reason"],
+        "oneOf": [
+          {
+            "properties": {
+              "error_kind": { "const": "usage" },
+              "reason": { "const": null }
+            }
+          },
+          {
+            "properties": {
+              "error_kind": { "const": "missing_repro" },
+              "reason": {
+                "enum": [
+                  "repro_missing",
+                  "run_missing",
+                  "runs_root_missing",
+                  "scenario_missing",
+                  "scenarios_missing"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "error_kind": { "const": "unusable_repro" },
+              "reason": {
+                "enum": [
+                  "repro_changed",
+                  "repro_unreadable",
+                  "repro_unusable",
+                  "run_changed",
+                  "run_unusable",
+                  "runs_root_changed",
+                  "runs_root_missing",
+                  "runs_root_symlink",
+                  "runs_root_unusable",
+                  "scenario_changed",
+                  "scenario_unusable",
+                  "scenarios_changed",
+                  "scenarios_unusable"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "error_kind": { "const": "replay_busy" },
+              "reason": { "const": "replay_busy" }
+            }
+          },
+          {
+            "properties": {
+              "error_kind": { "const": "preflight" },
+              "reason": {
+                "enum": [
+                  "descriptor_exec_failed",
+                  "descriptor_exec_unavailable",
+                  "replay_lock_unavailable"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "error_kind": { "const": "error" },
+              "reason": { "const": "replay_supervision_failed" }
+            }
+          }
+        ]
+      },
+      "else": {
+        "not": { "required": ["reason"] }
+      }
+    }
+  ]
 }

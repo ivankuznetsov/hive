@@ -802,6 +802,7 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       assert sup.terminate_child(pid, grace_sec: 0)
     end
     assert_equal 4321, arguments.fetch(:pgid)
+    assert_equal 0, arguments.fetch(:sleeper).call(0)
     assert_equal pid, sup.reap_all.first.pid
   end
 

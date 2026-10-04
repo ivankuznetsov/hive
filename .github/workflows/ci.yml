@@ -502,6 +502,8 @@ jobs:
           bundler-cache: true
       - name: Bundle pinned Betterleaks
         run: ruby packaging/betterleaks.rb
+      - name: replay descriptor portability
+        run: bundle exec ruby -Itest -Ilib test/e2e/lib/replay_portability_test.rb
       - name: workflow creator native publication happy path
         run: >-
           bundle exec ruby -Itest test/unit/packaging/workflow_creator_evidence_test.rb

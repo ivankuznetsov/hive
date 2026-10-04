@@ -1,9 +1,9 @@
 ---
 title: Agentic E2E Suite
 type: reference
-source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
+source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection,error}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-08-11
+updated: 2026-10-02
 tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
@@ -70,23 +70,150 @@ and are the only modes that add `selection.json`.
 | `0` | all selected scenarios passed |
 | `1` | one or more scenarios failed, or an unclassified harness error occurred |
 | `64` | usage error: unknown command, missing required Thor arguments, unsafe replay path, invalid retention window, or no matching scenarios |
-| `78` | preflight/config failure: malformed scenario YAML/definitions, missing `tmux`, missing replay repro artifact, or a replay `repro.sh` that is not a regular executable file |
+| `75` | retryable replay admission contention (`replay_busy`) |
+| `78` | preflight/config failure: malformed scenario YAML/definitions, missing `tmux`, missing or unsafe replay entries, unavailable lock or descriptor execution, or descriptor launch failure |
 
 `asciinema` is optional. When it is missing, too old, or cannot start, TUI
 scenarios continue without cast capture; that degraded artifact coverage is not
 an exit `78` preflight failure.
 
-Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Scenario parse/config failures from both `run` and `list` use `error_kind: "preflight"` and exit `78`, before any scenario executes. Replay artifact failures are split: a missing `repro.sh` emits `error_kind: "missing_repro"`, while an existing but non-executable `repro.sh` emits `error_kind: "unusable_repro"`; both exit `78`. Top-level `--version` / `-v` is intercepted before Thor dispatch so prose callers get only `Hive::VERSION`; `version --json` emits the versioned `hive-e2e-version` envelope.
+Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Scenario parse/config failures from both `run` and `list` use `error_kind: "preflight"` and exit `78`, before any scenario executes. Replay adds the typed `command`/`reason` contract and retryable `replay_busy` classification detailed below. Top-level `--version` / `-v` is intercepted before Thor dispatch so prose callers get only `Hive::VERSION`; `version --json` emits the versioned `hive-e2e-version` envelope.
 Successful `--json` commands emit exactly one top-level JSON document on stdout, including `list --json`, `clean --json`, and `version --json`, so wrapper callers can parse stdout directly.
 
-`bin/hive-e2e replay RUN_ID SCENARIO` validates safe run/scenario basenames,
-resolves the stored `scenarios/<scenario>/repro.sh` under the selected run
-directory, and only `exec`s it when it is both a regular file and executable.
-Missing scripts return `error_kind: missing_repro`; existing but unusable
-scripts, including symlinked runs roots, scenario directories, and repro
-entries (even dangling symlinks, which are a present-but-unusable repro entry
-rather than a missing one), return `error_kind: unusable_repro`. Both are
-config failures (`78`) and use the `hive-e2e-error` envelope in `--json` mode.
+### Replay descriptor custody
+
+`bin/hive-e2e replay RUN_ID SCENARIO` first validates both arguments as safe
+basenames, before opening the filesystem or admission lock. It then opens the
+configured runs root without following its final entry and descends through
+`RUN_ID/scenarios/SCENARIO/repro.sh` one component at a time with no-follow
+descriptor operations. The root, every selected directory, and the executable
+regular script remain held until launch. Symlinks are categorically rejected
+for the configured root's final entry and every selected descendant; supported
+symlinks in ancestor components of the configured runs-root path are unchanged.
+
+Immediately before launch, replay freshly reopens the public root and rewalks
+the descendant chain. Every observed device/inode/type or required-mode
+mismatch rejects the attempt. This final binding fence is a logical decision,
+not an atomic namespace snapshot: a move-and-restore that presents the same
+held identities at the fence is the prior consistent state. Once the fence
+passes, replay creates any Darwin native launch alias and then publishes the
+decision event. Later pathname replacement cannot redirect launch because
+scripts use an identity-checked alias for the pinned descriptor and Darwin
+native binaries use a verified private hard link to the same inode. Replay
+never falls back to the public runs-tree pathname as a launch target.
+
+Linux launch uses `/proc/self/fd/<fd>` and macOS launch uses `/dev/fd/<fd>`.
+Linux requires the alias pathname to stat as the held script object. Darwin's
+synthetic descriptor filesystem is instead verified by opening the alias, which
+duplicates the numbered descriptor, and requiring that duplicate's descriptor
+stat to match the held script. Darwin also holds a separately identity-checked
+`O_EXEC` descriptor: its `/dev/fd` implementation exposes execute permission
+only for descriptors opened in that mode. Launch-time execute-mode validation
+uses that held descriptor's `fstat` metadata, including the current process's
+owner/group permission class, rather than synthetic alias pathname metadata.
+Because an
+`O_EXEC` descriptor is not readable by a shebang interpreter, scripts launch
+through their readable alias after replay parses the pinned shebang; text
+without a shebang uses `/bin/sh`, matching Ruby's ENOEXEC fallback. The selected
+readable script descriptor is duplicated onto child descriptor 9 (or 8 when 9
+is the source), above spawn's process-control slots but below Bash's internal
+descriptor range. Darwin's kernel refuses native image lookup through
+`/dev/fd` even for an inherited `O_EXEC` handle. Immediately after the final
+binding fence, replay therefore hard-links the public script name into its
+validated owner-private control directory and requires the link's
+device/inode/type identity to equal the pinned descriptor before publishing the
+fence event. The deterministic per-selection name is admission-serialized,
+replaces crash debris on retry, and is unlinked when custody closes. Native
+launch uses only that protected alias, retains `repro.sh` as `argv[0]`, and
+fails closed with `descriptor_exec_unavailable` when a hard link cannot be
+created, including across filesystems. Other root, component, verification,
+and admission handles stay close-on-exec and do not survive image replacement.
+A generated shebang
+script consequently observes the readable descriptor alias as `$0`; the native
+executable compatibility fixture observes `repro.sh` as `argv[0]`. The
+interpreter named by a shebang, `/usr/bin/env` and its `PATH` lookup, and the
+no-shebang fallback shell remain ordinary pathname-resolved program images
+outside script custody.
+
+Replay admission lives outside the mutable runs tree at
+`$XDG_STATE_HOME/hive-e2e/replay-<effective-uid>/locks-v1`, provided
+`XDG_STATE_HOME` is absolute. Otherwise it uses the effective user's account
+home from the OS account database at
+`<home>/.local/state/hive-e2e/replay-<effective-uid>/locks-v1`. `TMPDIR`,
+`TMP`, `TEMP`, and sandbox `HIVE_HOME` do not affect this location, and
+cooperating callers must use the same stable XDG state configuration. Hive
+validates the owned mode-`0700` directory and persistent, zero-byte,
+mode-`0600` shard files without following symlinks. Directory-link validation
+keeps the strict one-or-two-link rule on non-Darwin hosts and accepts Darwin's
+bounded APFS entry-count semantics up to the 256-shard namespace plus its two
+special entries. Native shard creation calls the variadic `openat` interface as
+variadic, preserving the requested mode on both Linux and Apple Silicon rather
+than relying on their different fixed-call argument conventions.
+
+For one root/run/scenario selection, replay nonblockingly acquires the sorted
+unique shards derived from its normalized configured-root path, sandwiched
+canonical-root path, and held root device/inode. This makes same-path
+replacement generations and accepted aliases to the same root contend. The
+256-shard namespace is a bounded superset, so an unrelated selection can hash
+to one of the same shards and receive retryable `replay_busy`; this is not a
+claim that the unrelated logical selection is running. A losing attempt
+executes no artifact and does not alter the runs tree. Shards are persistent
+coordination metadata and are never unlinked during normal operation.
+
+The foreground-compatible parent keeps admission until the top-level artifact
+has exited or signalled. It installs signal handling only after spawn, ignores
+its own `INT`/`QUIT` while terminal delivery reaches the foreground child,
+leaves `TSTP` compatible with job control, forwards direct `TERM`/`HUP`, retries
+interrupted waits, then mirrors the child's normal exit status or signal.
+Pre-spawn rejection and spawn failure release custody, so a stable retry can
+launch once. Admission is parent-owned: background descendants cannot prolong
+it after the top-level artifact exits.
+
+The v1 JSON error schema requires `command: "replay"` and a `reason` on every
+replay error. Replay usage errors use `reason: null`; non-replay envelopes
+continue to forbid `reason`. The stable replay outcomes are:
+
+| Condition | `error_kind` | Exit | `reason` |
+|---|---|---:|---|
+| malformed run or scenario | `usage` | 64 | `null` |
+| initially missing selected entry | `missing_repro` | 78 | `runs_root_missing`, `run_missing`, `scenarios_missing`, `scenario_missing`, or `repro_missing` |
+| unsafe, unreadable, changed, or unusable selected entry | `unusable_repro` | 78 | `runs_root_symlink`, `runs_root_unusable`, `runs_root_changed`, `runs_root_missing`, `run_unusable`, `run_changed`, `scenarios_unusable`, `scenarios_changed`, `scenario_unusable`, `scenario_changed`, `repro_unreadable`, `repro_unusable`, or `repro_changed` |
+| admission shard is held, including a shard collision | `replay_busy` | 75 | `replay_busy` |
+| safe admission cannot be established | `preflight` | 78 | `replay_lock_unavailable` |
+| no identity-matching descriptor alias or Darwin native hard-link alias is available | `preflight` | 78 | `descriptor_exec_unavailable` |
+| descriptor spawn fails before execution | `preflight` | 78 | `descriptor_exec_failed` |
+| terminal child state cannot be established | `error` | 1 | `replay_supervision_failed` |
+
+The descriptor pins identity, not bytes. Same-user in-place writes to the
+already-open script inode remain outside this namespace-substitution boundary.
+Nor does replay add transactional or exactly-once semantics to arbitrary
+effects after child spawn. If the supervisor dies abruptly, its parent-only
+lock is released while the artifact may survive. A
+`replay_supervision_failed` result likewise means the artifact may still be
+running. Neither case is safe to retry until the following recovery procedure
+establishes that the prior process set has ended.
+
+#### Replay recovery
+
+1. Stop starting new replays for the affected run and scenario.
+2. Inspect `ps -axo pid,ppid,pgid,lstart,args`. Correlate candidates using the
+   selected run/scenario, launch time, working directory, and open files. Where
+   available, use `lsof -p PID`; remember that a shebang script can show a
+   `/proc/self/fd/<fd>` or `/dev/fd/<fd>` `$0` instead of literal `repro.sh`.
+3. Track the identified artifact and its descendants, including descendants
+   reparented after supervisor death. Recheck each PID's identity and start
+   time before acting so PID reuse is not mistaken for the original process.
+4. Wait for the verified process set to exit or deliberately stop it. Confirm
+   all identified processes have ended before retrying. If identity cannot be
+   established, do not claim that a retry is safe.
+
+For `replay_lock_unavailable`, the diagnostic names the resolved control
+directory when possible. Use the same process recovery procedure before
+repairing it. Manually remove or recreate a damaged current or old-version
+control directory only after every replay supervisor and surviving artifact is
+confirmed stopped; never remove live shard inodes. `bin/hive-e2e clean` cleans
+run artifacts only. It never removes the replay control directory or its
+persistent shards.
 
 `bin/hive-e2e` is a checkout-only harness entrypoint, not a packaged
 `hive-cli` executable. It handles top-level `--version` / `-v` before Thor
@@ -139,7 +266,7 @@ variable from silently overriding the harness-specific cleanup policy.
 | `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
-| `test/e2e/check_incident_budget.rb` | Report-integrity gate plus below-16s-per-incident and below-32s-aggregate advisory check. |
+| `test/e2e/check_incident_budget.rb` | Report-integrity gate plus below-16s-per-incident and below-36s-aggregate advisory check. |
 | `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
 
 ## Scenario DSL
@@ -274,7 +401,7 @@ On failure, the harness writes a scenario bundle containing:
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
 | `incident_plan_only_dependency_gate` | Rejects a plan-only assertion, holds exact metadata below the gate, then proves one real dispatch after the prerequisite reaches `8-finalize`. |
-| `incident_provider_limit_retry` | Opens one account-scoped circuit from trusted transport evidence and proves one charged fallback successor under daemon recovery ownership. Incident scenarios retain a sixteen-second per-scenario ceiling and a thirty-two-second aggregate ceiling, leaving bounded headroom for normal hosted-runner subprocess variance. |
+| `incident_provider_limit_retry` | Opens one account-scoped circuit from trusted transport evidence and proves one charged fallback successor under daemon recovery ownership. Incident scenarios retain a sixteen-second per-scenario ceiling and a thirty-six-second aggregate ceiling, leaving bounded headroom for normal hosted-runner subprocess variance. |
 | `provider_routing_durable_matrix` | Runs AE2-AE8 through `Attempts::Dispatcher`, durable attempt ownership and receipts, restart reopening, a real `Attempts::Supervisor`, recovery reuse, operator/corruption handling, and the real no-pool subscription `limits_reached` isolation path. |
 | `incident_repository_routing` | Rejects a cross-project dependency whose registered repository identity disagrees with its live origin and preserves the non-target task. |
 
@@ -294,7 +421,7 @@ retains the run directory even after failure, and feeds that functional job
 into the protected `rake test (Ruby 3.4)` aggregate. A downstream advisory job
 downloads the artifact and reads enabled incident durations from `report.json`.
 Durations include sandbox bootstrap; each enabled incident targets below sixteen
-seconds and the group targets below thirty-two seconds. Timing failures remain
+seconds and the group targets below thirty-six seconds. Timing failures remain
 visible without blocking a merge. Missing enabled results, duplicate
 metadata/results, and invalid durations remain functional failures in the E2E
 job. Neither job folds e2e into the local default `rake test` task.

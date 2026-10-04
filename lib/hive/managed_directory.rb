@@ -9,6 +9,7 @@ module Hive
   # resolved relative to directory descriptors held for one reentrant session.
   class ManagedDirectory
     class UnsafeError < Hive::ConfigError; end
+    class NativeAdapterUnavailable < StandardError; end
 
     private_constant :NativeAt
 
@@ -39,13 +40,24 @@ module Hive
       match && match[:target]
     end
 
+    # Replay needs the same descriptor-relative, no-follow primitive as the
+    # managed store without reaching through this class's private constants.
+    # Keep the native implementation private and normalize platform details at
+    # this narrow capability boundary.
+    def self.build_native_at_adapter
+      NativeAt.new
+    rescue NativeAt::Unavailable
+      raise NativeAdapterUnavailable,
+            "required descriptor capability is unavailable"
+    end
+
     def initialize(root:, label:, anchor: nil)
       @root = File.expand_path(root).freeze
       @label = label.to_s.freeze
       @anchor = File.expand_path(anchor || nearest_existing_ancestor(@root)).freeze
       unsafe! unless contained?(@root, @anchor)
-      @native = NativeAt.new
-    rescue NativeAt::Unavailable
+      @native = self.class.build_native_at_adapter
+    rescue NativeAdapterUnavailable
       unsafe!
     end
 

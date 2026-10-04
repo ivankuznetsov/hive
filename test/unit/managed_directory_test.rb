@@ -1375,10 +1375,118 @@ class ManagedDirectoryTest < Minitest::Test
         native.class.platform_flags("aarch64-linux")
       )
       assert_equal(
-        { directory: 0x00100000, cloexec: 0x01000000 },
+        {
+          directory: 0x00100000,
+          cloexec: 0x01000000,
+          executable: 0x40000000
+        },
         native.class.platform_flags("arm64-darwin")
       )
       assert_nil native.class.platform_flags("java")
+    end
+  end
+
+  def test_native_adapter_opens_executable_without_following_components
+    with_tmp_dir do |root|
+      script = File.join(root, "repro.sh")
+      File.write(script, "#!/bin/sh\n")
+      File.chmod(0o755, script)
+      native = Hive::ManagedDirectory.build_native_at_adapter
+      directory = native.open_absolute_directory(root)
+      executable = native.open_executable(directory, "repro.sh")
+
+      assert_equal File.stat(script).ino, executable.stat.ino
+      assert_raises(Errno::ENOENT) do
+        native.open_executable(directory, "missing.sh")
+      end
+      assert_raises(ArgumentError) do
+        native.open_executable(directory, "../repro.sh")
+      end
+    ensure
+      executable&.close
+      directory&.close
+    end
+  end
+
+  def test_native_adapter_declares_and_dispatches_openat_mode_as_variadic
+    native_class = Hive::ManagedDirectory.const_get(:NativeAt, false)
+    native = native_class.new
+    openat_with_mode = native.instance_variable_get(:@openat_with_mode)
+
+    assert_equal [
+      Fiddle::TYPE_INT,
+      Fiddle::TYPE_VOIDP,
+      Fiddle::TYPE_INT
+    ], openat_with_mode.instance_variable_get(:@argument_types)
+    assert openat_with_mode.instance_variable_get(:@is_variadic)
+
+    arguments = nil
+    native.instance_variable_set(
+      :@openat_with_mode,
+      ->(*values) { arguments = values; 23 }
+    )
+    assert_equal 23, native.send(
+      :call_openat,
+      17,
+      "record",
+      File::WRONLY | File::CREAT,
+      mode: 0o600
+    )
+    assert_equal [
+      17,
+      "record",
+      File::WRONLY | File::CREAT,
+      Fiddle::TYPE_INT,
+      0o600
+    ], arguments
+  end
+
+  def test_public_native_adapter_factory_returns_the_private_adapter
+    adapter = Hive::ManagedDirectory.build_native_at_adapter
+    native_class = Hive::ManagedDirectory.const_get(:NativeAt, false)
+
+    assert_instance_of native_class, adapter
+    assert_raises(NameError) { Hive::ManagedDirectory::NativeAt }
+  end
+
+  def test_public_native_adapter_factory_normalizes_capability_unavailability
+    native_class = Hive::ManagedDirectory.const_get(:NativeAt, false)
+    unavailable = native_class.const_get(:Unavailable, false)
+
+    with_replaced_singleton_method(
+      native_class,
+      :new,
+      -> { raise unavailable, "platform-specific detail" }
+    ) do
+      error = assert_raises(Hive::ManagedDirectory::NativeAdapterUnavailable) do
+        Hive::ManagedDirectory.build_native_at_adapter
+      end
+
+      assert_equal "required descriptor capability is unavailable", error.message
+      refute_includes error.message, "platform-specific"
+    end
+  end
+
+  def test_path_projection_and_missing_enumeration_cover_the_factory_file_contract
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(root: root, label: "test state")
+
+      assert_equal ".", directory.relative_path(root)
+      assert_equal "nested/record", directory.relative_path(
+        File.join(root, "nested", "record")
+      )
+      assert_raises(Hive::ConfigError) do
+        directory.relative_path(File.join(File.dirname(root), "outside"))
+      end
+      assert_empty directory.each_child("missing/nested", missing: true).to_a
+
+      File.write(File.join(root, "record"), "data")
+      error = assert_raises(Hive::ConfigError) do
+        directory.each_child(".") do
+          raise Hive::ConfigError, "caller config failure"
+        end
+      end
+      assert_equal "caller config failure", error.message
     end
   end
 

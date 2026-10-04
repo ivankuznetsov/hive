@@ -27,6 +27,10 @@ Service lifecycle subcommands remain human-readable. Every `--once` invocation
 emits exactly one `hive-one-shot.v1` document, with or without an explicit
 `--json`, including `--all` when no project is enabled.
 
+The one-shot babysitter adapter is loaded with the command itself, so direct
+one-shot construction and the normal command execution path use the same
+adapter and persistent-admission predicate.
+
 `install` writes and starts the supervised per-user service through
 `Hive::UserService`: `hive-babysitter.service` on Linux systemd-user or
 `local.hive-babysitter.plist` on macOS launchd. It runs `hive babysit start`

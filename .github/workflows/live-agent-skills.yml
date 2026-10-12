@@ -170,7 +170,7 @@ jobs:
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
         with:
           ruby-version: "3.4"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - name: Install the native agent CLI in the ephemeral runner
@@ -256,7 +256,7 @@ jobs:
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: candidate-artifacts
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.23.1"
       - name: Install locked OpenClaw and exact candidate

@@ -115,7 +115,7 @@ jobs:
           git archive --format=tar.gz --output="$source_archive" "$CANDIDATE_SHA"
           ruby packaging/live_agent_skills/build.rb \
             "$CANDIDATE_SHA" "$gem_file" "$source_archive" dist/live-agent-candidate
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: dist/live-agent-candidate
@@ -209,7 +209,7 @@ jobs:
           bundle exec ruby -Itest test/smoke/live_hive_operating_skill_smoke_test.rb
       - name: Upload redacted structural evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-agent-evidence-${{ matrix.platform }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/live-agent-evidence/${{ matrix.platform }}.json
@@ -321,7 +321,7 @@ jobs:
           ruby candidate-source/packaging/live_agent_skills/workflow_creator_live_runner.rb finalize-bootstrap
       - name: Upload redacted workflow-creator evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: workflow-creator-evidence-openclaw-${{ github.run_attempt }}
           path: ${{ runner.temp }}/workflow-creator-evidence
@@ -376,7 +376,7 @@ jobs:
             candidate-artifacts evidence creator-evidence proof)"
           attestation_sha256="$(jq -er '.attestation_sha256' <<<"$result")"
           echo "attestation_sha256=$attestation_sha256" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: live-agent-skills-proof-${{ github.run_attempt }}
           path: proof

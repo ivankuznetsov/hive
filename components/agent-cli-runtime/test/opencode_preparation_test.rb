@@ -615,6 +615,54 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     ENV.delete("UNSELECTED_PROBE_SECRET")
   end
 
+  def test_probe_request_rejects_environment_keys_outside_the_overlay_contract
+    profile = AgentCliRuntime::Profiles.fetch(:opencode)
+    %w[
+      BUNDLE_BIN_PATH BUNDLE_GEMFILE GEM_HOME GEM_PATH RUBYLIB RUBYOPT
+    ].each do |key|
+      error = assert_raises(ArgumentError) do
+        AgentCliRuntime::ProbeRequest.new(
+          profile:, route: "anthropic/claude-sonnet-4-5",
+          environment: { key => "restored-injection" }
+        )
+      end
+      assert_match(/must be OpenCode overlay keys/, error.message)
+      assert_includes error.message, key
+    end
+  end
+
+  def test_probe_child_environment_keeps_scrubbed_runtime_keys_nil_across_the_overlay_merge
+    profile = AgentCliRuntime::Profiles.fetch(:opencode)
+    request = AgentCliRuntime::ProbeRequest.new(
+      profile:, route: "anthropic/claude-sonnet-4-5",
+      environment: {
+        "XDG_CONFIG_HOME" => "/fixture/config",
+        "XDG_DATA_HOME" => "/fixture/data",
+        "TMPDIR" => "/fixture/tmp"
+      }
+    )
+
+    child = AgentCliRuntime::OpenCode::Probe.send(
+      :child_environment, profile, request,
+      env: {
+        "PATH" => ENV.fetch("PATH"),
+        "HOME" => "/fixture/home",
+        "RUBYOPT" => "-r/ambient/missing",
+        "GEM_HOME" => "/fixture/gems"
+      }
+    )
+
+    %w[
+      BUNDLE_BIN_PATH BUNDLE_GEMFILE GEM_HOME GEM_PATH RUBYLIB RUBYOPT
+    ].each do |key|
+      assert_nil child[key], "expected #{key} to stay scrubbed in the child environment"
+    end
+    assert_equal "/fixture/config", child.fetch("XDG_CONFIG_HOME")
+    assert_equal "/fixture/data", child.fetch("XDG_DATA_HOME")
+    assert_equal "/fixture/tmp", child.fetch("TMPDIR")
+    assert_equal "/fixture/home", child.fetch("HOME")
+  end
+
   def test_credential_environment_keys_cannot_override_overlay_controls
     error = assert_raises(ArgumentError) do
       AgentCliRuntime::OpenCodePreparationRequest.new(

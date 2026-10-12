@@ -339,11 +339,17 @@ module AgentCliRuntime
                    configured_variants: nil,
                    executable: nil)
       parsed_route = route.is_a?(Route) ? route : Route.parse(route)
+      normalized_environment = Immutable.hash(environment)
+      unallowed = normalized_environment.keys - OPENCODE_OVERLAY_ENVIRONMENT_KEYS
+      unless unallowed.empty?
+        raise ArgumentError,
+              "ProbeRequest environment keys must be OpenCode overlay keys: #{unallowed.join(', ')}"
+      end
       super(
         profile: profile,
         route: parsed_route,
         variant: variant.nil? ? nil : Immutable.string(variant),
-        environment: Immutable.hash(environment),
+        environment: normalized_environment,
         credential_environment_keys:
           Immutable.strings(credential_environment_keys),
         credential_file_staged: credential_file_staged == true,

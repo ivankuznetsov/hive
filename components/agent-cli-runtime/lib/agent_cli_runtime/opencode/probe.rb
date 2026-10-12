@@ -182,7 +182,15 @@ module AgentCliRuntime
         request.credential_environment_keys.each do |key|
           selected[key] = env[key].to_s unless env[key].to_s.empty?
         end
-        selected.merge(request.environment).freeze
+        # The overlay is the only caller-supplied channel into the child
+        # environment. Filtering here keeps the denylist cleanup final even if
+        # a request is built with keys outside the validated overlay contract.
+        request.environment.each do |key, value|
+          next unless OPENCODE_OVERLAY_ENVIRONMENT_KEYS.include?(key)
+
+          selected[key] = value.to_s
+        end
+        selected.freeze
       end
       private_class_method :child_environment
 

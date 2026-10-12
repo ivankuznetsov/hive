@@ -93,9 +93,15 @@ executable the compiled invocation runs. ProbeRequest environment overrides are
 restricted to the OpenCode overlay keys (`OPENCODE_OVERLAY_ENVIRONMENT_KEYS`);
 any other key is rejected with `ArgumentError`. The probe child environment
 also copies only overlay-contract keys into the scrubbed base rather than
-blanket-merging the request environment, so Ruby and Bundler injection
+blanket-merging the request environment, and applies the denylist scrub last
+after every caller-controlled channel, so Ruby and Bundler injection
 variables such as `RUBYOPT` stay removed even when a request is constructed
-outside the validated overlay contract. An exact route declared by the selected overlay is
+outside the validated overlay contract. Credential keys are bound by the
+same rule: `ProbeRequest` and `OpenCodePreparationRequest` reject any
+credential key in `SCRUBBED_RUNTIME_ENVIRONMENT_KEYS` (`RUBYOPT`, `RUBYLIB`,
+`GEM_HOME`, `GEM_PATH`, `BUNDLE_BIN_PATH`, `BUNDLE_GEMFILE`) with
+`ArgumentError`, so a poisoned ambient value cannot be selected back into a
+scrubbed child. An exact route declared by the selected overlay is
 authoritative and skips the large verbose CLI inventory; an undeclared route
 must still exist in that bounded local inventory. Generic `probe(profile)` and
 `prepare!(profile)` remain compatible for legacy profiles. OpenCode's ordinary

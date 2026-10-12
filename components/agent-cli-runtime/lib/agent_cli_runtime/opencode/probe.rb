@@ -173,9 +173,6 @@ module AgentCliRuntime
             selected[key] = value.to_s
           end
         end
-        %w[
-          BUNDLE_BIN_PATH BUNDLE_GEMFILE GEM_HOME GEM_PATH RUBYLIB RUBYOPT
-        ].each { |key| selected[key] = nil }
         profile.env_bin_override_keys.each do |key|
           selected[key] = env[key].to_s unless env[key].to_s.empty?
         end
@@ -190,6 +187,11 @@ module AgentCliRuntime
 
           selected[key] = value.to_s
         end
+        # The denylist scrub must stay last: every caller-controlled channel
+        # above (credential keys, executable overrides, the overlay) copies
+        # selected values into the child environment, so no selection may
+        # reintroduce a scrubbed runtime injection key.
+        SCRUBBED_RUNTIME_ENVIRONMENT_KEYS.each { |key| selected[key] = nil }
         selected.freeze
       end
       private_class_method :child_environment

@@ -675,6 +675,69 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     assert_match(/cannot override the OpenCode overlay/, error.message)
   end
 
+  def test_probe_request_rejects_scrubbed_runtime_keys_as_credential_keys
+    profile = AgentCliRuntime::Profiles.fetch(:opencode)
+    %w[
+      BUNDLE_BIN_PATH BUNDLE_GEMFILE GEM_HOME GEM_PATH RUBYLIB RUBYOPT
+    ].each do |key|
+      error = assert_raises(ArgumentError) do
+        AgentCliRuntime::ProbeRequest.new(
+          profile:, route: "anthropic/claude-sonnet-4-5",
+          credential_environment_keys: [ key ]
+        )
+      end
+      assert_match(/cannot restore scrubbed runtime injection keys/, error.message)
+      assert_includes error.message, key
+    end
+  end
+
+  def test_preparation_request_rejects_scrubbed_runtime_keys_as_credential_keys
+    %w[
+      BUNDLE_BIN_PATH BUNDLE_GEMFILE GEM_HOME GEM_PATH RUBYLIB RUBYOPT
+    ].each do |key|
+      error = assert_raises(ArgumentError) do
+        AgentCliRuntime::OpenCodePreparationRequest.new(
+          request: AgentCliRuntime::Request.new(profile: :opencode, prompt: "test"),
+          working_directory: Dir.pwd,
+          invocation_root: File.join(Dir.tmpdir, "unused-opencode-root"),
+          credential_environment_keys: [ key ]
+        )
+      end
+      assert_match(/cannot restore scrubbed runtime injection keys/, error.message)
+      assert_includes error.message, key
+    end
+  end
+
+  def test_probe_child_environment_keeps_scrubbed_runtime_keys_nil_across_credential_selection
+    profile = AgentCliRuntime::Profiles.fetch(:opencode)
+    request = AgentCliRuntime::ProbeRequest.new(
+      profile:, route: "anthropic/claude-sonnet-4-5",
+      environment: {
+        "XDG_CONFIG_HOME" => "/fixture/config"
+      },
+      credential_environment_keys: [ "ANTHROPIC_API_KEY" ]
+    )
+
+    child = AgentCliRuntime::OpenCode::Probe.send(
+      :child_environment, profile, request,
+      env: {
+        "PATH" => ENV.fetch("PATH"),
+        "RUBYOPT" => "-r/ambient/missing",
+        "GEM_HOME" => "/ambient/gems",
+        "ANTHROPIC_API_KEY" => "secret-canary"
+      }
+    )
+
+    %w[
+      BUNDLE_BIN_PATH BUNDLE_GEMFILE GEM_HOME GEM_PATH RUBYLIB RUBYOPT
+    ].each do |key|
+      assert_nil child[key],
+                 "expected #{key} to stay scrubbed despite ambient values"
+    end
+    assert_equal "/fixture/config", child.fetch("XDG_CONFIG_HOME")
+    assert_equal "secret-canary", child.fetch("ANTHROPIC_API_KEY")
+  end
+
   def test_route_probe_is_fail_soft_when_the_binary_is_missing
     request = AgentCliRuntime::ProbeRequest.new(
       profile: :opencode,

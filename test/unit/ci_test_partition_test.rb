@@ -9,7 +9,7 @@ class CiTestPartitionTest < Minitest::Test
   include HiveTestHelper
 
   ROOT = File.expand_path("../..", __dir__)
-  UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+  UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
   DOWNLOAD_ARTIFACT_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
   RAKEFILE_CONSTANTS = %i[
     HIVE_CI_GATE_TESTS

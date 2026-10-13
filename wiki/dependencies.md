@@ -55,8 +55,8 @@ The live-agent validation workflow pins `actions/setup-node` v7.0.0 to
 v7 ESM migration does not change Hive's workflow contract. The job runs on a
 GitHub-hosted runner.
 
-All nine paired `actions/download-artifact` calls pin v8.0.1 to
-`3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`. Existing artifact names,
+The `actions/download-artifact` workflow calls pin v8.0.2 to
+`9000827ccba6bdab643e8b6fd33ac0654aef8333`. Existing artifact names,
 patterns, merge behavior, and destinations remain unchanged. Hive keeps
 archive-mode uploads, while v8's default strict digest verification causes a
 corrupted or substituted artifact to fail the job instead of merely warning.

@@ -98,7 +98,7 @@ module Hive
 
       def read_only_scope(profile)
         return {} unless @read_only
-        if Hive::AgentSupport.supports?(profile, :Interactive)
+        if Hive::AgentSupport.supports?(profile, :Launch)
           scope = Hive::PermissionScope.resolve(
             "read-only",
             task_folder: @project_root,

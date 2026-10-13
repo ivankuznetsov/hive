@@ -121,7 +121,7 @@ module Hive
             agent_custody: agent_custody
           }
           spawn_result =
-            if Hive::AgentSupport.supports?(profile, :Interactive)
+            if Hive::AgentSupport.supports?(profile, :Launch)
               Hive::Stages::Base.spawn_claude!(
                 task,
                 cfg,

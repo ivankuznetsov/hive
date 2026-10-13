@@ -22,21 +22,9 @@ module Hive::AgentSupport::Claude::Interactive
   # A repainted session banner means any trust dialog above it is scrollback.
   VERSION_BANNER_LINE = /\AClaude Code v\d/.freeze
 
-  PLANNER_TOOLS = "Read,Write,Edit,LS".freeze
-  IMPLEMENTER_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
-  # Stage sessions run detached in tmux and only finish through the Stop hook,
-  # so a question menu has no one to answer it and hangs the stage until its
-  # timeout. Every launch denies it, whatever the permission scope.
-  HEADLESS_DENIED_TOOLS = %w[AskUserQuestion].freeze
-
-  def ensure_claude_profile!(profile)
-    return if profile.name == :claude
-
-    raise Hive::AgentError, "ClaudeLauncher only supports the claude profile; got #{profile.name.inspect}"
-  end
-
   def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
-                      allowed_tools: PLANNER_TOOLS, disallowed_tools: nil,
+                      allowed_tools: Hive::AgentSupport::Claude::Launch::PLANNER_TOOLS,
+                      disallowed_tools: nil,
                       cli_flags: [], mcp_config_path: nil,
                       strict_mcp_config: false, runtime_policy: nil)
     if runtime_policy
@@ -55,7 +43,8 @@ module Hive::AgentSupport::Claude::Interactive
     command.concat(runtime_policy ? runtime_policy.cli_flags : mcp_cli_flags(mcp_config_path, strict_mcp_config))
     allowed = Hive::PermissionScope.tool_csv(allowed_tools)
     disallowed = Hive::PermissionScope.tool_csv(
-      Hive::PermissionScope.tool_csv(disallowed_tools).to_s.split(",") + HEADLESS_DENIED_TOOLS
+      Hive::PermissionScope.tool_csv(disallowed_tools).to_s.split(",") +
+        Hive::AgentSupport::Claude::Launch::DENIED_TOOLS
     )
     command.concat([ "--allowedTools", allowed ]) if allowed
     command.concat([ "--disallowedTools", disallowed ]) if disallowed
@@ -67,14 +56,6 @@ module Hive::AgentSupport::Claude::Interactive
       Hive::AgentProfiles.lookup(:claude).subscription_environment(unset_value: "")
     ).merge("HIVE_SCREENOTE_BASE_URL" => "", "HIVE_TASK_STAGE_DIR" => task.folder)
     [ "/usr/bin/env", "-i", *environment.sort.map { |key, value| "#{key}=#{value}" }, *command ]
-  end
-
-  def mcp_cli_flags(path, strict)
-    return [] if path.to_s.strip.empty?
-
-    flags = [ "--mcp-config", path ]
-    flags << "--strict-mcp-config" if strict
-    flags
   end
 
   def claude_trust_prompt?(pane)

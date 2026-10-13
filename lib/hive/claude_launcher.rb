@@ -19,6 +19,7 @@ require "hive/tmux_runner"
 
 module Hive
   module ClaudeLauncher
+    extend Hive::AgentSupport::Claude::Launch
     extend Hive::AgentSupport::Claude::Interactive
 
     READY_WAIT_TIMEOUT_SEC = 5
@@ -55,8 +56,8 @@ module Hive
     # is intentional: both forms are normalized by PermissionScope.tool_csv
     # at the argv chokepoint, which accepts CSV String | Array | nil (see its
     # doc for the idempotency caveat).
-    PLANNER_ALLOWED_TOOLS = Hive::AgentSupport::Claude::Interactive::PLANNER_TOOLS
-    IMPLEMENTER_ALLOWED_TOOLS = Hive::AgentSupport::Claude::Interactive::IMPLEMENTER_TOOLS
+    PLANNER_ALLOWED_TOOLS = Hive::AgentSupport::Claude::Launch::PLANNER_TOOLS
+    IMPLEMENTER_ALLOWED_TOOLS = Hive::AgentSupport::Claude::Launch::IMPLEMENTER_TOOLS
     DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS
 
     ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024

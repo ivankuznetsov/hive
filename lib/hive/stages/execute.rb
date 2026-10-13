@@ -627,7 +627,7 @@ module Hive
           status_mode: :exit_code_only,
           **launch_arguments
         }
-        result = if Hive::AgentSupport.supports?(profile, :Interactive)
+        result = if Hive::AgentSupport.supports?(profile, :Launch)
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task,
             cfg,

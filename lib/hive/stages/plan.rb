@@ -221,7 +221,7 @@ module Hive
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
-        if Hive::AgentSupport.supports?(profile, :Interactive)
+        if Hive::AgentSupport.supports?(profile, :Launch)
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task,
             cfg,

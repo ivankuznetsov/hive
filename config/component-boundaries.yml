@@ -554,6 +554,7 @@ components:
         - Hive::AgentSupport::StreamMeter
         - Hive::AgentSupport::Claude
         - Hive::AgentSupport::Claude::Interactive
+        - Hive::AgentSupport::Claude::Launch
         - Hive::AgentSupport::Claude::Runtime
         - Hive::AgentSupport::Claude::Skills
         - Hive::AgentSupport::Codex
@@ -580,6 +581,7 @@ components:
       - lib/hive/agent_support/stream_meter.rb
       - lib/hive/agent_support/claude.rb
       - lib/hive/agent_support/claude/interactive.rb
+      - lib/hive/agent_support/claude/launch.rb
       - lib/hive/agent_support/claude/runtime.rb
       - lib/hive/agent_support/claude/skills.rb
       - lib/hive/agent_support/claude/stream.rb
@@ -616,6 +618,7 @@ components:
     internal_collaborators:
       - Hive::AgentSupport::OpenCode::Skills
       - Hive::AgentSupport::Claude::Interactive
+      - Hive::AgentSupport::Claude::Launch
       - Hive::AgentSupport::Claude::Runtime
       - Hive::AgentSupport::Claude::Skills
       - Hive::AgentSupport::Codex::ArtifactPolicy

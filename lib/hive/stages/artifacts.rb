@@ -648,7 +648,7 @@ module Hive
               runtime_policy: producer_runtime_policy
             )
           end
-          unless Hive::AgentSupport.supports?(profile, :Interactive)
+          unless Hive::AgentSupport.supports?(profile, :Launch)
             raise Hive::ConfigError,
                   "outcome-evidence producer agent #{profile.name.inspect} cannot enforce " \
                   "controller-scoped evidence writes"
@@ -670,7 +670,7 @@ module Hive
            !(spec.is_a?(Hash) && spec["preset"].to_s == "read-only")
           raise Hive::ConfigError, "artifacts.evidence.#{role} permissions cannot exceed read-only"
         end
-        stage_scoped = Hive::AgentSupport.supports?(profile, :Interactive) ||
+        stage_scoped = Hive::AgentSupport.supports?(profile, :Launch) ||
           Hive::AgentSupport.supports?(profile, :LaunchPolicy)
         if role != "producer" && !stage_scoped
           if profile.read_only_supported?

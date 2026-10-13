@@ -141,7 +141,7 @@ module Hive
             status_mode: :output_file_exists
           }
           spawn_result =
-            if Hive::AgentSupport.supports?(profile, :Interactive)
+            if Hive::AgentSupport.supports?(profile, :Launch)
               Hive::Stages::Base.spawn_claude!(
                 task,
                 cfg,

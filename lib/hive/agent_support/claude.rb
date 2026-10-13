@@ -2,6 +2,7 @@ require "hive/agent_support"
 
 module Hive::AgentSupport::Claude
   autoload :Interactive, "hive/agent_support/claude/interactive"
+  autoload :Launch, "hive/agent_support/claude/launch"
   autoload :Runtime, "hive/agent_support/claude/runtime"
   autoload :Skills, "hive/agent_support/claude/skills"
   autoload :SetupAdapter, "hive/agent_support/claude/setup_adapter"

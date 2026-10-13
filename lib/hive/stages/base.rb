@@ -1022,6 +1022,15 @@ module Hive
         if max_budget_usd && !profile.budget_flag
           warn_budget_unenforced(task, profile, max_budget_usd)
         end
+        # A Claude question menu has no one to answer it on a detached
+        # launch, so every Claude spawn denies it. A runtime_policy carries
+        # its own deny list, which already includes it.
+        if runtime_policy.nil? && Hive::AgentSupport.supports?(profile, :Interactive)
+          disallowed_tools = Hive::PermissionScope.tool_csv(
+            Hive::PermissionScope.tool_csv(disallowed_tools).to_s.split(",") +
+              Hive::AgentSupport::Claude::Interactive::HEADLESS_DENIED_TOOLS
+          )
+        end
 
         # `cli_flags: nil` means "no explicit flags — derive model/effort
         # (and permission_mode) from cfg". `cli_flags: []` means "explicitly

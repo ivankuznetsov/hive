@@ -885,6 +885,30 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # Under tmux, Claude reviewers got the AskUserQuestion deny through the
+  # shared session; a headless reviewer spawn must carry it in argv.
+  def test_claude_reviewer_argv_denies_ask_user_question
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
+
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
+
+      reviewer.run!
+
+      argv = File.readlines(File.join(log_dir, "fake-claude-argv.log"), chomp: true)
+      deny_index = argv.index("arg=--disallowedTools")
+      refute_nil deny_index, "Claude reviewer spawn must pass --disallowedTools"
+      denied = argv.fetch(deny_index + 1).delete_prefix("arg=").split(",")
+      assert_equal 1, denied.count("AskUserQuestion")
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
   # --- Plan-context flow through to spawned subprocess argv ---
   #
   # The render_prompt tests (above) verify the prompt STRING is built

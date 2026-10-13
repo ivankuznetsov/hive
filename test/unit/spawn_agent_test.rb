@@ -206,6 +206,106 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  # The value following `--disallowedTools` in the fake-claude argv log, or
+  # nil when the flag is absent.
+  def logged_disallowed_tools(log_dir)
+    lines = File.readlines(File.join(log_dir, "fake-claude-argv.log"), chomp: true)
+    index = lines.index("arg=--disallowedTools")
+    index && lines.fetch(index + 1).delete_prefix("arg=")
+  end
+
+  def spawn_claude_logging_argv(dir, **kwargs)
+    task = make_task(dir)
+    File.write(task.state_file, "<!-- WAITING -->\n")
+    log_dir = File.join(dir, "argv-log")
+    FileUtils.mkdir_p(log_dir)
+    ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+    Hive::Stages::Base.spawn_agent(
+      task, prompt: "x", max_budget_usd: 1, timeout_sec: 5, **kwargs
+    )
+    log_dir
+  end
+
+  def test_claude_spawn_without_caller_deny_denies_ask_user_question
+    with_tmp_dir do |dir|
+      log_dir = spawn_claude_logging_argv(dir)
+
+      assert_equal "AskUserQuestion", logged_disallowed_tools(log_dir)
+    end
+  end
+
+  def test_claude_spawn_merges_ask_user_question_into_caller_deny
+    with_tmp_dir do |dir|
+      log_dir = spawn_claude_logging_argv(dir, disallowed_tools: %w[Write])
+
+      assert_equal "Write,AskUserQuestion", logged_disallowed_tools(log_dir)
+    end
+  end
+
+  def test_claude_spawn_does_not_duplicate_caller_supplied_ask_user_question
+    with_tmp_dir do |dir|
+      log_dir = spawn_claude_logging_argv(
+        dir, disallowed_tools: "AskUserQuestion,Write"
+      )
+
+      assert_equal "AskUserQuestion,Write", logged_disallowed_tools(log_dir)
+    end
+  end
+
+  def test_claude_spawn_with_runtime_policy_keeps_the_policy_deny_list
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      policy = managed_output_policy(task, FAKE_BIN, File.join(task.folder, "out.md"))
+      captured = nil
+      agent = Object.new
+      agent.define_singleton_method(:run!) { { status: :ok } }
+      constructor = lambda do |**kwargs|
+        captured = kwargs
+        agent
+      end
+
+      with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+        with_replaced_singleton_method(Hive::Agent, :new, constructor) do
+          Hive::Stages::Base.spawn_agent(
+            task, prompt: "x", max_budget_usd: nil, timeout_sec: 5,
+            runtime_policy: policy, cleanup_runtime_policy: false
+          )
+        end
+      end
+
+      assert_nil captured.fetch(:disallowed_tools),
+                 "a runtime_policy launch must not gain a spawn-level deny"
+      assert_same policy, captured.fetch(:runtime_policy)
+    end
+  end
+
+  def test_non_claude_spawns_gain_no_ask_user_question_deny
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      %i[codex pi].each do |name|
+        captured = nil
+        agent = Object.new
+        agent.define_singleton_method(:run!) { { status: :ok } }
+        constructor = lambda do |**kwargs|
+          captured = kwargs
+          agent
+        end
+
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+          with_replaced_singleton_method(Hive::Agent, :new, constructor) do
+            Hive::Stages::Base.spawn_agent(
+              task, prompt: "x", max_budget_usd: nil, timeout_sec: 5,
+              profile: Hive::AgentProfiles.lookup(name),
+              status_mode: :exit_code_only
+            )
+          end
+        end
+
+        assert_nil captured.fetch(:disallowed_tools), "#{name} must gain no deny"
+      end
+    end
+  end
+
   def test_typed_permission_policy_reaches_agent
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -276,6 +376,8 @@ class SpawnAgentTest < Minitest::Test
       refute_includes argv, "--permission-mode",
                        "codex spawns must never receive Claude's --permission-mode flag"
       refute_includes argv, "auto"
+      refute_includes argv, "--disallowedTools"
+      refute(argv.any? { |arg| arg.include?("AskUserQuestion") })
       assert_includes argv, "--dangerously-bypass-approvals-and-sandbox",
                       "codex keeps its own skip flag regardless of claude.permission_mode in cfg"
     end
@@ -327,6 +429,7 @@ class SpawnAgentTest < Minitest::Test
       assert_includes argv, "arg=high"
       refute_includes argv, "arg=sonnet"
       refute_includes argv, "arg=medium"
+      assert_equal "AskUserQuestion", logged_disallowed_tools(log_dir)
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end

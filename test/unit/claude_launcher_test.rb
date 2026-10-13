@@ -119,6 +119,45 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  # The headless branch delegates to Stages::Base.spawn_agent, which owns
+  # the AskUserQuestion deny: a plan launch with no caller deny must still
+  # render it, and per-stage model/effort must reach argv unchanged.
+  def test_headless_plan_launch_denies_ask_user_question_and_keeps_model_effort
+    with_tmp_task(stage: "3-plan") do |task|
+      prepare_test_task_run(task.folder)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      log_dir = File.join(File.dirname(task.folder), "argv-log")
+      FileUtils.mkdir_p(log_dir)
+      fake_bin = File.expand_path("../fixtures/fake-claude", __dir__)
+      with_env("HIVE_CLAUDE_BIN" => fake_bin, "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir) do
+        Hive::AgentProfile.reset_version_cache!
+        Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: { "claude" => { "mode" => "headless" } },
+          prompt: "plan",
+          add_dirs: [ task.folder ],
+          cwd: task.folder,
+          max_budget_usd: 1,
+          timeout_sec: 5,
+          log_label: "plan",
+          session_name: "hive-test-session",
+          allowed_tools: %w[Read Write Edit LS],
+          model: "opus",
+          effort: "high"
+        )
+      end
+
+      argv = File.readlines(File.join(log_dir, "fake-claude-argv.log"), chomp: true)
+      deny_index = argv.index("arg=--disallowedTools")
+      refute_nil deny_index, "headless Claude launch must pass --disallowedTools"
+      assert_equal "arg=AskUserQuestion", argv.fetch(deny_index + 1)
+      assert_equal "arg=opus", argv.fetch(argv.index("arg=--model") + 1)
+      assert_equal "arg=high", argv.fetch(argv.index("arg=--effort") + 1)
+    ensure
+      Hive::AgentProfile.reset_version_cache!
+    end
+  end
+
   def test_tmux_mode_delegates_configured_permission_mode_to_shared_session
     with_tmp_task do |task|
       captured = nil

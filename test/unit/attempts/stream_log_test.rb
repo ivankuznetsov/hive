@@ -487,23 +487,38 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
-  def test_streaming_reconciliation_rejects_a_high_sequence_with_invalid_base64
+  def test_streaming_reconciliation_matches_public_replay_for_invalid_base64
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
       log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       log.append(:stdout, "published")
-      malformed = JSON.generate(
-        "sequence" => 99,
-        "timestamp" => NOW.iso8601(6),
-        "channel" => "stdout",
-        "data" => "not base64"
-      ) + "\n"
-      seed_torn_tail(path, malformed)
+      [ "not base64", "AB==", "AAB=" ].each_with_index do |data, index|
+        malformed = JSON.generate(
+          "sequence" => 97 + index,
+          "timestamp" => NOW.iso8601(6),
+          "channel" => "stdout",
+          "data" => data
+        ) + "\n"
+        seed_torn_tail(path, malformed)
+      end
 
       assert_equal 2, log.append(:stdout, "next")
       assert_equal [ 1, 2 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
     ensure
       log&.close unless log&.closed?
+    end
+  end
+
+  def test_reconciliation_base64_validation_matches_strict_decoder_padding_rules
+    [ "", "AAAA", "AA==", "AAA=", "AB==", "AAB=", "not base64" ].each do |encoded|
+      replayable = begin
+        Base64.strict_decode64(encoded)
+        true
+      rescue ArgumentError
+        false
+      end
+
+      assert_equal replayable, Hive::Attempts::StreamLog.valid_base64?(encoded), encoded.inspect
     end
   end
 
@@ -550,6 +565,25 @@ class AttemptsStreamLogTest < Minitest::Test
         other&.close unless other&.closed?
         log&.close unless log&.closed?
       end
+    end
+  end
+
+  def test_strict_reconciliation_translates_an_eof_error
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      log.append(:stdout, "one")
+      reader = ReadFile.new(log.instance_variable_get(:@read_io), error: EOFError.new("short read"))
+      log.instance_variable_set(:@read_io, reader)
+      other = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      other.append(:stdout, "two")
+      other.close
+
+      error = assert_raises(IOError) { log.append(:stdout, "blocked") }
+      assert_match(/reported boundary/, error.message)
+    ensure
+      other&.close unless other&.closed?
+      log&.close unless log&.closed?
     end
   end
 
@@ -1058,6 +1092,52 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_constructor_interrupt_closes_descriptors_and_custody_without_masking_the_interrupt
+    [ :lock, :scan ].each do |phase|
+      with_tmp_dir do |root|
+        path = File.join(root, "logs", "#{phase}.frames")
+        FileUtils.mkdir_p(File.dirname(path))
+        File.binwrite(path, serialized_frame(sequence: 1, bytes: "published"))
+        custody = CustodyFile.new(close_error: IOError.new("custody close failed"))
+        original_open = File.method(:open)
+        opened = []
+        interrupt = Interrupt.new("#{phase} interrupted")
+        replacement = lambda do |candidate, *args, **kwargs, &block|
+          io = original_open.call(candidate, *args, **kwargs, &block)
+          next io unless candidate == path && args.first.is_a?(Integer)
+
+          if (args.first & File::WRONLY) == File::WRONLY
+            writer = FileWriter.new(
+              io, lock_error: (interrupt if phase == :lock),
+              close_error: IOError.new("append close failed")
+            )
+            opened << writer
+            writer
+          else
+            reader = ReadFile.new(
+              io, error: (interrupt if phase == :scan),
+              close_error: IOError.new("read close failed")
+            )
+            opened << reader
+            reader
+          end
+        end
+
+        with_replaced_singleton_method(File, :open, replacement) do
+          raised = assert_raises(Interrupt) do
+            Hive::Attempts::StreamLog.new(path, custody_io: custody)
+          end
+          assert_same interrupt, raised
+        end
+        assert_equal 2, opened.length
+        assert opened.all?(&:closed?), "#{phase} interrupt must close both log descriptors"
+        assert custody.closed?, "#{phase} interrupt must close custody"
+      ensure
+        custody&.close unless custody&.closed?
+      end
+    end
+  end
+
   def test_constructor_rejects_descriptors_for_different_inodes_and_closes_them
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
@@ -1125,6 +1205,60 @@ class AttemptsStreamLogTest < Minitest::Test
       )
       assert_same unlock_error, assert_raises(IOError) { custody_log.close }
       assert failing_custody.closed?
+    end
+  end
+
+  def test_close_releases_remaining_resources_when_append_descriptor_replacement_fails
+    [ :open, :validation, :mismatch, :cleanup, :writer_close ].each do |failure|
+      with_tmp_dir do |root|
+        path = File.join(root, "logs", "#{failure}.frames")
+        other_path = File.join(root, "other.frames")
+        File.binwrite(other_path, "") if failure == :mismatch
+        custody = CustodyFile.new
+        log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW }, custody_io: custody)
+        reader = log.instance_variable_get(:@read_io)
+        if [ :validation, :cleanup ].include?(failure)
+          reader.define_singleton_method(:stat) { raise IOError, "validation failed" }
+        end
+        writer = FileWriter.new(
+          log.instance_variable_get(:@io), unlock_error: Errno::EIO.new("unlock"),
+          close_error: (IOError.new("writer close failed") if failure == :writer_close)
+        )
+        log.instance_variable_set(:@io, writer)
+        original_open = File.method(:open)
+        uninstalled = nil
+        replacement = lambda do |candidate, *args, **kwargs, &block|
+          replacing = candidate == path && args.first.is_a?(Integer) &&
+            (args.first & File::WRONLY) == File::WRONLY && (args.first & File::CREAT).zero?
+          next original_open.call(candidate, *args, **kwargs, &block) unless replacing
+          raise Errno::EMFILE, "replacement unavailable" if failure == :open
+
+          opened = original_open.call(failure == :mismatch ? other_path : candidate, *args, **kwargs, &block)
+          uninstalled = if failure == :cleanup
+            FileWriter.new(opened, close_error: IOError.new("replacement close failed"))
+          else
+            opened
+          end
+        end
+
+        with_replaced_singleton_method(File, :open, replacement) do
+          assert_raises(Errno::EIO) { log.append(:stdout, "published") }
+        end
+        assert writer.closed?
+        if failure == :writer_close
+          refute uninstalled.closed?, "the successfully installed replacement must remain open"
+        else
+          assert uninstalled.closed? if uninstalled
+        end
+        refute log.closed?, "retained reader and custody still require explicit cleanup"
+
+        log.close
+        assert reader.closed?
+        assert custody.closed?
+        assert log.closed?
+      ensure
+        log&.close unless log&.closed?
+      end
     end
   end
 

@@ -64,7 +64,9 @@ module Hive
 
       # @api private
       def self.valid_base64?(encoded)
-        encoded.match?(%r{\A(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?\z})
+        encoded.match?(
+          %r{\A(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?\z}
+        )
       end
 
       def initialize(path, clock: -> { Time.now.utc }, custody_io: nil,
@@ -88,7 +90,7 @@ module Hive
       rescue Errno::ELOOP
         cleanup_failed_initialization
         raise IOError, "attempt log path is a symlink"
-      rescue StandardError
+      rescue Exception # rubocop:disable Lint/RescueException -- every failed construction releases custody
         cleanup_failed_initialization
         raise
       end
@@ -129,13 +131,13 @@ module Hive
 
       def close
         @mutex.synchronize do
-          return if @io.closed?
+          return if resources_closed?
 
           close_resources
         end
       end
 
-      def closed? = @mutex.synchronize { @io.closed? }
+      def closed? = @mutex.synchronize { resources_closed? }
 
       private
 
@@ -277,8 +279,10 @@ module Hive
       def close_resources
         # Preserve the historical retry contract: a flush/fsync failure leaves
         # the writer open so Supervisor can append its terminal diagnostic.
-        @io.flush
-        @io.fsync
+        unless @io.closed?
+          @io.flush
+          @io.fsync
+        end
 
         error = run_cleanup_steps(
           -> { @read_io.close unless @read_io.closed? },
@@ -290,12 +294,16 @@ module Hive
         raise error if error
       end
 
+      def resources_closed?
+        @io.closed? && @read_io.closed? && (!@custody_io || @custody_io.closed?)
+      end
+
       def run_cleanup_steps(*steps)
         first_error = nil
         steps.each do |step|
           begin
             step.call
-          rescue StandardError => error
+          rescue Exception => error # rubocop:disable Lint/RescueException -- finish cleanup before reraising
             first_error ||= error
           end
         end
@@ -304,6 +312,7 @@ module Hive
 
       def replace_append_descriptor_after_unlock_failure
         failed_io = @io
+        replacement = nil
         begin
           failed_io.close unless failed_io.closed?
         rescue StandardError
@@ -316,12 +325,18 @@ module Hive
         read_status = @read_io.stat
         unless replacement_status.file? && replacement_status.dev == read_status.dev &&
                replacement_status.ino == read_status.ino
-          replacement.close
           return
         end
         @io = replacement
+        replacement = nil
       rescue StandardError
         nil
+      ensure
+        begin
+          replacement&.close unless replacement&.closed?
+        rescue StandardError
+          nil
+        end
       end
 
       def monotonic_now

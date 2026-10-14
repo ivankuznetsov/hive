@@ -181,7 +181,8 @@ error during construction or reconciliation fails closed instead of becoming
 an empty sequence-zero log. Public `StreamLog.read` remains tolerant of
 filesystem errors and malformed records. Constructor failure releases any
 acquired log lock and closes both log descriptors and an owned custody
-descriptor without replacing the initiating error.
+descriptor without replacing the initiating error, including asynchronous
+unwinds such as `Interrupt`.
 
 Every append takes the per-instance mutex and then polls for the log's exclusive
 advisory lock with nonblocking `flock` and a five-second monotonic deadline.
@@ -189,8 +190,9 @@ While holding both, it inspects the physical last byte, optionally seals the
 tail, reconciles the sequence when its coherent sequence/size snapshot is
 stale, writes and flushes the complete frame, and only then publishes the new
 sequence and size snapshot. Reconciliation streams complete records, validates
-their replayability, and tracks only the maximum sequence; it does not decode
-payloads, allocate frames, sort, or retain the whole log. An unchanged healthy
+their replayability—including canonical Base64 padding bits—and tracks only the
+maximum sequence; it does not decode payloads, allocate frames, sort, or retain
+the whole log. An unchanged healthy
 snapshot avoids that scan, but does not skip physical tail inspection. Any
 append failure invalidates the snapshot, so the next append performs streaming
 strict reconciliation under the lock. The same mutex makes `close` and
@@ -230,7 +232,10 @@ handles.
 leaves the writer and custody handles open for a caller-controlled retry; this
 lets Supervisor append one terminal diagnostic and retry close after a one-shot
 sync failure. Once synchronization succeeds, all descriptor and custody cleanup
-steps run while preserving the first cleanup error.
+steps run while preserving the first cleanup error. If lock-release recovery
+cannot install a replacement append descriptor, the instance remains explicitly
+closeable until its retained reader and custody handles have also been released;
+an opened but rejected replacement is closed immediately.
 
 ## Maintenance
 

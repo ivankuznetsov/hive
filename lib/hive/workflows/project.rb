@@ -12,15 +12,21 @@ module Hive
       module_function
 
       class NestedProjectActivationError < Hive::Error
-        attr_reader :active_root, :requested_root
+        attr_reader :active_root, :requested_root, :active_workflow_dir, :requested_workflow_dir
 
-        def initialize(active_root, requested_root)
+        def initialize(active_root, requested_root, active_workflow_dir: nil, requested_workflow_dir: nil)
           @active_root = active_root
           @requested_root = requested_root
-          super(
-            "cannot activate project #{requested_root} while project #{active_root} " \
-            "is active on this thread"
-          )
+          @active_workflow_dir = active_workflow_dir
+          @requested_workflow_dir = requested_workflow_dir
+          message = if active_workflow_dir && requested_workflow_dir
+                      "cannot activate workflow directory #{requested_workflow_dir} while " \
+                        "#{active_workflow_dir} is active on this thread"
+          else
+                      "cannot activate project #{requested_root} while project #{active_root} " \
+                        "is active on this thread"
+          end
+          super(message)
         end
       end
 
@@ -50,13 +56,19 @@ module Hive
       # workflows. The Monitor stays held through the caller block, so another
       # thread cannot replace the process-wide project overlay between a
       # descriptor read and its corresponding stage-vocabulary read.
-      def with_active_workflows(project_root, config: nil, hive_state_path: nil)
+      def with_active_workflows(project_root, config: nil, hive_state_path: nil, &block)
         project_root = normalize_project_root(project_root)
         with_project_operation(project_root) do
           activate_with_cleanup!(
             project_root, config: config, hive_state_path: hive_state_path
           )
-          yield Hive::Workflows::Registry, registered_stage_names
+          raise LocalJumpError, "no block given (yield)" unless block
+
+          if block_accepts_stage_names?(block)
+            block.call(Hive::Workflows::Registry, registered_stage_names)
+          else
+            block.call(Hive::Workflows::Registry)
+          end
         end
       end
 
@@ -167,10 +179,26 @@ module Hive
           return
         end
 
+        if reuse_active && nested_project_operation? && @active_root == project_root && @active_fingerprint
+          activation[:reused_active] = true
+          raise NestedProjectActivationError.new(
+            project_root,
+            project_root,
+            active_workflow_dir: @active_fingerprint.first,
+            requested_workflow_dir: workflow_dir
+          )
+        end
+
         activation[:reused_active] = false
         load_overlay!(project_root, workflow_dir)
       end
       private_class_method :activate_overlay!
+
+      def block_accepts_stage_names?(block)
+        positional = block.parameters.select { |kind, _name| [ :req, :opt, :rest ].include?(kind) }
+        positional.any? { |kind, _name| kind == :rest } || positional.length >= 2
+      end
+      private_class_method :block_accepts_stage_names?
 
       # This file is intentionally loadable without the aggregate
       # `hive/workflows` entrypoint (for example, `hive markers clear` reaches

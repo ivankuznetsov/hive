@@ -84,6 +84,29 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_with_active_workflows_skips_stage_vocabulary_when_the_block_does_not_accept_it
+    with_tmp_dir do |project_root|
+      calls = 0
+      original = Hive::Workflows::Project.method(:registered_stage_names)
+      with_replaced_singleton_method(
+        Hive::Workflows::Project,
+        :registered_stage_names,
+        lambda {
+          calls += 1
+          original.call
+        }
+      ) do
+        result = Hive::Workflows::Project.with_active_workflows(project_root) do |registry|
+          assert_same Hive::Workflows::Registry, registry
+          :block_result
+        end
+
+        assert_equal :block_result, result
+        assert_equal 1, calls, "strict config validation is the only required stage-vocabulary read"
+      end
+    end
+  end
+
   def test_rejected_builtin_collision_stage_is_not_part_of_strict_configuration_vocabulary
     with_tmp_dir do |project_root|
       path = write_project_workflow(project_root, "coding", stage_name: "collision-only")
@@ -157,6 +180,28 @@ class WorkflowsProjectTest < Minitest::Test
             refute_includes stage_names, "alpha"
           end
         end
+      end
+    end
+  end
+
+  def test_same_root_nesting_rejects_a_different_workflow_directory_before_mutation
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "flow-a", stage_name: "alpha", hive_state_path: "state-a")
+      write_project_workflow(project_root, "flow-b", stage_name: "beta", hive_state_path: "state-b")
+
+      Hive::Workflows::Project.with_active_workflows(project_root, hive_state_path: "state-a") do |registry, stages|
+        assert_includes registry.ids, :"flow-a"
+        assert_includes stages, "alpha"
+
+        error = assert_raises(Hive::Workflows::Project::NestedProjectActivationError) do
+          Hive::Workflows::Project.stage_names_for_config(project_root, hive_state_path: "state-b")
+        end
+
+        assert_includes error.message, File.join(project_root, "state-a", "workflows")
+        assert_includes error.message, File.join(project_root, "state-b", "workflows")
+        assert_includes registry.ids, :"flow-a"
+        refute_includes registry.ids, :"flow-b"
+        assert_includes stages, "alpha"
       end
     end
   end
@@ -825,8 +870,8 @@ class WorkflowsProjectTest < Minitest::Test
 
   private
 
-    def write_project_workflow(project_root, id, stage_name: "work")
-      workflows_dir = File.join(project_root, ".hive-state", "workflows")
+    def write_project_workflow(project_root, id, stage_name: "work", hive_state_path: ".hive-state")
+      workflows_dir = File.join(project_root, hive_state_path, "workflows")
       instruction_dir = File.join(workflows_dir, id)
       FileUtils.mkdir_p(instruction_dir)
       File.write(File.join(instruction_dir, "#{stage_name}.md"), "Do #{stage_name}.\n")

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-10-14
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -14,7 +14,10 @@ approve/decide rollback, and their live callers now retain and revalidate a
 process-local directory observation. Focused tests force deletion and copied
 same-path replacement before custody, after metadata read, and before
 persistence. Supported `hive drop` participates in the project-commit-lock then
-task-lease order, so those operations serialize. This does not claim protection
+task-lease order, so observed run and plan-review claims now serialize with it
+without retaining the project lock for their long-running work. Cross-device
+cleanup retains the copied directory handle and preserves a destination whose
+identity changes before validation. This does not claim protection
 against an arbitrary same-user filesystem process that ignores Hive locks and
 mutates paths between individual filesystem syscalls; the observation is
 transient custody evidence, not a persistent generation authority or an OS

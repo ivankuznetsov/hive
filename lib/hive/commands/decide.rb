@@ -420,9 +420,13 @@ module Hive
         target = task.workflow.stage_named(outcome.to)
         return repeat_stage!(task, stage, outcome, decision_id) if target.dir == stage.dir
 
+        task_observation = Hive::TaskMeta.observe(task.folder)
+        raise Hive::TaskMeta::StaleTask, "decision task is missing before rollback custody" unless task_observation
+
         record = decision_record(task, stage, outcome, decision_id)
         snapshot = nil
-        observation = lambda do |locked|
+        observation_guard = lambda do |locked|
+          Hive::TaskMeta.validate_observation!(locked.folder, task_observation)
           validate_current_decision!(locked, stage, decision_id)
           snapshot = snapshot_files(locked.folder, [ stage.state_file, target.state_file ])
         end
@@ -435,15 +439,16 @@ module Hive
           Hive::Lock.with_commit_lock(task.hive_state_path) do
             Hive::Commands::Approve.new(
               task.slug, to: target.dir, from: stage.dir, project: task.project_name,
-              force: true, quiet: true, observation_guard: observation,
-              post_rearm_mutation: mutation, commit_lock: false
+              force: true, quiet: true, observation_guard: observation_guard,
+              post_rearm_mutation: mutation, commit_lock: false,
+              task_observation: task_observation
             ).call
           end
         rescue Hive::WrongStage => error
           folder = File.directory?(task.folder) ? task.folder : File.join(
             task.hive_state_path, "stages", target.dir, task.slug
           )
-          restore_files(folder, snapshot) if snapshot
+          restore_files(folder, snapshot, observation: task_observation) if snapshot
           replay = resolve_task
           replay_record = self.class.latest_record(File.join(replay.folder, stage.state_file))
           return emit_same_or_conflicting!(replay, stage, outcome, replay_record) if
@@ -454,23 +459,31 @@ module Hive
           folder = File.directory?(task.folder) ? task.folder : File.join(
             task.hive_state_path, "stages", target.dir, task.slug
           )
-          restore_files(folder, snapshot) if snapshot
+          restore_files(folder, snapshot, observation: task_observation) if snapshot
           raise
         end
 
         moved = Hive::Task.new(File.join(task.hive_state_path, "stages", target.dir, task.slug))
         complete_decision_operation(@decision_operation, moved, record)
         emit_success(moved, stage, outcome, record, applied: true)
+      ensure
+        task_observation&.close
       end
 
       def repeat_stage!(task, stage, outcome, decision_id)
+        observation = Hive::DependencySnapshot.observe_for_admission!(
+          task, missing_message: "decision task is missing before repeat"
+        )
         record = decision_record(task, stage, outcome, decision_id)
         snapshot = nil
         ops = Hive::GitOps.new(task.project_root)
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
           begin
-            Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "decide") do
+            Hive::Lock.with_task_lock(
+              task.folder, slug: task.slug, op: "decide",
+              create: false, observation: observation
+            ) do
               locked = Hive::Task.new(task.folder)
               locked_record = self.class.latest_record(File.join(locked.folder, stage.state_file))
               return emit_same_or_conflicting!(locked, stage, outcome, locked_record) if
@@ -490,8 +503,8 @@ module Hive
             )
           rescue StandardError, Interrupt
             if snapshot
-              issue = restore_files(task.folder, snapshot)
-              restage_restored_files(task, snapshot) unless issue
+              issue = restore_files(task.folder, snapshot, observation: observation)
+              restage_restored_files(task, snapshot, observation: observation) unless issue
             end
             raise
           end
@@ -500,6 +513,8 @@ module Hive
         current = Hive::Task.new(task.folder)
         complete_decision_operation(@decision_operation, current, record)
         emit_success(current, stage, outcome, record, applied: true)
+      ensure
+        observation&.close
       end
 
       def validate_current_decision!(task, stage, decision_id)

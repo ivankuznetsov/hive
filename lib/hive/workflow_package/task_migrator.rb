@@ -306,12 +306,27 @@ module Hive
               rescue Errno::EXDEV
                 begin
                   FileUtils.cp_r(operation.source, operation.destination)
-                  destination_handle = Hive::TaskMeta.capture_relocation_handle!(
-                    operation.destination, operation.observation
-                  )
                 rescue StandardError
                   FileUtils.rm_rf(operation.destination) if File.exist?(operation.source)
                   raise
+                end
+                copied_handle = Hive::TaskMeta.capture_directory_handle!(operation.destination)
+                begin
+                  destination_handle = Hive::TaskMeta.capture_relocation_handle!(
+                    operation.destination, operation.observation,
+                    directory_handle: copied_handle
+                  )
+                  copied_handle = nil
+                rescue StandardError
+                  if File.exist?(operation.source) &&
+                     Hive::TaskMeta.directory_handle_matches?(
+                       operation.destination, copied_handle
+                     )
+                    FileUtils.rm_rf(operation.destination)
+                  end
+                  raise
+                ensure
+                  copied_handle&.close unless copied_handle&.closed?
                 end
                 FileUtils.rm_rf(operation.source)
                 cross_device = true
@@ -404,12 +419,25 @@ module Hive
               rescue Errno::EXDEV
                 begin
                   FileUtils.cp_r(operation.destination, operation.source)
-                  destination_handle = Hive::TaskMeta.capture_relocation_handle!(
-                    operation.source, operation.observation
-                  )
                 rescue StandardError
                   FileUtils.rm_rf(operation.source) if File.exist?(operation.destination)
                   raise
+                end
+                copied_handle = Hive::TaskMeta.capture_directory_handle!(operation.source)
+                begin
+                  destination_handle = Hive::TaskMeta.capture_relocation_handle!(
+                    operation.source, operation.observation,
+                    directory_handle: copied_handle
+                  )
+                  copied_handle = nil
+                rescue StandardError
+                  if File.exist?(operation.destination) &&
+                     Hive::TaskMeta.directory_handle_matches?(operation.source, copied_handle)
+                    FileUtils.rm_rf(operation.source)
+                  end
+                  raise
+                ensure
+                  copied_handle&.close unless copied_handle&.closed?
                 end
                 FileUtils.rm_rf(operation.destination)
                 cross_device = true

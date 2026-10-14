@@ -71,7 +71,8 @@ module Hive
           @task_observation = observation
           Hive::Lock.with_task_lock(
             @task.folder, slug: @task.slug, op: "plan-review",
-            create: false, observation: observation
+            create: false, observation: observation,
+            acquire_under_commit_lock: task_hive_state_path
           ) do
             @store.with_orchestration_lock(observation: observation) { advance_unlocked! }
           end
@@ -85,6 +86,12 @@ module Hive
       end
 
       private
+
+      def task_hive_state_path
+        return @task.hive_state_path if @task.respond_to?(:hive_state_path)
+
+        File.dirname(File.dirname(File.dirname(@task.folder)))
+      end
 
       def advance_unlocked!
         plan_path = File.join(@task.folder, "plan.md")

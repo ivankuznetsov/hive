@@ -72,7 +72,7 @@ module Hive
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
                      observation_guard: nil, post_rearm_mutation: nil, commit_lock: true,
                      clock: DEFAULT_CLOCK, dependency_admission: true,
-                     idempotency_key: nil, command_receipt_store: nil)
+                     idempotency_key: nil, command_receipt_store: nil, task_observation: nil)
         @target = target
         @to = to
         @from = from
@@ -90,6 +90,7 @@ module Hive
         @dependency_admission = dependency_admission
         @idempotency_key = idempotency_key
         @command_receipt_store = command_receipt_store
+        @task_observation = task_observation
       end
 
       def call
@@ -409,7 +410,8 @@ module Hive
       #     during the mv. Its stable task id survives the folder move and its
       #     holder nonce keeps release fenced from a replacement owner.
       def perform_move_and_commit(task, dest_stage, enforce_admission: false)
-        observation = Hive::DependencySnapshot.observe_for_admission!(
+        owned_observation = @task_observation.nil?
+        observation = @task_observation || Hive::DependencySnapshot.observe_for_admission!(
           task, missing_message: "approve task is missing before mutation"
         )
         new_folder = nil
@@ -472,7 +474,7 @@ module Hive
         end
         [ new_folder, commit_action ]
       ensure
-        observation&.close
+        observation&.close if owned_observation
       end
 
       def with_optional_commit_lock(hive_state_path, &block)
@@ -698,10 +700,16 @@ module Hive
                 "cross-device move failed while copying; partial destination cleaned up. " \
                 "underlying: #{e.class}: #{e.message}"
         end
+        copied_handle = Hive::TaskMeta.capture_directory_handle!(dst)
         begin
-          destination_handle = Hive::TaskMeta.capture_relocation_handle!(dst, observation)
+          destination_handle = Hive::TaskMeta.capture_relocation_handle!(
+            dst, observation, directory_handle: copied_handle
+          )
+          copied_handle = nil
         rescue StandardError
-          FileUtils.rm_rf(dst) if File.exist?(src)
+          if File.exist?(src) && Hive::TaskMeta.directory_handle_matches?(dst, copied_handle)
+            FileUtils.rm_rf(dst)
+          end
           raise
         end
         FileUtils.rm_rf(src)
@@ -710,6 +718,7 @@ module Hive
         )
         destination_handle = nil
       ensure
+        copied_handle&.close unless copied_handle&.closed?
         destination_handle&.close unless destination_handle&.closed?
       end
 

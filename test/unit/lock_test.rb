@@ -46,6 +46,38 @@ class LockTest < Minitest::Test
     assert_nil row.fetch(:holder_id)
   end
 
+  def test_observed_task_lease_acquisition_runs_under_project_commit_custody
+    folder = task_folder(102)
+    observation = Hive::TaskMeta.observe(folder)
+    state_root = File.join(@root, ".hive-state")
+    inside_commit_lock = false
+    testcase = self
+    commit_lock = lambda do |path, **, &block|
+      testcase.assert_equal state_root, path
+      inside_commit_lock = true
+      block.call
+    ensure
+      inside_commit_lock = false
+    end
+    subject = Hive::Lock.task_lease_repository
+    original_acquire = subject.method(:acquire)
+    guarded_acquire = lambda do |*args, **kwargs|
+      testcase.assert inside_commit_lock, "observed lease claim escaped project commit custody"
+      original_acquire.call(*args, **kwargs)
+    end
+
+    with_replaced_singleton_method(subject, :acquire, guarded_acquire) do
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, commit_lock) do
+        Hive::Lock.with_task_lock(
+          folder, create: false, observation: observation,
+          acquire_under_commit_lock: state_root
+        ) { assert Hive::Lock.task_lock_held?(folder) }
+      end
+    end
+  ensure
+    observation&.close
+  end
+
   def test_registered_slug_lookup_is_scoped_to_the_state_root
     folder = task_folder(19)
     lookup = Hive::RuntimeControlPlane::TaskLeaseRepository

@@ -412,6 +412,43 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_deleted_terminal_task_at_completion_persistence_never_commits_success
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      destination = File.join(state, "stages", "2-done", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "work.md"), "ready\n")
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      prepare_test_task_lease_repository(source)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      committed = false
+      cmd = command(clock: -> { Time.utc(2026, 10, 14, 12) })
+      cmd.define_singleton_method(:record_hive_commit) { |*| committed = true }
+      original = Hive::TaskMeta.method(:write_completed_at_once)
+      delete_at_persistence = lambda do |folder, value, **kwargs|
+        FileUtils.rm_rf(folder)
+        original.call(folder, value, **kwargs)
+      end
+
+      error = with_replaced_singleton_method(
+        Hive::TaskMeta, :write_completed_at_once, delete_at_persistence
+      ) do
+        assert_raises(Hive::Error) do
+          cmd.send(:perform_move_and_commit, current, "2-done")
+        end
+      end
+
+      assert_includes error.message, "rollback NOT possible"
+      refute committed
+      refute File.exist?(source)
+      refute File.exist?(destination)
+    end
+  end
+
   def test_terminal_commit_failure_rolls_back_move_and_completed_at
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")
@@ -1020,6 +1057,38 @@ class HiveCommandsApproveTest < Minitest::Test
 
       refute File.exist?(src)
       assert File.directory?(dst), "the only surviving task copy must be preserved"
+      assert_equal 1, Hive::TaskMeta.read(dst)[:id]
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_cross_device_move_preserves_replacement_rejected_during_handle_capture
+    Dir.mktmpdir("hive-approve-unit") do |root|
+      src = File.join(root, "src")
+      dst = File.join(root, "dst")
+      Hive::TaskMeta.write(src, id: 1, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(src)
+      original = Hive::TaskMeta.method(:capture_relocation_handle!)
+      replace_before_validation = lambda do |path, observed, directory_handle: nil|
+        metadata = File.binread(Hive::TaskMeta.path(path))
+        FileUtils.rm_rf(path)
+        FileUtils.mkdir_p(path)
+        File.binwrite(Hive::TaskMeta.path(path), metadata)
+        File.write(File.join(path, "replacement.txt"), "keep\n")
+        original.call(path, observed, directory_handle: directory_handle)
+      end
+
+      with_replaced_singleton_method(
+        Hive::TaskMeta, :capture_relocation_handle!, replace_before_validation
+      ) do
+        assert_raises(Hive::TaskMeta::StaleTask) do
+          command.send(:cross_device_move!, src, dst, observation: observation)
+        end
+      end
+
+      assert File.directory?(src), "rejected copy must leave the source task in place"
+      assert_equal "keep\n", File.read(File.join(dst, "replacement.txt"))
       assert_equal 1, Hive::TaskMeta.read(dst)[:id]
     ensure
       observation&.close

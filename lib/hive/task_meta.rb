@@ -149,10 +149,9 @@ module Hive
       validate_observation!(destination, observation)
     end
 
-    # Capture the exact cross-device copy before removing the source. Supplying
-    # this handle to relocate_observation! prevents a byte-identical replacement
-    # installed at the destination from being accepted as the copied task.
-    def capture_relocation_handle!(destination, observation)
+    # Retain custody of a copied cross-device destination independently from
+    # its metadata so cleanup can distinguish that copy from a replacement.
+    def capture_directory_handle!(destination)
       folder = File.expand_path(destination)
       flags = File::RDONLY | File::NONBLOCK
       flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
@@ -161,21 +160,41 @@ module Hive
       path_stat = File.lstat(folder)
       unless stat.directory? && path_stat.directory? && !path_stat.symlink? &&
              stat.dev == path_stat.dev && stat.ino == path_stat.ino
-        raise StaleTask, "relocated task directory changed at #{folder}"
+        raise StaleTask, "task directory changed while capturing custody at #{folder}"
       end
+
+      directory
+    rescue Exception
+      directory&.close unless directory&.closed?
+      raise
+    end
+
+    def directory_handle_matches?(destination, directory)
+      return false unless directory
+
+      stat = directory.stat
+      path_stat = File.lstat(File.expand_path(destination))
+      stat.directory? && path_stat.directory? && !path_stat.symlink? &&
+        stat.dev == path_stat.dev && stat.ino == path_stat.ino
+    rescue IOError, SystemCallError
+      false
+    end
+
+    def capture_relocation_handle!(destination, observation, directory_handle: nil)
+      folder = File.expand_path(destination)
+      owned_handle = directory_handle.nil?
+      directory = directory_handle || capture_directory_handle!(folder)
 
       result = read_for_admission(folder)
       unless result.ok? && stable_identity(result.data) == observation.identity
         raise StaleTask, "relocated task metadata identity changed at #{folder}"
       end
-      path_stat = File.lstat(folder)
-      unless path_stat.directory? && !path_stat.symlink? &&
-             stat.dev == path_stat.dev && stat.ino == path_stat.ino
+      unless directory_handle_matches?(folder, directory)
         raise StaleTask, "relocated task directory changed at #{folder}"
       end
       directory
     rescue Exception
-      directory&.close unless directory&.closed?
+      directory&.close if owned_handle && !directory&.closed?
       raise
     end
 

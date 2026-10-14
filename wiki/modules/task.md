@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-10-14
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -101,7 +101,10 @@ For stages 4 and later:
   even when it copies every metadata byte. Directory handles are opened
   nonblocking, so a FIFO at a task path is rejected instead of hanging. An
   authorized cross-device move may rebind only through a handle captured from
-  the exact destination copy before the source is removed.
+  the exact destination copy before the source is removed. Cross-device
+  callers retain that raw directory handle while validating metadata; cleanup
+  removes the copy only if the destination path still resolves to that handle,
+  preserving a replacement installed before validation rejects the copy.
 - `rewrite(...)` and the display-name/id setters are update-only. They return
   an `UpdateResult` with `applied?` or `stale?`, never create a missing task
   directory, preserve unrelated fields, and keep invalid metadata or real I/O

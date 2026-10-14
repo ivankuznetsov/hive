@@ -45,12 +45,14 @@ hive approve <slug> --json                 # machine-readable result (success AN
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
 10. For a forward move, build a fresh all-project dependency snapshot and enforce admission inside both locks, after the read-only destination collision check and immediately before `File.rename`. A benign dependency wait raises `DependencyWaitError` (exit 75); an admission error raises `DependencyAdmissionError` (exit 78). `--force` bypasses only step 7's marker check. Backward moves skip admission so corrupt metadata can be repaired by moving to an earlier stage.
-11. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. Cross-device fallback uses `cp_r` + `rm_rf`.
+11. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. Cross-device fallback uses `cp_r` + `rm_rf`; it retains a handle to the copied directory while validating relocation and cleans up a rejected copy only if the destination still has that identity.
 12. Record the slug-scoped commit and roll the move back if commit fails.
     Terminal completion and automatic rollback use the original task
     observation. Rollback validates it before undoing a move or restoring
     metadata, so a dropped task is not recreated and a copied replacement is
-    not moved or overwritten.
+    not moved or overwritten. A caller-supplied observation lets composed
+    Decide transitions retain that same identity through the move and any
+    later sibling-file rollback.
 13. Report human prose or one `hive-approve` JSON document.
 
 ## JSON contract (`schema = "hive-approve"`, version 2)

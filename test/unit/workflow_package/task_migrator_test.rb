@@ -282,6 +282,90 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
     end
   end
 
+  def test_cross_device_forward_cleanup_preserves_a_rejected_replacement
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      original_rename = File.method(:rename)
+      cross_device = lambda do |from, to|
+        raise Errno::EXDEV, "cross-device" if from == source && to == destination
+
+        original_rename.call(from, to)
+      end
+      original_capture = Hive::TaskMeta.method(:capture_relocation_handle!)
+      replace_destination = lambda do |path, observation, directory_handle: nil|
+        metadata = File.binread(Hive::TaskMeta.path(path))
+        FileUtils.rm_rf(path)
+        FileUtils.mkdir_p(path)
+        File.binwrite(Hive::TaskMeta.path(path), metadata)
+        File.write(File.join(path, "replacement.txt"), "keep\n")
+        original_capture.call(path, observation, directory_handle: directory_handle)
+      end
+
+      with_replaced_singleton_method(File, :rename, cross_device) do
+        with_replaced_singleton_method(
+          Hive::TaskMeta, :capture_relocation_handle!, replace_destination
+        ) do
+          assert_raises(Hive::TaskMeta::StaleTask) { migrator(dir, store).call }
+        end
+      end
+
+      assert File.directory?(source)
+      assert_equal "keep\n", File.read(File.join(destination, "replacement.txt"))
+      assert_empty store.cleaned
+    end
+  end
+
+  def test_cross_device_rollback_cleanup_preserves_a_rejected_replacement
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      original_rename = File.method(:rename)
+      cross_device = lambda do |from, to|
+        if [ from, to ].sort == [ source, destination ].sort
+          raise Errno::EXDEV, "cross-device"
+        end
+
+        original_rename.call(from, to)
+      end
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+      original_capture = Hive::TaskMeta.method(:capture_relocation_handle!)
+      replace_rollback_source = lambda do |path, observation, directory_handle: nil|
+        if path == source
+          metadata = File.binread(Hive::TaskMeta.path(path))
+          FileUtils.rm_rf(path)
+          FileUtils.mkdir_p(path)
+          File.binwrite(Hive::TaskMeta.path(path), metadata)
+          File.write(File.join(path, "replacement.txt"), "keep\n")
+        end
+        original_capture.call(path, observation, directory_handle: directory_handle)
+      end
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(File, :rename, cross_device) do
+          with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
+            with_replaced_singleton_method(
+              Hive::TaskMeta, :capture_relocation_handle!, replace_rollback_source
+            ) do
+              assert_raises(Hive::RollbackFailed) { migrator(dir, store).call }
+            end
+          end
+        end
+      end
+
+      assert_equal "keep\n", File.read(File.join(source, "replacement.txt"))
+      assert File.directory?(destination)
+      assert_includes err, "rollback skipped stale task"
+      assert_empty store.cleaned
+    end
+  end
+
   def test_rollback_skips_a_source_path_that_reappeared_after_the_move
     with_tmp_dir do |dir|
       old = workflow("review" => 4)

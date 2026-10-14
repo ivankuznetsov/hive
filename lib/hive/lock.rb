@@ -8,7 +8,8 @@ module Hive
 
     PS_LSTART_TIMEOUT_SECONDS = 0.25
 
-    def with_task_lock(task_folder, payload = nil, create: true, observation: nil, **payload_keywords)
+    def with_task_lock(task_folder, payload = nil, create: true, observation: nil,
+                       acquire_under_commit_lock: nil, **payload_keywords)
       payload = (payload || {}).merge(payload_keywords)
       lock_key = task_lease_repository.lease_key(task_folder, observation: observation)
       held = (Thread.current[:hive_task_locks] ||= {})
@@ -23,9 +24,16 @@ module Hive
       end
 
       held.delete(lock_key)
-      lock_data = acquire_task_lock(
-        task_folder, payload, create: create, observation: observation
-      )
+      acquire = lambda do
+        acquire_task_lock(
+          task_folder, payload, create: create, observation: observation
+        )
+      end
+      lock_data = if acquire_under_commit_lock
+        with_commit_lock(acquire_under_commit_lock, &acquire)
+      else
+        acquire.call
+      end
       held[lock_key] = { depth: 1, lock_id: lock_data.fetch("lock_id"), pid: Process.pid }
       begin
         # The lease claim is a race window: validate again before handing the

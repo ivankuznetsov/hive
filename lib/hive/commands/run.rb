@@ -137,7 +137,8 @@ module Hive
 
         Hive::Lock.with_task_lock(
           task.folder, slug: task.slug, stage: task.stage_name,
-          create: false, observation: observation
+          create: false, observation: observation,
+          acquire_under_commit_lock: task.hive_state_path
         ) do
           Hive::DependencySnapshot.enforce_admission!(task)
           Hive::Attempts::Context.current&.validate_generation!(task)

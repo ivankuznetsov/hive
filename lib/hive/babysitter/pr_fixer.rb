@@ -83,6 +83,15 @@ module Hive
         )
         return :shutdown unless admission_open?
 
+        if billing_blocked_ci?(context)
+          Hive::Babysitter::Events.emit(
+            project: @project, pr: number, action: "noop", outcome: "ci_blocked",
+            reason: "github_actions_billing", head_sha: status["headRefOid"] || @pr["headRefOid"],
+            duration_ms: duration_ms(started)
+          )
+          return :ci_blocked
+        end
+
         result = spawn_agent(worktree.path, context)
         return :shutdown if result == :shutdown
 
@@ -108,6 +117,20 @@ module Hive
       end
 
       private
+
+      # An Actions account hold needs an operator, not code changes. Only
+      # withhold repair when every failed job has that explicit diagnostic;
+      # independent test failures and merge conflicts remain repairable.
+      def billing_blocked_ci?(context)
+        return false if context.mergeable_state.to_s == "CONFLICTING"
+
+        jobs = Array(context.failing_jobs)
+        jobs.any? && jobs.all? do |job|
+          job.fetch("log", "").match?(
+            /The job was not started because (?:recent account payments have failed|.*?spending limit needs to be increased)/i
+          )
+        end
+      end
 
       def admission_open?
         @admission_open.call == true

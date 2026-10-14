@@ -142,6 +142,47 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_billing_blocked_ci_never_launches_an_agent_on_repeated_ticks
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      inflight = Set.new
+      jobs = [ { "name" => "tests", "log" => "[hive-babysitter: GitHub check annotations]\nThe job was not started because recent account payments have failed or your spending limit needs to be increased." } ]
+      stub_non_green_context(project, dir, mergeable: "MERGEABLE", failing_jobs: jobs) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { raise Minitest::Assertion, "billing cannot be repaired by an agent" }) do
+          2.times do
+            outcome = Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: inflight)
+            assert_equal :ci_blocked, outcome
+          end
+        end
+      end
+      assert_empty inflight
+      events = read_events(project)
+      assert_equal 2, events.length
+      assert events.all? { |event| event["action"] == "noop" && event["outcome"] == "ci_blocked" && event["reason"] == "github_actions_billing" }
+    end
+  end
+
+  def test_billing_hold_does_not_hide_a_separate_code_failure_or_merge_conflict
+    [
+      [ "MERGEABLE", [ { "log" => "The job was not started because recent account payments have failed" }, { "log" => "1 test failure" } ] ],
+      [ "CONFLICTING", [ { "log" => "The job was not started because recent account payments have failed" } ] ]
+    ].each do |mergeable, jobs|
+      with_tmp_dir do |dir|
+        project = project_entry(dir)
+        spawned = false
+        stub_non_green_context(project, dir, mergeable: mergeable, failing_jobs: jobs) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_args, **_kwargs|
+            spawned = true
+            { status: :ok }
+          }) do
+            assert_equal :success, Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+          end
+        end
+        assert spawned, "an independently repairable failure must remain eligible"
+      end
+    end
+  end
+
   def test_shutdown_during_context_build_prevents_agent_spawn
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -958,13 +999,13 @@ class BabysitterPrFixerTest < Minitest::Test
     File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
   end
 
-  def stub_non_green_context(project, worktree_path, before_return: nil)
-    status = { "mergeable" => "CONFLICTING", "statusCheckRollup" => [ { "conclusion" => "FAILURE" } ] }
+  def stub_non_green_context(project, worktree_path, before_return: nil, mergeable: "CONFLICTING", failing_jobs: [])
+    status = { "mergeable" => mergeable, "statusCheckRollup" => [ { "conclusion" => "FAILURE" } ] }
     context = Hive::Babysitter::ContextBuilder::Context.new(
       status_rollup: status,
-      failing_jobs: [],
+      failing_jobs: failing_jobs,
       diff_stat: "README.md | 1 +",
-      mergeable_state: "CONFLICTING",
+      mergeable_state: mergeable,
       base_ref: "main",
       head_ref: "feature"
     )

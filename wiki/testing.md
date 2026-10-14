@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-10-14
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest]
 ---
 
@@ -1395,6 +1395,11 @@ manifest.
 
 ## Task workspace verification
 
+The execute-stage suite includes a real bare-remote lifecycle fixture: it lands
+two prerequisite commits on the origin default while the local default remains
+stale, then proves list-dependent initialization fetches that updated default,
+contains both commits, and leaves the developer's local branch untouched.
+
 The read-only task workspace is verified in layers. Root unit coverage under
 `test/unit/task_workspace/` pins strict v1 audit compatibility, closed semantic
 v2 schema, workflow-aware primary/applicability projection, descriptor-safe
@@ -1422,7 +1427,9 @@ an effective 320-CSS-pixel viewport;
 keyboard traversal, 24-pixel targets, primary-result hierarchy, collision-safe
 heading anchors, outline threshold, contained code/tables,
 focus/exact-selection/disclosure/scroll preservation, lazy correlated logs,
-morph-owned publication facts, and non-repeating material announcements.
+morph-owned publication facts, and non-repeating material announcements. The
+same real browser route renders list fan-in as scheduling edges and distinguishes
+one landed prerequisite's clear edge from a second prerequisite's blocking edge.
 Pipeline coverage keeps a typed answer enabled and
 intact across a pushed morph while the task workspace remains partial, rejects
 an intervention draft when its opaque binding changes between rounds, and unit

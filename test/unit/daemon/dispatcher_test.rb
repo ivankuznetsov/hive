@@ -1432,6 +1432,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal %w[first second], fan_in.dig("condition", "dependencies")
     assert_equal %w[missing-one missing-two], operator.dig("condition", "dependencies")
     assert_equal %w[first second], report.dig("wake_conditions", 0, "dependencies")
+    refute report.dig("wake_conditions", 0).key?("reference")
+    refute report.dig("wake_conditions", 0).key?("dependency_stage")
+    refute report.dig("wake_conditions", 0).key?("required_gate")
     assert Hive::OneShot::Result.send(:authoritative_document?, report)
   end
 

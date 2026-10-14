@@ -678,6 +678,13 @@ decision. Daemon rows retain scalar-or-array `depends_on`, the complete ordered
 `9-done`, even when project `dependency_gate_stage` is `8-finalize`, and no
 force flag or cached earlier verdict can release it. The coherent operational
 snapshot/status-cache format is v2 so these fields survive the fast path.
+The compact one-shot contract is intentionally narrower: dependency pending
+items and wake conditions carry `dependency` plus a `dependencies` array of
+task-name strings for fan-in. They do not copy the status surface's structured
+`reference`, `dependency_stage`, or `required_gate` records. Consumers that
+need those associations read `hive-operational-status.v5`. Both private v2
+readers reject retained v1 operational snapshots and status-cache records, so
+an upgrade rebuilds observations instead of reinterpreting scalar-era rows.
 Upgrade all readers first, restart the daemon to discard v1 caches, and only
 then create dependency arrays; never downgrade a running installation while
 array metadata exists.

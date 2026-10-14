@@ -310,7 +310,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_reader_rejects_a_malformed_status_cache
+  def test_status_cache_reader_rejects_retired_v1_records_with_otherwise_current_payloads
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader, cache_reader = build(path)
@@ -323,7 +323,10 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         "tick_sequence" => 1,
         "published_at" => (T0 + 1).iso8601(6),
         "valid_until" => (T0 + 90).iso8601(6),
-        "payload" => { "schema" => "wrong", "ok" => true }
+        "payload" => {
+          "schema" => "hive-status", "schema_version" => 9, "ok" => true,
+          "generated_at" => (T0 + 1).iso8601(6), "projects" => []
+        }
       })
 
       snapshot = reader.read(now: T0 + 1)

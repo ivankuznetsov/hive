@@ -307,6 +307,42 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_no_selector "#workspace-dependencies"
   end
 
+  test "task detail renders list dependencies as per-prerequisite scheduling edges" do
+    landed = create_task!(@project, "Landed prerequisite")
+    waiting = create_task!(@project, "Waiting prerequisite")
+    Hive::TaskMeta.rewrite(@folder.to_s, depends_on: [ landed, waiting ])
+
+    landed_folder = stage_dir(@project, "9-done").join(landed)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(landed), landed_folder)
+    landed_folder.join("task.md").write("<!-- COMPLETE -->\n")
+    Hive::TaskMeta.rewrite(landed_folder.to_s, completed_at: Time.now.utc)
+
+    waiting_folder = stage_dir(@project, "8-finalize").join(waiting)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(waiting), waiting_folder)
+    waiting_folder.join("pr.md").write("<!-- WAITING -->\n")
+
+    sign_in!
+    visit task_path(@project, @slug)
+
+    assert_selector "#workspace-dependencies", wait: 10
+    within "#workspace-dependencies" do
+      assert_selector "caption", text: "Tasks this work depends on"
+      assert_selector "tbody tr", minimum: 3
+      assert_text landed
+      assert_text waiting
+
+      edges = find("details", text: "All dependency edges (2)")
+      edges.find("summary").click
+      within edges do
+        assert_selector "td", text: "Scheduling", count: 2
+        assert_selector "td .workspace-state-label", text: "Clear", count: 1
+        assert_selector "td .workspace-state-label", text: "Blocking", count: 1
+      end
+    end
+    assert_text "Waiting for #{waiting}."
+    refute_text "[\"#{landed}"
+  end
+
   test "pushed morphs preserve workspace ownership and announce only safe decisions" do
     @folder.join("brainstorm.md").write("draft context\n")
     sign_in!

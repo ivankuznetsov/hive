@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-09-01
+updated: 2026-10-14
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest]
 ---
 
@@ -161,6 +161,28 @@ During implementation, run the smallest relevant test files directly:
 bundle exec ruby -Itest test/unit/example_test.rb
 bundle exec ruby -Itest test/integration/example_test.rb
 ```
+
+Project workflow-view performance has a revision-selectable local harness:
+
+```bash
+# Extract BASE into an ignored directory under tmp/ first.
+HIVE_WORKFLOW_VIEW_LABEL=baseline \
+  HIVE_WORKFLOW_VIEW_LIB="$PWD/tmp/workflow-view-baseline/lib" \
+  bundle exec ruby script/measure_project_workflow_view.rb
+HIVE_WORKFLOW_VIEW_LABEL=candidate \
+  bundle exec ruby script/measure_project_workflow_view.rb
+```
+
+Run the baseline command from the extracted baseline checkout so Bundler loads
+that checkout's path gems. The harness resets Project before every timed sample,
+uses the same generated three-project/four-task workload for Status and
+StatusFeed, records descriptor/managed-selection activation I/O, and measures an
+unrelated project while another activation is deliberately stalled. Defaults
+produce three runs of five samples; `HIVE_WORKFLOW_VIEW_RUNS`,
+`HIVE_WORKFLOW_VIEW_SAMPLES`, `HIVE_WORKFLOW_VIEW_PROJECTS`,
+`HIVE_WORKFLOW_VIEW_TASKS`, and `HIVE_WORKFLOW_VIEW_STALL_MS` make larger matched
+comparisons explicit. This is local comparative evidence, not an absolute CI or
+production latency gate.
 
 `test/unit/running_status_test.rb` pins the compact liveness boundary: empty,
 runner-only, child-only, combined, stale/reused, malformed, transition, FIFO,
@@ -775,7 +797,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | `test/unit/web/{web_command,app_bundle,environment,service_status}_test.rb`, `test/integration/web_packaged_bootstrap_test.rb`, `web/test/integration/{production_host_authorization,local_loopback_auth,sessions_flow}_test.rb` | Hive web app-dir resolution (canonical input plus warned alias), exact six-variable precedence/warnings, launchd lifecycle/readiness polling including unsupported/disabled fallbacks, readiness-failing install and versioned status-error contracts, release-workflow-and-tag-pinned bundle authentication, authenticated lockfile preservation across Bundler/assets, bounded verifier output/termination cleanup, real packaged-root Bundler/Rails bootstrap without a parent checkout, arbitrary production proxy hosts reaching the controller-level GitHub gate, raw-Host enforcement despite spoofed `X-Forwarded-Host`, bracketed IPv6 loopback access, owner-claim copy on proxied native login, configured Action Cable origin retention, mutation rejection before side effects, `db:prepare` typed failure guidance, final Rails `Kernel.exec` env/argv, and loopback/public-bind policy. |
 | `web/test/models/{task,task_mutations,project,daemon}_test.rb`, `web/test/integration/{ideas,tasks,daemon_repairs}_test.rb` | Rails resource ownership — canonical stage-run verb mapping, exact digest-bound outcome-evidence rework dispatch with malformed-command refusal, fresh-row action/stage comparison, unknown-action and queue-grammar refusal before writes, canonical recovery receipt routing and disabled lifecycle UI, Reject's prior-gate derivation, custom-workflow Approve/Drop, binding-bearing brainstorm answer/intervention writes with same-number replacement-round refusal, idea capture through `Project`, path-redacted typed handling of task-capture I/O failures without partial mutation, and global daemon repair. |
 | `web/test/models/agent_login_test.rb`, `web/test/integration/agents_test.rb`, `web/test/system/agents_login_flow_test.rb` | Rails agent-login resource ownership — immutable PTY-session snapshots, session/agent URL binding, dedicated create/show/completion routes, login-status rendering without account/project/skill inventory, Turbo frame responses without a recursive source, binary-output safety, paste-back/operator-ward polling policy, and real-browser polling that stops when the CLI session completes. |
-| `test/unit/web/{status_feed,task_target_resolver}_test.rb`, `web/test/channels/status_channel_test.rb`, `web/test/models/{project,board,status_broadcaster}_test.rb`, `web/test/integration/{status,tasks}_test.rb`, `web/test/system/{kanban_board,pipeline_flow}_test.rb` | Hive web status/archive views and broadcasting — descriptor-ordered board bands, ordinary producer filtering and linked hidden summaries, separate lossless archive snapshots that do not replace the ordinary feed baseline, project-scoped archive navigation, expired-task detail lookup through explicit archive source and exact project/stage resolution, immutable archive logs without repeated polling, hidden-count-only semantic changes, unknown-stage/degraded-project visibility, Board/Grid preferences and filtering, one shared scan per poll tick, non-scanning cached HTTP renders, same-generation still-valid scheduler receipt continuity through daemon tick start, cold loading-to-first-publication handoff, canonical semantic tokens, confirmed-channel catch-up, broadcast lifecycle/error recovery, mutation survival, and real-browser Board-to-Archive-to-task navigation. |
+| `test/unit/web/{status_feed,task_target_resolver}_test.rb`, `web/test/channels/status_channel_test.rb`, `web/test/models/{project,board,status_broadcaster}_test.rb`, `web/test/integration/{status,tasks}_test.rb`, `web/test/system/{kanban_board,pipeline_flow}_test.rb` | Hive web status/archive views and broadcasting — descriptor-ordered board bands, ordinary producer filtering and linked hidden summaries, separate lossless archive snapshots that do not replace the ordinary feed baseline, project-scoped archive navigation, expired-task detail lookup through explicit archive source and exact project/stage resolution, immutable archive logs without repeated polling, hidden-count-only semantic changes, unknown-stage/degraded-project visibility, unavailable managed tasks remaining reachable with inert board/detail controls and retained browser screenshots, Board/Grid preferences and filtering, one shared scan per poll tick, non-scanning cached HTTP renders, same-generation still-valid scheduler receipt continuity through daemon tick start, cold loading-to-first-publication handoff, canonical semantic tokens, confirmed-channel catch-up, broadcast lifecycle/error recovery, mutation survival, and real-browser Board-to-Archive-to-task navigation. |
 | `web/agents_auth_test.rb`, `web/agents_auth_login_test.rb`, `web/agents_routes_test.rb` | `Hive::Web::AgentsAuth` — Claude paste-back PTY login URL capture, Codex and Grok `--device-auth` poll-login behavior, `gh auth login --web` URL capture plus auto-Enter prompt handling, binary PTY output scrubbing, rejected-code errors, watchdog/process-group cleanup, concurrent-session cap, Pi token JSON rejection/persistence, and route wiring. |
 | `web/config_test.rb`, `web/supervisor_test.rb`, `web/app_coverage_test.rb` | Hivebox config/supervisor packaging support — global web defaults/validation, child restart/backoff/reload/shutdown decisions, and route coverage attribution guardrails. |
 | patrol scheduler, StateStore, value, feature-batch, reviewer, fingerprint, and command tests | Ordinary Patrol discovery — detached SHA-bound rotation, strict evidence, native finding lifecycle, direct cycle reservation, direct Patrol Fix admission, allowance/backoff behavior including reservation-time registration, enablement, capacity, and concurrent failure-backoff rechecks, and dry-run non-mutation. |

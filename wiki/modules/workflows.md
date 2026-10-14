@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/terminal_outcome.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/task_workspace/builder.rb
 created: 2026-04-26
-updated: 2026-09-09
+updated: 2026-10-14
 tags: [module, workflow, result, verbs, selection, human-stage, outcomes, terminal-outcomes, registry, archive, retention]
 ---
 
@@ -270,7 +270,10 @@ stage artifact while work is in progress, warns when a completed task is
 missing its declared deliverable, and emits only applicable evidence. Web and
 `hive task TARGET --project NAME --json` therefore use the same workflow
 meaning without `coding`, `architecture`, or `writing` conditionals in the
-view.
+view. When a removed or invalid descriptor makes that contract unavailable,
+Web keeps the v2 result vocabulary closed by rendering the inert artifact view
+as a document, emits an explicit descriptor-unavailable warning, reports no
+inferred capabilities, and disables every workflow-dependent action.
 
 Project descriptors cannot override the built-in `bench` workflow, including
 an unchanged historical `workflows/bench.yml`. Discovery records a collision;

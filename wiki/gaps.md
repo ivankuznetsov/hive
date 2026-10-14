@@ -39,13 +39,14 @@ context exposes no admitted video-capture channel. The absence of a recording
 does not imply a browser failure and is not represented as accepted video
 evidence.
 
-## Incident timing calibration (2026-09-27)
+## Incident timing calibration (2026-10-14)
 
-The 32-second aggregate advisory cap covers observed hosted totals of 30.577
-and 30.643 seconds while preserving the 16-second per-scenario ceiling. These
-runs do not establish a long-run percentile or separate budgets for each runner
-class. Revisit the cap after representative hosted timing history exists;
-timing remains advisory and does not replace functional E2E coverage.
+The 36-second aggregate advisory cap covers observed hosted totals of 30.577,
+30.643, 32.543, and 32.146 seconds while preserving the 16-second
+per-scenario ceiling. These runs do not establish a long-run percentile or
+separate budgets for each runner class. Revisit the cap after representative
+hosted timing history exists; timing remains advisory and does not replace
+functional E2E coverage.
 
 ## Operator cancellation awaits live validation (2026-09-09)
 

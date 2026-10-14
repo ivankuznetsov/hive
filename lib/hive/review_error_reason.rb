@@ -103,8 +103,7 @@ module Hive
     # never reaches for raw agent output on its own. The specific buckets fire
     # only when that raw stdout/stderr is passed in. Today's triage/fix callers
     # forward a condensed wrapper string instead ("expected output file missing
-    # or empty: …", "tmux_session_terminated before writing …", "triage agent
-    # failed (timeout)"), none of which match a PATTERN, so real-world input
+    # or empty: …", "triage agent failed (timeout)"), none of which match a PATTERN, so real-world input
     # falls back to FALLBACK; the marker's `message=` attr preserves the raw
     # cause regardless.
     def classify(error_message)

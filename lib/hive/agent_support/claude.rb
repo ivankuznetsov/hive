@@ -1,7 +1,6 @@
 require "hive/agent_support"
 
 module Hive::AgentSupport::Claude
-  autoload :Interactive, "hive/agent_support/claude/interactive"
   autoload :Launch, "hive/agent_support/claude/launch"
   autoload :Runtime, "hive/agent_support/claude/runtime"
   autoload :Skills, "hive/agent_support/claude/skills"
@@ -15,7 +14,6 @@ module Hive::AgentSupport::Claude
   def legacy_control(cfg, name) = cfg.dig("claude", name.to_s)
   def legacy_wiki_plan_alias? = true
   def skill_alias_root = ".claude/commands/"
-  def interactive_mode(cfg) = Hive::Config.claude_mode(cfg)
   def legacy_launch_options(cfg, model:, effort:)
     [ Hive::Config.claude_permission_mode(cfg), Hive::Config.claude_cli_flags(cfg, model:, effort:) ]
   end

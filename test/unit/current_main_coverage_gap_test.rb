@@ -111,38 +111,6 @@ class CurrentMainCoverageGapTest < Minitest::Test
     Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
   end
 
-  def test_claude_launcher_wait_for_done_signal_handles_success_after_poll
-    with_tmp_dir do |dir|
-      task = Struct.new(:folder).new(dir)
-      done = File.join(dir, ".done")
-      calls = 0
-      sleeps = []
-      base = Time.utc(2026, 5, 25, 12, 0, 0)
-      times = [ base, base, base ]
-      original_exist = File.method(:exist?)
-
-      with_replaced_singleton_method(Time, :now, -> { times.shift || base }) do
-        with_replaced_singleton_method(File, :exist?, lambda { |path|
-          if path == done
-            calls += 1
-            calls > 1
-          else
-            original_exist.call(path)
-          end
-        }) do
-          with_replaced_singleton_method(Hive::ClaudeLauncher, :read_result_json_status, ->(_task) { :ok }) do
-            with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(seconds) { sleeps << seconds }) do
-              result = Hive::ClaudeLauncher.wait_for_done_signal(task, nil, 5, "review")
-
-              assert_equal({ status: :ok, log_label: "review" }, result)
-              assert_equal [ 0.5 ], sleeps
-            end
-          end
-        end
-      end
-    end
-  end
-
   def test_stage_non_claude_dispatchers_use_generic_spawn_agent
     with_tmp_dir do |root|
       folder = task_folder(root)

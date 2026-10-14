@@ -91,6 +91,9 @@ module Hive
       # daemon gates auto-resume on (see `brainstorm_answer_state`).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
       EMPTY_BRAINSTORM_ANSWER_STATE = { pending: false, complete: false }.freeze
+      EMPTY_STAGE_DIRS = [].freeze
+      BUILT_IN_STAGE_DIRS = Hive::Workflows::Registry::WORKFLOWS.values
+        .flat_map(&:stage_dirs).uniq.freeze
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
@@ -297,6 +300,10 @@ module Hive
         # inherit it so a freshly completed task cannot reuse its slot before
         # older capacity-deferred rows are reconsidered by the next full scan.
         @priority_capacity_fences = { global: nil, projects: {} }
+        # A successful full tick replaces this bounded project-stage view.
+        # Changed-task ticks reuse it instead of re-reading the registry and
+        # reactivating every project overlay on each fast poll.
+        @workflow_stage_dirs_by_project = {}.freeze
         @one_shot_ran = []
         @one_shot_failure = nil
       end
@@ -509,6 +516,8 @@ module Hive
         queue_dispatch = process_dispatch_requests(
           now: now, rows: result.rows, projects: result.projects
         )
+        @workflow_stage_dirs_by_project = queue_dispatch[:stage_dirs_by_project] ||
+          workflow_stage_dirs_by_project(result.rows.map(&:project))
         @priority_capacity_fences = queue_dispatch.fetch(:capacity_fences)
 
         # Accepted-source admission is an independent control lane. It is
@@ -529,7 +538,8 @@ module Hive
         else
           dispatch_rows_in_priority_order(
             remaining_rows, now: now,
-            capacity_fences: @priority_capacity_fences
+            capacity_fences: @priority_capacity_fences,
+            stage_dirs_by_project: @workflow_stage_dirs_by_project
           )
         end
 
@@ -690,7 +700,8 @@ module Hive
         end
         dispatch_rows = dispatchable_change ? incremental_dispatch_rows(result.rows) : result.rows
         @priority_capacity_fences = dispatch_rows_in_priority_order(
-          dispatch_rows, now: now, capacity_fences: @priority_capacity_fences
+          dispatch_rows, now: now, capacity_fences: @priority_capacity_fences,
+          stage_dirs_by_project: @workflow_stage_dirs_by_project
         )
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  action: "incremental",
@@ -2874,11 +2885,12 @@ module Hive
       # old earlier-stage work from starving behind a continuous stream of
       # newer later-stage work. Equal effective priorities preserve source
       # order, and unranked/unknown stages start below recognized stages.
-      def dispatch_priority_order(rows, now: Time.now, stage_dirs_by_project: nil)
-        stage_dirs_by_project ||= workflow_stage_dirs_by_project(rows.map(&:project))
+      def dispatch_priority_order(
+        rows, now: Time.now, stage_dirs_by_project: @workflow_stage_dirs_by_project
+      )
         rows.each_with_index
             .sort_by do |row, idx|
-              dirs = stage_dirs_by_project[row.project.to_s]
+              dirs = stage_dirs_for_project(stage_dirs_by_project, row.project)
               [ -dispatch_priority(row, now: now, stage_dirs: dirs), idx ]
             end
             .map(&:first)
@@ -2922,9 +2934,14 @@ module Hive
       # global/durable capacity result fences every later dispatch;
       # project/daily caps fence only that project. Non-dispatch policy rows
       # still run so the operational snapshot remains complete.
-      def dispatch_rows_in_priority_order(rows, now:, capacity_fences: nil)
+      def dispatch_rows_in_priority_order(
+        rows, now:, capacity_fences: nil,
+        stage_dirs_by_project: @workflow_stage_dirs_by_project
+      )
         dispatch_prioritized_rows(
-          dispatch_priority_order(rows, now: now),
+          dispatch_priority_order(
+            rows, now: now, stage_dirs_by_project: stage_dirs_by_project
+          ),
           now: now, capacity_fences: capacity_fences
         )
       end
@@ -3007,7 +3024,10 @@ module Hive
             Hive::RuntimeControlPlane::DispatchRepository::GLOBAL_MAINTENANCE_PROJECT
 
         row = row_index[[ request.project.to_s, request.slug.to_s ]]
-        stage_rank(row&.stage, stage_dirs: stage_dirs_by_project&.[](request.project.to_s)) +
+        stage_dirs = if stage_dirs_by_project
+          stage_dirs_for_project(stage_dirs_by_project, request.project)
+        end
+        stage_rank(row&.stage, stage_dirs: stage_dirs) +
           dispatch_age_steps_since(request.created_at, now: now)
       end
 
@@ -3016,17 +3036,31 @@ module Hive
         by_name = Array(projects).to_h { |project| [ project.fetch("name").to_s, project ] }
         Array(project_names).map(&:to_s).uniq.to_h do |name|
           project = by_name[name]
-          dirs = if project&.fetch("path", nil)
-            Hive::Workflows::Project.with_active_workflows(project.fetch("path")) do
-              Hive::Workflows.all_stage_dirs.dup.freeze
+          dirs = begin
+            if project&.fetch("path", nil)
+              Hive::Workflows::Project.with_active_workflows(project.fetch("path")) do
+                Hive::Workflows.all_stage_dirs.dup.freeze
+              end
+            else
+              BUILT_IN_STAGE_DIRS
             end
-          else
-            Hive::Workflows::Project.synchronize do
-              Hive::Workflows.all_stage_dirs.dup.freeze
-            end
+          rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => error
+            previous = @workflow_stage_dirs_by_project[name] if
+              @workflow_stage_dirs_by_project.key?(name)
+            @logger.event(
+              :workflow_stage_dirs_unavailable,
+              project: name,
+              error: "#{error.class}: #{error.message[0, 200]}",
+              keeping_previous: !previous.nil?
+            )
+            previous || EMPTY_STAGE_DIRS
           end
           [ name, dirs ]
-        end
+        end.freeze
+      end
+
+      def stage_dirs_for_project(stage_dirs_by_project, project)
+        stage_dirs_by_project.fetch(project.to_s, BUILT_IN_STAGE_DIRS)
       end
 
       def apply_external_running_counts
@@ -3477,7 +3511,9 @@ module Hive
           while (priority_row = priority_rows[priority_row_cursor]) &&
                 dispatch_priority(
                   priority_row, now: now,
-                  stage_dirs: stage_dirs_by_project[priority_row.project.to_s]
+                  stage_dirs: stage_dirs_for_project(
+                    stage_dirs_by_project, priority_row.project
+                  )
                 ) > request_priority
             priority_row_cursor += 1
             processed_row_ids[priority_row.object_id] = true
@@ -3549,7 +3585,8 @@ module Hive
           capacity_fences: {
             global: global_capacity_fence,
             projects: project_capacity_fences
-          }
+          },
+          stage_dirs_by_project: stage_dirs_by_project
         }
       end
 

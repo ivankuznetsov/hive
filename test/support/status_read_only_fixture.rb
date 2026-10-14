@@ -76,10 +76,11 @@ module StatusReadOnlyFixture
     database = Hive::RuntimeControlPlane.database
     database.open!
     database.read { |db| db.run("PRAGMA wal_autocheckpoint=0") }
-    publish_observation(cache_variant: cache_variant, daemon_pid: daemon_pid)
+    observed_at = publish_observation(cache_variant: cache_variant, daemon_pid: daemon_pid)
     $stdout.puts JSON.generate(
       "published" => true,
       "cache_variant" => cache_variant,
+      "observed_at" => observed_at.iso8601(6),
       "database_sha256" => Digest::SHA256.file(database.path).hexdigest
     )
     $stdout.flush
@@ -113,7 +114,7 @@ module StatusReadOnlyFixture
       status_payload: cache_variant == "valid" ? payload : nil,
       now: now
     )
-    return unless cache_variant == "expired"
+    return now unless cache_variant == "expired"
 
     snapshot = repository.snapshot
     expired_at = now - 60
@@ -130,6 +131,7 @@ module StatusReadOnlyFixture
         "payload" => payload
       }
     )
+    now
   end
 
   def snapshot_rows(payload)

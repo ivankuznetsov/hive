@@ -1699,3 +1699,17 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
   follow-up.
 - Terminal prune reclaims reusable SQLite pages. It does not guarantee that the
   database or WAL files shrink on disk.
+
+## Read-only operational inspection boundaries (2026-10-14)
+
+- Immutable inspection assumes stable database bytes: no concurrent writer may
+  modify the same database through another read-write mount while the audit is
+  running. A torn read can surface as SQLite corruption and retain the existing
+  backup guidance even when the durable database is healthy. The one-shot
+  fallback does not coordinate writers it cannot see across mounts.
+- Paired WAL/SHM inspection depends on the host SQLite and kernel being able to
+  open or recover the WAL index without writing to the mounted state. The Docker
+  gate accepts only a recovery-specific typed SQLite failure for that excluded
+  host capability; it does not treat unrelated command or storage failures as a
+  valid degraded outcome. This documents the exclusion and does not claim that
+  a degraded run was observed.

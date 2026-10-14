@@ -263,6 +263,20 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_non_storage_unavailable_errors_remain_repository_errors
+    with_repository do |repository|
+      unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+        "unsupported sqlite", code: :sqlite_version_unsupported
+      )
+      repository.database.define_singleton_method(:read) { |**| raise unavailable }
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        repository.live_attempt_for(task_id: "42")
+      end
+      assert_match(/live attempt query failed/, error.message)
+    end
+  end
+
   def test_immediate_transaction_does_not_over_reserve_the_final_global_slot
     with_repository do |repository|
       limits = { max_global: 1, max_per_project: 2, max_daily: 10 }

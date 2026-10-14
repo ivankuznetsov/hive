@@ -68,6 +68,34 @@ class RuntimeControlPlaneOperationalInspectionTest < Minitest::Test
     end
   end
 
+  def test_eligible_route_matches_thor_boolean_and_underscore_normalization
+    [
+      %w[status --operational],
+      %w[status --operational=true --json],
+      %w[--json status --operational=TRUE],
+      %w[status --operational t],
+      %w[status --operational --write=false --force FALSE --internal_task_graph=f],
+      %w[status --no-operational --operational],
+      %w[status --operational=false --operational=true]
+    ].each do |argv|
+      assert Hive::RuntimeControlPlane::OperationalInspection.eligible_route?(argv), argv.inspect
+    end
+
+    [
+      %w[status],
+      %w[status --operational false],
+      %w[status --operational --no-operational],
+      %w[status --operational --diagnose task],
+      %w[status --operational --write],
+      %w[status --operational --force],
+      %w[status --operational --internal_task_graph],
+      %w[status --operational --daemon_task=demo:task],
+      %w[new demo --operational task]
+    ].each do |argv|
+      refute Hive::RuntimeControlPlane::OperationalInspection.eligible_route?(argv), argv.inspect
+    end
+  end
+
   def test_clear_is_scoped_to_the_current_process
     with_tmp_dir do |root|
       error = Hive::RuntimeControlPlane::Unavailable.new(

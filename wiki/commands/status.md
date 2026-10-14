@@ -750,11 +750,23 @@ task/commit locks and committed before the clock can hide a row.
 `status --diagnose --write` is the explicit agent mutation path and writes only
 `diagnostics/red-status.md`.
 
+`status --operational` normally uses the same writable startup and command
+registration as other commands. If that startup returns a typed read-only
+storage error, the one-shot CLI may use a PID-bound, fiber-local inspection
+session only when Linux mount metadata unambiguously confirms the state mount
+is read-only. Clean databases use SQLite immutable URI inspection; a complete
+WAL/SHM pair uses plain read-only SQLite so committed WAL rows remain visible.
+An unpaired sidecar, inaccessible metadata, ambiguous mount evidence, or a
+non-Linux platform fails closed. Integrity validation is reused only within the
+owned one-shot session; custody is still checked for each inspection open, and
+every mutating database entrypoint remains unavailable.
+
 ## Tests
 
 - `test/integration/status_read_only_test.rb` — real Linux read-only mounts,
-  clean and retained-WAL inspection across cache variants, exact unpaired
-  sidecar errors, and unchanged-state evidence.
+  clean and retained-WAL inspection across cache variants, a distinguishable
+  WAL-only scheduler observation, recovery-specific degraded evidence, exact
+  unpaired sidecar errors, and unchanged-state evidence.
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration, and v5 admission fields.
 - `test/integration/dependency_admission_test.rb` — plan-only ordering drift and cross-project repository identity mismatch.
 - `test/unit/commands/status_test.rb` — status row collection, per-project `project_load_failed` degradation, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, workflow-aware retention/count projection, strict boundaries, and lossless archive-mode listing.

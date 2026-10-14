@@ -747,6 +747,9 @@ module Hive
           raise error
         end
         true
+      rescue Hive::RuntimeControlPlane::Error => error
+        emit_lifecycle_storage_error(schema, error)
+        raise
       ensure
         database&.disconnect
       end

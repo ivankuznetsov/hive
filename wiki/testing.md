@@ -343,8 +343,11 @@ The proof runs both `hive runtime status --json` and `hive status
 --operational --json`. AE1 covers clean no-sidecar storage and AE4 covers
 retained paired WAL/SHM storage, each with valid, absent, and expired cache
 variants. The recorded real-mount run returned the nonempty operational task
-list and successful runtime status in all six variants, including committed
-WAL-only task data. Separate WAL-only and SHM-only fixtures returned the exact
+list and successful runtime status in all six variants, including a
+distinguishable scheduler observation committed exclusively in WAL. If a host
+kernel cannot recover the read-only WAL index, degraded acceptance requires the
+typed storage envelope to retain the underlying SQLite recovery error; unrelated
+failures fail the gate. Separate WAL-only and SHM-only fixtures returned the exact
 `state_storage_read_only` guidance without creating the missing sidecar. Every
 scenario proves the state bytes, inventory, modes, and ownership are unchanged.
 CI retains the candidate revision, source digest, Docker/image identity, mount

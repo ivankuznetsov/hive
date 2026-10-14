@@ -192,6 +192,39 @@ class RuntimeControlPlaneCommandRegistrationTest < Minitest::Test
     assert Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure?
   end
 
+  def test_read_only_failures_from_open_and_reserve_remain_fallback_safe
+    unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+      "read only", code: :state_storage_read_only,
+      action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+    )
+    diagnosis = Struct.new(:ok?).new(true)
+
+    database = Object.new
+    database.define_singleton_method(:diagnostics) { diagnosis }
+    database.define_singleton_method(:open!) { raise unavailable }
+    database.define_singleton_method(:disconnect) { true }
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**) { database }) do
+      assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[status --operational])
+      end
+    end
+    assert Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure?
+
+    database.define_singleton_method(:open!) { self }
+    registry = Object.new
+    registry.define_singleton_method(:reserve!) { |**| raise unavailable }
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**) { database }) do
+      with_replaced_singleton_method(Hive::RuntimeControlPlane::ProcessRegistry, :new, ->(**) { registry }) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+          Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[status --operational])
+        end
+      end
+    end
+    assert Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure?
+  ensure
+    Hive::RuntimeControlPlane::CommandRegistration.reset!
+  end
+
   def test_inherited_or_durably_reserved_registration_is_never_fallback_safe
     unavailable = Hive::RuntimeControlPlane::Unavailable.new(
       "read only", code: :state_storage_read_only,

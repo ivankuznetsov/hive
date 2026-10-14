@@ -51,6 +51,31 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
     puts "STATUS_READ_ONLY_EVIDENCE=#{JSON.generate(evidence)}"
   end
 
+  def test_ae4_degraded_outcome_rejects_unrelated_storage_failures
+    error = Hive::RuntimeControlPlane::Unavailable.new(
+      "Hive state is mounted read-only", code: :state_storage_read_only,
+      action: GENERAL_ACTION,
+      details: {
+        cause_chain: [ { error_class: "Errno::EROFS" } ],
+        confirmed_read_only: true
+      }
+    )
+    payload = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-runtime-maintenance", error: error, error_kind: "runtime",
+      extras: {
+        "action" => "status", "runtime_code" => error.code.to_s,
+        "next_action" => error.action,
+        "details" => Hive::RuntimeControlPlane::Codec.normalize(error.details)
+      }
+    )
+    result = { status: Hive::ExitCodes::UNAVAILABLE, stdout: JSON.generate(payload), stderr: "" }
+
+    assertion = assert_raises(Minitest::Assertion) do
+      assert_ae4_outcome(result, command: "status --operational", task_slug: WAL_TASK)
+    end
+    assert_match(/WAL-index recovery failure/, assertion.message)
+  end
+
   private
 
   def prove_clean_fixture(root, image, variant)
@@ -88,6 +113,8 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
       command: fixture_command("publish-wal", variant, Process.pid.to_s)
     )
     assert_equal 0, result.fetch(:status), result.fetch(:stderr)
+    publication = JSON.parse(result.fetch(:stdout).lines.last)
+    wal_observed_at = publication.fetch("observed_at")
     wal = "#{database}-wal"
     shm = "#{database}-shm"
     assert_path_exists wal, "abnormal writer must retain WAL"
@@ -105,7 +132,8 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
     operational = assert_ae4_outcome(
       run_hive(image, fixture, "status", "--operational", "--json"),
       command: "status --operational", task_slug: WAL_TASK,
-      expected_provenance: variant == "valid" ? "daemon_cache" : "fresh_scan"
+      expected_provenance: variant == "valid" ? "daemon_cache" : "fresh_scan",
+      expected_scheduler_observed_at: wal_observed_at
     )
     assert_equal before, inventory(fixture), "AE4 #{variant} mutated retained state or sidecars"
     {
@@ -199,7 +227,8 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
     { "exit" => result.fetch(:status), "outcome" => "success" }
   end
 
-  def assert_operational_success(result, task_slug:, expected_provenance: nil)
+  def assert_operational_success(result, task_slug:, expected_provenance: nil,
+                                 expected_scheduler_observed_at: nil)
     assert_equal 0, result.fetch(:status), result.fetch(:stderr)
     payload = JSON.parse(result.fetch(:stdout))
     assert_equal true, payload.fetch("ok")
@@ -211,18 +240,33 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
     if expected_provenance
       assert_equal expected_provenance, payload.dig("source", "task_graph", "provenance")
     end
+    if expected_scheduler_observed_at
+      assert_equal expected_scheduler_observed_at, payload.dig("source", "scheduler", "observed_at"),
+                   "the scheduler observation committed only in WAL was not read"
+    end
     { "exit" => result.fetch(:status), "outcome" => "success" }
   end
 
-  def assert_ae4_outcome(result, command:, task_slug:, expected_provenance: nil)
+  def assert_ae4_outcome(result, command:, task_slug:, expected_provenance: nil,
+                         expected_scheduler_observed_at: nil)
     return assert_operational_success(
-      result, task_slug: task_slug, expected_provenance: expected_provenance
+      result, task_slug: task_slug, expected_provenance: expected_provenance,
+      expected_scheduler_observed_at: expected_scheduler_observed_at
     ).merge("command" => command) if result.fetch(:status).zero? && task_slug
     return assert_runtime_success(result).merge("command" => command) if
       result.fetch(:status).zero?
 
     payload = JSON.parse(result.fetch(:stdout))
     assert_storage_error(payload, result, action: GENERAL_ACTION)
+    causes = payload.dig("details", "cause_chain") || []
+    recovery_failure = causes.any? do |cause|
+      primary_code = cause["sqlite_code"].to_i & 0xff if cause.key?("sqlite_code")
+      cause.fetch("error_class", "").match?(/SQLite3::(?:CantOpen|ReadOnly)/) ||
+        [ SQLite3::Constants::ErrorCode::CANTOPEN,
+          SQLite3::Constants::ErrorCode::READONLY ].include?(primary_code)
+    end
+    assert recovery_failure,
+           "AE4 degraded acceptance requires an underlying SQLite WAL-index recovery failure: #{payload.inspect}"
     puts "AE4_DEGRADED=#{JSON.generate(
       "command" => command,
       "exit" => result.fetch(:status),
@@ -282,6 +326,8 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
   end
 
   def docker_run(image, fixture, command:, writable: false)
+    # publish_observation records the host test process as the live daemon;
+    # sharing the PID namespace makes that exact identity visible in the fixture.
     argv = [
       "docker", "run", "--rm", "--pid=host", "--user", "#{Process.uid}:#{Process.gid}",
       "--env", "HIVE_HOME=/state", "--env", "HOME=/tmp",

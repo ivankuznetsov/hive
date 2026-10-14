@@ -75,8 +75,9 @@ module Hive
         database_exists = File.file?(database.path)
         database.open!(revalidate: !database_exists) if database_exists || create_directories
         prepare_payload_root! if create_directories
-      rescue RuntimeControlPlane::Unavailable
-        raise
+      rescue RuntimeControlPlane::Unavailable => error
+        raise if storage_unavailable?(error)
+        raise RepositoryError, "attempt runtime control plane is unavailable: #{error.message}"
       rescue RuntimeControlPlane::Error, SystemCallError, IOError => error
         raise RepositoryError, "attempt runtime control plane is unavailable: #{error.message}"
       end
@@ -647,9 +648,13 @@ module Hive
 
       def translate_store_error(error, prefix)
         raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed) ||
-          error.is_a?(RuntimeControlPlane::AdmissionClosed) ||
-          error.is_a?(RuntimeControlPlane::Unavailable)
+          error.is_a?(RuntimeControlPlane::AdmissionClosed) || storage_unavailable?(error)
         raise RepositoryError, "#{prefix}: #{error.message}"
+      end
+
+      def storage_unavailable?(error)
+        error.is_a?(RuntimeControlPlane::Unavailable) &&
+          %i[state_storage_read_only state_storage_inaccessible].include?(error.code)
       end
     end
   end

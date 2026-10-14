@@ -133,16 +133,17 @@ hive review <slug> --from 6-review
 
 Use `--name REVIEW_ERROR` when the runner recorded a phase error.
 
-### Recover a tmux review-fix Stop-hook timeout
+### Recover a review-fix left by the retired Claude Stop hook
 
-For affected versions, a tmux-launched review-fix agent can finish, write
-artifacts, and even commit, but still leave `REVIEW_ERROR phase=fix
-reason=fix_failed` because Claude's interactive Stop hook did not write
-`.done` / `result.json`. Hive now accepts that case only when it can prove
-completion from on-disk evidence and emits `claude_completion_fallback`.
+Hive versions that still had the Claude tmux launch mode could leave
+`REVIEW_ERROR phase=fix reason=fix_failed` on a review-fix agent that had
+finished, written artifacts, and even committed, because Claude's
+interactive Stop hook did not write `.done` / `result.json`. Claude now
+launches only as headless `claude -p`, so new tasks cannot hit this, but a
+task that stopped this way before the upgrade keeps its marker.
 
-For already-stuck tasks such as task 58 / PR #622, task 287 / PR #623, and
-task 288 / PR #624, do not clear the marker blindly. First verify all of
+For such a task (for example task 58 / PR #622, task 287 / PR #623, and
+task 288 / PR #624), do not clear the marker blindly. First verify all of
 these:
 
 - `reviews/escalations-<NN>.md` exists and has no unresolved `[ ]` items;
@@ -162,9 +163,7 @@ hive run <FOLDER>
 ```
 
 If any evidence is missing, inspect the task manually and rerun without
-clearing only after you understand the failure. `claude.mode: headless`
-remains the recommended workaround for affected versions and service hosts;
-this fix does not rewrite or revert local operator config.
+clearing only after you understand the failure.
 
 ## Recover From EXECUTE_STALE
 

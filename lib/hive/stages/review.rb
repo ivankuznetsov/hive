@@ -835,10 +835,9 @@ module Hive
         # the failure state, then re-raise so the runner / test suite
         # still surfaces the underlying bug.
         #
-        # Truncate `e.message` to a bounded length: when a helper
-        # (e.g. `prepare_claude_session!`) raises with a pane-tail
-        # context, that tail is the single most actionable debug signal
-        # for the operator. Dropping the message entirely (the previous
+        # Truncate `e.message` to a bounded length: when a helper raises
+        # with diagnostic context, that context is the single most
+        # actionable debug signal for the operator. Dropping the message entirely (the previous
         # `exception_class`-only marker) silently hid it.
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
@@ -856,8 +855,7 @@ module Hive
 
       # Marker attr values are scanned by the internal task graph and read by
       # the TUI; an unbounded multi-kilobyte tail in a single attr would
-      # break the line-oriented marker format. 500 bytes is the same cap
-      # `prepare_claude_session!` uses for its own tail capture.
+      # break the line-oriented marker format, so cap it at 500 bytes.
       def truncate_marker_message(message, max: 500, ellipsis: "...")
         return "" if message.nil?
 

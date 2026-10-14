@@ -229,10 +229,10 @@ Its `HIVE_FAKE_CLAUDE_READY_FILE` /
 waits on a condition file, allowing cross-process races without fixed sleeps.
 `spawn_background` owns a process group, and both explicit `stop_process` and
 scenario teardown terminate and reap registered groups.
-The copied project pins `claude.mode: headless`; this keeps fake Claude on its
-subprocess contract instead of sending it through production interactive-tmux
-readiness detection. TUI scenarios still run the real long-lived `hive tui`
-inside tmux. The harness creates that tmux server inside
+Production Claude launches are headless-only, so fake Claude always runs on
+its `claude -p` subprocess contract; `test/e2e/lib/sandbox_test.rb` asserts
+that the fresh init config carries no `claude.mode` key. TUI scenarios still
+run the real long-lived `hive tui` inside tmux. The harness creates that tmux server inside
 `Bundler.with_unbundled_env`, preventing the parent root bundle's `RUBYOPT` or
 `BUNDLE_PATH` from being combined with the sample project's Gemfile.
 

@@ -123,8 +123,8 @@ cross-process ordering, set `HIVE_FAKE_CLAUDE_READY_FILE` and
 `HIVE_FAKE_CLAUDE_RELEASE_FILE`: the fixture atomically writes its PID to the
 ready file and waits until the harness creates the release file. Assertions
 poll those observable conditions; elapsed-time sleeps are not synchronization.
-The sandbox pins fake Claude to headless mode while the user-facing TUI itself
-still runs in tmux. Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in
+Fake Claude runs headless like every Claude launch, while the user-facing TUI
+itself still runs in tmux. Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in
 agent binaries, checkout Hive binaries, and both PATH/direct GitHub shim routes
 cannot be replaced by scenario overrides.
 

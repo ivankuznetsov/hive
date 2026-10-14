@@ -198,6 +198,7 @@ module Hive
       end
 
       def semantic_task(projection)
+        workflow = native_workflow
         {
           "project" => @project,
           "slug" => task_value("slug"),
@@ -206,7 +207,7 @@ module Hive
           "generation" => projection.dig("identity", "task_generation") ||
             task_value("condition_task_generation") || task_value("task_generation"),
           "workflow" => task_value("workflow") ||
-            (@native_task.workflow.id if @native_task.workflow.respond_to?(:id)),
+            (workflow.id if workflow.respond_to?(:id)),
           "patrol_fix" => task_value("patrol_fix"),
           "archived" => @archive ||
             task_value("action").to_s == Hive::Schemas::TaskActionKind::ARCHIVED
@@ -214,17 +215,19 @@ module Hive
       end
 
       def semantic_result(artifacts)
-        contract = @native_task.workflow.result
         records = Array(artifacts["records"]).map { |record| semantic_artifact(record) }
-        declared = contract.primary_artifact
+        contract = native_workflow&.result
+        declared = contract&.primary_artifact
         primary = records.find { |record| record["reference"] == declared }
         primary ||= current_stage_artifact(records)
         primary ||= records.first
-        warning = if declared && primary&.fetch("reference", nil) != declared && semantic_completed?
+        warning = if workflow_unavailable?
+          "Workflow descriptor is unavailable; task controls are disabled."
+        elsif declared && primary&.fetch("reference", nil) != declared && semantic_completed?
           "Declared primary artifact #{declared} is unavailable for this completed task."
         end
         {
-          "kind" => contract.kind.to_s,
+          "kind" => contract ? contract.kind.to_s : "unknown",
           "declared_primary" => declared,
           "primary" => primary,
           "supporting" => records.reject { |record| primary && record["reference"] == primary["reference"] },
@@ -245,8 +248,11 @@ module Hive
       end
 
       def current_stage_artifact(records)
-        stage = @native_task.workflow.stage_for_dir(task_value("stage").to_s) ||
-                @native_task.workflow.stage_named(@native_task.stage_name.to_s)
+        workflow = native_workflow
+        return unless workflow
+
+        stage = workflow.stage_for_dir(task_value("stage").to_s) ||
+                workflow.stage_named(@native_task.stage_name.to_s)
         reference = stage&.state_file
         records.find { |record| record["reference"] == reference }
       rescue StandardError
@@ -254,7 +260,7 @@ module Hive
       end
 
       def semantic_applicability(result)
-        capabilities = @native_task.workflow.result.capabilities.map(&:to_s)
+        capabilities = native_workflow&.result&.capabilities.to_a.map(&:to_s)
         actual_worktree = actual_worktree_evidence?
         actual_publication = !task_value("pr_url").to_s.empty?
         actual_dependencies = !task_value("depends_on").to_s.empty?
@@ -296,7 +302,8 @@ module Hive
       def semantic_action(status)
         kind = task_value("action")&.to_s
         enabled = status["freshness"] == "fresh" && status["state"] == "current" &&
-                  !@archive && !semantic_completed? && semantic_actionable?(kind)
+                  !@archive && !semantic_completed? && !workflow_unavailable? &&
+                  semantic_actionable?(kind)
         {
           "kind" => kind,
           "label" => task_value("action_label")&.to_s,
@@ -317,6 +324,7 @@ module Hive
       def semantic_action_reason(enabled, status)
         return nil if enabled
         return "Archived and completed tasks are read-only." if @archive || semantic_completed?
+        return "Workflow policy is unavailable; task controls are disabled." if workflow_unavailable?
         return "Refresh canonical task status before acting." unless
           status["freshness"] == "fresh" && status["state"] == "current"
 
@@ -686,6 +694,8 @@ module Hive
         )
         posture, reason = if @archive
           [ "investigate", "Archived task evidence is read-only." ]
+        elsif workflow_unavailable?
+          [ "investigate", "Workflow policy is unavailable; task controls are disabled." ]
         elsif answer_evidence_current
           count = answerable_questions.length
           [ "answer", "#{count} required #{count == 1 ? 'question is' : 'questions are'} unanswered." ]
@@ -776,6 +786,9 @@ module Hive
 
       def action_enabled(evidence_current:, answer_evidence_current:)
         return [ false, "Archived tasks are read-only." ] if @archive
+        if workflow_unavailable?
+          return [ false, "Workflow policy is unavailable; task controls are disabled." ]
+        end
         return [ true, nil ] if answer_evidence_current
         unless evidence_current
           return [ false, "Refresh complete workspace evidence before acting." ]
@@ -822,6 +835,15 @@ module Hive
         @task.respond_to?(name) && @task.public_send(name) == true
       rescue StandardError
         false
+      end
+
+      def native_workflow
+        @native_task.workflow if @native_task.respond_to?(:workflow)
+      end
+
+      def workflow_unavailable?
+        task_predicate(:workflow_unavailable?) ||
+          (@native_task.respond_to?(:workflow_unavailable?) && @native_task.workflow_unavailable?)
       end
 
       def panel(name, &block)

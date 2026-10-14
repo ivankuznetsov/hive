@@ -40,6 +40,22 @@ module Hive
       # validation reentrant without exposing caller-owned load choreography.
       LOCK = Monitor.new
       ACTIVE_OPERATION_KEY = :hive_workflows_project_active_operation
+      ActivationBootstrap = Data.define(
+        :source_path, :data, :workflow_dir, :validate_config, :fallback, :fallback_from
+      )
+      PreparedOverlay = Data.define(:workflow_dir, :fingerprint, :workflows)
+
+      class FallbackActivation < StandardError
+        attr_reader :workflow_dir, :fallback_from, :cause_error
+
+        def initialize(workflow_dir, fallback_from, cause_error)
+          @workflow_dir = workflow_dir
+          @fallback_from = fallback_from
+          @cause_error = cause_error
+          super(cause_error.message)
+        end
+      end
+      private_constant :ActivationBootstrap, :PreparedOverlay, :FallbackActivation
 
       # Run a block with the project overlay held stable. Callers that load a
       # project then resolve against its overlay (e.g. `hive status`'s
@@ -57,11 +73,9 @@ module Hive
         project_root = normalize_project_root(project_root)
         raise LocalJumpError, "no block given (yield)" unless block
 
-        with_project_operation(project_root) do
-          activate_with_cleanup!(
-            project_root, config: config, hive_state_path: hive_state_path
-          )
-
+        with_prepared_activation(
+          project_root, config: config, hive_state_path: hive_state_path
+        ) do
           if block_accepts_stage_names?(block)
             block.call(Hive::Workflows::Registry, registered_stage_names)
           else
@@ -80,11 +94,9 @@ module Hive
       # descriptor; `call!` does not re-resolve in-process.
       def load!(project_root, config: nil, hive_state_path: nil)
         project_root = normalize_project_root(project_root)
-        with_project_operation(project_root) do
-          activate_with_cleanup!(
-            project_root, config: config, hive_state_path: hive_state_path
-          )
-        end
+        with_prepared_activation(
+          project_root, config: config, hive_state_path: hive_state_path
+        ) { nil }
       end
 
       # Config.load calls this only when raw keys need a project-authored stage
@@ -93,20 +105,66 @@ module Hive
       # calls Config.load and therefore cannot complete a reverse load cycle.
       def stage_names_for_config(project_root, hive_state_path:)
         project_root = normalize_project_root(project_root)
-        with_project_operation(project_root) do
-          activate_with_cleanup!(
-            project_root, hive_state_path: hive_state_path, reuse_active: true
-          )
+        with_prepared_activation(
+          project_root, hive_state_path: hive_state_path, reuse_active: true
+        ) do
           registered_stage_names
         end
       end
 
-      def activate_with_cleanup!(project_root, config: nil, hive_state_path: nil, reuse_active: false)
+      def with_prepared_activation(project_root, config: nil, hive_state_path: nil,
+                                   reuse_active: false)
+        assert_nested_root!(project_root)
+        bootstrap = activation_bootstrap(
+          project_root, config: config, hive_state_path: hive_state_path
+        )
+
+        if current_project_operation
+          return with_project_operation(project_root) do
+            activate_with_cleanup!(
+              project_root, bootstrap: bootstrap,
+              reuse_active: reuse_active || nested_project_operation?
+            )
+            yield
+          end
+        end
+
+        prepared = reusable_active_overlay(project_root, bootstrap.workflow_dir) if reuse_active
+        prepared ||= prepare_overlay(project_root, bootstrap.workflow_dir)
+        begin
+          with_project_operation(project_root) do
+            activate_with_cleanup!(
+              project_root, bootstrap: bootstrap, prepared: prepared,
+              reuse_active: reuse_active
+            )
+            yield
+          end
+        rescue FallbackActivation => fallback
+          warn_config_fallback(project_root, fallback.cause_error)
+          fallback_bootstrap = ActivationBootstrap.new(
+            source_path: nil,
+            data: nil,
+            workflow_dir: fallback.workflow_dir,
+            validate_config: false,
+            fallback: true,
+            fallback_from: fallback.fallback_from
+          )
+          fallback_prepared = prepare_overlay(project_root, fallback.workflow_dir)
+          with_project_operation(project_root) do
+            activate_with_cleanup!(
+              project_root, bootstrap: fallback_bootstrap, prepared: fallback_prepared,
+              reuse_active: reuse_active
+            )
+            yield
+          end
+        end
+      end
+      private_class_method :with_prepared_activation
+
+      def activate_with_cleanup!(project_root, bootstrap:, prepared: nil, reuse_active: false)
         activation = { reused_active: false }
         activate_project!(
-          project_root,
-          config: config,
-          hive_state_path: hive_state_path,
+          project_root, bootstrap: bootstrap, prepared: prepared,
           reuse_active: reuse_active || nested_project_operation?,
           activation: activation
         )
@@ -120,61 +178,35 @@ module Hive
       end
       private_class_method :activate_with_cleanup!
 
-      def activate_project!(project_root, config:, hive_state_path:, reuse_active:, activation:)
-        if config || hive_state_path
-          resolution = { fallback: false }
-          workflow_dir = workflow_dir_for(
-            project_root, config: config, hive_state_path: hive_state_path,
-            resolution: resolution
-          )
-          return activate_overlay!(
-            project_root, workflow_dir, reuse_active: reuse_active, activation: activation,
-            fallback: resolution[:fallback]
-          )
-        end
-
-        source_path, data = project_config_source(project_root)
-        unless data
-          return activate_overlay!(
-            project_root,
-            fallback_workflow_dir(project_root),
-            reuse_active: reuse_active, activation: activation
-          )
-        end
-        configured_path = data["hive_state_path"]
-        configured_path = Hive::Config::DEFAULTS.fetch("hive_state_path") unless configured_path.is_a?(String)
-        workflow_dir = begin
-          workflow_dir_for(project_root, hive_state_path: configured_path)
-        rescue ArgumentError
-          Hive::Config.validate_project_top_level_keys!(
-            data, source_path, project_root, stage_names: []
-          )
-          raise
-        end
+      def activate_project!(project_root, bootstrap:, prepared:, reuse_active:, activation:)
         activate_overlay!(
-          project_root, workflow_dir, reuse_active: reuse_active, activation: activation,
-          fallback: false
+          project_root, bootstrap.workflow_dir,
+          reuse_active: reuse_active,
+          activation: activation,
+          fallback: bootstrap.fallback,
+          fallback_from: bootstrap.fallback_from,
+          prepared: prepared
         )
+        return if activation[:reused_active] && nested_project_operation?
+        return unless bootstrap.validate_config
 
         begin
           Hive::Config.build_project_config(
-            project_root, source_path, data, stage_names: registered_stage_names
+            project_root, bootstrap.source_path, bootstrap.data,
+            stage_names: registered_stage_names
           )
         rescue Hive::UnsupportedProjectConfigError
           raise
         rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
-          warn_config_fallback(project_root, e)
-          activate_overlay!(
-            project_root,
-            fallback_workflow_dir(project_root),
-            reuse_active: reuse_active, activation: activation, fallback_from: workflow_dir
+          raise FallbackActivation.new(
+            fallback_workflow_dir(project_root), bootstrap.workflow_dir, e
           )
         end
       end
       private_class_method :activate_project!
 
       def activate_overlay!(project_root, workflow_dir, reuse_active:, activation:, fallback: false,
-                            fallback_from: nil)
+                            fallback_from: nil, prepared: nil)
         if reuse_active && active_overlay?(project_root, workflow_dir)
           activation[:reused_active] = true
           return
@@ -193,9 +225,87 @@ module Hive
         end
 
         activation[:reused_active] = false
-        load_overlay!(project_root, workflow_dir, fallback: fallback, fallback_from: fallback_from)
+        load_overlay!(
+          project_root, workflow_dir, fallback: fallback, fallback_from: fallback_from,
+          prepared: prepared
+        )
       end
       private_class_method :activate_overlay!
+
+      def activation_bootstrap(project_root, config:, hive_state_path:)
+        if config || hive_state_path
+          resolution = { fallback: false }
+          workflow_dir = workflow_dir_for(
+            project_root, config: config, hive_state_path: hive_state_path,
+            resolution: resolution
+          )
+          return ActivationBootstrap.new(
+            source_path: nil, data: nil, workflow_dir: workflow_dir,
+            validate_config: false, fallback: resolution[:fallback], fallback_from: nil
+          )
+        end
+
+        source_path, data = project_config_source(project_root)
+        unless data
+          return ActivationBootstrap.new(
+            source_path: nil, data: nil,
+            workflow_dir: fallback_workflow_dir(project_root),
+            validate_config: false, fallback: false, fallback_from: nil
+          )
+        end
+
+        configured_path = data["hive_state_path"]
+        configured_path = Hive::Config::DEFAULTS.fetch("hive_state_path") unless configured_path.is_a?(String)
+        workflow_dir = begin
+          workflow_dir_for(project_root, hive_state_path: configured_path)
+        rescue ArgumentError
+          Hive::Config.validate_project_top_level_keys!(
+            data, source_path, project_root, stage_names: []
+          )
+          raise
+        end
+        ActivationBootstrap.new(
+          source_path: source_path, data: data, workflow_dir: workflow_dir,
+          validate_config: true, fallback: false, fallback_from: nil
+        )
+      end
+      private_class_method :activation_bootstrap
+
+      # Fingerprinting and descriptor/package I/O happen before entering the
+      # process-wide Project Monitor. In particular, ManagedStore#selections
+      # may wait on the cross-process package mutation flock; that wait must not
+      # stop an unrelated project from using its already independent overlay.
+      def prepare_overlay(project_root, workflow_dir)
+        fingerprint = [ workflow_dir, *Hive::Workflows::Loader.fingerprint(workflow_dir) ].freeze
+        cached = LOCK.synchronize do
+          entry = loaded_workflows[project_root]
+          entry if entry && entry.fetch(:fingerprint) == fingerprint
+        end
+        workflows = cached ? cached.fetch(:workflows) : Hive::Workflows::Loader.load_dir(workflow_dir)
+        PreparedOverlay.new(
+          workflow_dir: workflow_dir, fingerprint: fingerprint, workflows: workflows
+        )
+      rescue StandardError
+        LOCK.synchronize { clear_incomplete_activation! }
+        raise
+      end
+      private_class_method :prepare_overlay
+
+      def reusable_active_overlay(project_root, workflow_dir)
+        LOCK.synchronize do
+          return unless active_overlay?(project_root, workflow_dir)
+
+          cached = loaded_workflows[project_root]
+          return unless cached && cached.fetch(:fingerprint) == @active_fingerprint
+
+          PreparedOverlay.new(
+            workflow_dir: workflow_dir,
+            fingerprint: cached.fetch(:fingerprint),
+            workflows: cached.fetch(:workflows)
+          )
+        end
+      end
+      private_class_method :reusable_active_overlay
 
       def block_accepts_stage_names?(block)
         positional = block.parameters.select { |kind, _name| [ :req, :opt, :rest ].include?(kind) }
@@ -247,6 +357,19 @@ module Hive
       end
       private_class_method :with_project_operation
 
+      def current_project_operation
+        Thread.current.thread_variable_get(ACTIVE_OPERATION_KEY)
+      end
+      private_class_method :current_project_operation
+
+      def assert_nested_root!(project_root)
+        operation = current_project_operation
+        return unless operation && operation.fetch(:root) != project_root
+
+        raise NestedProjectActivationError.new(operation.fetch(:root), project_root)
+      end
+      private_class_method :assert_nested_root!
+
       def nested_project_operation?
         operation = Thread.current.thread_variable_get(ACTIVE_OPERATION_KEY)
         operation && operation.fetch(:depth) > 1
@@ -262,10 +385,12 @@ module Hive
       end
       private_class_method :clear_incomplete_activation!
 
-      def load_overlay!(project_root, workflow_dir, fallback: false, fallback_from: nil)
-        # Include the resolved directory so changing hive_state_path cannot
-        # reuse an overlay cached from a different, equally empty directory.
-        fingerprint = [ workflow_dir, *Hive::Workflows::Loader.fingerprint(workflow_dir) ].freeze
+      def load_overlay!(project_root, workflow_dir, fallback: false, fallback_from: nil,
+                        prepared: nil)
+        unless prepared&.workflow_dir == workflow_dir
+          raise Hive::Error, "project workflow activation was not prepared"
+        end
+        fingerprint = prepared.fingerprint
         if @active_root == project_root && @active_fingerprint == fingerprint
           @active_fallback = fallback
           @active_fallback_from = fallback_from
@@ -287,8 +412,8 @@ module Hive
         cached = loaded_workflows[project_root]
         workflows = if cached && cached.fetch(:fingerprint) == fingerprint
                       cached.fetch(:workflows)
-        else
-                      Hive::Workflows::Loader.load_dir(workflow_dir).tap do |loaded|
+                    else
+                      prepared.workflows.tap do |loaded|
                         loaded_workflows[project_root] = { fingerprint: fingerprint, workflows: loaded }
                       end
         end

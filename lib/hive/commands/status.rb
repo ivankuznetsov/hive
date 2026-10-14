@@ -1496,10 +1496,9 @@ module Hive
           entry.match?(/\A\d+-[a-z][a-z0-9-]*\z/) &&
             File.directory?(File.join(stages_root, entry)) &&
             (selected_stage_dirs.include?(entry) ||
-             (!exclude_archived &&
              orphan_stage_has_workflow_reference?(
                File.join(stages_root, entry), workflow_generation: workflow_generation
-             )))
+             ))
         end
         (selected_stage_dirs + on_disk).uniq
       rescue SystemCallError
@@ -1582,10 +1581,14 @@ module Hive
                 next unless Hive::Stages.task_slug?(slug)
 
                 warn "hive: status: #{entry} failed to load (#{e.message}); surfaced as an Error row"
+                invalid_meta = Hive::TaskMeta.read(entry)
                 rows << invalid_task_row(
                   stage: stage, slug: slug, folder: entry, message: e.message, now: now,
+                  id: invalid_meta[:id], display_name: invalid_meta[:display_name],
+                  workflow: invalid_meta[:workflow] || workflow_generation&.default_workflow,
+                  depends_on: invalid_meta[:depends_on],
                   archive_member: terminal_stage_dirs.include?(stage) ||
-                    !known_stage_dirs.include?(stage)
+                    (!known_stage_dirs.include?(stage) && !invalid_meta[:completed_at].nil?)
                 )
                 next
               end
@@ -2076,6 +2079,7 @@ module Hive
       # in the snapshot instead of being silently dropped. The load error lands
       # in `marker_attrs[:message]` (surfaced in the JSON row's `attrs`).
       def invalid_task_row(stage:, slug:, folder:, message:, now: Time.now.utc,
+                           id: nil, display_name: nil, workflow: nil, depends_on: nil,
                            archive_member: false)
         folder_mtime =
           begin
@@ -2094,10 +2098,10 @@ module Hive
           archive_member: archive_member,
           stage: stage,
           slug: slug,
-          id: nil,
-          display_name: nil,
-          workflow: nil,
-          depends_on: nil,
+          id: id,
+          display_name: display_name,
+          workflow: workflow,
+          depends_on: depends_on,
           admission_error: nil,
           folder: folder,
           # Schema requires a non-null string; the workflow never resolved, so

@@ -691,6 +691,59 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_managed_package_lock_wait_does_not_hold_the_project_monitor
+    with_tmp_dir do |managed_root|
+      with_tmp_dir do |other_root|
+        managed_dir = File.join(managed_root, ".hive-state", "workflows")
+        lock_path = File.join(
+          managed_dir, "managed-flow", Hive::WorkflowPackage::ManagedStore::LOCK_FILE
+        )
+        FileUtils.mkdir_p(File.dirname(lock_path))
+        File.write(lock_path, "{}")
+        write_project_workflow(other_root, "other-flow", stage_name: "other")
+
+        entered_package_read = Queue.new
+        release_package_read = Queue.new
+        store = Hive::WorkflowPackage::ManagedStore.allocate
+        store.define_singleton_method(:selections) do
+          entered_package_read << true
+          release_package_read.pop
+          []
+        end
+
+        managed_loader = nil
+        other_reader = nil
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }
+        ) do
+          managed_loader = Thread.new do
+            Hive::Workflows::Project.load!(managed_root)
+          end
+          entered_package_read.pop
+
+          other_reader = Thread.new do
+            Hive::Workflows::Project.with_active_workflows(other_root) do |registry|
+              registry.fetch(:"other-flow").id
+            end
+          end
+
+          assert other_reader.join(1),
+                 "another project must remain usable while managed activation waits on its package lock"
+          assert_equal :"other-flow", other_reader.value
+        ensure
+          release_package_read << true
+          managed_loader&.join(2)
+        end
+
+        assert managed_loader&.stop?, "managed activation did not finish after its package lock released"
+      ensure
+        release_package_read << true if release_package_read&.empty?
+        managed_loader&.kill if managed_loader&.alive?
+        other_reader&.kill if other_reader&.alive?
+      end
+    end
+  end
+
   def test_consumer_exception_releases_the_operation_for_another_root
     with_tmp_dir do |root_a|
       with_tmp_dir do |root_b|

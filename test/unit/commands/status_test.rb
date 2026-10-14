@@ -815,7 +815,8 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "error", row.fetch("marker")
       assert_equal "invalid_task", row.fetch("attrs").fetch("reason")
       assert_includes row.fetch("attrs").fetch("message"), "ghost-workflow"
-      refute row.key?("workflow"), "an unresolved workflow is omitted, not emitted as null"
+      assert_equal "ghost-workflow", row.fetch("workflow"),
+                   "an unresolved task must retain its selector for diagnosis and UI grouping"
       assert_match(/failed to load/, err)
 
       refute(tasks.any? { |candidate| candidate.fetch("slug") == "NotASlug" },

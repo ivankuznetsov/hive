@@ -231,7 +231,7 @@ module Hive
     def resolve_workflow
       return resolve_workflow_from(@workflow_generation) if @workflow_generation
 
-      Hive::Workflows::Project.with_active_workflows(@project_root) do |registry, _stage_names|
+      Hive::Workflows::Project.with_active_workflows(@project_root) do |registry|
         @workflow_view = registry.workflows.dup.freeze
         resolve_workflow_from(registry)
       end

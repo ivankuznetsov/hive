@@ -6,7 +6,7 @@ module Hive
     module_function
 
     def fetch!(name, project_root: Dir.pwd)
-      Hive::Workflows::Project.with_active_workflows(project_root) do |registry, _stage_names|
+      Hive::Workflows::Project.with_active_workflows(project_root) do |registry|
         raw = name.to_s.strip
         id = raw.empty? ? Hive::Workflows::CODING_ID : raw.to_sym
         # An explicitly-named workflow (not the blank→coding default) whose
@@ -33,7 +33,7 @@ module Hive
 
     def valid_names(project_root: nil)
       if project_root
-        Hive::Workflows::Project.with_active_workflows(project_root) do |registry, _stage_names|
+        Hive::Workflows::Project.with_active_workflows(project_root) do |registry|
           registry.ids.map(&:to_s)
         end
       else

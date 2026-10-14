@@ -37,7 +37,7 @@ module Hive
       def resolve_descriptor(workflow, project: nil)
         match = registered_project(project)
         if match
-          Hive::Workflows::Project.with_active_workflows(match.fetch("path")) do |registry, _stage_names|
+          Hive::Workflows::Project.with_active_workflows(match.fetch("path")) do |registry|
             registry.fetch(workflow.to_s.to_sym)
           end
         else

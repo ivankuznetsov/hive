@@ -618,7 +618,7 @@ class Task
     id = self["workflow"].presence || Hive::Workflows::CODING_ID
     begin
       @workflow_descriptor = if project&.[]("path").present?
-        Hive::Workflows::Project.with_active_workflows(project.path) do |registry, _stage_names|
+        Hive::Workflows::Project.with_active_workflows(project.path) do |registry|
           registry.fetch(id.to_sym)
         end
       else

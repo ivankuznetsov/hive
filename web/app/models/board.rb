@@ -124,7 +124,7 @@ class Board
       end
     end
     if project["path"].present?
-      Hive::Workflows::Project.with_active_workflows(project.path, config: project.config) do |registry, _stage_names|
+      Hive::Workflows::Project.with_active_workflows(project.path, config: project.config) do |registry|
         fetch.call(registry)
       end
     else

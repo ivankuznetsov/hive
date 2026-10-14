@@ -38,7 +38,7 @@ module Hive
         @membership_end_exclusive = membership_end_exclusive
         @attention_ends_at = normalize_time(attention_ends_at)
         workflows = begin
-          Hive::Workflows::Project.with_active_workflows(@project.fetch("path")) do |registry, _stage_names|
+          Hive::Workflows::Project.with_active_workflows(@project.fetch("path")) do |registry|
             registry.workflows.dup.freeze
           end
         rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => error

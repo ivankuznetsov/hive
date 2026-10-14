@@ -1399,6 +1399,12 @@ The execute-stage suite includes a real bare-remote lifecycle fixture: it lands
 two prerequisite commits on the origin default while the local default remains
 stale, then proves list-dependent initialization fetches that updated default,
 contains both commits, and leaves the developer's local branch untouched.
+The creation integration suite also crosses the real `bin/hive` process
+boundary for repeated dependency flags: it validates the JSON envelope and
+stderr notice, reads the persisted array, proves byte-stable idempotent replay,
+and rejects a malformed later flag without publishing a task. Status integration
+keeps JSON, text, and TUI blocker order/stage/gate labels aligned while moving
+the prerequisites independently through `9-done`.
 
 The read-only task workspace is verified in layers. Root unit coverage under
 `test/unit/task_workspace/` pins strict v1 audit compatibility, closed semantic

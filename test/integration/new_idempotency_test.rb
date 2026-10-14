@@ -1,6 +1,8 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "open3"
+require "rbconfig"
 require "hive/commands/approve"
 require "hive/commands/init"
 require "hive/commands/new"
@@ -13,6 +15,7 @@ require "hive/runtime_control_plane/command_schema_installation"
 class NewIdempotencyTest < Minitest::Test
   include HiveTestHelper
 
+  HIVE_BIN = File.expand_path("../../bin/hive", __dir__)
   TEST_PACKAGE = {
     version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "9" * 64
   }.freeze
@@ -236,6 +239,56 @@ class NewIdempotencyTest < Minitest::Test
       assert_empty schemer.validate(payload).to_a
       assert_includes err, "branches from the project default"
       assert_includes err, "require 9-done"
+    end
+  end
+
+  def test_bin_hive_repeated_dependencies_persist_replay_and_reject_invalid_later_values
+    with_initialized_project do |project_root, project|
+      argv = [
+        "new", project, "--idempotency-key", "creator:terminal-list", "--json",
+        "--depends-on", "base-task", "terminal dependency list",
+        "--depends-on", "other-task"
+      ]
+
+      first_out, first_err, first_status = Open3.capture3(
+        RbConfig.ruby, "-Ilib", HIVE_BIN, *argv
+      )
+
+      assert first_status.success?, first_err
+      payload = JSON.parse(first_out)
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
+      assert_empty schemer.validate(payload).to_a
+      assert_equal true, payload.fetch("ok")
+      assert_includes first_err, "branches from the project default"
+      assert_includes first_err, "require 9-done"
+
+      folders = Dir[File.join(
+        project_root, ".hive-state", "stages", "1-inbox", "terminal-dependency-list-*"
+      )]
+      assert_equal 1, folders.length
+      assert_equal %w[base-task other-task], Hive::TaskMeta.read(folders.first).fetch(:depends_on)
+
+      replay_out, replay_err, replay_status = Open3.capture3(
+        RbConfig.ruby, "-Ilib", HIVE_BIN, *argv
+      )
+      assert replay_status.success?, replay_err
+      assert_equal first_out, replay_out
+      assert_includes replay_err, "branches from the project default"
+      assert_equal 1, Dir[File.join(
+        project_root, ".hive-state", "stages", "1-inbox", "terminal-dependency-list-*"
+      )].length
+
+      invalid_out, invalid_err, invalid_status = Open3.capture3(
+        RbConfig.ruby, "-Ilib", HIVE_BIN,
+        "new", project, "--json", "--depends-on", "base-task",
+        "invalid terminal list", "--depends-on", "BAD TASK"
+      )
+      refute invalid_status.success?
+      assert_empty invalid_out
+      assert_includes invalid_err, "depends_on element 2 is invalid"
+      assert_empty Dir[File.join(
+        project_root, ".hive-state", "stages", "1-inbox", "invalid-terminal-list-*"
+      )]
     end
   end
 

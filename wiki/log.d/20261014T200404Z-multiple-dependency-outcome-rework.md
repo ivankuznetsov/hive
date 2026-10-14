@@ -13,3 +13,6 @@ date: 2026-10-14
   remain on operational status.
 - Strengthened private-reader coverage so otherwise-current payloads in retired
   v1 operational snapshot or status-cache records are rejected and rebuilt.
+- Added real `bin/hive` creation/replay/rejection coverage and an integration
+  fixture that refreshes ordered JSON, text, and TUI blockers as individual
+  prerequisites reach `9-done`.

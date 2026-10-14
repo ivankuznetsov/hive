@@ -11,7 +11,7 @@
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a
       worktree exists). The sharp tools live in the Advanced section. %>
-  <% if @daemon_enabled && !@daemon_running && !@task.terminal? %>
+  <% if @daemon_enabled && !@daemon_running && !@task.terminal? && !@task.workflow_unavailable? %>
     <div class="state-banner daemon-blocker">
       <span class="status-dot status-dot-waiting"></span>
       <span>

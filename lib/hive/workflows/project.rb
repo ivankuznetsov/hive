@@ -30,17 +30,14 @@ module Hive
         end
       end
 
-      # Serializes the per-project `load!` + downstream resolve so the
-      # module-level overlay state (@active_root / @loaded_workflows and the
-      # Registry's project_registrations + union caches) is never swapped out
-      # from under a concurrent reader. The web tier's StatusFeed runs
-      # `json_payload` (→ load! per project, then resolve each task's workflow)
-      # on BOTH a background poller thread and per-request threads; without this
-      # lock a `load!(B)` on one thread could clear project A's overlay while
-      # another thread is mid-resolve of A, making A's custom-workflow rows
-      # raise UnknownWorkflow and degrade the project. A Monitor (reentrant) so
-      # the eager Task#initialize → load! and the status call's own
-      # `synchronize { load!; resolve }` can re-enter without deadlocking.
+      # Serializes each project operation so the module-level overlay state
+      # (@active_root / @loaded_workflows and the Registry's project
+      # registrations + union caches) is never swapped out from under a live
+      # reader. The web tier's StatusFeed runs project operations on both a
+      # background poller thread and per-request threads; without this lock an
+      # operation for project B could clear project A's overlay while another
+      # thread is resolving A. A Monitor keeps same-root configuration
+      # validation reentrant without exposing caller-owned load choreography.
       LOCK = Monitor.new
       ACTIVE_OPERATION_KEY = :hive_workflows_project_active_operation
 
@@ -58,11 +55,12 @@ module Hive
       # descriptor read and its corresponding stage-vocabulary read.
       def with_active_workflows(project_root, config: nil, hive_state_path: nil, &block)
         project_root = normalize_project_root(project_root)
+        raise LocalJumpError, "no block given (yield)" unless block
+
         with_project_operation(project_root) do
           activate_with_cleanup!(
             project_root, config: config, hive_state_path: hive_state_path
           )
-          raise LocalJumpError, "no block given (yield)" unless block
 
           if block_accepts_stage_names?(block)
             block.call(Hive::Workflows::Registry, registered_stage_names)
@@ -124,11 +122,14 @@ module Hive
 
       def activate_project!(project_root, config:, hive_state_path:, reuse_active:, activation:)
         if config || hive_state_path
+          resolution = { fallback: false }
           workflow_dir = workflow_dir_for(
-            project_root, config: config, hive_state_path: hive_state_path
+            project_root, config: config, hive_state_path: hive_state_path,
+            resolution: resolution
           )
           return activate_overlay!(
-            project_root, workflow_dir, reuse_active: reuse_active, activation: activation
+            project_root, workflow_dir, reuse_active: reuse_active, activation: activation,
+            fallback: resolution[:fallback]
           )
         end
 
@@ -137,8 +138,7 @@ module Hive
           return activate_overlay!(
             project_root,
             fallback_workflow_dir(project_root),
-            reuse_active: reuse_active,
-            activation: activation
+            reuse_active: reuse_active, activation: activation
           )
         end
         configured_path = data["hive_state_path"]
@@ -152,7 +152,8 @@ module Hive
           raise
         end
         activate_overlay!(
-          project_root, workflow_dir, reuse_active: reuse_active, activation: activation
+          project_root, workflow_dir, reuse_active: reuse_active, activation: activation,
+          fallback: false
         )
 
         begin
@@ -166,14 +167,14 @@ module Hive
           activate_overlay!(
             project_root,
             fallback_workflow_dir(project_root),
-            reuse_active: reuse_active,
-            activation: activation
+            reuse_active: reuse_active, activation: activation, fallback_from: workflow_dir
           )
         end
       end
       private_class_method :activate_project!
 
-      def activate_overlay!(project_root, workflow_dir, reuse_active:, activation:)
+      def activate_overlay!(project_root, workflow_dir, reuse_active:, activation:, fallback: false,
+                            fallback_from: nil)
         if reuse_active && active_overlay?(project_root, workflow_dir)
           activation[:reused_active] = true
           return
@@ -181,6 +182,8 @@ module Hive
 
         if reuse_active && nested_project_operation? && @active_root == project_root && @active_fingerprint
           activation[:reused_active] = true
+          return if @active_fallback && @active_fallback_from == workflow_dir
+
           raise NestedProjectActivationError.new(
             project_root,
             project_root,
@@ -190,7 +193,7 @@ module Hive
         end
 
         activation[:reused_active] = false
-        load_overlay!(project_root, workflow_dir)
+        load_overlay!(project_root, workflow_dir, fallback: fallback, fallback_from: fallback_from)
       end
       private_class_method :activate_overlay!
 
@@ -254,14 +257,20 @@ module Hive
         Hive::Workflows::Registry.reset_project_registrations!
         @active_root = nil
         @active_fingerprint = nil
+        @active_fallback = false
+        @active_fallback_from = nil
       end
       private_class_method :clear_incomplete_activation!
 
-      def load_overlay!(project_root, workflow_dir)
+      def load_overlay!(project_root, workflow_dir, fallback: false, fallback_from: nil)
         # Include the resolved directory so changing hive_state_path cannot
         # reuse an overlay cached from a different, equally empty directory.
         fingerprint = [ workflow_dir, *Hive::Workflows::Loader.fingerprint(workflow_dir) ].freeze
-        return if @active_root == project_root && @active_fingerprint == fingerprint
+        if @active_root == project_root && @active_fingerprint == fingerprint
+          @active_fallback = fallback
+          @active_fallback_from = fallback_from
+          return
+        end
 
         # Clear the prior project's overlay BEFORE loading, and drop
         # @active_root to nil first. @active_root is re-set to the new root only
@@ -272,6 +281,8 @@ module Hive
         Hive::Workflows::Registry.reset_project_registrations!
         @active_root = nil
         @active_fingerprint = nil
+        @active_fallback = false
+        @active_fallback_from = nil
 
         cached = loaded_workflows[project_root]
         workflows = if cached && cached.fetch(:fingerprint) == fingerprint
@@ -288,6 +299,8 @@ module Hive
         # respond_to? guard the registry already encapsulates).
         @active_root = project_root
         @active_fingerprint = fingerprint
+        @active_fallback = fallback || !fallback_from.nil?
+        @active_fallback_from = fallback_from
       end
 
       def active_overlay?(project_root, workflow_dir)
@@ -363,6 +376,8 @@ module Hive
         LOCK.synchronize do
           @active_root = nil
           @active_fingerprint = nil
+          @active_fallback = false
+          @active_fallback_from = nil
           loaded_workflows.clear
           warned_skips.clear
           Hive::Workflows::Registry.reset_project_registrations!
@@ -386,7 +401,7 @@ module Hive
         @warned_skips ||= Set.new
       end
 
-      def workflow_dir_for(project_root, config: nil, hive_state_path: nil)
+      def workflow_dir_for(project_root, config: nil, hive_state_path: nil, resolution: nil)
         return Hive::Workflows::Loader.workflow_dir(project_root, hive_state_path: hive_state_path) unless hive_state_path.nil?
         return Hive::Workflows::Loader.workflow_dir(project_root, config: config) if config
 
@@ -399,6 +414,7 @@ module Hive
         # wrong (default) directory — its workflows would otherwise go
         # unregistered and resurface later as a confusing "unknown workflow".
         warn_config_fallback(project_root, e)
+        resolution[:fallback] = true if resolution
         fallback_workflow_dir(project_root)
       end
     end

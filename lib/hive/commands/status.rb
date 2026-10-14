@@ -1473,12 +1473,9 @@ module Hive
         puts "    read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent before converting this state"
       end
 
-      # Stage dirs to walk when no explicit `stages:` list is given are
-      # computed from `Hive::Workflows.all_stage_dirs` AT CALL TIME. For
-      # the TUI's active-only re-parse this runs INSIDE the per-project
-      # `Workflows::Project.synchronize { load!(path); ... }` block, so a
-      # project's custom-workflow active stages are honored instead of
-      # being dropped by a union pre-computed against a different project's
+      # Stage dirs to walk when no explicit `stages:` list is given come from
+      # the captured project workflow generation. That bounded view keeps
+      # custom stages stable after the Project operation releases the live
       # overlay. Archive membership is applied after TaskAction annotation,
       # because one workflow's terminal directory may be another workflow's
       # active directory.

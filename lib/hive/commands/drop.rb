@@ -242,7 +242,7 @@ module Hive
         projects = projects.select { |p| p["name"] == @project_filter } if @project_filter
         all_matches = projects.flat_map do |project|
           stages = Hive::Workflows::Project.with_active_workflows(project["path"]) do
-            Hive::Workflows.all_stage_dirs.dup.freeze
+            Hive::Workflows.all_stage_dirs
           end
           collect_stage_folders(project["hive_state_path"], @target, stages).map do |folder|
             [ project, folder ]

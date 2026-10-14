@@ -7,6 +7,25 @@ updated: 2026-09-28
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Project workflow operation measurement gaps (2026-10-14)
+
+Each outer `with_active_workflows` operation currently re-reads project
+configuration, fingerprints the workflow directory, and re-validates strict
+configuration before yielding. The parsed descriptor cache avoids repeated
+descriptor parsing, but there is no measurement of activation I/O, Monitor
+hold/wait latency, or end-to-end status and Web latency under concurrent project
+reads. The lock-extent tests establish ownership and blocking behavior; they do
+not establish a latency budget or the plan's back-out threshold.
+
+Web `Task#terminal?` now prefers the task's resolved workflow descriptor rather
+than treating every directory that is terminal in any active project workflow
+as terminal for every task. Built-in terminal directories remain a conservative
+fallback when resolution is unavailable, and unavailable workflow actions are
+suppressed. The remaining uncertainty is whether a future public status
+projection should carry the captured workflow's terminal directory explicitly,
+so Web can distinguish a removed project-authored terminal descriptor from an
+unknown active stage without reactivating the project.
+
 ## Command-receipt external evidence gaps (2026-09-28)
 
 Resolved for Tier A on 2026-09-28: the compatibility candidate was rebuilt

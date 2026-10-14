@@ -230,35 +230,18 @@ module Hive
     # than consulting whichever project overlay happens to be live then.
     def resolve_workflow
       return resolve_workflow_from(@workflow_generation) if @workflow_generation
+      managed_workflow = resolve_managed_workflow if managed_workflow_provenance?
 
       Hive::Workflows::Project.with_active_workflows(@project_root) do |registry|
         @workflow_view = registry.workflows.dup.freeze
-        resolve_workflow_from(registry)
+        managed_workflow || resolve_workflow_from(registry)
       end
     rescue Hive::Workflows::UnknownWorkflow => e
       raise InvalidTaskPath, e.message
     end
 
     def resolve_workflow_from(source)
-      if meta[:workflow_commit] || meta[:workflow_manifest_digest] || meta[:workflow_configuration_digest]
-        unless meta[:workflow] && meta[:workflow_commit] && meta[:workflow_manifest_digest]
-          raise InvalidTaskPath, "managed workflow task provenance is incomplete"
-        end
-        store = Hive::WorkflowPackage::ManagedStore.new(@hive_state_path)
-        begin
-          cfg = @workflow_generation&.config || Hive::Config.load(@project_root)
-          selected = current_managed_selection!(store, cfg)
-          return store.workflow(
-            meta[:workflow], selected.fetch("source_commit"), selected.fetch("manifest_digest"),
-            configuration_digest: selected.fetch("configuration_digest"), cfg: cfg,
-            verify_profiles: false
-          )
-        rescue Hive::UnsupportedProjectConfigError
-          raise
-        rescue Hive::ConfigError => e
-          raise InvalidTaskPath, e.message
-        end
-      end
+      return resolve_managed_workflow if managed_workflow_provenance?
 
       selector = meta[:workflow]
       # TaskMeta.read normalizes blank → nil, so a missing/blank selector is
@@ -279,6 +262,30 @@ module Hive
         )
       end
       source.fetch(selector.to_sym)
+    end
+
+    def managed_workflow_provenance?
+      meta[:workflow_commit] || meta[:workflow_manifest_digest] ||
+        meta[:workflow_configuration_digest]
+    end
+
+    def resolve_managed_workflow
+      unless meta[:workflow] && meta[:workflow_commit] && meta[:workflow_manifest_digest]
+        raise InvalidTaskPath, "managed workflow task provenance is incomplete"
+      end
+
+      store = Hive::WorkflowPackage::ManagedStore.new(@hive_state_path)
+      cfg = @workflow_generation&.config || Hive::Config.load(@project_root)
+      selected = current_managed_selection!(store, cfg)
+      store.workflow(
+        meta[:workflow], selected.fetch("source_commit"), selected.fetch("manifest_digest"),
+        configuration_digest: selected.fetch("configuration_digest"), cfg: cfg,
+        verify_profiles: false
+      )
+    rescue Hive::UnsupportedProjectConfigError
+      raise
+    rescue Hive::ConfigError => e
+      raise InvalidTaskPath, e.message
     end
 
     def current_managed_selection!(store, cfg)

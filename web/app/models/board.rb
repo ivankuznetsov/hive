@@ -108,14 +108,18 @@ class Board
   def workflows_for(project, workflow_ids)
     fetch = lambda do |registry|
       workflow_ids.to_h do |workflow_id|
-        workflow = registry.fetch(workflow_id.to_sym) do
-          known = registry.keys
-          raise Hive::Workflows::UnknownWorkflow.new(
-            "unknown workflow #{workflow_id.to_sym.inspect}; known workflows: " \
-              "#{known.map(&:inspect).join(', ')}",
-            value: workflow_id.to_sym,
-            valid: known.map(&:to_s)
-          )
+        workflow = if registry.equal?(Hive::Workflows::Registry::WORKFLOWS)
+          registry.fetch(workflow_id.to_sym) do
+            known = registry.keys
+            raise Hive::Workflows::UnknownWorkflow.new(
+              "unknown workflow #{workflow_id.to_sym.inspect}; known workflows: " \
+                "#{known.map(&:inspect).join(', ')}",
+              value: workflow_id.to_sym,
+              valid: known.map(&:to_s)
+            )
+          end
+        else
+          registry.fetch(workflow_id.to_sym)
         end
         [ workflow_id, workflow ]
       rescue Hive::Workflows::UnknownWorkflow, KeyError => e
@@ -130,7 +134,8 @@ class Board
     else
       fetch.call(Hive::Workflows::Registry::WORKFLOWS)
     end
-  rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+  rescue Hive::ConfigError, Hive::Workflows::Project::NestedProjectActivationError,
+         Psych::Exception, SystemCallError, IOError, ArgumentError => e
     workflow_ids.each { |workflow_id| log_unavailable_workflow(project, workflow_id, e) }
     workflow_ids.index_with { nil }
   end

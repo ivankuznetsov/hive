@@ -145,6 +145,29 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_with_active_workflows_rejects_a_missing_block_before_changing_the_overlay
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "stable-flow")
+      Hive::Workflows::Project.load!(project_root)
+      expected_ids = Hive::Workflows::Registry.ids
+      fingerprint_calls = 0
+
+      original = Hive::Workflows::Loader.method(:fingerprint)
+      with_replaced_singleton_method(Hive::Workflows::Loader, :fingerprint, lambda { |dir|
+        fingerprint_calls += 1
+        original.call(dir)
+      }) do
+        error = assert_raises(LocalJumpError) do
+          Hive::Workflows::Project.with_active_workflows(project_root)
+        end
+        assert_includes error.message, "no block given"
+      end
+
+      assert_equal 0, fingerprint_calls
+      assert_equal expected_ids, Hive::Workflows::Registry.ids
+    end
+  end
+
   def test_same_root_nesting_reuses_the_view_and_different_root_adapter_entry_is_rejected_before_mutation
     with_tmp_dir do |root_a|
       with_tmp_dir do |root_b|
@@ -202,6 +225,58 @@ class WorkflowsProjectTest < Minitest::Test
         assert_includes registry.ids, :"flow-a"
         refute_includes registry.ids, :"flow-b"
         assert_includes stages, "alpha"
+      end
+    end
+  end
+
+  def test_same_root_nested_config_validation_reuses_an_outer_fallback_overlay
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "fallback-flow", stage_name: "review")
+      config_path = File.join(project_root, ".hive-state", "config.yml")
+      File.write(
+        config_path,
+        {
+          "hive_state_path" => "custom-state",
+          "budget_usd" => "not-a-number",
+          "review" => { "agent" => "codex" }
+        }.to_yaml
+      )
+
+      _out, warning = capture_io do
+        Hive::Workflows::Project.with_active_workflows(project_root) do |registry|
+          error = assert_raises(Hive::ConfigError) { Hive::Config.load(project_root) }
+          refute_kind_of Hive::Workflows::Project::NestedProjectActivationError, error
+          assert_includes registry.ids, :"fallback-flow"
+        end
+      end
+
+      assert_match(/falling back to/, warning)
+    end
+  end
+
+  def test_outer_fallback_does_not_allow_an_unrelated_nested_directory_switch
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "fallback-flow", stage_name: "review")
+      File.write(
+        File.join(project_root, ".hive-state", "config.yml"),
+        {
+          "hive_state_path" => "custom-state",
+          "budget_usd" => "not-a-number",
+          "review" => { "agent" => "codex" }
+        }.to_yaml
+      )
+
+      capture_io do
+        Hive::Workflows::Project.with_active_workflows(project_root) do |registry|
+          error = assert_raises(Hive::Workflows::Project::NestedProjectActivationError) do
+            Hive::Workflows::Project.stage_names_for_config(
+              project_root, hive_state_path: "unrelated-state"
+            )
+          end
+
+          assert_includes error.message, File.join(project_root, "unrelated-state", "workflows")
+          assert_includes registry.ids, :"fallback-flow"
+        end
       end
     end
   end

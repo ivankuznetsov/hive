@@ -2118,6 +2118,95 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_match(/UnsupportedProjectConfigError/, unavailable.last.fetch(:error))
   end
 
+  def test_full_tick_captures_custom_stage_dirs_when_the_request_queue_is_empty
+    with_tmp_dir do |project_root|
+      workflows_dir = File.join(project_root, ".hive-state", "workflows")
+      FileUtils.mkdir_p(File.join(workflows_dir, "custom-daemon"))
+      File.write(
+        File.join(workflows_dir, "custom-daemon.yml"),
+        <<~YAML
+          id: custom-daemon
+          stages:
+            - name: inbox
+              kind: terminal
+              state_file: idea.md
+            - name: quality
+              kind: agent
+              state_file: quality.md
+              instruction: ./custom-daemon/quality.md
+            - name: done
+              kind: terminal
+              state_file: done.md
+        YAML
+      )
+      File.write(File.join(workflows_dir, "custom-daemon", "quality.md"), "Do quality.\n")
+      observed = row(
+        stage: "2-quality", workflow: "custom-daemon", action: nil, command: nil
+      )
+      dispatcher, = make_dispatcher(rows: [ observed ])
+      projects = [
+        {
+          "name" => "p1", "path" => project_root,
+          "hive_state_path" => File.join(project_root, ".hive-state")
+        }
+      ]
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        dispatcher.tick(now: T0)
+      end
+
+      stage_dirs = dispatcher.instance_variable_get(:@workflow_stage_dirs_by_project).fetch("p1")
+      assert_includes stage_dirs, "2-quality"
+      assert_includes stage_dirs, "3-done"
+    end
+  end
+
+  def test_workflow_stage_dir_degradation_keeps_previous_and_uses_built_ins_for_unknown_projects
+    dispatcher, = make_dispatcher(rows: [])
+    dispatcher.instance_variable_set(
+      :@workflow_stage_dirs_by_project, { "previous" => %w[1-inbox 2-custom 3-done] }.freeze
+    )
+    projects = [ { "name" => "previous", "path" => "/projects/previous" } ]
+    activation = ->(*, **, &) { raise Hive::ConfigError, "temporarily invalid" }
+
+    result = with_replaced_singleton_method(
+      Hive::Workflows::Project, :with_active_workflows, activation
+    ) do
+      dispatcher.send(
+        :workflow_stage_dirs_by_project, %w[previous unregistered], projects: projects
+      )
+    end
+
+    assert_equal %w[1-inbox 2-custom 3-done], result.fetch("previous")
+    assert_equal Hive::Daemon::Dispatcher::BUILT_IN_STAGE_DIRS,
+                 result.fetch("unregistered")
+  end
+
+  def test_workflow_stage_dir_degradation_contains_every_activation_error_class
+    errors = [
+      Hive::ConfigError.new("bad config"),
+      Hive::Workflows::Project::NestedProjectActivationError.new("/a", "/b"),
+      Psych::Exception.new("bad yaml"),
+      Errno::EACCES.new("denied"),
+      IOError.new("unreadable"),
+      ArgumentError.new("blank root")
+    ]
+
+    errors.each do |activation_error|
+      dispatcher, = make_dispatcher(rows: [])
+      projects = [ { "name" => "bad", "path" => "/projects/bad" } ]
+      activation = ->(*, **, &) { raise activation_error }
+
+      result = with_replaced_singleton_method(
+        Hive::Workflows::Project, :with_active_workflows, activation
+      ) do
+        dispatcher.send(:workflow_stage_dirs_by_project, [ "bad" ], projects: projects)
+      end
+
+      assert_empty result.fetch("bad"), activation_error.class.name
+    end
+  end
+
   def test_empty_dispatch_request_scan_skips_global_index_work
     dispatcher, = make_dispatcher(rows: [])
     rows = Object.new
@@ -4033,6 +4122,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
                      dispatcher.send(:find_post_advance_state_file, hive_state, slug),
                      "the post-advance scan must locate the generic non-coding stage dir"
       end
+    end
+  end
+
+  def test_find_post_advance_state_file_contains_activation_failure_and_uses_built_ins
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    Dir.mktmpdir("hive-post-advance-fallback") do |hive_state|
+      slug = "coding-1"
+      done_dir = File.join(hive_state, "stages", "9-done", slug)
+      FileUtils.mkdir_p(done_dir)
+      state_file = File.join(done_dir, "task.md")
+      File.write(state_file, "# done\n")
+      project = { "name" => "broken", "path" => "", "hive_state_path" => hive_state }
+
+      assert_equal state_file,
+                   dispatcher.send(:find_post_advance_state_file, project, slug)
+      event = logger.events.find do |name, attributes|
+        name == :post_advance_workflow_dirs_unavailable && attributes[:project] == "broken"
+      end
+      refute_nil event
+      assert_match(/ArgumentError/, event.last.fetch(:error))
+      assert_equal true, event.last.fetch(:using_built_in)
     end
   end
 

@@ -91,6 +91,49 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_managed_task_resolves_package_before_entering_the_project_operation
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(
+        File.join(hive_state, "config.yml"),
+        Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state").to_yaml
+      )
+      folder = File.join(hive_state, "stages", "1-inbox", "managed-261014-aaaa")
+      Hive::TaskMeta.write(
+        folder, id: 1, slug: File.basename(folder), display_name: "Managed",
+        workflow: "demo", workflow_commit: "a" * 40,
+        workflow_manifest_digest: "b" * 64,
+        workflow_configuration_digest: "c" * 64
+      )
+      descriptor = Hive::Workflows::Registry.fetch(:coding)
+      selection = {
+        "source_commit" => "a" * 40,
+        "manifest_digest" => "b" * 64,
+        "configuration_digest" => "c" * 64
+      }
+      store = Object.new
+      store.define_singleton_method(:selected) do |_name, cfg:|
+        raise "managed selection read held Project::LOCK" if Hive::Workflows::Project::LOCK.mon_owned?
+
+        selection
+      end
+      store.define_singleton_method(:workflow) do |*, **|
+        raise "managed workflow read held Project::LOCK" if Hive::Workflows::Project::LOCK.mon_owned?
+
+        descriptor
+      end
+
+      task = with_replaced_singleton_method(
+        Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }
+      ) do
+        Hive::Task.new(folder)
+      end
+
+      assert_equal :coding, task.workflow.id
+    end
+  end
+
   def test_parses_valid_path
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "add-foo")

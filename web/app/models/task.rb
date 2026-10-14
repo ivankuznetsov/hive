@@ -460,6 +460,8 @@ class Task
     end
   end
 
+  def workflow_unavailable? = workflow_descriptor.nil?
+
   def diff
     Hive::Web::TaskDiff.new(task: self, timeout_sec: DIFF_TIMEOUT_SEC).call
   end
@@ -624,8 +626,9 @@ class Task
       else
         Hive::Workflows::Registry::WORKFLOWS.fetch(id.to_sym)
       end
-    rescue Hive::Workflows::UnknownWorkflow, KeyError, Hive::ConfigError, Psych::Exception,
-           SystemCallError, IOError => error
+    rescue Hive::Workflows::UnknownWorkflow, KeyError, Hive::ConfigError,
+           Hive::Workflows::Project::NestedProjectActivationError, Psych::Exception,
+           SystemCallError, IOError, ArgumentError => error
       @workflow_descriptor = nil
       Rails.logger.warn(
         "task workflow unavailable for #{project&.[]('name') || 'unknown'}/#{id}: " \

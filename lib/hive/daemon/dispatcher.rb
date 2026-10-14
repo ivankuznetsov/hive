@@ -2162,15 +2162,26 @@ module Hive
         return nil unless hive_state_path && Dir.exist?(hive_state_path)
 
         stage_dirs = if project_entry&.[]("path")
-          Hive::Workflows::Project.with_active_workflows(project_entry["path"]) do
-            Hive::Workflows.all_stage_dirs.dup.freeze
+          begin
+            Hive::Workflows::Project.with_active_workflows(project_entry["path"]) do
+              Hive::Workflows.all_stage_dirs
+            end
+          rescue Hive::ConfigError, Hive::Workflows::Project::NestedProjectActivationError,
+                 Psych::Exception, SystemCallError, IOError, ArgumentError => error
+            @logger.event(
+              :post_advance_workflow_dirs_unavailable,
+              project: project_entry["name"].to_s,
+              error: "#{error.class}: #{error.message[0, 200]}",
+              using_built_in: true
+            )
+            BUILT_IN_STAGE_DIRS
           end
         else
           # Compatibility for the long-standing path-only helper seam. It has
           # no project identity to activate, so preserve the synchronized
           # current union (including runtime test/plugin registrations).
           Hive::Workflows::Project.synchronize do
-            Hive::Workflows.all_stage_dirs.dup.freeze
+            Hive::Workflows.all_stage_dirs
           end
         end
 
@@ -2998,7 +3009,7 @@ module Hive
       # coding row under slot scarcity (consistent with the sibling gates).
       def stage_rank(stage, stage_dirs: nil)
         stage_dirs ||= Hive::Workflows::Project.synchronize do
-          Hive::Workflows.all_stage_dirs.dup.freeze
+          Hive::Workflows.all_stage_dirs
         end
         stage_dirs.index(stage.to_s) || -1
       end
@@ -3039,12 +3050,13 @@ module Hive
           dirs = begin
             if project&.fetch("path", nil)
               Hive::Workflows::Project.with_active_workflows(project.fetch("path")) do
-                Hive::Workflows.all_stage_dirs.dup.freeze
+                Hive::Workflows.all_stage_dirs
               end
             else
               BUILT_IN_STAGE_DIRS
             end
-          rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => error
+          rescue Hive::ConfigError, Hive::Workflows::Project::NestedProjectActivationError,
+                 Psych::Exception, SystemCallError, IOError, ArgumentError => error
             previous = @workflow_stage_dirs_by_project[name] if
               @workflow_stage_dirs_by_project.key?(name)
             @logger.event(

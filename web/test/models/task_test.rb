@@ -487,9 +487,11 @@ class TaskTest < ActiveSupport::TestCase
   test "workflow descriptor failures are logged and memoized as unavailable" do
     errors = [
       Hive::ConfigError.new("bad config"),
+      Hive::Workflows::Project::NestedProjectActivationError.new("/tmp/a", "/tmp/b"),
       Psych::Exception.new("bad yaml"),
       Errno::EACCES.new("denied"),
-      IOError.new("unreadable")
+      IOError.new("unreadable"),
+      ArgumentError.new("blank root")
     ]
 
     errors.each do |error|
@@ -557,6 +559,23 @@ class TaskTest < ActiveSupport::TestCase
 
     assert done.terminal?
     refute active.terminal?
+    assert done.workflow_unavailable?
+    assert active.workflow_unavailable?
+  end
+
+  test "a project-authored terminal stage stays unavailable when its descriptor cannot load" do
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => "/tmp/alpha"),
+      attributes: { "stage" => "3-finished", "workflow" => "custom" }
+    )
+    activation = ->(*, **, &) { raise Hive::ConfigError, "bad project workflow" }
+
+    with_replaced_singleton_method(
+      Hive::Workflows::Project, :with_active_workflows, activation
+    ) do
+      refute task.terminal?
+      assert task.workflow_unavailable?
+    end
   end
 
   test "queues a run through the task resource instead of a web dispatcher" do

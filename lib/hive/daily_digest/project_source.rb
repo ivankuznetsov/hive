@@ -41,9 +41,10 @@ module Hive
           Hive::Workflows::Project.with_active_workflows(@project.fetch("path")) do |registry|
             registry.workflows.dup.freeze
           end
-        rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => error
+        rescue Hive::ConfigError, Hive::Workflows::Project::NestedProjectActivationError,
+               Psych::Exception, SystemCallError, IOError, ArgumentError => error
           raise SourceUnavailable,
-                "registered project workflows are unavailable (#{error.class}): #{error.message}"
+                "registered project workflows are unavailable (#{error.class})"
         end
         @stages_by_dir = workflows.values.flat_map(&:stages).each_with_object({}) do |stage, by_dir|
           by_dir[stage.dir] ||= stage

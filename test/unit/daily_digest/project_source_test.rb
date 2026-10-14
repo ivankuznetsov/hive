@@ -46,8 +46,22 @@ class DailyDigestProjectSourceTest < Minitest::Test
 
       assert_match(/registered project workflows are unavailable/, error.message)
       assert_match(/Hive::UnsupportedProjectConfigError/, error.message)
-      assert_match(/bogus_typo_key/, error.message)
+      refute_match(/bogus_typo_key/, error.message)
+      refute_includes error.message, File.join(state, "config.yml")
     end
+  end
+
+  def test_blank_project_root_is_typed_and_redacted_as_source_unavailable
+    error = assert_raises(Hive::DailyDigest::ProjectSource::SourceUnavailable) do
+      Hive::DailyDigest::ProjectSource.new(
+        project: { "name" => "blank", "project_id" => "blank", "path" => "" },
+        starts_at: Time.iso8601("2026-08-30T00:00:00Z"),
+        ends_at: Time.iso8601("2026-08-31T00:00:00Z")
+      )
+    end
+
+    assert_equal "registered project workflows are unavailable (ArgumentError)", error.message
+    refute_includes error.message, "project_root"
   end
 
   def test_collects_creation_and_material_journal_activity_once

@@ -293,4 +293,49 @@ class WorkflowsTest < Minitest::Test
 
     assert_includes error.message, "ambiguous stage 'done'"
   end
+
+  def test_assert_known_stage_filter_reports_a_stable_union_across_projects
+    Dir.mktmpdir("hive-stage-hint-a") do |root_a|
+      Dir.mktmpdir("hive-stage-hint-b") do |root_b|
+        write_authored_workflow(root_a, "flow-zulu", "zulu")
+        write_authored_workflow(root_b, "flow-alpha", "alpha")
+        projects = [ { "path" => root_a }, { "path" => root_b } ]
+
+        first = assert_raises(Hive::InvalidTaskPath) do
+          Hive::Workflows.assert_known_stage_filter!("missing", projects)
+        end
+        second = assert_raises(Hive::InvalidTaskPath) do
+          Hive::Workflows.assert_known_stage_filter!("missing", projects.reverse)
+        end
+
+        assert_equal first.message, second.message
+        assert_includes first.message, "2-alpha"
+        assert_includes first.message, "2-zulu"
+        assert_operator first.message.index("2-alpha"), :<, first.message.index("2-zulu")
+      end
+    end
+  end
+
+  private
+
+  def write_authored_workflow(project_root, id, stage_name)
+    workflows_dir = File.join(project_root, ".hive-state", "workflows")
+    instruction_dir = File.join(workflows_dir, id)
+    FileUtils.mkdir_p(instruction_dir)
+    File.write(File.join(instruction_dir, "#{stage_name}.md"), "Do #{stage_name}.\n")
+    File.write(File.join(workflows_dir, "#{id}.yml"), <<~YAML)
+      id: #{id}
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+        - name: #{stage_name}
+          kind: agent
+          state_file: #{stage_name}.md
+          instruction: ./#{id}/#{stage_name}.md
+        - name: done
+          kind: terminal
+          state_file: done.md
+    YAML
+  end
 end

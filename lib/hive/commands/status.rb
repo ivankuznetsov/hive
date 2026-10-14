@@ -1497,7 +1497,9 @@ module Hive
             File.directory?(File.join(stages_root, entry)) &&
             (selected_stage_dirs.include?(entry) ||
              orphan_stage_has_workflow_reference?(
-               File.join(stages_root, entry), workflow_generation: workflow_generation
+               File.join(stages_root, entry),
+               workflow_generation: workflow_generation,
+               unresolved_only: exclude_archived
              ))
         end
         (selected_stage_dirs + on_disk).uniq
@@ -1505,13 +1507,25 @@ module Hive
         selected_stage_dirs || workflow_stage_dirs(workflow_generation)
       end
 
-      def orphan_stage_has_workflow_reference?(stage_dir, workflow_generation: nil)
+      def orphan_stage_has_workflow_reference?(stage_dir, workflow_generation: nil,
+                                               unresolved_only: false)
         task_folders = Dir.children(stage_dir).filter_map do |child|
           folder = File.join(stage_dir, child)
           folder if Hive::Stages.task_slug?(child) && File.directory?(folder)
         end
         return false if task_folders.empty?
-        return true if task_folders.any? { |folder| Hive::TaskMeta.read(folder)[:workflow] }
+
+        task_meta = task_folders.map { |folder| Hive::TaskMeta.read(folder) }
+        selectors = task_meta.filter_map do |meta|
+          selector = meta[:workflow].to_s.strip
+          selector unless selector.empty?
+        end
+        return true if !unresolved_only && selectors.any?
+        if unresolved_only
+          accepted = workflow_ids(workflow_generation).map(&:to_s)
+          return true if selectors.any? { |selector| !accepted.include?(selector) }
+        end
+        return false unless task_meta.any? { |meta| meta[:workflow].to_s.strip.empty? }
 
         # Fieldless legacy tasks follow the project default. Keep their orphan
         # stage visible when that default descriptor was deleted or could not be

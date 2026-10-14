@@ -967,8 +967,8 @@ module Hive
     end
 
     # argv fragment for hive-launched claude: ["--model", m, "--effort", e].
-    # Semantics: model "inherit"/blank omits the flag (operator's interactive default
-    # applies); anything else — including the live alias "default" — passes
+    # Semantics: model "inherit"/blank omits the flag (operator's interactive
+    # default applies); anything else — including the live alias "default" — passes
     # through. effort "default"/"inherit"/blank omits the flag (Claude
     # Code's own tier applies); any other tier Claude Code accepts passes
     # through verbatim (low/medium/high/xhigh/max as of CC 2.1.x — the init

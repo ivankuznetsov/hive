@@ -302,6 +302,55 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def write_legacy_stop_hook_stub(dir)
+    settings = File.join(dir, ".claude", "settings.json")
+    FileUtils.mkdir_p(File.dirname(settings))
+    command = "HIVE_TASK_STAGE_DIR=#{dir} /opt/hive/lib/hive/scripts/stop_hook.sh"
+    File.write(settings, JSON.generate(
+      "hooks" => { "Stop" => [ { "hooks" => [ { "type" => "command", "command" => command } ] } ] }
+    ))
+    settings
+  end
+
+  def spawn_with_stubbed_agent(task, **kwargs)
+    agent = Object.new
+    agent.define_singleton_method(:run!) { { status: :ok } }
+    with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+      with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+        Hive::Stages::Base.spawn_agent(task, prompt: "x", max_budget_usd: nil, timeout_sec: 5, **kwargs)
+      end
+    end
+  end
+
+  # Reviewers and other direct Claude spawns bypass ClaudeLauncher.launch!,
+  # so the tmux-era stub repair lives in spawn_agent.
+  def test_claude_spawn_repairs_a_legacy_stop_hook_stub_in_cwd
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      worktree = File.join(dir, "worktree")
+      settings = write_legacy_stop_hook_stub(worktree)
+
+      spawn_with_stubbed_agent(task, cwd: worktree)
+
+      refute File.exist?(settings)
+    end
+  end
+
+  def test_codex_spawn_leaves_a_legacy_stop_hook_stub_alone
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      worktree = File.join(dir, "worktree")
+      settings = write_legacy_stop_hook_stub(worktree)
+
+      spawn_with_stubbed_agent(
+        task, cwd: worktree, profile: Hive::AgentProfiles.lookup(:codex),
+        status_mode: :exit_code_only
+      )
+
+      assert File.exist?(settings)
+    end
+  end
+
   def test_typed_permission_policy_reaches_agent
     with_tmp_dir do |dir|
       task = make_task(dir)

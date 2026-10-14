@@ -343,9 +343,10 @@ class ClaudeLauncherTest < Minitest::Test
       JSON.generate("hooks" => { "Stop" => [ { "hooks" => [ { "type" => "command", "command" => "./my_hook.sh" } ] } ] }),
       JSON.generate(legacy_stop_hook_stub("/tmp/x").merge("model" => "opus")),
       JSON.generate("hooks" => { "Stop" => [ { "hooks" => [ { "type" => "command", "command" => "/opt/stop_hook.sh" } ] } ] }),
-      JSON.generate("hooks" => "not-a-hash"),
-      "[]",
-      "{not json"
+      # Each of these names the stub script so it reaches the parse checks.
+      JSON.generate("hooks" => "/opt/stop_hook.sh"),
+      %(["/opt/stop_hook.sh"]),
+      "{not json /opt/stop_hook.sh"
     ]
     project_owned.each do |content|
       with_tmp_task do |task|
@@ -372,6 +373,80 @@ class ClaudeLauncherTest < Minitest::Test
         end
       end
       assert_match(/could not repair legacy Claude settings #{Regexp.escape(settings)}: Errno::EACCES/, err)
+    end
+  end
+
+  def test_repair_never_acts_through_a_symlinked_settings_file
+    with_tmp_task do |task|
+      target = File.join(File.dirname(task.folder), "elsewhere.json")
+      File.write(target, JSON.generate(legacy_stop_hook_stub(task.folder)))
+      File.chmod(0o600, target)
+      settings = File.join(task.folder, ".claude", "settings.json")
+      FileUtils.mkdir_p(File.dirname(settings))
+      File.symlink(target, settings)
+      File.write("#{settings}.hive-pre-install", "{}")
+
+      launch_with_stubbed_spawn(task)
+
+      assert File.symlink?(settings), "the symlink must survive"
+      assert_equal 0o600, File.stat(target).mode & 0o777
+      assert File.exist?("#{settings}.hive-pre-install"), "the backup must survive"
+    end
+  end
+
+  def test_repair_never_acts_through_a_symlinked_claude_dir
+    with_tmp_task do |task|
+      real_dir = File.join(File.dirname(task.folder), "real-claude")
+      write_settings(File.dirname(real_dir), legacy_stop_hook_stub(task.folder))
+      FileUtils.mv(File.join(File.dirname(real_dir), ".claude"), real_dir)
+      File.symlink(real_dir, File.join(task.folder, ".claude"))
+
+      launch_with_stubbed_spawn(task)
+
+      assert File.exist?(File.join(real_dir, "settings.json")), "a stub behind a symlinked dir must survive"
+    end
+  end
+
+  def test_repair_keeps_a_backup_beside_project_owned_settings_and_warns
+    with_tmp_task do |task|
+      settings = write_settings(task.folder, %({"model":"opus"}))
+      File.write("#{settings}.hive-pre-install", %({"model":"sonnet"}))
+
+      _out, err = capture_io { launch_with_stubbed_spawn(task) }
+
+      assert_equal %({"model":"opus"}), File.read(settings)
+      assert_equal %({"model":"sonnet"}), File.read("#{settings}.hive-pre-install")
+      assert_equal 1, err.scan(/left legacy Claude settings backup #{Regexp.escape(settings)}\.hive-pre-install/).size
+    end
+  end
+
+  def test_repair_restores_a_backup_when_settings_are_missing
+    with_tmp_task do |task|
+      settings = File.join(task.folder, ".claude", "settings.json")
+      FileUtils.mkdir_p(File.dirname(settings))
+      File.write("#{settings}.hive-pre-install", %({"model":"sonnet"}))
+
+      launch_with_stubbed_spawn(task)
+
+      assert_equal %({"model":"sonnet"}), File.read(settings)
+      refute File.exist?("#{settings}.hive-pre-install")
+    end
+  end
+
+  def test_unexpected_filesystem_error_warns_and_the_launch_proceeds
+    with_tmp_task do |task|
+      settings = write_settings(task.folder, legacy_stop_hook_stub(task.folder))
+      result = nil
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(File, :delete, ->(_path) { raise Errno::EIO }) do
+          result = launch_with_stubbed_spawn(task)
+        end
+      end
+
+      assert_equal :complete, result.fetch(:status)
+      assert File.exist?(settings)
+      assert_match(/could not repair legacy Claude settings #{Regexp.escape(settings)}: Errno::EIO/, err)
     end
   end
 
@@ -418,12 +493,18 @@ class ClaudeLauncherTest < Minitest::Test
     settings
   end
 
+  # The repair runs inside Base.spawn_agent, so stub only the preflight and
+  # the agent process beneath it.
   def launch_with_stubbed_spawn(task, cwd: task.folder)
-    with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(_task, **_kwargs) { { status: :complete } }) do
-      Hive::ClaudeLauncher.launch!(
-        task: task, cfg: {}, prompt: "prompt", add_dirs: [ task.folder ], cwd: cwd,
-        max_budget_usd: 1, timeout_sec: 1, log_label: "test"
-      )
+    agent = Object.new
+    agent.define_singleton_method(:run!) { { status: :complete } }
+    with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+      with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+        Hive::ClaudeLauncher.launch!(
+          task: task, cfg: {}, prompt: "prompt", add_dirs: [ task.folder ], cwd: cwd,
+          max_budget_usd: 1, timeout_sec: 1, log_label: "test"
+        )
+      end
     end
   end
 end

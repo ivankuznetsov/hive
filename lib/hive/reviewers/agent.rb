@@ -1,6 +1,8 @@
 require "hive/reviewers/base"
 require "hive/reviewers/plan_context"
 require "hive/agent_profiles"
+require "hive/claude_launcher"
+require "hive/config"
 require "hive/stages/base"
 
 module Hive
@@ -27,6 +29,8 @@ module Hive
           scope = Hive::Stages::Base.stage_permission_scope(
             @cfg || {}, "review.reviewers", synthetic_task, profile,
             base_add_dirs: [ ctx.task_folder ],
+            # Only a yolo Claude scope keeps this list; others drop it.
+            default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
             **Hive::Stages::Base.explicit_permission_kwargs(spec)
           )
           Hive::Stages::Base.spawn_agent(
@@ -44,7 +48,7 @@ module Hive
               @cfg || {}, "review_reviewers", profile,
               current: Hive::Stages::Base.model_routing_current(spec)
             ),
-            **Hive::Stages::Base.tool_scope_kwargs(scope),
+            **reviewer_tool_scope_kwargs(scope, profile),
             # Reviewer spawns own a per-pass output file, not the task
             # marker — the orchestrator's REVIEW_WORKING marker must
             # persist across each reviewer's spawn.
@@ -61,6 +65,17 @@ module Hive
       end
 
       private
+
+      # model_launch_arguments makes spawn_agent skip its cfg-derived
+      # permission mode, so a yolo Claude reviewer takes
+      # claude.permission_mode here.
+      def reviewer_tool_scope_kwargs(scope, profile)
+        kwargs = Hive::Stages::Base.tool_scope_kwargs(scope)
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          kwargs[:permission_mode] ||= Hive::Config.claude_permission_mode(@cfg || {})
+        end
+        kwargs
+      end
 
       def run_with_spawn(deadline:)
         ensure_reviews_dir!

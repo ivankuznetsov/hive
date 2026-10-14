@@ -274,7 +274,7 @@ module Hive
           end
       end
 
-      # A `kind: "warning"` row — it does NOT contribute to the missing-skill
+      # Emits a `kind: "warning"` row — it does NOT contribute to the missing-skill
       # exit code, but renders in the human table with a "!" marker and in
       # the JSON envelope under `summary.warning`.
       #

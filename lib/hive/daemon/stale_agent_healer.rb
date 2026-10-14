@@ -430,11 +430,11 @@ module Hive
       end
 
       # Map a review marker reason to the healer's `reason:` log label.
-      # `review_agent_died` keeps its own label; every other
-      # auto-recoverable review reason (today only the tmux-death subset
-      # of `reviewer_partial_failure`) logs as
-      # `reviewer_tmux_session_terminated`. The marker's literal reason is
-      # carried separately as `marker_reason:`.
+      # `review_agent_died` keeps its own label. The
+      # `reviewer_tmux_session_terminated` and `fix_claude_stop_hook` labels
+      # predate the removal of the Claude tmux runtime and are kept stable
+      # for log consumers. The marker's literal reason is carried
+      # separately as `marker_reason:`.
       def review_heal_label(reason)
         case reason
         when "review_agent_died" then "review_agent_died"

@@ -1,4 +1,3 @@
-require "fileutils"
 require "json"
 
 require "hive/agent_profiles"
@@ -53,7 +52,6 @@ module Hive
       # Per-stage model/effort override the project-global claude.* pins.
       cli_flags = routed_flags || identity_arguments ||
                   (cfg ? Hive::Config.claude_cli_flags(cfg, model: model, effort: effort) : [])
-      repair_legacy_scratch_settings([ task.folder, cwd ])
       require "hive/stages/base"
       headless_flags = (routing_arguments ? [] : cli_flags) +
                        (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
@@ -93,21 +91,30 @@ module Hive
 
     # Restore a project-owned settings.json from its backup; otherwise drop
     # a Stop-hook stub. Any other settings.json belongs to the project and
-    # is left alone.
+    # is left alone. rename(2)/unlink(2) need only directory write access,
+    # so the 0444 stub is replaced without a chmod. Nothing here may abort
+    # a launch.
     def repair_legacy_settings_at(settings_path)
       backup_path = "#{settings_path}#{LEGACY_SETTINGS_BACKUP_SUFFIX}"
+      dir = File.dirname(settings_path)
+      # Never act through a symlink: it could point outside the scratch dir.
+      return if [ dir, settings_path, backup_path ].any? { |path| File.symlink?(path) }
+
+      stub = legacy_stop_hook_stub?(settings_path)
       if File.exist?(backup_path)
-        # The stub was written 0444; make it writable before replacing it.
-        File.chmod(0o644, settings_path) if File.exist?(settings_path)
-        FileUtils.mv(backup_path, settings_path)
-      elsif legacy_stop_hook_stub?(settings_path)
+        if stub || !File.exist?(settings_path)
+          File.rename(backup_path, settings_path)
+        else
+          warn "[hive] left legacy Claude settings backup #{backup_path} in place: " \
+               "#{settings_path} is not the tmux-era stub"
+        end
+      elsif stub
         File.delete(settings_path)
-        dir = File.dirname(settings_path)
         Dir.rmdir(dir) if Dir.empty?(dir)
       end
     rescue Errno::ENOENT, Errno::ENOTEMPTY
       nil
-    rescue Errno::EACCES, Errno::EROFS, Errno::EPERM => e
+    rescue SystemCallError => e
       warn "[hive] could not repair legacy Claude settings #{settings_path}: #{e.class}: #{e.message}"
       nil
     end
@@ -115,9 +122,14 @@ module Hive
     # The exact shape the tmux-era installer wrote: one Stop matcher group
     # holding one command handler that runs Hive's stop_hook.sh.
     def legacy_stop_hook_stub?(settings_path)
-      return false unless File.file?(settings_path)
+      return false if File.symlink?(settings_path) || !File.file?(settings_path)
 
-      data = JSON.parse(File.read(settings_path))
+      raw = File.read(settings_path)
+      # Most launches find a project-owned settings.json; skip the parse
+      # unless it could be the stub.
+      return false unless raw.include?(LEGACY_STOP_HOOK_SCRIPT)
+
+      data = JSON.parse(raw)
       return false unless data.is_a?(Hash)
 
       command = data.dig("hooks", "Stop", 0, "hooks", 0, "command")

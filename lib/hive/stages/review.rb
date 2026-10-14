@@ -837,8 +837,9 @@ module Hive
         #
         # Truncate `e.message` to a bounded length: when a helper raises
         # with diagnostic context, that context is the single most
-        # actionable debug signal for the operator. Dropping the message entirely (the previous
-        # `exception_class`-only marker) silently hid it.
+        # actionable debug signal for the operator. Dropping the message
+        # entirely (the previous `exception_class`-only marker) silently
+        # hid it.
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
                           reason: "runner_exception",
@@ -1063,10 +1064,9 @@ module Hive
       # Run the triage phase with a bounded retry budget, mirroring the
       # per-reviewer retry in Hive::Reviewers::Agent. On a loaded host a
       # single transient infra blip (an "expected output missing" timeout)
-      # used to
-      # fail triage outright and park the task in 6-review with a terminal
-      # review-error marker that the daemon never auto-retries. Retrying
-      # the same transient class that reviewers already retry keeps an infra
+      # used to fail triage outright and park the task in 6-review with a
+      # terminal review-error marker that the daemon never auto-retries.
+      # Retrying the same transient class that reviewers already retry keeps an infra
       # flake from sticking the whole task.
       #
       # Non-retryable outcomes return immediately:

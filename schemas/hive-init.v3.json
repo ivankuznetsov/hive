@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init.v3.json",
   "title": "hive init output (v3)",
-  "description": "Stable success contract emitted by `hive init --json`. V2 adds the explicit fresh-project architecture patrol discovery choice while leaving auto-fix and issue-filing policy in project config.",
+  "description": "Stable success contract emitted by `hive init --json`. V3 drops the retired `claude_mode` field (Claude always runs headless) and keeps the explicit fresh-project architecture patrol discovery choice, leaving auto-fix and issue-filing policy in project config.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/AlreadyInitializedPayload" },

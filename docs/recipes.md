@@ -133,6 +133,17 @@ hive review <slug> --from 6-review
 
 Use `--name REVIEW_ERROR` when the runner recorded a phase error.
 
+### Upgrade from a Hive version with the Claude tmux launch mode
+
+Claude now launches only as headless `claude -p`; the new version cannot see
+or stop a Claude session that an older version started in tmux. Before
+upgrading, let running Claude stages finish (`hive status`). After upgrading,
+list leftover sessions with `tmux ls` and stop any Hive Claude session with
+`tmux kill-session -t <name>`. A leftover `claude.mode` line in
+`.hive-state/config.yml` is ignored; delete it when `hive doctor` reports it.
+Stage `budget_usd` caps now apply to every Claude stage, so raise a stage's
+budget in config if a long Claude run stops with a budget error.
+
 ### Recover a review-fix left by the retired Claude Stop hook
 
 Hive versions that still had the Claude tmux launch mode could leave

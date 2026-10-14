@@ -16,6 +16,7 @@ require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
+require "hive/claude_launcher"
 require "hive/agent_observation"
 require "hive/billing_evidence"
 require "hive/context_provenance"
@@ -1021,10 +1022,16 @@ module Hive
         if max_budget_usd && !profile.budget_flag
           warn_budget_unenforced(task, profile, max_budget_usd)
         end
+        claude_launch = Hive::AgentSupport.supports?(profile, :Launch)
+        # A killed tmux-era runner could leave its Stop-hook stub behind in
+        # either scratch dir; every Claude spawn path repairs it here.
+        if claude_launch
+          Hive::ClaudeLauncher.repair_legacy_scratch_settings([ task.folder, cwd || task.folder ])
+        end
         # A Claude question menu has no one to answer it on a detached
         # launch, so every Claude spawn denies it. A runtime_policy carries
         # its own deny list, which already includes it.
-        if runtime_policy.nil? && Hive::AgentSupport.supports?(profile, :Launch)
+        if runtime_policy.nil? && claude_launch
           disallowed_tools = Hive::PermissionScope.tool_csv(
             Hive::PermissionScope.tool_csv(disallowed_tools).to_s.split(",") +
               Hive::AgentSupport::Claude::Launch::DENIED_TOOLS
@@ -1222,8 +1229,6 @@ module Hive
                          edit_patterns: [], bash_patterns: [],
                          resource_guards: nil, agent_custody: nil,
                          model: nil, effort: nil)
-        require "hive/claude_launcher"
-
         context = Hive::Attempts::Context.current
         if context&.explicit_routing? &&
             !Hive::AgentSupport.supports?(context.adapter, :Launch)
@@ -1256,8 +1261,7 @@ module Hive
           )
         end
 
-        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg) if context&.explicit_routing?
-        profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg) if profile.nil? || context&.explicit_routing?
         unless Hive::AgentSupport.supports?(profile, :Launch)
           raise Hive::AgentError,
                 "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"

@@ -886,6 +886,69 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # The retired shared tmux session gave Claude reviewers the implementer
+  # allowlist and claude.permission_mode; the headless spawn must too.
+  def test_yolo_claude_reviewer_argv_honors_permission_mode_and_implementer_tools
+    argv = claude_reviewer_argv("claude" => { "permission_mode" => "dontAsk" })
+
+    assert_equal Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS, argv_value(argv, "--allowedTools")
+    assert_equal "dontAsk", argv_value(argv, "--permission-mode")
+    refute_includes argv, "arg=--dangerously-skip-permissions"
+  end
+
+  def test_yolo_claude_reviewer_argv_keeps_bypass_under_default_config
+    argv = claude_reviewer_argv(nil)
+
+    assert_equal Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS, argv_value(argv, "--allowedTools")
+    assert_includes argv, "arg=--dangerously-skip-permissions"
+    refute_includes argv, "arg=--permission-mode"
+  end
+
+  def test_codex_reviewer_gains_no_claude_permission_mode_or_allowlist
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      reviewer = Hive::Reviewers::Agent.new(
+        make_spec("agent" => "codex"), ctx,
+        cfg: { "claude" => { "permission_mode" => "dontAsk" } }
+      )
+      captured = nil
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        assert reviewer.run!.ok?
+      end
+
+      assert_equal :codex, captured.fetch(:profile).name
+      assert_nil captured.fetch(:permission_mode)
+      assert_nil captured.fetch(:allowed_tools)
+    end
+  end
+
+  def claude_reviewer_argv(cfg)
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx, cfg: cfg)
+      log_dir = File.join(dir, "argv-log")
+      FileUtils.mkdir_p(log_dir)
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
+
+      assert reviewer.run!.ok?
+      File.readlines(File.join(log_dir, "fake-claude-argv.log"), chomp: true)
+    end
+  end
+
+  def argv_value(argv, flag)
+    index = argv.index("arg=#{flag}")
+    refute_nil index, "expected #{flag} in argv"
+    argv.fetch(index + 1).delete_prefix("arg=")
+  end
+
   # --- Plan-context flow through to spawned subprocess argv ---
   #
   # The render_prompt tests (above) verify the prompt STRING is built

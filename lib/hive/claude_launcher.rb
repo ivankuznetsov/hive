@@ -84,27 +84,10 @@ module Hive
       /\Atmux \S+ below minimum/
     ].freeze
 
-    SessionHandle = Struct.new(:task, :runner, :reestablish, keyword_init: true) do
-      def send_and_wait!(prompt:, expected_output: nil, timeout_sec:,
-                         status_mode: nil, log_label: nil, deadline: nil)
-        Hive::ClaudeLauncher.send_prompt_and_wait!(
-          task: task,
-          runner: runner,
-          prompt: prompt,
-          expected_output: expected_output,
-          timeout_sec: timeout_sec,
-          status_mode: status_mode,
-          log_label: log_label,
-          deadline: deadline,
-          reestablish: reestablish
-        )
-      end
-    end
-
     module_function
 
     def launch!(task:, cfg:, prompt:, add_dirs:, cwd:, max_budget_usd:,
-                timeout_sec:, log_label:, session_name:, status_mode: nil,
+                timeout_sec:, log_label:, status_mode: nil,
                 expected_output: nil, profile: nil,
                 allowed_tools: nil,
                 disallowed_tools: nil,
@@ -123,153 +106,34 @@ module Hive
       # Per-stage model/effort override the project-global claude.* pins.
       cli_flags = routed_flags || identity_arguments ||
                   (cfg ? Hive::Config.claude_cli_flags(cfg, model: model, effort: effort) : [])
-      launch_mode = if defined?(Hive::Attempts::Context) &&
-                       Hive::Attempts::Context.current&.explicit_routing?
-        :headless
-      else
-        Hive::Config.claude_mode(cfg)
-      end
-
-      if launch_mode == :headless
-        require "hive/stages/base"
-        # mcp_flags is only consumed on this headless branch — the tmux path
-        # recomputes them inside wrapper_command — so compute it here.
-        headless_flags = (routing_arguments ? [] : cli_flags) +
-                         (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
-        return Hive::Stages::Base.spawn_agent(
-          task,
-          prompt: prompt,
-          add_dirs: add_dirs,
-          cwd: cwd,
-          max_budget_usd: max_budget_usd,
-          timeout_sec: timeout_sec,
-          log_label: log_label,
-          profile: profile,
-          expected_output: expected_output,
-          status_mode: status_mode,
-          permission_mode: permission_mode,
-          allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools,
-          cli_flags: headless_flags,
-          identity_arguments: identity_arguments,
-          routing_arguments: routing_arguments,
-          runtime_policy: runtime_policy,
-          additional_read_roots: additional_read_roots,
-          additional_write_roots: additional_write_roots,
-          edit_patterns: edit_patterns,
-          bash_patterns: bash_patterns,
-          resource_guards: resource_guards,
-          agent_custody: agent_custody
-        )
-      end
-
-      allowed_tools ||= DEFAULT_ALLOWED_TOOLS
-      result = nil
-      with_shared_session(
-        task: task,
-        cfg: cfg,
-        session_name: session_name,
-        cwd: cwd,
+      require "hive/stages/base"
+      headless_flags = (routing_arguments ? [] : cli_flags) +
+                       (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: prompt,
         add_dirs: add_dirs,
+        cwd: cwd,
+        max_budget_usd: max_budget_usd,
+        timeout_sec: timeout_sec,
+        log_label: log_label,
         profile: profile,
+        expected_output: expected_output,
+        status_mode: status_mode,
+        permission_mode: permission_mode,
         allowed_tools: allowed_tools,
         disallowed_tools: disallowed_tools,
-        permission_mode: permission_mode,
-        mcp_config_path: mcp_config_path,
-        strict_mcp_config: strict_mcp_config,
+        cli_flags: headless_flags,
+        identity_arguments: identity_arguments,
+        routing_arguments: routing_arguments,
         runtime_policy: runtime_policy,
-        cli_flags: cli_flags
-      ) do |handle|
-        result = handle.send_and_wait!(
-          prompt: prompt,
-          expected_output: expected_output,
-          timeout_sec: timeout_sec,
-          status_mode: status_mode || profile.status_detection_mode,
-          log_label: log_label
-        )
-      end
-      result
-    end
-
-    def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,
-                            profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
-                            disallowed_tools: nil,
-                            permission_mode: nil, mcp_config_path: nil,
-                            strict_mcp_config: false, cli_flags: nil, runtime_policy: nil)
-      profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
-      ensure_claude_profile!(profile)
-      permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-
-      runner = build_runner(
-        task: task, session_name: session_name, cwd: cwd, profile: profile
+        additional_read_roots: additional_read_roots,
+        additional_write_roots: additional_write_roots,
+        edit_patterns: edit_patterns,
+        bash_patterns: bash_patterns,
+        resource_guards: resource_guards,
+        agent_custody: agent_custody
       )
-      # Pre-clean signal files BEFORE the preflight check so a stale
-      # `.done` / `result.json` from a previously-collided run doesn't
-      # leak into the next attempt's wait_for_status loop. A
-      # session-collision raise out of `preflight!` would otherwise leave
-      # the prior task's signal files in place (this block runs before
-      # the inner `begin/ensure`, where the cleanup_done sat previously).
-      safe_with_log(task, "reset_signal_files") { reset_signal_files(task) }
-      preflight!(profile, runner)
-
-      settings_paths = []
-      recorded_child = nil
-      begin
-        # Install the Stop hook under task.folder (orchestrator-owned)
-        # AND the launch cwd. Claude resolves `.claude/settings.json`
-        # from the process cwd, not from --add-dir paths; stages whose
-        # cwd is the feature worktree (4-execute / 6-review) otherwise
-        # never produced .done / result.json and downstream waits hung
-        # until timeout.
-        settings_paths = Array(Hive::StopHookInstaller.install(
-          stage_dir: task.folder,
-          extra_dirs: [ cwd ]
-        ))
-        launch_command = wrapper_command(
-          cwd: cwd,
-          add_dirs: add_dirs,
-          profile: profile,
-          allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools,
-          permission_mode: permission_mode,
-          cli_flags: cli_flags || (cfg ? Hive::Config.claude_cli_flags(cfg) : []),
-          mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config,
-          runtime_policy: runtime_policy
-        )
-        launch_command = isolated_managed_command(launch_command, runtime_policy, task) if runtime_policy
-        # (Re)establish the shared claude session. Reused as the handle's
-        # `reestablish` closure so a reviewer that finds the session dead
-        # (a prior reviewer's claude exited/crashed, closing the tmux
-        # session) can restart it instead of cascade-failing the pass.
-        establish = lambda do
-          runner.start_detached(command: launch_command)
-          wait_until_session_exists!(runner)
-          recorded_child = record_claude_pid(task, runner)
-        end
-        establish.call
-        prepare_claude_session!(runner)
-        yield SessionHandle.new(task: task, runner: runner, reestablish: establish)
-      ensure
-        # Send `/quit` to claude inside the pane and give it a brief
-        # window to exit cleanly before SIGKILL'ing the tmux session.
-        # Previously the session was torn down with `kill-session`
-        # alone, so claude received SIGKILL and never wrote its session
-        # rollup. The grace window is short enough not to block real
-        # error paths; the hard `kill_session` below is the backstop.
-        safe_with_log(task, "shutdown_claude") { shutdown_claude(runner) }
-        safe_with_log(task, "kill_session") { runner.kill_session if runner }
-        safe_with_log(task, "sweep_orphan_processes") { sweep_orphan_processes(task) }
-        if recorded_child
-          safe_with_log(task, "clear_claude_pid") do
-            Hive::Lock.clear_task_lock_child(task.folder, **recorded_child)
-          end
-        end
-        Array(settings_paths).each do |path|
-          safe_with_log(task, "cleanup_scratch") { cleanup_scratch(path) }
-        end
-        safe_with_log(task, "cleanup_done") { cleanup_done(task) }
-      end
     end
 
     def send_prompt_and_wait!(task:, runner:, prompt:, timeout_sec:,
@@ -501,7 +365,7 @@ module Hive
       nil
     end
 
-    # Self-heal a dead shared reviewer session. In `with_shared_session`
+    # Self-heal a dead shared reviewer session. In a shared session
     # the claude-tmux reviewers run sequentially in one session; if a prior
     # reviewer's claude exited or crashed, the tmux session closes and the
     # next reviewer would raise "session no longer exists", cascade-failing

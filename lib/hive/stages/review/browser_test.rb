@@ -142,12 +142,7 @@ module Hive
           }
           spawn_result =
             if Hive::AgentSupport.supports?(profile, :Launch)
-              Hive::Stages::Base.spawn_claude!(
-                task,
-                cfg,
-                **kwargs,
-                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-browser-pass#{ctx.pass}-attempt#{attempt}", task)
-              )
+              Hive::Stages::Base.spawn_claude!(task, cfg, **kwargs)
             else
               Hive::Stages::Base.spawn_agent(task, **kwargs)
             end

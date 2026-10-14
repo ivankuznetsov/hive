@@ -62,15 +62,6 @@ class BrainstormTmuxSentinelTest < Minitest::Test
   # outside `scan`'s block and collapsed every entry to the final match,
   # which masked the non-terminal name.
 
-  def test_runtime_for_non_claude_agent_is_headless_before_tmux_preflight
-    cfg = {
-      "claude" => { "mode" => "tmux" },
-      "brainstorm" => { "agent" => "codex" }
-    }
-
-    assert_equal :headless, Hive::Stages::Brainstorm.runtime_for(cfg)
-  end
-
   def test_safe_swallows_teardown_errors
     result = Hive::ClaudeLauncher.safe_with_log(nil, "teardown") do
       raise "teardown failed"

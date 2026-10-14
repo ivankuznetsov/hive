@@ -28,7 +28,6 @@ class ClaudeLauncherTest < Minitest::Test
           max_budget_usd: 1,
           timeout_sec: 1,
           log_label: "test",
-          session_name: "hive-test-session",
           status_mode: :state_file_marker,
           allowed_tools: %w[Read LS],
           disallowed_tools: %w[Write Bash],
@@ -48,34 +47,32 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
-  def test_explicit_routing_forces_headless_even_when_mutable_config_requests_tmux
+  # A config that still carries the retired `claude.mode: tmux` key launches
+  # through the headless spawn path like every other Claude launch.
+  def test_legacy_tmux_mode_config_still_launches_headless
     with_tmp_task do |task|
-      context = Object.new
-      context.define_singleton_method(:explicit_routing?) { true }
       captured = nil
       spawn = lambda do |_task, **kwargs|
         captured = kwargs
         { status: :complete }
       end
 
-      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
-        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
-          result = Hive::ClaudeLauncher.launch!(
-            task: task,
-            cfg: { "claude" => { "mode" => "tmux", "permission_mode" => "auto" } },
-            prompt: "prompt",
-            add_dirs: [ task.folder ],
-            cwd: task.folder,
-            max_budget_usd: 1,
-            timeout_sec: 1,
-            log_label: "test",
-            session_name: "hive-test-session",
-            status_mode: :state_file_marker
-          )
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        result = Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: { "claude" => { "mode" => "tmux", "permission_mode" => "auto" } },
+          prompt: "prompt",
+          add_dirs: [ task.folder ],
+          cwd: task.folder,
+          max_budget_usd: 1,
+          timeout_sec: 1,
+          log_label: "test",
+          status_mode: :state_file_marker
+        )
 
-          assert_equal({ status: :complete }, result)
-          assert_equal :claude, captured.fetch(:profile).name
-        end
+        assert_equal({ status: :complete }, result)
+        assert_equal :claude, captured.fetch(:profile).name
+        assert_equal "auto", captured.fetch(:permission_mode)
       end
     end
   end
@@ -99,7 +96,6 @@ class ClaudeLauncherTest < Minitest::Test
           max_budget_usd: 1,
           timeout_sec: 1,
           log_label: "test",
-          session_name: "hive-test-session",
           status_mode: :state_file_marker,
           allowed_tools: "Read,mcp__screenote__list_projects",
           mcp_config_path: "/tmp/screenote.mcp.json",
@@ -140,7 +136,6 @@ class ClaudeLauncherTest < Minitest::Test
           max_budget_usd: 1,
           timeout_sec: 5,
           log_label: "plan",
-          session_name: "hive-test-session",
           allowed_tools: %w[Read Write Edit LS],
           model: "opus",
           effort: "high"
@@ -158,100 +153,6 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
-  def test_tmux_mode_delegates_configured_permission_mode_to_shared_session
-    with_tmp_task do |task|
-      captured = nil
-      handle = Struct.new(:result) do
-        def send_and_wait!(**_kwargs)
-          result
-        end
-      end.new({ status: :complete })
-      original = Hive::ClaudeLauncher.method(:with_shared_session)
-
-      capture_unbound_method(:with_shared_session, original) do
-        Hive::ClaudeLauncher.define_singleton_method(:with_shared_session) do |**kwargs, &block|
-          captured = kwargs
-          block.call(handle)
-        end
-
-        result = Hive::ClaudeLauncher.launch!(
-          task: task,
-          cfg: { "claude" => { "mode" => "tmux", "permission_mode" => "auto" } },
-          prompt: "prompt",
-          add_dirs: [ task.folder ],
-          cwd: task.folder,
-          max_budget_usd: 1,
-          timeout_sec: 1,
-          log_label: "test",
-          session_name: "hive-test-session",
-          status_mode: :state_file_marker
-        )
-
-        assert_equal({ status: :complete }, result)
-        assert_equal "auto", captured.fetch(:permission_mode)
-      end
-    end
-  end
-
-  def test_shared_session_derives_cli_flags_from_config_when_none_are_passed
-    with_tmp_task do |task|
-      runner = Object.new
-      runner.define_singleton_method(:start_detached) { |command:| @command = command }
-      runner.define_singleton_method(:kill_session) { }
-      captured_flags = nil
-      cleared_child = nil
-      cfg = {
-        "claude" => {
-          "permission_mode" => "bypassPermissions",
-          "model" => "sonnet",
-          "effort" => "medium"
-        }
-      }
-
-      with_replaced_singleton_method(Hive::ClaudeLauncher, :build_runner, ->(**) { runner }) do
-        with_replaced_singleton_method(Hive::ClaudeLauncher, :preflight!, ->(*) { }) do
-          with_replaced_singleton_method(Hive::ClaudeLauncher, :reset_signal_files, ->(*) { }) do
-            with_replaced_singleton_method(Hive::StopHookInstaller, :install, ->(**) { [] }) do
-              with_replaced_singleton_method(Hive::ClaudeLauncher, :wrapper_command, lambda { |**kwargs|
-                captured_flags = kwargs.fetch(:cli_flags)
-                [ "claude" ]
-              }) do
-                with_replaced_singleton_method(Hive::ClaudeLauncher, :wait_until_session_exists!, ->(*) { }) do
-                  child = { pid: 12_345, process_start_time: "child-start" }
-                  with_replaced_singleton_method(Hive::ClaudeLauncher, :record_claude_pid, ->(*) { child }) do
-                    with_replaced_singleton_method(Hive::ClaudeLauncher, :prepare_claude_session!, ->(*) { }) do
-                      with_replaced_singleton_method(Hive::ClaudeLauncher, :shutdown_claude, ->(*) { }) do
-                        with_replaced_singleton_method(Hive::ClaudeLauncher, :sweep_orphan_processes, ->(*) { }) do
-                          clear = lambda do |folder, pid:, process_start_time:|
-                            cleared_child = [ folder, pid, process_start_time ]
-                          end
-                          with_replaced_singleton_method(Hive::Lock, :clear_task_lock_child, clear) do
-                            with_replaced_singleton_method(Hive::ClaudeLauncher, :cleanup_done, ->(*) { }) do
-                              Hive::ClaudeLauncher.with_shared_session(
-                                task: task,
-                                cfg: cfg,
-                                session_name: "hive-test-session",
-                                cwd: task.folder,
-                                add_dirs: [],
-                              ) { |_handle| }
-                            end
-                          end
-                        end
-                      end
-                    end
-                  end
-                end
-              end
-            end
-          end
-        end
-      end
-
-      assert_equal %w[--model sonnet --effort medium], captured_flags
-      assert_equal [ task.folder, 12_345, "child-start" ], cleared_child
-    end
-  end
-
   def test_launcher_rejects_non_claude_profile
     with_tmp_task do |task|
       err = assert_raises(Hive::AgentError) do
@@ -264,7 +165,6 @@ class ClaudeLauncherTest < Minitest::Test
           max_budget_usd: 1,
           timeout_sec: 1,
           log_label: "test",
-          session_name: "hive-test-session",
           profile: Hive::AgentProfiles.lookup(:codex)
         )
       end
@@ -277,26 +177,6 @@ class ClaudeLauncherTest < Minitest::Test
     with_tmp_task(stage: "3-plan") do |task|
       assert_equal "hive-3-plan-#{task.slug}", Hive::ClaudeLauncher.tmux_session_name("3-plan", task)
       assert_equal "hive-4-execute-#{task.slug}", Hive::ClaudeLauncher.tmux_session_name("4-execute", task)
-    end
-  end
-
-  def test_session_handle_passes_deadline_to_send_prompt_and_wait
-    with_tmp_task do |task|
-      captured = nil
-      original = Hive::ClaudeLauncher.method(:send_prompt_and_wait!)
-      Hive::ClaudeLauncher.define_singleton_method(:send_prompt_and_wait!) do |**kwargs|
-        captured = kwargs
-        { status: :ok }
-      end
-
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
-      handle = Hive::ClaudeLauncher::SessionHandle.new(task: task, runner: Object.new)
-      handle.send_and_wait!(prompt: "prompt", timeout_sec: 5, deadline: deadline)
-
-      assert_equal deadline, captured.fetch(:deadline)
-    ensure
-      Hive::ClaudeLauncher.singleton_class.send(:remove_method, :send_prompt_and_wait!)
-      Hive::ClaudeLauncher.define_singleton_method(:send_prompt_and_wait!, original) if original
     end
   end
 
@@ -719,19 +599,19 @@ class ClaudeLauncherTest < Minitest::Test
            "a pane whose footer offers to interrupt a running turn is not idle"
   end
 
-  def test_launch_passes_per_stage_model_and_effort_to_tmux_session
+  def test_launch_passes_per_stage_model_and_effort_over_project_pins
     with_tmp_task do |task|
-      cfg = { "claude" => { "mode" => "tmux", "model" => "sonnet", "effort" => "medium" } }
+      cfg = { "claude" => { "model" => "sonnet", "effort" => "medium" } }
       captured_flags = nil
-      shared = lambda do |**kwargs, &_block|
+      spawn = lambda do |_task, **kwargs|
         captured_flags = kwargs[:cli_flags]
-        nil
+        { status: :complete }
       end
-      with_replaced_singleton_method(Hive::ClaudeLauncher, :with_shared_session, shared) do
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
         Hive::ClaudeLauncher.launch!(
           task: task, cfg: cfg, prompt: "prompt", add_dirs: [], cwd: task.folder,
           max_budget_usd: 1, timeout_sec: 5, log_label: "brainstorm",
-          session_name: "hive-test-session", model: "claude-opus-5-5", effort: "high"
+          model: "claude-opus-5-5", effort: "high"
         )
       end
 
@@ -741,7 +621,7 @@ class ClaudeLauncherTest < Minitest::Test
 
   # Stages splat `model_launch_arguments` into spawn_claude!, so every key it
   # can return must be an accepted keyword (a missing one raised
-  # "unknown keywords: :model, :effort" from brainstorm under tmux mode).
+  # "unknown keywords: :model, :effort" from brainstorm).
   def test_spawn_claude_accepts_every_model_launch_argument
     accepted = Hive::Stages::Base.method(:spawn_claude!).parameters
                                  .select { |kind, _| %i[key keyreq].include?(kind) }.map(&:last)
@@ -854,30 +734,27 @@ class ClaudeLauncherTest < Minitest::Test
   end
 
   def test_spawn_claude_bang_propagates_agent_error_unchanged
-    # `spawn_claude!` no longer catches tmux-unavailable AgentErrors;
-    # the propagation is what lets the review stage's outer rescue
-    # land `:review_error reason="tmux_unavailable"` against the real
-    # task instead of writing the wrong marker shape to a synthetic
-    # task's state_file. Per-stage callers that want the marker shape
-    # use `spawn_claude_with_tmux_marker!` (see below).
+    # `spawn_claude!` does not catch launcher AgentErrors; the 6-review
+    # stage relies on that propagation so it never writes a marker onto a
+    # synthetic task's state_file. Per-stage callers that want the marker
+    # use `spawn_claude_with_failure_marker!` (see below).
     with_tmp_task do |task|
       original = Hive::ClaudeLauncher.method(:launch!)
       capture_unbound_method(:launch!, original) do
         Hive::ClaudeLauncher.define_singleton_method(:launch!) do |**_kwargs|
-          raise Hive::AgentError, "tmux binary not runnable: tmux"
+          raise Hive::AgentError, "claude exited before start"
         end
 
         assert_raises(Hive::AgentError) do
           Hive::Stages::Base.spawn_claude!(
             task,
-            { "claude" => { "mode" => "tmux" } },
+            {},
             prompt: "prompt",
             add_dirs: [ task.folder ],
             cwd: task.folder,
             max_budget_usd: 1,
             timeout_sec: 1,
             log_label: "test",
-            session_name: "hive-test-spawn-claude",
             status_mode: :state_file_marker
           )
         end
@@ -885,35 +762,53 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
-  def test_spawn_claude_with_tmux_marker_records_marker
+  def test_spawn_claude_with_failure_marker_records_claude_launch_failed
     with_tmp_task do |task|
       original = Hive::ClaudeLauncher.method(:launch!)
       capture_unbound_method(:launch!, original) do
         Hive::ClaudeLauncher.define_singleton_method(:launch!) do |**_kwargs|
-          raise Hive::AgentError, "tmux binary not runnable: tmux"
+          raise Hive::AgentError, "claude exited before start"
         end
 
         result = nil
-        _out, _err = capture_io do
-          result = Hive::Stages::Base.spawn_claude_with_tmux_marker!(
+        _out, err = capture_io do
+          result = Hive::Stages::Base.spawn_claude_with_failure_marker!(
             task,
-            { "claude" => { "mode" => "tmux" } },
+            {},
             prompt: "prompt",
             add_dirs: [ task.folder ],
             cwd: task.folder,
             max_budget_usd: 1,
             timeout_sec: 1,
             log_label: "test",
-            session_name: "hive-test-spawn-claude-with-marker",
             status_mode: :state_file_marker
           )
         end
 
         marker = Hive::Markers.current(task.state_file)
-        assert_equal :error, result[:status]
+        assert_equal({ status: :error, error_message: "claude exited before start" }, result)
         assert_equal :error, marker.name
-        assert_equal "tmux_unavailable", marker.attrs["reason"]
-        assert_match(/tmux binary not runnable/, marker.attrs["message"])
+        assert_equal "claude_launch_failed", marker.attrs["reason"]
+        assert_equal "Hive::AgentError", marker.attrs["exception_class"]
+        assert_match(/claude exited before start/, marker.attrs["message"])
+        assert_match(/claude launch failed: claude exited before start/, err)
+      end
+    end
+  end
+
+  def test_spawn_claude_with_failure_marker_reraises_provider_route_failures
+    with_tmp_task do |task|
+      original = Hive::ClaudeLauncher.method(:launch!)
+      capture_unbound_method(:launch!, original) do
+        Hive::ClaudeLauncher.define_singleton_method(:launch!) do |**_kwargs|
+          raise Hive::ProviderRouteFailed, "route failed"
+        end
+
+        assert_raises(Hive::ProviderRouteFailed) do
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(
+            task, {}, prompt: "prompt", max_budget_usd: 1, timeout_sec: 1
+          )
+        end
       end
     end
   end

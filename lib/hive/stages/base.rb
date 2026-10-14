@@ -152,7 +152,7 @@ module Hive
       # Production stage launches run inside a durable attempt. Direct unit
       # calls predating attempt supervision receive nil and retain their
       # explicit test profile seam; real launches always resolve and journal
-      # implementation ownership before Process.spawn/tmux starts.
+      # implementation ownership before Process.spawn starts.
       def implementation_stage_identity(task, cfg, stage)
         return nil unless Hive::Attempts::Context.current
 
@@ -329,7 +329,7 @@ module Hive
           values = {
             add_dirs: base_dirs,
             permission_mode: nil,
-            allowed_tools: default_allowed_tools_for_mode(cfg, profile, default_allowed_tools),
+            allowed_tools: yolo_default_allowed_tools(profile, default_allowed_tools),
             disallowed_tools: nil
           }
           return prepare_support_scope(values, profile, stage_name, yolo: true)
@@ -443,11 +443,10 @@ module Hive
         raise
       end
 
-      def default_allowed_tools_for_mode(cfg, profile, default_allowed_tools)
-        return nil unless default_allowed_tools
-        support = Hive::AgentSupport.for(profile)
-        return nil unless cfg && support&.respond_to?(:interactive_mode) &&
-                          support.interactive_mode(cfg) == :tmux
+      # Yolo Claude launches keep the stage's default `--allowedTools`;
+      # other providers cannot take Claude's tool list.
+      def yolo_default_allowed_tools(profile, default_allowed_tools)
+        return nil unless default_allowed_tools && Hive::AgentSupport.supports?(profile, :Launch)
 
         default_allowed_tools
       end
@@ -1212,7 +1211,7 @@ module Hive
       end
 
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
-                         session_name:, add_dirs: [], cwd: nil, log_label: nil,
+                         add_dirs: [], cwd: nil, log_label: nil,
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
@@ -1264,117 +1263,44 @@ module Hive
                 "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
         end
 
-        headless = context&.explicit_routing? || Hive::Config.claude_mode(cfg) == :headless
-        if headless
-          return Hive::ClaudeLauncher.launch!(
-            task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
-            cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
-            timeout_sec: timeout_sec, log_label: log_label,
-            session_name: session_name, status_mode: status_mode,
-            expected_output: expected_output, profile: profile,
-            permission_mode: permission_mode, allowed_tools: allowed_tools,
-            disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
-            strict_mcp_config: strict_mcp_config,
-            identity_arguments: identity_arguments,
-            routing_arguments: routing_arguments, runtime_policy: runtime_policy,
-            additional_read_roots: additional_read_roots,
-            additional_write_roots: additional_write_roots,
-            edit_patterns: edit_patterns,
-            bash_patterns: bash_patterns,
-            resource_guards: resource_guards, agent_custody: agent_custody,
-            model: model, effort: effort
-          )
-        end
-
-        prompt = Hive::ContextProvenance.decorate_prompt(
-          task: task, prompt: prompt, context: context
+        Hive::ClaudeLauncher.launch!(
+          task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
+          cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
+          timeout_sec: timeout_sec, log_label: log_label,
+          status_mode: status_mode,
+          expected_output: expected_output, profile: profile,
+          permission_mode: permission_mode, allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
+          strict_mcp_config: strict_mcp_config,
+          identity_arguments: identity_arguments,
+          routing_arguments: routing_arguments, runtime_policy: runtime_policy,
+          additional_read_roots: additional_read_roots,
+          additional_write_roots: additional_write_roots,
+          edit_patterns: edit_patterns,
+          bash_patterns: bash_patterns,
+          resource_guards: resource_guards, agent_custody: agent_custody,
+          model: model, effort: effort
         )
-        observation = session_observation(
-          task: task, context: context, profile: profile,
-          role: log_label || task.stage_name,
-          requested_model: requested_model(context, routing_arguments, nil, model),
-          requested_effort: requested_effort(context, routing_arguments, nil, effort),
-          timeout_sec: timeout_sec,
-          guards: runtime_resource_guards(
-            resource_guards, profile: profile, max_budget_usd: max_budget_usd,
-            timeout_sec: timeout_sec
-          )
-        )
-        result = nil
-        started_at = Time.now.utc.iso8601
-        start_session_observation!(observation)
-        begin
-          result = run_with_agent_custody(agent_custody) do
-            Hive::ClaudeLauncher.launch!(
-              task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
-              cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
-              timeout_sec: timeout_sec, log_label: log_label,
-              session_name: session_name, status_mode: status_mode,
-              expected_output: expected_output, profile: profile,
-              permission_mode: permission_mode, allowed_tools: allowed_tools,
-              disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
-              strict_mcp_config: strict_mcp_config,
-              identity_arguments: identity_arguments,
-              routing_arguments: routing_arguments, runtime_policy: runtime_policy,
-              additional_read_roots: additional_read_roots,
-              additional_write_roots: additional_write_roots,
-              edit_patterns: edit_patterns,
-              bash_patterns: bash_patterns,
-              model: model, effort: effort
-            )
-          end
-          record_usage(
-            task, profile, result, started_at,
-            context: context, session_id: observation.session_id
-          )
-          if context && agent_custody_safe_after?(agent_custody)
-            Hive::ContextProvenance.promote_agent_receipt(
-              task: task, context: context
-            )
-          end
-          result
-        ensure
-          if agent_custody_safe_after?(agent_custody)
-            observation.finish!(result || {}, exception: $!)
-          end
-        end
       end
 
       # Wrap a spawn_claude! call so that AgentErrors land on the
       # calling stage's own task.state_file with an attributed marker
       # rather than propagating uncaught through Plan.run! / OpenPr.run!
       # / Finalize.run! / Artifacts.run! / Execute.run_pass — none of
-      # which carry their own `rescue Hive::AgentError`.
-      #
-      # tmux-unavailable errors are tagged `reason="tmux_unavailable"`
-      # (existing contract, preserved). Every OTHER AgentError raised
-      # by `ClaudeLauncher.launch!` — "tmux session … did not start",
-      # "tmux session … already exists", "claude interactive prompt did
-      # not become ready", "could not inspect claude tmux session",
-      # etc. — used to escape as a generic crash via cli.rb, leaving a
-      # stale AGENT_WORKING marker on disk. Now they land
-      # `reason="claude_launch_failed"` so the operator sees the real
-      # cause and AGENT_WORKING is replaced.
+      # which carry their own `rescue Hive::AgentError`. Without it a
+      # launch failure escapes as a generic crash via cli.rb, leaving a
+      # stale AGENT_WORKING marker on disk; `reason="claude_launch_failed"`
+      # shows the operator the real cause and lets daemon auto-retry pick
+      # it up.
       #
       # The 6-review stage deliberately does NOT use this helper: its
-      # sub-stage spawns share state with the main review task, and the
-      # outer `Stages::Review.run!` rescue maps the same AgentError to
-      # `:review_error reason="tmux_unavailable"` against the real task.
-      # Routing through here would write the wrong marker shape onto the
+      # sub-stage spawns share state with the main review task, and
+      # routing through here would write the wrong marker shape onto the
       # synthetic-task state file (which points at the main task.md).
-      def spawn_claude_with_tmux_marker!(task, cfg, **kwargs)
+      def spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         spawn_claude!(task, cfg, **kwargs)
       rescue Hive::AgentError => e
         raise if e.is_a?(Hive::ProviderRouteFailed)
-
-        if Hive::Config.claude_mode(cfg) == :tmux &&
-           Hive::ClaudeLauncher.tmux_unavailable_error?(e)
-          warn "[hive] claude tmux mode is unavailable: #{e.message}"
-          Hive::Markers.set(task.state_file, :error,
-                            reason: "tmux_unavailable",
-                            message: e.message)
-          return { status: :error, error_message: e.message }
-        end
 
         # Any other AgentError out of the launcher: surface the cause,
         # replace any stale AGENT_WORKING with an attributed :error so

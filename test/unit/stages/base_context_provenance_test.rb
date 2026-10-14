@@ -71,23 +71,27 @@ class StagesBaseContextProvenanceTest < Minitest::Test
       promoter = lambda do |task:, context:|
         calls << [ :promote, task.slug, context.attempt_id ]
       end
-      launcher = lambda do |**kwargs|
+      fake_agent_new = lambda do |**kwargs|
         calls << [ :launch, kwargs.fetch(:prompt) ]
-        { status: :ok }
+        Object.new.tap do |agent|
+          agent.define_singleton_method(:run!) { { status: :ok } }
+        end
       end
 
       with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
         with_replaced_singleton_method(Hive::ContextProvenance, :decorate_prompt, decorator) do
           with_replaced_singleton_method(Hive::ContextProvenance, :promote_agent_receipt, promoter) do
-            with_replaced_singleton_method(
-              Hive::Stages::Base, :session_observation, ->(**) { observation }
-            ) do
-              with_replaced_singleton_method(Hive::ClaudeLauncher, :launch!, launcher) do
-                result = Hive::Stages::Base.spawn_claude!(
-                  task, {}, prompt: "stage contract", max_budget_usd: nil,
-                  timeout_sec: 30, session_name: "test-session"
-                )
-                assert_equal :ok, result.fetch(:status)
+            with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+              with_replaced_singleton_method(
+                Hive::Stages::Base, :session_observation, ->(**) { observation }
+              ) do
+                with_replaced_singleton_method(Hive::Agent, :new, fake_agent_new) do
+                  result = Hive::Stages::Base.spawn_claude!(
+                    task, {}, prompt: "stage contract", max_budget_usd: nil,
+                    timeout_sec: 30
+                  )
+                  assert_equal :ok, result.fetch(:status)
+                end
               end
             end
           end
@@ -138,21 +142,23 @@ class StagesBaseContextProvenanceTest < Minitest::Test
       context = context_stub(task)
       observation = failed_start_observation
       launched = false
-      launcher = lambda do |**|
+      fake_agent_new = lambda do |**|
         launched = true
-        raise "provider must not launch"
+        raise "provider must not be constructed"
       end
 
       with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
-        with_replaced_singleton_method(Hive::Stages::Base, :session_observation, ->(**) { observation }) do
-          with_replaced_singleton_method(Hive::ClaudeLauncher, :launch!, launcher) do
-            error = assert_raises(Hive::AgentError) do
-              Hive::Stages::Base.spawn_claude!(
-                task, {}, prompt: "stage contract", max_budget_usd: nil,
-                timeout_sec: 30, session_name: "test-session"
-              )
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+          with_replaced_singleton_method(Hive::Stages::Base, :session_observation, ->(**) { observation }) do
+            with_replaced_singleton_method(Hive::Agent, :new, fake_agent_new) do
+              error = assert_raises(Hive::AgentError) do
+                Hive::Stages::Base.spawn_claude!(
+                  task, {}, prompt: "stage contract", max_budget_usd: nil,
+                  timeout_sec: 30
+                )
+              end
+              assert_includes error.message, "durable agent session start"
             end
-            assert_includes error.message, "durable agent session start"
           end
         end
       end

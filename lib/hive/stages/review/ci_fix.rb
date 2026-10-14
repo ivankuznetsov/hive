@@ -448,12 +448,7 @@ module Hive
             **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
           }
           if Hive::AgentSupport.supports?(profile, :Launch)
-            Hive::Stages::Base.spawn_claude!(
-              task,
-              cfg,
-              **kwargs,
-              session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
-            )
+            Hive::Stages::Base.spawn_claude!(task, cfg, **kwargs)
           else
             Hive::Stages::Base.spawn_agent(
               task, **kwargs, cfg: cfg,

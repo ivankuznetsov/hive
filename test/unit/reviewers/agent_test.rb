@@ -639,29 +639,6 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
-
-  def test_run_in_session_passes_deadline_to_shared_handle
-    with_tmp_dir do |dir|
-      reviewer, _ = with_stubbed_adapter(dir)
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
-      calls = []
-      handle = Object.new
-      handle.define_singleton_method(:send_and_wait!) do |**kwargs|
-        calls << kwargs
-        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
-        { status: :ok }
-      end
-
-      result = reviewer.run_in_session!(handle: handle, deadline: deadline)
-
-      assert result.ok?
-      assert_equal 1, calls.size
-      assert_equal deadline, calls.first.fetch(:deadline)
-      assert calls.first.fetch(:timeout_sec) <= 2,
-             "shared-session timeout must be clamped to the reviewer deadline"
-    end
-  end
-
   def test_run_uses_default_timeout_when_spec_omits_timeout
     with_tmp_dir do |dir|
       reviewer, _ = with_stubbed_adapter(dir, "timeout_sec" => nil)
@@ -971,19 +948,6 @@ class ReviewersAgentTest < Minitest::Test
                    "no wrapper tag in the spawn argv when plan.md is absent")
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
-    end
-  end
-  def test_run_in_shared_session_rejects_non_claude_profile
-    with_tmp_dir do |dir|
-      ctx = make_ctx(dir)
-      FileUtils.mkdir_p(ctx.task_folder)
-      reviewer = Hive::Reviewers::Agent.new(make_spec("agent" => "codex"), ctx)
-
-      err = assert_raises(Hive::AgentError) do
-        reviewer.run_in_session!(handle: Object.new)
-      end
-
-      assert_match(/shared Claude reviewer session cannot run :codex/, err.message)
     end
   end
 end

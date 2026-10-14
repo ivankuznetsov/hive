@@ -10,26 +10,11 @@ module Hive
       module_function
 
       def run!(task, cfg)
-        case runtime_for(cfg)
-        when :headless
-          profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
-          if Hive::AgentSupport.supports?(profile, :Launch)
-            run_claude!(task, cfg_with_claude_mode(cfg, :headless), profile: profile)
-          else
-            run_headless!(task, cfg, profile: profile)
-          end
-        when :tmux_interactive
-          run_claude!(task, cfg)
-        end
-      end
-
-      def runtime_for(cfg)
-        agent_name = (cfg.dig("brainstorm", "agent") || "claude").to_s
-        return :headless unless Hive::AgentSupport.supports?(agent_name, :Launch)
-
-        case Hive::Config.claude_mode(cfg)
-        when :headless then :headless
-        when :tmux then :tmux_interactive
+        profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          run_claude!(task, cfg, profile: profile)
+        else
+          run_headless!(task, cfg, profile: profile)
         end
       end
 
@@ -48,8 +33,8 @@ module Hive
         # with `dirs:` deliberately opts into a wider add-dir set
         # (scope.fetch(:add_dirs) appends those extras) — that is an
         # operator's explicit, config-level choice, not the default.
-        # (Claude-on-tmux is now routed through `run_claude!`; this method
-        # only covers codex / pi — both run with their own profile
+        # (Claude is routed through `run_claude!`; this method only covers
+        # non-Claude providers, which run with their own profile
         # permissions, not Claude's `--dangerously-skip-permissions`.)
         result = Hive::Stages::Base.spawn_agent(
           task,
@@ -83,7 +68,7 @@ module Hive
           cfg, "brainstorm", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
-        result = Hive::Stages::Base.spawn_claude_with_tmux_marker!(
+        result = Hive::Stages::Base.spawn_claude_with_failure_marker!(
           task,
           cfg,
           prompt: prompt,
@@ -97,7 +82,6 @@ module Hive
             cfg, "brainstorm", profile,
             current: Hive::Stages::Base.model_routing_current(cfg["brainstorm"])
           ),
-          session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task), # coding-scoped: coding brainstorm stage tmux session
           status_mode: :state_file_marker,
           **Hive::Stages::Base.tool_scope_kwargs(scope)
         )
@@ -189,18 +173,6 @@ module Hive
           message: message.byteslice(0, 200).to_s.scrub
         }.compact
         Hive::Markers.set(task.state_file, :error, **attrs)
-      end
-
-      # Returns a new cfg Hash with `claude.mode` overridden, leaving the
-      # caller's cfg untouched (the dispatcher passes its cfg by reference
-      # to many stage helpers; mutating it would surprise unrelated
-      # call-sites that read claude.mode later in the same run).
-      def cfg_with_claude_mode(cfg, mode)
-        desired = mode.to_s
-        return cfg if cfg.dig("claude", "mode") == desired
-
-        existing_claude = cfg["claude"].is_a?(Hash) ? cfg["claude"] : {}
-        cfg.merge("claude" => existing_claude.merge("mode" => desired))
       end
 
       def render_prompt(task, cfg, profile:)

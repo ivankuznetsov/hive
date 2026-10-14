@@ -193,12 +193,7 @@ module Hive
           status_mode: :state_file_marker
         }
         if Hive::AgentSupport.supports?(profile, :Launch)
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task,
-            cfg,
-            **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task) # coding-scoped: coding finalize stage tmux session
-          )
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end

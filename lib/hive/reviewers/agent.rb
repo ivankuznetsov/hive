@@ -53,23 +53,6 @@ module Hive
         end
       end
 
-      def run_in_session!(handle:, deadline: nil)
-        run_with_spawn(deadline: deadline) do |profile, prompt, configured_timeout, spawn_timeout, attempts|
-          unless Hive::AgentSupport.supports?(profile, :Interactive)
-            raise Hive::AgentError, "shared Claude reviewer session cannot run #{profile.name.inspect}"
-          end
-
-          handle.send_and_wait!(
-            prompt: prompt,
-            expected_output: staged_output_path,
-            timeout_sec: spawn_timeout || configured_timeout,
-            status_mode: :output_file_exists,
-            log_label: build_log_label(attempts),
-            deadline: deadline
-          )
-        end
-      end
-
       # Agent reviewers write into a staging path and publish only after a
       # successful exit. Orchestrator cleanup must therefore target the staging
       # file, never an earlier successful findings artifact at output_path.

@@ -358,6 +358,18 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_incremental_dependency_hold_defaults_base_mode_without_a_full_context
+    row = { slug: "dependent-task", dependency_base_mode: nil }
+
+    Hive::Commands::Status.new.send(
+      :hold_incremental_dependency, row, { "name" => "demo" }
+    )
+
+    assert_equal "default", row.fetch(:dependency_base_mode)
+    assert_equal true, row.fetch(:blocked)
+    assert_equal "dependency_validation_failed", row.fetch(:admission_error).reason_code
+  end
+
   def test_daemon_task_payload_checks_dependencies_when_authoritative
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

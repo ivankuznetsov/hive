@@ -429,6 +429,20 @@ class DependencyAdmissionTest < Minitest::Test
     assert_predicate indexed.project_snapshots, :frozen?
   end
 
+  def test_context_overlays_one_unique_project_without_mutating_the_snapshot
+    app = project(tasks: [ task("app", "active") ])
+    data = project(name: "data", tasks: [ task("data", "unchanged") ])
+    indexed = context(app, data)
+    added = task("app", "proposed")
+
+    overlaid = indexed.with_task(project: "app", task: added)
+
+    assert_equal %w[active proposed], overlaid.projects.first.tasks.map(&:slug)
+    assert_equal [ "unchanged" ], overlaid.projects.last.tasks.map(&:slug)
+    assert_equal [ "active" ], indexed.projects.first.tasks.map(&:slug)
+    assert_same indexed, indexed.with_task(project: "missing", task: added)
+  end
+
   def test_immutable_context_memoizes_shared_dependency_tails
     indexed = context(project(tasks: [
       task("app", "a", depends_on: "b"),

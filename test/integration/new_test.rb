@@ -376,6 +376,19 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_dependency_error_value_falls_back_when_json_generation_fails
+    value = Object.new
+    value.define_singleton_method(:to_s) { "opaque dependency" }
+
+    rendered = with_replaced_singleton_method(
+      JSON, :generate, ->(*) { raise JSON::GeneratorError, "cannot encode" }
+    ) do
+      Hive::Commands::New.allocate.send(:dependency_error_value, value)
+    end
+
+    assert_equal "opaque dependency", rendered
+  end
+
   def test_creation_rejects_a_resolvable_cycle_before_publishing_or_allocating_an_id
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -1594,6 +1594,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
     )
     assert_equal [ "waiting_operator", "operator_action" ],
                  [ item.fetch("bucket"), item.dig("condition", "kind") ]
+
+    scalar = row(slug: "queued", depends_on: "base-task")
+    condition = dependency_dispatcher.send(:operator_dependency_condition, scalar)
+    assert_equal "base-task", condition.fetch("dependency")
   end
 
   def test_recovery_and_retry_projection_cover_running_unknown_and_safety_states

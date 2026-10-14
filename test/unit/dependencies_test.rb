@@ -252,7 +252,8 @@ class DependenciesTest < Minitest::Test
     unmet = [
       { "reference" => "first", "blocked_by" => "first", "dependency_stage" => "7-artifacts" },
       { "reference" => "other:second", "blocked_by" => "other:second",
-        "dependency_stage" => "8-finalize" }
+        "dependency_stage" => "8-finalize" },
+      { "reference" => "missing", "blocked_by" => nil, "dependency_stage" => nil }
     ]
 
     label = Hive::Dependencies.blocked_label(
@@ -260,7 +261,8 @@ class DependenciesTest < Minitest::Test
       unmet_dependencies: unmet
     )
 
-    assert_equal "⏸ blocked by first (7-artifacts), other:second (8-finalize)", label
+    assert_equal "⏸ blocked by first (7-artifacts), other:second (8-finalize), " \
+                 "missing (unresolved)", label
     refute_includes label, "[\""
   end
 

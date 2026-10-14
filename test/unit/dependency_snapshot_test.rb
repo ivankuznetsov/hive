@@ -1316,6 +1316,23 @@ class DependencySnapshotTest < Minitest::Test
     )
   end
 
+  def test_workflow_generation_capture_records_unexpected_project_failures
+    with_tmp_dir do |root|
+      generations = with_replaced_singleton_method(
+        Hive::Workflows::Project, :synchronize,
+        ->(&) { raise RuntimeError, "generation failed" }
+      ) do
+        Hive::DependencySnapshot.send(
+          :capture_workflow_generations, [ { "path" => root } ]
+        )
+      end
+
+      error = generations.fetch(File.expand_path(root))
+      assert_instance_of RuntimeError, error
+      assert_equal "generation failed", error.message
+    end
+  end
+
   private
 
   def write_task_meta(root, stage, slug, id:)

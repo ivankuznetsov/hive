@@ -119,12 +119,10 @@ class RuntimeControlPlaneInstallationTest < Minitest::Test
     with_tmp_dir do |root|
       path = Hive::Paths.runtime_control_plane_path(root)
       original_exist = File.method(:exist?)
-      target_checks = 0
 
       with_replaced_singleton_method(File, :exist?, lambda { |candidate|
         if candidate == path
-          target_checks += 1
-          target_checks > 1 || original_exist.call(candidate)
+          true
         else
           original_exist.call(candidate)
         end

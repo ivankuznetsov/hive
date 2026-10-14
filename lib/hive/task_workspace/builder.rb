@@ -227,7 +227,12 @@ module Hive
           "Declared primary artifact #{declared} is unavailable for this completed task."
         end
         {
-          "kind" => contract ? contract.kind.to_s : "unknown",
+          # SemanticSnapshot v2 deliberately has a closed document/change
+          # result vocabulary. When the descriptor is unavailable we cannot
+          # recover its declared contract, so expose the inert artifact view as
+          # a document instead of inventing a third wire value. The warning and
+          # disabled action/applicability fields retain the loss of authority.
+          "kind" => contract ? contract.kind.to_s : "document",
           "declared_primary" => declared,
           "primary" => primary,
           "supporting" => records.reject { |record| primary && record["reference"] == primary["reference"] },

@@ -40,7 +40,7 @@ module Hive
       end
 
       def call
-        legacy_rows = check_claude_auth + check_llm_wiki_qmd + check_project_config +
+        legacy_rows = check_claude_auth + check_claude_config + check_llm_wiki_qmd + check_project_config +
                       check_web_environment_aliases + check_runtime_control_plane
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
@@ -294,6 +294,24 @@ module Hive
           skill: leaked.join(","),
           message: "#{leaked.join(' and ')} is exported in this shell; Hive unsets it before launching Claude, " \
                    "so Claude bills your subscription, not the API key"
+        ) ]
+      end
+
+      # `claude.mode` is retired (Claude always launches headless). Config
+      # loading tolerates and ignores the key, so a leftover line is harmless
+      # but misleading — nudge the operator to delete it. Warning only: it
+      # never changes doctor's exit code.
+      def check_claude_config
+        return [] unless Hive::Config.obsolete_claude_mode_key?(@config)
+
+        [ warning_row(
+          stage: "claude",
+          label: "claude/config",
+          agent: "claude",
+          configured_skill: "claude.mode",
+          skill: ".hive-state/config.yml",
+          message: "claude.mode is obsolete and ignored (Claude always runs headless); " \
+                   "delete the claude.mode line from .hive-state/config.yml"
         ) ]
       end
 

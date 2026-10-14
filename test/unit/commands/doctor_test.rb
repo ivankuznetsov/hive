@@ -67,7 +67,6 @@ class HiveCommandsDoctorTest < Minitest::Test
 
   def base_config(overrides = {})
     {
-      "claude" => { "mode" => "headless" },
       "brainstorm" => { "agent" => "claude" },
       "plan" => { "agent" => "claude" }
     }.merge(overrides) { |_k, a, b| a.merge(b) }
@@ -170,8 +169,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.pi/agent/skills/wiki-plan/SKILL.md")
       out = StringIO.new
       cfg = {
-        "claude" => { "mode" => "headless" },
-        "brainstorm" => { "agent" => "pi" },
+          "brainstorm" => { "agent" => "pi" },
         "plan" => { "agent" => "pi" }
       }
       exit_code = Hive::Commands::Doctor.new(
@@ -190,8 +188,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.pi/agent/skills/ce-brainstorm/SKILL.md")
       out = StringIO.new
       cfg = {
-        "claude" => { "mode" => "headless" },
-        "brainstorm" => { "agent" => "pi" },
+          "brainstorm" => { "agent" => "pi" },
         "plan" => { "agent" => "pi" }
       }
       exit_code = Hive::Commands::Doctor.new(
@@ -210,8 +207,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.codex/plugins/cache/mp/compound-engineering/3.8.1/skills/ce-brainstorm/SKILL.md")
       out = StringIO.new
       cfg = {
-        "claude" => { "mode" => "headless" },
-        "brainstorm" => { "agent" => "codex" },
+          "brainstorm" => { "agent" => "codex" },
         "plan" => { "agent" => "codex" }
       }
       exit_code = Hive::Commands::Doctor.new(
@@ -231,8 +227,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.codex/plugins/cache/mp/compound-engineering/3.8.1/skills/ce-brainstorm/SKILL.md")
       out = StringIO.new
       cfg = {
-        "claude" => { "mode" => "headless" },
-        "brainstorm" => { "agent" => "codex" },
+          "brainstorm" => { "agent" => "codex" },
         "plan" => { "agent" => "codex", "skill" => "/plan" }
       }
       exit_code = Hive::Commands::Doctor.new(
@@ -283,8 +278,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       write_file("#{home}/.claude/commands/plan.md")
       out = StringIO.new
       cfg = {
-        "claude" => { "mode" => "headless" },
-        "brainstorm" => { "agent" => "claude" },
+          "brainstorm" => { "agent" => "claude" },
         "plan" => { "agent" => "claude" }
       }
       exit_code = Hive::Commands::Doctor.new(
@@ -376,6 +370,68 @@ class HiveCommandsDoctorTest < Minitest::Test
       assert_doctor_schema_valid(env)
       refute(env.fetch("checks").any? { |check| check["label"] == "claude/auth" })
       assert_equal 0, env.fetch("summary").fetch("warnings")
+    end
+  end
+
+  def doctor_json_for_project_config(home, yaml)
+    install_brainstorm_and_plan_skills(home)
+    with_tmp_dir do |project|
+      FileUtils.mkdir_p(File.join(project, ".hive-state"))
+      File.write(File.join(project, ".hive-state", "config.yml"), yaml)
+      out = StringIO.new
+      environment = ENV.to_h.except("ANTHROPIC_API_KEY", "CLAUDE_API_KEY")
+      exit_code = Hive::Commands::Doctor.new(
+        config: Hive::Config.load(project), project_root: project, json: true, output: out,
+        environment: environment
+      ).call
+      [ exit_code, JSON.parse(out.string) ]
+    end
+  end
+
+  PARKED_STAGE_YAML = "brainstorm:\n  agent: claude\n  skill: /x\nplan:\n  agent: claude\n  skill: /x\n"
+
+  def test_claude_config_warns_once_about_obsolete_claude_mode_key
+    with_fake_home do |home|
+      exit_code, env = doctor_json_for_project_config(home, "claude:\n  mode: tmux\n#{PARKED_STAGE_YAML}")
+
+      assert_equal 0, exit_code, "an obsolete key is a warning, not a failing check"
+      assert_doctor_schema_valid(env)
+      rows = env.fetch("checks").select { |check| check["label"] == "claude/config" }
+      assert_equal 1, rows.length
+      row = rows.first
+      assert_equal "warning", row.fetch("kind")
+      assert_equal "warning", row.fetch("status")
+      assert_equal "claude.mode", row.fetch("configured_skill")
+      assert_match(/claude\.mode is obsolete.*headless.*delete the claude\.mode line/, row.fetch("message"))
+      assert_equal 1, env.fetch("summary").fetch("warnings")
+      assert_equal 0, env.fetch("summary").fetch("legacy_failures")
+    end
+  end
+
+  def test_claude_config_is_silent_without_claude_mode_key
+    with_fake_home do |home|
+      exit_code, env = doctor_json_for_project_config(home, PARKED_STAGE_YAML)
+
+      assert_equal 0, exit_code
+      assert_doctor_schema_valid(env)
+      refute(env.fetch("checks").any? { |check| check["label"] == "claude/config" })
+      assert_equal 0, env.fetch("summary").fetch("warnings")
+    end
+  end
+
+  def test_claude_config_warning_renders_in_text_table
+    with_fake_home do |home|
+      install_brainstorm_and_plan_skills(home)
+      out = StringIO.new
+      cfg = cfg_with_reviewers([]).merge(Hive::Config::OBSOLETE_CLAUDE_MODE_KEY => true)
+
+      exit_code = Hive::Commands::Doctor.new(
+        config: cfg, project_root: nil, output: out,
+        environment: { "HOME" => home }
+      ).call
+
+      assert_equal 0, exit_code
+      assert_match(%r{claude/config}, out.string)
     end
   end
 
@@ -556,7 +612,6 @@ class HiveCommandsDoctorTest < Minitest::Test
 
   def cfg_with_reviewers(reviewers)
     {
-      "claude" => { "mode" => "headless" },
       "brainstorm" => { "agent" => "claude", "skill" => "/x" }, # parked
       "plan" => { "agent" => "claude", "skill" => "/x" },       # parked
       "review" => { "reviewers" => reviewers }
@@ -640,8 +695,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       [
         cfg_with_reviewers([]),
         cfg_with_reviewers(nil),
-        { "claude" => { "mode" => "headless" },
-          "brainstorm" => { "agent" => "claude", "skill" => "/x" },
+        { "brainstorm" => { "agent" => "claude", "skill" => "/x" },
           "plan" => { "agent" => "claude", "skill" => "/x" } } # `review:` absent
       ].each do |cfg|
         out = StringIO.new
@@ -875,7 +929,7 @@ class HiveCommandsDoctorTest < Minitest::Test
 
       state = File.join(dir, ".hive-state")
       FileUtils.mkdir_p(state)
-      File.write(File.join(state, "config.yml"), "brainstorm:\n  runtime: tmux\n")
+      File.write(File.join(state, "config.yml"), "brainstorm:\n  agent: claude\n")
 
       clean = Hive::Commands::Doctor.new(config: base_config, project_root: dir, output: StringIO.new)
       refute clean.send(:config_yml_unreadable?)

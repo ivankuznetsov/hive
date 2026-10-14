@@ -961,7 +961,8 @@ module Hive
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
                       isolate_environment: false, launch_environment: nil,
-                      terminate_on_parent_signal: true)
+                      terminate_on_parent_signal: true,
+                      receipt_model: nil, receipt_effort: nil)
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
         unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
         unless unknown_launch_keys.empty? && launch_environment.values.all? { |value| value.is_a?(String) }
@@ -1009,7 +1010,7 @@ module Hive
               error_message: "preflight failed for admitted provider account #{context.provider_account_id}"
             }
           end
-          return { status: :error,
+          return { status: :error, preflight_failed: true,
                    error_message: "preflight failed: #{e.message}" }
         end
 
@@ -1073,8 +1074,10 @@ module Hive
 
         started_at = Time.now.utc.iso8601
         effective_status_mode = runtime_policy&.host_outputs? ? :exit_code_only : status_mode
+        # `observed_*` name what a caller already put in cli_flags (the
+        # Claude launcher's claude.* resolution); they feed the receipt only.
         requested_identity = requested_model(
-          context, routing_arguments, launch_arguments, model
+          context, routing_arguments, launch_arguments, model || receipt_model
         )
         requested_provider, requested_model_identity = execution_identity(
           profile, requested_identity
@@ -1087,7 +1090,9 @@ module Hive
           role: log_label || task.stage_name,
           requested_provider: requested_provider,
           requested_model: requested_model_identity,
-          requested_effort: requested_effort(context, routing_arguments, launch_arguments, effort),
+          requested_effort: requested_effort(
+            context, routing_arguments, launch_arguments, effort || receipt_effort
+          ),
           billing_route: billing_route,
           billing_evidence_source: billing_evidence_source,
           timeout_sec: timeout_sec,
@@ -1301,8 +1306,15 @@ module Hive
       # sub-stage spawns share state with the main review task, and
       # routing through here would write the wrong marker shape onto the
       # synthetic-task state file (which points at the main task.md).
+      #
+      # A missing or outdated claude binary does not raise: spawn_agent
+      # returns `preflight_failed: true` before anything runs, and the
+      # stage's own marker would still be the previous run's. Mark it too.
       def spawn_claude_with_failure_marker!(task, cfg, **kwargs)
-        spawn_claude!(task, cfg, **kwargs)
+        result = spawn_claude!(task, cfg, **kwargs)
+        return result unless result.is_a?(Hash) && result[:preflight_failed]
+
+        mark_claude_launch_failed(task, result[:error_message])
       rescue Hive::AgentError => e
         raise if e.is_a?(Hive::ProviderRouteFailed)
 
@@ -1310,12 +1322,15 @@ module Hive
         # replace any stale AGENT_WORKING with an attributed :error so
         # `hive status` shows the failure state and the runner picks a
         # recoverable next step instead of treating the task as alive.
-        warn "[hive] claude launch failed: #{e.message}"
-        Hive::Markers.set(task.state_file, :error,
-                          reason: "claude_launch_failed",
-                          exception_class: e.class.name,
-                          message: e.message)
-        { status: :error, error_message: e.message }
+        mark_claude_launch_failed(task, e.message, exception_class: e.class.name)
+      end
+
+      def mark_claude_launch_failed(task, message, exception_class: nil)
+        warn "[hive] claude launch failed: #{message}"
+        attrs = { reason: "claude_launch_failed" }
+        attrs[:exception_class] = exception_class if exception_class
+        Hive::Markers.set(task.state_file, :error, **attrs, message: message)
+        { status: :error, error_message: message }
       end
 
       # Artifact custody belongs around the untrusted provider execution, not

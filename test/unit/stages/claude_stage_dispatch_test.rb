@@ -511,6 +511,36 @@ class ClaudeStageDispatchTest < Minitest::Test
     end
   end
 
+  # A plan already WAITING from an earlier run whose relaunch fails Claude
+  # preflight must end on an error marker, so the old draft never reaches
+  # plan review as a fresh `draft_updated`.
+  def test_plan_preflight_failure_replaces_waiting_marker_before_plan_review
+    with_tmp_dir do |dir|
+      cfg = {}
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      preflight = ->(*, **) { raise Hive::AgentError, "claude binary not found" }
+      reviewed = false
+
+      result = nil
+      capture_io do
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, preflight) do
+          result = Hive::Stages::Plan.spawn_plan_agent(task, cfg, "prompt", claude_profile(cfg))
+        end
+      end
+      marker = Hive::Markers.current(task.state_file)
+      with_replaced_singleton_method(Hive::PlanReview::Orchestrator, :run!, ->(**) { reviewed = true }) do
+        assert_nil Hive::Stages::Plan.start_plan_review(task, cfg, claude_profile(cfg), result, marker)
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :error, marker.name
+      assert_equal "claude_launch_failed", marker.attrs["reason"]
+      assert_equal "error", Hive::Stages::Plan.action_for(marker.name)
+      refute reviewed, "a failed launch must not send the previous draft to plan review"
+    end
+  end
+
   def identity_config
     fields = { "agent" => "codex", "model" => "gpt-5.6-sol" }.freeze
     {

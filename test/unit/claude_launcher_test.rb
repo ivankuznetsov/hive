@@ -153,6 +153,88 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  # Stage-local model/effort reach Claude as flags; the session receipt
+  # must record the same pair instead of leaving the identity unknown.
+  def test_session_receipt_records_stage_model_and_effort
+    with_tmp_task(stage: "3-plan") do |task|
+      prepare_test_task_run(task.folder)
+      log_dir = File.join(File.dirname(task.folder), "argv-log")
+      FileUtils.mkdir_p(log_dir)
+      fake_bin = File.expand_path("../fixtures/fake-claude", __dir__)
+      original = Hive::Stages::Base.method(:session_observation)
+      observation = nil
+      capture = lambda do |**kwargs|
+        observation = original.call(**kwargs)
+      end
+      with_env("HIVE_CLAUDE_BIN" => fake_bin, "HIVE_FAKE_CLAUDE_LOG_DIR" => log_dir) do
+        Hive::AgentProfile.reset_version_cache!
+        with_replaced_singleton_method(Hive::Stages::Base, :session_observation, capture) do
+          Hive::ClaudeLauncher.launch!(
+            task: task,
+            cfg: { "claude" => { "model" => "opus", "effort" => "medium" } },
+            prompt: "plan", add_dirs: [ task.folder ], cwd: task.folder,
+            max_budget_usd: 1, timeout_sec: 5, log_label: "plan",
+            model: "sonnet", effort: "high"
+          )
+        end
+      end
+
+      payload = observation.send(:base_payload)
+      assert_equal "sonnet", payload.fetch("requested_model")
+      assert_equal "high", payload.fetch("requested_effort")
+      argv = File.readlines(File.join(log_dir, "fake-claude-argv.log"), chomp: true)
+      assert_equal 1, argv.count("arg=--model")
+      assert_equal 1, argv.count("arg=--effort")
+    ensure
+      Hive::AgentProfile.reset_version_cache!
+    end
+  end
+
+  def test_receipt_identity_omits_inherited_model_and_effort
+    with_tmp_task do |task|
+      captured = nil
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        { status: :complete }
+      end
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        Hive::ClaudeLauncher.launch!(
+          task: task, cfg: { "claude" => { "model" => "inherit", "effort" => "default" } },
+          prompt: "prompt", add_dirs: [], cwd: task.folder,
+          max_budget_usd: 1, timeout_sec: 5, log_label: "brainstorm"
+        )
+      end
+
+      assert_equal [], captured.fetch(:cli_flags)
+      assert_nil captured.fetch(:receipt_model)
+      assert_nil captured.fetch(:receipt_effort)
+    end
+  end
+
+  # Resolved identity arguments already carry their own receipt identity
+  # through spawn_agent, so the claude.* hint stays empty.
+  def test_receipt_identity_hint_is_empty_with_identity_arguments
+    with_tmp_task do |task|
+      captured = nil
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        { status: :complete }
+      end
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        Hive::ClaudeLauncher.launch!(
+          task: task, cfg: { "claude" => { "model" => "opus" } },
+          prompt: "prompt", add_dirs: [], cwd: task.folder,
+          max_budget_usd: 1, timeout_sec: 5, log_label: "execute-impl",
+          identity_arguments: %w[--model claude-opus-5-5]
+        )
+      end
+
+      assert_equal %w[--model claude-opus-5-5], captured.fetch(:cli_flags)
+      assert_nil captured.fetch(:receipt_model)
+      assert_nil captured.fetch(:receipt_effort)
+    end
+  end
+
   def test_launcher_rejects_non_claude_profile
     with_tmp_task do |task|
       err = assert_raises(Hive::AgentError) do
@@ -267,6 +349,54 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal "Hive::AgentError", marker.attrs["exception_class"]
         assert_match(/claude exited before start/, marker.attrs["message"])
         assert_match(/claude launch failed: claude exited before start/, err)
+      end
+    end
+  end
+
+  # A missing or outdated claude binary fails preflight, which returns an
+  # error envelope instead of raising. The stage marker must still flip.
+  def test_spawn_claude_with_failure_marker_marks_returned_preflight_failures
+    with_tmp_task do |task|
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      preflight = ->(*, **) { raise Hive::AgentError, "claude 1.0.0 is older than required" }
+
+      result = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, preflight) do
+          result = Hive::Stages::Base.spawn_claude_with_failure_marker!(
+            task, {}, prompt: "prompt", add_dirs: [ task.folder ], cwd: task.folder,
+            max_budget_usd: 1, timeout_sec: 1, log_label: "test",
+            status_mode: :state_file_marker
+          )
+        end
+      end
+
+      message = "preflight failed: claude 1.0.0 is older than required"
+      assert_equal({ status: :error, error_message: message }, result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "claude_launch_failed", marker.attrs["reason"]
+      refute marker.attrs.key?("exception_class")
+      assert_includes marker.attrs["message"], "older than required"
+      assert_includes err, "claude launch failed"
+    end
+  end
+
+  def test_spawn_claude_with_failure_marker_passes_other_error_envelopes_through
+    with_tmp_task do |task|
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      envelope = { status: :error, error_reason: "provider_route_preflight_failed",
+                   error_message: "preflight failed for admitted provider account acct" }
+      original = Hive::ClaudeLauncher.method(:launch!)
+      capture_unbound_method(:launch!, original) do
+        Hive::ClaudeLauncher.define_singleton_method(:launch!) { |**_kwargs| envelope }
+
+        result = Hive::Stages::Base.spawn_claude_with_failure_marker!(
+          task, {}, prompt: "prompt", max_budget_usd: 1, timeout_sec: 1
+        )
+
+        assert_same envelope, result
+        assert_equal :waiting, Hive::Markers.current(task.state_file).name
       end
     end
   end

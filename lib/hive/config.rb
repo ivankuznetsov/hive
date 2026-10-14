@@ -974,12 +974,23 @@ module Hive
     # through verbatim (low/medium/high/xhigh/max as of CC 2.1.x — the init
     # questionnaire offers the common three, the config key is open).
     def claude_cli_flags(cfg, model: nil, effort: nil)
+      model, effort = claude_identity(cfg, model: model, effort: effort)
       flags = []
+      flags.concat([ "--model", model ]) if model
+      flags.concat([ "--effort", effort ]) if effort
+      flags
+    end
+
+    # The model and effort a Claude launch passes, after per-stage values
+    # override the project-wide claude.* pins. nil means the flag is
+    # omitted and Claude picks its own.
+    def claude_identity(cfg, model: nil, effort: nil)
       model = (model || cfg.dig("claude", "model") || DEFAULTS.dig("claude", "model")).to_s.strip
       effort = (effort || cfg.dig("claude", "effort") || DEFAULTS.dig("claude", "effort")).to_s.strip
-      flags.concat([ "--model", model ]) unless model.empty? || model == "inherit"
-      flags.concat([ "--effort", effort ]) unless effort.empty? || [ "default", "inherit" ].include?(effort)
-      flags
+      [
+        (model unless model.empty? || model == "inherit"),
+        (effort unless effort.empty? || [ "default", "inherit" ].include?(effort))
+      ]
     end
 
     def claude_permission_mode(cfg)

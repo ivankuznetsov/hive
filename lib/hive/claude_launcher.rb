@@ -50,6 +50,13 @@ module Hive
       profile.validate_routing_arguments!(routing_arguments) if routing_arguments
       routed_flags = routing_arguments&.native_arguments
       # Per-stage model/effort override the project-global claude.* pins.
+      # The resolved pair also goes to spawn_agent for the session receipt.
+      receipt_model, receipt_effort =
+        if routed_flags || identity_arguments || cfg.nil?
+          [ nil, nil ]
+        else
+          Hive::Config.claude_identity(cfg, model: model, effort: effort)
+        end
       cli_flags = routed_flags || identity_arguments ||
                   (cfg ? Hive::Config.claude_cli_flags(cfg, model: model, effort: effort) : [])
       require "hive/stages/base"
@@ -78,7 +85,9 @@ module Hive
         edit_patterns: edit_patterns,
         bash_patterns: bash_patterns,
         resource_guards: resource_guards,
-        agent_custody: agent_custody
+        agent_custody: agent_custody,
+        receipt_model: receipt_model,
+        receipt_effort: receipt_effort
       )
     end
 

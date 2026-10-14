@@ -37,8 +37,13 @@ module Hive
         @membership_ends_at = normalize_time(membership_ends_at)
         @membership_end_exclusive = membership_end_exclusive
         @attention_ends_at = normalize_time(attention_ends_at)
-        workflows = Hive::Workflows::Project.with_active_workflows(@project.fetch("path")) do |registry, _stage_names|
-          registry.workflows.dup.freeze
+        workflows = begin
+          Hive::Workflows::Project.with_active_workflows(@project.fetch("path")) do |registry, _stage_names|
+            registry.workflows.dup.freeze
+          end
+        rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => error
+          raise SourceUnavailable,
+                "registered project workflows are unavailable (#{error.class}): #{error.message}"
         end
         @stages_by_dir = workflows.values.flat_map(&:stages).each_with_object({}) do |stage, by_dir|
           by_dir[stage.dir] ||= stage

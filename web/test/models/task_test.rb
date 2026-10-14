@@ -484,6 +484,81 @@ class TaskTest < ActiveSupport::TestCase
     FileUtils.remove_entry(root_b) if root_b&.exist?
   end
 
+  test "workflow descriptor failures are logged and memoized as unavailable" do
+    errors = [
+      Hive::ConfigError.new("bad config"),
+      Psych::Exception.new("bad yaml"),
+      Errno::EACCES.new("denied"),
+      IOError.new("unreadable")
+    ]
+
+    errors.each do |error|
+      task = Task.new(
+        project: Project.new("name" => "alpha", "path" => "/tmp/alpha"),
+        attributes: { "slug" => "broken-task", "stage" => "9-done", "workflow" => "coding" }
+      )
+      calls = 0
+      warnings = []
+      activation = lambda do |*, **, &|
+        calls += 1
+        raise error
+      end
+
+      with_replaced_singleton_method(
+        Hive::Workflows::Project, :with_active_workflows, activation
+      ) do
+        with_replaced_singleton_method(Rails.logger, :warn, ->(message) { warnings << message }) do
+          assert_nil task.send(:workflow_descriptor)
+          assert_nil task.send(:workflow_descriptor)
+        end
+      end
+
+      assert_equal 1, calls, error.class.name
+      assert_equal 1, warnings.length, error.class.name
+      assert_match(/task workflow unavailable for alpha\/coding/, warnings.sole)
+      assert_includes warnings.sole, error.class.name
+      assert_includes warnings.sole, error.message
+    end
+  end
+
+  test "unexpected workflow descriptor failures are not memoized" do
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => "/tmp/alpha"),
+      attributes: { "slug" => "retry-task", "stage" => "9-done", "workflow" => "coding" }
+    )
+    calls = 0
+    activation = lambda do |*, **, &block|
+      calls += 1
+      raise RuntimeError, "unexpected" if calls == 1
+
+      block.call(Hive::Workflows::Registry)
+    end
+
+    with_replaced_singleton_method(
+      Hive::Workflows::Project, :with_active_workflows, activation
+    ) do
+      assert_raises(RuntimeError) { task.send(:workflow_descriptor) }
+      assert_equal Hive::Workflows::Registry::WORKFLOWS.fetch(:coding),
+                   task.send(:workflow_descriptor)
+    end
+
+    assert_equal 2, calls
+  end
+
+  test "terminal detection falls back to frozen built-in workflows when the descriptor is unavailable" do
+    done = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "stage" => "9-done", "workflow" => "removed-workflow" }
+    )
+    active = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "stage" => "4-execute", "workflow" => "removed-workflow" }
+    )
+
+    assert done.terminal?
+    refute active.terminal?
+  end
+
   test "queues a run through the task resource instead of a web dispatcher" do
     dispatched = nil
     task = Task.new(

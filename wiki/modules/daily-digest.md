@@ -25,6 +25,9 @@ identities (falling back to the origin remote), reuses `gh` authentication, and
 calls PRDigest's collector. It redacts recognized secrets before giving facts
 to an agent. Non-GitHub projects are outside this PR-only scope. Collection
 failure leaves the previous document intact instead of publishing an empty day.
+Project-local source construction contains workflow activation and strict-config
+failures as `SourceUnavailable`, so one invalid registered project contributes a
+diagnostic health entry without aborting collection for healthy projects.
 
 `DocumentGenerator` invokes the selected Hive agent with
 `Prdigest::Document.prompt`. `daily_digest.agent`, `model`, and `effort` can

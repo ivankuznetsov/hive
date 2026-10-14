@@ -34,6 +34,22 @@ class DailyDigestProjectSourceTest < Minitest::Test
     end
   end
 
+  def test_invalid_project_config_is_typed_as_source_unavailable_during_initialization
+    with_tmp_dir do |project|
+      state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "config.yml"), { "bogus_typo_key" => 1 }.to_yaml)
+
+      error = assert_raises(Hive::DailyDigest::ProjectSource::SourceUnavailable) do
+        build_source(project)
+      end
+
+      assert_match(/registered project workflows are unavailable/, error.message)
+      assert_match(/Hive::UnsupportedProjectConfigError/, error.message)
+      assert_match(/bogus_typo_key/, error.message)
+    end
+  end
+
   def test_collects_creation_and_material_journal_activity_once
     with_tmp_dir do |project|
       hive_state = File.join(project, ".hive-state")

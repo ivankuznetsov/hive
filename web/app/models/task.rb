@@ -452,7 +452,12 @@ class Task
   end
 
   def terminal?
-    workflow_descriptor&.stages&.last&.dir == self["stage"].to_s
+    workflow = workflow_descriptor
+    return workflow.stages.last&.dir == self["stage"].to_s if workflow
+
+    Hive::Workflows::Registry::WORKFLOWS.values.any? do |built_in|
+      built_in.stages.last&.dir == self["stage"].to_s
+    end
   end
 
   def diff
@@ -608,20 +613,28 @@ class Task
   end
 
   def workflow_descriptor
-    return @workflow_descriptor if defined?(@workflow_descriptor_loaded)
+    return @workflow_descriptor if @workflow_descriptor_loaded
 
     id = self["workflow"].presence || Hive::Workflows::CODING_ID
-    @workflow_descriptor = if project&.[]("path").present?
-      Hive::Workflows::Project.with_active_workflows(project.path) do |registry, _stage_names|
-        registry.fetch(id.to_sym)
+    begin
+      @workflow_descriptor = if project&.[]("path").present?
+        Hive::Workflows::Project.with_active_workflows(project.path) do |registry, _stage_names|
+          registry.fetch(id.to_sym)
+        end
+      else
+        Hive::Workflows::Registry::WORKFLOWS.fetch(id.to_sym)
       end
-    else
-      Hive::Workflows::Registry::WORKFLOWS.fetch(id.to_sym)
+    rescue Hive::Workflows::UnknownWorkflow, KeyError, Hive::ConfigError, Psych::Exception,
+           SystemCallError, IOError => error
+      @workflow_descriptor = nil
+      Rails.logger.warn(
+        "task workflow unavailable for #{project&.[]('name') || 'unknown'}/#{id}: " \
+          "#{error.class}: #{error.message}"
+      )
     end
-  rescue Hive::Workflows::UnknownWorkflow, KeyError
-    @workflow_descriptor = nil
-  ensure
+
     @workflow_descriptor_loaded = true
+    @workflow_descriptor
   end
 
   def normalized_media_items(items)

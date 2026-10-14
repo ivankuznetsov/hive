@@ -108,7 +108,15 @@ class Board
   def workflows_for(project, workflow_ids)
     fetch = lambda do |registry|
       workflow_ids.to_h do |workflow_id|
-        workflow = registry.fetch(workflow_id.to_sym)
+        workflow = registry.fetch(workflow_id.to_sym) do
+          known = registry.keys
+          raise Hive::Workflows::UnknownWorkflow.new(
+            "unknown workflow #{workflow_id.to_sym.inspect}; known workflows: " \
+              "#{known.map(&:inspect).join(', ')}",
+            value: workflow_id.to_sym,
+            valid: known.map(&:to_s)
+          )
+        end
         [ workflow_id, workflow ]
       rescue Hive::Workflows::UnknownWorkflow, KeyError => e
         log_unavailable_workflow(project, workflow_id, e)

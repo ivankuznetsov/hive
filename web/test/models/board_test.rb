@@ -198,11 +198,19 @@ class BoardTest < ActiveSupport::TestCase
       ]
     )
 
-    band = Board.new([ project ]).bands.sole
+    warnings = []
+    band = with_replaced_singleton_method(
+      Rails.logger, :warn, ->(message) { warnings << message }
+    ) do
+      Board.new([ project ]).bands.sole
+    end
 
     assert_equal "workflow_unavailable", band.error
     assert_equal [ "foreign-task" ], band.columns.sole.tasks.map(&:slug)
     assert_equal "2-foreign-stage", band.columns.sole.stage
+    warning = warnings.grep(/board workflow unavailable for saved-without-path\/overlay-only/).sole
+    assert_match(/Hive::Workflows::UnknownWorkflow/, warning)
+    assert_match(/unknown workflow :"overlay-only"; known workflows:/, warning)
   ensure
     Hive::Workflows::Project.reset!
   end

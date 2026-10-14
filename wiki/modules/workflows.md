@@ -86,6 +86,13 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 
 The operation rejects collisions with built-in/runtime ids and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). Descriptor signatures include content, not only mtime/size, so creation, deletion, rename, same-size replacement, and preserved/coarse-mtime replacement are visible on the next outermost activation. There is no last-known-good fallback for a currently selected malformed/missing workflow policy. The self-loading path resolves `hive_state_path` from the shared raw project-config reader, installs one fingerprinted overlay, then validates strict root keys against that overlay; it does not call `Config.load` recursively. For command paths that load `Project` without the aggregate `hive/workflows` entrypoint, strict validation derives its stage-name union directly from `Registry.all`, so behavior does not depend on require order. `Config.load` reuses the active matching view when it needs project stage names.
 
+Web task and board rendering treat unknown workflows, invalid project config,
+malformed YAML, and workflow I/O failures as unavailable descriptors with a
+diagnostic warning instead of raising through the page. Terminal detection can
+still recognize terminal directories from the frozen built-in descriptors when
+the selected descriptor is unavailable. Blank-path board rows use the same
+`UnknownWorkflow` diagnostic shape, including the known built-in ids.
+
 ### Workflow reader boundary audit
 
 The executable allowlist in `test/unit/workflow_reader_boundaries_test.rb` pins every direct production Registry read, union-helper read, and Project activation call by file, line, enclosing method, and occurrence count. Project-specific reads must use the Project operation or consume a bounded generation/copy captured inside it. Compatibility current-view reads are deliberately non-project-specific and serialized; built-in-only reads use the frozen built-in descriptor map. Internal union helpers remain safe only under the ownership stated by their callers.

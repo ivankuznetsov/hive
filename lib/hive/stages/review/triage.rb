@@ -88,6 +88,10 @@ module Hive
             reviewer_files: reviewer_files,
             escalations_path: escalations
           )
+          # A retried pass finds its previous escalations file still on
+          # disk. Its content is already in the prompt; drop it so only a
+          # file this run writes can satisfy the output check.
+          cleanup_partial_escalations!(escalations)
 
           custody_manifest = Hive::ArtifactFirewall::Manifest.new(
             root: ctx.task_folder,

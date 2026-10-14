@@ -45,7 +45,6 @@ class TriageTest < Minitest::Test
   def default_cfg(overrides = {})
     deep_merge_for_test(
       {
-        "claude" => { "mode" => "headless" },
         "review" => {
           "triage" => {
             "agent" => "claude",

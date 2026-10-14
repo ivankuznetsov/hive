@@ -409,7 +409,7 @@ class SchemaFilesTest < Minitest::Test
     inspector = Struct.new(:rows) { def inspect = rows }.new([ health ])
     output = StringIO.new
     Hive::Commands::Doctor.new(
-      config: { "claude" => { "mode" => "headless" } },
+      config: {},
       project_root: nil,
       json: true,
       output: output,

@@ -21,7 +21,7 @@ class ClaudeLauncherTest < Minitest::Test
 
         result = Hive::ClaudeLauncher.launch!(
           task: task,
-          cfg: { "claude" => { "mode" => "headless", "permission_mode" => "auto" } },
+          cfg: { "claude" => { "permission_mode" => "auto" } },
           prompt: "prompt",
           add_dirs: [ task.folder ],
           cwd: task.folder,
@@ -89,7 +89,7 @@ class ClaudeLauncherTest < Minitest::Test
 
         Hive::ClaudeLauncher.launch!(
           task: task,
-          cfg: { "claude" => { "mode" => "headless", "permission_mode" => "auto" } },
+          cfg: { "claude" => { "permission_mode" => "auto" } },
           prompt: "prompt",
           add_dirs: [ task.folder ],
           cwd: task.folder,
@@ -129,7 +129,7 @@ class ClaudeLauncherTest < Minitest::Test
         Hive::AgentProfile.reset_version_cache!
         Hive::ClaudeLauncher.launch!(
           task: task,
-          cfg: { "claude" => { "mode" => "headless" } },
+          cfg: {},
           prompt: "plan",
           add_dirs: [ task.folder ],
           cwd: task.folder,
@@ -158,7 +158,7 @@ class ClaudeLauncherTest < Minitest::Test
       err = assert_raises(Hive::AgentError) do
         Hive::ClaudeLauncher.launch!(
           task: task,
-          cfg: { "claude" => { "mode" => "headless" } },
+          cfg: {},
           prompt: "prompt",
           add_dirs: [],
           cwd: task.folder,

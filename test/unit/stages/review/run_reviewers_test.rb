@@ -1942,7 +1942,6 @@ class RunReviewersTest < Minitest::Test
   def test_provider_route_failure_terminates_reviewer_phase
     with_tmp_dir do |dir|
       cfg = {
-        "claude" => { "mode" => "headless" },
         "review" => {
           "reviewers" => [
             { "name" => "failed-route", "output_basename" => "failed-route" },
@@ -2055,7 +2054,6 @@ class RunReviewersTest < Minitest::Test
   def test_unenforceable_reviewer_scope_hard_errors_the_run
     with_tmp_dir do |dir|
       cfg = {
-        "claude" => { "mode" => "headless" },
         "review" => {
           "reviewers" => [
             { "name" => "scoped-codex", "output_basename" => "scoped-codex",

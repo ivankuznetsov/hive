@@ -10,7 +10,7 @@ require "hive/stages/review"
 require "hive/stages/review/ci_fix"
 require "hive/reviewers"
 
-class ClaudeModeDispatchTest < Minitest::Test
+class ClaudeStageDispatchTest < Minitest::Test
   include HiveTestHelper
 
   TaskStub = Struct.new(
@@ -89,7 +89,7 @@ class ClaudeModeDispatchTest < Minitest::Test
 
   def test_brainstorm_claude_uses_claude_launcher_with_caller_cfg
     with_tmp_dir do |dir|
-      cfg = { "claude" => { "mode" => "headless" } }
+      cfg = { "claude" => { "permission_mode" => "auto" } }
       task = make_task(dir, stage_name: "brainstorm", state_name: "brainstorm.md")
       File.write(File.join(task.folder, "idea.md"), "test idea")
 

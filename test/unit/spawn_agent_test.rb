@@ -1144,7 +1144,6 @@ class SpawnAgentTest < Minitest::Test
       absolute = File.join(dir, "abs")
       cfg = {
         "permissions" => "yolo",
-        "claude" => { "mode" => "headless" },
         "execute" => {
           "permissions" => {
             "preset" => "scoped",

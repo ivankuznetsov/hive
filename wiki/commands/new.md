@@ -61,10 +61,9 @@ hive: captured <task>/idea.md
 next: mv <task> <hive-state>/stages/<next-stage>/ && hive run <id-or-task>
 ```
 
-The final token in the next-step hint is the numeric id allocated by
-`Hive::TaskCounter.next!`. If the runtime control plane cannot allocate an id,
-capture fails and rolls back the uncommitted candidate instead of publishing an
-id-less task that cannot enter durable attempt admission.
+When `Hive::TaskCounter.next_or_nil` allocates an id, the final token in the
+next-step hint is that numeric id. If the runtime control plane is unavailable,
+capture still succeeds and the hint falls back to the task path.
 
 The CLI argv surface is unchanged. Internally, `Hive::Commands::New.new(project, text, body_override: nil, attachments: [[abs_path, dest_name], …])` also supports the TUI rich composer (the `attachments:` argument is an array of `[src_abs_path, dest_filename]` tuples, not a flat array of paths):
 
@@ -106,11 +105,10 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
    ```
    Body is the original text, or `body_override:` for programmatic rich-input callers, plus a trailing marker. Coding keeps `<!-- WAITING -->` for the historical inbox path. Non-coding workflows remove the waiting marker; if the entry stage is `kind: :inert`, capture writes `<!-- COMPLETE -->` so the real `hive approve` safety gate can move it forward.
 6. If attachments were supplied, copy them into `assets/` beside the state file.
-7. Allocate a monotonic task id via `Hive::TaskCounter.next!` and write
-   `meta.yml` via
-   `Hive::TaskMeta.write(task_dir, id:, slug:, display_name: nil, workflow: ...)`.
-   Allocation failure aborts capture and removes the uncommitted candidate; a
-   current-format task is never published with a null id.
+7. Attempt to allocate a monotonic task id via `Hive::TaskCounter.next_or_nil`
+   and write `meta.yml` via `Hive::TaskMeta.write(task_dir, id:, slug:,
+   display_name: nil, workflow: ...)`. A typed runtime-control-plane outage is
+   fail-soft and leaves the id null; the task is still captured.
 8. Leave task history absent. The first authoritative event creates `task-journal.jsonl`; until then the absent journal is an empty history stream.
 
 Managed selection is resolved once under the store's stable-read lock. Project
@@ -118,7 +116,7 @@ configuration is loaded lazily only for a legacy v1 selection that must derive
 its compatibility snapshot; current v2 locks and unmanaged workflows do not
 pay that validation cost.
 9. Take `Hive::Lock.with_commit_lock(hive_state_path)`, then run `Hive::GitOps#hive_commit(stage_name: entry_stage.dir, slug:, action: "captured")` on `hive/state`. The lock only covers the short `git add && git commit` window, serializing concurrent web/TUI/bot `hive new` captures so git's shared worktree index lock is not raced. Diff-empty commits are skipped silently.
-10. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; repair a remaining blank name with `hive generate-name <task_dir>` or the explicit [[commands/migrate]] command.
+10. Best-effort spawn `hive generate-name <task_dir>` in its own process group, appending stdout/stderr to `<state_home>/logs/display-name.log`. Spawn or wait errors are swallowed so capture is not blocked by display-name generation; repair a remaining blank name with `hive generate-name <task_dir>`.
 11. Print `hive: captured <path>` and the descriptor-derived `mv ... && hive run ...` next-step hint.
 
 ## Task metadata

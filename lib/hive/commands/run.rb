@@ -131,8 +131,9 @@ module Hive
       end
 
       def run_task(task)
-        observation = Hive::TaskMeta.observe(task.folder)
-        raise Hive::TaskMeta::StaleTask, "run task is missing before lease acquisition" unless observation
+        observation = Hive::DependencySnapshot.observe_for_admission!(
+          task, missing_message: "run task is missing before lease acquisition"
+        )
 
         Hive::Lock.with_task_lock(
           task.folder, slug: task.slug, stage: task.stage_name,
@@ -325,40 +326,44 @@ module Hive
         action = result.is_a?(Hash) ? result[:commit] : nil
         return unless action || archived
 
-        owned_observation = observation.nil?
-        observation ||= Hive::TaskMeta.observe(task.folder)
-        raise Hive::TaskMeta::StaleTask, "run task is stale before commit" unless observation
-        Hive::TaskMeta.validate_observation!(task.folder, observation)
-        ops = Hive::GitOps.new(task.project_root)
-        transactional_terminal = archived || rollback_on_failure
-        owned_snapshot = transactional_terminal && terminal_snapshot.nil?
-        terminal_snapshot ||= TerminalStateSnapshot.capture(
-          task.folder, observation: observation
-        ) if transactional_terminal
-        Hive::Lock.with_commit_lock(task.hive_state_path) do
-          begin
-            Hive::TaskMeta.validate_observation!(task.folder, observation)
-            stamp_completed_at(task, observation: observation) if archived && stamp_completion
-            ops.hive_commit(
-              stage_name: "#{task.stage_index}-#{task.stage_name}",
-              slug: task.slug,
-              action: action || "completed"
-            )
-          rescue Hive::Error, Hive::TaskMeta::InvalidMetadata, Hive::TaskMeta::StaleTask,
-                 SystemCallError, IOError, ArgumentError, Interrupt => e
-            if transactional_terminal && terminal_snapshot
-              rollback_terminal_state!(task, terminal_snapshot, ops, e)
-            else
-              raise
+        owned_snapshot = false
+        Hive::TaskMeta.with_observation(task.folder, observation) do |current_observation|
+          unless current_observation
+            raise Hive::TaskMeta::StaleTask, "run task is stale before commit"
+          end
+          Hive::TaskMeta.validate_observation!(task.folder, current_observation)
+          ops = Hive::GitOps.new(task.project_root)
+          transactional_terminal = archived || rollback_on_failure
+          owned_snapshot = transactional_terminal && terminal_snapshot.nil?
+          terminal_snapshot ||= TerminalStateSnapshot.capture(
+            task.folder, observation: current_observation
+          ) if transactional_terminal
+          Hive::Lock.with_commit_lock(task.hive_state_path) do
+            begin
+              Hive::TaskMeta.validate_observation!(task.folder, current_observation)
+              if archived && stamp_completion
+                stamp_completed_at(task, observation: current_observation)
+              end
+              ops.hive_commit(
+                stage_name: "#{task.stage_index}-#{task.stage_name}",
+                slug: task.slug,
+                action: action || "completed"
+              )
+            rescue Hive::Error, Hive::TaskMeta::InvalidMetadata, Hive::TaskMeta::StaleTask,
+                   SystemCallError, IOError, ArgumentError, Interrupt => e
+              if transactional_terminal && terminal_snapshot
+                rollback_terminal_state!(task, terminal_snapshot, ops, e)
+              else
+                raise
+              end
             end
           end
         end
       ensure
         terminal_snapshot&.close if owned_snapshot
-        observation&.close if owned_observation
       end
 
-      def stamp_completed_at(task, completion_time = nil, observation: nil)
+      def stamp_completed_at(task, completion_time = nil, observation:)
         Hive::TaskMeta.write_completed_at_once(
           task.folder, completion_time || @clock.call, observation: observation
         )
@@ -384,7 +389,7 @@ module Hive
         )
       end
 
-      def terminal_state_snapshot(task, observation: nil)
+      def terminal_state_snapshot(task, observation:)
         terminal = task.action_workflow.stages.last
         return nil unless terminal.dir == "#{task.stage_index}-#{task.stage_name}"
         return nil unless [ :agent, :council ].include?(terminal.kind)

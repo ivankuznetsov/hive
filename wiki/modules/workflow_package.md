@@ -127,10 +127,15 @@ weakening owner-authored descriptor compatibility:
 - `TaskMigrator` carries a retained directory observation across an authorized
   source-to-destination move and requires every pin rewrite to be applied before
   success counts, pathspecs, the commit callback, recovery pruning, or package
-  cleanup. Its transaction rollback validates that same observation before
-  moving artifacts or restoring metadata. A dropped task is not recreated and
-  a copied same-path replacement is left untouched; rollback skips are reported
-  alongside the original migration failure.
+  cleanup. Same-filesystem moves retain the original inode; cross-device moves
+  capture the exact copied destination before removing the source. An unexpected
+  destination identity is rejected, and every completed move enters the rollback
+  set before fallible observation rebinding. Its transaction rollback validates
+  that same observation before moving artifacts or restoring metadata. A dropped
+  task is not recreated and a copied same-path replacement is left untouched;
+  rollback skips are reported alongside the original migration failure. Open-file
+  descriptor exhaustion closes already-owned observations and returns a typed
+  availability error naming the process descriptor limit.
 - `SemanticDiff` reports prompt/descriptor changes by hash (never prompt text),
   dependency and policy set changes, file inventory changes, and semantic
   escalation reasons.

@@ -28,6 +28,8 @@ module Hive
       )
       held[lock_key] = { depth: 1, lock_id: lock_data.fetch("lock_id"), pid: Process.pid }
       begin
+        # The lease claim is a race window: validate again before handing the
+        # protected task to the caller.
         Hive::TaskMeta.validate_observation!(task_folder, observation) if observation
         yield
       ensure

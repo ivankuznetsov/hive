@@ -37,10 +37,12 @@ module Hive
 
       def acquire(task_folder, payload, create: true, observation: nil)
         folder = File.expand_path(task_folder)
-        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         if create && !observation
           FileUtils.mkdir_p(folder)
         elsif !File.directory?(folder)
+          if observation
+            raise Hive::TaskMeta::StaleTask, "task directory changed identity at #{folder}"
+          end
           raise Errno::ENOENT, folder
         end
         subject = subject_for(folder, observe: true, observation: observation)
@@ -146,6 +148,7 @@ module Hive
       def lease_key(task_folder, observation: nil)
         require "hive/task_meta"
         folder = File.expand_path(task_folder)
+        # Bind the lock key to the observed task before reading its stable id.
         Hive::TaskMeta.validate_observation!(folder, observation) if observation
         task_id = Hive::TaskMeta.read(folder)[:id]&.to_s
         raise IdentityError.new(
@@ -159,6 +162,7 @@ module Hive
 
       def subject_for(folder, observe: false, observation: nil)
         require "hive/task_meta"
+        # Guard registration and subject lookup against a same-path replacement.
         Hive::TaskMeta.validate_observation!(folder, observation) if observation
         metadata = Hive::TaskMeta.read(folder)
         task_id = metadata[:id]&.to_s
@@ -186,6 +190,7 @@ module Hive
             code: :task_identity_conflict
           )
         end
+        # Recheck after database reads before publishing a new observed path.
         Hive::TaskMeta.validate_observation!(folder, observation) if observation
         if observe && row.fetch(:observed_path) != folder
           timestamp = Codec.dump_time(@clock.call)

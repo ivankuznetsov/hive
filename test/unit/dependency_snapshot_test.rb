@@ -260,6 +260,36 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_observation_boundary_preserves_dependency_metadata_diagnostics
+    with_tmp_dir do |root|
+      slug = "corrupt-task"
+      folder = File.join(root, ".hive-state", "stages", "4-execute", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), "- invalid\n")
+      task = FakeTask.new(
+        slug: slug, folder: folder, project_root: root,
+        project_name: File.basename(root)
+      )
+      entries = [
+        { "name" => File.basename(root), "path" => root, "repository_identity" => nil }
+      ]
+
+      error = with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { entries }
+      ) do
+        assert_raises(Hive::DependencyAdmissionError) do
+          Hive::DependencySnapshot.observe_for_admission!(
+            task, missing_message: "task disappeared"
+          )
+        end
+      end
+
+      assert_equal "dependency_metadata_invalid", error.reason_code
+      assert_match(/Repair .*meta.yml/, error.safe_correction)
+      assert_equal Hive::ExitCodes::CONFIG, error.exit_code
+    end
+  end
+
   def test_admission_context_preserves_invalid_dependency_reference_as_its_exact_error
     with_tmp_dir do |root|
       slug = "invalid-reference-task"

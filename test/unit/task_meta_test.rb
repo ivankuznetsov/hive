@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/task_meta"
+require "timeout"
 
 class TaskMetaTest < Minitest::Test
   def test_observe_rejects_an_opened_non_directory
@@ -16,6 +17,15 @@ class TaskMetaTest < Minitest::Test
     end
 
     assert closed
+  end
+
+  def test_observe_does_not_block_on_a_fifo_task_path
+    with_tmp_dir do |root|
+      fifo = File.join(root, "task-fifo")
+      assert system("mkfifo", fifo)
+
+      Timeout.timeout(1) { assert_nil Hive::TaskMeta.observe(fifo) }
+    end
   end
 
   def test_observation_validation_rejects_invalid_and_changed_identity_metadata
@@ -35,6 +45,13 @@ class TaskMetaTest < Minitest::Test
     ensure
       observation&.close
     end
+  end
+
+  def test_stale_task_uses_retryable_concurrency_semantics
+    error = Hive::TaskMeta::StaleTask.new("task changed")
+
+    assert_kind_of Hive::ConcurrentRunError, error
+    assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
   end
 
   def test_observe_rejects_a_directory_replaced_after_metadata_read
@@ -61,12 +78,20 @@ class TaskMetaTest < Minitest::Test
       observation = Hive::TaskMeta.observe(source)
 
       assert_raises(Hive::TaskMeta::StaleTask) do
-        Hive::TaskMeta.relocate_observation!(source, destination, observation)
+        Hive::TaskMeta.relocate_observation!(
+          source, destination, observation, destination_handle: nil
+        )
       end
 
       FileUtils.cp_r(source, destination)
+      destination_handle = Hive::TaskMeta.capture_relocation_handle!(
+        destination, observation
+      )
       FileUtils.rm_rf(source)
-      assert Hive::TaskMeta.relocate_observation!(source, destination, observation)
+      assert Hive::TaskMeta.relocate_observation!(
+        source, destination, observation, destination_handle: destination_handle
+      )
+      destination_handle = nil
       assert Hive::TaskMeta.validate_observation!(destination, observation)
 
       assert_raises(Errno::ENOENT) do
@@ -78,17 +103,23 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.write(other_source, id: 8, slug: "other", display_name: nil)
       other_observation = Hive::TaskMeta.observe(other_source)
       FileUtils.cp_r(other_source, other_destination)
+      other_handle = Hive::TaskMeta.capture_relocation_handle!(
+        other_destination, other_observation
+      )
       FileUtils.rm_rf(other_source)
       Hive::TaskMeta.update_id(other_destination, 9)
 
       assert_raises(Hive::TaskMeta::StaleTask) do
         Hive::TaskMeta.relocate_observation!(
-          other_source, other_destination, other_observation
+          other_source, other_destination, other_observation,
+          destination_handle: other_handle
         )
       end
     ensure
       observation&.close
       other_observation&.close
+      destination_handle&.close unless destination_handle&.closed?
+      other_handle&.close unless other_handle&.closed?
     end
   end
 
@@ -250,6 +281,60 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_guarded_absent_snapshot_restore_rechecks_before_deleting_metadata
+    with_tmp_dir do |root|
+      task = File.join(root, "task")
+      FileUtils.mkdir_p(task)
+      snapshot = Hive::TaskMeta.snapshot(task)
+      observation = Hive::TaskMeta.observe(task)
+      Hive::TaskMeta.write(task, id: nil, slug: nil, display_name: "Created later")
+      metadata_path = Hive::TaskMeta.path(task)
+      original_exist = File.method(:exist?)
+      swapped = false
+      swap_before_delete = lambda do |path|
+        exists = original_exist.call(path)
+        if path == metadata_path && exists && !swapped
+          swapped = true
+          bytes = File.binread(metadata_path)
+          FileUtils.rm_rf(task)
+          FileUtils.mkdir_p(task)
+          File.binwrite(metadata_path, bytes)
+          File.write(File.join(task, "replacement.txt"), "keep\n")
+        end
+        exists
+      end
+
+      result = with_replaced_singleton_method(File, :exist?, swap_before_delete) do
+        Hive::TaskMeta.restore(
+          task, snapshot, observation: observation, create: false
+        )
+      end
+
+      assert swapped, "delete boundary must be exercised"
+      assert result.stale?
+      assert File.exist?(metadata_path)
+      assert_equal "keep\n", File.read(File.join(task, "replacement.txt"))
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_explicit_restore_rejects_an_observation
+    with_tmp_dir do |task|
+      Hive::TaskMeta.write(task, id: 7, slug: "task", display_name: "Original")
+      snapshot = Hive::TaskMeta.snapshot(task)
+      observation = Hive::TaskMeta.observe(task)
+
+      error = assert_raises(ArgumentError) do
+        Hive::TaskMeta.restore(task, snapshot, observation: observation)
+      end
+
+      assert_includes error.message, "cannot use a guarded task observation"
+    ensure
+      observation&.close
+    end
+  end
+
   def test_explicit_restore_retains_creation_semantics
     with_tmp_dir do |root|
       task = File.join(root, "task")
@@ -321,6 +406,23 @@ class TaskMetaTest < Minitest::Test
       assert_equal "2026-07-20T08:00:00Z", first
       assert_equal first, second
       assert_equal first, Hive::TaskMeta.read(dir)[:completed_at]
+    end
+  end
+
+  def test_slug_normalization_keeps_the_callers_observation_valid
+    with_tmp_dir do |task|
+      File.write(Hive::TaskMeta.path(task), "id: 42\nworkflow: coding\n")
+      observation = Hive::TaskMeta.observe(task)
+
+      completed_at = Hive::TaskMeta.write_completed_at_once(
+        task, Time.utc(2026, 10, 14, 12), observation: observation
+      )
+
+      assert_equal "2026-10-14T12:00:00Z", completed_at
+      assert_equal File.basename(task), Hive::TaskMeta.read(task)[:slug]
+      assert Hive::TaskMeta.validate_observation!(task, observation)
+    ensure
+      observation&.close
     end
   end
 

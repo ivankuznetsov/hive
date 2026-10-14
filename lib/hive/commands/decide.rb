@@ -11,6 +11,7 @@ require "hive/task_action"
 require "hive/task_meta"
 require "hive/task_resolver"
 require "hive/task_activity"
+require "hive/dependency_snapshot"
 
 module Hive
   module Commands
@@ -98,6 +99,7 @@ module Hive
         when Hive::AmbiguousSlug then "ambiguous_slug"
         when Hive::InvalidTaskPath then "invalid_task_path"
         when Hive::ConcurrentRunError then "concurrent_run"
+        when Hive::RollbackFailed then "rollback_failed"
         when Hive::ConfigError then "config"
         when Hive::GitError then "git"
         when Hive::InternalError then "internal"
@@ -297,11 +299,13 @@ module Hive
       end
 
       def complete!(task, stage, outcome, decision_id)
-        observation = Hive::TaskMeta.observe(task.folder)
-        raise Hive::TaskMeta::StaleTask, "decision task is missing before completion" unless observation
+        observation = Hive::DependencySnapshot.observe_for_admission!(
+          task, missing_message: "decision task is missing before completion"
+        )
         record = nil
         snapshot = nil
         meta_snapshot = nil
+        index_snapshot = nil
         ops = Hive::GitOps.new(task.project_root)
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
@@ -324,6 +328,7 @@ module Hive
               )
               snapshot = snapshot_files(locked.folder, [ stage.state_file ])
               meta_snapshot = Hive::TaskMeta.snapshot(locked.folder)
+              index_snapshot = snapshot_commit_index(locked)
               record["decided_at"] = Hive::TaskMeta.write_completed_at_once(
                 locked.folder, Time.iso8601(record.fetch("decided_at")),
                 observation: observation
@@ -333,26 +338,40 @@ module Hive
             Hive::TaskMeta.validate_observation!(task.folder, observation)
             ops.hive_commit(stage_name: stage.dir, slug: task.slug,
                             action: "decide #{stage.name} #{outcome.name}")
-          rescue StandardError, Interrupt
+          rescue StandardError, Interrupt => original_error
+            rollback_issues = []
             if snapshot
-              restored_files = restore_files(
+              file_issue = restore_files(
                 task.folder, snapshot, observation: observation
               )
-              restored_meta = if restored_files && meta_snapshot
-                Hive::TaskMeta.restore(
-                  task.folder, meta_snapshot,
-                  observation: observation, create: false
-                )
+              rollback_issues << file_issue if file_issue
+              restored_meta = if !file_issue && meta_snapshot
+                begin
+                  Hive::TaskMeta.restore(
+                    task.folder, meta_snapshot,
+                    observation: observation, create: false
+                  )
+                rescue Hive::TaskMeta::InvalidMetadata, SystemCallError, IOError,
+                       ArgumentError => error
+                  issue = rollback_skip("invalid task metadata", error)
+                  rollback_issues << issue
+                  nil
+                end
               end
-              if restored_files && (!meta_snapshot || restored_meta&.applied?)
-                restage_restored_files(
-                  task, snapshot,
-                  extra_names: meta_snapshot ? [ Hive::TaskMeta::FILENAME ] : [],
-                  observation: observation
-                )
-              elsif restored_meta&.stale?
-                warn "hive: decide rollback skipped stale task metadata for #{task.slug}"
+              if restored_meta&.stale?
+                issue = "decide rollback skipped stale task metadata for #{task.slug}"
+                warn "hive: #{issue}"
+                rollback_issues << issue
               end
+            end
+            index_issue = restore_commit_index(task, index_snapshot) if index_snapshot
+            rollback_issues << index_issue if index_issue
+            if rollback_issues.any?
+              raise Hive::RollbackFailed,
+                    "decision failed and guarded rollback was incomplete: " \
+                    "#{rollback_issues.join('; ')}; underlying: " \
+                    "#{original_error.class}: #{original_error.message}",
+                    cause: original_error
             end
             raise
           end
@@ -471,8 +490,8 @@ module Hive
             )
           rescue StandardError, Interrupt
             if snapshot
-              restore_files(task.folder, snapshot)
-              restage_restored_files(task, snapshot)
+              issue = restore_files(task.folder, snapshot)
+              restage_restored_files(task, snapshot) unless issue
             end
             raise
           end
@@ -533,20 +552,22 @@ module Hive
       end
 
       def restore_files(folder, snapshots, observation: nil)
-        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         snapshots.each do |name, snapshot|
           path = File.join(folder, name)
-          if snapshot.fetch(:existed)
-            Hive::Markers.write_atomic(path, snapshot.fetch(:body))
-          else
-            File.delete(path) if File.exist?(path) || File.symlink?(path)
+          Hive::Markers.with_markers_lock(path, create: false) do
+            Hive::TaskMeta.validate_observation!(folder, observation) if observation
+            if snapshot.fetch(:existed)
+              Hive::Markers.write_atomic(path, snapshot.fetch(:body))
+            else
+              File.delete(path) if File.exist?(path) || File.symlink?(path)
+            end
           end
         end
-        true
-      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
-        warn "hive: decide rollback skipped stale task files " \
-             "(#{error.class}: #{error.message})"
-        false
+        nil
+      rescue Hive::TaskMeta::InvalidMetadata => error
+        rollback_skip("invalid task metadata while restoring task files", error)
+      rescue Hive::TaskMeta::StaleTask, SystemCallError, IOError, ArgumentError => error
+        rollback_skip("stale task files", error)
       end
 
       def restage_restored_files(task, snapshots, extra_names: [], observation: nil)
@@ -562,6 +583,59 @@ module Hive
         warn "hive: decide rollback skipped stale task restaging " \
              "(#{error.class}: #{error.message})"
         nil
+      end
+
+      def snapshot_commit_index(task)
+        pathspecs = [
+          File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug),
+          "logs"
+        ]
+        entries, error, status = Open3.capture3(
+          "git", "-C", task.hive_state_path, "ls-files", "--stage", "-z", "--", *pathspecs
+        )
+        unless status.success?
+          raise Hive::GitError,
+                "git index snapshot failed: #{error.strip.empty? ? entries : error}"
+        end
+        { pathspecs: pathspecs.freeze, entries: entries.b.freeze }
+      end
+
+      def restore_commit_index(task, snapshot)
+        current, error, status = Open3.capture3(
+          "git", "-C", task.hive_state_path, "ls-files", "-z", "--", *snapshot.fetch(:pathspecs)
+        )
+        unless status.success?
+          raise Hive::GitError,
+                "git index rollback inventory failed: #{error.strip.empty? ? current : error}"
+        end
+        paths = current.split("\0")
+        unless paths.empty?
+          _out, error, status = Open3.capture3(
+            "git", "-C", task.hive_state_path, "update-index", "--force-remove", "--", *paths
+          )
+          unless status.success?
+            raise Hive::GitError, "git index rollback removal failed: #{error}"
+          end
+        end
+        entries = snapshot.fetch(:entries)
+        unless entries.empty?
+          _out, error, status = Open3.capture3(
+            "git", "-C", task.hive_state_path, "update-index", "-z", "--index-info",
+            stdin_data: entries
+          )
+          unless status.success?
+            raise Hive::GitError, "git index rollback restore failed: #{error}"
+          end
+        end
+        nil
+      rescue Hive::GitError, SystemCallError, IOError => error
+        rollback_skip("git index state", error)
+      end
+
+      def rollback_skip(context, error)
+        message = "decide rollback skipped #{context} (#{error.class}: #{error.message})"
+        warn "hive: #{message}"
+        message
       end
 
       def emit_success(task, stage, outcome, record, applied:)

@@ -1465,26 +1465,31 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_concurrent_entries_coalesce_under_the_orchestration_lock
+  def test_concurrent_entries_serialize_through_lifecycle_custody
     with_task(standard_plan) do |task, cfg|
+      entered = Queue.new
+      release = Queue.new
       adapter = FakeAdapter.new do |request|
-        sleep 0.03 if request.kind == "primary"
+        if request.kind == "primary"
+          entered << true
+          release.pop
+        end
         successful_result(request)
       end
-      ready = Queue.new
-      release = Queue.new
-      threads = 2.times.map do
-        Thread.new do
-          ready << true
-          release.pop
-          orchestrator(task, cfg, adapter:).advance!
-        end
+      first = Thread.new do
+        orchestrator(task, cfg, adapter:).advance!
       end
-      2.times { ready.pop }
-      2.times { release << true }
-      projections = threads.map(&:value)
+      entered.pop
 
-      assert_equal 1, projections.map { |projection| projection.record.review_id }.uniq.length
+      assert_raises(Hive::ConcurrentRunError) do
+        orchestrator(task, cfg, adapter:).advance!
+      end
+
+      release << true
+      first_projection = first.value
+      retried_projection = orchestrator(task, cfg, adapter: success_adapter).advance!
+
+      assert_equal first_projection.record.review_id, retried_projection.record.review_id
       assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
     end
   end
@@ -1747,9 +1752,9 @@ class PlanReviewOrchestratorTest < Minitest::Test
       runner = orchestrator(task, cfg, adapter: success_adapter)
       task.meta_yml_path && File.write(task.meta_yml_path, "plan_review_required: false\n")
       error = assert_raises(Hive::PlanReview::InvalidRecord) do
-        runner.send(:ensure_review_requirement!)
+        runner.advance!
       end
-      assert_includes error.message, "could not be persisted"
+      assert_includes error.message, "metadata is invalid"
     end
   end
 
@@ -1846,8 +1851,10 @@ class PlanReviewOrchestratorTest < Minitest::Test
       error = with_replaced_singleton_method(
         Hive::TaskMeta, :read_for_update!, delete_after_read
       ) do
-        assert_raises(Hive::PlanReview::InvalidRecord) do
-          runner.send(:ensure_review_requirement!)
+        with_runner_custody(runner, task, observation: observation) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
         end
       end
 
@@ -1865,8 +1872,10 @@ class PlanReviewOrchestratorTest < Minitest::Test
       stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
 
       error = with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
-        assert_raises(Hive::PlanReview::InvalidRecord) do
-          runner.send(:ensure_review_requirement!)
+        with_runner_custody(runner, task) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
         end
       end
 
@@ -1876,6 +1885,20 @@ class PlanReviewOrchestratorTest < Minitest::Test
   end
 
   private
+
+  def with_runner_custody(runner, task, observation: nil)
+    owned = observation.nil?
+    current = observation || Hive::TaskMeta.observe(task.folder)
+    previous = runner.instance_variable_get(:@task_observation)
+    runner.instance_variable_set(:@task_observation, current)
+    Hive::Lock.with_task_lock(
+      task.folder, slug: task.slug, op: "plan-review-test",
+      create: false, observation: current
+    ) { yield }
+  ensure
+    runner.instance_variable_set(:@task_observation, previous) if runner
+    current&.close if owned
+  end
 
   def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan),
                    route_resolver: method(:resolve_route),

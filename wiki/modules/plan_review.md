@@ -55,10 +55,13 @@ conversion must preserve metadata and rerun required review rather than invent
 approval evidence.
 
 Persisting `plan_review_required: true` is a mandatory, identity-fenced update.
-The orchestrator validates the task observation under the existing
-project-then-task lock order even when the bit is already present. Deletion, a
-same-path copied replacement, or an unapplied rewrite raises `InvalidRecord`;
-stale metadata can never satisfy or bypass the review gate.
+Before creating task-local review storage, the orchestrator validates a retained
+directory observation and acquires the task lease without creating the task.
+It retains that lifecycle custody through the bounded orchestration lock and
+every review-store side effect; the orchestration lock never acquires the
+project commit lock. Deletion, a same-path copied replacement, or an unapplied
+rewrite raises `InvalidRecord`; stale metadata can never satisfy or bypass the
+review gate, and review setup cannot recreate a dropped task.
 
 ## Deterministic policy
 

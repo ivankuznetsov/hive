@@ -59,6 +59,10 @@ mutexes. `hive new` and other true identity creators use the commit lock
 because no task subject exists yet. Explicit fleet cutover/bootstrap is the
 other identity-creation exception.
 
+Plan review acquires task lifecycle custody before its task-local orchestration
+lock. That orchestration flock uses the same bounded-acquire policy as the
+project commit lock and never acquires a project commit lock while held.
+
 The runner adds `slug:` and `stage:` to the payload. After launch, both the
 headless `Hive::Agent` writer and the tmux-backed `Hive::ClaudeLauncher` writer
 inject `claude_pid` plus `claude_pid_start_time` through `update_task_lock`.

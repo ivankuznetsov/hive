@@ -119,7 +119,7 @@ tempfile-plus-rename.
 
 `hive status` v5 projects strict evidence into a three-state read model: clear; benign below-gate wait (`blocked_by`/`dependency_stage`); or structured admission error (`reason_code`, `offending_ref`, `safe_correction`). Raw folder moves remain possible, but the next status or supported dispatch boundary observes and holds invalid state.
 
-`workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. `hive migrate` backfills legacy ids, names, and completion clocks through strict metadata reads. Daemon ticks and status projections never mutate that metadata. Patrol review handoff writes a normal id and display name because the task joins the standard review flow.
+`workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. Daemon ticks and status projections never backfill ids, names, or completion metadata. Display names are repaired explicitly with `hive generate-name`; managed workflow install/update owns retained-task pin migration. Patrol review handoff attempts normal id allocation and writes its display name as part of capture.
 
 ## Evidence-bound task closure
 
@@ -232,13 +232,9 @@ same move/finalization transaction. Rollback restores the exact prior metadata.
 Reopening deliberately keeps the clock, and a later return to the terminal
 stage reuses it.
 
-`hive migrate` converges archived legacy tasks that lack the field. The explicit
-command prefers the earliest credible Git event that first made the resolved
-terminal stage archived, then the terminal state-file mtime, then the task-folder
-mtime, and commits the discovered clocks once. Missing sources warn and keep the
-task visible. Ordinary status, daemon ticks, and stage execution never discover
-or persist legacy completion clocks; rerunning an already-archived legacy task
-also leaves its missing clock for the explicit migration.
+Current stage transitions persist completion clocks. Historical archived tasks
+that lack the field remain visible; ordinary status, daemon ticks, and stage
+execution do not infer or persist a clock from Git or filesystem timestamps.
 
 `ArchiveFilter` captures one UTC `now` for a refresh and applies the currently
 resolved task pin, project default, or `coding` workflow policy. Positive
@@ -252,9 +248,10 @@ via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`).
 The immediate SQLite transaction makes read-plus-increment atomic across
 processes; there is no counter YAML or counter lock file. `peek` returns the
 stored next value (or infers a floor above numeric task subject IDs), and `seed_at_least!`
-advances without moving backwards. Capture paths use strict `next!` allocation:
-a runtime-control-plane failure aborts and rolls back the candidate instead of
-publishing an id-less task that durable attempt admission cannot accept.
+advances without moving backwards. Capture paths use `next_or_nil`, so a typed
+runtime-control-plane outage can preserve an already-created task with a null
+id. Such a task remains visible but cannot enter lease-backed execution until
+its identity is repaired explicitly.
 
 ## Slug grammar
 
@@ -290,8 +287,9 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 New `REVIEW_WORKING` and `REVIEW_ERROR` writes carry a generated `marker_id`,
 just like generic `ERROR` writes. Review healers match the id observed in the
 status row and claim the per-task lock before clearing. Runtime recovery rejects
-an id-less recoverable marker with `recovery_migration_required`; `hive migrate`
-performs the one-off identity backfill. If an external run acquired the lock
+an id-less recoverable marker with `recovery_migration_required`; current Hive
+does not backfill that identity automatically, so the operator must use the
+verified current-format migration guide. If an external run acquired the lock
 after the status snapshot, healing leaves its lock and marker untouched.
 For a live-but-wedged review holder, status also snapshots the lock PID,
 process start time, and generated lock id. The healer rechecks that exact

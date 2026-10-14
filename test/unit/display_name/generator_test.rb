@@ -148,6 +148,35 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_generation_failure_reports_and_skips_metadata_update_and_commit
+    with_generator do |gen, task|
+      updated = false
+      committed = false
+      gen.define_singleton_method(:generate_name) do
+        raise Hive::ConfigError, "agent profile unavailable"
+      end
+      gen.define_singleton_method(:commit_name) { committed = true }
+      update = lambda do |*, **|
+        updated = true
+        raise "metadata update must not run"
+      end
+
+      result = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :update_display_name, update) do
+          result = gen.call
+        end
+      end
+
+      assert_nil result
+      refute updated
+      refute committed
+      assert_nil Hive::TaskMeta.read(task.folder)[:display_name]
+      assert_includes err, "generation failed"
+      assert_includes err, "Hive::ConfigError: agent profile unavailable"
+    end
+  end
+
   def test_call_does_not_hide_unexpected_errors
     with_generator do |gen, task|
       FileUtils.mkdir_p(task.folder)

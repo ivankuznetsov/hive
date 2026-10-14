@@ -258,7 +258,7 @@ class AdhocReviewCommandTest < Minitest::Test
     end
   end
 
-  def test_enqueue_rolls_back_when_task_id_allocation_is_unavailable
+  def test_enqueue_tolerates_task_counter_unavailability_and_proceeds_with_null_id
     with_registered_project do |_repo, hive_state, _worktree_root|
       pr_metadata = metadata
       with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(_number, **_kwargs) { pr_metadata }) do
@@ -270,12 +270,11 @@ class AdhocReviewCommandTest < Minitest::Test
             "database busy", code: :database_busy
           )
           with_replaced_singleton_method(Hive::TaskCounter, :next!, -> { raise unavailable }) do
-            assert_raises(Hive::RuntimeControlPlane::Unavailable) do
-              Hive::Commands::AdhocReview.new(pr: "197").enqueue
-            end
+            result = Hive::Commands::AdhocReview.new(pr: "197").enqueue
 
+            assert_equal "adhoc-review-pr-197", result.fetch(:slug)
             folder = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-197")
-            refute Dir.exist?(folder)
+            assert_nil Hive::TaskMeta.read(folder)[:id]
           end
         end
       end

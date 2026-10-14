@@ -16,9 +16,13 @@ module Hive
     # the newly created file (pass 0o600 for owner-private state). `fsync:`
     # flushes to disk before the rename — keep it on for state that must
     # survive a crash; a caller that measurably can't afford it may opt out.
-    def write(path, content, mode: 0o644, fsync: true)
+    def write(path, content, mode: 0o644, fsync: true, create: true)
       dir = File.dirname(path)
-      FileUtils.mkdir_p(dir)
+      if create
+        FileUtils.mkdir_p(dir)
+      elsif !Dir.exist?(dir)
+        raise Errno::ENOENT, dir
+      end
       tmp = File.join(dir, ".#{File.basename(path)}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, mode) do |file|
         file.write(content)

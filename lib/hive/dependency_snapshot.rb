@@ -281,6 +281,19 @@ module Hive
       )
     end
 
+    # Observation now precedes mandatory task leases. Preserve the established
+    # dependency-admission taxonomy for malformed metadata instead of leaking a
+    # generic filesystem parser error at that earlier boundary.
+    def observe_for_admission!(task, missing_message:)
+      observation = Hive::TaskMeta.observe(task.folder)
+      raise Hive::TaskMeta::StaleTask, missing_message unless observation
+
+      observation
+    rescue Hive::TaskMeta::InvalidMetadata => error
+      enforce_admission!(task)
+      raise error
+    end
+
     # Stable input to durable-attempt generation identity. A terminal
     # dependency wait must remain replayable while the same admission verdict
     # holds, but it must not mask a later wait->clear (or validation) change.

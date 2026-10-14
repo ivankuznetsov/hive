@@ -98,8 +98,10 @@ For stages 4 and later:
 - `observe(task_folder)` retains a process-local directory handle and its
   device/inode together with stable metadata identity. Update callers validate
   that observation under lifecycle custody. A same-path replacement is stale
-  even when it copies every metadata byte; an authorized managed-workflow move
-  can explicitly rebind the same observation.
+  even when it copies every metadata byte. Directory handles are opened
+  nonblocking, so a FIFO at a task path is rejected instead of hanging. An
+  authorized cross-device move may rebind only through a handle captured from
+  the exact destination copy before the source is removed.
 - `rewrite(...)` and the display-name/id setters are update-only. They return
   an `UpdateResult` with `applied?` or `stale?`, never create a missing task
   directory, preserve unrelated fields, and keep invalid metadata or real I/O
@@ -107,11 +109,14 @@ For stages 4 and later:
   directory remains a valid legacy update shape.
 - `write_completed_at_once(...)` uses the same observation boundary while
   retaining its timestamp return value and first-writer-wins contract. A stale
-  task raises `StaleTask`; it cannot masquerade as a successful completion.
+  task raises retryable `StaleTask`; it cannot masquerade as a successful
+  completion. A legacy slug-less sidecar may normalize its slug without
+  invalidating the caller's retained observation.
 - `restore(...)` remains creation-capable by default for explicit restoration.
   Automatic rollback passes `create: false` plus the original observation and
   receives an applied/stale result, so it neither recreates a dropped task nor
-  deletes or overwrites replacement metadata.
+  deletes or overwrites replacement metadata. Passing an observation to the
+  creation-capable form is rejected as a conflicting contract.
 - `plan_review_required?(task_folder)` strictly distinguishes new or manually
   converted pre-execute coding tasks from legacy execute tasks. Absence is the
   durable compatibility shape; malformed values fail closed.
@@ -128,8 +133,8 @@ For stages 4 and later:
 
 - `next!` returns the current value and increments it in one immediate
   transaction, so competing processes cannot duplicate an id.
-- Current-format task capture calls `next!` strictly. Allocation failure rolls
-  back the uncommitted candidate; consumed ids are not reused or rolled back.
+- `next_or_nil` turns typed runtime-control-plane or database unavailability
+  into a null id for fail-soft capture paths.
 - `peek` returns the stored next value, inferring a floor above numeric task subject IDs before first use.
 - `seed_at_least!(next_id)` advances the counter floor without moving it backwards.
 
@@ -140,7 +145,7 @@ For stages 4 and later:
   validation, workflow selector preservation, corrupt-input mutation refusal,
   update-only stale results, replacement identity, guarded restoration,
   completion clocks, and compatibility id updates.
-- `test/unit/task_counter_test.rb` — first/sequential ids, seeding, strict
+- `test/unit/task_counter_test.rb` — first/sequential ids, seeding, fail-soft
   allocation, and real forked contention.
 
 ## Backlinks

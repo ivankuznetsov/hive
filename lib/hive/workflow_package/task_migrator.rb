@@ -180,6 +180,11 @@ module Hive
           )
         end
         operations
+      rescue Errno::EMFILE, Errno::ENFILE => error
+        close_observations(operations || [])
+        raise Hive::UnavailableError,
+              "managed workflow migration exhausted the open-file descriptor limit " \
+              "while observing tasks (#{error.class}); raise the process fd limit and retry"
       rescue StandardError
         close_observations(operations || [])
         raise
@@ -258,9 +263,7 @@ module Hive
 
       def revalidate_tasks!(operations)
         operations.each do |operation|
-          Hive::TaskMeta.validate_observation!(
-            operation.source, operation.observation
-          ) if operation.observation
+          Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
           meta = Hive::TaskMeta.read_for_admission(operation.source)
           unless meta.status == :ok && pin_from_meta(meta.data) == operation.from_pin
             raise Hive::ConcurrentRunError.new(
@@ -290,35 +293,62 @@ module Hive
         revalidate_selections!(operations)
         mutated = []
         operations.each do |operation|
-          Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
-          snapshot = Hive::TaskMeta.snapshot(operation.source)
-          FileUtils.mkdir_p(File.dirname(operation.destination))
-          if operation.source != operation.destination
-            FileUtils.mv(operation.source, operation.destination)
-            unless operation.observation.same_directory?(operation.destination)
-              Hive::TaskMeta.relocate_observation!(
-                operation.source, operation.destination, operation.observation
-              )
+          destination_handle = nil
+          begin
+            Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
+            snapshot = Hive::TaskMeta.snapshot(operation.source)
+            FileUtils.mkdir_p(File.dirname(operation.destination))
+            mutation = { operation: operation, snapshot: snapshot, artifact_moved: false }
+            if operation.source != operation.destination
+              cross_device = false
+              begin
+                File.rename(operation.source, operation.destination)
+              rescue Errno::EXDEV
+                begin
+                  FileUtils.cp_r(operation.source, operation.destination)
+                  destination_handle = Hive::TaskMeta.capture_relocation_handle!(
+                    operation.destination, operation.observation
+                  )
+                rescue StandardError
+                  FileUtils.rm_rf(operation.destination) if File.exist?(operation.source)
+                  raise
+                end
+                FileUtils.rm_rf(operation.source)
+                cross_device = true
+              end
+              mutated << mutation
+              if cross_device
+                Hive::TaskMeta.relocate_observation!(
+                  operation.source, operation.destination, operation.observation,
+                  destination_handle: destination_handle
+                )
+                destination_handle = nil
+              elsif !operation.observation.same_directory?(operation.destination)
+                raise Hive::TaskMeta::StaleTask,
+                      "managed task #{operation.slug} destination changed identity after move"
+              end
+            else
+              mutated << mutation
             end
-          end
-          mutation = { operation: operation, snapshot: snapshot, artifact_moved: false }
-          mutated << mutation
-          if operation.from_state_file != operation.to_state_file
-            from = File.join(operation.destination, operation.from_state_file)
-            to = File.join(operation.destination, operation.to_state_file)
-            if File.exist?(from)
-              FileUtils.mkdir_p(File.dirname(to))
-              FileUtils.mv(from, to)
-              mutation[:artifact_moved] = true
+            if operation.from_state_file != operation.to_state_file
+              from = File.join(operation.destination, operation.from_state_file)
+              to = File.join(operation.destination, operation.to_state_file)
+              if File.exist?(from)
+                FileUtils.mkdir_p(File.dirname(to))
+                FileUtils.mv(from, to)
+                mutation[:artifact_moved] = true
+              end
             end
-          end
-          result = Hive::TaskMeta.rewrite(
-            operation.destination, operation.to_pin,
-            observation: operation.observation
-          )
-          if result.stale?
-            raise Hive::TaskMeta::StaleTask,
-                  "managed workflow pin update lost task custody for #{operation.slug}"
+            result = Hive::TaskMeta.rewrite(
+              operation.destination, operation.to_pin,
+              observation: operation.observation
+            )
+            if result.stale?
+              raise Hive::TaskMeta::StaleTask,
+                    "managed workflow pin update lost task custody for #{operation.slug}"
+            end
+          ensure
+            destination_handle&.close unless destination_handle&.closed?
           end
         end
 
@@ -326,8 +356,15 @@ module Hive
         yield result if block_given?
         warnings = prune_recovery_requests(operations)
         result.with(warnings: warnings.freeze)
-      rescue StandardError
-        rollback!(mutated || [])
+      rescue StandardError => original_error
+        rollback_issues = rollback!(mutated || [])
+        if rollback_issues.any?
+          raise Hive::RollbackFailed,
+                "managed workflow migration failed and rollback was incomplete: " \
+                "#{rollback_issues.join('; ')}; underlying: " \
+                "#{original_error.class}: #{original_error.message}",
+                cause: original_error
+        end
         raise
       end
 
@@ -341,14 +378,18 @@ module Hive
       end
 
       def rollback!(mutated)
+        issues = []
         mutated.reverse_each do |mutation|
           operation = mutation.fetch(:operation)
+          destination_handle = nil
           begin
             current = operation.destination
             Hive::TaskMeta.validate_observation!(current, operation.observation)
             if operation.source != operation.destination && File.exist?(operation.source)
-              warn "hive: managed workflow migration rollback skipped stale task #{operation.slug}: " \
-                   "source path now belongs to another entry"
+              issues << rollback_issue(
+                operation,
+                "skipped stale task: source path now belongs to another entry"
+              )
               next
             end
             if mutation[:artifact_moved]
@@ -357,11 +398,31 @@ module Hive
               FileUtils.mv(from, to) if File.exist?(from)
             end
             if operation.source != operation.destination && File.exist?(operation.destination)
-              FileUtils.mv(operation.destination, operation.source)
-              unless operation.observation.same_directory?(operation.source)
+              cross_device = false
+              begin
+                File.rename(operation.destination, operation.source)
+              rescue Errno::EXDEV
+                begin
+                  FileUtils.cp_r(operation.destination, operation.source)
+                  destination_handle = Hive::TaskMeta.capture_relocation_handle!(
+                    operation.source, operation.observation
+                  )
+                rescue StandardError
+                  FileUtils.rm_rf(operation.source) if File.exist?(operation.destination)
+                  raise
+                end
+                FileUtils.rm_rf(operation.destination)
+                cross_device = true
+              end
+              if cross_device
                 Hive::TaskMeta.relocate_observation!(
-                  operation.destination, operation.source, operation.observation
+                  operation.destination, operation.source, operation.observation,
+                  destination_handle: destination_handle
                 )
+                destination_handle = nil
+              elsif !operation.observation.same_directory?(operation.source)
+                raise Hive::TaskMeta::StaleTask,
+                      "managed task #{operation.slug} rollback destination changed identity"
               end
             end
             Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
@@ -370,16 +431,27 @@ module Hive
               observation: operation.observation, create: false
             )
             if restored.stale?
-              warn "hive: managed workflow migration rollback skipped stale task #{operation.slug}"
+              issues << rollback_issue(operation, "skipped stale task metadata restore")
             end
           rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
-            warn "hive: managed workflow migration rollback skipped stale task #{operation.slug}: " \
-                 "#{error.class}: #{error.message}"
+            issues << rollback_issue(
+              operation, "skipped stale task: #{error.class}: #{error.message}"
+            )
           rescue StandardError => error
-            warn "hive: managed workflow migration rollback failed for #{operation.slug}: " \
-                 "#{error.class}: #{error.message}"
+            issues << rollback_issue(
+              operation, "failed: #{error.class}: #{error.message}"
+            )
+          ensure
+            destination_handle&.close unless destination_handle&.closed?
           end
         end
+        issues
+      end
+
+      def rollback_issue(operation, detail)
+        message = "managed workflow migration rollback #{detail} for #{operation.slug}"
+        warn "hive: #{message}"
+        message
       end
 
       def release_locks(locks, operations)
@@ -393,7 +465,7 @@ module Hive
       end
 
       def close_observations(operations)
-        operations.each { |operation| operation.observation&.close }
+        operations.each { |operation| operation.observation.close }
       end
 
       def prune_recovery_requests(operations)

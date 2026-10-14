@@ -23,11 +23,17 @@ class HiveStagesPlanTest < Minitest::Test
     depends_on.nil? ? "# Plan\n" : "---\ndepends_on: #{depends_on}\n---\n\n# Plan\n"
   end
 
+  def adopt_dependency(task, marker, observation: nil)
+    Hive::TaskMeta.with_observation(task.folder, observation) do |current|
+      Hive::Stages::Plan.adopt_plan_dependency!(task, marker, observation: current)
+    end
+  end
+
   # Absence is adopted: a plan that declares a dependency must not park the
   # task on an admission error whose only remedy is copying a string by hand.
   def test_complete_plan_dependency_is_adopted_into_meta
     with_planned_task(plan_doc("rails-task")) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_equal "rails-task", Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -37,7 +43,7 @@ class HiveStagesPlanTest < Minitest::Test
   # so plan_dependency_mismatch stays a human decision.
   def test_existing_meta_dependency_is_never_overwritten
     with_planned_task(plan_doc("rails-task"), meta_depends_on: "operator-choice") do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_equal "operator-choice", Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -45,7 +51,7 @@ class HiveStagesPlanTest < Minitest::Test
 
   def test_incomplete_plan_is_not_adopted
     with_planned_task(plan_doc("rails-task")) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:waiting))
+      adopt_dependency(task, Marker.new(:waiting))
 
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -53,7 +59,7 @@ class HiveStagesPlanTest < Minitest::Test
 
   def test_plan_without_a_dependency_changes_nothing
     with_planned_task(plan_doc(nil)) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -61,7 +67,7 @@ class HiveStagesPlanTest < Minitest::Test
 
   def test_self_dependency_is_refused
     with_planned_task(plan_doc("cli-task")) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -76,7 +82,7 @@ class HiveStagesPlanTest < Minitest::Test
 
       _out, err = capture_io do
         with_replaced_singleton_method(Hive::TaskMeta, :rewrite, raising) do
-          assert_nil Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+          assert_nil adopt_dependency(task, Marker.new(:complete))
         end
       end
 
@@ -92,7 +98,7 @@ class HiveStagesPlanTest < Minitest::Test
 
       _out, err = capture_io do
         with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
-          assert_nil Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+          assert_nil adopt_dependency(task, Marker.new(:complete))
         end
       end
 
@@ -107,9 +113,7 @@ class HiveStagesPlanTest < Minitest::Test
       FileUtils.rm_rf(dir)
 
       _out, err = capture_io do
-        assert_nil Hive::Stages::Plan.adopt_plan_dependency!(
-          task, Marker.new(:complete), observation: observation
-        )
+        assert_nil adopt_dependency(task, Marker.new(:complete), observation: observation)
       end
 
       refute File.exist?(dir)
@@ -125,7 +129,7 @@ class HiveStagesPlanTest < Minitest::Test
       FileUtils.rm_rf(dir)
 
       _out, err = capture_io do
-        assert_nil Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+        assert_nil adopt_dependency(task, Marker.new(:complete))
       end
 
       refute File.exist?(dir)
@@ -149,9 +153,7 @@ class HiveStagesPlanTest < Minitest::Test
 
       _out, err = capture_io do
         with_replaced_singleton_method(Hive::TaskMeta, :read_for_update!, delete_after_read) do
-          assert_nil Hive::Stages::Plan.adopt_plan_dependency!(
-            task, Marker.new(:complete), observation: observation
-          )
+          assert_nil adopt_dependency(task, Marker.new(:complete), observation: observation)
         end
       end
 
@@ -176,9 +178,7 @@ class HiveStagesPlanTest < Minitest::Test
       File.write(File.join(dir, "replacement.txt"), "untouched\n")
 
       _out, err = capture_io do
-        assert_nil Hive::Stages::Plan.adopt_plan_dependency!(
-          task, Marker.new(:complete), observation: observation
-        )
+        assert_nil adopt_dependency(task, Marker.new(:complete), observation: observation)
       end
 
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
@@ -195,7 +195,7 @@ class HiveStagesPlanTest < Minitest::Test
 
       with_replaced_singleton_method(Hive::TaskMeta, :rewrite, failing) do
         error = assert_raises(RuntimeError) do
-          Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+          adopt_dependency(task, Marker.new(:complete))
         end
         assert_equal "programmer error", error.message
       end

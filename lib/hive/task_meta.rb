@@ -3,6 +3,7 @@ require "securerandom"
 require "time"
 require "yaml"
 require "hive/dependencies"
+require "hive/errors"
 require "hive/warnings"
 
 module Hive
@@ -17,7 +18,7 @@ module Hive
     ].freeze
 
     class InvalidMetadata < StandardError; end
-    class StaleTask < StandardError; end
+    class StaleTask < Hive::ConcurrentRunError; end
 
     UpdateResult = Data.define(:status, :value) do
       def applied? = status == :applied
@@ -46,11 +47,10 @@ module Hive
         @directory.close unless @directory.closed?
       end
 
-      def rebind!(task_folder)
-        flags = File::RDONLY
+      def rebind!(task_folder, directory: nil)
+        flags = File::RDONLY | File::NONBLOCK
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-        flags |= File::DIRECTORY if File.const_defined?(:DIRECTORY)
-        replacement = File.open(File.expand_path(task_folder), flags)
+        replacement = directory || File.open(File.expand_path(task_folder), flags)
         stat = replacement.stat
         raise StaleTask, "replacement observation is not a directory" unless stat.directory?
 
@@ -62,6 +62,10 @@ module Hive
       rescue Exception
         replacement&.close unless replacement&.closed?
         raise
+      end
+
+      def refresh_identity!(identity)
+        @identity = identity.freeze
       end
     end
 
@@ -81,9 +85,8 @@ module Hive
     # callers must close it when their operation finishes.
     def observe(task_folder)
       folder = File.expand_path(task_folder)
-      flags = File::RDONLY
+      flags = File::RDONLY | File::NONBLOCK
       flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-      flags |= File::DIRECTORY if File.const_defined?(:DIRECTORY)
       directory = File.open(folder, flags)
       unless directory.stat.directory?
         directory.close
@@ -106,6 +109,14 @@ module Hive
       nil
     end
 
+    def with_observation(task_folder, observation = nil)
+      owned_observation = observation.nil?
+      current = observation || observe(task_folder)
+      yield current
+    ensure
+      current&.close if owned_observation
+    end
+
     def validate_observation!(task_folder, observation)
       folder = File.expand_path(task_folder)
       unless observation&.same_directory?(folder)
@@ -124,15 +135,48 @@ module Hive
     # Cross-device workflow moves cannot retain a directory inode. Callers may
     # rebind only after they created the destination under lifecycle custody,
     # the source is gone, and the copied stable metadata still matches.
-    def relocate_observation!(source, destination, observation)
+    def relocate_observation!(source, destination, observation, destination_handle:)
       raise StaleTask, "original task path still exists after relocation" if File.exist?(source)
+      unless destination_handle
+        raise ArgumentError, "relocation requires custody of the copied destination"
+      end
 
       result = read_for_admission(destination)
       unless result.ok? && stable_identity(result.data) == observation.identity
         raise StaleTask, "relocated task metadata identity changed at #{destination}"
       end
-      observation.rebind!(destination)
+      observation.rebind!(destination, directory: destination_handle)
       validate_observation!(destination, observation)
+    end
+
+    # Capture the exact cross-device copy before removing the source. Supplying
+    # this handle to relocate_observation! prevents a byte-identical replacement
+    # installed at the destination from being accepted as the copied task.
+    def capture_relocation_handle!(destination, observation)
+      folder = File.expand_path(destination)
+      flags = File::RDONLY | File::NONBLOCK
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      directory = File.open(folder, flags)
+      stat = directory.stat
+      path_stat = File.lstat(folder)
+      unless stat.directory? && path_stat.directory? && !path_stat.symlink? &&
+             stat.dev == path_stat.dev && stat.ino == path_stat.ino
+        raise StaleTask, "relocated task directory changed at #{folder}"
+      end
+
+      result = read_for_admission(folder)
+      unless result.ok? && stable_identity(result.data) == observation.identity
+        raise StaleTask, "relocated task metadata identity changed at #{folder}"
+      end
+      path_stat = File.lstat(folder)
+      unless path_stat.directory? && !path_stat.symlink? &&
+             stat.dev == path_stat.dev && stat.ino == path_stat.ino
+        raise StaleTask, "relocated task directory changed at #{folder}"
+      end
+      directory
+    rescue Exception
+      directory&.close unless directory&.closed?
+      raise
     end
 
     def read(task_folder)
@@ -315,6 +359,11 @@ module Hive
       File.write(tmp, data.to_yaml)
       validate_observation!(task_folder, observation) unless create
       File.rename(tmp, path(task_folder))
+      observation.refresh_identity!({
+        id: data["id"]&.to_s,
+        slug: normalize_string(data["slug"]),
+        workflow: normalize_string(data["workflow"])
+      }) unless create
       notify_stage_directory(task_folder)
       result = data.transform_keys(&:to_sym).merge(
         depends_on: normalized_depends_on, workflow: normalized_workflow
@@ -366,48 +415,46 @@ module Hive
     # shared task lease (or the project commit lock during bootstrap) before
     # calling this helper, so metadata has no second mutex.
     def write_completed_at_once(task_folder, value = Time.now.utc, observation: nil)
-      owned_observation = observation.nil?
-      observation ||= observe(task_folder)
-      raise StaleTask, "task directory is missing at #{File.expand_path(task_folder)}" unless observation
+      with_observation(task_folder, observation) do |current_observation|
+        unless current_observation
+          raise StaleTask, "task directory is missing at #{File.expand_path(task_folder)}"
+        end
 
-      validate_observation!(task_folder, observation)
-      current = read_for_update!(task_folder)
-      validate_observation!(task_folder, observation)
-      return current[:completed_at] if current[:completed_at]
+        validate_observation!(task_folder, current_observation)
+        current = read_for_update!(task_folder)
+        validate_observation!(task_folder, current_observation)
+        return current[:completed_at] if current[:completed_at]
 
-      completed_at = normalize_completed_at(value, label: "completed_at", strict: true)
-      updated = current.merge(completed_at: completed_at)
-      updated[:slug] ||= File.basename(task_folder)
-      result = write(
-        task_folder, **updated.slice(*WRITABLE_FIELDS),
-        create: false, observation: observation
-      )
-      raise StaleTask, "task directory changed before completion write" if result.stale?
+        completed_at = normalize_completed_at(value, label: "completed_at", strict: true)
+        updated = current.merge(completed_at: completed_at)
+        updated[:slug] ||= File.basename(task_folder)
+        result = write(
+          task_folder, **updated.slice(*WRITABLE_FIELDS),
+          create: false, observation: current_observation
+        )
+        raise StaleTask, "task directory changed before completion write" if result.stale?
 
-      completed_at
-    ensure
-      observation&.close if owned_observation
+        completed_at
+      end
     end
 
     def rewrite(task_folder, changes = nil, observation: nil, **keyword_changes)
       changes = (changes || {}).merge(keyword_changes)
-      owned_observation = observation.nil?
-      observation ||= observe(task_folder)
-      return UpdateResult.new(status: :stale, value: nil) unless observation
+      with_observation(task_folder, observation) do |current_observation|
+        return UpdateResult.new(status: :stale, value: nil) unless current_observation
 
-      validate_observation!(task_folder, observation)
-      current = read_for_update!(task_folder)
-      validate_observation!(task_folder, observation)
-      updated = current.merge(changes)
-      updated[:slug] ||= File.basename(task_folder)
-      write(
-        task_folder, **updated.slice(*WRITABLE_FIELDS),
-        create: false, observation: observation
-      )
+        validate_observation!(task_folder, current_observation)
+        current = read_for_update!(task_folder)
+        validate_observation!(task_folder, current_observation)
+        updated = current.merge(changes)
+        updated[:slug] ||= File.basename(task_folder)
+        write(
+          task_folder, **updated.slice(*WRITABLE_FIELDS),
+          create: false, observation: current_observation
+        )
+      end
     rescue StaleTask
       UpdateResult.new(status: :stale, value: nil)
-    ensure
-      observation&.close if owned_observation
     end
 
     Snapshot = Data.define(:exists, :bytes)
@@ -419,6 +466,9 @@ module Hive
     end
 
     def restore(task_folder, snapshot, observation: nil, create: true)
+      if create && observation
+        raise ArgumentError, "explicit restore cannot use a guarded task observation"
+      end
       unless create
         raise ArgumentError, "guarded restore requires a task observation" unless observation
         validate_observation!(task_folder, observation)
@@ -431,7 +481,9 @@ module Hive
       else
         metadata_path = path(task_folder)
         if File.exist?(metadata_path)
+          validate_observation!(task_folder, observation) unless create
           File.delete(metadata_path)
+          observation.refresh_identity!(stable_identity(empty)) unless create
           notify_stage_directory(task_folder)
         end
       end
@@ -575,6 +627,13 @@ module Hive
       File.binwrite(tmp, bytes)
       validate_observation!(task_folder, observation) if observation
       File.rename(tmp, path(task_folder))
+      if observation
+        result = read_for_admission(task_folder)
+        unless result.ok?
+          raise InvalidMetadata, "cannot restore invalid task metadata: #{result.error}"
+        end
+        observation.refresh_identity!(stable_identity(result.data))
+      end
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
     end

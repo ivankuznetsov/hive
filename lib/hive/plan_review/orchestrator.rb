@@ -64,20 +64,24 @@ module Hive
       end
 
       def advance!
-        owned_observation = @task_observation.nil?
-        @task_observation ||= Hive::TaskMeta.observe(@task.folder)
-        unless @task_observation
-          raise InvalidRecord, "plan review task is stale or missing"
+        supplied_observation = @task_observation
+        Hive::TaskMeta.with_observation(@task.folder, supplied_observation) do |observation|
+          raise InvalidRecord, "plan review task is stale or missing" unless observation
+
+          @task_observation = observation
+          Hive::Lock.with_task_lock(
+            @task.folder, slug: @task.slug, op: "plan-review",
+            create: false, observation: observation
+          ) do
+            @store.with_orchestration_lock(observation: observation) { advance_unlocked! }
+          end
         end
-        Hive::TaskMeta.validate_observation!(@task.folder, @task_observation)
-        @store.with_orchestration_lock { advance_unlocked! }
       rescue Hive::TaskMeta::StaleTask => error
         raise InvalidRecord, "plan review task is stale: #{error.message}"
+      rescue Hive::TaskMeta::InvalidMetadata => error
+        raise InvalidRecord, "plan review task metadata is invalid: #{error.message}"
       ensure
-        if owned_observation
-          @task_observation&.close
-          @task_observation = nil
-        end
+        @task_observation = supplied_observation
       end
 
       private
@@ -1332,31 +1336,13 @@ module Hive
       end
 
       def with_task_mutation_lock
-        owned_observation = @task_observation.nil?
-        @task_observation ||= Hive::TaskMeta.observe(@task.folder)
         raise Hive::TaskMeta::StaleTask, "plan review task is missing" unless @task_observation
-
-        if Hive::Lock.task_lock_held?(@task.folder)
-          Hive::TaskMeta.validate_observation!(@task.folder, @task_observation)
-          return yield
+        Hive::TaskMeta.validate_observation!(@task.folder, @task_observation)
+        unless Hive::Lock.task_lock_held?(@task.folder)
+          raise Hive::ConcurrentRunError,
+                "plan review task mutation requires lifecycle custody"
         end
-
-        state_path = if @task.respond_to?(:hive_state_path)
-          @task.hive_state_path
-        else
-          File.join(@task.project_root, ".hive-state")
-        end
-        Hive::Lock.with_commit_lock(state_path) do
-          Hive::Lock.with_task_lock(
-            @task.folder, slug: @task.slug, op: "plan-review-promote",
-            create: false, observation: @task_observation
-          ) { yield }
-        end
-      ensure
-        if owned_observation
-          @task_observation&.close
-          @task_observation = nil
-        end
+        yield
       end
 
       def persisted_run_level

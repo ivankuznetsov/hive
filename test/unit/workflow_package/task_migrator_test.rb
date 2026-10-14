@@ -102,6 +102,33 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
     end
   end
 
+  def test_descriptor_exhaustion_is_typed_and_closes_prepared_observations
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      task_folder(dir, "4-review", old_pin, slug: "first-task-260812-aaaa")
+      task_folder(dir, "4-review", old_pin, slug: "second-task-260812-bbbb")
+      original_observe = Hive::TaskMeta.method(:observe)
+      first_observation = nil
+      calls = 0
+      exhausting = lambda do |folder|
+        calls += 1
+        raise Errno::EMFILE, "fd limit" if calls == 2
+
+        first_observation = original_observe.call(folder)
+      end
+
+      error = with_replaced_singleton_method(Hive::TaskMeta, :observe, exhausting) do
+        assert_raises(Hive::UnavailableError) { migrator(dir, store).call }
+      end
+
+      assert_includes error.message, "open-file descriptor limit"
+      assert first_observation.instance_variable_get(:@directory).closed?
+      assert_empty store.cleaned
+    end
+  end
+
   def test_incomplete_managed_provenance_fails_instead_of_being_skipped
     with_tmp_dir do |dir|
       current = workflow("review" => 6)
@@ -233,12 +260,14 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       source = task_folder(dir, "4-review", old_pin)
       destination = File.join(dir, "stages", "6-review", File.basename(source))
       stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+      original_rename = File.method(:rename)
       cross_device_move = lambda do |from, to, **|
-        FileUtils.cp_r(from, to)
-        FileUtils.rm_rf(from)
+        raise Errno::EXDEV, "cross-device" if [ from, to ].sort == [ source, destination ].sort
+
+        original_rename.call(from, to)
       end
 
-      with_replaced_singleton_method(FileUtils, :mv, cross_device_move) do
+      with_replaced_singleton_method(File, :rename, cross_device_move) do
         with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
           assert_raises(Hive::TaskMeta::StaleTask) { migrator(dir, store).call }
         end
@@ -268,7 +297,7 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
 
       _out, err = capture_io do
         with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
-          assert_raises(Hive::TaskMeta::StaleTask) { migrator(dir, store).call }
+          assert_raises(Hive::RollbackFailed) { migrator(dir, store).call }
         end
       end
 
@@ -292,7 +321,7 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       _out, err = capture_io do
         with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale_rewrite) do
           with_replaced_singleton_method(Hive::TaskMeta, :restore, stale_restore) do
-            assert_raises(Hive::TaskMeta::StaleTask) { migrator(dir, store).call }
+            assert_raises(Hive::RollbackFailed) { migrator(dir, store).call }
           end
         end
       end
@@ -353,7 +382,7 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
 
       _out, err = capture_io do
         with_replaced_singleton_method(Hive::TaskMeta, :read_for_update!, delete_after_read) do
-          assert_raises(Hive::TaskMeta::StaleTask) do
+          assert_raises(Hive::RollbackFailed) do
             migrator(dir, store).call { committed = true }
           end
         end
@@ -393,7 +422,7 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
 
       _out, err = capture_io do
         with_replaced_singleton_method(Hive::TaskMeta, :rewrite, replace_before_write) do
-          assert_raises(Hive::TaskMeta::StaleTask) do
+          assert_raises(Hive::RollbackFailed) do
             migrator(dir, store).call { committed = true }
           end
         end
@@ -408,6 +437,43 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       )
       assert_equal "untouched\n", File.read(File.join(destination, "replacement.txt"))
       assert_includes err, "rollback skipped stale task"
+      assert_empty store.cleaned
+    end
+  end
+
+  def test_same_filesystem_move_rejects_an_unexpected_destination_identity
+    with_tmp_dir do |dir|
+      old = workflow("review" => 4)
+      current = workflow("review" => 6)
+      store = store_for(old:, current:)
+      source = task_folder(dir, "4-review", old_pin)
+      destination = File.join(dir, "stages", "6-review", File.basename(source))
+      original_rename = File.method(:rename)
+      replace_after_move = lambda do |from, to|
+        result = original_rename.call(from, to)
+        if from == source && to == destination
+          files = Dir.children(to).to_h do |name|
+            path = File.join(to, name)
+            [ name, File.file?(path) ? File.binread(path) : nil ]
+          end
+          FileUtils.rm_rf(to)
+          FileUtils.mkdir_p(to)
+          files.each { |name, bytes| File.binwrite(File.join(to, name), bytes) if bytes }
+          File.write(File.join(to, "replacement.txt"), "keep\n")
+        end
+        result
+      end
+
+      error = with_replaced_singleton_method(File, :rename, replace_after_move) do
+        assert_raises(Hive::RollbackFailed) { migrator(dir, store).call }
+      end
+
+      assert_includes error.message, "destination changed identity"
+      refute File.exist?(source)
+      assert_equal "keep\n", File.read(File.join(destination, "replacement.txt"))
+      assert_equal old_pin, Hive::TaskMeta.read(destination).slice(
+        :workflow_commit, :workflow_manifest_digest, :workflow_configuration_digest
+      )
       assert_empty store.cleaned
     end
   end
@@ -584,7 +650,7 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
         end
       end
 
-      assert_includes err, "rollback failed for task"
+      assert_includes err, "rollback failed: Errno::EIO"
     ensure
       observation&.close
     end

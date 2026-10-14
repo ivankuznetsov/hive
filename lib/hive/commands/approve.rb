@@ -409,19 +409,20 @@ module Hive
       #     during the mv. Its stable task id survives the folder move and its
       #     holder nonce keeps release fenced from a replacement owner.
       def perform_move_and_commit(task, dest_stage, enforce_admission: false)
-        observation = Hive::TaskMeta.observe(task.folder)
-        raise Hive::TaskMeta::StaleTask, "approve task is missing before mutation" unless observation
+        observation = Hive::DependencySnapshot.observe_for_admission!(
+          task, missing_message: "approve task is missing before mutation"
+        )
         new_folder = nil
         commit_action = nil
         human_state_snapshot = nil
         rewind_state_snapshots = []
         completion_snapshot = nil
-        begin
-          with_optional_commit_lock(task.hive_state_path) do
-            Hive::Lock.with_task_lock(
-              task.folder, slug: task.slug, op: "approve",
-              create: false, observation: observation
-            ) do
+        with_optional_commit_lock(task.hive_state_path) do
+          Hive::Lock.with_task_lock(
+            task.folder, slug: task.slug, op: "approve",
+            create: false, observation: observation
+          ) do
+            begin
               # Preserve the command's typed collision contract before building
               # a multi-project snapshot: a pre-existing destination necessarily
               # duplicates the slug, but it is first and foremost an unsafe move
@@ -442,23 +443,32 @@ module Hive
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
               end
               new_folder = move_task!(task, dest_stage, observation: observation)
+              verb = stage_for_dest!(task, dest_stage).index < task.stage_index ? "reject" : "approve"
+              commit_action = "#{verb} #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
+              record_commit_or_rollback!(
+                task, dest_stage, new_folder, commit_action,
+                completion_snapshot: completion_snapshot,
+                observation: observation
+              )
+            rescue StandardError, Interrupt => original_error
+              rollback_issues = [
+                restore_human_destination!(
+                  task, new_folder, human_state_snapshot, observation: observation
+                ),
+                restore_rearmed_stages!(
+                  task, new_folder, rewind_state_snapshots, observation: observation
+                )
+              ].compact
+              if rollback_issues.any?
+                raise Hive::RollbackFailed,
+                      "approve failed and guarded rollback was incomplete: " \
+                      "#{rollback_issues.join('; ')}; underlying: " \
+                      "#{original_error.class}: #{original_error.message}",
+                      cause: original_error
+              end
+              raise
             end
-            verb = stage_for_dest!(task, dest_stage).index < task.stage_index ? "reject" : "approve"
-            commit_action = "#{verb} #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
-            record_commit_or_rollback!(
-              task, dest_stage, new_folder, commit_action,
-              completion_snapshot: completion_snapshot,
-              observation: observation
-            )
           end
-        rescue StandardError, Interrupt
-          restore_human_destination!(
-            task, new_folder, human_state_snapshot, observation: observation
-          )
-          restore_rearmed_stages!(
-            task, new_folder, rewind_state_snapshots, observation: observation
-          )
-          raise
         end
         [ new_folder, commit_action ]
       ensure
@@ -509,27 +519,32 @@ module Hive
         )
       end
 
-      def restore_rearmed_stages!(task, new_folder, snapshots, observation: nil)
+      def restore_rearmed_stages!(task, new_folder, snapshots, observation:)
         return unless snapshots
 
         folder = File.directory?(task.folder) ? task.folder : new_folder
-        return unless folder && File.directory?(folder)
-        Hive::TaskMeta.validate_observation!(folder, observation) if observation
-
+        folder ||= task.folder
+        issues = []
         snapshots.reverse_each do |snapshot|
-          path = File.join(folder, snapshot.fetch(:state_file))
-          Hive::Markers.with_markers_lock(path) do
-            if snapshot.fetch(:existed)
-              Hive::AtomicFile.write(path, snapshot.fetch(:body))
-            else
-              File.delete(path) if File.exist?(path) || File.symlink?(path)
+          begin
+            path = File.join(folder, snapshot.fetch(:state_file))
+            Hive::Markers.with_markers_lock(path, create: false) do
+              Hive::TaskMeta.validate_observation!(folder, observation)
+              if snapshot.fetch(:existed)
+                Hive::Markers.write_atomic(path, snapshot.fetch(:body))
+              else
+                File.delete(path) if File.exist?(path) || File.symlink?(path)
+              end
             end
+          rescue Hive::TaskMeta::InvalidMetadata => error
+            issues << rollback_skip(
+              "invalid task metadata while restoring rewound stages", error
+            )
+          rescue Hive::TaskMeta::StaleTask, SystemCallError, IOError, ArgumentError => error
+            issues << rollback_skip("stale task while restoring rewound stages", error)
           end
         end
-      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
-        warn "hive: approve rollback skipped stale task while restoring rewound stages " \
-             "(#{error.class}: #{error.message})"
-        nil
+        issues.empty? ? nil : issues.join("; ")
       end
 
       def initialize_human_destination!(task, dest_stage)
@@ -583,33 +598,49 @@ module Hive
         raise Hive::InvalidTaskPath, invalid
       end
 
-      def restore_human_destination!(task, new_folder, snapshot, observation: nil)
+      def restore_human_destination!(task, new_folder, snapshot, observation:)
         return unless snapshot
 
         folder = File.directory?(task.folder) ? task.folder : new_folder
-        return unless folder && File.directory?(folder)
-        Hive::TaskMeta.validate_observation!(folder, observation) if observation
+        folder ||= task.folder
 
         path = File.join(folder, snapshot.fetch(:state_file))
-        if snapshot.fetch(:existed)
-          Hive::AtomicFile.write(path, snapshot.fetch(:body))
-        else
-          File.delete(path) if File.exist?(path) || File.symlink?(path)
+        Hive::Markers.with_markers_lock(path, create: false) do
+          Hive::TaskMeta.validate_observation!(folder, observation)
+          if snapshot.fetch(:existed)
+            Hive::Markers.write_atomic(path, snapshot.fetch(:body))
+          else
+            File.delete(path) if File.exist?(path) || File.symlink?(path)
+          end
         end
-      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
-        warn "hive: approve rollback skipped stale task while restoring human state " \
-             "(#{error.class}: #{error.message})"
         nil
+      rescue Hive::TaskMeta::InvalidMetadata => error
+        rollback_skip("invalid task metadata while restoring human state", error)
+      rescue Hive::TaskMeta::StaleTask, SystemCallError, IOError, ArgumentError => error
+        rollback_skip("stale task while restoring human state", error)
+      end
+
+      def rollback_skip(context, error)
+        message = "approve rollback skipped #{context} (#{error.class}: #{error.message})"
+        warn "hive: #{message}"
+        message
       end
 
       def move_task!(task, dest_stage, observation: nil)
-        workflows_dir = File.join(task.hive_state_path, "workflows")
-        Hive::WorkflowPackage::MutationLock.with_lock(workflows_dir, shared: true) do
-          move_task_under_workflow_lock!(task, dest_stage, observation: observation)
+        Hive::TaskMeta.with_observation(task.folder, observation) do |current_observation|
+          unless current_observation
+            raise Hive::TaskMeta::StaleTask, "approve task disappeared before move"
+          end
+          workflows_dir = File.join(task.hive_state_path, "workflows")
+          Hive::WorkflowPackage::MutationLock.with_lock(workflows_dir, shared: true) do
+            move_task_under_workflow_lock!(
+              task, dest_stage, observation: current_observation
+            )
+          end
         end
       end
 
-      def move_task_under_workflow_lock!(task, dest_stage, observation: nil)
+      def move_task_under_workflow_lock!(task, dest_stage, observation:)
         new_parent = File.join(task.hive_state_path, "stages", dest_stage)
         FileUtils.mkdir_p(new_parent)
         new_folder = destination_folder(task, dest_stage)
@@ -629,6 +660,10 @@ module Hive
         rescue Errno::EXDEV
           cross_device_move!(task.folder, new_folder, observation: observation)
         end
+        if observation && !observation.same_directory?(new_folder)
+          raise Hive::TaskMeta::StaleTask,
+                "approve destination changed identity after same-filesystem move"
+        end
         Hive::TaskMeta.validate_observation!(new_folder, observation) if observation
         new_folder
       end
@@ -646,14 +681,36 @@ module Hive
       # destination so the next retry doesn't hit a phantom "destination
       # exists" collision. The source is left intact on copy failure.
       def cross_device_move!(src, dst, observation: nil)
-        FileUtils.cp_r(src, dst)
+        Hive::TaskMeta.with_observation(src, observation) do |current_observation|
+          unless current_observation
+            raise Hive::TaskMeta::StaleTask, "cross-device move source disappeared"
+          end
+          cross_device_move_observed!(src, dst, observation: current_observation)
+        end
+      end
+
+      def cross_device_move_observed!(src, dst, observation:)
+        begin
+          FileUtils.cp_r(src, dst)
+        rescue StandardError => e
+          FileUtils.rm_rf(dst) if File.exist?(dst)
+          raise Hive::Error,
+                "cross-device move failed while copying; partial destination cleaned up. " \
+                "underlying: #{e.class}: #{e.message}"
+        end
+        begin
+          destination_handle = Hive::TaskMeta.capture_relocation_handle!(dst, observation)
+        rescue StandardError
+          FileUtils.rm_rf(dst) if File.exist?(src)
+          raise
+        end
         FileUtils.rm_rf(src)
-        Hive::TaskMeta.relocate_observation!(src, dst, observation) if observation
-      rescue StandardError => e
-        FileUtils.rm_rf(dst) if File.exist?(dst)
-        raise Hive::Error,
-              "cross-device move failed; partial destination cleaned up. " \
-              "underlying: #{e.class}: #{e.message}"
+        Hive::TaskMeta.relocate_observation!(
+          src, dst, observation, destination_handle: destination_handle
+        )
+        destination_handle = nil
+      ensure
+        destination_handle&.close unless destination_handle&.closed?
       end
 
       def raise_destination_collision(path)
@@ -728,9 +785,7 @@ module Hive
       end
 
       def attempt_rollback!(task, new_folder, original_error, completion_snapshot: nil,
-                            observation: nil)
-        owned_observation = observation.nil?
-        observation ||= Hive::TaskMeta.observe(new_folder) if new_folder
+                            observation:)
         # The pre-condition check stays in this caller — the helper only
         # owns the rescue + re-raise contract. If the source path now
         # exists, an undo would clobber it; surface a manual-recovery
@@ -745,10 +800,7 @@ module Hive
           original_error,
           on_undo: lambda do
             Hive::TaskMeta.validate_observation!(new_folder, observation)
-            FileUtils.mv(new_folder, task.folder)
-            unless observation.same_directory?(task.folder)
-              Hive::TaskMeta.relocate_observation!(new_folder, task.folder, observation)
-            end
+            move_observed_task!(new_folder, task.folder, observation: observation)
             Hive::TaskMeta.validate_observation!(task.folder, observation)
             if completion_snapshot
               restored = Hive::TaskMeta.restore(
@@ -778,8 +830,18 @@ module Hive
               "rollback error: #{rb.class}: #{rb.message}"
           end
         )
-      ensure
-        observation&.close if owned_observation
+      end
+
+      def move_observed_task!(source, destination, observation:)
+        begin
+          File.rename(source, destination)
+        rescue Errno::EXDEV
+          return cross_device_move!(source, destination, observation: observation)
+        end
+        unless observation.same_directory?(destination)
+          raise Hive::TaskMeta::StaleTask,
+                "rollback destination changed identity after same-filesystem move"
+        end
       end
 
       def completion_on_terminal_entry?(task, dest_stage)

@@ -8,6 +8,7 @@ require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/planner_identity"
 require "hive/plan_frontmatter"
 require "hive/dependencies"
+require "hive/dependency_snapshot"
 require "hive/task_meta"
 
 module Hive
@@ -43,8 +44,9 @@ module Hive
       module_function
 
       def run!(task, cfg)
-        observation = Hive::TaskMeta.observe(task.folder)
-        raise Hive::TaskMeta::StaleTask, "plan task is missing before execution" unless observation
+        observation = Hive::DependencySnapshot.observe_for_admission!(
+          task, missing_message: "plan task is missing before execution"
+        )
 
         if cleared_plan_ready?(task, cfg)
           return { commit: action_for(:complete), status: :complete, plan_review: nil }
@@ -88,7 +90,7 @@ module Hive
         yield nil
       end
 
-      def run_with_source!(task, cfg, source_checkout, observation: nil)
+      def run_with_source!(task, cfg, source_checkout, observation:)
         brainstorm_path = File.join(task.folder, "brainstorm.md")
         brainstorm_text = File.exist?(brainstorm_path) ? File.read(brainstorm_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "plan")
@@ -187,13 +189,7 @@ module Hive
       # dependency adopted here is not trusted blindly either — admission still
       # resolves the target and still reports `dependency_cycle` with the
       # offending path, which is a far better error than a copy instruction.
-      def adopt_plan_dependency!(task, marker, observation: nil)
-        owned_observation = observation.nil?
-        observation ||= Hive::TaskMeta.observe(task.folder)
-        unless observation
-          warn "[hive] plan: stale task; dependency adoption skipped for #{task.slug}"
-          return nil
-        end
+      def adopt_plan_dependency!(task, marker, observation:)
         Hive::TaskMeta.validate_observation!(task.folder, observation)
         return unless marker.name == :complete
 
@@ -223,8 +219,6 @@ module Hive
         warn "[hive] plan: dependency adoption failed for #{task.slug} " \
              "(#{error.class}: #{error.message.to_s.byteslice(0, 240)})"
         nil
-      ensure
-        observation&.close if owned_observation
       end
 
       def spawn_plan_agent(task, cfg, prompt, profile, source_checkout: nil)
@@ -268,7 +262,7 @@ module Hive
         end
       end
 
-      def start_plan_review(task, cfg, profile, result, marker, observation: nil)
+      def start_plan_review(task, cfg, profile, result, marker, observation:)
         return nil unless %i[waiting complete].include?(marker.name)
         return nil unless task.respond_to?(:workflow) && task.respond_to?(:meta_yml_path)
 

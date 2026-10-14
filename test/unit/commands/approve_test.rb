@@ -109,33 +109,42 @@ class HiveCommandsApproveTest < Minitest::Test
     with_tmp_dir do |root|
       source = File.join(root, "source")
       destination = File.join(root, "destination")
-      FileUtils.mkdir_p(source)
-      FileUtils.mkdir_p(destination)
+      Hive::TaskMeta.write(source, id: 1, slug: "source", display_name: nil)
+      observation = Hive::TaskMeta.observe(source)
       current = task(folder: source)
       state = File.join(source, "approval.md")
       File.write(state, "changed")
 
       command.send(
         :restore_human_destination!, current, destination,
-        { state_file: "approval.md", existed: true, body: "original" }
+        { state_file: "approval.md", existed: true, body: "original" },
+        observation: observation
       )
       assert_equal "original", File.read(state)
 
-      FileUtils.rm_rf(source)
+      FileUtils.mkdir_p(File.dirname(destination))
+      File.rename(source, destination)
       destination_state = File.join(destination, "approval.md")
       File.write(destination_state, "created")
       command.send(
         :restore_human_destination!, current, destination,
-        { state_file: "approval.md", existed: false, body: nil }
+        { state_file: "approval.md", existed: false, body: nil },
+        observation: observation
       )
       refute File.exist?(destination_state)
 
       FileUtils.rm_rf(destination)
-      assert_nil command.send(
+      assert_includes command.send(
         :restore_human_destination!, current, destination,
-        { state_file: "approval.md", existed: false, body: nil }
+        { state_file: "approval.md", existed: false, body: nil },
+        observation: observation
+      ), "rollback skipped stale task"
+      assert_nil command.send(
+        :restore_human_destination!, current, destination, nil,
+        observation: observation
       )
-      assert_nil command.send(:restore_human_destination!, current, destination, nil)
+    ensure
+      observation&.close
     end
   end
 
@@ -150,11 +159,11 @@ class HiveCommandsApproveTest < Minitest::Test
       current = task(folder: source)
 
       _out, err = capture_io do
-        assert_nil command.send(
+        assert_includes command.send(
           :restore_human_destination!, current, nil,
           { state_file: "approval.md", existed: true, body: "original\n" },
           observation: observation
-        )
+        ), "rollback skipped stale task"
       end
 
       assert_includes err, "rollback skipped stale task"
@@ -453,12 +462,13 @@ class HiveCommandsApproveTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(destination))
       FileUtils.mv(source, destination)
       Hive::TaskMeta.write_completed_at_once(destination, Time.utc(2026, 7, 22, 10, 0, 0))
+      observation = Hive::TaskMeta.observe(destination)
       run!("git", "-C", state, "add", "-A", "--", "stages/1-work", "stages/2-done")
 
       assert_raises(Hive::GitError) do
         command.send(
           :attempt_rollback!, current, destination, Hive::GitError.new("commit failed"),
-          completion_snapshot: completion_snapshot
+          completion_snapshot: completion_snapshot, observation: observation
         )
       end
 
@@ -467,6 +477,8 @@ class HiveCommandsApproveTest < Minitest::Test
       refute Hive::TaskMeta.read(source).key?(:completed_at)
       cached, = Open3.capture3("git", "-C", state, "diff", "--cached")
       assert_empty cached, cached
+    ensure
+      observation&.close
     end
   end
 
@@ -514,12 +526,14 @@ class HiveCommandsApproveTest < Minitest::Test
       current = task(folder: source, hive_state_path: root, project_root: root)
       fake_ops = Object.new
       fake_ops.define_singleton_method(:run_git!) { |*| nil }
-      cross_device_move = lambda do |from, to, **|
-        FileUtils.cp_r(from, to)
-        FileUtils.rm_rf(from)
+      original_rename = File.method(:rename)
+      cross_device_rename = lambda do |from, to|
+        raise Errno::EXDEV, "cross-device" if from == destination && to == source
+
+        original_rename.call(from, to)
       end
 
-      with_replaced_singleton_method(FileUtils, :mv, cross_device_move) do
+      with_replaced_singleton_method(File, :rename, cross_device_rename) do
         with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
           assert_raises(Hive::GitError) do
             command.send(
@@ -988,6 +1002,30 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_cross_device_move_preserves_destination_after_source_removal
+    Dir.mktmpdir("hive-approve-unit") do |root|
+      src = File.join(root, "src")
+      dst = File.join(root, "dst")
+      Hive::TaskMeta.write(src, id: 1, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(src)
+      failure = lambda do |*_, **|
+        raise Errno::EACCES, "cannot rebind observation"
+      end
+
+      with_replaced_singleton_method(Hive::TaskMeta, :relocate_observation!, failure) do
+        assert_raises(Errno::EACCES) do
+          command.send(:cross_device_move!, src, dst, observation: observation)
+        end
+      end
+
+      refute File.exist?(src)
+      assert File.directory?(dst), "the only surviving task copy must be preserved"
+      assert_equal 1, Hive::TaskMeta.read(dst)[:id]
+    ensure
+      observation&.close
+    end
+  end
+
   def test_source_has_tracked_files_reports_git_failures_from_stdout_or_stderr
     cmd = command
     original = Open3.singleton_class.instance_method(:capture3)
@@ -1035,7 +1073,8 @@ class HiveCommandsApproveTest < Minitest::Test
     Dir.mktmpdir("hive-approve-unit") do |root|
       source = File.join(root, "source")
       moved = File.join(root, "moved")
-      FileUtils.mkdir_p(moved)
+      Hive::TaskMeta.write(moved, id: 1, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(moved)
       approve_task = task(folder: source)
       captured = {}
       original = Hive::CommitOrRollback.singleton_class.instance_method(:attempt!)
@@ -1048,11 +1087,15 @@ class HiveCommandsApproveTest < Minitest::Test
         on_undo
       end
 
-      command.send(:attempt_rollback!, approve_task, moved, Hive::GitError.new("commit"))
+      command.send(
+        :attempt_rollback!, approve_task, moved, Hive::GitError.new("commit"),
+        observation: observation
+      )
 
       assert_includes captured.fetch(:rolled_back), "underlying: StandardError: commit nope"
       assert_includes captured.fetch(:rollback_failed), "rollback error: StandardError: undo nope"
     ensure
+      observation&.close
       Hive::CommitOrRollback.singleton_class.define_method(:attempt!, original) if original
     end
   end

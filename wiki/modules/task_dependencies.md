@@ -3,7 +3,7 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
 created: 2026-06-18
-updated: 2026-10-02
+updated: 2026-10-14
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -118,9 +118,11 @@ Duplicate or ambiguous identities fail closed. Full-chain walking follows
 every scalar or list edge, detects missing tasks, self-reference, corrupt
 upstream nodes, and cycles, and reports a cycle as an ordered qualified path
 including the repeated closing node. Creation rejects any resolvable cycle or
-self-reference before publishing the new task; admission repeats the complete
-check against current disk state. Cycle bookkeeping and immutable-context
-verdicts are indexed and memoized, so one active projection evaluates shared
+self-reference before publishing the new task, including cycles behind an
+unreachable gate; qualified self-reference paths identify the actual upstream
+task. Admission repeats the complete check against current disk state. Cycle
+bookkeeping and immutable-context verdicts are indexed and memoized, so one
+active projection evaluates shared
 dependency tails once instead of rewalking them for every row. Each task folder's
 device/inode identity is checked before and after strict reads; a concurrent
 stage move invalidates that snapshot instead of retaining the enumerated old

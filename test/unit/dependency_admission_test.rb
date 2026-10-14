@@ -181,6 +181,33 @@ class DependencyAdmissionTest < Minitest::Test
     assert_equal "app:a -> app:b -> app:a", verdict.admission_error.offending_ref
   end
 
+  def test_cycle_behind_an_unreachable_list_gate_is_still_reported
+    indexed = context(project(tasks: [
+      task("app", "a", depends_on: [ "b" ]),
+      task(
+        "app", "b", depends_on: "a", stage: "6-done",
+        workflow_stages: %w[1-inbox 6-done]
+      )
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "a")
+
+    assert_error verdict, "dependency_cycle"
+    assert_equal "app:a -> app:b -> app:a", verdict.admission_error.offending_ref
+  end
+
+  def test_upstream_self_reference_reports_its_qualified_cycle_path
+    indexed = context(project(tasks: [
+      task("app", "a", depends_on: "b"),
+      task("app", "b", depends_on: "b")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "a")
+
+    assert_error verdict, "dependency_self_reference"
+    assert_equal "app:b -> app:b", verdict.admission_error.offending_ref
+  end
+
   def test_list_gate_unreachable_has_list_specific_remediation
     indexed = context(project(gate: "8-finalize", tasks: [
       task("app", "dependent", depends_on: [ "fix" ]),

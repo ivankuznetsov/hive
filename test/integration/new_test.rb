@@ -430,6 +430,63 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_creation_rejects_a_cycle_hidden_by_an_unreachable_list_gate
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        existing = File.join(dir, ".hive-state", "stages", "1-inbox", "existing-task")
+        FileUtils.mkdir_p(existing)
+        Hive::TaskMeta.write(
+          existing, id: 40, slug: "existing-task", display_name: nil,
+          depends_on: "proposed-task", workflow: "content"
+        )
+        next_id = Hive::TaskCounter.peek
+
+        error = assert_raises(Hive::Commands::New::InvalidDependencyError) do
+          Hive::Commands::New.new(
+            project, "proposed task", slug_override: "proposed-task",
+            depends_on: [ "existing-task" ]
+          ).call!
+        end
+
+        path = "#{project}:proposed-task -> #{project}:existing-task -> #{project}:proposed-task"
+        assert_equal path, error.value
+        assert_includes error.message, path
+        refute Dir.exist?(
+          File.join(dir, ".hive-state", "stages", "1-inbox", "proposed-task")
+        )
+        assert_equal next_id, Hive::TaskCounter.peek
+      end
+    end
+  end
+
+  def test_creation_reports_an_upstream_self_reference_as_the_actual_cycle
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        existing = File.join(dir, ".hive-state", "stages", "1-inbox", "existing-task")
+        FileUtils.mkdir_p(existing)
+        Hive::TaskMeta.write(
+          existing, id: 40, slug: "existing-task", display_name: nil,
+          depends_on: "existing-task"
+        )
+
+        error = assert_raises(Hive::Commands::New::InvalidDependencyError) do
+          Hive::Commands::New.new(
+            project, "proposed task", slug_override: "proposed-task",
+            depends_on: "existing-task"
+          ).call!
+        end
+
+        path = "#{project}:existing-task -> #{project}:existing-task"
+        assert_equal path, error.value
+        assert_includes error.message, path
+      end
+    end
+  end
+
   def test_creation_keeps_unresolved_future_dependencies_captureable
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

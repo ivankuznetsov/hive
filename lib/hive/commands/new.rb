@@ -726,12 +726,7 @@ module Hive
         error = verdict.admission_error
         return unless error && %w[dependency_cycle dependency_self_reference].include?(error.reason_code)
 
-        path = if error.reason_code == "dependency_self_reference"
-          qualified = "#{project.fetch("name")}:#{slug}"
-          "#{qualified} -> #{qualified}"
-        else
-          error.offending_ref
-        end
+        path = error.offending_ref
         raise InvalidDependencyError.new(
           "invalid dependency cycle: #{path}",
           value: path,

@@ -300,6 +300,38 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_admission_fingerprint_uses_the_configured_default_branch_for_base_mode
+    with_tmp_dir do |root|
+      hive_state = File.join(root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "default_branch: develop\n")
+      write_task_meta(root, "9-done", "develop", id: 1)
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "develop"
+      )
+      project = File.basename(root)
+      task = FakeTask.new(
+        slug: "dependent-task", id: 2, depends_on: "develop",
+        folder: dependent, project_root: root, project_name: project
+      )
+      registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
+
+      fingerprint = with_replaced_singleton_method(
+        Hive::Worktree, :origin_branch_ref_exists?, ->(*) { true }
+      ) do
+        Hive::DependencySnapshot.admission_fingerprint(task, registry_entries: registry)
+      end
+      expected_payload = [
+        "hive-dependency-admission-v2", project, "dependent-task",
+        "clear", "", "", [], "default", "", "", ""
+      ]
+
+      assert_equal Digest::SHA256.hexdigest(JSON.generate(expected_payload)), fingerprint
+    end
+  end
+
   def test_supplied_context_preserves_project_enrollment_fingerprints
     with_tmp_dir do |root|
       slug = "independent-task"

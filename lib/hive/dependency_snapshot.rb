@@ -420,8 +420,9 @@ module Hive
       admission_context ||= self.admission_context(registry_entries)
       verdict = admission_context.verdict(project: project, slug: task.slug)
       error = verdict.admission_error
+      default_branch = Hive::Config.load(task.project_root)["default_branch"]
       base_mode = base_selection(
-        task, nil, warn_on_fallback: false,
+        task, default_branch, warn_on_fallback: false,
         admission_context: admission_context, project_name: project,
         local_branch_evidence: true
       ).mode

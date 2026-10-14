@@ -1144,6 +1144,36 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_dependency_base_mode_uses_the_configured_default_branch
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "default_branch: develop\n")
+      base = write_status_task(
+        hive_state, "9-done", "develop", state_file: "task.md", marker: "COMPLETE"
+      )
+      dependent = write_status_task(
+        hive_state, "4-execute", "dependent-task-260618-bbbb",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      Hive::TaskMeta.write(base, id: 1, slug: "develop", display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: File.basename(dependent), display_name: nil,
+        depends_on: "develop"
+      )
+
+      row = with_replaced_singleton_method(
+        Hive::Worktree, :origin_branch_ref_exists?, ->(*) { true }
+      ) do
+        Hive::Commands::Status.new.json_payload([
+          { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        ]).dig("projects", 0, "tasks").find { |task| task["slug"] == File.basename(dependent) }
+      end
+
+      assert_equal "default", row.fetch("dependency_base_mode")
+    end
+  end
+
   def test_json_and_text_status_emit_every_list_blocker_with_null_singulars
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

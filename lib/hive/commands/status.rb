@@ -840,7 +840,10 @@ module Hive
             config: prepared.config, workflow_generation: prepared.workflow_generation
           )
         else
-          annotate_dependencies(rows, prepared.project, admission_context: admission_context)
+          annotate_dependencies(
+            rows, prepared.project,
+            admission_context: admission_context, config: prepared.config
+          )
         end
         projection = Hive::ArchiveFilter.project(
           rows, now: now,
@@ -1266,7 +1269,9 @@ module Hive
             rows, project, project_count,
             config: config, with_diagnostic: false
           )
-          rows = annotate_dependencies(rows, project, admission_context: admission_context)
+          rows = annotate_dependencies(
+            rows, project, admission_context: admission_context, config: config
+          )
           projection = Hive::ArchiveFilter.project(
             rows, now: now,
             apply_retention: !@archive
@@ -1797,9 +1802,9 @@ module Hive
         true
       end
 
-      def annotate_dependencies(rows, project, admission_context: nil)
+      def annotate_dependencies(rows, project, admission_context: nil, config: nil)
         context = admission_context || build_admission_context([ project ])
-        rows.each { |row| apply_dependency_verdict(row, context, project) }
+        rows.each { |row| apply_dependency_verdict(row, context, project, config: config) }
         rows
       end
 
@@ -2013,10 +2018,8 @@ module Hive
         task = row[:task]
         return "default" unless task
 
-        default_branch = unless admission_context
-          config&.fetch("default_branch", nil) ||
-            Hive::Config.load(task.project_root)["default_branch"]
-        end
+        default_branch = config&.fetch("default_branch", nil) ||
+          Hive::Config.load(task.project_root)["default_branch"]
         Hive::DependencySnapshot.base_selection(
           task, default_branch, warn_on_fallback: false,
           admission_context: admission_context, project_name: project_name,

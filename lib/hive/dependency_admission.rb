@@ -232,11 +232,12 @@ module Hive
           target, target_project = edge
           target_identity = qualify(target)
           if target_identity == frame.identity
+            cycle = "#{frame.identity} -> #{target_identity}"
             frame.fail!(admission_error(
               "dependency_self_reference",
-              reference.to_s,
+              cycle,
               "Remove or correct depends_on in #{frame.task.folder}/meta.yml."
-            ).admission_error)
+            ).admission_error, cycle_derived: true)
             next
           end
           if (cycle_start = active_index[target_identity])
@@ -253,12 +254,11 @@ module Hive
             frame.task, target, target_project, reference,
             list_declaration: frame.list_declaration
           )
-          if gate_result.is_a?(Verdict)
-            frame.fail!(gate_result.admission_error)
-            next
+          incoming = if gate_result.is_a?(Verdict)
+            { blocker: nil, admission_error: gate_result.admission_error }.freeze
+          else
+            { blocker: gate_result, admission_error: nil }.freeze
           end
-
-          incoming = { blocker: gate_result }.freeze
           if (cached = @verdict_cache[target_identity])
             absorb_child(frame, incoming, cached)
           else
@@ -320,6 +320,7 @@ module Hive
             evaluation.blockers.map { |blocker| blocker_for_requesting_project(frame, blocker) }
           )
         end
+        frame.fail!(incoming[:admission_error]) if incoming[:admission_error]
         return unless evaluation.verdict.error?
 
         frame.fail!(evaluation.verdict.admission_error, cycle_derived: evaluation.cycle_derived)

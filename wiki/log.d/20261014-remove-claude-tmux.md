@@ -15,7 +15,8 @@
   headless reviewers (no shared tmux session, so slightly less prompt-cache
   reuse within a pass). The review-fix completion fallback is gone;
   `spawn_claude_with_tmux_marker!` is now `spawn_claude_with_failure_marker!`
-  and still writes `claude_launch_failed`. Yolo Claude launches keep the
+  and still writes `claude_launch_failed`, including when Claude preflight
+  (missing or outdated binary) returns an error instead of raising. Yolo Claude launches keep the
   stage's default `--allowedTools`.
 - `ClaudeLauncher` repairs a tmux-era Stop-hook `.claude/settings.json` stub
   or its `.hive-pre-install` backup before launching. Legacy reasons
@@ -32,3 +33,8 @@
   `hive tui` session ([[dependencies]]). Gaps 14, 17, 17a, 34, the tmux
   large-prompt settle item, and the xbookmark triage `tmux has-session`
   question are closed in [[gaps]].
+- Session receipts for a Claude launch record the model and effort resolved
+  from stage overrides and `claude.*` pins (`Config.claude_identity`).
+- Review triage deletes a same-pass escalations file left by an earlier run
+  before it spawns (its content is already in the prompt), so a retry that
+  writes nothing fails instead of passing on the stale file.

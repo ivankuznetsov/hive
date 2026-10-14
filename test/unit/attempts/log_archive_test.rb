@@ -1,17 +1,19 @@
 require "test_helper"
 require "hive/attempts/log_archive"
+require_relative "../../support/stream_log_test_support"
 
 class AttemptsLogArchiveTest < Minitest::Test
   include HiveTestHelper
+  include StreamLogTestSupport
 
   NOW = Time.utc(2026, 8, 10, 12, 0, 0)
   CAPABILITY = "c" * 64
 
-  class SeparatorFaultWriter
+  class SeparatorFaultWriter < StreamLogTestSupport::DelegatingIO
     attr_reader :separator_attempts
 
     def initialize(io)
-      @io = io
+      super(io)
       @separator_attempts = 0
     end
 
@@ -23,13 +25,6 @@ class AttemptsLogArchiveTest < Minitest::Test
 
       @io.syswrite(bytes)
     end
-
-    def flush = @io.flush
-    def flock(operation) = @io.flock(operation)
-    def stat = @io.stat
-    def fsync = @io.fsync
-    def close = @io.close
-    def closed? = @io.closed?
   end
 
   def test_writer_and_reader_custody_block_content_addressed_publication
@@ -104,7 +99,7 @@ class AttemptsLogArchiveTest < Minitest::Test
       archive = store.log_archive
       writer = archive.open_writer(running.attempt_id, clock: -> { NOW })
       writer.append(:stdout, "before")
-      File.open(writer.path, "ab") { |file| file.write('{"sequence":2') }
+      seed_torn_tail(writer.path, '{"sequence":2')
       assert_equal 2, writer.append(:stderr, "after")
       writer.close
 
@@ -134,7 +129,7 @@ class AttemptsLogArchiveTest < Minitest::Test
       archive = store.log_archive
       writer = archive.open_writer(running.attempt_id, clock: -> { NOW })
       writer.append(:stdout, "before")
-      File.open(writer.path, "ab") { |file| file.write("torn") }
+      seed_torn_tail(writer.path)
       fault = SeparatorFaultWriter.new(writer.instance_variable_get(:@io))
       writer.instance_variable_set(:@io, fault)
 

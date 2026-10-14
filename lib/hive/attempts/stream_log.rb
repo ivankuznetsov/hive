@@ -15,6 +15,8 @@ module Hive
       CHANNELS = %w[stdout stderr supervisor].freeze
       INVALIDATING_SEPARATOR = "#\n".b.freeze
       READ_CHUNK_SIZE = 64 * 1024
+      APPEND_LOCK_TIMEOUT_SEC = 5.0
+      APPEND_LOCK_POLL_SEC = 0.01
 
       attr_reader :path
 
@@ -27,34 +29,50 @@ module Hive
         []
       end
 
+      # @api private
       def self.parse_frames(bytes, after_sequence:)
         bytes.lines.filter_map do |line|
           next unless line.end_with?("\n")
 
           begin
-            data = JSON.parse(line)
-            sequence = Integer(data.fetch("sequence"))
+            data, sequence = parse_frame_fields(line)
             next if sequence <= after_sequence
-            channel = data.fetch("channel")
-            next unless CHANNELS.include?(channel)
 
             Frame.new(
               sequence: sequence,
               timestamp: data.fetch("timestamp"),
-              channel: channel,
+              channel: data.fetch("channel"),
               bytes: Base64.strict_decode64(data.fetch("data"))
             )
-          rescue JSON::ParserError, KeyError, ArgumentError
+          rescue JSON::ParserError, KeyError, ArgumentError, TypeError
             nil
           end
         end.sort_by(&:sequence)
       end
-      private_class_method :parse_frames
 
-      def initialize(path, clock: -> { Time.now.utc }, custody_io: nil)
+      # @api private
+      def self.parse_frame_fields(line)
+        data = JSON.parse(line)
+        sequence = Integer(data.fetch("sequence"))
+        channel = data.fetch("channel")
+        encoded = data.fetch("data")
+        raise TypeError, "frame data must be a string" unless encoded.is_a?(String)
+        raise ArgumentError, "unknown frame channel" unless CHANNELS.include?(channel)
+
+        [ data, sequence ]
+      end
+
+      # @api private
+      def self.valid_base64?(encoded)
+        encoded.match?(%r{\A(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?\z})
+      end
+
+      def initialize(path, clock: -> { Time.now.utc }, custody_io: nil,
+                     lock_timeout: APPEND_LOCK_TIMEOUT_SEC)
         @path = File.expand_path(path)
         @clock = clock
         @custody_io = custody_io
+        @lock_timeout = lock_timeout
         @mutex = Mutex.new
         @io = nil
         @read_io = nil
@@ -65,9 +83,7 @@ module Hive
         @read_io = File.open(@path, open_flags(File::RDONLY))
         validate_open_descriptors!
         with_append_lock do
-          size = @io.stat.size
-          @sequence = strict_frames(size).last&.sequence.to_i
-          @observed_size = size
+          reconcile_sequence(@io.stat.size)
         end
       rescue Errno::ELOOP
         cleanup_failed_initialization
@@ -88,8 +104,8 @@ module Hive
             with_append_lock do
               size = @io.stat.size
               sealed = seal_torn_tail(size)
-              size = @io.stat.size if sealed
-              reconcile_sequence(size) if sealed || @observed_size.nil? || size != @observed_size
+              size += INVALIDATING_SEPARATOR.bytesize if sealed
+              reconcile_sequence(size) if @observed_size.nil? || size != @observed_size
 
               next_sequence = @sequence + 1
               frame = JSON.generate(
@@ -101,10 +117,10 @@ module Hive
               write_complete(frame)
               @io.flush
               @sequence = next_sequence
-              @observed_size = @io.stat.size
+              @observed_size = size + frame.bytesize
               next_sequence
             end
-          rescue StandardError
+          rescue Exception # rubocop:disable Lint/RescueException -- snapshot invalidation must cover interrupts
             @observed_size = nil
             raise
           end
@@ -157,22 +173,30 @@ module Hive
       end
 
       def with_append_lock
-        locked = false
         primary_error = nil
-        acquired = @io.flock(File::LOCK_EX)
-        raise IOError, "attempt log lock could not be acquired" unless acquired
+        release_needed = true
+        deadline = monotonic_now + @lock_timeout
+        until @io.flock(File::LOCK_EX | File::LOCK_NB)
+          remaining = deadline - monotonic_now
+          if remaining <= 0
+            raise IOError, "attempt log lock held longer than #{@lock_timeout}s"
+          end
 
-        locked = true
+          sleep([ APPEND_LOCK_POLL_SEC, remaining ].min)
+        end
         yield
-      rescue StandardError => error
+      rescue Exception => error # rubocop:disable Lint/RescueException -- preserve every initiating unwind
         primary_error = error
         raise
       ensure
-        if locked
+        # release_needed is set before flock so an asynchronous unwind after
+        # acquisition cannot strand the kernel lock. LOCK_UN is harmless when
+        # this descriptor never acquired the lock.
+        if release_needed
           begin
-            released = @io.flock(File::LOCK_UN)
-            raise IOError, "attempt log lock could not be released" unless released
-          rescue StandardError
+            @io.flock(File::LOCK_UN)
+          rescue Exception # rubocop:disable Lint/RescueException -- cleanup must not replace an unwind
+            replace_append_descriptor_after_unlock_failure
             raise unless primary_error
           end
         end
@@ -184,35 +208,52 @@ module Hive
         return false if size.zero?
 
         last_byte = @read_io.pread(1, size - 1)
-        unless last_byte&.bytesize == 1
-          raise IOError, "attempt log ended before its reported boundary"
-        end
+        raise IOError, "attempt log ended before its reported boundary" unless last_byte.bytesize == 1
         return false if last_byte == "\n"
 
         write_complete(INVALIDATING_SEPARATOR)
         @io.flush
         true
+      rescue EOFError
+        raise IOError, "attempt log ended before its reported boundary"
       end
 
       def reconcile_sequence(size)
-        @sequence = strict_frames(size).last&.sequence.to_i
+        @sequence = strict_max_sequence(size)
         @observed_size = size
       end
 
-      def strict_frames(size)
-        bytes = +"".b
+      def strict_max_sequence(size)
+        pending = +"".b
         offset = 0
+        max_sequence = 0
         while offset < size
-          chunk = @read_io.pread([ READ_CHUNK_SIZE, size - offset ].min, offset)
-          if chunk.nil? || chunk.empty?
-            raise IOError, "attempt log ended before its reported boundary"
-          end
+          length = [ READ_CHUNK_SIZE, size - offset ].min
+          chunk = @read_io.pread(length, offset)
+          raise IOError, "attempt log ended before its reported boundary" unless chunk.bytesize == length
 
-          bytes << chunk
+          pending << chunk
           offset += chunk.bytesize
+          while (newline = pending.index("\n"))
+            sequence = strict_frame_sequence(pending.slice!(0, newline + 1))
+            max_sequence = sequence if sequence && sequence > max_sequence
+          end
         end
 
-        self.class.send(:parse_frames, bytes, after_sequence: 0)
+        max_sequence
+      rescue EOFError
+        raise IOError, "attempt log ended before its reported boundary"
+      end
+
+      def strict_frame_sequence(line)
+        data, sequence = self.class.parse_frame_fields(line)
+        data.fetch("timestamp")
+        encoded = data.fetch("data")
+        return nil unless sequence.positive? && self.class.valid_base64?(encoded)
+
+        sequence
+      rescue JSON::ParserError, KeyError, ArgumentError, TypeError
+        nil
       end
 
       def write_complete(bytes)
@@ -226,48 +267,65 @@ module Hive
       end
 
       def cleanup_failed_initialization
-        close_quietly(@read_io)
-        close_quietly(@io)
-        close_quietly(@custody_io)
+        run_cleanup_steps(
+          -> { @read_io&.close unless @read_io&.closed? },
+          -> { @io&.close unless @io&.closed? },
+          -> { @custody_io&.close unless @custody_io&.closed? }
+        )
       end
 
-      def close_quietly(io)
-        io&.close unless io&.closed?
+      def close_resources
+        # Preserve the historical retry contract: a flush/fsync failure leaves
+        # the writer open so Supervisor can append its terminal diagnostic.
+        @io.flush
+        @io.fsync
+
+        error = run_cleanup_steps(
+          -> { @read_io.close unless @read_io.closed? },
+          -> { @io.close unless @io.closed? },
+          -> { @custody_io.flock(File::LOCK_UN) if @custody_io && !@custody_io.closed? },
+          -> { @custody_io.close if @custody_io && !@custody_io.closed? }
+        )
+
+        raise error if error
+      end
+
+      def run_cleanup_steps(*steps)
+        first_error = nil
+        steps.each do |step|
+          begin
+            step.call
+          rescue StandardError => error
+            first_error ||= error
+          end
+        end
+        first_error
+      end
+
+      def replace_append_descriptor_after_unlock_failure
+        failed_io = @io
+        begin
+          failed_io.close unless failed_io.closed?
+        rescue StandardError
+          nil
+        end
+        return unless failed_io&.closed?
+
+        replacement = File.open(@path, open_flags(File::WRONLY | File::APPEND))
+        replacement_status = replacement.stat
+        read_status = @read_io.stat
+        unless replacement_status.file? && replacement_status.dev == read_status.dev &&
+               replacement_status.ino == read_status.ino
+          replacement.close
+          return
+        end
+        @io = replacement
       rescue StandardError
         nil
       end
 
-      def close_resources
-        error = nil
-        begin
-          @io.flush
-          @io.fsync
-        rescue StandardError => close_error
-          error ||= close_error
-        end
-
-        [ @read_io, @io ].each do |io|
-          begin
-            io.close unless io.closed?
-          rescue StandardError => close_error
-            error ||= close_error
-          end
-        end
-
-        if @custody_io
-          begin
-            @custody_io.flock(File::LOCK_UN) unless @custody_io.closed?
-          rescue StandardError => close_error
-            error ||= close_error
-          end
-          begin
-            @custody_io.close unless @custody_io.closed?
-          rescue StandardError => close_error
-            error ||= close_error
-          end
-        end
-
-        raise error if error
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
     end
   end

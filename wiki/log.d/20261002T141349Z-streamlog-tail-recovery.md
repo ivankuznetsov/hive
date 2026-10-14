@@ -10,11 +10,14 @@ tags: [attempts, stream-log, recovery, concurrency]
   written and defensively flushed before sequence allocation; errors escape
   unchanged for caller-controlled, physical-state-driven retry.
 - Recovery preserves the damaged bytes while keeping an unconfirmed JSON tail
-  unreadable. Per-instance mutex and per-log advisory-lock serialization now
-  cover physical inspection, sealing, strict sequence reconciliation, and frame
-  publication for cooperating threads, instances, and processes.
+  unreadable. Per-instance mutex and bounded, monotonic, nonblocking per-log
+  advisory-lock acquisition now cover physical inspection, sealing, streaming
+  strict sequence reconciliation, and frame publication for cooperating
+  threads, instances, and processes. Failed appends invalidate the snapshot for
+  the next scan, and unlock exceptions fall back to descriptor replacement.
 - Focused StreamLog regressions cover ambiguous separator outcomes,
   same-instance and reopen retry, strict-read and constructor cleanup failures,
   and thread, instance, and process contention. Client and archive regressions
   prove successful post-recovery frames remain cursor-visible, while Supervisor
-  coverage pins both one-shot and persistent fatal drain-error outcomes.
+  coverage pins both one-shot and persistent fatal drain-error outcomes plus
+  diagnostic terminalization after one-shot flush and sync failures.

@@ -1,14 +1,16 @@
 require "test_helper"
 require "hive/attempts/stream_log"
+require_relative "../support/stream_log_test_support"
 
 class AttemptsStreamLogRecoveryTest < Minitest::Test
   include HiveTestHelper
+  include StreamLogTestSupport
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
 
-  class BlockingWriter
+  class BlockingWriter < StreamLogTestSupport::DelegatingIO
     def initialize(io, held:, release:)
-      @io = io
+      super(io)
       @held = held
       @release = release
       @blocked = false
@@ -24,13 +26,24 @@ class AttemptsStreamLogRecoveryTest < Minitest::Test
 
       @io.syswrite(bytes)
     end
+  end
 
-    def flush = @io.flush
-    def flock(operation) = @io.flock(operation)
-    def stat = @io.stat
-    def fsync = @io.fsync
-    def close = @io.close
-    def closed? = @io.closed?
+  class ContentionObserver < StreamLogTestSupport::DelegatingIO
+    def initialize(io, attempted:)
+      super(io)
+      @attempted = attempted
+      @reported = false
+    end
+
+    def flock(operation)
+      result = super
+      if !result && operation == (File::LOCK_EX | File::LOCK_NB) && !@reported
+        @reported = true
+        @attempted.write("A")
+        @attempted.flush
+      end
+      result
+    end
   end
 
   def test_independently_opened_processes_serialize_torn_tail_recovery
@@ -41,7 +54,7 @@ class AttemptsStreamLogRecoveryTest < Minitest::Test
       seed = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       seed.append(:stdout, "seed")
       seed.close
-      File.open(path, "ab") { |file| file.write("torn") }
+      seed_torn_tail(path)
 
       first_ready_r, first_ready_w = IO.pipe
       first_start_r, first_start_w = IO.pipe
@@ -169,12 +182,12 @@ class AttemptsStreamLogRecoveryTest < Minitest::Test
 
   def run_second_contender(path:, ready:, start:, attempted:, result:)
     log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+    observer = ContentionObserver.new(log.instance_variable_get(:@io), attempted: attempted)
+    log.instance_variable_set(:@io, observer)
     ready.write("R")
     ready.flush
     raise IOError, "parent closed the second start gate" unless start.read(1) == "S"
 
-    attempted.write("A")
-    attempted.flush
     sequence = log.append(:stdout, "child-b")
     log.close
     result.write(JSON.generate("sequence" => sequence) + "\n")

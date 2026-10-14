@@ -5,18 +5,20 @@ require "hive/attempts/supervisor"
 require "hive/patrol_fix/attempt_diagnostic"
 require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/task_resolver"
+require_relative "../../support/stream_log_test_support"
 
 class AttemptsSupervisorTest < Minitest::Test
   include HiveTestHelper
+  include StreamLogTestSupport
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
   CLAIM_CAPABILITY = "c" * 64
 
-  class SeparatorFaultWriter
+  class SeparatorFaultWriter < StreamLogTestSupport::DelegatingIO
     attr_reader :separator_attempts
 
     def initialize(io, persistent:)
-      @io = io
+      super(io)
       @persistent = persistent
       @separator_attempts = 0
     end
@@ -29,13 +31,34 @@ class AttemptsSupervisorTest < Minitest::Test
 
       @io.syswrite(bytes)
     end
+  end
 
-    def flush = @io.flush
-    def flock(operation) = @io.flock(operation)
-    def stat = @io.stat
-    def fsync = @io.fsync
-    def close = @io.close
-    def closed? = @io.closed?
+  class OneShotSyncFaultWriter < StreamLogTestSupport::DelegatingIO
+    def initialize(io, operation:, error:)
+      super(io)
+      @operation = operation
+      @error = error
+      @raised = false
+    end
+
+    def flush
+      raise_once(:flush)
+      super
+    end
+
+    def fsync
+      raise_once(:fsync)
+      super
+    end
+
+    private
+
+    def raise_once(operation)
+      return unless @operation == operation && !@raised
+
+      @raised = true
+      raise @error
+    end
   end
 
   def test_wrapper_registration_is_released_and_cleanup_errors_are_bounded
@@ -1082,6 +1105,39 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_one_shot_log_sync_failure_keeps_writer_open_for_diagnostic_terminalization
+    %i[flush fsync].each do |operation|
+      with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+        original = store.log_archive.method(:open_writer)
+        captured_log = nil
+        error = IOError.new("#{operation} failed")
+        store.log_archive.define_singleton_method(:open_writer) do |attempt_id, clock:|
+          captured_log = original.call(attempt_id, clock: clock)
+          fault = AttemptsSupervisorTest::OneShotSyncFaultWriter.new(
+            captured_log.instance_variable_get(:@io), operation: operation, error: error
+          )
+          captured_log.instance_variable_set(:@io, fault)
+          captured_log
+        end
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+          stale_sec: 1, first_heartbeat_timeout_sec: 1
+        )
+
+        assert_equal Hive::ExitCodes::SOFTWARE, supervisor.run
+        terminal = store.fetch(attempt.attempt_id)
+        frames = Hive::Attempts::StreamLog.read(
+          File.join(store.root, terminal.receipt.dig("log_reference", "path"))
+        )
+        assert_equal "terminal", terminal.state
+        assert_equal "failed", terminal.outcome
+        assert_match(/#{operation} failed/, frames.last.bytes)
+        assert captured_log.closed?
+      end
+    end
+  end
+
   def test_one_shot_separator_error_during_drain_is_fatal_and_diagnostic_recovers
     worker_argv = [ "/bin/sh", "-c", "printf worker-output; sleep 10" ]
     with_attempt(worker_argv: worker_argv) do |store, attempt|
@@ -1285,11 +1341,12 @@ class AttemptsSupervisorTest < Minitest::Test
 
   def inject_torn_log_separator_failure(archive, persistent:)
     original = archive.method(:open_writer)
+    seed_torn = method(:seed_torn_tail)
     injection = {}
     archive.define_singleton_method(:open_writer) do |attempt_id, clock:|
       log = original.call(attempt_id, clock: clock)
       log.append(:supervisor, "existing\n")
-      File.open(log.path, "ab") { |file| file.write("torn") }
+      seed_torn.call(log.path)
       fault = AttemptsSupervisorTest::SeparatorFaultWriter.new(
         log.instance_variable_get(:@io), persistent: persistent
       )

@@ -1,24 +1,26 @@
 require "test_helper"
 require "hive/attempts/stream_log"
+require_relative "../../support/stream_log_test_support"
 
 class AttemptsStreamLogTest < Minitest::Test
   include HiveTestHelper
+  include StreamLogTestSupport
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
 
-  class FileWriter
+  class FileWriter < StreamLogTestSupport::DelegatingIO
     attr_accessor :flush_error
     attr_reader :writes
 
     def initialize(io, limit: nil, separator_outcome: nil, frame_prefix_before_error: nil,
-                   lock_error: nil, unlock_result: true, close_error: nil,
+                   lock_error: nil, unlock_error: nil, close_error: nil,
                    error: Errno::EINTR.new)
-      @io = io
+      super(io)
       @limit = limit
       @separator_outcome = separator_outcome
       @frame_prefix_before_error = frame_prefix_before_error
       @lock_error = lock_error
-      @unlock_result = unlock_result
+      @unlock_error = unlock_error
       @close_error = close_error
       @error = error
       @writes = []
@@ -70,20 +72,15 @@ class AttemptsStreamLogTest < Minitest::Test
     end
 
     def flock(operation)
-      raise @lock_error if operation == File::LOCK_EX && @lock_error
-
-      if operation == File::LOCK_UN && @unlock_result != true
-        result = @unlock_result
-        @unlock_result = true
-        return result
+      raise @lock_error if operation & File::LOCK_EX != 0 && @lock_error
+      if operation == File::LOCK_UN && @unlock_error
+        error = @unlock_error
+        @unlock_error = nil
+        raise error
       end
 
-      @io.flock(operation)
+      super
     end
-
-    def stat = @io.stat
-    def fsync = @io.fsync
-    def chmod(mode) = @io.chmod(mode)
 
     def close
       @io.close
@@ -93,31 +90,29 @@ class AttemptsStreamLogTest < Minitest::Test
     def closed? = @io.closed?
   end
 
-  class ReadFile
-    attr_accessor :error, :short_read
-    attr_reader :full_reads
+  class ReadFile < StreamLogTestSupport::DelegatingIO
+    attr_accessor :error
+    attr_reader :full_reads, :pread_calls, :bytes_requested
 
-    def initialize(io, error: nil, short_read: nil, close_error: nil)
-      @io = io
+    def initialize(io, error: nil, close_error: nil)
+      super(io)
       @error = error
-      @short_read = short_read
       @close_error = close_error
       @full_reads = 0
+      @pread_calls = 0
+      @bytes_requested = 0
     end
 
     def pread(length, offset)
-      return "".b if @short_read == :tail && length == 1
-      return "".b if @short_read == :full && offset.zero? && length > 1
-
+      @pread_calls += 1
+      @bytes_requested += length
       if offset.zero? && length > 1
         @full_reads += 1
         raise @error if @error
       end
 
-      @io.pread(length, offset)
+      super
     end
-
-    def stat = @io.stat
 
     def close
       @io.close
@@ -125,6 +120,67 @@ class AttemptsStreamLogTest < Minitest::Test
     end
 
     def closed? = @io.closed?
+  end
+
+  class TruncatingReadFile < StreamLogTestSupport::DelegatingIO
+    def initialize(io, path:, truncate_to:, trigger:)
+      super(io)
+      @path = path
+      @truncate_to = truncate_to
+      @trigger = trigger
+      @truncated = false
+    end
+
+    def pread(length, offset)
+      if !@truncated && @trigger.call(length, offset)
+        @truncated = true
+        File.truncate(@path, @truncate_to)
+      end
+      super
+    end
+  end
+
+  class InterruptingLockWriter < StreamLogTestSupport::DelegatingIO
+    attr_reader :unlock_attempts
+
+    def initialize(io, interrupt:, unlock_error:)
+      super(io)
+      @interrupt = interrupt
+      @unlock_error = unlock_error
+      @interrupted = false
+      @unlock_attempts = 0
+    end
+
+    def flock(operation)
+      if operation & File::LOCK_EX != 0 && !@interrupted
+        @interrupted = true
+        super
+        raise @interrupt
+      end
+      if operation == File::LOCK_UN
+        @unlock_attempts += 1
+        raise @unlock_error
+      end
+
+      super
+    end
+  end
+
+  class PostWriteStatFaultWriter < StreamLogTestSupport::DelegatingIO
+    attr_reader :stat_calls
+
+    def initialize(io, error:)
+      super(io)
+      @error = error
+      @stat_calls = 0
+    end
+
+    def stat
+      @stat_calls += 1
+      raise @error if @stat_calls > 1
+
+      super
+    end
   end
 
   class CustodyFile
@@ -213,7 +269,7 @@ class AttemptsStreamLogTest < Minitest::Test
       log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       log.append(:stdout, "complete")
       log.close
-      File.open(path, "ab") { |file| file.write('{"sequence":2') }
+      seed_torn_tail(path, '{"sequence":2')
 
       assert_equal [ "complete" ], Hive::Attempts::StreamLog.read(path).map(&:bytes)
       reference = Hive::OutputReference.build(path, root: root)
@@ -243,7 +299,7 @@ class AttemptsStreamLogTest < Minitest::Test
       log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       log.append(:stdout, "published")
       torn = '{"sequence":2'
-      File.open(path, "ab") { |file| file.write(torn) }
+      seed_torn_tail(path, torn)
       before = File.binread(path)
       error = Errno::EINTR.new("separator")
       writer = FileWriter.new(
@@ -276,7 +332,7 @@ class AttemptsStreamLogTest < Minitest::Test
         log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
         log.append(:stdout, "published")
         torn = '{"sequence":2'
-        File.open(path, "ab") { |file| file.write(torn) }
+        seed_torn_tail(path, torn)
         damaged_prefix = File.binread(path)
         error = Errno::EINTR.new(outcome.to_s)
         writer = FileWriter.new(
@@ -310,7 +366,7 @@ class AttemptsStreamLogTest < Minitest::Test
         log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
         log.append(:stdout, "published")
         torn = '{"sequence":2'
-        File.open(path, "ab") { |file| file.write(torn) }
+        seed_torn_tail(path, torn)
         damaged_prefix = File.binread(path)
         writer = FileWriter.new(log.instance_variable_get(:@io), separator_outcome: outcome)
         log.instance_variable_set(:@io, writer)
@@ -339,7 +395,7 @@ class AttemptsStreamLogTest < Minitest::Test
       path = File.join(root, "logs", "attempt.frames")
       log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       log.append(:stdout, "published")
-      File.open(path, "ab") { |file| file.write("torn") }
+      seed_torn_tail(path)
       damaged_prefix = File.binread(path)
       writer = FileWriter.new(log.instance_variable_get(:@io), limit: 1)
       log.instance_variable_set(:@io, writer)
@@ -359,7 +415,7 @@ class AttemptsStreamLogTest < Minitest::Test
       first = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       first.append(:stdout, "published")
       first.close
-      File.open(path, "ab") { |file| file.write("torn bytes") }
+      seed_torn_tail(path, "torn bytes")
       before = File.binread(path)
 
       reopened = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
@@ -395,13 +451,30 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_successful_append_derives_its_snapshot_without_a_post_write_stat
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      writer = PostWriteStatFaultWriter.new(
+        log.instance_variable_get(:@io), error: IOError.new("post-write stat")
+      )
+      log.instance_variable_set(:@io, writer)
+
+      assert_equal 1, log.append(:stdout, "published")
+      assert_equal 1, writer.stat_calls
+      assert_equal [ "published" ], Hive::Attempts::StreamLog.read(path).map(&:bytes)
+    ensure
+      log&.close unless log&.closed?
+    end
+  end
+
   def test_newline_terminated_malformed_record_is_not_rewritten
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
       first = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       first.append(:stdout, "published")
       first.close
-      File.open(path, "ab") { |file| file.write("not-json\n") }
+      seed_torn_tail(path, "not-json\n")
       before = File.binread(path)
 
       reopened = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
@@ -414,6 +487,26 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_streaming_reconciliation_rejects_a_high_sequence_with_invalid_base64
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      log.append(:stdout, "published")
+      malformed = JSON.generate(
+        "sequence" => 99,
+        "timestamp" => NOW.iso8601(6),
+        "channel" => "stdout",
+        "data" => "not base64"
+      ) + "\n"
+      seed_torn_tail(path, malformed)
+
+      assert_equal 2, log.append(:stdout, "next")
+      assert_equal [ 1, 2 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+    ensure
+      log&.close unless log&.closed?
+    end
+  end
+
   def test_valid_json_without_newline_stays_unreadable_after_recovery
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
@@ -421,7 +514,7 @@ class AttemptsStreamLogTest < Minitest::Test
       first.append(:stdout, "published")
       first.close
       unconfirmed = serialized_frame(sequence: 2, bytes: "unconfirmed").delete_suffix("\n")
-      File.open(path, "ab") { |file| file.write(unconfirmed) }
+      seed_torn_tail(path, unconfirmed)
 
       reopened = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       assert_equal 2, reopened.append(:stdout, "confirmed")
@@ -460,28 +553,36 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
-  def test_reported_boundary_short_reads_fail_closed_and_allow_retry
+  def test_real_truncation_past_reported_boundaries_fails_closed_and_allows_retry
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
       log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       log.append(:stdout, "one")
-      read_file = ReadFile.new(log.instance_variable_get(:@read_io), short_read: :tail)
-      log.instance_variable_set(:@read_io, read_file)
+      seed_torn_tail(path, "x")
+      tail_size = File.size(path)
+      tail_reader = TruncatingReadFile.new(
+        log.instance_variable_get(:@read_io), path: path, truncate_to: tail_size - 1,
+        trigger: ->(length, _offset) { length == 1 }
+      )
+      log.instance_variable_set(:@read_io, tail_reader)
 
       error = assert_raises(IOError) { log.append(:stdout, "blocked") }
       assert_match(/reported boundary/, error.message)
-      read_file.short_read = nil
       assert_equal 2, log.append(:stdout, "two")
 
       other = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       assert_equal 3, other.append(:stdout, "three")
       other.close
-      read_file.short_read = :full
+      retained_size = log.instance_variable_get(:@observed_size)
+      full_reader = TruncatingReadFile.new(
+        tail_reader, path: path, truncate_to: retained_size,
+        trigger: ->(length, offset) { offset.zero? && length > 1 }
+      )
+      log.instance_variable_set(:@read_io, full_reader)
       error = assert_raises(IOError) { log.append(:stdout, "blocked again") }
       assert_match(/reported boundary/, error.message)
-      read_file.short_read = nil
-      assert_equal 4, log.append(:stdout, "four")
-      assert_equal [ 1, 2, 3, 4 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+      assert_equal 3, log.append(:stdout, "four")
+      assert_equal [ 1, 2, 3 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
     ensure
       other&.close unless other&.closed?
       log&.close unless log&.closed?
@@ -492,15 +593,22 @@ class AttemptsStreamLogTest < Minitest::Test
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
       log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
-      writer = FileWriter.new(log.instance_variable_get(:@io), unlock_result: false)
+      unlock_error = Errno::EIO.new("unlock")
+      writer = FileWriter.new(log.instance_variable_get(:@io), unlock_error: unlock_error)
       log.instance_variable_set(:@io, writer)
 
-      error = assert_raises(IOError) { log.append(:stdout, "physically published") }
-      assert_match(/lock could not be released/, error.message)
+      error = assert_raises(Errno::EIO) { log.append(:stdout, "physically published") }
+      assert_same unlock_error, error
       assert_equal [ 1 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
-      assert_equal 2, log.append(:stdout, "retry")
-      assert_equal [ 1, 2 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+      independent = Timeout.timeout(1) do
+        Hive::Attempts::StreamLog.new(path, clock: -> { NOW }, lock_timeout: 0.1)
+      end
+      assert_equal 2, independent.append(:stdout, "independent")
+      independent.close
+      assert_equal 3, log.append(:stdout, "retry")
+      assert_equal [ 1, 2, 3 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
     ensure
+      independent&.close unless independent&.closed?
       log&.close
     end
   end
@@ -509,11 +617,11 @@ class AttemptsStreamLogTest < Minitest::Test
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
       log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
-      File.open(path, "ab") { |file| file.write("torn") }
+      seed_torn_tail(path)
       error = Errno::EINTR.new("separator")
       writer = FileWriter.new(
         log.instance_variable_get(:@io), separator_outcome: :write_error,
-        unlock_result: false, error: error
+        unlock_error: Errno::EIO.new("unlock"), error: error
       )
       log.instance_variable_set(:@io, writer)
 
@@ -522,6 +630,76 @@ class AttemptsStreamLogTest < Minitest::Test
       assert_equal 1, log.append(:stdout, "recovered")
     ensure
       log&.close
+    end
+  end
+
+  def test_interrupt_during_acquisition_is_preserved_and_fallback_releases_the_lock
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      interrupt = Interrupt.new("stop")
+      writer = InterruptingLockWriter.new(
+        log.instance_variable_get(:@io), interrupt: interrupt,
+        unlock_error: Errno::EIO.new("unlock")
+      )
+      log.instance_variable_set(:@io, writer)
+
+      raised = assert_raises(Interrupt) { log.append(:stdout, "blocked") }
+      assert_same interrupt, raised
+      assert_equal 1, writer.unlock_attempts
+      independent = Timeout.timeout(1) do
+        Hive::Attempts::StreamLog.new(path, clock: -> { NOW }, lock_timeout: 0.1)
+      end
+      assert_equal 1, independent.append(:stdout, "recovered")
+    ensure
+      independent&.close unless independent&.closed?
+      log&.close unless log&.closed?
+    end
+  end
+
+  def test_lock_wait_is_bounded_without_releasing_another_descriptors_lock
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      holder = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      contender = Hive::Attempts::StreamLog.new(
+        path, clock: -> { NOW }, lock_timeout: 0.02
+      )
+      holder_io = holder.instance_variable_get(:@io)
+      assert holder_io.flock(File::LOCK_EX | File::LOCK_NB)
+
+      error = assert_raises(IOError) { contender.append(:stdout, "blocked") }
+      assert_match(/held longer than/, error.message)
+      File.open(path, File::WRONLY | File::APPEND) do |probe|
+        refute probe.flock(File::LOCK_EX | File::LOCK_NB),
+               "timed-out contender must not unlock the holder's descriptor"
+      end
+
+      holder_io.flock(File::LOCK_UN)
+      assert_equal 1, contender.append(:stdout, "recovered")
+    ensure
+      holder_io&.flock(File::LOCK_UN) rescue nil
+      contender&.close unless contender&.closed?
+      holder&.close unless holder&.closed?
+    end
+  end
+
+  def test_constructor_lock_wait_is_bounded_and_closes_opened_descriptors
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      seed = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      seed.close
+      holder = File.open(path, File::WRONLY | File::APPEND)
+      assert holder.flock(File::LOCK_EX | File::LOCK_NB)
+
+      error = assert_raises(IOError) do
+        Hive::Attempts::StreamLog.new(path, clock: -> { NOW }, lock_timeout: 0.02)
+      end
+      assert_match(/held longer than/, error.message)
+      refute holder.closed?
+    ensure
+      holder&.flock(File::LOCK_UN) rescue nil
+      holder&.close unless holder&.closed?
+      seed&.close unless seed&.closed?
     end
   end
 
@@ -563,7 +741,7 @@ class AttemptsStreamLogTest < Minitest::Test
       seed = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       seed.append(:stdout, "seed")
       seed.close
-      File.open(path, "ab") { |file| file.write("torn") }
+      seed_torn_tail(path)
 
       first_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       second_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
@@ -611,7 +789,7 @@ class AttemptsStreamLogTest < Minitest::Test
       seed = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       seed.append(:stdout, "seed")
       seed.close
-      File.open(path, "ab") { |file| file.write("torn") }
+      seed_torn_tail(path)
 
       failing_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       recovering_log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
@@ -688,18 +866,45 @@ class AttemptsStreamLogTest < Minitest::Test
       read_file = ReadFile.new(log.instance_variable_get(:@read_io))
       log.instance_variable_set(:@read_io, read_file)
       original_open = File.method(:open)
+      original_binread = File.method(:binread)
+      original_read = File.method(:read)
+      original_stream_read = Hive::Attempts::StreamLog.method(:read)
       path_opens = 0
+      alternate_reads = 0
       replacement = lambda do |candidate, *args, **kwargs, &block|
         path_opens += 1 if File.expand_path(candidate) == path
         original_open.call(candidate, *args, **kwargs, &block)
       end
+      binread_replacement = lambda do |candidate, *args, **kwargs|
+        alternate_reads += 1 if File.expand_path(candidate) == path
+        original_binread.call(candidate, *args, **kwargs)
+      end
+      read_replacement = lambda do |candidate, *args, **kwargs|
+        alternate_reads += 1 if File.expand_path(candidate) == path
+        original_read.call(candidate, *args, **kwargs)
+      end
+      stream_read_replacement = lambda do |candidate, **kwargs|
+        alternate_reads += 1 if File.expand_path(candidate) == path
+        original_stream_read.call(candidate, **kwargs)
+      end
 
       with_replaced_singleton_method(File, :open, replacement) do
-        assert_equal 1, log.append(:stdout, "one")
-        assert_equal 2, log.append(:stdout, "two")
+        with_replaced_singleton_method(File, :binread, binread_replacement) do
+          with_replaced_singleton_method(File, :read, read_replacement) do
+            with_replaced_singleton_method(
+              Hive::Attempts::StreamLog, :read, stream_read_replacement
+            ) do
+              assert_equal 1, log.append(:stdout, "one")
+              assert_equal 2, log.append(:stdout, "two")
+            end
+          end
+        end
       end
       assert_equal 0, path_opens
+      assert_equal 0, alternate_reads
       assert_equal 0, read_file.full_reads
+      assert_equal 1, read_file.pread_calls
+      assert_equal 1, read_file.bytes_requested
 
       other = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       assert_equal 3, other.append(:stdout, "three")
@@ -722,6 +927,32 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_reconciliation_streams_sequences_without_decoding_or_allocating_frames
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      log.append(:stdout, "one")
+      other = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      other.append(:stdout, "two")
+      other.close
+
+      with_replaced_singleton_method(
+        Base64, :strict_decode64, ->(_encoded) { raise "decoded during reconciliation" }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Attempts::StreamLog::Frame, :new,
+          ->(**_attributes) { raise "allocated a frame during reconciliation" }
+        ) do
+          assert_equal 3, log.append(:stdout, "three")
+        end
+      end
+      assert_equal [ 1, 2, 3 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+    ensure
+      other&.close unless other&.closed?
+      log&.close unless log&.closed?
+    end
+  end
+
   def test_constructor_strict_read_failure_closes_both_descriptors_and_releases_lock
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
@@ -736,9 +967,7 @@ class AttemptsStreamLogTest < Minitest::Test
         next io unless candidate == path && args.first.is_a?(Integer)
 
         if (args.first & File::WRONLY) == File::WRONLY
-          writer = FileWriter.new(
-            io, unlock_result: false, close_error: IOError.new("append close failed")
-          )
+          writer = FileWriter.new(io, close_error: IOError.new("append close failed"))
           opened << writer
           writer
         else
@@ -755,6 +984,42 @@ class AttemptsStreamLogTest < Minitest::Test
       assert_equal 2, opened.length
       assert opened.all?(&:closed?)
       Timeout.timeout(2) { Hive::Attempts::StreamLog.new(path).close }
+    end
+  end
+
+  def test_constructor_failure_closes_real_custody_descriptor_without_masking_the_error
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      seed = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      seed.append(:stdout, "published")
+      seed.close
+      custody_path = File.join(root, "custody.lock")
+      custody = File.open(custody_path, File::RDWR | File::CREAT, 0o600)
+      assert custody.flock(File::LOCK_EX | File::LOCK_NB)
+      original_open = File.method(:open)
+      error = IOError.new("strict read failed")
+      replacement = lambda do |candidate, *args, **kwargs, &block|
+        io = original_open.call(candidate, *args, **kwargs, &block)
+        if candidate == path && args.first.is_a?(Integer) &&
+           (args.first & File::WRONLY) != File::WRONLY
+          ReadFile.new(io, error: error)
+        else
+          io
+        end
+      end
+
+      with_replaced_singleton_method(File, :open, replacement) do
+        raised = assert_raises(IOError) do
+          Hive::Attempts::StreamLog.new(path, custody_io: custody)
+        end
+        assert_same error, raised
+      end
+      assert custody.closed?
+      File.open(custody_path, File::RDWR) do |probe|
+        assert probe.flock(File::LOCK_EX | File::LOCK_NB)
+      end
+    ensure
+      custody&.close unless custody&.closed?
     end
   end
 
@@ -838,6 +1103,9 @@ class AttemptsStreamLogTest < Minitest::Test
       sync_writer.flush_error = sync_error
       sync_log.instance_variable_set(:@io, sync_writer)
       assert_same sync_error, assert_raises(IOError) { sync_log.close }
+      refute sync_log.closed?
+      sync_log.append(:supervisor, "diagnostic")
+      sync_log.close
       assert sync_log.closed?
 
       close_log = Hive::Attempts::StreamLog.new(File.join(root, "close.frames"), clock: -> { NOW })
@@ -866,7 +1134,7 @@ class AttemptsStreamLogTest < Minitest::Test
       log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       log.append(:stdout, "a")
       log.close
-      File.open(path, "ab") { |file| file.write('{"sequence":2,"timestamp":"2026-') }
+      seed_torn_tail(path, '{"sequence":2,"timestamp":"2026-')
 
       reopened = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
       assert_equal 2, reopened.append(:stdout, "b")

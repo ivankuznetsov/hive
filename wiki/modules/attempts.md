@@ -183,15 +183,20 @@ filesystem errors and malformed records. Constructor failure releases any
 acquired log lock and closes both log descriptors and an owned custody
 descriptor without replacing the initiating error.
 
-Every append takes the per-instance mutex and then the log's exclusive advisory
-lock. While holding both, it inspects the physical last byte, optionally seals
-the tail, reconciles the sequence when its coherent sequence/size snapshot is
+Every append takes the per-instance mutex and then polls for the log's exclusive
+advisory lock with nonblocking `flock` and a five-second monotonic deadline.
+While holding both, it inspects the physical last byte, optionally seals the
+tail, reconciles the sequence when its coherent sequence/size snapshot is
 stale, writes and flushes the complete frame, and only then publishes the new
-sequence and size snapshot. An unchanged healthy snapshot avoids a full replay
-scan, but does not skip physical tail inspection. The same mutex serializes
-`close`; a forked child must independently open its own `StreamLog`. This
-contract coordinates `StreamLog` writers only—direct writers that ignore the
-advisory lock remain outside its scope.
+sequence and size snapshot. Reconciliation streams complete records, validates
+their replayability, and tracks only the maximum sequence; it does not decode
+payloads, allocate frames, sort, or retain the whole log. An unchanged healthy
+snapshot avoids that scan, but does not skip physical tail inspection. Any
+append failure invalidates the snapshot, so the next append performs streaming
+strict reconciliation under the lock. The same mutex makes `close` and
+`closed?` wait behind an in-flight append; a forked child must independently
+open its own `StreamLog`. This contract coordinates `StreamLog` writers
+only—direct writers that ignore the advisory lock remain outside its scope.
 
 An unterminated tail is isolated by completely appending the fixed invalidating
 separator `"#\n".b` and defensively flushing it before sequence selection or
@@ -221,6 +226,12 @@ diagnostic append, no success or terminal receipt is manufactured; the running
 row remains for lost recovery, and cleanup releases the log and custody
 handles.
 
+`close` flushes and syncs before closing any descriptor. A flush or sync error
+leaves the writer and custody handles open for a caller-controlled retry; this
+lets Supervisor append one terminal diagnostic and retry close after a one-shot
+sync failure. Once synchronization succeeds, all descriptor and custody cleanup
+steps run while preserving the first cleanup error.
+
 ## Maintenance
 
 Only the daemon schedules periodic attempt maintenance. Its timer is
@@ -234,9 +245,6 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 - `test/unit/attempts/`
 - `test/unit/attempts/stream_log_test.rb`
 - `test/integration/attempts_stream_log_recovery_test.rb`
-- `test/unit/attempts/client_test.rb`
-- `test/unit/attempts/log_archive_test.rb`
-- `test/unit/attempts/supervisor_test.rb`
 - `test/unit/runtime_control_plane/admission_transition_test.rb`
 - `test/unit/daemon/attempt_loss_healer_test.rb`
 - `test/integration/provider_routing_admission_test.rb`

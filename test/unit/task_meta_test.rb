@@ -338,6 +338,22 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_tolerant_read_preserves_invalid_dependency_array_shape
+    with_tmp_dir do |dir|
+      [ [], [ "base-task", "" ] ].each do |declaration|
+        File.write(File.join(dir, "meta.yml"), YAML.dump("depends_on" => declaration))
+
+        value = Hive::TaskMeta.read(dir)[:depends_on]
+        assert_instance_of Array, value
+        assert_equal declaration, value
+        assert_equal "⏸ blocked by a task dependency",
+                     Hive::Dependencies.blocked_label(
+                       depends_on: value, blocked_by: nil, dependency_stage: nil
+                     )
+      end
+    end
+  end
+
   def test_write_and_read_round_trip_with_workflow
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo", workflow: "research")

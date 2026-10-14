@@ -30,13 +30,6 @@ class DependenciesTest < Minitest::Test
     end
   end
 
-  def test_parse_optional_reference_allows_only_absence
-    assert_nil Hive::Dependencies.parse_optional_reference(nil)
-    assert_raises(Hive::Dependencies::InvalidReference) do
-      Hive::Dependencies.parse_optional_reference(" ")
-    end
-  end
-
   def test_parse_declaration_preserves_scalar_and_array_shape
     scalar = Hive::Dependencies.parse_declaration("base-task")
     singleton = Hive::Dependencies.parse_declaration([ "base-task" ])
@@ -269,6 +262,34 @@ class DependenciesTest < Minitest::Test
 
     assert_equal "⏸ blocked by first (7-artifacts), other:second (8-finalize)", label
     refute_includes label, "[\""
+  end
+
+  def test_blocked_label_names_stronger_gate_and_has_a_generic_fallback
+    label = Hive::Dependencies.blocked_label(
+      depends_on: [ "base" ], blocked_by: nil, dependency_stage: nil,
+      unmet_dependencies: [ {
+        "reference" => "base", "blocked_by" => "base",
+        "dependency_stage" => "8-finalize", "required_gate" => "9-done"
+      } ]
+    )
+
+    assert_equal "⏸ blocked by base (8-finalize, needs 9-done)", label
+    assert_equal "⏸ blocked by a task dependency", Hive::Dependencies.blocked_label(
+      depends_on: [], blocked_by: nil, dependency_stage: nil
+    )
+  end
+
+  def test_blocker_names_preserves_order_deduplicates_and_uses_references
+    names = Hive::Dependencies.blocker_names(
+      unmet_dependencies: [
+        { "reference" => "one", "blocked_by" => "one" },
+        { "reference" => "remote:two", "blocked_by" => "" },
+        { "reference" => "one", "blocked_by" => "one" }
+      ],
+      blocked_by: "fallback"
+    )
+
+    assert_equal [ "one", "remote:two" ], names
   end
 
   # A numeric self-reference where the current task and its snapshot entry

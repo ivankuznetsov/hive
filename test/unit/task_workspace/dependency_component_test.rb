@@ -99,6 +99,20 @@ class TaskWorkspaceDependencyComponentTest < Minitest::Test
     assert_equal "9-done", waiting.fetch("required_gate")
   end
 
+  def test_same_named_cross_project_edges_match_blockers_by_qualified_identity
+    app = project(tasks: [
+      task("same", stage: "4-execute"),
+      task("child", depends_on: [ "same", "data:same" ])
+    ])
+    data = project(name: "data", tasks: [ task("same", project: "data", stage: "9-done") ])
+
+    edges = component(context(app, data), slug: "child").call.fetch("edges")
+      .select { |edge| edge["from"] == "app:child" }
+
+    assert_equal "blocking", edges.find { |edge| edge["to"] == "app:same" }.fetch("state")
+    assert_equal "clear", edges.find { |edge| edge["to"] == "data:same" }.fetch("state")
+  end
+
   def test_connected_nodes_receive_individual_stack_and_publication_observations
     indexed = context(project(tasks: [ task("base"), task("child", depends_on: "base") ]))
     observed = []

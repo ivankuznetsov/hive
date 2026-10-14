@@ -231,7 +231,11 @@ module Hive
     rescue Exception => error # rubocop:disable Lint/RescueException -- preserve Interrupt/SystemExit ambiguity
       raise if persistence_failed
       raise if error.is_a?(SystemExit) && claim&.disposition == :replay
-      if claim && effect && deterministic_non_application?(error)
+      if claim && effect && retryable_pre_application_rejection?(error)
+        @store.abort_pre_submission(
+          claim, effect_id: effect.fetch(:effect_id), reason: "command_pre_application_rejected"
+        )
+      elsif claim && effect && deterministic_non_application?(error)
         persist_failure(claim, effect, error)
       elsif claim
         persist_uncertainty(claim, effect, error)
@@ -623,6 +627,11 @@ module Hive
     def deterministic_non_application?(error)
       error.is_a?(Hive::UsageError) ||
         error.is_a?(Hive::OperationalActionUsageError) || error.is_a?(Hive::WrongStage)
+    end
+
+    def retryable_pre_application_rejection?(error)
+      error.respond_to?(:retryable_pre_application_rejection?) &&
+        error.retryable_pre_application_rejection?
     end
 
     def retryable_pre_submission_contention?(error)

@@ -58,7 +58,14 @@ module Hive
 
       class ProjectNotFound < TypedValueError; end
       class InvalidSlugError < TypedValueError; end
-      class InvalidDependencyError < TypedValueError; end
+      class InvalidDependencyError < TypedValueError
+        def initialize(message, value: nil, retryable_after_state_change: false)
+          super(message, value: value)
+          @retryable_after_state_change = retryable_after_state_change
+        end
+
+        def retryable_pre_application_rejection? = @retryable_after_state_change
+      end
       class InvalidBaseError < TypedValueError
         def exit_code = Hive::ExitCodes::USAGE
       end
@@ -186,7 +193,7 @@ module Hive
             "slug" => @slug_override,
             "body_sha256" => @body_override && ::Digest::SHA256.hexdigest(@body_override.to_s),
             "base" => @base,
-            "depends_on" => @depends_on,
+            "depends_on" => dependency_receipt_value(@depends_on),
             "workflow" => @workflow_name,
             "attachments" => @attachments.map { |attachment| attachment_identity(attachment) }
           },
@@ -251,7 +258,7 @@ module Hive
         if depends_on && draft_pr
           raise InvalidDraftPrCombination.new(
             "workflow #{workflow.id} uses draft-PR handoff and does not support --depends-on stacking",
-            value: depends_on
+            value: dependency_error_value(depends_on)
           )
         end
         if normalize_optional(@base) && !draft_pr
@@ -681,14 +688,29 @@ module Hive
       rescue Hive::Dependencies::InvalidReference => e
 
         # Describe the accepted shape in plain English for humans and
-        # agents; the raw offending value stays in the structured `value:`
-        # field for machine consumers (the regex source is an
-        # implementation detail, not an operator-facing format).
+        # agents; scalar values stay exact in the structured `value:` field,
+        # while composite values use JSON text so the existing envelope
+        # schema remains valid (the regex source is an implementation detail,
+        # not an operator-facing format).
         raise InvalidDependencyError.new(
           "invalid dependency #{value.inspect} — #{e.message}; expected a prerequisite task id, " \
           "slug, explicit project:slug reference, or a nonempty flat list of those references",
-          value: value
+          value: dependency_error_value(value)
         )
+      end
+
+      def dependency_receipt_value(value)
+        Hive::Dependencies.normalize_declaration(value)
+      rescue Hive::Dependencies::InvalidReference
+        dependency_error_value(value)
+      end
+
+      def dependency_error_value(value)
+        return value if value.is_a?(String) || value.is_a?(Integer)
+
+        JSON.generate(value)
+      rescue JSON::GeneratorError
+        value.to_s
       end
 
       def validate_creation_dependency_cycle!(project:, slug:, depends_on:, workflow:, task_dir:)
@@ -712,7 +734,8 @@ module Hive
         end
         raise InvalidDependencyError.new(
           "invalid dependency cycle: #{path}",
-          value: path
+          value: path,
+          retryable_after_state_change: true
         )
       end
 

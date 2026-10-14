@@ -119,6 +119,42 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_base_selection_uses_local_branch_evidence_for_effective_status_mode
+    with_tmp_dir do |root|
+      task = FakeTask.new(
+        slug: "dependent", id: 2, depends_on: "base-task",
+        folder: execute_folder(root, "dependent"), project_root: root, project_name: "app"
+      )
+      prerequisite = Struct.new(:slug, :id).new("base-task", 1)
+      context = Object.new
+      context.define_singleton_method(:task_snapshot) { |**| prerequisite }
+
+      missing = with_replaced_singleton_method(
+        Hive::Worktree, :origin_branch_ref_exists?, ->(*) { false }
+      ) do
+        with_replaced_singleton_method(Hive::Worktree, :local_branch_ref_exists?, ->(*) { false }) do
+          Hive::DependencySnapshot.base_selection(
+            task, "main", admission_context: context, project_name: "app",
+            local_branch_evidence: true
+          )
+        end
+      end
+      local = with_replaced_singleton_method(
+        Hive::Worktree, :origin_branch_ref_exists?, ->(*) { false }
+      ) do
+        with_replaced_singleton_method(Hive::Worktree, :local_branch_ref_exists?, ->(*) { true }) do
+          Hive::DependencySnapshot.base_selection(
+            task, "main", admission_context: context, project_name: "app",
+            local_branch_evidence: true
+          )
+        end
+      end
+
+      assert_equal [ nil, "default" ], [ missing.branch, missing.mode ]
+      assert_equal [ "base-task", "stacked" ], [ local.branch, local.mode ]
+    end
+  end
+
   def test_base_selection_resolves_a_numeric_reference_from_a_supplied_context
     with_tmp_dir do |root|
       write_task_meta(root, "8-finalize", "base-task", id: 1)
@@ -1077,6 +1113,45 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_proposed_cross_project_edge_participates_in_identity_and_cycle_discovery
+    with_tmp_dir do |home|
+      app_root = File.join(home, "app")
+      other_root = File.join(home, "other")
+      FileUtils.mkdir_p(File.join(app_root, ".hive-state", "stages"))
+      loop_task = write_task_meta(other_root, "9-done", "loop", id: 1)
+      Hive::TaskMeta.write(
+        loop_task, id: 1, slug: "loop", display_name: nil, depends_on: "app:new-task"
+      )
+      entries = [
+        { "name" => "app", "path" => app_root,
+          "repository_identity" => "github.com/acme/app" },
+        { "name" => "other", "path" => other_root,
+          "repository_identity" => "github.com/acme/other" }
+      ]
+      proposed_folder = File.join(app_root, ".hive-state", "stages", "1-inbox", "new-task")
+
+      verdict = with_replaced_singleton_method(
+        Hive::RepositoryIdentity, :current,
+        ->(root) { "github.com/acme/#{File.basename(root)}" }
+      ) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :admission_tasks,
+          ->(*) { flunk "proposed-cycle validation must use an exact dependency closure" }
+        ) do
+          Hive::DependencySnapshot.proposed_task_verdict(
+            project: entries.first, slug: "new-task", depends_on: "other:loop",
+            workflow: Hive::Workflows::Registry.default, folder: proposed_folder,
+            registry_entries: entries
+          )
+        end
+      end
+
+      assert_equal "dependency_cycle", verdict.admission_error.reason_code
+      assert_equal "app:new-task -> other:loop -> app:new-task",
+                   verdict.admission_error.offending_ref
+    end
+  end
+
   def test_enforce_admission_translates_wait_error_and_unexpected_results
     with_tmp_dir do |root|
       task = FakeTask.new(
@@ -1137,6 +1212,34 @@ class DependencySnapshotTest < Minitest::Test
         end
         assert_equal "base", error.offending_ref
         assert_match(/reach 9-done/, error.safe_correction)
+      end
+
+      multi_wait_context = Object.new
+      multi_wait_context.define_singleton_method(:verdict) do |**_kwargs|
+        unmet = [
+          Hive::DependencyAdmission::UnmetDependency.new(
+            reference: "one", blocked_by: "one", dependency_stage: "7-artifacts",
+            required_gate: "9-done"
+          ),
+          Hive::DependencyAdmission::UnmetDependency.new(
+            reference: "two", blocked_by: "two", dependency_stage: "8-finalize",
+            required_gate: "9-done"
+          )
+        ].freeze
+        Hive::DependencyAdmission::Verdict.new(
+          state: :wait, unmet_dependencies: unmet, admission_error: nil
+        )
+      end
+      with_replaced_singleton_method(
+        Hive::DependencySnapshot, :admission_context, ->(_entries) { multi_wait_context }
+      ) do
+        error = assert_raises(Hive::DependencyWaitError) do
+          Hive::DependencySnapshot.enforce_admission!(task, registry_entries: registry)
+        end
+        assert_equal "one, two", error.offending_ref
+        assert_match(/one at 7-artifacts \(needs 9-done\)/, error.message)
+        assert_match(/two to reach 9-done \(currently at 8-finalize\)/,
+                     error.safe_correction)
       end
       with_replaced_singleton_method(
         Hive::DependencySnapshot, :admission_context, ->(_entries) { raise "snapshot exploded" }

@@ -212,7 +212,7 @@ class DependencyAdmissionIntegrationTest < Minitest::Test
         end
         payload = JSON.parse(out)
         assert_equal "dependency_wait", payload.fetch("reason_code")
-        assert_equal prerequisites.first, payload.fetch("offending_ref")
+        assert_equal prerequisites.join(", "), payload.fetch("offending_ref")
         assert File.directory?(fan_in_folder), "--force must not bypass dependency admission"
         assert_equal head_before,
                      run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD").strip

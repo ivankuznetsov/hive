@@ -132,14 +132,14 @@ module Hive
       "hive-task-closure-input" => 1,
       "hive-task-closure" => 1,
       # Bounded, read-only detail projection shared by authenticated Web HTML
-      # and JSON. It is intentionally independent from fleet-wide status v8.
+      # and JSON. It is intentionally independent from fleet-wide status v9.
       "hive-task-workspace" => 2,
       # Forward-only controller and agent context provenance receipts.
       "hive-context-receipt" => 1
     }.freeze
 
-    # The v8 producers name their projection semantics. The field remains
-    # optional for compatibility with earlier v8 success documents.
+    # The status producers name their v9 projection semantics. The field remains
+    # optional for compatibility with earlier success documents.
     # Keeping this compatibility marker in the daemon's code-fingerprint file
     # also forces an already-running daemon to re-exec before it observes the
     # active-only cutover from a freshly installed CLI.

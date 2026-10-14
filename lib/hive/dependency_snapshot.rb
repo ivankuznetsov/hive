@@ -88,10 +88,10 @@ module Hive
     # Resolve the branch a dependent task's worktree / PR should stack
     # onto. Shared by 4-execute (worktree base) and 5-open-pr (PR base) so
     # the read-depends_on → load-snapshot → resolve → null-out-when-default
-    # scaffolding lives in one place. Returns nil when the task has no
-    # dependency, or when a set dependency does not resolve to a stacked
-    # base. Lists are scheduling-only by declaration shape, including a
-    # singleton list, and use the default branch without a warning. Scalar
+    # scaffolding lives in one place. Always returns a BaseSelection; its
+    # branch is nil when the task has no dependency or a set dependency does
+    # not resolve to a stacked base. Lists are scheduling-only by declaration
+    # shape, including a singleton list, and use the default branch without a warning. Scalar
     # fallbacks (typo / prereq transiently absent from the snapshot /
     # self-reference) warn so a silently
     # collapsed stack is observable at execute/open-pr time rather than
@@ -99,7 +99,8 @@ module Hive
     # layer) rather than in the pure `Hive::Dependencies` resolver so the
     # resolver stays free of disk I/O.
     def base_selection(task, default_branch, warn_on_fallback: true,
-                       admission_context: nil, project_name: nil)
+                       admission_context: nil, project_name: nil,
+                       local_branch_evidence: false)
       dependency = depends_on(task)
       return BaseSelection.new(branch: nil, mode: "default") if dependency.nil?
       if Hive::Dependencies.list_declaration?(dependency)
@@ -134,7 +135,8 @@ module Hive
           task: current_task(task)
         )
       end
-      if base == default_branch
+      if base == default_branch ||
+         (local_branch_evidence && !stacked_branch_available?(task.project_root, base))
         if warn_on_fallback
           warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} " \
                "but it did not resolve to a stacked base (prerequisite missing " \
@@ -154,6 +156,14 @@ module Hive
 
     def stacked_base(task, default_branch)
       base_selection(task, default_branch).branch
+    end
+
+    # Status uses the same remote-tracking/local-ref fallback choices as
+    # Worktree#freshest_override_base, but never performs a network fetch.
+    # Execution may refresh the remote evidence before selecting its base.
+    def stacked_branch_available?(project_root, branch)
+      Hive::Worktree.origin_branch_ref_exists?(project_root, branch) ||
+        Hive::Worktree.local_branch_ref_exists?(project_root, branch)
     end
 
     def admission_context(registry_entries = Hive::Config.registered_projects,
@@ -177,7 +187,7 @@ module Hive
 
     def proposed_task_verdict(project:, slug:, depends_on:, workflow:, folder:,
                               registry_entries: Hive::Config.registered_projects)
-      context = admission_context(registry_entries)
+      entries = Array(registry_entries)
       proposed = Hive::DependencyAdmission::TaskSnapshot.new(
         project: project.fetch("name"),
         slug: slug,
@@ -194,8 +204,34 @@ module Hive
         validation_error: nil,
         cancelled: false
       )
-      context.with_task(project: project.fetch("name"), task: proposed)
-             .verdict(project: project.fetch("name"), slug: slug)
+      generations = capture_workflow_generations(entries)
+      context = targeted_admission_context(
+        entries,
+        targets: { project.fetch("name") => [ slug ] },
+        workflow_generations: generations,
+        overlays: { project.fetch("name") => [ proposed ] }
+      )
+      context.verdict(project: project.fetch("name"), slug: slug)
+    end
+
+    def capture_workflow_generations(registry_entries)
+      Array(registry_entries).each_with_object({}) do |entry, generations|
+        root = File.expand_path(entry.fetch("path"))
+        next unless File.directory?(root)
+
+        generations[root] = Hive::Workflows::Project.synchronize do
+          Hive::Workflows::Project.load!(root)
+          config = Hive::Config.load(root)
+          admission_config, admission_config_error = admission_project_config(root)
+          Hive::Task.capture_workflow_generation(
+            root, config: config,
+            admission_config: admission_config,
+            admission_config_error: admission_config_error
+          )
+        end
+      rescue StandardError => e
+        generations[root] = e if root
+      end
     end
 
     # Builds the routine dependency view without reparsing terminal history.
@@ -231,7 +267,8 @@ module Hive
     # context; the complete enrollment index still validates project identity.
     # This is the dependency counterpart to Status's partial exact-task
     # projection used by bounded watchers.
-    def targeted_admission_context(registry_entries, targets:, workflow_generations: nil)
+    def targeted_admission_context(registry_entries, targets:, workflow_generations: nil,
+                                   overlays: nil)
       entries = Array(registry_entries)
       project_configs = {}
       projects = entries.map do |entry|
@@ -247,6 +284,10 @@ module Hive
           task_references: references,
           project_configs: project_configs
         )
+      end
+      projects = projects.map do |project|
+        additions = Array(overlays&.fetch(project.name, nil))
+        additions.empty? ? project : project.with(tasks: (project.tasks + additions).freeze)
       end
       admission_context_with_fallback(
         entries, projects, workflow_generations: workflow_generations,
@@ -307,15 +348,27 @@ module Hive
       return verdict if verdict.clear?
 
       if verdict.wait?
-        unmet = verdict.unmet_dependencies.first
-        ref = (verdict.blocked_by || unmet&.blocked_by).to_s
-        stage = verdict.dependency_stage || unmet&.dependency_stage
-        required_gate = unmet&.required_gate
-        gate_label = required_gate ? required_gate : "the configured dependency gate"
-        correction = "Wait for #{ref} to reach #{gate_label}; it is currently at #{stage}."
+        unmet_dependencies = verdict.unmet_dependencies
+        waits = unmet_dependencies.map do |unmet|
+          ref = unmet.blocked_by.to_s
+          "#{ref} at #{unmet.dependency_stage} (needs #{unmet.required_gate})"
+        end
+        corrections = unmet_dependencies.map do |unmet|
+          "#{unmet.blocked_by} to reach #{unmet.required_gate} " \
+            "(currently at #{unmet.dependency_stage})"
+        end
+        if waits.empty?
+          refs = verdict.blocked_by.to_s
+          waits << "#{refs} at #{verdict.dependency_stage}"
+          corrections << "#{refs} to reach the configured dependency gate " \
+            "(currently at #{verdict.dependency_stage})"
+        else
+          refs = unmet_dependencies.map(&:blocked_by).join(", ")
+        end
+        correction = "Wait for every prerequisite: #{corrections.join('; ')}."
         raise Hive::DependencyWaitError.new(
-          "dependency wait: #{task.slug} is blocked by #{ref} at #{stage}",
-          offending_ref: ref,
+          "dependency wait: #{task.slug} is blocked by #{waits.join(', ')}",
+          offending_ref: refs,
           safe_correction: correction
         )
       end
@@ -369,7 +422,8 @@ module Hive
       error = verdict.admission_error
       base_mode = base_selection(
         task, nil, warn_on_fallback: false,
-        admission_context: admission_context, project_name: project
+        admission_context: admission_context, project_name: project,
+        local_branch_evidence: true
       ).mode
       unmet = verdict.unmet_dependencies.map do |dependency|
         [ dependency.reference, dependency.blocked_by, dependency.dependency_stage,

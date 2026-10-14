@@ -1804,6 +1804,11 @@ module Hive
       end
 
       def annotate_incremental_dependencies(rows, project, config:, workflow_generation:)
+        base_context = Hive::DependencySnapshot.targeted_admission_context(
+          [ project ],
+          targets: { project.fetch("name") => rows.filter_map { |row| row[:slug] unless row[:invalid] } },
+          workflow_generations: { File.expand_path(project.fetch("path")) => workflow_generation }
+        )
         snapshots = rows.filter_map do |row|
           next if row[:invalid]
 
@@ -1826,19 +1831,23 @@ module Hive
         context = Hive::DependencyAdmission::Context.new(projects: [ project_snapshot ])
         rows.each do |row|
           apply_dependency_verdict(
-            row, context, project, config: config, base_context: nil
+            row, context, project, config: config, base_context: base_context
           )
-          hold_incremental_dependency(row, project, config: config) if row[:depends_on]
+          hold_incremental_dependency(
+            row, project, config: config, base_context: base_context
+          ) if row[:depends_on]
         end
         rows
       rescue StandardError => e
         warn "hive: status: bounded dependency admission failed " \
              "(#{e.class}: #{e.message}); holding changed rows until the next full scan"
-        rows.each { |row| hold_incremental_dependency(row, project, config: config) }
+        rows.each do |row|
+          hold_incremental_dependency(row, project, config: config, base_context: base_context)
+        end
         rows
       end
 
-      def hold_incremental_dependency(row, project, config: nil)
+      def hold_incremental_dependency(row, project, config: nil, base_context: nil)
         error = Hive::DependencyAdmission::AdmissionError.new(
           reason_code: "dependency_validation_failed",
           offending_ref: "#{project['name']}:#{row[:slug]}",
@@ -1847,7 +1856,14 @@ module Hive
         row[:blocked_by] = nil
         row[:dependency_stage] = nil
         row[:unmet_dependencies] = []
-        row[:dependency_base_mode] ||= dependency_base_mode(row, config: config)
+        row[:dependency_base_mode] ||= if base_context
+          dependency_base_mode(
+            row, config: config, admission_context: base_context,
+            project_name: project["name"]
+          )
+        else
+          "default"
+        end
         row[:blocked] = true
         row[:admission_error] = error
         row[:action_key] = Hive::Schemas::TaskActionKind::ADMISSION_ERROR
@@ -2003,9 +2019,12 @@ module Hive
         end
         Hive::DependencySnapshot.base_selection(
           task, default_branch, warn_on_fallback: false,
-          admission_context: admission_context, project_name: project_name
+          admission_context: admission_context, project_name: project_name,
+          local_branch_evidence: true
         ).mode
-      rescue StandardError
+      rescue StandardError => e
+        warn "hive: status: dependency base resolution failed for #{row[:slug].inspect} " \
+             "(#{e.class}: #{e.message}); using the default base mode"
         "default"
       end
 

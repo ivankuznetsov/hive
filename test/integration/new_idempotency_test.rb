@@ -116,6 +116,71 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_equivalent_normalized_dependency_lists_share_a_receipt
+    with_initialized_project do |project_root, project|
+      first = create_json_with(
+        project, "normalized dependencies", key: "creator:normalized-dependencies",
+        slug: "normalized-dependencies", depends_on: [ "base-task", "base-task" ]
+      )
+      replay = create_json_with(
+        project, "normalized dependencies", key: "creator:normalized-dependencies",
+        slug: "normalized-dependencies", depends_on: [ "base-task" ]
+      )
+
+      assert_equal first.dig("command_receipt", "id"), replay.dig("command_receipt", "id")
+      assert_equal [ "base-task" ], Hive::TaskMeta.read(
+        idempotent_tasks(project_root).then { |paths| File.dirname(paths.fetch(0)) }
+      )[:depends_on]
+      assert_raises(Hive::CommandConflict) do
+        Hive::Commands::New.new(
+          project, "normalized dependencies", slug_override: "normalized-dependencies",
+          idempotency_key: "creator:normalized-dependencies", json: true,
+          depends_on: "base-task"
+        ).call!
+      end
+    end
+  end
+
+  def test_invalid_dependency_lists_emit_schema_valid_json_values
+    with_initialized_project do |_project_root, project|
+      out, err, status = with_captured_exit do
+        Hive::Commands::New.new(
+          project, "invalid dependency list", slug_override: "invalid-dependency-list",
+          idempotency_key: "creator:invalid-list", json: true,
+          depends_on: [ "base-task", "BAD TASK" ]
+        ).call
+      end
+      payload = JSON.parse(out)
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
+
+      assert_empty err
+      refute_equal 0, status
+      assert_instance_of String, payload.fetch("value")
+      assert_empty schemer.validate(payload).to_a
+    end
+  end
+
+  def test_draft_workflow_dependency_list_emits_a_schema_valid_json_value
+    with_registered_workflow(draft_pr_workflow) do
+      with_initialized_project do |_project_root, project|
+        out, err, status = with_captured_exit do
+          Hive::Commands::New.new(
+            project, "invalid draft dependency", slug_override: "invalid-draft-dependency",
+            idempotency_key: "creator:draft-list", json: true, workflow: "async_fix",
+            depends_on: %w[base-task other-task]
+          ).call
+        end
+        payload = JSON.parse(out)
+        schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
+
+        assert_empty err
+        assert_equal Hive::ExitCodes::USAGE, status
+        assert_instance_of String, payload.fetch("value")
+        assert_empty schemer.validate(payload).to_a
+      end
+    end
+  end
+
   def test_creation_cycle_error_keeps_the_path_in_the_json_envelope
     with_initialized_project do |project_root, project|
       existing = File.join(project_root, ".hive-state", "stages", "1-inbox", "existing-task")
@@ -144,6 +209,15 @@ class NewIdempotencyTest < Minitest::Test
       refute Dir.exist?(
         File.join(project_root, ".hive-state", "stages", "1-inbox", "proposed-task")
       )
+
+      Hive::TaskMeta.write(
+        existing, id: 40, slug: "existing-task", display_name: nil, depends_on: nil
+      )
+      retry_payload = create_json_with(
+        project, "proposed task", key: "creator:cycle", slug: "proposed-task",
+        depends_on: "existing-task"
+      )
+      assert_equal true, retry_payload.fetch("created")
     end
   end
 
@@ -703,6 +777,21 @@ class NewIdempotencyTest < Minitest::Test
   end
 
   private
+
+  def draft_pr_workflow
+    Hive::Workflow.new(
+      id: :async_fix,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "inbox", index: 1, state_file: "request.md", kind: :inert
+        ),
+        Hive::Workflow::Stage.new(
+          name: "fix", index: 2, state_file: "fix-report.md", kind: :agent,
+          workspace: :worktree, handoff: :draft_pr, deliverable: "fix-report.md"
+        )
+      ]
+    )
+  end
 
   def with_initialized_project
     Hive::Workflows::Project.reset!

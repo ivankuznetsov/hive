@@ -454,8 +454,10 @@ lists, cross-project scalars, invalid fallbacks, and dependency-free tasks use
 
 - clear: `blocked: false`, singular wait fields null,
   `unmet_dependencies: []`, `admission_error: null`;
-- scalar wait: `blocked: true`, `blocked_by`/`dependency_stage` populated and
-  the same blocker present in `unmet_dependencies`, `admission_error: null`;
+- scalar wait: `blocked: true`; `blocked_by`/`dependency_stage` identify the
+  first unmet direct edge when one exists, but remain null for a transitive-only
+  wait; every outstanding direct or transitive blocker remains in
+  `unmet_dependencies`, with `admission_error: null`;
 - list wait: `blocked: true`, singular wait fields null, and every remaining
   blocker present in declaration order in `unmet_dependencies`;
 - admission error: `blocked: true`, singular wait fields null, action

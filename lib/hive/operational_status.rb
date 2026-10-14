@@ -1026,7 +1026,11 @@ module Hive
     end
 
     def dependency_wait?(row)
-      row["blocked_by"] || Array(row["unmet_dependencies"]).any?
+      return false if row["admission_error"]
+
+      Hive::Dependencies.blocker_names(
+        unmet_dependencies: row["unmet_dependencies"], blocked_by: row["blocked_by"]
+      ).any?
     end
 
     def dependency_wait_message(row)

@@ -495,7 +495,8 @@ class HiveCliTest < Minitest::Test
 
   def test_new_task_dispatches_joined_text_and_rejects_blank_text
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([ "new", "proj", "build", "thing" ])
+      _out, err = capture_io { Hive::CLI.start([ "new", "proj", "build", "thing" ]) }
+      assert_empty err
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
       assert_equal(
         { base: nil, depends_on: nil, workflow: nil, idempotency_key: nil, json: false },
@@ -504,10 +505,13 @@ class HiveCliTest < Minitest::Test
     end
 
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([
-        "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture",
-        "--idempotency-key", "creator:v1", "--json", "build", "thing"
-      ])
+      _out, err = capture_io do
+        Hive::CLI.start([
+          "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture",
+          "--idempotency-key", "creator:v1", "--json", "build", "thing"
+        ])
+      end
+      assert_empty err
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
       assert_equal(
         {

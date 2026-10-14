@@ -227,7 +227,8 @@ module Hive
         unmet = Array(source.dig("admission", "unmet_dependencies")).find do |entry|
           entry["reference"] == reference&.to_s ||
             entry["blocked_by"] == target["id"] ||
-            entry["blocked_by"] == target["slug"]
+            (source["project"] == target["project"] &&
+             entry["blocked_by"] == target["slug"])
         end
         state = if error
           "error"

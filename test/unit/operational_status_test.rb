@@ -89,7 +89,8 @@ class OperationalStatusTest < Minitest::Test
     assert_nil projected.dig("dependency", "dependency_stage")
     assert_equal unmet, projected.dig("dependency", "unmet_dependencies")
     assert_equal "default", projected.dig("dependency", "dependency_base_mode")
-    assert_equal "blocked by first (7-artifacts), other:second (8-finalize)",
+    assert_equal "blocked by first (7-artifacts, needs 9-done), " \
+                 "other:second (8-finalize, needs 9-done)",
                  projected.fetch("reason")
   end
 
@@ -311,6 +312,10 @@ class OperationalStatusTest < Minitest::Test
     )
     admission = task(
       action: "admission_error", slug: "admission", blocked: true,
+      unmet_dependencies: [ {
+        "reference" => "base", "blocked_by" => "base",
+        "dependency_stage" => "3-plan", "required_gate" => "8-finalize"
+      } ],
       admission_error: {
         "reason_code" => "dependency_cycle", "offending_ref" => "demo:a -> demo:a",
         "safe_correction" => "Break the cycle."
@@ -324,6 +329,8 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "unknown", rows.fetch("invalid").fetch("state")
     assert_equal "needs_repair", rows.fetch("admission").fetch("state")
     assert_equal "Break the cycle.", rows.fetch("admission").fetch("reason")
+    refute_includes rows.fetch("admission").fetch("reasons").map { |reason| reason["code"] },
+                    "dependency_wait"
   end
 
   def test_daemon_owned_plan_approval_is_not_reported_as_human_input

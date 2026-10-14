@@ -169,6 +169,18 @@ class DependencyAdmissionTest < Minitest::Test
     assert_equal "app:a -> app:b -> app:a", verdict.admission_error.offending_ref
   end
 
+  def test_cycle_behind_an_earlier_missing_sibling_is_still_reported
+    indexed = context(project(tasks: [
+      task("app", "a", depends_on: %w[ghost b]),
+      task("app", "b", depends_on: "a", stage: "9-done")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "a")
+
+    assert_error verdict, "dependency_cycle"
+    assert_equal "app:a -> app:b -> app:a", verdict.admission_error.offending_ref
+  end
+
   def test_list_gate_unreachable_has_list_specific_remediation
     indexed = context(project(gate: "8-finalize", tasks: [
       task("app", "dependent", depends_on: [ "fix" ]),
@@ -180,6 +192,8 @@ class DependencyAdmissionTest < Minitest::Test
     assert_error verdict, "dependency_gate_unreachable"
     assert_match(/lists require 9-done regardless of project configuration/i,
                  verdict.admission_error.safe_correction)
+    assert_match(/app:dependent/, verdict.admission_error.safe_correction)
+    assert_match(%r{/tmp/app/dependent/meta\.yml}, verdict.admission_error.safe_correction)
     refute_match(/dependency_gate_stage/, verdict.admission_error.safe_correction)
   end
 
@@ -196,6 +210,54 @@ class DependencyAdmissionTest < Minitest::Test
     assert verdict.wait?
     assert_equal [ "tail" ], verdict.unmet_dependencies.map(&:blocked_by)
     assert_equal [ "9-done" ], verdict.unmet_dependencies.map(&:required_gate)
+  end
+
+  def test_shared_tail_keeps_strongest_gate_in_both_orders_and_after_finalize
+    [ %w[scalar list], %w[list scalar] ].each do |root_order|
+      %w[7-artifacts 8-finalize].each do |tail_stage|
+        indexed = context(project(gate: "8-finalize", tasks: [
+          task("app", "root", depends_on: root_order),
+          task("app", "scalar", depends_on: "tail", stage: "9-done"),
+          task("app", "list", depends_on: [ "tail" ], stage: "9-done"),
+          task("app", "tail", stage: tail_stage)
+        ]))
+
+        verdict = indexed.verdict(project: "app", slug: "root")
+
+        assert_equal [ "tail" ], verdict.unmet_dependencies.map(&:blocked_by)
+        assert_equal [ "9-done" ], verdict.unmet_dependencies.map(&:required_gate)
+      end
+    end
+  end
+
+  def test_direct_blockers_precede_transitive_blockers
+    indexed = context(project(tasks: [
+      task("app", "root", depends_on: %w[parent direct]),
+      task("app", "parent", depends_on: "tail", stage: "9-done"),
+      task("app", "direct", stage: "7-artifacts"),
+      task("app", "tail", stage: "3-plan")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "root")
+
+    assert_equal %w[direct tail], verdict.unmet_dependencies.map(&:blocked_by)
+  end
+
+  def test_remote_transitive_blockers_are_qualified_for_the_requesting_project
+    app = project(tasks: [ task("app", "root", depends_on: %w[one:done two:done]) ])
+    one = project(name: "one", tasks: [
+      task("one", "done", depends_on: "tail", stage: "9-done"),
+      task("one", "tail", stage: "3-plan")
+    ])
+    two = project(name: "two", tasks: [
+      task("two", "done", depends_on: "tail", stage: "9-done"),
+      task("two", "tail", stage: "3-plan")
+    ])
+
+    unmet = context(app, one, two).verdict(project: "app", slug: "root").unmet_dependencies
+
+    assert_equal %w[one:tail two:tail], unmet.map(&:reference)
+    assert_equal %w[one:tail two:tail], unmet.map(&:blocked_by)
   end
 
   def test_nine_way_fan_in_reports_the_eight_remaining_prerequisites

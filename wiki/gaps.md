@@ -41,8 +41,9 @@ evidence.
 
 ## Incident timing calibration (updated 2026-10-03)
 
-The 36-second aggregate advisory cap covers observed hosted totals through
-34.015 seconds while preserving the 16-second per-scenario ceiling. These runs
+The 40-second aggregate advisory cap covers observed hosted totals through
+37.459 seconds (with an earlier 34.015-second sample) while preserving the
+16-second per-scenario ceiling. These runs
 do not establish a long-run percentile or separate budgets for each runner
 class. Revisit the cap after representative hosted timing history exists;
 timing remains advisory and does not replace functional E2E coverage.

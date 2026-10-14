@@ -63,11 +63,32 @@ module Hive
     end
 
     EMPTY_UNMET_DEPENDENCIES = [].freeze
-    private_constant :EMPTY_UNMET_DEPENDENCIES
+    EMPTY_REFERENCES = [].freeze
+    private_constant :EMPTY_UNMET_DEPENDENCIES, :EMPTY_REFERENCES
 
     Blocker = Data.define(:identity, :unmet)
     Evaluation = Data.define(:verdict, :blockers, :cycle_derived)
-    private_constant :Blocker, :Evaluation
+    Frame = Struct.new(
+      :task, :identity, :incoming, :entered, :references, :cursor,
+      :list_declaration, :direct_blockers, :transitive_blockers,
+      :admission_error, :cycle_derived,
+      keyword_init: true
+    ) do
+      def complete? = cursor >= references.length
+
+      def next_reference
+        reference = references[cursor]
+        self.cursor += 1
+        reference
+      end
+
+      def fail!(error, cycle_derived: false)
+        cycle_error = %w[dependency_cycle dependency_self_reference].include?(error&.reason_code)
+        self.admission_error = error if admission_error.nil? || cycle_error
+        self.cycle_derived ||= cycle_derived
+      end
+    end
+    private_constant :Blocker, :Evaluation, :Frame
 
     TaskSnapshot = Data.define(
       :project, :slug, :id, :stage, :workflow_stages, :depends_on,
@@ -183,61 +204,57 @@ module Hive
 
       def walk(source)
         frames = []
-        active_path = []
         active_index = {}
-        push_frame(frames, active_path, active_index, source, incoming: nil)
+        push_frame(frames, active_index, source, incoming: nil)
 
         until frames.empty?
           frame = frames.last
-          enter_frame(frame) unless frame[:entered]
+          enter_frame(frame) unless frame.entered
 
-          if frame[:admission_error] || frame[:cursor] >= frame[:references].length
+          if frame.complete?
             evaluation = complete_frame(frame)
             frames.pop
-            active_index.delete(frame[:identity])
-            active_path.pop
-            @verdict_cache[frame[:identity]] = evaluation unless evaluation.cycle_derived
+            active_index.delete(frame.identity)
+            @verdict_cache[frame.identity] = evaluation unless evaluation.cycle_derived
             return evaluation.verdict if frames.empty?
 
-            absorb_child(frames.last, frame[:incoming], evaluation)
+            absorb_child(frames.last, frame.incoming, evaluation)
             next
           end
 
-          reference = frame[:references][frame[:cursor]]
-          frame[:cursor] += 1
-          edge = resolve_edge(frame[:task], reference)
+          reference = frame.next_reference
+          edge = resolve_edge(frame.task, reference)
           if edge.is_a?(Verdict)
-            frame[:admission_error] = edge.admission_error
+            frame.fail!(edge.admission_error)
             next
           end
 
           target, target_project = edge
           target_identity = qualify(target)
-          if target_identity == frame[:identity]
-            frame[:admission_error] = admission_error(
+          if target_identity == frame.identity
+            frame.fail!(admission_error(
               "dependency_self_reference",
               reference.to_s,
-              "Remove or correct depends_on in #{frame[:task].folder}/meta.yml."
-            ).admission_error
+              "Remove or correct depends_on in #{frame.task.folder}/meta.yml."
+            ).admission_error)
             next
           end
           if (cycle_start = active_index[target_identity])
-            cycle = (active_path[cycle_start..] + [ target_identity ]).join(" -> ")
-            frame[:admission_error] = admission_error(
+            cycle = (frames[cycle_start..].map(&:identity) + [ target_identity ]).join(" -> ")
+            frame.fail!(admission_error(
               "dependency_cycle",
               cycle,
               "Break the cycle by correcting one depends_on declaration in the reported path."
-            ).admission_error
-            frame[:cycle_derived] = true
+            ).admission_error, cycle_derived: true)
             next
           end
 
           gate_result = validate_gate(
-            frame[:task], target, target_project, reference,
-            list_declaration: frame[:list_declaration]
+            frame.task, target, target_project, reference,
+            list_declaration: frame.list_declaration
           )
           if gate_result.is_a?(Verdict)
-            frame[:admission_error] = gate_result.admission_error
+            frame.fail!(gate_result.admission_error)
             next
           end
 
@@ -245,40 +262,39 @@ module Hive
           if (cached = @verdict_cache[target_identity])
             absorb_child(frame, incoming, cached)
           else
-            push_frame(frames, active_path, active_index, target, incoming: incoming)
+            push_frame(frames, active_index, target, incoming: incoming)
           end
         end
       end
 
-      def push_frame(frames, active_path, active_index, task, incoming:)
+      def push_frame(frames, active_index, task, incoming:)
         identity = qualify(task)
-        active_index[identity] = active_path.length
-        active_path << identity
-        frames << {
+        active_index[identity] = frames.length
+        frames << Frame.new(
           task: task, identity: identity, incoming: incoming, entered: false,
-          references: EMPTY_UNMET_DEPENDENCIES, cursor: 0, list_declaration: false,
+          references: EMPTY_REFERENCES, cursor: 0, list_declaration: false,
           direct_blockers: [], transitive_blockers: [], admission_error: nil,
           cycle_derived: false
-        }
+        )
       end
 
       def enter_frame(frame)
-        frame[:entered] = true
-        if (node_error = validate_node(frame[:task]))
-          frame[:admission_error] = node_error.admission_error
+        frame.entered = true
+        if (node_error = validate_node(frame.task))
+          frame.fail!(node_error.admission_error)
           return
         end
-        return unless frame[:task].depends_on
+        return unless frame.task.depends_on
 
-        declaration = parse_declaration(frame[:task].depends_on)
+        declaration = parse_declaration(frame.task.depends_on)
         if declaration.is_a?(Verdict)
-          frame[:admission_error] = declaration.admission_error
+          frame.fail!(declaration.admission_error)
           return
         end
 
         references, list_declaration = declaration
-        frame[:references] = references
-        frame[:list_declaration] = list_declaration
+        frame.references = references
+        frame.list_declaration = list_declaration
       end
 
       def resolve_edge(task, reference)
@@ -298,22 +314,23 @@ module Hive
 
       def absorb_child(frame, incoming, evaluation)
         if incoming[:blocker]
-          frame[:direct_blockers] << incoming[:blocker]
+          frame.direct_blockers << incoming[:blocker]
         else
-          frame[:transitive_blockers].concat(evaluation.blockers)
+          frame.transitive_blockers.concat(
+            evaluation.blockers.map { |blocker| blocker_for_requesting_project(frame, blocker) }
+          )
         end
         return unless evaluation.verdict.error?
 
-        frame[:admission_error] ||= evaluation.verdict.admission_error
-        frame[:cycle_derived] ||= evaluation.cycle_derived
+        frame.fail!(evaluation.verdict.admission_error, cycle_derived: evaluation.cycle_derived)
       end
 
       def complete_frame(frame)
-        blockers = deduplicate_blockers(frame[:direct_blockers] + frame[:transitive_blockers])
+        blockers = deduplicate_blockers(frame.direct_blockers + frame.transitive_blockers)
         unmet = blockers.map(&:unmet).freeze
-        singular = frame[:list_declaration] ? nil : frame[:direct_blockers].first&.unmet
-        verdict = if frame[:admission_error]
-          error_verdict(frame[:admission_error], unmet)
+        singular = frame.list_declaration ? nil : frame.direct_blockers.first&.unmet
+        verdict = if frame.admission_error
+          error_verdict(frame.admission_error, unmet)
         elsif blockers.empty?
           clear
         else
@@ -326,7 +343,19 @@ module Hive
         Evaluation.new(
           verdict: verdict.freeze,
           blockers: blockers.freeze,
-          cycle_derived: frame[:cycle_derived]
+          cycle_derived: frame.cycle_derived
+        ).freeze
+      end
+
+      def blocker_for_requesting_project(frame, blocker)
+        blocker_project, = blocker.identity.split(":", 2)
+        return blocker if blocker_project == frame.task.project
+
+        Blocker.new(
+          identity: blocker.identity,
+          unmet: blocker.unmet.with(
+            reference: blocker.identity, blocked_by: blocker.identity
+          ).freeze
         ).freeze
       end
 
@@ -500,7 +529,11 @@ module Hive
         depending_project = unique_project(depending_task.project)
         return validation_failure("depending project snapshot is ambiguous", depending_task.project) unless depending_project
 
-        gate = list_declaration ? "9-done" : depending_project.dependency_gate_stage # not-a-stage-ref: fixed list dependency gate policy
+        gate = if list_declaration
+          Hive::Config::DEPENDENCY_GATE_STAGES.last
+        else
+          depending_project.dependency_gate_stage
+        end
         unless Hive::Config::DEPENDENCY_GATE_STAGES.include?(gate)
           return admission_error(
             "dependency_gate_unknown",
@@ -512,7 +545,10 @@ module Hive
         gate_index = prerequisite.workflow_stages.index(gate)
         unless gate_index
           correction = if list_declaration
-            "Dependency lists require 9-done regardless of project configuration; use a prerequisite workflow that reaches 9-done or correct erroneous workflow metadata."
+            "Task #{depending_task.project}:#{depending_task.slug} declares a dependency list in " \
+              "#{depending_task.folder}/meta.yml; lists require #{gate} regardless of project " \
+              "configuration. Use a prerequisite workflow that reaches #{gate} or correct " \
+              "erroneous workflow metadata."
           else
             "Use a prerequisite workflow that contains #{gate}, or correct the depending project's gate."
           end

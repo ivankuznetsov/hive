@@ -1,4 +1,5 @@
 require "hive/stages"
+require "hive/config"
 require "psych"
 
 module Hive
@@ -60,12 +61,6 @@ module Hive
       else
         raise InvalidReference.new(value, "depends_on contains too many ':' separators")
       end
-    end
-
-    def parse_optional_reference(value)
-      return nil if value.nil?
-
-      parse_reference(value)
     end
 
     # Parse the authoritative dependency declaration without erasing whether
@@ -162,24 +157,44 @@ module Hive
       Result.new(blocked_by: slug, dependency_stage: stage, blocked: blocked)
     end
 
+    def blocker_names(unmet_dependencies:, blocked_by: nil)
+      names = Array(unmet_dependencies).filter_map do |entry|
+        value = field(entry, :blocked_by).to_s.strip
+        value = field(entry, :reference).to_s.strip if value.empty?
+        value unless value.empty?
+      end
+      fallback = blocked_by.to_s.strip
+      names << fallback if names.empty? && !fallback.empty?
+      names.uniq
+    end
+
     # Single source of truth for the "⏸ blocked by …" indicator rendered by
-    # both Commands::Status (text mode) and Tui::Views::TasksPane. The
-    # unresolved-vs-resolved discriminator is `blocked_by` presence —
-    # `resolve`'s resolved⟹slug guard makes a resolved prerequisite always
-    # carry its slug and an unresolved one (missing / self-reference) always
-    # nil — so the two renderers can never diverge on the predicate.
+    # Commands::Status and the TUI. The complete unmet collection is
+    # authoritative; scalar singulars are compatibility fallbacks only.
     def blocked_label(depends_on:, blocked_by:, dependency_stage:, unmet_dependencies: [])
-      blockers = Array(unmet_dependencies).map do |entry|
+      blockers = Array(unmet_dependencies).filter_map do |entry|
         reference = field(entry, :reference)
         target = field(entry, :blocked_by)
         stage = field(entry, :dependency_stage)
-        target.to_s.strip.empty? ? "#{reference} (unresolved)" : "#{target} (#{stage})"
+        gate = field(entry, :required_gate)
+        name = target.to_s.strip.empty? ? reference.to_s.strip : target.to_s.strip
+        next if name.empty?
+
+        if target.to_s.strip.empty?
+          "#{name} (unresolved)"
+        elsif gate.to_s == Hive::Config::DEPENDENCY_GATE_STAGES.last
+          "#{name} (#{stage}, needs #{gate})"
+        else
+          "#{name} (#{stage})"
+        end
       end
       if blockers.empty?
-        blockers << if blocked_by.to_s.strip.empty?
-          "#{Array(depends_on).first || depends_on} (unresolved)"
-        else
+        blockers << if !blocked_by.to_s.strip.empty?
           "#{blocked_by} (#{dependency_stage})"
+        elsif !depends_on.is_a?(Array) && !depends_on.to_s.strip.empty?
+          "#{depends_on} (unresolved)"
+        else
+          "a task dependency"
         end
       end
       "⏸ blocked by #{blockers.join(', ')}"

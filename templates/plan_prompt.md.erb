@@ -64,9 +64,12 @@ Constraints:
   in the execution checkout before editing; do not claim a missing prerequisite
   solely because you cannot inspect it, or block planning solely for that access
   limitation. Do not assume an architecture exists merely because another plan
-  describes it. If a known unfinished task supplies a prerequisite, declare exactly one scalar
-  `depends_on: <slug-or-id>` or `depends_on: <project>:<slug>` in plan.md YAML
-  frontmatter. Hive adopts it into meta.yml when no dependency is already set;
+  describes it. If known unfinished tasks supply prerequisites, declare either one scalar
+  `depends_on: <slug-or-id>` / `depends_on: <project>:<slug>` or a nonempty flat
+  list of those references in plan.md YAML frontmatter. Scalars retain dependency
+  branch stacking and the configured gate; lists are scheduling-only, branch from
+  the project default, and require every prerequisite to reach `9-done`. Hive
+  adopts the declaration into meta.yml when no dependency is already set;
   do not edit meta.yml. A conflicting existing dependency must be reconciled,
   and prose dependency statements alone are not scheduling input.
 - Screenshots, recordings, and other collected outcome evidence are best-effort

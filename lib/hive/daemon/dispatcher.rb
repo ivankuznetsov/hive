@@ -1082,8 +1082,7 @@ module Hive
           condition = if blockers.any?
             dependency_condition(row, blockers)
           else
-            { "kind" => "operator_action", "task" => row.slug,
-              "dependency" => row.depends_on }.compact
+            operator_dependency_condition(row)
           end
           pending_item(bucket, "dispatch:task:#{row.slug}", "dependency_blocked",
                        condition: condition)
@@ -3793,12 +3792,9 @@ module Hive
       end
 
       def dependency_blockers(row)
-        blockers = Array(row&.unmet_dependencies).filter_map do |entry|
-          value = Hive::Dependencies.field(entry, :blocked_by)
-          value.to_s unless value.to_s.empty?
-        end
-        blockers << row.blocked_by.to_s if blockers.empty? && !row&.blocked_by.to_s.empty?
-        blockers.uniq
+        Hive::Dependencies.blocker_names(
+          unmet_dependencies: row&.unmet_dependencies, blocked_by: row&.blocked_by
+        )
       end
 
       def dependency_condition(row, blockers)
@@ -3808,6 +3804,18 @@ module Hive
           "dependency" => blockers.first
         }
         condition["dependencies"] = blockers if blockers.length > 1
+        condition
+      end
+
+      def operator_dependency_condition(row)
+        condition = { "kind" => "operator_action", "task" => row.slug }
+        declaration = row.depends_on
+        if declaration.is_a?(Array)
+          dependencies = declaration.map(&:to_s).reject(&:empty?).uniq
+          condition["dependencies"] = dependencies unless dependencies.empty?
+        elsif !declaration.to_s.empty?
+          condition["dependency"] = declaration.to_s
+        end
         condition
       end
 

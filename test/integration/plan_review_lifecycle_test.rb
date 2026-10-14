@@ -214,7 +214,6 @@ class PlanReviewLifecycleIntegrationTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io do
           Hive::Commands::Init.new(dir).call
-          set_project_claude_mode(dir, "headless")
           Hive::Commands::New.new(File.basename(dir), "plan review lifecycle").call
         end
         inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first

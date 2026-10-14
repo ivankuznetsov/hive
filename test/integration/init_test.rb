@@ -395,7 +395,7 @@ class InitTest < Minitest::Test
           workflow_input = StringIO.new("#{author_index}\nwriting\n")
           workflow_input.define_singleton_method(:tty?) { true }
           workflow_output = StringIO.new
-          setup_inputs = ([ "codex", "", "", "", "", "", "", "", "", "", "", "" ] +
+          setup_inputs = ([ "codex", "", "", "", "", "", "", "", "", "", "" ] +
                           ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
                           [ "", "", "", "" ]).join("\n") + "\n"
           prompts = make_tty_prompts(setup_inputs)
@@ -1377,7 +1377,7 @@ class InitTest < Minitest::Test
         refute_includes out, "hive: using defaults"
         refute_includes out, "hive: initialized"
         assert_equal "hive-init", payload.fetch("schema")
-        assert_equal 2, payload.fetch("schema_version")
+        assert_equal 3, payload.fetch("schema_version")
         assert_equal true, payload.fetch("ok")
         assert_equal File.basename(dir), payload.fetch("project")
         assert_equal File.expand_path(dir), payload.fetch("path")
@@ -1398,6 +1398,7 @@ class InitTest < Minitest::Test
         assert_equal payload.fetch("answers").fetch("budgets"), payload.fetch("budgets")
         assert_equal false, payload.fetch("daemon_autostart_requested")
 
+        assert_equal "hive-init.v3.json", File.basename(Hive::Schemas.schema_path("hive-init"))
         schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
         errors = JSONSchemer.schema(schema).validate(payload).map { |e| e["error"] }
         assert_empty errors, "hive init --json payload must validate: #{errors.inspect}"
@@ -1606,14 +1607,14 @@ class InitTest < Minitest::Test
   end
 
   def test_init_json_mirrors_non_default_prompt_answers
-    # Order: planning, claude_mode, claude_permission_mode, development,
+    # Order: planning, claude_permission_mode, development,
     # reviewers, patrol_reviewers, patrol_mode, triage, ad-hoc auto-fix,
     # architecture patrol discovery,
     # then limits, daemon-enable, babysitter-enable, daemon-autostart, confirm.
     # Two blank slots after claude_permission_mode accept the model/effort
     # defaults. patrol_reviewers index 3 = claude-ce-code-review
     # (1=codex-native-review, 2=codex-ce-code-review, 3=claude-ce-code-review).
-    inputs = ([ "codex", "2", "", "", "", "pi", "2", "3", "high", "safetyist", "y", "", "60,120" ] +
+    inputs = ([ "codex", "", "", "", "pi", "2", "3", "high", "safetyist", "y", "", "60,120" ] +
               ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
 
@@ -1625,7 +1626,6 @@ class InitTest < Minitest::Test
         answers = payload.fetch("answers")
 
         assert_equal "codex", answers.fetch("planning_agent")
-        assert_equal "headless", answers.fetch("claude_mode")
         assert_equal "pi", answers.fetch("development_agent")
         assert_equal [ "codex-ce-code-review" ], answers.fetch("enabled_reviewers")
         assert_equal [ "claude-ce-code-review" ], answers.fetch("patrol_reviewers")
@@ -1640,7 +1640,7 @@ class InitTest < Minitest::Test
         assert_equal false, answers.fetch("daemon_autostart")
 
         %w[
-          planning_agent claude_mode development_agent enabled_reviewers patrol_reviewers
+          planning_agent development_agent enabled_reviewers patrol_reviewers
           patrol_mode triage_bias adhoc_auto_fix refactor_patrol_enabled budgets timeouts daemon_enabled babysitter_enabled
         ].each do |key|
           assert_equal answers.fetch(key), payload.fetch(key), "top-level #{key} must mirror answers"
@@ -2337,8 +2337,8 @@ class InitTest < Minitest::Test
 
         assert_equal "claude", cfg.dig("brainstorm", "agent"),
                      "brainstorm.agent must default to claude"
-        assert_equal "tmux", cfg.dig("claude", "mode"),
-                     "claude.mode must default to tmux in fresh templates"
+        refute raw_cfg.fetch("claude").key?("mode"),
+               "fresh templates must not render the retired claude.mode key"
         assert_equal "bypassPermissions", cfg.dig("claude", "permission_mode"),
                      "claude.permission_mode must default to bypassPermissions in fresh templates"
         refute raw_cfg.fetch("brainstorm").key?("runtime"),
@@ -2416,7 +2416,7 @@ class InitTest < Minitest::Test
   end
 
   def default_setup_prompt_input
-    (([ "" ] * 12) + ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
+    (([ "" ] * 11) + ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
       [ "", "", "", "" ]).join("\n") + "\n"
   end
 
@@ -2474,11 +2474,11 @@ class InitTest < Minitest::Test
 
   def test_init_with_piped_user_choices_writes_matching_config
     # Order matches Prompts#collect. Choose codex for planning, default
-    # claude_mode, codex for development, safetyist triage, only first +
+    # Claude permission mode/model/effort, codex for development, safetyist triage, only first +
     # third normal reviewer, default patrol reviewer, high patrol mode, override `plan`
     # budget/timeout, keep ad-hoc PR auto-fix disabled, accept the rest.
     inputs = [
-      "codex", "", "", "", "", "2", "1,3", "", "high", "safetyist",
+      "codex", "", "", "", "2", "1,3", "", "high", "safetyist",
       "", "", "", "30,900", "", "", "", "", "", "", "", "",
       "", "", "", ""
     ].join("\n") + "\n"
@@ -2520,26 +2520,21 @@ class InitTest < Minitest::Test
     end
   end
 
-  def test_init_with_headless_claude_mode_writes_matching_config
-    # planning=blank(claude), claude_mode="2"(headless), claude_permission_mode=blank,
-    # dev=blank, reviewers=blank, patrol_reviewers=blank, patrol_mode=blank,
-    # triage=blank, ad-hoc auto-fix=blank, architecture patrol=blank,
-    # limit blanks, daemon-enable=blank,
-    # babysitter-enable=blank, daemon-autostart=blank, confirm=blank.
-    inputs = ([ "", "2", "", "", "", "", "", "", "", "", "", "" ] +
-              ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
-              [ "", "", "", "" ]).join("\n") + "\n"
+  def test_init_interactive_flow_writes_no_claude_launch_mode
+    # Blank answers for every prompt (planning, Claude permission mode,
+    # model, effort, dev, reviewers, patrol reviewers, patrol mode, triage,
+    # ad-hoc auto-fix, architecture patrol, limits, daemon-enable,
+    # babysitter-enable, daemon-autostart, confirm).
+    inputs = ([ "" ] * (11 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size + 4)).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         prompts = make_tty_prompts(inputs)
         capture_io { Hive::Commands::Init.new(dir, prompts: prompts).call }
 
-        cfg = Hive::Config.load(dir)
-        config_path = File.join(dir, ".hive-state", "config.yml")
-        raw_cfg = YAML.safe_load(File.read(config_path))
-        assert_equal "claude", cfg.dig("brainstorm", "agent")
-        assert_equal "headless", cfg.dig("claude", "mode")
-        assert_equal "bypassPermissions", cfg.dig("claude", "permission_mode")
+        raw_cfg = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        refute raw_cfg.fetch("claude").key?("mode"), "init must not write the retired claude.mode key"
+        assert_equal "bypassPermissions", raw_cfg.dig("claude", "permission_mode")
+        assert_equal false, Hive::Config.obsolete_claude_mode_key?(Hive::Config.load(dir))
         refute raw_cfg.fetch("brainstorm").key?("runtime"),
                "fresh init config must not render legacy brainstorm.runtime"
       end
@@ -2547,11 +2542,11 @@ class InitTest < Minitest::Test
   end
 
   def test_init_with_claude_permission_mode_auto_writes_matching_config
-    # planning=blank, claude_mode=blank, claude_permission_mode="2"(auto),
+    # planning=blank, claude_permission_mode="2"(auto),
     # dev/reviewers/patrol_reviewers/patrol_mode/triage/ad-hoc auto-fix/
     # architecture patrol=blank, limits blank,
     # daemon/babysitter/autostart/confirm blank.
-    inputs = ([ "", "", "2", "", "", "", "", "", "", "", "", "" ] +
+    inputs = ([ "", "2", "", "", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -2560,7 +2555,6 @@ class InitTest < Minitest::Test
         capture_io { Hive::Commands::Init.new(dir, prompts: prompts).call }
 
         cfg = Hive::Config.load(dir)
-        assert_equal "tmux", cfg.dig("claude", "mode")
         assert_equal "auto", cfg.dig("claude", "permission_mode")
       end
     end
@@ -2568,11 +2562,11 @@ class InitTest < Minitest::Test
 
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
-    # Blanks: planning (claude), claude mode, Claude permission mode, dev,
+    # Blanks: planning (claude), Claude permission mode, model, effort, dev,
     # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix,
     # architecture patrol, limits. Then "n" for daemon-enable and blanks for
     # babysitter-enable, daemon-autostart, and confirm.
-    inputs = (([ "" ] * (12 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    inputs = (([ "" ] * (11 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -2588,11 +2582,11 @@ class InitTest < Minitest::Test
 
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
-    # Blanks: planning (claude), claude mode, Claude permission mode, dev,
+    # Blanks: planning (claude), Claude permission mode, model, effort, dev,
     # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix,
     # architecture patrol, limits, daemon-enable, babysitter-enable,
     # daemon-autostart.
-    inputs = (([ "" ] * (15 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    inputs = (([ "" ] * (14 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -2625,11 +2619,11 @@ class InitTest < Minitest::Test
       with_tmp_git_repo do |dir|
         error = assert_raises(Hive::InternalError) do
           capture_io do
-            Hive::Commands::Init.new(dir, prompts: make_incomplete_prompts("claude_mode")).call
+            Hive::Commands::Init.new(dir, prompts: make_incomplete_prompts("claude_permission_mode")).call
           end
         end
         assert_includes error.message, "KeyError"
-        assert_includes error.message, "claude_mode"
+        assert_includes error.message, "claude_permission_mode"
 
         refute File.directory?(File.join(dir, ".hive-state")),
                ".hive-state must not exist after an incomplete prompt answer hash"

@@ -320,8 +320,7 @@ reference.
      "response_business_days" => 1,
      "minutes_per_namespace_per_day" => nil}},
  "claude" =>
-  {"mode" => "tmux",
-   "permission_mode" => "bypassPermissions",
+  {"permission_mode" => "bypassPermissions",
    "model" => "default",
    "effort" => "default"},
  "budget_usd" =>

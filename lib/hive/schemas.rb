@@ -13,7 +13,7 @@ module Hive
       "hive-runtime-maintenance" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
-      "hive-init" => 2,
+      "hive-init" => 3,
       "hive-init-preview" => 1,
       "hive-new" => 1,
       "hive-setup-agents" => 1,

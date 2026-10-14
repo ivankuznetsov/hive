@@ -25,7 +25,6 @@ module Hive
 
         DEFAULT_PLANNING_AGENT = "claude".freeze
         DEFAULT_DEVELOPMENT_AGENT = "codex".freeze
-        DEFAULT_CLAUDE_MODE = "tmux".freeze
         DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions".freeze
         # "default" is a live Claude Code alias that tracks ITS recommended
         # model (Opus-class today) — hive follows Claude Code's defaults
@@ -37,9 +36,7 @@ module Hive
         # default tier (high today).
         DEFAULT_CLAUDE_EFFORT = "default".freeze
         CLAUDE_EFFORT_CHOICES = [ "default", "low", "medium", "high" ].freeze
-        CLAUDE_MODES = Hive::Config::CLAUDE_MODES
         CLAUDE_PERMISSION_MODES = Hive::Config::CLAUDE_PERMISSION_MODES
-        CLAUDE_MODE_CHOICES = [ "tmux", "headless" ].freeze
         DEFAULT_PATROL_MODE = Hive::Config::DEFAULT_PATROL_MODE
         PATROL_MODE_CHOICES = Hive::Config::PATROL_MODES
         # Display/index order for the prompt menu; CLAUDE_PERMISSION_MODES is the
@@ -154,7 +151,6 @@ module Hive
         def self.minimal_defaults
           {
             "planning_agent" => DEFAULT_PLANNING_AGENT,
-            "claude_mode" => DEFAULT_CLAUDE_MODE,
             "claude_permission_mode" => DEFAULT_CLAUDE_PERMISSION_MODE,
             "claude_model" => DEFAULT_CLAUDE_MODEL,
             "claude_effort" => DEFAULT_CLAUDE_EFFORT,
@@ -182,7 +178,6 @@ module Hive
         # Returns the answers hash with shape:
         #   {
         #     "planning_agent"    => String,           # one of @registered_agents
-        #     "claude_mode"      => String,           # tmux | headless
         #     "claude_permission_mode" => String,      # Claude Code permission mode
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of AVAILABLE_REVIEWER_NAMES
@@ -203,7 +198,6 @@ module Hive
 
           intro
           planning = prompt_agent("Planning agent (brainstorm + plan)", DEFAULT_PLANNING_AGENT)
-          claude_mode = prompt_claude_mode
           claude_permission_mode = prompt_claude_permission_mode
           claude_model = prompt_claude_model
           claude_effort = prompt_claude_effort
@@ -225,7 +219,6 @@ module Hive
 
           answers = {
             "planning_agent" => planning,
-            "claude_mode" => claude_mode,
             "claude_permission_mode" => claude_permission_mode,
             "claude_model" => claude_model,
             "claude_effort" => claude_effort,
@@ -269,7 +262,6 @@ module Hive
         def non_interactive_defaults
           answers = {
             "planning_agent" => DEFAULT_PLANNING_AGENT,
-            "claude_mode" => DEFAULT_CLAUDE_MODE,
             "claude_permission_mode" => DEFAULT_CLAUDE_PERMISSION_MODE,
             "claude_model" => DEFAULT_CLAUDE_MODEL,
             "claude_effort" => DEFAULT_CLAUDE_EFFORT,
@@ -290,7 +282,6 @@ module Hive
           # `summary=$(hive init)` capture has a parseable single line.
           @summary_io.puts(
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
-            "claude_mode=#{DEFAULT_CLAUDE_MODE}, " \
             "claude_permission_mode=#{DEFAULT_CLAUDE_PERMISSION_MODE}, " \
             "claude_model=#{DEFAULT_CLAUDE_MODEL}, " \
             "claude_effort=#{DEFAULT_CLAUDE_EFFORT}, " \
@@ -358,38 +349,9 @@ module Hive
           end
         end
 
-        def prompt_claude_mode
-          @output.puts ""
-          @output.puts "Claude launch mode — applies to every stage that uses Claude:"
-          @output.puts "  1) tmux     - attachable tmux pane using your logged-in Claude session"
-          @output.puts "  2) headless - non-interactive `claude -p`"
-          loop do
-            @output.print "Claude mode [#{DEFAULT_CLAUDE_MODE}]: "
-            @output.flush
-            answer = read_line
-            return DEFAULT_CLAUDE_MODE if answer.empty?
-
-            resolved = resolve_claude_mode_choice(answer)
-            return resolved if resolved
-
-            @output.puts "  unknown Claude mode #{answer.inspect}; pick " \
-                         "#{CLAUDE_MODES.join('/')} or 1..#{CLAUDE_MODE_CHOICES.size}"
-          end
-        end
-
-        def resolve_claude_mode_choice(answer)
-          if answer =~ /\A\d+\z/
-            idx = answer.to_i
-            return CLAUDE_MODE_CHOICES[idx - 1] if idx.between?(1, CLAUDE_MODE_CHOICES.size)
-
-            return nil
-          end
-          CLAUDE_MODES.find { |mode| mode.casecmp(answer).zero? }
-        end
-
         def prompt_claude_permission_mode
           @output.puts ""
-          @output.puts "Claude permission mode — applies to every Claude-backed stage (tmux and headless):"
+          @output.puts "Claude permission mode — applies to every Claude-backed stage:"
           @output.puts "  1) bypassPermissions - skip permission prompts (recommended default)"
           @output.puts "  2) auto              - use Claude Code auto-mode rules"
           @output.puts "  3) default           - normal Claude Code permissions"
@@ -720,7 +682,6 @@ module Hive
           @output.puts ""
           @output.puts "Summary:"
           @output.puts "  planning_agent          = #{answers['planning_agent']}"
-          @output.puts "  claude_mode             = #{answers['claude_mode']}"
           @output.puts "  claude_permission_mode  = #{answers['claude_permission_mode']}"
           @output.puts "  claude_model            = #{answers['claude_model']}"
           @output.puts "  claude_effort           = #{answers['claude_effort']}"

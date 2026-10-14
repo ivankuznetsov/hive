@@ -49,7 +49,6 @@ class RunFinalizeTest < Minitest::Test
 
   def setup_finalize_task(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
-    set_project_claude_mode(dir, "headless")
     cfg_path = File.join(dir, ".hive-state", "config.yml")
     cfg = YAML.safe_load(File.read(cfg_path))
     worktree_root = Dir.mktmpdir("finalize-wt-root-")

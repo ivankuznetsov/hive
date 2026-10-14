@@ -29,10 +29,8 @@ command_receipts:
     minutes_per_namespace_per_day:
 
 claude:
-  # tmux uses your logged-in Claude session in an attachable pane.
-  # headless keeps the non-interactive `claude -p` path.
-  mode: <%= claude_mode %>
-  # Applies to every Claude-backed stage, in both tmux and headless mode,
+  # Hive launches Claude headless (`claude -p`).
+  # permission_mode applies to every Claude-backed stage,
   # EXCEPT where a stage sets a non-yolo `permissions:` scope (below): a
   # read-only/scoped stage runs in "default" permission mode and ignores this
   # value for that stage.
@@ -127,8 +125,6 @@ brainstorm:
   # permissions:
   #   preset: scoped
   #   tools: [Read, Write, Edit]
-  # Runtime mode is configured project-wide through
-  # the project-global claude.mode setting above.
 plan:
   agent: <%= planning_agent %>
   # skill: /plan

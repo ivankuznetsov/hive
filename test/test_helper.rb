@@ -673,14 +673,6 @@ module HiveTestHelper
     end
   end
 
-  def set_project_claude_mode(project_root, mode)
-    cfg_path = File.join(project_root, ".hive-state", "config.yml")
-    cfg = YAML.safe_load(File.read(cfg_path)) || {}
-    cfg["claude"] ||= {}
-    cfg["claude"]["mode"] = mode.to_s
-    File.write(cfg_path, cfg.to_yaml)
-  end
-
   # Variant that also overrides HOME - needed by tests that exercise
   # daemon ServiceInstaller, which anchors on the real user home for
   # launchd/systemd paths and would otherwise write units to the

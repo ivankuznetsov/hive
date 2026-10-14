@@ -17,6 +17,7 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
   WAL_TASK = "paired-wal-audit-task"
   GENERAL_ACTION = "Use a writable, accessible state root (HIVE_HOME).".freeze
   UNPAIRED_ACTION = "Use a writable state root (HIVE_HOME), or safely restore a matching WAL/SHM pair or remove the stray sidecar after verifying no committed data will be lost.".freeze
+  SQLITE_READONLY_RECOVERY = SQLite3::Constants::ErrorCode::READONLY | (1 << 8)
 
   def test_operational_status_on_real_read_only_mounts
     assert_docker_available!
@@ -52,28 +53,39 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
   end
 
   def test_ae4_degraded_outcome_rejects_unrelated_storage_failures
-    error = Hive::RuntimeControlPlane::Unavailable.new(
-      "Hive state is mounted read-only", code: :state_storage_read_only,
-      action: GENERAL_ACTION,
-      details: {
-        cause_chain: [ { error_class: "Errno::EROFS" } ],
-        confirmed_read_only: true
+    [
+      { error_class: "Errno::EROFS" },
+      {
+        error_class: "SQLite3::ReadOnlyException",
+        sqlite_code: SQLite3::Constants::ErrorCode::READONLY
       }
-    )
-    payload = Hive::Schemas::ErrorEnvelope.build(
-      schema: "hive-runtime-maintenance", error: error, error_kind: "runtime",
-      extras: {
-        "action" => "status", "runtime_code" => error.code.to_s,
-        "next_action" => error.action,
-        "details" => Hive::RuntimeControlPlane::Codec.normalize(error.details)
-      }
-    )
-    result = { status: Hive::ExitCodes::UNAVAILABLE, stdout: JSON.generate(payload), stderr: "" }
-
-    assertion = assert_raises(Minitest::Assertion) do
-      assert_ae4_outcome(result, command: "status --operational", task_slug: WAL_TASK)
+    ].each do |cause|
+      assertion = assert_raises(Minitest::Assertion) do
+        assert_ae4_outcome(
+          ae4_failure_result(cause: cause),
+          command: "status --operational", task_slug: WAL_TASK
+        )
+      end
+      assert_match(/WAL-index recovery failure/, assertion.message)
     end
-    assert_match(/WAL-index recovery failure/, assertion.message)
+  end
+
+  def test_ae4_degraded_outcome_retains_recovery_failure_evidence
+    result = ae4_failure_result(
+      cause: {
+        error_class: "SQLite3::ReadOnlyException",
+        sqlite_code: SQLITE_READONLY_RECOVERY
+      },
+      stderr: "read-only WAL recovery failed"
+    )
+
+    outcome = assert_ae4_outcome(
+      result, command: "status --operational", task_slug: WAL_TASK
+    )
+
+    assert_equal JSON.parse(result.fetch(:stdout)), outcome.fetch("payload")
+    assert_equal result.fetch(:stderr), outcome.fetch("stderr")
+    assert_equal "wal_index_recovery_blocked", outcome.fetch("outcome")
   end
 
   private
@@ -260,20 +272,35 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
     assert_storage_error(payload, result, action: GENERAL_ACTION)
     causes = payload.dig("details", "cause_chain") || []
     recovery_failure = causes.any? do |cause|
-      primary_code = cause["sqlite_code"].to_i & 0xff if cause.key?("sqlite_code")
-      cause.fetch("error_class", "").match?(/SQLite3::(?:CantOpen|ReadOnly)/) ||
-        [ SQLite3::Constants::ErrorCode::CANTOPEN,
-          SQLite3::Constants::ErrorCode::READONLY ].include?(primary_code)
+      cause["sqlite_code"].to_i == SQLITE_READONLY_RECOVERY
     end
     assert recovery_failure,
            "AE4 degraded acceptance requires an underlying SQLite WAL-index recovery failure: #{payload.inspect}"
-    puts "AE4_DEGRADED=#{JSON.generate(
+    degraded = {
       "command" => command,
       "exit" => result.fetch(:status),
       "payload" => payload,
       "stderr" => result.fetch(:stderr)
-    )}"
-    { "command" => command, "exit" => result.fetch(:status), "outcome" => "wal_index_recovery_blocked" }
+    }
+    puts "AE4_DEGRADED=#{JSON.generate(degraded)}"
+    degraded.merge("outcome" => "wal_index_recovery_blocked")
+  end
+
+  def ae4_failure_result(cause:, stderr: "")
+    error = Hive::RuntimeControlPlane::Unavailable.new(
+      "Hive state is mounted read-only", code: :state_storage_read_only,
+      action: GENERAL_ACTION,
+      details: { cause_chain: [ cause ], confirmed_read_only: true }
+    )
+    payload = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-runtime-maintenance", error: error, error_kind: "runtime",
+      extras: {
+        "action" => "status", "runtime_code" => error.code.to_s,
+        "next_action" => error.action,
+        "details" => Hive::RuntimeControlPlane::Codec.normalize(error.details)
+      }
+    )
+    { status: Hive::ExitCodes::UNAVAILABLE, stdout: JSON.generate(payload), stderr: stderr }
   end
 
   def assert_unpaired_error(result, sidecar:)

@@ -346,12 +346,14 @@ variants. The recorded real-mount run returned the nonempty operational task
 list and successful runtime status in all six variants, including a
 distinguishable scheduler observation committed exclusively in WAL. If a host
 kernel cannot recover the read-only WAL index, degraded acceptance requires the
-typed storage envelope to retain the underlying SQLite recovery error; unrelated
+typed storage envelope's cause chain to retain SQLite's exact
+`SQLITE_READONLY_RECOVERY` extended result; generic read-only and unrelated
 failures fail the gate. Separate WAL-only and SHM-only fixtures returned the exact
 `state_storage_read_only` guidance without creating the missing sidecar. Every
 scenario proves the state bytes, inventory, modes, and ownership are unchanged.
 CI retains the candidate revision, source digest, Docker/image identity, mount
-proof, exit outcomes, and unchanged-state result in
+proof, exit outcomes, unchanged-state result, and complete payload/stderr for
+any accepted degraded outcome in
 `tmp/status-read-only-evidence.json` as the
 `operational-status-read-only-evidence` artifact. A paired-sidecar host that
 requires WAL-index recovery may instead satisfy AE4 only through the bounded

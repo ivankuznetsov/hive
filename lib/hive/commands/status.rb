@@ -793,9 +793,9 @@ module Hive
         return project_error_payload(base, "missing_project_path") unless File.directory?(path)
         return project_error_payload(base, "not_initialised") unless File.directory?(hive_state)
 
-        # Hold the project overlay stable while loading and classifying rows.
-        # StatusFeed runs this on poller and request threads, so every prepared
-        # row must capture its own project's workflow generation before unlock.
+        # Capture the selected project's workflow generation while the operation
+        # owns its overlay. Classification below is generation-backed after the
+        # operation releases the live registry for other status threads.
         raise workflow_generation if workflow_generation.is_a?(Exception)
         workflow_generation ||= Hive::Workflows::Project.with_active_workflows(path) do
           config = task_action_config(path)
@@ -803,21 +803,21 @@ module Hive
         end
         config = workflow_generation.config
         rows = annotate_implementation_identities(
-            collect_rows(
-              hive_state,
-              stages: stages,
-              exclude_archived: exclude_archived,
-              now: now,
-              workflow_generation: workflow_generation,
-              project_name: project["name"],
-              task_slugs: task_slugs
-            ),
-            config
-          )
-          rows = annotate_actions(
-            rows,
-            project, project_count, config: config, with_diagnostic: true
-          )
+          collect_rows(
+            hive_state,
+            stages: stages,
+            exclude_archived: exclude_archived,
+            now: now,
+            workflow_generation: workflow_generation,
+            project_name: project["name"],
+            task_slugs: task_slugs
+          ),
+          config
+        )
+        rows = annotate_actions(
+          rows,
+          project, project_count, config: config, with_diagnostic: true
+        )
         PreparedProject.new(
           project: project,
           base: base,
@@ -1243,6 +1243,9 @@ module Hive
           return
         end
 
+        # Capture the selected project's workflow generation while the operation
+        # owns its overlay. All text-mode classification below uses that bounded
+        # generation after the live registry is released.
         raise workflow_generation if workflow_generation.is_a?(Exception)
         workflow_generation ||= Hive::Workflows::Project.with_active_workflows(path) do
           # Text-mode renders icon / state_label / suggested_command / age
@@ -1254,17 +1257,17 @@ module Hive
         end
         config = workflow_generation.config
         rows = annotate_implementation_identities(
-            collect_rows(
-              hive_state, now: now, workflow_generation: workflow_generation,
-              project_name: project["name"]
-            ),
-            config
-          )
-          rows = annotate_actions(
-            rows, project, project_count,
-            config: config, with_diagnostic: false
-          )
-          rows = annotate_dependencies(rows, project, admission_context: admission_context)
+          collect_rows(
+            hive_state, now: now, workflow_generation: workflow_generation,
+            project_name: project["name"]
+          ),
+          config
+        )
+        rows = annotate_actions(
+          rows, project, project_count,
+          config: config, with_diagnostic: false
+        )
+        rows = annotate_dependencies(rows, project, admission_context: admission_context)
         projection = Hive::ArchiveFilter.project(
           rows, now: now,
           apply_retention: !@archive
@@ -1922,19 +1925,27 @@ module Hive
       end
 
       def workflow_stage_dirs(generation)
-        generation ? generation.stage_dirs : Hive::Workflows.all_stage_dirs
+        return generation.stage_dirs if generation
+
+        Hive::Workflows::Project.synchronize { Hive::Workflows.all_stage_dirs }
       end
 
       def workflow_active_stage_dirs(generation)
-        generation ? generation.active_stage_dirs : Hive::Workflows.all_active_stage_dirs
+        return generation.active_stage_dirs if generation
+
+        Hive::Workflows::Project.synchronize { Hive::Workflows.all_active_stage_dirs }
       end
 
       def workflow_terminal_stage_dirs(generation)
-        generation ? generation.terminal_stage_dirs : Hive::Workflows.all_terminal_stage_dirs
+        return generation.terminal_stage_dirs if generation
+
+        Hive::Workflows::Project.synchronize { Hive::Workflows.all_terminal_stage_dirs }
       end
 
       def workflow_ids(generation)
-        generation ? generation.workflows.keys : Hive::Workflows::Registry.ids
+        return generation.workflows.keys if generation
+
+        Hive::Workflows::Project.synchronize { Hive::Workflows::Registry.ids }
       end
 
       def note_retention_boundary(boundary)

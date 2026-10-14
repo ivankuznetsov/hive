@@ -363,6 +363,9 @@ expired completed dependency still satisfies its dependants. Ordinary and
 archive projections retain the complete dependency graph. Operational status
 uses the captured generation for each project's `daemon.enabled` context;
 callers supplying an existing payload keep the context-only config read.
+Row collection and classification continue from the immutable generation after
+the project operation releases the live overlay. Legacy nil-generation helper
+calls serialize their current-view workflow unions under `Project.synchronize`.
 The producer prepares each project once and reuses selected folders for
 admission. A project that cannot prepare rows falls back to a disk admission
 scan without repeating healthy projects. Synthetic invalid rows retain

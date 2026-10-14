@@ -3937,6 +3937,28 @@ class CommandsStatusTest < Minitest::Test
     refute_includes active_dirs, "9-done", "coding terminal is inert"
   end
 
+  def test_workflow_helper_compatibility_reads_hold_the_project_lock
+    cmd = Hive::Commands::Status.new
+    readers = [
+      [ :workflow_stage_dirs, Hive::Workflows, :all_stage_dirs ],
+      [ :workflow_active_stage_dirs, Hive::Workflows, :all_active_stage_dirs ],
+      [ :workflow_terminal_stage_dirs, Hive::Workflows, :all_terminal_stage_dirs ],
+      [ :workflow_ids, Hive::Workflows::Registry, :ids ]
+    ]
+
+    readers.each do |helper, owner, reader|
+      lock_owned = nil
+      expected = [ helper ].freeze
+      with_replaced_singleton_method(owner, reader, lambda {
+        lock_owned = Hive::Workflows::Project::LOCK.mon_owned?
+        expected
+      }) do
+        assert_same expected, cmd.send(helper, nil)
+      end
+      assert lock_owned, "#{helper} must serialize its nil-generation compatibility read"
+    end
+  end
+
   def test_status_generation_capture_records_unexpected_project_failures
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

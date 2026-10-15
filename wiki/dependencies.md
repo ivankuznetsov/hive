@@ -277,8 +277,9 @@ an ambiguous command-not-found failure.
 
 ## Release container builder action
 
-The three container publication jobs in `.github/workflows/release.yml` pin
-`docker/setup-buildx-action` v4.3.0 to commit
-`37fe631027851001ddb9b187196cc803df7f5f0e`. The action metadata and inputs are
-unchanged from the preceding v4.2.0 pin; this update refreshes its bundled
-JavaScript dependencies. The workflow remains tag-triggered.
+The three container publication jobs in `.github/workflows/release.yml` and
+three recovery/build jobs in `.github/workflows/hivebox-recover.yml` pin
+`docker/setup-buildx-action` v4.4.1 to commit
+`f87e5991a6d7451dcb8d9637bfbc97413f497069`. The action metadata and inputs are
+unchanged from the preceding v4.3.0 pin; this update refreshes its bundled
+JavaScript dependencies. The release workflow remains tag-triggered.

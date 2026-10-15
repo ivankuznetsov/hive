@@ -133,7 +133,7 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `browser_test_prompt.md.erb` | `Stages::Review::BrowserTest#run_attempt` (Phase 5) | `project_name`, `worktree_path`, `task_folder`, `pass`, `attempt`, `max_attempts`, `result_path`, `skill_invocation`, `user_supplied_tag` |
 | `triage_courageous.md.erb` | `Stages::Review::Triage` (Phase 3 default bias) | `project_name`, `worktree_path`, `task_folder`, `pass`, `reviewer_files`, `reviewer_contents`, `escalations_path`, `user_supplied_tag` |
 | `triage_safetyist.md.erb` | `Stages::Review::Triage` (opt-in bias preset) | same as `triage_courageous.md.erb` |
-| `reviewer_claude_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation`, `user_supplied_tag` |
+| `reviewer_claude_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2); reviews `git diff <default_branch>...HEAD` from the merge-base | `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation`, `user_supplied_tag` |
 | `reviewer_codex_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
 | `reviewer_pr_review_toolkit.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
 | `finalize_prompt.md.erb` | `Stages::Finalize.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `pr_url`, `plan_text`, `reviews_summary`, `user_supplied_tag` |

@@ -1761,3 +1761,18 @@ whether to drop them in that next major release or earlier now that the
 container is gone. The built-in capture manifest's evidence type also keeps the
 literal `hivebox` value because `hive-artifact-capture.v2` is a closed
 published contract; renaming it needs a new schema version.
+
+## Task ids are not unique across state homes (2026-10-16)
+
+`Hive::TaskCounter` allocates from the runtime database of the current state
+home. A fresh `HIVE_HOME` (for example an agent copying the global config into
+`mktemp -d` to run `hv new` against a real project) infers its first id from
+its own empty `task_subjects` and writes `id: 1` into the shared project's
+`meta.yml`. That is how topgreendeals.co.uk task
+`preview-only-prepare-the-top-260901-b765` collided with the hive project's
+task 1 on 2026-09-01. The live installation now detects and parks such tasks
+as an operator repair, but nothing prevents a second state home from minting
+the ids, and there is no CLI command that re-keys a task (`hive migrate` no
+longer exists). Open question: whether `hive new` should refuse to write into
+a project registered in a different installation, or whether a supported
+re-key command should exist.

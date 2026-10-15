@@ -590,7 +590,7 @@ class DependencySnapshotTest < Minitest::Test
     calls = []
     with_replaced_singleton_method(
       Hive::Worktree, :branch_refs,
-      ->(root) { calls << root; Set[ "refs/heads/base-task" ].freeze }
+      ->(root) { calls << root; Set["refs/heads/base-task"].freeze }
     ) do
       [ nil, [ "base-task" ], "other:base-task", "Not A Slug!", [] ].each do |declaration|
         inventory = Hive::DependencySnapshot.branch_refs_for("/repo", [ declaration ])

@@ -1,4 +1,5 @@
 require "json"
+require "set"
 
 require "hive/agent_profiles"
 require "hive/agent_support/claude"
@@ -29,6 +30,10 @@ module Hive
     # puts them right before the next launch.
     LEGACY_SETTINGS_BACKUP_SUFFIX = ".hive-pre-install".freeze
     LEGACY_STOP_HOOK_SCRIPT = "/stop_hook.sh".freeze
+    # The repair runs before every spawn, so a kept backup is reported once
+    # per settings path per process instead of on every launch.
+    KEPT_BACKUP_WARNED = Set.new
+    KEPT_BACKUP_WARNED_LOCK = Mutex.new
 
     module_function
 
@@ -114,8 +119,7 @@ module Hive
         if stub || !File.exist?(settings_path)
           File.rename(backup_path, settings_path)
         else
-          warn "[hive] left legacy Claude settings backup #{backup_path} in place: " \
-               "#{settings_path} is not the tmux-era stub"
+          warn_kept_backup_once(settings_path, backup_path)
         end
       elsif stub
         File.delete(settings_path)
@@ -126,6 +130,17 @@ module Hive
     rescue SystemCallError => e
       warn "[hive] could not repair legacy Claude settings #{settings_path}: #{e.class}: #{e.message}"
       nil
+    end
+
+    def warn_kept_backup_once(settings_path, backup_path)
+      return unless KEPT_BACKUP_WARNED_LOCK.synchronize { KEPT_BACKUP_WARNED.add?(settings_path) }
+
+      warn "[hive] left legacy Claude settings backup #{backup_path} in place: " \
+           "#{settings_path} is not the tmux-era stub"
+    end
+
+    def reset_kept_backup_warnings!
+      KEPT_BACKUP_WARNED_LOCK.synchronize { KEPT_BACKUP_WARNED.clear }
     end
 
     # The exact shape the tmux-era installer wrote: one Stop matcher group

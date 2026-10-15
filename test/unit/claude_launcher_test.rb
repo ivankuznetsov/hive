@@ -9,6 +9,16 @@ require "hive/task"
 class ClaudeLauncherTest < Minitest::Test
   include HiveTestHelper
 
+  def setup
+    super
+    Hive::ClaudeLauncher.reset_kept_backup_warnings!
+  end
+
+  def teardown
+    Hive::ClaudeLauncher.reset_kept_backup_warnings!
+    super
+  end
+
   def test_headless_mode_delegates_to_base_spawn_agent
     with_tmp_task do |task|
       captured = nil
@@ -547,6 +557,23 @@ class ClaudeLauncherTest < Minitest::Test
       assert_equal %({"model":"opus"}), File.read(settings)
       assert_equal %({"model":"sonnet"}), File.read("#{settings}.hive-pre-install")
       assert_equal 1, err.scan(/left legacy Claude settings backup #{Regexp.escape(settings)}\.hive-pre-install/).size
+    end
+  end
+
+  def test_kept_backup_warning_prints_once_per_settings_path
+    Dir.mktmpdir do |root|
+      first = write_settings(File.join(root, "a"), %({"model":"opus"}))
+      second = write_settings(File.join(root, "b"), %({"model":"opus"}))
+      [ first, second ].each { |path| File.write("#{path}.hive-pre-install", %({"model":"sonnet"})) }
+
+      _out, err = capture_io do
+        2.times { Hive::ClaudeLauncher.repair_legacy_settings_at(first) }
+        2.times { Hive::ClaudeLauncher.repair_legacy_settings_at(second) }
+      end
+
+      assert_equal 1, err.scan(/left legacy Claude settings backup #{Regexp.escape(first)}\.hive-pre-install/).size
+      assert_equal 1, err.scan(/left legacy Claude settings backup #{Regexp.escape(second)}\.hive-pre-install/).size
+      assert File.exist?("#{first}.hive-pre-install")
     end
   end
 

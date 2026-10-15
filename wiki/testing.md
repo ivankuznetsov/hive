@@ -1043,7 +1043,7 @@ written in the same second as the baseline can be reported as older or equal.
 
 The Hivebox image smoke, its stubbed-Docker unit tests, the release image
 jobs, and the Windows PowerShell installer harness were removed with the
-Hivebox distribution (ADR-054). `test/unit/packaging/verify_release_test.rb`
+Hivebox distribution (ADR-055). `test/unit/packaging/verify_release_test.rb`
 now asserts that `release.yml` builds no container image, and
 `test/unit/native_web_positioning_test.rb` asserts that no workflow or
 maintained entry point routes to the removed Docker packaging.

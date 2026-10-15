@@ -215,7 +215,7 @@ credential. The gem packages the gem metadata required for the managed app's
 installed-root path dependency; the Rails source remains in the authenticated
 versioned release bundle, or runs from a source checkout. The Hivebox Docker
 distribution (image, one-command installers, container supervisor) was removed
-by ADR-054.
+by ADR-055.
 
 ### E2E Harness
 

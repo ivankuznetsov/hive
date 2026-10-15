@@ -12,7 +12,7 @@ tags: [command, web, rails, turbo, plan-review, archive, retention, dogfood, dai
 `web/` at the repo root. It is the browser counterpart to the TUI over the same
 local registry and workflow state, with no mandatory sign-in on a verified
 loopback request. The former Hivebox container distribution is discontinued
-(ADR-054). The web tier adds no
+(ADR-055). The web tier adds no
 pipeline logic. Task detail is an operator-first semantic v2 view of the same
 workflow result and exact usage projection exposed by native `hive task`; v1
 attempt/provenance/timeline evidence remains on explicit audit paths. Status
@@ -206,7 +206,7 @@ the replacement and next-major support window. Warnings are deduplicated on
 stderr, included in setup/web JSON, and exposed as doctor warning rows.
 The former container-only Hivebox variables (`HIVEBOX_SESSION_SECRET`,
 `HIVEBOX_REPOS_DIR`, `HIVEBOX_PRECOMPILED_ASSETS`, `HIVEBOX_SUPERVISOR_PID`) are
-no longer read (ADR-054).
+no longer read (ADR-055).
 Foreground Rails receives resolved canonical timeout values even when the
 operator supplied an alias, and managed systemd/launchd units persist all six
 resolved settings so foreground and service-manager launches agree.
@@ -989,7 +989,7 @@ verifies the daemon pidfile through `Hive::PidFile` semantics and returns 503
 when the daemon is down or stale. The deep probe was the Hivebox container
 healthcheck; it remains available as a readiness probe for native operators.
 
-Hive no longer builds, smokes, or publishes the Hivebox Docker image (ADR-054):
+Hive no longer builds, smokes, or publishes the Hivebox Docker image (ADR-055):
 the Docker packaging directory, the release image jobs, the Windows installer
 CI job, and `hivebox-recover.yml` are gone. Already published
 `ghcr.io/ivankuznetsov/hivebox` tags remain in the registry without updates.

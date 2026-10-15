@@ -962,7 +962,7 @@ native-web `HIVEBOX_*` aliases remain accepted through the next major release:
 blank is unset, canonical wins conflicts, and alias use produces a deduplicated
 migration warning. The former container-only Hivebox
 image/name/bind/port/data/repo, session-secret, and supervisor variables are no
-longer read (ADR-054).
+longer read (ADR-055).
 
 The current `hive init` JSON summary envelope (`schemas/hive-init.v3.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the permission-mode choice. v3 dropped v2's `claude_mode` field when the Claude launch mode was removed. See [[commands/init]].
 

@@ -11,7 +11,7 @@ tags: [roadmap, status]
 
 ## Status
 
-The Hivebox Docker distribution was removed on 2026-10-15 (ADR-054): packaging, image release jobs, the Windows installer CI job, the recovery workflow, and the container supervisor are gone. Hivebox rows in the history tables below describe that retired surface and are kept as history.
+The Hivebox Docker distribution was removed on 2026-10-15 (ADR-055): packaging, image release jobs, the Windows installer CI job, the recovery workflow, and the container supervisor are gone. Hivebox rows in the history tables below describe that retired surface and are kept as history.
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` owns both stable-wrapper resolution and the shared PATH-only executable lookup used by doctor, update, and service installation. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 

@@ -385,7 +385,7 @@ the current owner on every request and evict old sessions when
 `web.github.owner` changes, so a repo-scoped session token cannot survive an
 ownership rotation. A local GitHub connection remains optional for repository
 listing and cloning and does not claim ownership. The Hivebox container
-distribution was removed by ADR-054. Managed local installs
+distribution was removed by ADR-055. Managed local installs
 stage a locked Bundler install plus a production asset precompile and verify
 the CSS/JavaScript manifest before the atomic bundle swap; both commands run
 through the locked Bundler and current Ruby without relying on `bundle` or a

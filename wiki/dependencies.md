@@ -277,5 +277,5 @@ an ambiguous command-not-found failure.
 ## Release container builder action
 
 Retired. The release and recovery workflows no longer build container images
-(ADR-054), so `docker/setup-buildx-action`, `docker/login-action`, and
+(ADR-055), so `docker/setup-buildx-action`, `docker/login-action`, and
 `docker/build-push-action` are no longer pinned anywhere in `.github/`.

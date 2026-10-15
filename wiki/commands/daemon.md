@@ -78,7 +78,7 @@ daemon are reserved by their parent before `Process.spawn`, remain blocked at
 then adopt that exact durable row for exit cleanup. A parent crash during the
 handoff leaves unresolved ownership in the registry rather than an invisible
 child. (The former Hivebox container supervisor and its
-`.hivebox-supervisor.pid` receipt were removed by ADR-054; legacy service
+`.hivebox-supervisor.pid` receipt were removed by ADR-055; legacy service
 discovery now covers only the daemon, bot, and babysitter pid files.)
 
 For the narrow backup-safe result, the two observations are inseparable:

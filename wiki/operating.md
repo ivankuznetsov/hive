@@ -333,7 +333,7 @@ start a per-user service on every host, so Homebrew/AUR caveats direct users to
 run setup. `hive setup --no-service` opts out of every web-service mutation;
 `hive setup --no-bootstrap` is diagnose-only. Windows runs native Hive inside
 WSL with systemd rather than a separate native manager. Hive no longer ships a
-container distribution (ADR-054); see the README for migrating a Hivebox
+container distribution (ADR-055); see the README for migrating a Hivebox
 install to native Hive.
 
 Updates and uninstall:

@@ -37,21 +37,45 @@ module Hive
 
     module_function
 
+    # Launch options `spawn_claude!` and `launch!` take through `**options`
+    # rather than naming them, with their defaults. Most reach spawn_agent
+    # unchanged. A fresh Hash per call keeps the Array defaults unshared.
+    def launch_option_defaults
+      {
+        expected_output: nil, status_mode: nil, permission_mode: nil,
+        allowed_tools: nil, disallowed_tools: nil,
+        identity_arguments: nil, routing_arguments: nil, runtime_policy: nil,
+        additional_read_roots: [], additional_write_roots: [],
+        edit_patterns: [], bash_patterns: [],
+        resource_guards: nil, agent_custody: nil,
+        model: nil, effort: nil
+      }
+    end
+
+    LAUNCH_OPTIONS = launch_option_defaults.keys.freeze
+
+    # Raise like a keyword signature on anything outside LAUNCH_OPTIONS:
+    # spawn_agent accepts more (cfg:, cli_flags:, ...) than callers may pass.
+    def launch_options(options)
+      unknown = options.keys - LAUNCH_OPTIONS
+      unless unknown.empty?
+        raise ArgumentError,
+              "unknown keyword#{'s' unless unknown.one?}: #{unknown.map(&:inspect).join(', ')}"
+      end
+      launch_option_defaults.merge(options)
+    end
+
     def launch!(task:, cfg:, prompt:, add_dirs:, cwd:, max_budget_usd:,
-                timeout_sec:, log_label:, status_mode: nil,
-                expected_output: nil, profile: nil,
-                allowed_tools: nil,
-                disallowed_tools: nil,
-                permission_mode: nil, mcp_config_path: nil,
-                strict_mcp_config: false, identity_arguments: nil,
-                routing_arguments: nil, runtime_policy: nil,
-                additional_read_roots: [], additional_write_roots: [],
-                edit_patterns: [], bash_patterns: [],
-                resource_guards: nil, agent_custody: nil,
-                model: nil, effort: nil)
+                timeout_sec:, log_label:, profile: nil,
+                mcp_config_path: nil, strict_mcp_config: false, **options)
+      options = launch_options(options)
+      routing_arguments = options[:routing_arguments]
+      identity_arguments = options[:identity_arguments]
+      model = options[:model]
+      effort = options[:effort]
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
-      permission_mode ||= Hive::Config.claude_permission_mode(cfg)
+      permission_mode = options[:permission_mode] || Hive::Config.claude_permission_mode(cfg)
       profile.validate_routing_arguments!(routing_arguments) if routing_arguments
       routed_flags = routing_arguments&.native_arguments
       # Per-stage model/effort override the project-global claude.* pins.
@@ -66,31 +90,16 @@ module Hive
                   (cfg ? Hive::Config.claude_cli_flags(cfg, model: model, effort: effort) : [])
       require "hive/stages/base"
       headless_flags = (routing_arguments ? [] : cli_flags) +
-                       (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
+                       (options[:runtime_policy] ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
+      # model/effort are already folded into cli_flags and the receipt pair.
       Hive::Stages::Base.spawn_agent(
         task,
-        prompt: prompt,
-        add_dirs: add_dirs,
-        cwd: cwd,
-        max_budget_usd: max_budget_usd,
-        timeout_sec: timeout_sec,
-        log_label: log_label,
-        profile: profile,
-        expected_output: expected_output,
-        status_mode: status_mode,
+        prompt: prompt, add_dirs: add_dirs, cwd: cwd,
+        max_budget_usd: max_budget_usd, timeout_sec: timeout_sec,
+        log_label: log_label, profile: profile,
+        **options.except(:model, :effort),
         permission_mode: permission_mode,
-        allowed_tools: allowed_tools,
-        disallowed_tools: disallowed_tools,
         cli_flags: headless_flags,
-        identity_arguments: identity_arguments,
-        routing_arguments: routing_arguments,
-        runtime_policy: runtime_policy,
-        additional_read_roots: additional_read_roots,
-        additional_write_roots: additional_write_roots,
-        edit_patterns: edit_patterns,
-        bash_patterns: bash_patterns,
-        resource_guards: resource_guards,
-        agent_custody: agent_custody,
         receipt_model: receipt_model,
         receipt_effort: receipt_effort
       )

@@ -1239,47 +1239,28 @@ module Hive
         }
       end
 
+      # Named keywords are the ones this layer reads or re-defaults; every
+      # other launch option (Hive::ClaudeLauncher::LAUNCH_OPTIONS) travels
+      # in `options`, which launch_options validates so an unknown keyword
+      # still raises ArgumentError here.
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
-                         add_dirs: [], cwd: nil, log_label: nil,
-                         profile: nil, expected_output: nil, status_mode: nil,
-                         permission_mode: nil, allowed_tools: nil,
-                         disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false, identity_arguments: nil,
-                         routing_arguments: nil, runtime_policy: nil,
-                         implementation_stage: nil,
-                         additional_read_roots: [], additional_write_roots: [],
-                         edit_patterns: [], bash_patterns: [],
-                         resource_guards: nil, agent_custody: nil,
-                         model: nil, effort: nil)
+                         add_dirs: [], cwd: nil, log_label: nil, profile: nil,
+                         mcp_config_path: nil, strict_mcp_config: false,
+                         implementation_stage: nil, **options)
+        options = Hive::ClaudeLauncher.launch_options(options)
+        common = {
+          prompt: prompt, max_budget_usd: max_budget_usd,
+          timeout_sec: timeout_sec, add_dirs: add_dirs, log_label: log_label
+        }
         context = Hive::Attempts::Context.current
         if context&.explicit_routing? &&
             !Hive::AgentSupport.supports?(context.adapter, :Launch)
+          # A non-Claude admitted adapter has no MCP flags to render.
           return spawn_agent(
-            task,
-            prompt: prompt,
-            max_budget_usd: max_budget_usd,
-            timeout_sec: timeout_sec,
-            add_dirs: add_dirs,
-            cwd: cwd,
-            log_label: log_label,
+            task, **common, **options,
+            cwd: cwd, cfg: cfg,
             profile: Hive::AgentProfiles.lookup(context.adapter, cfg: cfg),
-            expected_output: expected_output,
-            status_mode: status_mode,
-            cfg: cfg,
-            permission_mode: permission_mode,
-            allowed_tools: allowed_tools,
-            disallowed_tools: disallowed_tools,
-            identity_arguments: identity_arguments,
-            routing_arguments: routing_arguments,
-            runtime_policy: runtime_policy,
-            implementation_stage: implementation_stage,
-            additional_read_roots: additional_read_roots,
-            additional_write_roots: additional_write_roots,
-            edit_patterns: edit_patterns,
-            bash_patterns: bash_patterns,
-            resource_guards: resource_guards,
-            agent_custody: agent_custody,
-            model: model, effort: effort
+            implementation_stage: implementation_stage
           )
         end
 
@@ -1290,22 +1271,10 @@ module Hive
         end
 
         Hive::ClaudeLauncher.launch!(
-          task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
-          cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
-          timeout_sec: timeout_sec, log_label: log_label,
-          status_mode: status_mode,
-          expected_output: expected_output, profile: profile,
-          permission_mode: permission_mode, allowed_tools: allowed_tools,
-          disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config,
-          identity_arguments: identity_arguments,
-          routing_arguments: routing_arguments, runtime_policy: runtime_policy,
-          additional_read_roots: additional_read_roots,
-          additional_write_roots: additional_write_roots,
-          edit_patterns: edit_patterns,
-          bash_patterns: bash_patterns,
-          resource_guards: resource_guards, agent_custody: agent_custody,
-          model: model, effort: effort
+          task: task, cfg: cfg, **common, **options,
+          cwd: cwd || task.folder, profile: profile,
+          mcp_config_path: mcp_config_path,
+          strict_mcp_config: strict_mcp_config
         )
       end
 

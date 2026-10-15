@@ -287,16 +287,78 @@ class ClaudeLauncherTest < Minitest::Test
 
   # Stages splat `model_launch_arguments` into spawn_claude!, so every key it
   # can return must be an accepted keyword (a missing one raised
-  # "unknown keywords: :model, :effort" from brainstorm).
+  # "unknown keywords: :model, :effort" from brainstorm). Both layers take
+  # these through `**options`, validated against LAUNCH_OPTIONS.
   def test_spawn_claude_accepts_every_model_launch_argument
-    accepted = Hive::Stages::Base.method(:spawn_claude!).parameters
-                                 .select { |kind, _| %i[key keyreq].include?(kind) }.map(&:last)
-    launch_accepted = Hive::ClaudeLauncher.method(:launch!).parameters
-                                          .select { |kind, _| %i[key keyreq].include?(kind) }.map(&:last)
+    [ Hive::Stages::Base.method(:spawn_claude!), Hive::ClaudeLauncher.method(:launch!) ].each do |entry|
+      assert entry.parameters.any? { |kind, _| kind == :keyrest }, "#{entry.name} must forward **options"
+    end
 
     %i[model effort routing_arguments].each do |key|
-      assert_includes accepted, key
-      assert_includes launch_accepted, key
+      assert_includes Hive::ClaudeLauncher::LAUNCH_OPTIONS, key
+    end
+  end
+
+  # The `**options` splat must not swallow typos or reach spawn_agent's
+  # wider keyword surface (cfg:, cli_flags:, receipt_model:).
+  def test_unknown_launch_keywords_still_raise_argument_error
+    with_tmp_task do |task|
+      spawn = ->(*, **) { flunk "spawn_agent must not run for an unknown keyword" }
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        err = assert_raises(ArgumentError) do
+          Hive::Stages::Base.spawn_claude!(
+            task, {}, prompt: "prompt", max_budget_usd: 1, timeout_sec: 1,
+            modle: "opus"
+          )
+        end
+        assert_equal "unknown keyword: :modle", err.message
+
+        err = assert_raises(ArgumentError) do
+          Hive::ClaudeLauncher.launch!(
+            task: task, cfg: {}, prompt: "prompt", add_dirs: [], cwd: task.folder,
+            max_budget_usd: 1, timeout_sec: 1, log_label: "test",
+            cli_flags: [], receipt_model: "opus"
+          )
+        end
+        assert_equal "unknown keywords: :cli_flags, :receipt_model", err.message
+      end
+    end
+  end
+
+  # An explicitly routed non-Claude adapter skips the launcher: spawn_claude!
+  # hands spawn_agent the launch options plus cfg and implementation_stage,
+  # and drops the Claude-only MCP flags.
+  def test_spawn_claude_routes_non_claude_adapter_straight_to_spawn_agent
+    with_tmp_task do |task|
+      context = Struct.new(:adapter) { def explicit_routing? = true }.new("codex")
+      captured = nil
+      spawn = lambda do |spawn_task, **kwargs|
+        captured = [ spawn_task, kwargs ]
+        { status: :complete }
+      end
+      cfg = { "claude" => {} }
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          Hive::Stages::Base.spawn_claude!(
+            task, cfg, prompt: "prompt", max_budget_usd: 1, timeout_sec: 1,
+            mcp_config_path: "/tmp/x.mcp.json", strict_mcp_config: true,
+            implementation_stage: "4-execute", model: "opus",
+            allowed_tools: %w[Read]
+          )
+        end
+      end
+
+      spawn_task, kwargs = captured
+      assert_equal task, spawn_task
+      assert_equal :codex, kwargs.fetch(:profile).name
+      assert_same cfg, kwargs.fetch(:cfg)
+      assert_nil kwargs.fetch(:cwd)
+      assert_equal "4-execute", kwargs.fetch(:implementation_stage)
+      assert_equal "opus", kwargs.fetch(:model)
+      assert_equal %w[Read], kwargs.fetch(:allowed_tools)
+      assert_equal [], kwargs.fetch(:additional_read_roots)
+      refute kwargs.key?(:mcp_config_path)
+      refute kwargs.key?(:strict_mcp_config)
     end
   end
 

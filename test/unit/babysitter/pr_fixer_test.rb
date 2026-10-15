@@ -296,6 +296,7 @@ class BabysitterPrFixerTest < Minitest::Test
       assert_equal 1, label_calls.size
       assert_equal 1, comment_calls.size
       assert_includes comment_calls.first[2], "tests failed"
+      refute_includes comment_calls.first[2], "Error:"
       events = File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
       assert events.any? do |event|
         event["action"] == "label-apply" && event["outcome"] == "failure" &&
@@ -303,6 +304,129 @@ class BabysitterPrFixerTest < Minitest::Test
       end
       assert events.any? { |event| event["action"] == "pr-comment" && event["outcome"] == "success" }
       assert events.any? { |event| event["action"] == "give-up" && event["outcome"] == "failure" }
+    end
+  end
+
+  # A provider usage limit is not a repair failure: no needs-human label or
+  # comment, and later ticks skip spawning until the hourly cooldown.
+  def test_usage_limit_holds_spawns_without_giving_up
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      spawns = 0
+      gh_calls = []
+      limited = lambda do |*_args, **_kwargs|
+        spawns += 1
+        { status: :error, error_reason: "limits_reached", retry_at: "2026-10-18T04:59:00Z",
+          error_message: "limits reached for codex: You've hit your usage limit",
+          final_message: "rmcp::transport::worker AuthRequired" }
+      end
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, limited) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*args, **_kwargs) { gh_calls << args }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, ->(*args, **_kwargs) { gh_calls << args }) do
+              assert_equal :limits_reached,
+                           Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+              assert_equal :limits_reached,
+                           Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+            end
+          end
+        end
+      end
+
+      assert_equal 1, spawns, "a held provider must not be spawned again before its cooldown"
+      assert_empty gh_calls, "a usage limit must not label the PR needs-human or comment"
+      hold = JSON.parse(File.read(File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json")))
+      assert_equal "2026-10-18T04:59:00Z", hold.dig("claude", "retry_after")
+      events = File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
+      assert(events.any? { |event| event["action"] == "agent-fix" && event["outcome"] == "limits_reached" })
+      assert(events.any? { |event| event["action"] == "skipped" && event["outcome"] == "limits_reached" && event["provider"] == "claude" })
+      refute(events.any? { |event| event["action"] == "give-up" })
+    end
+  end
+
+  def test_due_limit_hold_respawns_and_clears_after_a_non_limit_result
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      hold_path = File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json")
+      FileUtils.mkdir_p(File.dirname(hold_path))
+      File.write(hold_path, JSON.generate(
+        "claude" => { "limited_at" => (Time.now.utc - 7200).iso8601 },
+        "codex" => { "limited_at" => Time.now.utc.iso8601 }
+      ))
+      spawns = 0
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { spawns += 1; { status: :ok } }) do
+          assert_equal :success,
+                       Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+        end
+      end
+
+      assert_equal 1, spawns
+      assert_equal %w[codex], JSON.parse(File.read(hold_path)).keys
+    end
+  end
+
+  def test_unreadable_limit_hold_does_not_block_spawns
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      hold_path = File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json")
+      FileUtils.mkdir_p(File.dirname(hold_path))
+      spawns = 0
+      [ "not json", JSON.generate([ 1 ]), JSON.generate("claude" => "x"),
+        JSON.generate("claude" => { "limited_at" => "garbage" }) ].each do |content|
+        File.write(hold_path, content)
+        stub_non_green_context(project, worktree_path) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { spawns += 1; { status: :ok } }) do
+            assert_equal :success,
+                         Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+          end
+        end
+      end
+
+      assert_equal 4, spawns
+    end
+  end
+
+  # The classified error leads the give-up comment; the raw agent tail is
+  # often provider startup noise that hides why the run ended.
+  def test_give_up_comment_leads_with_the_classified_error
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      comments = []
+      failed = lambda do |*_args, **_kwargs|
+        { status: :error, error_message: "provider exited with status 2",
+          final_message: "rmcp::transport::worker quit with fatal: AuthRequired" }
+      end
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, failed) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, lambda { |*_args, **_kwargs|
+            Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+          }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, lambda { |*args, **_kwargs|
+              comments << args[2]
+              Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+            }) do
+              assert_equal :failure,
+                           Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+            end
+          end
+        end
+      end
+
+      body = comments.fetch(0)
+      assert_operator body.index("Error: provider exited with status 2"), :<, body.index("Agent tail:")
+      assert_includes body, "AuthRequired"
     end
   end
 

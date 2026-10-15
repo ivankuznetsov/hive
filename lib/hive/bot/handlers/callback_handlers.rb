@@ -403,7 +403,10 @@ module Hive
           return @result_class.new(action: :reply, text: "That idea picker expired. Send /idea again.") unless draft
 
           @idea_draft_store.set_project(chat_id: draft.chat_id, project: project)
-          if draft.origin == :voice && draft.attachments.empty?
+          # The immediate-commit-vs-file-collection decision belongs to the
+          # store: only a voice draft with a confirmed transcript and no staged
+          # fallback audio commits straight away.
+          if @idea_draft_store.transcript_only_voice_draft?(token: token)
             @set_last_project.call(project)
             return @result_class.new(action: :commit_idea, project: project,
                                      attachment: { chat_id: draft.chat_id }, clear_keyboard: true)

@@ -39,6 +39,7 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     lib/hive/scripts/stop_hook.sh
     lib/hive/stop_hook_installer.rb
     lib/hive/tmux_runner.rb
+    lib/hive/web/supervisor.rb
   ].freeze
   RETIRED_SCHEMA_FILES = %w[
     schemas/hive-attempt.v3.json
@@ -69,6 +70,7 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     Hive::StopHookInstaller
     Hive::TmuxError
     Hive::TmuxRunner
+    Hive::Web::Supervisor
   ].freeze
   RETIRED_ENVIRONMENT_PATHS = %w[
     HIVE_ATTEMPT_STORE_ROOT
@@ -78,6 +80,10 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC
     HIVE_TMUX_SOCKET
     HIVE_USAGE_DB_PATH
+    HIVEBOX_PRECOMPILED_ASSETS
+    HIVEBOX_REPOS_DIR
+    HIVEBOX_SESSION_SECRET
+    HIVEBOX_SUPERVISOR_PID
   ].freeze
   RETAINED_FILE_STORES = %w[
     lib/hive/artifact_firewall.rb

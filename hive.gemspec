@@ -92,8 +92,8 @@ Gem::Specification.new do |spec|
   # Hive packages must carry the runtime dependency explicitly.
   spec.add_dependency "fiddle", ">= 1.1"
   # Architecture-patrol manifests are runtime JSON contracts. The scheduler
-  # loads their validator in daemon/web-supervisor processes, so keeping this
-  # dependency test-only makes installed gems and hivebox crash on daemon boot.
+  # loads their validator in daemon and web processes, so keeping this
+  # dependency test-only makes installed gems crash on daemon boot.
   spec.add_dependency "json_schemer", "~> 2.5"
   spec.add_dependency "lipgloss", "~> 0.2.2"
   # rexml stopped being a default gem in Ruby 3.4, so it is not guaranteed

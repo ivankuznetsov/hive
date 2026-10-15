@@ -249,23 +249,21 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
-  def test_persisted_hivebox_supervisor_identity_is_visible_without_inherited_environment
+  def test_persisted_legacy_bot_identity_disqualifies_quiescence
     with_registry do |database, _registry, root|
-      File.write(Hive::Paths.hivebox_supervisor_pid_path(root), {
+      File.write(File.join(root, ".bot.pid"), {
         "pid" => Process.pid,
         "process_start_time" => Hive::Lock.process_start_time(Process.pid)
       }.to_yaml)
 
-      verdict = with_env("HIVEBOX_SUPERVISOR_PID" => nil) do
-        Hive::RuntimeControlPlane::QuiescenceCapability.new(
-          database: database, state_home: root,
-          custody: Hive::Attempts::ProcessCustody.unsupported("test")
-        ).call
-      end
+      verdict = Hive::RuntimeControlPlane::QuiescenceCapability.new(
+        database: database, state_home: root,
+        custody: Hive::Attempts::ProcessCustody.unsupported("test")
+      ).call
 
       refute verdict.eligible?
       assert_equal "legacy_process_unregistered", verdict.reason
-      assert_equal "hivebox_supervisor",
+      assert_equal ".bot.pid",
                    verdict.disqualifying_inventory.first.fetch("service_identity")
       assert_equal Process.pid, verdict.disqualifying_inventory.first.fetch("pid")
     end
@@ -322,12 +320,9 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
-  def test_capability_records_an_inherited_supervisor_when_its_identity_is_available
-    identity = Hive::Attempts::ProcessSnapshot.new(
-      pid: 123, start_fingerprint: "supervisor", session_id: 123, process_group_id: 123
-    )
+  def test_capability_ignores_the_retired_hivebox_supervisor_environment
     process_identity = Object.new
-    process_identity.define_singleton_method(:capture) { |_pid| identity }
+    process_identity.define_singleton_method(:capture) { |_pid| raise "must not probe the retired supervisor" }
     with_registry(process_identity: process_identity) do |database, _registry, root|
       capability = Hive::RuntimeControlPlane::QuiescenceCapability.new(
         database: database, state_home: root, process_identity: process_identity,
@@ -338,7 +333,7 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
         capability.send(:known_legacy_processes)
       end
 
-      assert_equal [ "hivebox_supervisor" ], legacy.map { |entry| entry.fetch("service_identity") }
+      assert_empty legacy
     end
   end
 

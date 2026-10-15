@@ -491,7 +491,7 @@ module Hive
         "github" => {
           "owner" => nil,
           "owner_id" => nil,
-          # The shared hivebox OAuth app (device flow only — public by
+          # The shared Hive web OAuth app (device flow only — public by
           # design, no client secret exists). Operators can override with
           # their own app's client_id; "Enable Device Flow" must be checked.
           "client_id" => "Ov23liYChIkP5PU4bvo1"

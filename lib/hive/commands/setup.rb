@@ -446,7 +446,7 @@ module Hive
             end
           else
             data["message"] = "managed Hive web autostart is unavailable on this host; " \
-                              "use foreground `hive web`, enable systemd in WSL, or choose Hivebox" \
+                              "use foreground `hive web` or enable systemd in WSL" \
                               if web_service_platform_exception?
           end
           add_phase("web_service", ok, data)
@@ -642,7 +642,7 @@ module Hive
             @output.puts "hive setup: Hive web ready at #{@web_service["url"]}"
           elsif @service && web_service_platform_exception?
             @output.puts "hive setup: Hive web autostart is unavailable on this host; " \
-                         "foreground command: `hive web`; enable systemd in WSL or choose Hivebox"
+                         "foreground command: `hive web`, or enable systemd in WSL"
           elsif @service && !@no_bootstrap
             @output.puts "hive setup: Hive web is not ready at #{web_url}; inspect `hive web status`"
           else

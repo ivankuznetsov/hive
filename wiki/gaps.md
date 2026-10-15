@@ -22,8 +22,8 @@ found while updating docs:
 - **Existing tasks still on a pre-upgrade tmux Claude.** Recovery relies on the
   operator letting Claude stages finish before upgrading, then killing leftover
   Hive Claude tmux sessions; the new code cannot see such a session. The step is
-  recorded in the PR and must be carried into the next release's CHANGELOG
-  section (the CHANGELOG has no Unreleased accumulator).
+  recorded in the `## 0.8.0` section of `CHANGELOG.md`, staged ahead of the
+  version bump; release prep keeps that section when it bumps to 0.8.0.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 

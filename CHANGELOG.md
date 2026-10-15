@@ -2,6 +2,33 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.8.0
+
+Claude now runs every stage as a headless `claude -p` process. Anthropic has confirmed that `claude -p` is permitted with a Claude subscription, so Hive no longer needs tmux to keep Claude on your subscription.
+
+### Claude without tmux
+
+- Claude-backed stages and reviewers run headless only. Hive still unsets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_API_KEY` before launching Claude, so Claude keeps billing your subscription.
+- You can no longer `tmux attach` to a running Claude stage. Follow it through its stage log under `.hive-state/logs/<slug>/`.
+- `hive setup` no longer requires tmux. tmux is only needed for the TUI end-to-end tests and the Docker image's `hive tui` session.
+- The `claude.mode` setting is gone and `hive init` no longer asks for a Claude launch mode. An existing `claude.mode` line is ignored, and `hive doctor` warns you to delete it. Doctor also warns when your shell exports `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY`.
+
+### Budgets are opt-in
+
+- A Claude stage or reviewer is capped only by a `budget_usd` your project config sets; Hive's built-in defaults no longer cap Claude.
+- `hive init` no longer sets budgets. It writes the suggested caps as commented-out lines, and a blank answer at the limits prompt means no cap. Configs from an earlier `hive init` still set every stage budget and stay capped until you edit them.
+
+### Breaking changes
+
+- `hive init --json` now emits `hive-init.v3`: the `claude_mode` field is gone, and an unset budget is reported as `null`.
+- Scripted `hive init` answer lists lose the Claude launch-mode slot; drop that answer.
+
+### Upgrading
+
+- Let running Claude stages finish before you upgrade: the new version cannot see or stop a Claude session started in tmux by the old one. After upgrading, run `tmux ls` and stop any leftover Hive Claude session with `tmux kill-session -t <name>`.
+
+[All changes since 0.7.4](https://github.com/ivankuznetsov/hive/compare/v0.7.4...v0.8.0)
+
 ## 0.7.4
 
 Hive's daily digest now tells you what changed across your projects in one readable document, with source PR links and project totals.

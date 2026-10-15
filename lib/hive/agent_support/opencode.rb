@@ -5,6 +5,7 @@ module Hive::AgentSupport::OpenCode
   autoload :Configuration, "hive/agent_support/opencode/configuration"
   autoload :Execution, "hive/agent_support/opencode/execution"
   autoload :LaunchPolicy, "hive/agent_support/opencode/launch_policy"
+  autoload :Mcp, "hive/agent_support/opencode/mcp"
   autoload :Observation, "hive/agent_support/opencode/observation"
   autoload :Skills, "hive/agent_support/opencode/skills"
   autoload :SetupAdapter, "hive/agent_support/opencode/setup_adapter"

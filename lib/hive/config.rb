@@ -219,7 +219,8 @@ module Hive
         "pi" => {
           "bin" => "pi",
           "env_override" => "HIVE_PI_BIN",
-          "min_version" => "0.70.2"
+          # 1.0.4 added `--no-mcp`, which Hive passes on every Pi launch.
+          "min_version" => "1.0.4"
         },
         "grok" => {
           "bin" => "grok",

@@ -195,7 +195,8 @@ module Hive
             {}
           end
           content["plugin"] = configuration.plugins.dup unless configuration.plugins.empty?
-          content
+          overlay = mcp_launch&.config_overlay
+          overlay ? Hive::Config.deep_merge(content, overlay) : content
         end
 
         def skill_invocations

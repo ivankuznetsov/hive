@@ -182,7 +182,7 @@ class McpLaunchTest < Minitest::Test
   end
 
   def test_policy_and_scope_helpers
-    assert_same Hive::Mcp::EMPTY_POLICY, Hive::Mcp.policy(nil, scope: "execute")
+    assert_equal Hive::Mcp::EMPTY_POLICY, Hive::Mcp.policy(nil, scope: "execute")
     with_catalog do
       assert_equal %w[docs], Hive::Mcp.policy({ "mcp" => { "use" => %w[docs] } }, scope: "plan").servers.map(&:name)
     end

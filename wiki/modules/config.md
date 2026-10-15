@@ -427,7 +427,7 @@ reference.
      "env_override" => "HIVE_CODEX_BIN",
      "min_version" => "0.125.0"},
    "pi" =>
-    {"bin" => "pi", "env_override" => "HIVE_PI_BIN", "min_version" => "0.70.2"},
+    {"bin" => "pi", "env_override" => "HIVE_PI_BIN", "min_version" => "1.0.4"},
    "grok" =>
     {"bin" => "grok",
      "env_override" => "HIVE_GROK_BIN",

@@ -1,6 +1,7 @@
 require "fileutils"
 require "json"
 require "tmpdir"
+require "hive/agent_runtime"
 require "hive/agent_support"
 require "hive/atomic_file"
 require "hive/mcp/settings"
@@ -35,6 +36,15 @@ module Hive
         end.flatten
       end
 
+      # `base` plus the host vars the rendered servers read and the launch's
+      # own env.
+      def environment_for(base)
+        passthrough = passthrough_env.each_with_object({}) do |name, out|
+          out[name] = ENV[name] if ENV.key?(name)
+        end
+        base.merge(passthrough).merge(environment)
+      end
+
       def cleanup!
         cleanup_paths.each do |path|
           FileUtils.remove_entry_secure(path)
@@ -49,11 +59,10 @@ module Hive
 
     module_function
 
-    # The policy for one launch scope; a cfg-less launch grants nothing.
+    # The policy for one launch scope. A cfg-less launch grants nothing but
+    # still honors the global `inherit_user`.
     def policy(cfg, scope:)
-      return EMPTY_POLICY if cfg.nil?
-
-      Settings.resolve(cfg, scope: scope)
+      Settings.resolve(cfg || {}, scope: scope)
     end
 
     # The config block a task's stage reads its grant from: "4-execute" ->
@@ -79,8 +88,9 @@ module Hive
       )
     end
 
-    # Prepare a launch for a direct Hive::Agent caller and remove its
-    # rendered files once the block returns.
+    # Prepare a launch for a caller outside spawn_agent (a direct
+    # Hive::Agent, or a launcher that compiles and spawns itself) and remove
+    # its rendered files once the block returns.
     def with_launch(profile:, cfg:, scope:, cwd:)
       launch = prepare(profile: profile, policy: policy(cfg, scope: scope), cwd: cwd)
       yield launch
@@ -100,6 +110,19 @@ module Hive
         isolation: isolation,
         notices: notices.dup.freeze
       )
+    end
+
+    # Compile `request` for a launcher that spawns the agent itself, adding
+    # `launch`'s argv. Carried defaults yield to keys the request's own
+    # argv already sets.
+    def compile(request, launch)
+      base = Hive::AgentRuntime.compile(request)
+      extra = launch.arguments_for(base.argv)
+      return base if extra.empty?
+
+      collapse_repeated_flags(Hive::AgentRuntime.compile(
+        request.with(trusted_cli_arguments: request.trusted_cli_arguments + extra)
+      ))
     end
 
     # Codex's sandbox presets already pass `--ignore-user-config`, and clap

@@ -2128,7 +2128,7 @@ class AgentTest < Minitest::Test
       ).run!
 
       assert_equal :ok, result[:status]
-      assert_equal [ "-p" ], File.read(argv_log).lines.map(&:chomp)
+      assert_equal [ "-p", "--no-mcp" ], File.read(argv_log).lines.map(&:chomp)
       assert_equal prompt, File.binread(stdin_log)
     end
   end

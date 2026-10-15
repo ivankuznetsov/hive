@@ -178,14 +178,8 @@ module Hive
     def child_environment
       @child_environment ||= begin
         launch = mcp_launch
-        passthrough = Array(launch&.passthrough_env).each_with_object({}) do |name, out|
-          out[name] = ENV[name] if ENV.key?(name)
-        end
-        @base_child_environment
-          .merge(passthrough)
-          .merge(launch&.environment || {})
-          .merge(@controller_environment_scrub)
-          .freeze
+        base = launch ? launch.environment_for(@base_child_environment) : @base_child_environment
+        base.merge(@controller_environment_scrub).freeze
       end
     end
 
@@ -195,7 +189,7 @@ module Hive
 
       @owns_mcp_launch = true
       @mcp_launch = Hive::Mcp.prepare(
-        profile: @profile, policy: Hive::Mcp::EMPTY_POLICY, cwd: @cwd
+        profile: @profile, policy: Hive::Mcp.policy(nil, scope: @log_label), cwd: @cwd
       )
     end
 

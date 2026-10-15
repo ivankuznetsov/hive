@@ -58,6 +58,7 @@ module Hive
                 cfg: @cfg,
                 model: request.reviewer["model"],
                 effort: request.reviewer["effort"],
+                mcp_scope: "plan_review",
                 **scope
               )
             end

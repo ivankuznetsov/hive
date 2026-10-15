@@ -55,7 +55,7 @@ module Hive::AgentSupport::Codex::Runtime
     flags.concat([ "--output-schema", schema_path ]) if schema_path
     host.portable_policy(
       scope, task_root:, directories:, environment:, outputs:, runtime_root:,
-      cli_flags: flags, executable:
+      cli_flags: flags, executable:, mcp_isolated: true
     )
   end
 

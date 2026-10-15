@@ -84,7 +84,8 @@ module Hive
             cfg, model_actor, profile, current: model_current
           ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
-          status_mode: :exit_code_only, cfg: cfg, agent_custody: custody
+          status_mode: :exit_code_only, cfg: cfg, agent_custody: custody,
+          mcp_scope: stage
         )
         report = custody.report
         custody_status = if report&.tampered?

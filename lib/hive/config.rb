@@ -3439,6 +3439,7 @@ module Hive
     MCP_STDIO_KEYS = %w[command args env env_from cwd].freeze
     MCP_HTTP_KEYS = %w[
       url bearer_token_env headers headers_env oauth_resource oauth_client_id oauth_scopes
+      oauth_logins
     ].freeze
     MCP_COMMON_KEYS = %w[imported_from enabled].freeze
     # Nested role blocks that resolve their own grant, beyond the shallow
@@ -3596,6 +3597,16 @@ module Hive
       end
       validate_mcp_string!(spec["oauth_client_id"], "#{label}.oauth_client_id", source_path) if spec.key?("oauth_client_id")
       validate_mcp_string_list!(spec["oauth_scopes"], "#{label}.oauth_scopes", source_path) if spec.key?("oauth_scopes")
+      # Agents holding a saved OAuth login for this server (presence only,
+      # recorded by `hive mcp import`/`hive mcp login`).
+      if spec.key?("oauth_logins")
+        logins = spec["oauth_logins"]
+        unless logins.is_a?(Array) && logins.all? { |agent| GLOBAL_AGENT_BACKENDS.include?(agent) }
+          raise ConfigError,
+                "#{label}.oauth_logins in #{describe_source(source_path)} must be a list of agents from " \
+                "#{GLOBAL_AGENT_BACKENDS.inspect}; got #{logins.inspect}"
+        end
+      end
       if spec.key?("bearer_token_env")
         validate_mcp_string!(spec["bearer_token_env"], "#{label}.bearer_token_env", source_path, pattern: MCP_ENV_NAME)
       end

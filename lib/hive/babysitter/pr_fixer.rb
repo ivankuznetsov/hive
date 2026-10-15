@@ -379,7 +379,8 @@ module Hive
               current: Hive::Stages::Base.model_routing_current(@cfg["babysitter"])
             ),
             status_mode: :exit_code_only,
-            terminate_on_parent_signal: false
+            terminate_on_parent_signal: false,
+            mcp_scope: "babysitter"
           )
         end
         @dry_run ? Hive::Babysitter::DryRunEnv.with_env(worktree_path, &spawn) : spawn.call

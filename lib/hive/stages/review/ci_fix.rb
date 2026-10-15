@@ -442,6 +442,7 @@ module Hive
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
             implementation_stage: "review.ci",
+            mcp_scope: "review.ci",
             agent_custody: agent_custody,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only,

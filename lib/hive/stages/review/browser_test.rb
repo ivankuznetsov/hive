@@ -138,7 +138,8 @@ module Hive
               )
             ),
             **Hive::Stages::Base.tool_scope_kwargs(scope),
-            status_mode: :output_file_exists
+            status_mode: :output_file_exists,
+            mcp_scope: "review.browser_test"
           }
           spawn_result =
             if Hive::AgentSupport.supports?(profile, :Launch)

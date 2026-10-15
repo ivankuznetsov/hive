@@ -1990,6 +1990,7 @@ module Hive
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
           implementation_stage: "review.fix",
+          mcp_scope: "review.fix",
           agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,

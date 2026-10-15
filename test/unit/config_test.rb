@@ -5861,7 +5861,7 @@ class ConfigTest < Minitest::Test
           "openaiDeveloperDocs" => {
             "url" => "https://developers.openai.com/mcp", "imported_from" => "codex", "enabled" => true,
             "oauth_resource" => "https://developers.openai.com/mcp", "oauth_client_id" => "client",
-            "oauth_scopes" => %w[read], "bearer_token_env" => "DOCS_TOKEN",
+            "oauth_scopes" => %w[read], "oauth_logins" => %w[codex claude], "bearer_token_env" => "DOCS_TOKEN",
             "headers" => { "X-Org" => "hive" }, "headers_env" => { "X-Team" => "TEAM_ID" }
           },
           "context7" => {
@@ -5893,6 +5893,9 @@ class ConfigTest < Minitest::Test
       { "servers" => { "x" => http.merge("oauth_resource" => "nope") } } => "mcp.servers.x.oauth_resource",
       { "servers" => { "x" => http.merge("oauth_client_id" => " ") } } => "mcp.servers.x.oauth_client_id",
       { "servers" => { "x" => http.merge("oauth_scopes" => []) } } => "mcp.servers.x.oauth_scopes",
+      { "servers" => { "x" => http.merge("oauth_logins" => %w[vim]) } } => "mcp.servers.x.oauth_logins",
+      { "servers" => { "x" => http.merge("oauth_logins" => "codex") } } => "mcp.servers.x.oauth_logins",
+      { "servers" => { "x" => stdio.merge("oauth_logins" => []) } } => "unknown field(s): oauth_logins",
       { "servers" => { "x" => http.merge("bearer_token_env" => "Bearer abc") } } => "mcp.servers.x.bearer_token_env",
       { "servers" => { "x" => http.merge("headers" => "Authorization: x") } } => "mcp.servers.x.headers in",
       { "servers" => { "x" => http.merge("headers" => { "Bad Header" => "v" }) } } => "invalid entry",

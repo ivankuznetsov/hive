@@ -158,7 +158,7 @@ module Hive
         end
 
         def native_environment(configuration)
-          environment = @child_environment.dup
+          environment = child_environment.dup
           configuration.credential_environment_keys.each do |key|
             value = selected_credential_value(key)
             environment[key] = value unless value.to_s.empty?
@@ -319,6 +319,7 @@ module Hive
                      "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
                      "profile=opencode executable=#{File.basename(launch.executable)} " \
                      "argc=#{command.length}#{launch_identity_log_fields}"
+            write_mcp_log(log)
           end
         end
 

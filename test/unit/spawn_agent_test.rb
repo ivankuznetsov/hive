@@ -1798,11 +1798,14 @@ class SpawnAgentTest < Minitest::Test
         "--add-dir", task.folder,
         "--allowedTools", default_tools,
         "--max-budget-usd", "1",
+        "--strict-mcp-config", "--mcp-config", agent.mcp_launch.arguments.last,
         "--output-format", "stream-json", "--include-partial-messages",
         "--verbose", "--no-session-persistence"
       ]
       assert_equal expected, agent.send(:build_cmd),
                    "yolo #{stage} argv must carry exactly the stage default allowlist"
+    ensure
+      agent&.cleanup_mcp_launch!
     end
   end
 end

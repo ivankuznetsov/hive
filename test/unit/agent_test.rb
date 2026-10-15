@@ -919,11 +919,13 @@ class AgentTest < Minitest::Test
         "--max-budget-usd", "1",
         "--model", "opus",
         "--effort", "high",
+        "--strict-mcp-config", "--mcp-config", claude_agent.mcp_launch.arguments.last,
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
         "--no-session-persistence"
       ], claude_agent.send(:build_cmd)
+      claude_agent.cleanup_mcp_launch!
     end
   end
 

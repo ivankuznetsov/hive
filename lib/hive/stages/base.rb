@@ -968,7 +968,8 @@ module Hive
                       resource_guards: nil, agent_custody: nil,
                       isolate_environment: false, launch_environment: nil,
                       terminate_on_parent_signal: true,
-                      receipt_model: nil, receipt_effort: nil)
+                      receipt_model: nil, receipt_effort: nil, mcp_scope: nil)
+        mcp_launch = nil
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
         unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
         unless unknown_launch_keys.empty? && launch_environment.values.all? { |value| value.is_a?(String) }
@@ -1007,7 +1008,7 @@ module Hive
         # instead of letting the exception escape and land
         # `reason="runner_exception"`.
         begin
-          Hive::AgentRuntime.prepare!(profile, launch_binding: launch_binding)
+          probe = Hive::AgentRuntime.prepare!(profile, launch_binding: launch_binding)
         rescue Hive::AgentError => e
           if context&.explicit_routing?
             return {
@@ -1018,6 +1019,17 @@ module Hive
           end
           return { status: :error, preflight_failed: true,
                    error_message: "preflight failed: #{e.message}" }
+        end
+
+        # Hive-owned MCP (plan 2026-10-15-001): the scope's grant, rendered
+        # for this profile, unless a managed runtime policy already isolates.
+        unless runtime_policy&.mcp_isolated
+          mcp_launch = Hive::Mcp.prepare(
+            profile: profile,
+            policy: Hive::Mcp.policy(cfg, scope: mcp_scope || Hive::Mcp.scope_for(task.stage_name)),
+            cwd: cwd || task.folder,
+            version: (probe.version if probe.is_a?(Hive::AgentRuntime::ProbeResult))
+          )
         end
 
         support = Hive::AgentSupport.for(profile)
@@ -1140,7 +1152,8 @@ module Hive
               permission_policy: permission_policy,
               isolate_environment: isolate_environment,
               completion_probe: completion_probe,
-              terminate_on_parent_signal: terminate_on_parent_signal
+              terminate_on_parent_signal: terminate_on_parent_signal,
+              mcp_launch: mcp_launch
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
               agent_result.is_a?(Hash) && agent_result.key?(:requested_route)
@@ -1184,6 +1197,7 @@ module Hive
           end
         end
       ensure
+        mcp_launch&.cleanup!
         runtime_policy&.cleanup! if cleanup_runtime_policy
       end
 
@@ -1245,7 +1259,6 @@ module Hive
       # still raises ArgumentError here.
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
                          add_dirs: [], cwd: nil, log_label: nil, profile: nil,
-                         mcp_config_path: nil, strict_mcp_config: false,
                          implementation_stage: nil, **options)
         options = Hive::ClaudeLauncher.launch_options(options)
         common = {
@@ -1255,7 +1268,6 @@ module Hive
         context = Hive::Attempts::Context.current
         if context&.explicit_routing? &&
             !Hive::AgentSupport.supports?(context.adapter, :Launch)
-          # A non-Claude admitted adapter has no MCP flags to render.
           return spawn_agent(
             task, **common, **options,
             cwd: cwd, cfg: cfg,
@@ -1272,9 +1284,7 @@ module Hive
 
         Hive::ClaudeLauncher.launch!(
           task: task, cfg: cfg, **common, **options,
-          cwd: cwd || task.folder, profile: profile,
-          mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config
+          cwd: cwd || task.folder, profile: profile
         )
       end
 

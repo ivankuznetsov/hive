@@ -547,7 +547,7 @@ module Hive
             ),
             timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
             log_label: "artifacts-#{role}-#{context_id}", profile: profile,
-            status_mode: :exit_code_only, cfg: cfg,
+            status_mode: :exit_code_only, cfg: cfg, mcp_scope: "artifacts",
             **launch_arguments,
             permission_arguments: permission_arguments,
             isolate_environment: true,

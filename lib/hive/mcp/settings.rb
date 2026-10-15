@@ -13,10 +13,12 @@ module Hive
       # Credential-bearing fields hold env-var NAMES only: `env_from` and
       # `headers_env` map child var / header name to a host env var name, and
       # `bearer_token_env` names the host var holding the bearer token.
+      # `oauth_logins` lists the agents holding a saved OAuth login (nil when
+      # untracked).
       Server = Data.define(
         :name, :transport, :command, :args, :env, :env_from, :cwd,
         :url, :bearer_token_env, :headers, :headers_env,
-        :oauth_resource, :oauth_client_id, :oauth_scopes, :imported_from
+        :oauth_resource, :oauth_client_id, :oauth_scopes, :oauth_logins, :imported_from
       )
 
       # `inherit_user: true` means Hive adds no MCP isolation at all and
@@ -106,6 +108,7 @@ module Hive
           oauth_resource: spec["oauth_resource"],
           oauth_client_id: spec["oauth_client_id"],
           oauth_scopes: spec.fetch("oauth_scopes", []),
+          oauth_logins: spec["oauth_logins"],
           imported_from: spec["imported_from"]
         }
         Server.new(**fields.transform_values { |value| Hive::Config.deep_freeze(Hive::Config.deep_dup(value)) })

@@ -522,6 +522,68 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_reconciliation_base64_validation_matches_strict_decoder_for_every_final_quantum
+    alphabet = [ *"A".."Z", *"a".."z", *"0".."9", "+", "/" ]
+    replayable = lambda do |encoded|
+      Base64.strict_decode64(encoded)
+      true
+    rescue ArgumentError
+      false
+    end
+    mismatches = []
+    alphabet.product(alphabet).each do |first, second|
+      encoded = "QUJD#{first}#{second}=="
+      mismatches << encoded unless replayable.call(encoded) == Hive::Attempts::StreamLog.valid_base64?(encoded)
+      alphabet.each do |third|
+        encoded = "QUJD#{first}#{second}#{third}="
+        mismatches << encoded unless replayable.call(encoded) == Hive::Attempts::StreamLog.valid_base64?(encoded)
+      end
+    end
+
+    assert_empty mismatches
+  end
+
+  def test_reopen_ignores_frames_with_noncanonical_padding_bits_like_public_replay
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      first = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      first.append(:stdout, "published")
+      first.close
+      [ [ 98, "AB==" ], [ 99, "AAB=" ] ].each do |sequence, data|
+        seed_torn_tail(path, JSON.generate(
+          "sequence" => sequence, "timestamp" => NOW.iso8601(6), "channel" => "stdout", "data" => data
+        ) + "\n")
+      end
+      assert_equal [ 1 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+
+      reopened = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      assert_equal 2, reopened.append(:stdout, "next")
+      assert_equal [ 1, 2 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+    ensure
+      reopened&.close unless reopened&.closed?
+    end
+  end
+
+  def test_non_object_and_out_of_range_frames_are_skipped_by_replay_and_reconciliation
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      first = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      first.append(:stdout, "published")
+      first.close
+      seed_torn_tail(path, "\"text\"\nnull\n[1]\n42\n")
+      seed_torn_tail(path, %({"sequence":1e400,"timestamp":"t","channel":"stdout","data":""}\n))
+      assert_equal [ 1 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+
+      reopened = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      assert_equal 2, reopened.append(:stdout, "next")
+      seed_torn_tail(path, "null\n")
+      assert_equal 3, reopened.append(:stdout, "after foreign append")
+      assert_equal [ 1, 2, 3 ], Hive::Attempts::StreamLog.read(path).map(&:sequence)
+    ensure
+      reopened&.close unless reopened&.closed?
+    end
+  end
+
   def test_valid_json_without_newline_stays_unreadable_after_recovery
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")

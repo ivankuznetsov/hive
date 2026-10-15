@@ -190,7 +190,9 @@ While holding both, it inspects the physical last byte, optionally seals the
 tail, reconciles the sequence when its coherent sequence/size snapshot is
 stale, writes and flushes the complete frame, and only then publishes the new
 sequence and size snapshot. Reconciliation streams complete records, validates
-their replayability—including canonical Base64 padding bits—and tracks only the
+their replayability—including canonical Base64 padding bits, and skipping
+non-object JSON lines and out-of-range sequences exactly as public replay
+does—and tracks only the
 maximum sequence; it does not decode payloads, allocate frames, sort, or retain
 the whole log. An unchanged healthy
 snapshot avoids that scan, but does not skip physical tail inspection. Any

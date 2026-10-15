@@ -44,7 +44,7 @@ module Hive
               channel: data.fetch("channel"),
               bytes: Base64.strict_decode64(data.fetch("data"))
             )
-          rescue JSON::ParserError, KeyError, ArgumentError, TypeError
+          rescue JSON::ParserError, KeyError, ArgumentError, TypeError, RangeError
             nil
           end
         end.sort_by(&:sequence)
@@ -53,6 +53,8 @@ module Hive
       # @api private
       def self.parse_frame_fields(line)
         data = JSON.parse(line)
+        raise TypeError, "frame must be a JSON object" unless data.is_a?(Hash)
+
         sequence = Integer(data.fetch("sequence"))
         channel = data.fetch("channel")
         encoded = data.fetch("data")
@@ -254,7 +256,7 @@ module Hive
         return nil unless sequence.positive? && self.class.valid_base64?(encoded)
 
         sequence
-      rescue JSON::ParserError, KeyError, ArgumentError, TypeError
+      rescue JSON::ParserError, KeyError, ArgumentError, TypeError, RangeError
         nil
       end
 

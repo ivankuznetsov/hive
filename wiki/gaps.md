@@ -24,12 +24,6 @@ found while updating docs:
   Hive Claude tmux sessions; the new code cannot see such a session. The step is
   recorded in the PR and must be carried into the next release's CHANGELOG
   section (the CHANGELOG has no Unreleased accumulator).
-- **Finalize checks the worktree before the settings repair runs.** A leftover
-  tmux-era `.claude/settings.json` stub or backup in the worktree can fail
-  finalize's dirty-worktree gate (`lib/hive/stages/finalize.rb`
-  `verify_state!`) before `spawn_agent` gets to repair it. The same ordering
-  exists before ADR-053; a fix would repair recognised legacy settings ahead
-  of that gate.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 

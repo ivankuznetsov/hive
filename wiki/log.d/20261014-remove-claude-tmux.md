@@ -19,7 +19,10 @@
   (missing or outdated binary) returns an error instead of raising. Yolo Claude launches keep the
   stage's default `--allowedTools`.
 - `ClaudeLauncher` repairs a tmux-era Stop-hook `.claude/settings.json` stub
-  or its `.hive-pre-install` backup before launching. Legacy reasons
+  or its `.hive-pre-install` backup before launching, and
+  `Stages::Base.with_stage_events` repairs the worktree's copy when
+  4-execute, 6-review, or 8-finalize starts, ahead of their dirty-worktree
+  checks (which would otherwise fail on, or auto-commit, the stub). Legacy reasons
   (`tmux_session_terminated`, `reviewer_tmux_session_terminated`,
   `fix_claude_stop_hook`) and the `claude_completion_fallback` event type
   stay read-side only.

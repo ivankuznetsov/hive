@@ -358,6 +358,85 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  # A runner killed under the retired tmux launch mode could leave its
+  # Stop-hook stub in the worktree. Finalize repairs it before the
+  # clean-worktree gate instead of failing on (or committing) it.
+  def test_finalize_removes_legacy_stop_hook_stub_before_worktree_gate
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        # Start from a project without its own settings, so the stub has
+        # no backup and is the only thing to clean up.
+        run!("git", "-C", worktree_path, "rm", "--quiet", ".claude/settings.json")
+        run!("git", "-C", worktree_path, "commit", "-m", "drop settings", "--quiet")
+        run!("git", "-C", worktree_path, "push", "--quiet", "origin", "HEAD")
+        settings = File.join(worktree_path, ".claude", "settings.json")
+        write_legacy_stop_hook_stub(settings, task_dir)
+        write_final_pr_body(pr_md)
+        head_before = git_head(worktree_path)
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal :complete, Hive::Markers.current(pr_md).name
+        refute File.exist?(settings)
+        assert_equal head_before, git_head(worktree_path), "the stub must not be committed"
+      end
+    end
+  end
+
+  # `hive init` tracks .claude/settings.json, so the tmux installer backed
+  # it up before writing the stub. Finalize puts the project file back.
+  def test_finalize_restores_tracked_settings_from_legacy_backup_before_worktree_gate
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        settings = File.join(worktree_path, ".claude", "settings.json")
+        project_settings = File.read(settings)
+        File.rename(settings, "#{settings}.hive-pre-install")
+        write_legacy_stop_hook_stub(settings, task_dir)
+        write_final_pr_body(pr_md)
+        head_before = git_head(worktree_path)
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal :complete, Hive::Markers.current(pr_md).name
+        assert_equal project_settings, File.read(settings)
+        refute File.exist?("#{settings}.hive-pre-install")
+        assert_equal head_before, git_head(worktree_path)
+      end
+    end
+  end
+
+  def write_legacy_stop_hook_stub(settings, task_dir)
+    FileUtils.mkdir_p(File.dirname(settings))
+    command = "HIVE_TASK_STAGE_DIR=#{task_dir} /opt/hive/lib/hive/scripts/stop_hook.sh"
+    File.write(settings, JSON.generate(
+      "hooks" => { "Stop" => [ { "hooks" => [ { "type" => "command", "command" => command } ] } ] }
+    ))
+    File.chmod(0o444, settings)
+  end
+
+  def write_final_pr_body(pr_md)
+    ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+    ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+      ---
+      pr_url: https://github.com/acme/app/pull/9
+      pr_number: 9
+      ---
+
+      ## Summary
+      final
+
+      <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+    MD
+  end
+
+  def git_head(worktree_path)
+    out, _err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
+    assert status.success?
+    out.strip
+  end
+
   # Defense-in-depth backstop: in-scope residue at finalize entry must
   # auto-commit as `chore(8-finalize): commit residual worktree changes`
   # (with structured Hive-Auto-Commit trailers) and let finalize push,

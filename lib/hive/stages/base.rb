@@ -482,6 +482,12 @@ module Hive
           event_type: :stage_enter,
           message: "run started"
         )
+        # A tmux-era Stop-hook stub or its backup left in the worktree
+        # would trip these stages' dirty-worktree checks, which run before
+        # the launch that normally repairs it.
+        if WORKTREE_OWNING_STAGES.include?(stage)
+          Hive::ClaudeLauncher.repair_legacy_scratch_settings([ read_worktree_path(task) ])
+        end
         result = yield
         event_task = task_after_controller_move(task, result)
         if cfg && ensure_clean_on_exit_enabled?(cfg) && WORKTREE_OWNING_STAGES.include?(stage)

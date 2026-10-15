@@ -141,7 +141,7 @@ These roles control the authoritative outcome-evidence package described in
 used to create project-owned media bytes; a capture manifest is not completion
 authority by itself.
 
-Hive checkouts need no declaration: the complete locked Hivebox web layout
+Hive checkouts need no declaration: the complete locked Hive web layout
 selects the built-in recorder. A conventional project can declare one
 project-owned executable:
 
@@ -166,7 +166,7 @@ before capture starts. The provider request/result ABI and publication checks
 are documented in [[commands/web]].
 
 This declaration is additive. Projects that omit it retain their prior config
-shape: compatible Hivebox trees continue on the built-in recorder, while
+shape: compatible Hive web trees continue on the built-in recorder, while
 incompatible conventional trees receive the precise unsupported-provider
 diagnostic until they opt in. Retained v1 capture manifests remain readable;
 new successful capture emits the provider-neutral v2 manifest.
@@ -960,8 +960,9 @@ Shared Rails environment input is resolved centrally by
 `HIVE_WEB_DIFF_TIMEOUT_SEC`, and `HIVE_WEB_CLONE_TIMEOUT_SEC`. Their six named
 native-web `HIVEBOX_*` aliases remain accepted through the next major release:
 blank is unset, canonical wins conflicts, and alias use produces a deduplicated
-migration warning. Container-only Hivebox image/name/bind/port/data/repo,
-session-secret, and supervisor variables are not aliases and never warn.
+migration warning. The former container-only Hivebox
+image/name/bind/port/data/repo, session-secret, and supervisor variables are no
+longer read (ADR-054).
 
 The current `hive init` JSON summary envelope (`schemas/hive-init.v3.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the permission-mode choice. v3 dropped v2's `claude_mode` field when the Claude launch mode was removed. See [[commands/init]].
 

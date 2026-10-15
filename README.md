@@ -106,11 +106,17 @@ the intended owner before sharing that URL. Set
 `web.local_loopback: false` to require GitHub login even on literal loopback. See
 [wiki/commands/web.md](wiki/commands/web.md).
 
-Windows users should run the native path inside WSL with systemd enabled, or
-use Hivebox. **Choose [Hivebox](packaging/docker/README.md) when you need
-container isolation, multiple local instances, containment for untrusted
-agents, or a reproducible server/NAS deployment.** Hivebox remains fully
-supported; it is the container distribution of the same Rails app.
+Windows users should install native Hive inside WSL with systemd enabled.
+
+Hive has two supported routes: install native Hive (above) when you want to
+run and tinker with it yourself, or use the hosted Hive cloud product when you
+would rather not. The Hivebox Docker distribution is discontinued: already
+published `ghcr.io/ivankuznetsov/hivebox` images keep running but receive no
+further builds or updates. To move a Hivebox install to native Hive, install
+Hive through a channel above and run `hive setup`, then copy your project
+checkouts out of the box's `/data/repos` bind mount (`~/hivebox-data/repos` with
+the old installer defaults) or reclone them, register each one with `hive
+init`, sign agents in again on the host, and remove the container.
 
 ### Install via a coding agent
 
@@ -415,5 +421,5 @@ Full per-command reference, every flag, every envelope field, and every exit cod
 - **[docs/condition-rollout.md](docs/condition-rollout.md)** — Operator runbook for execute-stage marker/shadow/condition authority, task-journal validation, invalid-history recovery, divergence triage, explicit promotion, and lossless rollback.
 - **[wiki/operating.md](wiki/operating.md)** — Day-2 operations: install matrix, XDG paths, autostart (systemd-user on Linux, launchd on macOS), enrolling existing projects, the mandatory `--dry-run` shakedown, bot setup, tuning concurrency, cost-runaway response, troubleshooting. Read this before running the daemon live and any time you operate Hive across more than one project.
 - **[docs/recipes.md](docs/recipes.md)** — Concrete end-to-end workflows, including the xbookmark dogfood replay (linked to the real PR and a committed transcript of the run). Read this when you want to see what a complete idea-to-PR run looks like before trying it yourself.
-- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, how native Hive web shares the file-backed state model, and when to choose Hivebox instead. Read this when you hit a surprise or want to know "why is it like this?".
+- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, how native Hive web shares the file-backed state model, and how to move off the discontinued Hivebox container. Read this when you hit a surprise or want to know "why is it like this?".
 - **[wiki/index.md](wiki/index.md)** — The catalog of the LLM-maintained engineering wiki under `wiki/`, which is the deepest source of reference material for every command, module, and stage. Read this when the user-facing docs above don't have the depth you need.

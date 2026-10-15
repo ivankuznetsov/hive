@@ -366,7 +366,7 @@ sends the next question. The earlier "Codex draft-assist" flow — where
 Path A spawned Codex to draft an answer with write-draft/edit/cancel
 buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
-## Hive Web and Hivebox pipeline
+## Hive Web pipeline
 
 `hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
 the original Sinatra/Puma + SSE tier is gone). Native Hive web is the default
@@ -384,8 +384,8 @@ the first successful remote login writes
 the current owner on every request and evict old sessions when
 `web.github.owner` changes, so a repo-scoped session token cannot survive an
 ownership rotation. A local GitHub connection remains optional for repository
-listing and cloning and does not claim ownership. Hivebox is the distinct
-container distribution of the same owner-gated surface. Managed local installs
+listing and cloning and does not claim ownership. The Hivebox container
+distribution was removed by ADR-054. Managed local installs
 stage a locked Bundler install plus a production asset precompile and verify
 the CSS/JavaScript manifest before the atomic bundle swap; both commands run
 through the locked Bundler and current Ruby without relying on `bundle` or a
@@ -521,11 +521,7 @@ answers, and `Commands::New` (with the TUI's `attachments:` contract) for the
 idea composer. Repo setup clones via `gh`, reuses the `hive init` prompt seam,
 and normalizes GitHub SSH origins to https so later daemon-owned `5-open-pr`
 pushes use token-backed credentials; the Agents page can run the `gh` PTY
-login relay so the image's `gh auth git-credential` helper supplies those
-push credentials without docker-exec setup. The container supervisor (tini →
-`Hive::Web::Supervisor`) runs daemon + web + optional bot, restarts crashed or
-signal-killed children with backoff, survives malformed config, and
-SIGHUP-reloads the bot set. Details: [[commands/web]].
+login relay to supply those push credentials. Details: [[commands/web]].
 
 The Rails layer wraps each registry entry in a `Project` model. Project lookup,
 config-backed workflow/default/daemon behavior, and the non-interactive

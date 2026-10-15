@@ -21,8 +21,9 @@ change.
 - `docs/commands/index.md`
 - new `docs/commands/setup.md`
 - new `docs/commands/web.md`
-- `box/index.md` and `_includes/box/**` only where ordinary-page links or
-  positioning need adjustment
+- `box/index.md` and `_includes/box/**`: retire the Box section (replace it
+  with a short discontinuation and migration notice, or redirect it to that
+  notice) and remove ordinary-page links that route readers to it
 
 ## Content contract
 
@@ -41,27 +42,33 @@ foreground server, `hive web status --json` as read-only state, and
 name `hive-setup.v1`, `hive-web-status.v1`, and `hive-web-install.v1` and keep
 installed, enabled, running, manager availability, URL, and readiness distinct.
 
-Windows guidance should offer WSL with systemd for native Hive web or Hivebox
-through Docker Desktop. Ordinary pages need one concise chooser: choose Hivebox
-for container isolation, multiple local instances, containment of untrusted
-agents, or reproducible server/NAS deployment. Keep the Box section's complete
-shell/PowerShell installation, upgrade, and troubleshooting material.
+Hive has two supported routes: install native Hive (Homebrew on macOS arm64,
+AUR on Arch, the bash installer on glibc Linux) when the reader wants to run
+and tinker with it, or use the hosted Hive cloud product otherwise. Windows
+guidance is native Hive inside WSL with systemd. The Hivebox Docker
+distribution is discontinued: already published images keep running but get no
+updates, and the site must no longer offer the `hivecli.sh/box` or `box.ps1`
+installers as an install path. The retired Box page should carry only the
+discontinuation notice and the migration steps (install native Hive, run
+`hive setup`, copy or reclone projects from the box's `/data/repos` mount,
+register each with `hive init`, remove the container).
 
 Configuration pages must name the canonical `HIVE_WEB_APP_DIR`,
 `HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`, `HIVE_WEB_LOCAL_LOOPBACK`,
 `HIVE_WEB_DIFF_TIMEOUT_SEC`, and `HIVE_WEB_CLONE_TIMEOUT_SEC` settings. The six
 corresponding native-web `HIVEBOX_*` aliases remain accepted with migration
-warnings through the next major release; canonical values win. Container-only
-Hivebox variables remain canonical and quiet.
+warnings through the next major release; canonical values win. The former
+container-only Hivebox variables are no longer read and should not be
+documented.
 
 Package guidance must explain that released Hive web bundles use the installed
 `hive-cli` package root and are authenticated through the release's
 cosign-signed checksum manifest before extraction. A custom remote
 `HIVE_WEB_BUNDLE_URL` requires an exact `HIVE_WEB_BUNDLE_SHA256`.
 
-Reject maintained-site claims that Hive is TUI-only, has no web app, or uses
-Docker as the ordinary golden path. Historical material and the dedicated Box
-section remain explicit allowlists, not targets for broad rewriting.
+Reject maintained-site claims that Hive is TUI-only, has no web app, or ships
+a Docker distribution. Historical material (release notes, changelog) remains
+an explicit allowlist, not a target for broad rewriting.
 
 ## Verification and delivery
 
@@ -72,8 +79,8 @@ bundle exec jekyll build
 npx -y pagefind@^1 --site _site
 ```
 
-Review the rendered landing, setup, web, configuration, operating, and Box
-pages; check internal links and generated AI-native docs. Open a non-draft PR,
+Review the rendered landing, setup, web, configuration, operating, and retired
+Box pages; check internal links and generated AI-native docs. Open a non-draft PR,
 link it to the Hive PR in both descriptions, and leave both open without merge,
 auto-merge, version bump, publication, or Cloudflare deployment.
 
@@ -90,6 +97,7 @@ explicitly authorized versioned changelog section:
 > package roots and are authenticated before extraction. The six shared-app
 > settings are canonical under `HIVE_WEB_*`; their named native-web
 > `HIVEBOX_*` aliases continue to work with migration warnings through the next
-> major release. Hivebox remains the supported Docker distribution for
-> isolation, multiple instances, untrusted-agent containment, and reproducible
-> server/NAS deployment. Setup never creates or widens network exposure.
+> major release. Setup never creates or widens network exposure. The Hivebox
+> Docker distribution is discontinued: published images keep working but get
+> no updates; Windows users run native Hive inside WSL, and everyone who would
+> rather not self-host uses the hosted Hive cloud product.

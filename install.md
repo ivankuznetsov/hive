@@ -38,7 +38,7 @@ Use this decision tree:
 - macOS arm64: prefer Homebrew.
 - Arch Linux: prefer AUR through `yay` or `paru`.
 - Ubuntu 22.04+ or other glibc Linux on x86_64/aarch64: use the bash installer.
-- Windows: use WSL with systemd enabled for the native path, or offer Hivebox.
+- Windows: install native Hive inside WSL with systemd enabled.
 - Alpine, NixOS, BSD, and musl Linux: stop and report unsupported tier-3 platform.
 
 ## Install Commands
@@ -150,7 +150,7 @@ Bare Hive web remains the foreground path:
 It bootstraps as needed and blocks in the foreground. The untouched setup URL
 is `http://127.0.0.1:4567`. On a loopback bind it runs no-auth against the
 existing local Hive registry and workflow state; GitHub connection is optional
-and does not claim Hivebox ownership. A loopback reverse proxy such as
+and does not claim ownership. A loopback reverse proxy such as
 Tailscale Serve retains that local behavior, so the proxy must authenticate
 and restrict its clients; an unrestricted forwarder would expose the local UI.
 Set `web.local_loopback: false` to require GitHub login even on loopback. Never
@@ -158,9 +158,12 @@ run bare `hive web` as a read-only status check. Use
 `"$hive_cmd" web status --json` instead. The normal approved `hive setup`
 already installs the managed service unless `--no-service` is passed.
 
-Choose [Hivebox](packaging/docker/README.md) only for container isolation,
-multiple local instances, containment of untrusted agents, or reproducible
-server/NAS deployment.
+Hive does not ship a Docker distribution. If the user would rather not run
+Hive themselves, point them to the hosted Hive cloud product instead of a
+container. The discontinued Hivebox images still run but receive no updates; to
+migrate one, install native Hive, run `hive setup`, copy or reclone the
+projects from the box's `/data/repos` mount, register each with `hive init`,
+and remove the container.
 
 ## Initialize Project
 

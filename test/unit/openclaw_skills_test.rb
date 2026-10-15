@@ -166,7 +166,8 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "service.ready"
     assert_includes text, "service.readiness"
     assert_includes text, "hive web status --json"
-    assert_match(/Prefer this native managed-service path.*Choose Hivebox/m, text)
+    assert_includes text, "Prefer this native managed-service path"
+    refute_match(/Hivebox/i, text)
     assert_includes text, "their own real terminal"
     assert_includes text, "openclaw skills install #{CLAWHUB_REF}"
     assert_includes text, "Never patch an installed Hive runtime"

@@ -18,7 +18,7 @@ the task, plan, and exact committed diff into user-meaningful claims; a separate
 producer makes the required proof; and a third fresh read-only reviewer accepts,
 targets evidence for recapture, returns repository defects for implementation
 rework, or blocks every claim and supported exclusion. Legacy
-Hivebox screenshots and recordings remain visible diagnostics but never establish
+built-in synthetic screenshots and recordings remain visible diagnostics but never establish
 accepted-evidence authority. A best-effort completion is idempotent on resume;
 the existing notes, captures, and rejected packages remain available.
 
@@ -286,7 +286,7 @@ recapture of the real product surface or transition.
 The append-only requirement and attempts live under
 `<task>/outcome-evidence/generations/<generation>/`; the same generation also
 contains its append-only `implementation.diff`. Only
-`<task>/outcome-evidence/current.json` is replaceable. Hivebox validates the
+`<task>/outcome-evidence/current.json` is replaceable. Hive web validates the
 pointer and immutable document digests when listing a package without rerunning
 OCR/ffmpeg across every retained representation. A representation request then
 revalidates that selected file's exact size and digest before streaming it.
@@ -320,15 +320,15 @@ evidence generation immutable for audit.
 
 ## Capture diagnostics
 
-Current v2 `media/capture-manifest.json` remains readable for Hivebox
+Current v2 `media/capture-manifest.json` remains readable for Hive web
 diagnostics; v1 captures are rejected. The artifacts stage uses only the
 outcome-evidence collector. Its old marker-driven capture agent, Screenote
 prompt integration, and compatibility capture reader have been removed. Project-provider manifests may participate as a proof source only
 when they explicitly declare `evidence_role: claim_evidence` and pass the new
-proof contract. Built-in synthetic Hivebox media is always diagnostic-only and
+proof contract. Built-in synthetic capture media (manifest evidence type `hivebox`) is always diagnostic-only and
 cannot be admitted as accepted outcome evidence.
 
-The Hivebox task page leads with the verified outcome claims, proof kind,
+The Hive web task page leads with the verified outcome claims, proof kind,
 representations, verdict rationale, traceability, attempts, agent/model/effort,
 and reviewer capability. Legacy media follows in a visibly labelled
 `Legacy diagnostic` section.

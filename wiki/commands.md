@@ -49,11 +49,6 @@ one ClawHub listing per Hive verb.
 - `hive.gemspec`
 - `.github/workflows/release.yml`
 - `.github/workflows/live-agent-skills.yml`
-- `packaging/docker/Dockerfile`
-- `packaging/docker/entrypoint.sh`
-- `packaging/docker/install-box.sh`
-- `packaging/docker/install-box.ps1`
-- `packaging/docker/README.md`
 - `openclaw/skills/hive/SKILL.md`
 - `openclaw/README.md`
 
@@ -209,28 +204,18 @@ runs db:prepare, and execs `bin/rails server`. The web app reuses the same statu
 task-drop, agent-auth, repo, and Telegram setup contracts as the
 CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
 device-flow auth can either use a pre-pinned `web.github.owner` or first-login
-claim on an ownerless box. Production Action Cable accepts same-origin-as-host,
+claim on an ownerless instance. Production Action Cable accepts same-origin-as-host,
 with `web.origin` / `HIVE_WEB_ORIGIN` only as an extra allow for split-origin
 deploys. Task Drop is deliberately not daemon-queued: the web handler calls
 `Task#drop!`, which runs `Commands::Drop` in-process with the
 rendered `from` stage as a stale-page guard. Repo setup clones through `gh`,
-normalizes GitHub SSH origins to https, and relies on the Docker image's
-`gh auth git-credential` helper for GitHub push auth; the Agents page now starts
-the `gh auth login` PTY relay for that credential. Docker packaging adds the
-`hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
-directories and then runs `Hive::Web::Supervisor` unless custom argv is passed,
-and `packaging/docker/install-box.{sh,ps1}`, the one-command install entrypoints
-for `curl -fsSL https://hivecli.sh/box | sh` and
-`irm https://hivecli.sh/box.ps1 | iex`. Both pull
-`ghcr.io/ivankuznetsov/hivebox:latest` by default, start a named container,
-mount persistent data, and print the local URL; the PowerShell script is the
-native Windows shape for Docker Desktop hosts where `sh` or MSYS path conversion
-would be the wrong interface. The release workflow publishes versioned and
-`latest` multi-arch hivebox images to GHCR after `release-finalize`. The gem
-packages the gem metadata required for the managed app's installed-root path
-dependency; the Rails source remains in the authenticated versioned release
-bundle. The app also ships in the Hivebox image at `/app/web` or runs from a
-source checkout.
+normalizes GitHub SSH origins to https so pushes use `gh`-supplied https
+credentials; the Agents page starts the `gh auth login` PTY relay for that
+credential. The gem packages the gem metadata required for the managed app's
+installed-root path dependency; the Rails source remains in the authenticated
+versioned release bundle, or runs from a source checkout. The Hivebox Docker
+distribution (image, one-command installers, container supervisor) was removed
+by ADR-054.
 
 ### E2E Harness
 

@@ -64,8 +64,8 @@ hive daemon --once PROJECT [--json] [--dry-run]
 ## Increment-1 quiescence boundary
 
 The first quiescence increment is deliberately idle-registry-only. The audited
-launch table covers direct CLI commands, attempt wrappers, daemon children, the
-Hivebox supervisor, and web capture, but none of those surfaces is yet proven
+launch table covers direct CLI commands, attempt wrappers, daemon children, and
+web capture, but none of those surfaces is yet proven
 unable to create an unregistered descendant. A successful `paused: true`
 therefore requires no agent attempt roots, no unresolved launch reservation,
 no active registered process, and no discoverable legacy Hive service. Setting
@@ -77,11 +77,9 @@ daemon are reserved by their parent before `Process.spawn`, remain blocked at
 `bin/hive`'s launch gate until the parent registers their process identity, and
 then adopt that exact durable row for exit cleanup. A parent crash during the
 handoff leaves unresolved ownership in the registry rather than an invisible
-child. Hivebox similarly publishes `.hivebox-supervisor.pid` with PID-reuse
-identity before starting any children and removes only its own receipt on
-normal exit. Independent controllers such as
-`docker exec ... hive daemon status` therefore discover a live supervisor
-without relying on its process-local environment.
+child. (The former Hivebox container supervisor and its
+`.hivebox-supervisor.pid` receipt were removed by ADR-054; legacy service
+discovery now covers only the daemon, bot, and babysitter pid files.)
 
 For the narrow backup-safe result, the two observations are inseparable:
 

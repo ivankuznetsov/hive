@@ -245,8 +245,9 @@ A maintainer's separately authorized `vX.Y.Z` tag triggers
 `install-gate` installs those selected gem bytes natively before
 `release-finalize` creates and cosign-signs `SHA256SUMS`, publishes the exact
 gem/skill/web bytes, dispatches Homebrew when configured, and announces on
-Discord when configured. The existing AUR, multi-architecture Hivebox, and
-post-release verification graph remains downstream.
+Discord when configured. The existing AUR and post-release verification graph
+remains downstream. Releases no longer build or publish a Hivebox Docker image;
+already published `ghcr.io/ivankuznetsov/hivebox` tags are left in place.
 
 Implementation status: no real hosted candidate workflow, native-platform
 matrix, or historical package lane was run while adding this machinery. No
@@ -542,20 +543,6 @@ the release and channel graph:
    of the just-released version.
 5. **Weekly canary** (`install-canary.yml`, Mondays 06:00 UTC + `workflow_dispatch`)
    — re-installs the latest release to catch dependency / base-image drift.
-
-The Hivebox image gate is daemon-deep: `packaging/docker/smoke.sh` waits for
-Rails `/health`, then requires daemon-backed `/health?deep=1` to stay healthy
-across the supervisor's ten-second fast-failure window before checking the
-claimable login and owner gate. It probes deep health again afterward. This
-prevents a web-healthy image with a missing or crashlooping CLI/daemon bundle
-from receiving public versioned or `latest` tags.
-
-Both architectures are fail-closed before public tagging. The amd64 and native
-arm64 jobs push untagged content by digest, run the smoke against those exact
-digests, and expose the proven digests as job outputs. Only after both jobs
-succeed does `hivebox-image` create the versioned and `latest` multi-arch
-manifest from those two immutable inputs; it never rebuilds between smoke and
-promotion.
 
 Any failure opens or updates a single **`install-failure`** GitHub issue (one
 aggregation job, so no duplicate spam) naming the run. To check a specific

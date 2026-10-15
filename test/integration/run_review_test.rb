@@ -730,6 +730,130 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # Field incident (Oct 2026): four tasks re-ran pass 1 ~240 times at the
+  # hourly limit cadence. Every retry re-ran the healthy Codex reviewer for
+  # minutes before triage re-hit its plan wall. The cooled retry of a
+  # triage-limited pass must reuse that output at the same HEAD and re-run
+  # only the reviewer that failed, plus triage.
+  ReuseKeptReviewer = Class.new(Hive::Reviewers::Base) do
+    def run!(deadline: nil)
+      ensure_reviews_dir!
+      File.write(output_path, "## Low\n\n- [ ] kept finding\n")
+      Hive::Reviewers::Result.new(name: name, output_path: output_path, status: :ok, error_message: nil)
+    end
+  end
+
+  ReuseLimitedReviewer = Class.new(Hive::Reviewers::Base) do
+    def run!(deadline: nil)
+      Hive::Reviewers::Result.new(
+        name: name, output_path: output_path, status: :error,
+        error_message: "limits reached for claude: Claude account quota reached (five_hour)",
+        limit_text: "Claude account quota reached (five_hour)"
+      )
+    end
+  end
+
+  def run_reuse_review_attempt(folder, dispatched, triage_result)
+    dispatch = lambda do |spec, ctx, **_kwargs|
+      dispatched << spec["name"]
+      klass = spec["name"] == "kept" ? ReuseKeptReviewer : ReuseLimitedReviewer
+      klass.new(spec, ctx)
+    end
+    triage = lambda do |cfg:, ctx:|
+      triage_result.call(ctx)
+    end
+    capture_io do
+      with_replaced_singleton_method(Hive::Reviewers, :dispatch, dispatch) do
+        with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage) do
+          with_captured_exit { Hive::Commands::Run.new(folder).call }
+        end
+      end
+    end
+  end
+
+  def reuse_reviewers_cfg
+    {
+      "review" => {
+        "reviewers" => %w[kept limited].map do |name|
+          { "name" => name, "kind" => "agent", "agent" => "claude", "skill" => "ce-code-review",
+            "output_basename" => name, "prompt_template" => "reviewer_claude_ce_code_review.md.erb" }
+        end
+      }
+    }
+  end
+
+  def triage_limit_result(ctx)
+    Hive::Stages::Review::Triage::Result.new(
+      status: :error, escalations_path: nil,
+      error_message: "limits reached for codex: The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.",
+      tampered_files: [],
+      limit_text: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
+    )
+  end
+
+  def test_triage_limited_pass_retry_reuses_succeeded_reviewers_at_same_head
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: reuse_reviewers_cfg)
+        task_md = File.join(folder, "task.md")
+        receipt = Hive::Stages::Review::ReviewerReuse.path(folder, 1)
+
+        first = []
+        run_reuse_review_attempt(folder, first, method(:triage_limit_result))
+        assert_equal %w[kept limited], first
+        marker = Hive::Markers.current(task_md)
+        assert_equal [ :review_error, "triage", "limits_reached" ],
+                     [ marker.name, marker.attrs["phase"], marker.attrs["reason"] ]
+        assert File.exist?(receipt), "a triage limit records which reviewer outputs are reusable"
+        assert_equal [ "kept" ], JSON.parse(File.read(receipt)).fetch("outputs").keys
+
+        # The daemon's cooled retry clears the marker and re-runs the stage.
+        Hive::Markers.clear_current(task_md, expected_name: :review_error)
+        second = []
+        triage_inputs = nil
+        run_reuse_review_attempt(folder, second, lambda do |ctx|
+          triage_inputs = Hive::Stages::Review::Triage.discover_reviewer_files(ctx).map { |f| File.basename(f) }
+          triage_limit_result(ctx)
+        end)
+        assert_equal [ "limited" ], second, "the reviewer that already succeeded must not re-spend quota"
+        assert_equal [ "kept-01.md" ], triage_inputs, "triage still sees the reused output"
+        assert File.exist?(receipt), "a repeat limit re-records the reusable outputs"
+
+        # HEAD moved (e.g. an operator commit): nothing is reusable.
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        File.write(File.join(worktree, "README.md"), "moved\n")
+        run!("git", "-C", worktree, "commit", "-am", "move head", "--quiet")
+        Hive::Markers.clear_current(task_md, expected_name: :review_error)
+        third = []
+        run_reuse_review_attempt(folder, third, method(:triage_limit_result))
+        assert_equal %w[kept limited], third, "a different HEAD re-runs every reviewer"
+      end
+    end
+  end
+
+  def test_non_limit_triage_error_records_no_reviewer_reuse
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: reuse_reviewers_cfg)
+        failure = lambda do |_ctx|
+          Hive::Stages::Review::Triage::Result.new(
+            status: :error, escalations_path: nil, error_message: "triage agent failed (timeout)",
+            tampered_files: [], limit_text: nil
+          )
+        end
+        dispatched = []
+        with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
+          run_reuse_review_attempt(folder, dispatched, failure)
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal [ :review_error, "unknown" ], [ marker.name, marker.attrs["reason"] ]
+        refute File.exist?(Hive::Stages::Review::ReviewerReuse.path(folder, 1)),
+               "genuine errors keep re-running every reviewer on retry"
+      end
+    end
+  end
+
   # A non-limit triage failure (e.g. a timeout) must stay terminal: only an
   # actual usage/credit limit earns the self-healing retry stamp, so a real
   # bug can't masquerade as a transient limit and loop forever.

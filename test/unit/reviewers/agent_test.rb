@@ -586,6 +586,44 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # A provider wall does not clear within the adapter's seconds-long backoff;
+  # the 6-review limit marker owns the cooled retry. Retrying inline only
+  # re-spends a launch against the exhausted account (field evidence: every
+  # hourly retry of a limited pass ran a `-retry1` Claude spawn).
+  def test_run_does_not_retry_a_provider_limit_failure
+    with_tmp_dir do |dir|
+      reviewer, sleeps = with_stubbed_adapter(dir, "max_attempts" => 3)
+      limited = {
+        status: :error,
+        error_message: "limits reached for claude: Claude account quota reached (five_hour)",
+        limit_text: "Claude account quota reached (five_hour)"
+      }
+
+      with_spawn_stub([ limited, ok_result ]) do |count_fn, labels|
+        result = reviewer.run!
+        assert result.error?
+        assert_equal "Claude account quota reached (five_hour)", result.limit_text
+        assert_equal 1, count_fn.call
+        assert_equal [ "review-claude-ce-code-review-pass01" ], labels
+      end
+
+      assert_empty sleeps
+    end
+  end
+
+  def test_run_does_not_retry_a_legacy_wire_format_limit_message
+    with_tmp_dir do |dir|
+      reviewer, sleeps = with_stubbed_adapter(dir)
+
+      with_spawn_stub([ error_result("limits reached for codex: usage limit"), ok_result ]) do |count_fn, _|
+        assert reviewer.run!.error?
+        assert_equal 1, count_fn.call
+      end
+
+      assert_empty sleeps
+    end
+  end
+
   def test_run_backoff_cap_capped_at_eight_seconds
     with_tmp_dir do |dir|
       reviewer, sleeps = with_stubbed_adapter(dir, "max_attempts" => 6)

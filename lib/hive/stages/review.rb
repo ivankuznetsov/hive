@@ -20,6 +20,7 @@ require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
 require "hive/stages/review/orchestrator_owned"
+require "hive/stages/review/reviewer_reuse"
 require "hive/stages/review/suppression"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/remote_ci"
@@ -458,10 +459,17 @@ module Hive
             @current_phase = :reviewers
             mark_working(task, phase: :reviewers, pass: pass)
             reviewer_limit_texts = []
+            # A cooled retry of a triage-limited pass reuses the reviewer
+            # outputs that pass already produced at this exact HEAD, so only
+            # the reviewers that failed re-spend provider quota.
+            reviewed_head = git_head(worktree_path)
+            reusable_outputs = Hive::Stages::Review::ReviewerReuse.consume(ctx_pass, head: reviewed_head)
+            succeeded_reviewers = []
             reviewers_result = run_reviewers(
               cfg, ctx_pass, task,
               started_at: started_at, max_wall_clock_sec: max_wall_clock,
-              limit_texts: reviewer_limit_texts
+              limit_texts: reviewer_limit_texts,
+              reuse: reusable_outputs, succeeded: succeeded_reviewers
             )
             if reviewers_result == :wall_clock_exceeded
               return finalize_wall_clock_stale(task, started_at, pass: pass)
@@ -501,6 +509,7 @@ module Hive
               warn "[hive.review] suppressed #{stripped} no-fix finding(s) before triage for pass #{format('%02d', pass)}" if stripped.positive?
 
               @current_phase = :triage
+              pre_triage_digests = Hive::Stages::Review::ReviewerReuse.digests(ctx_pass, succeeded_reviewers)
               triage_result = run_triage_with_retries(
                 cfg, ctx_pass, task, pass: pass,
                 started_at: started_at, max_wall_clock_sec: max_wall_clock
@@ -534,6 +543,11 @@ module Hive
                   error_message: triage_result.error_message,
                   limit_text: triage_result.limit_text
                 )
+                if limited && git_head(worktree_path) == reviewed_head
+                  Hive::Stages::Review::ReviewerReuse.record(
+                    ctx_pass, head: reviewed_head, pre_triage_digests: pre_triage_digests
+                  )
+                end
                 label = limited ? "triage_limits_reached" : "triage_error"
                 return { commit: "#{label}_pass_#{format('%02d', pass)}",
                          status: :review_error }
@@ -1426,7 +1440,8 @@ module Hive
       # we short-circuit between reviewers as soon as the budget is
       # gone — the partial results stay on disk for the next run to
       # consume.
-      def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil, limit_texts: [])
+      def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil, limit_texts: [],
+                        reuse: {}, succeeded: [])
         specs = reviewer_specs_for(cfg, task)
 
         # Clear stale errors-NN.md BEFORE any early return. The docs
@@ -1479,6 +1494,17 @@ module Hive
         # being flattened to a generic "all_failed".
         error_messages = []
         specs.each do |spec|
+          if Hive::Stages::Review::ReviewerReuse.reusable?(ctx, spec["output_basename"], reuse)
+            # Already produced (and published) by this pass at this HEAD
+            # before a provider limit parked it; do not re-spend its quota.
+            warn "[hive.review] reusing reviewer #{spec['name'].inspect} pass " \
+                 "#{format('%02d', ctx.pass)} output produced before the provider-limit retry"
+            statuses << :ok
+            succeeded << spec["output_basename"]
+            remaining_specs -= 1
+            next
+          end
+
           result = run_reviewer_spec(
             cfg, ctx, spec,
             reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
@@ -1490,6 +1516,7 @@ module Hive
           statuses << result.status
           error_messages << result.error_message if result.error?
           limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
+          succeeded << spec["output_basename"] if result.ok? && spec["output_basename"]
           handle_reviewer_result(task, cfg, ctx, spec, result)
           remaining_specs -= 1
         end

@@ -22,8 +22,8 @@ found while updating docs:
 - **Existing tasks still on a pre-upgrade tmux Claude.** Recovery relies on the
   operator letting Claude stages finish before upgrading, then killing leftover
   Hive Claude tmux sessions; the new code cannot see such a session. The step is
-  recorded in the PR and must be carried into the next release's CHANGELOG
-  section (the CHANGELOG has no Unreleased accumulator).
+  recorded in the `## 0.8.0` section of `CHANGELOG.md`, staged ahead of the
+  version bump; release prep keeps that section when it bumps to 0.8.0.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 
@@ -57,13 +57,14 @@ context exposes no admitted video-capture channel. The absence of a recording
 does not imply a browser failure and is not represented as accepted video
 evidence.
 
-## Incident timing calibration (2026-09-27)
+## Incident timing calibration (2026-10-14)
 
-The 32-second aggregate advisory cap covers observed hosted totals of 30.577
-and 30.643 seconds while preserving the 16-second per-scenario ceiling. These
-runs do not establish a long-run percentile or separate budgets for each runner
-class. Revisit the cap after representative hosted timing history exists;
-timing remains advisory and does not replace functional E2E coverage.
+The 36-second aggregate advisory cap covers observed hosted totals of 30.577,
+30.643, 32.543, and 32.146 seconds while preserving the 16-second
+per-scenario ceiling. These runs do not establish a long-run percentile or
+separate budgets for each runner class. Revisit the cap after representative
+hosted timing history exists; timing remains advisory and does not replace
+functional E2E coverage.
 
 ## Operator cancellation awaits live validation (2026-09-09)
 
@@ -749,6 +750,9 @@ recovery. Channel coverage still forces adapter registration to finish after
 teardown and proves the late handler removes itself, then forces deferred
 registration to raise and proves the lease releases before the transport
 reconnects.
+
+The filtered-history composer correction is locally Playwright-smoked; hosted
+system-test confirmation is still pending for that repair.
 
 Dedicated client ownership intentionally changes allocation from turbo-rails'
 shared consumer to one Cable connection per simultaneously live status source.

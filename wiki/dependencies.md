@@ -43,8 +43,8 @@ the runner floor unchanged. Exact-SHA pins prevent a mutable tag from changing
 the executable workflow dependency between review and execution, while the
 trailing version comments keep Dependabot updates legible.
 
-All seven `actions/upload-artifact` calls likewise pin v7.0.1 to
-`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`. They retain archive mode and
+All seven `actions/upload-artifact` calls likewise pin v7.0.2 to
+`cf430e030ddbb5b0abf93d22962f4752f3646cd9`. They retain archive mode and
 their existing missing-file, hidden-file, and retention policies; Hive does
 not enable v7's single-file direct-upload mode. Upload jobs run only on
 GitHub-hosted runners, satisfying the Node 24 runner floor introduced in v6.
@@ -55,8 +55,8 @@ The live-agent validation workflow pins `actions/setup-node` v7.0.0 to
 v7 ESM migration does not change Hive's workflow contract. The job runs on a
 GitHub-hosted runner.
 
-All nine paired `actions/download-artifact` calls pin v8.0.1 to
-`3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`. Existing artifact names,
+The `actions/download-artifact` workflow calls pin v8.0.2 to
+`9000827ccba6bdab643e8b6fd33ac0654aef8333`. Existing artifact names,
 patterns, merge behavior, and destinations remain unchanged. Hive keeps
 archive-mode uploads, while v8's default strict digest verification causes a
 corrupted or substituted artifact to fail the job instead of merely warning.
@@ -277,8 +277,9 @@ an ambiguous command-not-found failure.
 
 ## Release container builder action
 
-The three container publication jobs in `.github/workflows/release.yml` pin
-`docker/setup-buildx-action` v4.3.0 to commit
-`37fe631027851001ddb9b187196cc803df7f5f0e`. The action metadata and inputs are
-unchanged from the preceding v4.2.0 pin; this update refreshes its bundled
-JavaScript dependencies. The workflow remains tag-triggered.
+The three container publication jobs in `.github/workflows/release.yml` and
+three recovery/build jobs in `.github/workflows/hivebox-recover.yml` pin
+`docker/setup-buildx-action` v4.4.1 to commit
+`f87e5991a6d7451dcb8d9637bfbc97413f497069`. The action metadata and inputs are
+unchanged from the preceding v4.3.0 pin; this update refreshes its bundled
+JavaScript dependencies. The release workflow remains tag-triggered.

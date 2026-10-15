@@ -5901,6 +5901,7 @@ class ConfigTest < Minitest::Test
       { "servers" => { "x" => http.merge("headers" => { "Bad Header" => "v" }) } } => "invalid entry",
       { "servers" => { "x" => http.merge("headers" => { "authorization" => "Bearer abc" }) } } => "literal credential",
       { "servers" => { "x" => http.merge("headers" => { "X-Api_Key" => "abc" }) } } => "literal credential",
+      { "servers" => { "x" => http.merge("headers" => { "X-Api-Key" => "abc" }) } } => "literal credential",
       { "servers" => { "x" => http.merge("headers_env" => { "X-Org" => "not-a-var" }) } } => "mcp.servers.x.headers_env",
       { "servers" => { "x" => http.merge("imported_from" => "vim") } } => "mcp.servers.x.imported_from",
       { "servers" => { "x" => http.merge("enabled" => "yes") } } => "mcp.servers.x.enabled",

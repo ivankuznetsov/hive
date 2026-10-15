@@ -50,7 +50,8 @@ module Hive
                      yes: false, input: $stdin, output: $stdout,
                      error: $stderr, environment: ENV, setup_agents_factory: nil,
                      rollback_package: Hive::RuntimeControlPlane::CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE,
-                     command_schema_writer_guard: Hive::RuntimeControlPlane::CommandSchemaWriterGuard)
+                     command_schema_writer_guard: Hive::RuntimeControlPlane::CommandSchemaWriterGuard,
+                     mcp_import_offer: !defined?(Minitest))
         @json = json
         @service = service
         @no_bootstrap = no_bootstrap
@@ -67,6 +68,7 @@ module Hive
         end
         @rollback_package = rollback_package
         @command_schema_writer_guard = command_schema_writer_guard
+        @mcp_import_offer = mcp_import_offer == true
         @phases = []
       end
 
@@ -103,6 +105,7 @@ module Hive
         unless @no_bootstrap
           emit_receipt_installation_disclosure if @install_command_receipts
           setup_agent_skills
+          offer_mcp_import
           unless agent_setup_refused?
             bootstrap_qmd_if_missing(diagnostics)
             web_bundle = bootstrap_web_bundle
@@ -369,6 +372,15 @@ module Hive
             "setup_agents_exit_code" => result.exit_code
           } ]
         end
+      end
+
+      # Ask once, in a terminal without --yes, to import personal MCP servers
+      # (plan 2026-10-15-001). Not a setup phase: declining changes nothing.
+      def offer_mcp_import
+        return if !@mcp_import_offer || unattended_without_yes? || @yes
+
+        require "hive/mcp/import_offer"
+        Hive::Mcp::ImportOffer.run(cwd: Dir.pwd, input: @input, output: @output, error: @error)
       end
 
       def unattended_without_yes?

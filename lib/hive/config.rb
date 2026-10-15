@@ -3436,7 +3436,9 @@ module Hive
     MCP_SECRET_NAME = /(TOKEN|SECRET|PASSWORD|API_?KEY)/i
     MCP_PROJECT_KEYS = %w[inherit_user use].freeze
     MCP_STAGE_KEYS = %w[use].freeze
-    MCP_GLOBAL_KEYS = %w[inherit_user servers].freeze
+    # `import_offered` records that `hive setup`/`hive init` already asked
+    # once to run `hive mcp import`.
+    MCP_GLOBAL_KEYS = %w[inherit_user servers import_offered].freeze
     MCP_STDIO_KEYS = %w[command args env env_from cwd].freeze
     MCP_HTTP_KEYS = %w[
       url bearer_token_env headers headers_env oauth_resource oauth_client_id oauth_scopes
@@ -3532,6 +3534,7 @@ module Hive
     def validate_global_mcp!(cfg, source_path)
       block = cfg.fetch("mcp")
       validate_closed_mapping!(block, MCP_GLOBAL_KEYS, "mcp", source_path)
+      validate_boolean!(block["import_offered"], "mcp.import_offered", source_path)
       unless [ true, false ].include?(block["inherit_user"])
         raise ConfigError,
               "mcp.inherit_user in #{describe_source(source_path)} must be true or false; " \
@@ -3619,7 +3622,7 @@ module Hive
 
       validate_mcp_map!(spec["headers"], "#{label}.headers", source_path, key: MCP_HEADER_NAME)
       spec["headers"].each_key do |header|
-        next unless header.casecmp?("authorization") || header.match?(MCP_SECRET_NAME)
+        next unless header.casecmp?("authorization") || mcp_secret_header?(header)
 
         raise ConfigError,
               "#{label}.headers.#{header} in #{describe_source(source_path)} is a literal credential; " \
@@ -3627,6 +3630,9 @@ module Hive
               "`headers_env: { #{header}: HOST_VAR }` instead."
       end
     end
+
+    # Header names hyphenate (`X-Api-Key`), so compare them as env names.
+    def mcp_secret_header?(header) = header.tr("-", "_").match?(MCP_SECRET_NAME)
 
     def validate_mcp_string!(value, label, source_path, pattern: nil)
       return if value.is_a?(String) && !value.strip.empty? && (pattern.nil? || value.match?(pattern))

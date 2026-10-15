@@ -1,6 +1,4 @@
 require "json"
-require "open3"
-require "timeout"
 require "hive/mcp"
 
 # OpenCode MCP renderer. OpenCode merges every config layer and has no
@@ -34,7 +32,7 @@ module Hive::AgentSupport::OpenCode::Mcp
   end
 
   def discover(bin, cwd)
-    stdout, status = capture(bin, cwd)
+    stdout, status = Hive::Mcp.capture([ bin, "debug", "config" ], chdir: cwd, timeout: probe_timeout)
     raise Hive::AgentError, "`opencode debug config` exited #{status.exitstatus}" unless status.success?
 
     servers = JSON.parse(stdout).fetch("mcp", {})
@@ -45,19 +43,6 @@ module Hive::AgentSupport::OpenCode::Mcp
     raise Hive::AgentError, "`opencode debug config` returned malformed JSON"
   rescue SystemCallError => e
     raise Hive::AgentError, "`opencode debug config` could not run (#{e.class.name.split('::').last})"
-  end
-
-  def capture(bin, cwd)
-    Open3.popen3(bin, "debug", "config", chdir: cwd, pgroup: true) do |stdin, stdout, stderr, waiter|
-      stdin.close
-      out = Thread.new { stdout.read }
-      Thread.new { stderr.read }
-      unless waiter.join(probe_timeout)
-        Process.kill("KILL", -waiter.pid)
-        raise Hive::AgentError, "`opencode debug config` timed out after #{probe_timeout}s"
-      end
-      [ out.value, waiter.value ]
-    end
   end
 
   def probe_timeout = PROBE_TIMEOUT_SECONDS
@@ -77,5 +62,5 @@ module Hive::AgentSupport::OpenCode::Mcp
     { "type" => "local", "command" => [ server.command, *server.args ], "enabled" => true }
       .tap { |out| out["environment"] = environment unless environment.empty? }
   end
-  private_class_method :discover, :capture, :entry
+  private_class_method :discover, :entry
 end

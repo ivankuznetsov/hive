@@ -1,5 +1,6 @@
 require "fileutils"
 require "json"
+require "open3"
 require "tmpdir"
 require "hive/agent_runtime"
 require "hive/agent_support"
@@ -133,6 +134,22 @@ module Hive
       return invocation if first.nil? || argv.count(ONCE_FLAG) == 1
 
       invocation.with(argv: argv.reject.with_index { |argument, index| argument == ONCE_FLAG && index != first })
+    end
+
+    # Run a read-only agent CLI inspection (`opencode debug config`, `codex
+    # mcp list --json`) with a deadline. Returns [stdout, status]; a hung
+    # process group is killed and reported as Hive::AgentError.
+    def capture(argv, chdir:, timeout:)
+      Open3.popen3(*argv, chdir: chdir, pgroup: true) do |stdin, stdout, stderr, waiter|
+        stdin.close
+        out = Thread.new { stdout.read }
+        Thread.new { stderr.read }
+        unless waiter.join(timeout)
+          Process.kill("KILL", -waiter.pid)
+          raise Hive::AgentError, "`#{[ File.basename(argv.first), *argv.drop(1) ].join(' ')}` timed out after #{timeout}s"
+        end
+        [ out.value, waiter.value ]
+      end
     end
 
     # A per-launch 0700 directory for rendered config.

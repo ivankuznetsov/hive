@@ -93,7 +93,9 @@ still recognize terminal directories from the frozen built-in descriptors when
 the selected descriptor is unavailable, while workflow-unavailable tasks expose
 no run, approval, recovery, rejection, or close affordance. Blank-path board
 rows use the same `UnknownWorkflow` diagnostic shape, including the known
-built-in ids.
+built-in ids. Completed cards short-circuit that descriptor-availability check:
+their saved status already disables stage mutations, and rendering them must
+not wait behind a background history refresh that owns the project Monitor.
 
 ### Workflow reader boundary audit
 

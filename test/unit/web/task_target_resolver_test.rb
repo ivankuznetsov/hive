@@ -219,6 +219,26 @@ class WebTaskTargetResolverTest < Minitest::Test
     end
   end
 
+  def test_unavailable_workflow_fallback_preserves_the_original_error_when_stages_are_unreadable
+    Dir.mktmpdir("task-target") do |root|
+      hive_state = File.join(root, ".hive-state")
+      FileUtils.mkdir_p(File.join(hive_state, "stages"))
+      project = { "name" => "demo", "path" => root, "hive_state_path" => hive_state }
+      original_error = Hive::InvalidTaskPath.new("unknown workflow")
+
+      error = with_replaced_singleton_method(Dir, :children, ->(*) { raise Errno::EACCES }) do
+        assert_raises(Hive::InvalidTaskPath) do
+          Hive::Web::TaskTargetResolver.new(
+            project: project, slug: "stranded-task",
+            task_resolver: -> { raise original_error }
+          ).call
+        end
+      end
+
+      assert_same original_error, error
+    end
+  end
+
   def test_project_load_failure_is_an_actionable_error
     Dir.mktmpdir("task-target") do |root|
       folder = File.join(root, ".hive-state", "stages", "4-execute", "ship-it")

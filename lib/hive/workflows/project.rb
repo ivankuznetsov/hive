@@ -410,13 +410,14 @@ module Hive
         @active_fallback_from = nil
 
         cached = loaded_workflows[project_root]
-        workflows = if cached && cached.fetch(:fingerprint) == fingerprint
-                      cached.fetch(:workflows)
-                    else
-                      prepared.workflows.tap do |loaded|
-                        loaded_workflows[project_root] = { fingerprint: fingerprint, workflows: loaded }
-                      end
-        end
+        workflows =
+          if cached && cached.fetch(:fingerprint) == fingerprint
+            cached.fetch(:workflows)
+          else
+            prepared.workflows.tap do |loaded|
+              loaded_workflows[project_root] = { fingerprint: fingerprint, workflows: loaded }
+            end
+          end
         workflows.each_value { |workflow| register_descriptor(workflow, workflow_dir, project_root) }
         # No trailing reset_union_cache! here: both register! and
         # reset_project_registrations! already invalidate the union cache, so an

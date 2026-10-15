@@ -316,6 +316,15 @@ class WorkflowsTest < Minitest::Test
     end
   end
 
+  def test_assert_known_stage_filter_uses_the_current_union_without_projects
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Workflows.assert_known_stage_filter!("missing", [])
+    end
+
+    assert_includes error.message, "1-inbox"
+    assert_includes error.message, "short names"
+  end
+
   private
 
   def write_authored_workflow(project_root, id, stage_name)

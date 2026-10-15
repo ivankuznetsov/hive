@@ -2,7 +2,7 @@
   <% completed = TaskDisplay.new(task, archived: @task_source == "archive").completed? %>
   <% mutations_enabled = local_assigns.fetch(:mutations_enabled, true) %>
   <% recovery = local_assigns[:recovery] %>
-  <% workflow_available = !task.workflow_unavailable? %>
+  <% workflow_available = completed || !task.workflow_unavailable? %>
   <% recovery_visible = recovery ? recovery.fetch("action_visible") : task.recovery_action_visible? %>
   <% recovery_enabled = recovery ? recovery.fetch("action_enabled") : task.recovery_action_enabled? %>
   <% if workflow_available && recovery_visible %>

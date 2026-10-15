@@ -25,6 +25,7 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     def recovery_primary_label = @attributes["recovery_label"]
     def recovery_context = Array(@attributes["recovery_context"])
     def dispatch_action = @attributes["dispatch_action"]
+    def workflow_unavailable? = @attributes["workflow_unavailable"] == true
   end
 
   Store = Struct.new(:records) do
@@ -354,6 +355,28 @@ class TaskWorkspaceBuilderTest < Minitest::Test
       assert_equal "artifact.md", snapshot.dig("result", "primary", "reference")
       assert_match(/final\.md.*unavailable/, snapshot.dig("result", "warning"))
       assert_equal "completed", snapshot.dig("headline", "state")
+    end
+  end
+
+  def test_semantic_v2_disables_actions_when_workflow_policy_is_unavailable
+    with_fixture do |native, task|
+      task.instance_variable_get(:@attributes)["workflow_unavailable"] = true
+      projector = builder(native, task, questions: 0)
+
+      snapshot = projector.semantic
+      audit = projector.call
+
+      assert_equal "Workflow descriptor is unavailable; task controls are disabled.",
+                   snapshot.dig("result", "warning")
+      refute snapshot.dig("action", "enabled")
+      assert_equal "Workflow policy is unavailable; task controls are disabled.",
+                   snapshot.dig("action", "reason")
+      assert_equal "investigate", audit.dig("decision", "posture")
+      assert_equal "Workflow policy is unavailable; task controls are disabled.",
+                   audit.dig("decision", "reason")
+      refute audit.dig("decision", "action", "enabled")
+      assert_equal "Workflow policy is unavailable; task controls are disabled.",
+                   audit.dig("decision", "action", "reason")
     end
   end
 

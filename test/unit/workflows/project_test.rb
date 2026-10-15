@@ -207,6 +207,33 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_project_operation_rejects_a_different_nested_root_at_the_lock_boundary
+    with_tmp_dir do |root_a|
+      with_tmp_dir do |root_b|
+        error = assert_raises(Hive::Workflows::Project::NestedProjectActivationError) do
+          Hive::Workflows::Project.send(:with_project_operation, root_a) do
+            Hive::Workflows::Project.send(:with_project_operation, root_b) { flunk "must not yield" }
+          end
+        end
+
+        assert_includes error.message, root_a
+        assert_includes error.message, root_b
+      end
+    end
+  end
+
+  def test_load_overlay_rejects_an_unprepared_activation
+    with_tmp_dir do |project_root|
+      workflow_dir = File.join(project_root, ".hive-state", "workflows")
+
+      error = assert_raises(Hive::Error) do
+        Hive::Workflows::Project.send(:load_overlay!, project_root, workflow_dir)
+      end
+
+      assert_equal "project workflow activation was not prepared", error.message
+    end
+  end
+
   def test_same_root_nesting_rejects_a_different_workflow_directory_before_mutation
     with_tmp_dir do |project_root|
       write_project_workflow(project_root, "flow-a", stage_name: "alpha", hive_state_path: "state-a")

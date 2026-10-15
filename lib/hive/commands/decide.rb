@@ -99,7 +99,6 @@ module Hive
         when Hive::AmbiguousSlug then "ambiguous_slug"
         when Hive::InvalidTaskPath then "invalid_task_path"
         when Hive::ConcurrentRunError then "concurrent_run"
-        when Hive::RollbackFailed then "rollback_failed"
         when Hive::ConfigError then "config"
         when Hive::GitError then "git"
         when Hive::InternalError then "internal"
@@ -445,21 +444,15 @@ module Hive
             ).call
           end
         rescue Hive::WrongStage => error
-          folder = File.directory?(task.folder) ? task.folder : File.join(
-            task.hive_state_path, "stages", target.dir, task.slug
-          )
-          restore_files(folder, snapshot, observation: task_observation) if snapshot
+          restore_returned_files!(task, target, snapshot, task_observation, error)
           replay = resolve_task
           replay_record = self.class.latest_record(File.join(replay.folder, stage.state_file))
           return emit_same_or_conflicting!(replay, stage, outcome, replay_record) if
             current_record?(replay_record, decision_id)
 
           raise error
-        rescue StandardError, Interrupt
-          folder = File.directory?(task.folder) ? task.folder : File.join(
-            task.hive_state_path, "stages", target.dir, task.slug
-          )
-          restore_files(folder, snapshot, observation: task_observation) if snapshot
+        rescue StandardError, Interrupt => error
+          restore_returned_files!(task, target, snapshot, task_observation, error)
           raise
         end
 
@@ -468,6 +461,28 @@ module Hive
         emit_success(moved, stage, outcome, record, applied: true)
       ensure
         task_observation&.close
+      end
+
+      # Approve has already unwound its project and task custody when it
+      # raises, so the decision-file rollback re-enters the project commit
+      # lock: a supported drop (commit lock, then task lease) cannot slip
+      # between the identity check and the restore, and a stale or replaced
+      # task is reported as an incomplete rollback instead of overwritten.
+      def restore_returned_files!(task, target, snapshot, observation, original_error)
+        return unless snapshot
+
+        issue = Hive::Lock.with_commit_lock(task.hive_state_path) do
+          folder = File.directory?(task.folder) ? task.folder : File.join(
+            task.hive_state_path, "stages", target.dir, task.slug
+          )
+          restore_files(folder, snapshot, observation: observation)
+        end
+        return unless issue
+
+        raise Hive::RollbackFailed,
+              "decision failed and guarded rollback was incomplete: #{issue}; underlying: " \
+              "#{original_error.class}: #{original_error.message}",
+              cause: original_error
       end
 
       def repeat_stage!(task, stage, outcome, decision_id)
@@ -501,10 +516,16 @@ module Hive
               stage_name: stage.dir, slug: task.slug,
               action: "decide #{stage.name} #{outcome.name}"
             )
-          rescue StandardError, Interrupt
+          rescue StandardError, Interrupt => original_error
             if snapshot
               issue = restore_files(task.folder, snapshot, observation: observation)
-              restage_restored_files(task, snapshot, observation: observation) unless issue
+              if issue
+                raise Hive::RollbackFailed,
+                      "decision failed and guarded rollback was incomplete: #{issue}; " \
+                      "underlying: #{original_error.class}: #{original_error.message}",
+                      cause: original_error
+              end
+              restage_restored_files(task, snapshot, observation: observation)
             end
             raise
           end

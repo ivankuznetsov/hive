@@ -86,6 +86,11 @@ module Hive
         fix_auto_commit_signing_failed
       ].freeze
       MARKERLESS_EXIT_REASON = "agent_exited_without_terminal_marker"
+      # Marker reasons written by the retired Claude tmux launch runtime.
+      # Nothing emits them now, but task records written before the upgrade
+      # still carry them on disk, so the literals must keep matching.
+      LEGACY_TMUX_ERA_REASONS = %w[tmux_session_terminated].freeze
+      AGENT_LOSS_REASONS = (%w[agent_orphaned] + LEGACY_TMUX_ERA_REASONS).freeze
 
       def initialize(controller:, logger:, grace_sec: 300,
                      attempt_store: nil, attempt_dispatcher: nil,
@@ -424,25 +429,20 @@ module Hive
         return "limits_reached" if reason == "limits_reached"
         return "stage_timeout" if reason == "timeout"
         return "clean_exit_residue" if reason == "ensure_clean_on_exit_failed"
-        return "agent_loss_retry" if %w[tmux_session_terminated agent_orphaned].include?(reason)
+        return "agent_loss_retry" if AGENT_LOSS_REASONS.include?(reason)
 
         "error_retry"
       end
 
       # Map a review marker reason to the healer's `reason:` log label.
-      # `review_agent_died` keeps its own label. The
-      # `reviewer_tmux_session_terminated` and `fix_claude_stop_hook` labels
-      # predate the removal of the Claude tmux runtime and are kept stable
-      # for log consumers. The marker's literal reason is carried
-      # separately as `marker_reason:`.
+      # `review_agent_died`, `fix_failed`, and `reviewer_partial_failure`
+      # keep their own reason as the label.
       def review_heal_label(reason)
         case reason
-        when "review_agent_died" then "review_agent_died"
+        when "review_agent_died", "fix_failed", "reviewer_partial_failure" then reason
         when "limits_reached" then "reviewer_limits_reached"
         when "all_failed" then "reviewer_all_failed"
-        when "fix_failed" then "fix_claude_stop_hook"
         when *FIX_AUTO_COMMIT_RETRYABLE_REASONS then "fix_auto_commit_retry"
-        when "reviewer_partial_failure" then "reviewer_tmux_session_terminated"
         else "review_error_retry"
         end
       end

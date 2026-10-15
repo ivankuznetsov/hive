@@ -22,10 +22,13 @@
   or its `.hive-pre-install` backup before launching, and
   `Stages::Base.with_stage_events` repairs the worktree's copy when
   4-execute, 6-review, or 8-finalize starts, ahead of their dirty-worktree
-  checks (which would otherwise fail on, or auto-commit, the stub). Legacy reasons
-  (`tmux_session_terminated`, `reviewer_tmux_session_terminated`,
-  `fix_claude_stop_hook`) and the `claude_completion_fallback` event type
-  stay read-side only.
+  checks (which would otherwise fail on, or auto-commit, the stub). The legacy
+  `tmux_session_terminated` marker reason (`StaleAgentHealer::LEGACY_TMUX_ERA_REASONS`)
+  and the `claude_completion_fallback` event type stay read-side only. The
+  healer's `marker_heal_failed` log labels for review `fix_failed` and
+  `reviewer_partial_failure` markers are now those reasons themselves
+  instead of the tmux-era `fix_claude_stop_hook` and
+  `reviewer_tmux_session_terminated`; no code or schema reads these labels.
 - Config: `claude.mode` is removed; a leftover value loads and is ignored,
   and `hive doctor` reports it as a `claude/config` warning. Doctor drops the
   tmux dependency row and reports exported `ANTHROPIC_API_KEY` /

@@ -2066,6 +2066,147 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ admission_context, admission_context ], observed_contexts
   end
 
+  def test_dispatch_request_scan_isolates_project_workflow_activation_failures
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [])
+    requests = recovery_scan_requests("bad-task", "good-task")
+    requests = [
+      requests.fetch(0).with(project: "bad"),
+      requests.fetch(1).with(project: "good")
+    ]
+    rows = [
+      recovery_scan_rows("bad-task").first.tap { |entry| entry.project = "bad" },
+      recovery_scan_rows("good-task").first.tap { |entry| entry.project = "good" }
+    ]
+    processed = []
+    dispatcher.define_singleton_method(:process_dispatch_request_iteration) do |request, **|
+      processed << request.project
+    end
+    projects = [
+      { "name" => "bad", "path" => "/projects/bad" },
+      { "name" => "good", "path" => "/projects/good" }
+    ]
+    activate = lambda do |path, **, &block|
+      raise Hive::UnsupportedProjectConfigError, "unsupported root key" if path == "/projects/bad"
+
+      block.call
+    end
+
+    result = with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        with_replaced_singleton_method(
+          Hive::Workflows::Project, :with_active_workflows, activate
+        ) do
+          with_replaced_singleton_method(
+            Hive::Workflows, :all_stage_dirs, -> { %w[1-inbox 4-execute 9-done] }
+          ) do
+            dispatcher.send(:process_dispatch_requests, now: T0, rows: rows)
+          end
+        end
+      end
+    end
+
+    assert_equal %w[bad good], processed,
+                 "one invalid project must not prevent healthy queued work from progressing"
+    assert_empty result.fetch(:stage_dirs_by_project).fetch("bad"),
+                 "a failed activation must not borrow another project's workflow view"
+    assert_equal %w[1-inbox 4-execute 9-done],
+                 result.fetch(:stage_dirs_by_project).fetch("good")
+    unavailable = logger.events.find do |name, attributes|
+      name == :workflow_stage_dirs_unavailable && attributes[:project] == "bad"
+    end
+    refute_nil unavailable
+    assert_match(/UnsupportedProjectConfigError/, unavailable.last.fetch(:error))
+  end
+
+  def test_full_tick_captures_custom_stage_dirs_when_the_request_queue_is_empty
+    with_tmp_dir do |project_root|
+      workflows_dir = File.join(project_root, ".hive-state", "workflows")
+      FileUtils.mkdir_p(File.join(workflows_dir, "custom-daemon"))
+      File.write(
+        File.join(workflows_dir, "custom-daemon.yml"),
+        <<~YAML
+          id: custom-daemon
+          stages:
+            - name: inbox
+              kind: terminal
+              state_file: idea.md
+            - name: quality
+              kind: agent
+              state_file: quality.md
+              instruction: ./custom-daemon/quality.md
+            - name: done
+              kind: terminal
+              state_file: done.md
+        YAML
+      )
+      File.write(File.join(workflows_dir, "custom-daemon", "quality.md"), "Do quality.\n")
+      observed = row(
+        stage: "2-quality", workflow: "custom-daemon", action: nil, command: nil
+      )
+      dispatcher, = make_dispatcher(rows: [ observed ])
+      projects = [
+        {
+          "name" => "p1", "path" => project_root,
+          "hive_state_path" => File.join(project_root, ".hive-state")
+        }
+      ]
+
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        dispatcher.tick(now: T0)
+      end
+
+      stage_dirs = dispatcher.instance_variable_get(:@workflow_stage_dirs_by_project).fetch("p1")
+      assert_includes stage_dirs, "2-quality"
+      assert_includes stage_dirs, "3-done"
+    end
+  end
+
+  def test_workflow_stage_dir_degradation_keeps_previous_and_uses_built_ins_for_unknown_projects
+    dispatcher, = make_dispatcher(rows: [])
+    dispatcher.instance_variable_set(
+      :@workflow_stage_dirs_by_project, { "previous" => %w[1-inbox 2-custom 3-done] }.freeze
+    )
+    projects = [ { "name" => "previous", "path" => "/projects/previous" } ]
+    activation = ->(*, **, &) { raise Hive::ConfigError, "temporarily invalid" }
+
+    result = with_replaced_singleton_method(
+      Hive::Workflows::Project, :with_active_workflows, activation
+    ) do
+      dispatcher.send(
+        :workflow_stage_dirs_by_project, %w[previous unregistered], projects: projects
+      )
+    end
+
+    assert_equal %w[1-inbox 2-custom 3-done], result.fetch("previous")
+    assert_equal Hive::Daemon::Dispatcher::BUILT_IN_STAGE_DIRS,
+                 result.fetch("unregistered")
+  end
+
+  def test_workflow_stage_dir_degradation_contains_every_activation_error_class
+    errors = [
+      Hive::ConfigError.new("bad config"),
+      Hive::Workflows::Project::NestedProjectActivationError.new("/a", "/b"),
+      Psych::Exception.new("bad yaml"),
+      Errno::EACCES.new("denied"),
+      IOError.new("unreadable"),
+      ArgumentError.new("blank root")
+    ]
+
+    errors.each do |activation_error|
+      dispatcher, = make_dispatcher(rows: [])
+      projects = [ { "name" => "bad", "path" => "/projects/bad" } ]
+      activation = ->(*, **, &) { raise activation_error }
+
+      result = with_replaced_singleton_method(
+        Hive::Workflows::Project, :with_active_workflows, activation
+      ) do
+        dispatcher.send(:workflow_stage_dirs_by_project, [ "bad" ], projects: projects)
+      end
+
+      assert_empty result.fetch("bad"), activation_error.class.name
+    end
+  end
+
   def test_empty_dispatch_request_scan_skips_global_index_work
     dispatcher, = make_dispatcher(rows: [])
     rows = Object.new
@@ -3984,6 +4125,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_find_post_advance_state_file_contains_activation_failure_and_uses_built_ins
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    Dir.mktmpdir("hive-post-advance-fallback") do |hive_state|
+      slug = "coding-1"
+      done_dir = File.join(hive_state, "stages", "9-done", slug)
+      FileUtils.mkdir_p(done_dir)
+      state_file = File.join(done_dir, "task.md")
+      File.write(state_file, "# done\n")
+      project = { "name" => "broken", "path" => "", "hive_state_path" => hive_state }
+
+      assert_equal state_file,
+                   dispatcher.send(:find_post_advance_state_file, project, slug)
+      event = logger.events.find do |name, attributes|
+        name == :post_advance_workflow_dirs_unavailable && attributes[:project] == "broken"
+      end
+      refute_nil event
+      assert_match(/ArgumentError/, event.last.fetch(:error))
+      assert_equal true, event.last.fetch(:using_built_in)
+    end
+  end
+
   def test_blocked_dependency_row_does_not_dispatch
     rows = [
       row(
@@ -4591,6 +4753,49 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "stage rank remains primary and terminal work wins within a stage"
     assert_equal %w[b d], ordered.select { |r| r.stage == "7-artifacts" }.map(&:slug),
                  "stable within the same stage and action class"
+  end
+
+  def test_incremental_priority_reuses_stage_dirs_captured_by_the_full_tick
+    observed = row(action: nil, command: nil)
+    dispatcher, = make_dispatcher(rows: [ observed ])
+    captures = 0
+    dispatcher.define_singleton_method(:workflow_stage_dirs_by_project) do |project_names, **|
+      captures += 1
+      project_names.map(&:to_s).uniq.to_h do |name|
+        [ name, %w[1-inbox 2-brainstorm 9-done].freeze ]
+      end.freeze
+    end
+
+    dispatcher.tick(now: T0)
+    status = dispatcher.instance_variable_get(:@status_consumer)
+    status.next_task_result = Hive::Daemon::StatusConsumer::Result.new(
+      ok: true, rows: [ observed ]
+    )
+    dispatcher.tick_changed(task_keys: [ [ "p1", "s1" ] ], now: T0 + 1)
+
+    assert_equal 1, captures,
+                 "changed-task ticks must reuse the full tick's per-project stage view"
+  end
+
+  def test_stage_rank_uses_the_synchronized_current_union_without_captured_dirs
+    dispatcher, = make_dispatcher
+    union_reads = 0
+    lock_states = []
+
+    rank = with_replaced_singleton_method(
+      Hive::Workflows, :all_stage_dirs, lambda {
+        union_reads += 1
+        lock_states << Hive::Workflows::Project::LOCK.mon_owned?
+        %w[1-inbox custom-stage 9-done]
+      }
+    ) do
+      dispatcher.send(:stage_rank, "custom-stage")
+    end
+
+    assert_equal 1, rank
+    assert_equal 1, union_reads
+    assert_equal [ true ], lock_states,
+                 "the compatibility read must hold the project workflow lock"
   end
 
   def test_terminal_advance_claims_a_scarce_slot_before_new_work_in_the_same_stage

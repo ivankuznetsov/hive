@@ -384,6 +384,13 @@ Fresh rows therefore preserve the pipeline WIP limit, while an old eligible
 plan, retry, or generic-stage row eventually outranks a continuous stream of
 newer later-stage work instead of starving indefinitely. Rows with missing or
 future mtimes receive no aging boost, and equal scores retain source order.
+The full tick captures one bounded stage-directory view per observed project;
+changed-task ticks reuse that view instead of reactivating every project
+overlay. A project activation/configuration failure logs
+`workflow_stage_dirs_unavailable` and keeps only that project's previous view,
+or an empty view when none exists, while healthy projects continue through the
+same dispatch pass. Unregistered rows use the frozen built-in stage set rather
+than the mutable live overlay.
 Within an equal stage-and-age lane, a generic Patrol Fix `ready_to_advance`
 controller transition receives a half-step tie-break ahead of fresh work. The
 same score participates in the shared row/request arbitration, so this

@@ -185,6 +185,36 @@ class BoardTest < ActiveSupport::TestCase
     Hive::Workflows::Project.reset!
   end
 
+  test "blank project paths cannot resolve workflows from another projects active overlay" do
+    project_name = create_hive_project!("kanban-overlay-source")
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
+    write_project_workflow(project_path, "overlay-only", stage_name: "foreign-stage")
+    Hive::Workflows::Project.reset!
+    Hive::Workflows::Project.load!(project_path)
+    project = Project.new(
+      "name" => "saved-without-path",
+      "tasks" => [
+        { "slug" => "foreign-task", "stage" => "2-foreign-stage", "workflow" => "overlay-only" }
+      ]
+    )
+
+    warnings = []
+    band = with_replaced_singleton_method(
+      Rails.logger, :warn, ->(message) { warnings << message }
+    ) do
+      Board.new([ project ]).bands.sole
+    end
+
+    assert_equal "workflow_unavailable", band.error
+    assert_equal [ "foreign-task" ], band.columns.sole.tasks.map(&:slug)
+    assert_equal "2-foreign-stage", band.columns.sole.stage
+    warning = warnings.grep(/board workflow unavailable for saved-without-path\/overlay-only/).sole
+    assert_match(/Hive::Workflows::UnknownWorkflow/, warning)
+    assert_match(/unknown workflow :"overlay-only"; known workflows:/, warning)
+  ensure
+    Hive::Workflows::Project.reset!
+  end
+
   private
 
   def write_project_workflow(project_root, id, stage_name:)

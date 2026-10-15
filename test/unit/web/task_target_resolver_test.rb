@@ -166,6 +166,79 @@ class WebTaskTargetResolverTest < Minitest::Test
     end
   end
 
+  def test_unavailable_workflow_falls_back_to_the_exact_existing_task_folder
+    Dir.mktmpdir("task-target") do |root|
+      hive_state = File.join(root, ".hive-state")
+      folder = File.join(hive_state, "stages", "2-draft", "stranded-task")
+      FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder, id: 41, slug: "stranded-task", display_name: "Stranded task",
+        workflow: "removed-managed", workflow_commit: "a" * 40,
+        workflow_manifest_digest: "b" * 64,
+        workflow_configuration_digest: "c" * 64
+      )
+      project = { "name" => "demo", "path" => root, "hive_state_path" => hive_state }
+      status = Object.new
+      status.define_singleton_method(:task_target_payload) do |*, **|
+        {
+          "tasks" => [ {
+            "slug" => "stranded-task", "folder" => folder, "stage" => "2-draft",
+            "workflow" => "removed-managed", "action" => "error"
+          } ]
+        }
+      end
+
+      result = Hive::Web::TaskTargetResolver.new(
+        project: project, slug: "stranded-task", status_command: status,
+        task_resolver: -> { raise Hive::InvalidTaskPath, "unknown workflow :removed_managed" }
+      ).call
+
+      assert_equal "unavailable_workflow", result.source
+      assert_equal folder, result.native_task.folder
+      assert_nil result.native_task.workflow
+      assert_equal "removed-managed", result.attributes.fetch("workflow")
+    end
+  end
+
+  def test_unavailable_workflow_fallback_rejects_an_ambiguous_slug
+    Dir.mktmpdir("task-target") do |root|
+      hive_state = File.join(root, ".hive-state")
+      %w[2-draft 3-review].each do |stage|
+        FileUtils.mkdir_p(File.join(hive_state, "stages", stage, "stranded-task"))
+      end
+      project = { "name" => "demo", "path" => root, "hive_state_path" => hive_state }
+
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Web::TaskTargetResolver.new(
+          project: project, slug: "stranded-task",
+          task_resolver: -> { raise Hive::InvalidTaskPath, "unknown workflow" }
+        ).call
+      end
+
+      assert_includes error.message, "multiple stage folders"
+    end
+  end
+
+  def test_unavailable_workflow_fallback_preserves_the_original_error_when_stages_are_unreadable
+    Dir.mktmpdir("task-target") do |root|
+      hive_state = File.join(root, ".hive-state")
+      FileUtils.mkdir_p(File.join(hive_state, "stages"))
+      project = { "name" => "demo", "path" => root, "hive_state_path" => hive_state }
+      original_error = Hive::InvalidTaskPath.new("unknown workflow")
+
+      error = with_replaced_singleton_method(Dir, :children, ->(*) { raise Errno::EACCES }) do
+        assert_raises(Hive::InvalidTaskPath) do
+          Hive::Web::TaskTargetResolver.new(
+            project: project, slug: "stranded-task",
+            task_resolver: -> { raise original_error }
+          ).call
+        end
+      end
+
+      assert_same original_error, error
+    end
+  end
+
   def test_project_load_failure_is_an_actionable_error
     Dir.mktmpdir("task-target") do |root|
       folder = File.join(root, ".hive-state", "stages", "4-execute", "ship-it")

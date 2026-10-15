@@ -3,9 +3,42 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-28
+updated: 2026-10-14
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Project workflow operation measurement boundary (2026-10-14)
+
+`script/measure_project_workflow_view.rb` now provides a reproducible same-host
+comparison for cold Project activation through production Status and StatusFeed,
+including `Loader.load_dir` I/O and unrelated-project Monitor wait. A five-run,
+ten-sample comparison used three projects with four tasks each, reset Project
+before every sample, and kept the OS file cache warm. Against base `fa96ebf16b8f`,
+candidate `19860f41c3` reduced Status p50/p95 from 22.233/27.280 ms to
+21.727/24.650 ms and StatusFeed p50/p95 from 25.613/27.560 ms to
+23.513/25.089 ms. Their per-run p50 ranges were 21.807–25.283 ms versus
+21.336–24.263 ms for Status and 24.701–26.416 ms versus 23.162–24.528 ms for
+StatusFeed. `Loader.load_dir` call counts stayed identical at 150 per surface;
+p50 activation I/O fell from 0.339 ms to 0.331 ms for Status and from 0.362 ms
+to 0.330 ms for StatusFeed.
+
+With project A's cold activation held for 25 ms, project B completed before A
+was released in 50/50 candidate samples and 0/50 baseline samples. Project B's
+p50 elapsed time fell from 28.305 ms to 1.421 ms (p95 29.632 ms to 2.585 ms).
+The requested back-out threshold did not fire: neither production surface
+showed a repeatable regression beyond baseline run variation. These figures are
+local Ruby 3.4.10 lab evidence, not a hosted-runner or production fleet latency
+budget; rerun the script on materially different storage or fleet shapes before
+using them to set an absolute service objective.
+
+Web `Task#terminal?` now prefers the task's resolved workflow descriptor rather
+than treating every directory that is terminal in any active project workflow
+as terminal for every task. Built-in terminal directories remain a conservative
+fallback when resolution is unavailable, and unavailable workflow actions are
+suppressed. The remaining uncertainty is whether a future public status
+projection should carry the captured workflow's terminal directory explicitly,
+so Web can distinguish a removed project-authored terminal descriptor from an
+unknown active stage without reactivating the project.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 

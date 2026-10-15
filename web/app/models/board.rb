@@ -106,17 +106,36 @@ class Board
   end
 
   def workflows_for(project, workflow_ids)
-    Hive::Workflows::Project.synchronize do
-      Hive::Workflows::Project.load!(project.path, config: project.config) if project["path"].present?
+    fetch = lambda do |registry|
       workflow_ids.to_h do |workflow_id|
-        workflow = Hive::Workflows::Registry.fetch(workflow_id.to_sym)
+        workflow = if registry.equal?(Hive::Workflows::Registry::WORKFLOWS)
+          registry.fetch(workflow_id.to_sym) do
+            known = registry.keys
+            raise Hive::Workflows::UnknownWorkflow.new(
+              "unknown workflow #{workflow_id.to_sym.inspect}; known workflows: " \
+                "#{known.map(&:inspect).join(', ')}",
+              value: workflow_id.to_sym,
+              valid: known.map(&:to_s)
+            )
+          end
+        else
+          registry.fetch(workflow_id.to_sym)
+        end
         [ workflow_id, workflow ]
-      rescue Hive::Workflows::UnknownWorkflow => e
+      rescue Hive::Workflows::UnknownWorkflow, KeyError => e
         log_unavailable_workflow(project, workflow_id, e)
         [ workflow_id, nil ]
       end
     end
-  rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+    if project["path"].present?
+      Hive::Workflows::Project.with_active_workflows(project.path, config: project.config) do |registry|
+        fetch.call(registry)
+      end
+    else
+      fetch.call(Hive::Workflows::Registry::WORKFLOWS)
+    end
+  rescue Hive::ConfigError, Hive::Workflows::Project::NestedProjectActivationError,
+         Psych::Exception, SystemCallError, IOError, ArgumentError => e
     workflow_ids.each { |workflow_id| log_unavailable_workflow(project, workflow_id, e) }
     workflow_ids.index_with { nil }
   end

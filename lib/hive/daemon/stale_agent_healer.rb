@@ -330,9 +330,9 @@ module Hive
       end
 
       def controller_workflow?(row)
-        workflow = Hive::Workflows::Registry.fetch(row.workflow.to_s.to_sym)
+        workflow = Hive::Workflows::Registry::WORKFLOWS.fetch(row.workflow.to_s.to_sym)
         workflow.controller?
-      rescue Hive::Workflows::UnknownWorkflow
+      rescue KeyError
         false
       end
 

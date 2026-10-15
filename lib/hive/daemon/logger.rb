@@ -71,6 +71,8 @@ module Hive
         dispatch_request_recovered
         dispatch_result_written
         dispatch_sequence_promotion_failed
+        post_advance_workflow_dirs_unavailable
+        workflow_stage_dirs_unavailable
         attempt_accepted
         attempt_claimed
         attempt_running

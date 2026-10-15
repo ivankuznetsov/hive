@@ -1,6 +1,7 @@
 require "hive"
 require "hive/commands/status"
 require "hive/task_resolver"
+require "hive/task_meta"
 
 module Hive
   module Web
@@ -10,6 +11,12 @@ module Hive
     # mode disables retention only for that resolved project/stage.
     class TaskTargetResolver
       Result = Data.define(:native_task, :attributes, :source)
+      UnavailableTask = Data.define(
+        :slug, :project_root, :folder, :stage_index, :stage_name, :id
+      ) do
+        def workflow = nil
+        def workflow_unavailable? = true
+      end
 
       def initialize(project:, slug:, cached_payload: nil, archive: false,
                      status_command: nil, task_resolver: nil)
@@ -24,7 +31,7 @@ module Hive
       end
 
       def call
-        native_task = @task_resolver.call
+        native_task = resolve_native_task
         validate_native_identity!(native_task)
         # The cached fleet row can lag a task mutation by up to one poll
         # interval. Resolve the exact current row first, then overlay only the
@@ -36,10 +43,59 @@ module Hive
           attributes && cached && cached["recovery"].is_a?(Hash)
         raise Hive::InvalidTaskPath, "unknown task #{@slug}" unless attributes
 
-        Result.new(native_task:, attributes:, source: "targeted")
+        source = native_task.respond_to?(:workflow_unavailable?) &&
+                 native_task.workflow_unavailable? ? "unavailable_workflow" : "targeted"
+        Result.new(native_task:, attributes:, source: source)
       end
 
       private
+
+      def resolve_native_task
+        @task_resolver.call
+      rescue Hive::InvalidTaskPath => original_error
+        folder = unavailable_task_folder
+        raise original_error unless folder
+
+        stage = File.basename(File.dirname(folder))
+        index, name = stage.split("-", 2)
+        meta = Hive::TaskMeta.read(folder)
+        UnavailableTask.new(
+          slug: @slug, project_root: File.expand_path(@project.fetch("path")),
+          folder: folder, stage_index: Integer(index, 10), stage_name: name,
+          id: meta[:id]
+        )
+      end
+
+      # Status deliberately preserves a synthetic row when workflow policy can
+      # no longer be loaded. Resolve only that exact registered project's
+      # existing folder so the browser can present the inert diagnosis; this
+      # fallback never manufactures a runnable Hive::Task.
+      def unavailable_task_folder
+        return unless Hive::Stages.task_slug?(@slug)
+
+        stages_root = File.join(@project.fetch("hive_state_path"), "stages")
+        return unless File.directory?(stages_root)
+
+        real_stages_root = File.realpath(stages_root)
+        matches = Dir.children(stages_root).sort.filter_map do |stage|
+          next unless Hive::Workflows.stage_dir?(stage)
+
+          candidate = File.join(stages_root, stage, @slug)
+          next unless File.directory?(candidate)
+
+          real = File.realpath(candidate)
+          next unless real.start_with?("#{real_stages_root}#{File::SEPARATOR}")
+
+          real
+        end
+        if matches.size > 1
+          raise Hive::InvalidTaskPath,
+                "task #{@slug} exists in multiple stage folders for project #{@project.fetch('name')}"
+        end
+        matches.first
+      rescue Errno::ENOENT, Errno::EACCES, IOError
+        nil
+      end
 
       def cached_attributes(native_task)
         project = Array(@cached_payload && @cached_payload["projects"]).find do |candidate|

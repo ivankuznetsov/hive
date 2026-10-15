@@ -469,10 +469,7 @@ module Hive
       end
       return scan.call if workflow_generation
 
-      Hive::Workflows::Project.synchronize do
-        Hive::Workflows::Project.load!(root)
-        scan.call
-      end
+      Hive::Workflows::Project.with_active_workflows(root) { scan.call }
     end
 
     def dependency_task_folders(root, reference)
@@ -599,10 +596,7 @@ module Hive
       end
       return scan.call if workflow_generation
 
-      Hive::Workflows::Project.synchronize do
-        Hive::Workflows::Project.load!(root)
-        scan.call
-      end
+      Hive::Workflows::Project.with_active_workflows(root) { scan.call }
     end
 
     def active_stage_dirs_for(workflow_generation)

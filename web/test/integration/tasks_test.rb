@@ -43,6 +43,47 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal 0, audit_reads, "ordinary task navigation must not read hidden audit panels"
   end
 
+  test "managed task with an unavailable workflow stays reachable but exposes no workflow actions" do
+    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", @project)
+    folder = File.join(
+      project_path, ".hive-state", "stages", "2-draft", "stranded-managed-task"
+    )
+    FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(
+      folder, id: 42, slug: "stranded-managed-task", display_name: "Stranded managed task",
+      workflow: "removed-managed", workflow_commit: "a" * 40,
+      workflow_manifest_digest: "b" * 64,
+      workflow_configuration_digest: "c" * 64
+    )
+    File.write(File.join(folder, "idea.md"), "A task whose package is unavailable.\n")
+    payload = refresh_status_feed!
+    managed_row = payload.fetch("projects").flat_map { |project| project.fetch("tasks", []) }
+                         .find { |task| task["slug"] == "stranded-managed-task" }
+    refute_nil managed_row, "status must retain the unavailable managed task"
+    assert_equal "removed-managed", managed_row.fetch("workflow")
+
+    get board_path
+
+    assert_response :success
+    assert_select ".kanban-band[data-workflow='removed-managed']" do
+      assert_select ".state-banner", text: /Workflow unavailable/
+      assert_select ".kanban-card[data-task-slug='stranded-managed-task']"
+      assert_select "form[action*='/approve'], form[action*='/run'], form[action*='/recover']", 0
+    end
+
+    get task_path(@project, "stranded-managed-task")
+
+    assert_response :success
+    assert_select ".task-header", text: "Stranded managed task"
+    assert_select ".daemon-blocker", 0
+    assert_select "form[action*='/approve'], form[action*='/run'], form[action*='/recover']", 0
+    assert_select ".advanced", 1
+    assert_select ".advanced-title", text: "Send back a stage", count: 0
+    assert_select ".advanced-title", text: "Force approve", count: 0
+    assert_select "a", text: "Close with evidence", count: 0
+    assert_select ".advanced-title", text: "Drop task", count: 1
+  end
+
   test "closure entry requires authentication" do
     post "/logout"
 

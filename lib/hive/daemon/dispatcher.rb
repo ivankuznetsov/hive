@@ -91,6 +91,9 @@ module Hive
       # daemon gates auto-resume on (see `brainstorm_answer_state`).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
       EMPTY_BRAINSTORM_ANSWER_STATE = { pending: false, complete: false }.freeze
+      EMPTY_STAGE_DIRS = [].freeze
+      BUILT_IN_STAGE_DIRS = Hive::Workflows::Registry::WORKFLOWS.values
+        .flat_map(&:stage_dirs).uniq.freeze
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
@@ -297,6 +300,10 @@ module Hive
         # inherit it so a freshly completed task cannot reuse its slot before
         # older capacity-deferred rows are reconsidered by the next full scan.
         @priority_capacity_fences = { global: nil, projects: {} }
+        # A successful full tick replaces this bounded project-stage view.
+        # Changed-task ticks reuse it instead of re-reading the registry and
+        # reactivating every project overlay on each fast poll.
+        @workflow_stage_dirs_by_project = {}.freeze
         @one_shot_ran = []
         @one_shot_failure = nil
       end
@@ -509,6 +516,8 @@ module Hive
         queue_dispatch = process_dispatch_requests(
           now: now, rows: result.rows, projects: result.projects
         )
+        @workflow_stage_dirs_by_project = queue_dispatch[:stage_dirs_by_project] ||
+          workflow_stage_dirs_by_project(result.rows.map(&:project))
         @priority_capacity_fences = queue_dispatch.fetch(:capacity_fences)
 
         # Accepted-source admission is an independent control lane. It is
@@ -529,7 +538,8 @@ module Hive
         else
           dispatch_rows_in_priority_order(
             remaining_rows, now: now,
-            capacity_fences: @priority_capacity_fences
+            capacity_fences: @priority_capacity_fences,
+            stage_dirs_by_project: @workflow_stage_dirs_by_project
           )
         end
 
@@ -690,7 +700,8 @@ module Hive
         end
         dispatch_rows = dispatchable_change ? incremental_dispatch_rows(result.rows) : result.rows
         @priority_capacity_fences = dispatch_rows_in_priority_order(
-          dispatch_rows, now: now, capacity_fences: @priority_capacity_fences
+          dispatch_rows, now: now, capacity_fences: @priority_capacity_fences,
+          stage_dirs_by_project: @workflow_stage_dirs_by_project
         )
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  action: "incremental",
@@ -2110,7 +2121,7 @@ module Hive
         project_entry = Hive::Config.find_project(project)
         return unless project_entry
 
-        path = find_post_advance_state_file(project_entry["hive_state_path"], slug)
+        path = find_post_advance_state_file(project_entry, slug)
         return unless path && File.exist?(path)
 
         state_file_mtime = File.mtime(path)
@@ -2142,11 +2153,37 @@ module Hive
         project_entry = Hive::Config.find_project(child_entry.project)
         return original unless project_entry
 
-        find_post_advance_state_file(project_entry["hive_state_path"], child_entry.slug) || original
+        find_post_advance_state_file(project_entry, child_entry.slug) || original
       end
 
-      def find_post_advance_state_file(hive_state_path, slug)
+      def find_post_advance_state_file(project_entry_or_state, slug)
+        project_entry = project_entry_or_state if project_entry_or_state.is_a?(Hash)
+        hive_state_path = project_entry ? project_entry["hive_state_path"] : project_entry_or_state
         return nil unless hive_state_path && Dir.exist?(hive_state_path)
+
+        stage_dirs = if project_entry&.[]("path")
+          begin
+            Hive::Workflows::Project.with_active_workflows(project_entry["path"]) do
+              Hive::Workflows.all_stage_dirs
+            end
+          rescue Hive::ConfigError, Hive::Workflows::Project::NestedProjectActivationError,
+                 Psych::Exception, SystemCallError, IOError, ArgumentError => error
+            @logger.event(
+              :post_advance_workflow_dirs_unavailable,
+              project: project_entry["name"].to_s,
+              error: "#{error.class}: #{error.message[0, 200]}",
+              using_built_in: true
+            )
+            BUILT_IN_STAGE_DIRS
+          end
+        else
+          # Compatibility for the long-standing path-only helper seam. It has
+          # no project identity to activate, so preserve the synchronized
+          # current union (including runtime test/plugin registrations).
+          Hive::Workflows::Project.synchronize do
+            Hive::Workflows.all_stage_dirs
+          end
+        end
 
         # Scan the runtime union of every registered workflow's stage dirs
         # (Hive::Workflows.all_stage_dirs), not just the coding descriptor's:
@@ -2155,7 +2192,7 @@ module Hive
         # the moved task's mtime baseline stale so its fresh `ready_to_run`
         # stage mis-debounces or stalls. Mirrors the sibling-gate migration
         # in task_resolver/status (U6.4).
-        Hive::Workflows.all_stage_dirs.each do |stage_dir|
+        stage_dirs.each do |stage_dir|
           slug_dir = File.join(hive_state_path, "stages", stage_dir, slug)
           next unless Dir.exist?(slug_dir)
 
@@ -2859,9 +2896,14 @@ module Hive
       # old earlier-stage work from starving behind a continuous stream of
       # newer later-stage work. Equal effective priorities preserve source
       # order, and unranked/unknown stages start below recognized stages.
-      def dispatch_priority_order(rows, now: Time.now)
+      def dispatch_priority_order(
+        rows, now: Time.now, stage_dirs_by_project: @workflow_stage_dirs_by_project
+      )
         rows.each_with_index
-            .sort_by { |row, idx| [ -dispatch_priority(row, now: now), idx ] }
+            .sort_by do |row, idx|
+              dirs = stage_dirs_for_project(stage_dirs_by_project, row.project)
+              [ -dispatch_priority(row, now: now, stage_dirs: dirs), idx ]
+            end
             .map(&:first)
       end
 
@@ -2903,9 +2945,14 @@ module Hive
       # global/durable capacity result fences every later dispatch;
       # project/daily caps fence only that project. Non-dispatch policy rows
       # still run so the operational snapshot remains complete.
-      def dispatch_rows_in_priority_order(rows, now:, capacity_fences: nil)
+      def dispatch_rows_in_priority_order(
+        rows, now:, capacity_fences: nil,
+        stage_dirs_by_project: @workflow_stage_dirs_by_project
+      )
         dispatch_prioritized_rows(
-          dispatch_priority_order(rows, now: now),
+          dispatch_priority_order(
+            rows, now: now, stage_dirs_by_project: stage_dirs_by_project
+          ),
           now: now, capacity_fences: capacity_fences
         )
       end
@@ -2960,12 +3007,15 @@ module Hive
       # Indexes the runtime union of all registered workflows' stage dirs so
       # a generic stage gets a real rank instead of sorting behind every
       # coding row under slot scarcity (consistent with the sibling gates).
-      def stage_rank(stage)
-        Hive::Workflows.all_stage_dirs.index(stage.to_s) || -1
+      def stage_rank(stage, stage_dirs: nil)
+        stage_dirs ||= Hive::Workflows::Project.synchronize do
+          Hive::Workflows.all_stage_dirs
+        end
+        stage_dirs.index(stage.to_s) || -1
       end
 
-      def dispatch_priority(row, now:)
-        stage_rank(row.stage) + dispatch_age_steps(row, now: now) +
+      def dispatch_priority(row, now:, stage_dirs: nil)
+        stage_rank(row.stage, stage_dirs: stage_dirs) + dispatch_age_steps(row, now: now) +
           (terminal_advance?(row) ? 0.5 : 0)
       end
 
@@ -2979,13 +3029,50 @@ module Hive
         [ (now - mtime).to_i, 0 ].max / DISPATCH_AGING_STEP_SEC
       end
 
-      def dispatch_request_priority(request, row_index:, now:)
+      def dispatch_request_priority(request, row_index:, now:, stage_dirs_by_project: nil)
         return Float::INFINITY if
           request.project ==
             Hive::RuntimeControlPlane::DispatchRepository::GLOBAL_MAINTENANCE_PROJECT
 
         row = row_index[[ request.project.to_s, request.slug.to_s ]]
-        stage_rank(row&.stage) + dispatch_age_steps_since(request.created_at, now: now)
+        stage_dirs = if stage_dirs_by_project
+          stage_dirs_for_project(stage_dirs_by_project, request.project)
+        end
+        stage_rank(row&.stage, stage_dirs: stage_dirs) +
+          dispatch_age_steps_since(request.created_at, now: now)
+      end
+
+      def workflow_stage_dirs_by_project(project_names, projects: nil)
+        projects = Hive::Config.registered_projects if projects.nil?
+        by_name = Array(projects).to_h { |project| [ project.fetch("name").to_s, project ] }
+        Array(project_names).map(&:to_s).uniq.to_h do |name|
+          project = by_name[name]
+          dirs = begin
+            if project&.fetch("path", nil)
+              Hive::Workflows::Project.with_active_workflows(project.fetch("path")) do
+                Hive::Workflows.all_stage_dirs
+              end
+            else
+              BUILT_IN_STAGE_DIRS
+            end
+          rescue Hive::ConfigError, Hive::Workflows::Project::NestedProjectActivationError,
+                 Psych::Exception, SystemCallError, IOError, ArgumentError => error
+            previous = @workflow_stage_dirs_by_project[name] if
+              @workflow_stage_dirs_by_project.key?(name)
+            @logger.event(
+              :workflow_stage_dirs_unavailable,
+              project: name,
+              error: "#{error.class}: #{error.message[0, 200]}",
+              keeping_previous: !previous.nil?
+            )
+            previous || EMPTY_STAGE_DIRS
+          end
+          [ name, dirs ]
+        end.freeze
+      end
+
+      def stage_dirs_for_project(stage_dirs_by_project, project)
+        stage_dirs_by_project.fetch(project.to_s, BUILT_IN_STAGE_DIRS)
       end
 
       def apply_external_running_counts
@@ -3374,7 +3461,12 @@ module Hive
         pending_task_keys = pending.to_h do |request|
           [ [ request.project.to_s, request.slug.to_s ], true ]
         end
-        ordered_rows = dispatch_priority_order(rows, now: now)
+        stage_dirs_by_project = workflow_stage_dirs_by_project(
+          rows.map(&:project) + pending.map(&:project), projects: registered_projects || []
+        )
+        ordered_rows = dispatch_priority_order(
+          rows, now: now, stage_dirs_by_project: stage_dirs_by_project
+        )
         priority_rows = ordered_rows.reject do |row|
           pending_task_keys.key?([ row.project.to_s, row.slug.to_s ])
         end
@@ -3382,7 +3474,8 @@ module Hive
         priority_ceiling = -Float::INFINITY
         pending.reverse_each do |request|
           request_priority = dispatch_request_priority(
-            request, row_index: rows_by_task, now: now
+            request, row_index: rows_by_task, now: now,
+            stage_dirs_by_project: stage_dirs_by_project
           )
           priority_ceiling = request_priority if request_priority > priority_ceiling
           fifo_priority_ceilings << priority_ceiling
@@ -3428,7 +3521,12 @@ module Hive
           request_priority = fifo_priority_ceilings.fetch(request_index)
           leading_rows = []
           while (priority_row = priority_rows[priority_row_cursor]) &&
-                dispatch_priority(priority_row, now: now) > request_priority
+                dispatch_priority(
+                  priority_row, now: now,
+                  stage_dirs: stage_dirs_for_project(
+                    stage_dirs_by_project, priority_row.project
+                  )
+                ) > request_priority
             priority_row_cursor += 1
             processed_row_ids[priority_row.object_id] = true
             leading_rows << priority_row
@@ -3499,7 +3597,8 @@ module Hive
           capacity_fences: {
             global: global_capacity_fence,
             projects: project_capacity_fences
-          }
+          },
+          stage_dirs_by_project: stage_dirs_by_project
         }
       end
 
@@ -4589,7 +4688,7 @@ module Hive
         project_entry = Hive::Config.find_project(req.project)
         return nil unless project_entry
 
-        find_post_advance_state_file(project_entry["hive_state_path"], req.slug)
+        find_post_advance_state_file(project_entry, req.slug)
       end
 
       def dispatch_request_state_home

@@ -463,6 +463,121 @@ class TaskTest < ActiveSupport::TestCase
     end
   end
 
+  test "captures workflow details from its own project before another overlay activates" do
+    root_a = Pathname(Dir.mktmpdir("hive-web-task-a"))
+    root_b = Pathname(Dir.mktmpdir("hive-web-task-b"))
+    write_project_workflow(root_a, "task-a", stage_name: "alpha", state_file: "alpha.md")
+    write_project_workflow(root_b, "task-b", stage_name: "beta", state_file: "beta.md")
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => root_a.to_s),
+      attributes: { "stage" => "3-done", "workflow" => "task-a" }
+    )
+
+    assert_equal [ "done.md", "idea.md", "alpha.md" ], task.send(:generic_artifact_order)
+    Hive::Workflows::Project.load!(root_b.to_s)
+
+    assert task.terminal?
+    assert_equal [ "done.md", "idea.md", "alpha.md" ], task.send(:generic_artifact_order)
+  ensure
+    Hive::Workflows::Project.reset!
+    FileUtils.remove_entry(root_a) if root_a&.exist?
+    FileUtils.remove_entry(root_b) if root_b&.exist?
+  end
+
+  test "workflow descriptor failures are logged and memoized as unavailable" do
+    errors = [
+      Hive::ConfigError.new("bad config"),
+      Hive::Workflows::Project::NestedProjectActivationError.new("/tmp/a", "/tmp/b"),
+      Psych::Exception.new("bad yaml"),
+      Errno::EACCES.new("denied"),
+      IOError.new("unreadable"),
+      ArgumentError.new("blank root")
+    ]
+
+    errors.each do |error|
+      task = Task.new(
+        project: Project.new("name" => "alpha", "path" => "/tmp/alpha"),
+        attributes: { "slug" => "broken-task", "stage" => "9-done", "workflow" => "coding" }
+      )
+      calls = 0
+      warnings = []
+      activation = lambda do |*, **, &|
+        calls += 1
+        raise error
+      end
+
+      with_replaced_singleton_method(
+        Hive::Workflows::Project, :with_active_workflows, activation
+      ) do
+        with_replaced_singleton_method(Rails.logger, :warn, ->(message) { warnings << message }) do
+          assert_nil task.send(:workflow_descriptor)
+          assert_nil task.send(:workflow_descriptor)
+        end
+      end
+
+      assert_equal 1, calls, error.class.name
+      assert_equal 1, warnings.length, error.class.name
+      assert_match(/task workflow unavailable for alpha\/coding/, warnings.sole)
+      assert_includes warnings.sole, error.class.name
+      assert_includes warnings.sole, error.message
+    end
+  end
+
+  test "unexpected workflow descriptor failures are not memoized" do
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => "/tmp/alpha"),
+      attributes: { "slug" => "retry-task", "stage" => "9-done", "workflow" => "coding" }
+    )
+    calls = 0
+    activation = lambda do |*, **, &block|
+      calls += 1
+      raise RuntimeError, "unexpected" if calls == 1
+
+      block.call(Hive::Workflows::Registry)
+    end
+
+    with_replaced_singleton_method(
+      Hive::Workflows::Project, :with_active_workflows, activation
+    ) do
+      assert_raises(RuntimeError) { task.send(:workflow_descriptor) }
+      assert_equal Hive::Workflows::Registry::WORKFLOWS.fetch(:coding),
+                   task.send(:workflow_descriptor)
+    end
+
+    assert_equal 2, calls
+  end
+
+  test "terminal detection falls back to frozen built-in workflows when the descriptor is unavailable" do
+    done = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "stage" => "9-done", "workflow" => "removed-workflow" }
+    )
+    active = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "stage" => "4-execute", "workflow" => "removed-workflow" }
+    )
+
+    assert done.terminal?
+    refute active.terminal?
+    assert done.workflow_unavailable?
+    assert active.workflow_unavailable?
+  end
+
+  test "a project-authored terminal stage stays unavailable when its descriptor cannot load" do
+    task = Task.new(
+      project: Project.new("name" => "alpha", "path" => "/tmp/alpha"),
+      attributes: { "stage" => "3-finished", "workflow" => "custom" }
+    )
+    activation = ->(*, **, &) { raise Hive::ConfigError, "bad project workflow" }
+
+    with_replaced_singleton_method(
+      Hive::Workflows::Project, :with_active_workflows, activation
+    ) do
+      refute task.terminal?
+      assert task.workflow_unavailable?
+    end
+  end
+
   test "queues a run through the task resource instead of a web dispatcher" do
     dispatched = nil
     task = Task.new(
@@ -606,6 +721,27 @@ class TaskTest < ActiveSupport::TestCase
   end
 
   private
+
+  def write_project_workflow(project_root, id, stage_name:, state_file:)
+    workflows_dir = project_root.join(".hive-state", "workflows")
+    instruction_dir = workflows_dir.join(id)
+    instruction_dir.mkpath
+    instruction_dir.join("#{stage_name}.md").write("Do #{stage_name}.\n")
+    workflows_dir.join("#{id}.yml").write(<<~YAML)
+      id: #{id}
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: idea.md
+        - name: #{stage_name}
+          kind: agent
+          state_file: #{state_file}
+          instruction: ./#{id}/#{stage_name}.md
+        - name: done
+          kind: terminal
+          state_file: done.md
+    YAML
+  end
 
   def seed_plan_review_store(folder)
     store = Hive::PlanReview::Store.new(task_folder: folder.to_s)

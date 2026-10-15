@@ -3,6 +3,46 @@ require "application_system_test_case"
 class KanbanBoardTest < ApplicationSystemTestCase
   teardown { StatusBroadcaster.stop! }
 
+  test "unavailable managed workflow stays visible and inert" do
+    project = create_hive_project!("kanban-unavailable-managed")
+    project_path = Pathname.new(ENV.fetch("HIVE_TEST_HOME_ROOT")).join("repos", project)
+    folder = project_path.join(
+      ".hive-state", "stages", "2-draft", "stranded-managed-task"
+    )
+    FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(
+      folder.to_s, id: 42, slug: "stranded-managed-task",
+      display_name: "Stranded managed task", workflow: "removed-managed",
+      workflow_commit: "a" * 40, workflow_manifest_digest: "b" * 64,
+      workflow_configuration_digest: "c" * 64
+    )
+    folder.join("idea.md").write("A task whose package is unavailable.\n")
+    sign_in!
+
+    visit board_path(project: project)
+    band = ".kanban-band[data-workflow='removed-managed']"
+    assert_selector "#{band} .state-banner", text: "Workflow unavailable", wait: 15
+    assert_selector "#{band} .kanban-card[data-task-slug='stranded-managed-task']"
+    assert_no_selector "#{band} form[action*='/approve'], #{band} form[action*='/run'], " \
+                       "#{band} form[action*='/recover']"
+    page.save_screenshot(Rails.root.join("tmp/screenshots/unavailable-workflow-board.png"))
+
+    within band do
+      click_link "Stranded managed task"
+    end
+    assert_current_path task_path(project, "stranded-managed-task")
+    assert_selector ".task-header", text: "Stranded managed task"
+    assert_selector ".state-banner", text: /Workflow descriptor is unavailable/
+    assert_no_selector ".daemon-blocker"
+    assert_no_selector "form[action*='/approve'], form[action*='/run'], form[action*='/recover']"
+    assert_no_text "Send back a stage"
+    assert_no_text "Force approve"
+    assert_no_link "Close with evidence"
+    find("summary", text: "Advanced").click
+    assert_text "Drop task"
+    page.save_screenshot(Rails.root.join("tmp/screenshots/unavailable-workflow-task.png"))
+  end
+
   test "old completed articles remain readable from Done on the board" do
     project = create_hive_project!("kanban-finished-articles")
     slug = create_task!(project, "Read the finished article")

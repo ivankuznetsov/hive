@@ -815,7 +815,8 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "error", row.fetch("marker")
       assert_equal "invalid_task", row.fetch("attrs").fetch("reason")
       assert_includes row.fetch("attrs").fetch("message"), "ghost-workflow"
-      refute row.key?("workflow"), "an unresolved workflow is omitted, not emitted as null"
+      assert_equal "ghost-workflow", row.fetch("workflow"),
+                   "an unresolved task must retain its selector for diagnosis and UI grouping"
       assert_match(/failed to load/, err)
 
       refute(tasks.any? { |candidate| candidate.fetch("slug") == "NotASlug" },
@@ -3937,6 +3938,28 @@ class CommandsStatusTest < Minitest::Test
     refute_includes active_dirs, "9-done", "coding terminal is inert"
   end
 
+  def test_workflow_helper_compatibility_reads_hold_the_project_lock
+    cmd = Hive::Commands::Status.new
+    readers = [
+      [ :workflow_stage_dirs, Hive::Workflows, :all_stage_dirs ],
+      [ :workflow_active_stage_dirs, Hive::Workflows, :all_active_stage_dirs ],
+      [ :workflow_terminal_stage_dirs, Hive::Workflows, :all_terminal_stage_dirs ],
+      [ :workflow_ids, Hive::Workflows::Registry, :ids ]
+    ]
+
+    readers.each do |helper, owner, reader|
+      lock_owned = nil
+      expected = [ helper ].freeze
+      with_replaced_singleton_method(owner, reader, lambda {
+        lock_owned = Hive::Workflows::Project::LOCK.mon_owned?
+        expected
+      }) do
+        assert_same expected, cmd.send(helper, nil)
+      end
+      assert lock_owned, "#{helper} must serialize its nil-generation compatibility read"
+    end
+  end
+
   def test_status_generation_capture_records_unexpected_project_failures
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -3944,7 +3967,7 @@ class CommandsStatusTest < Minitest::Test
       project = status_project(project_root, hive_state)
 
       generations = with_replaced_singleton_method(
-        Hive::Workflows::Project, :synchronize, ->(&) { raise RuntimeError, "generation failed" }
+        Hive::Workflows::Project, :with_active_workflows, ->(*) { raise RuntimeError, "generation failed" }
       ) do
         Hive::Commands::Status.new.send(:capture_workflow_generations, [ project ])
       end

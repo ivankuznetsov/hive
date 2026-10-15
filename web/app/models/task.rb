@@ -452,8 +452,15 @@ class Task
   end
 
   def terminal?
-    Hive::Workflows.all_terminal_stage_dirs.include?(self["stage"].to_s)
+    workflow = workflow_descriptor
+    return workflow.stages.last&.dir == self["stage"].to_s if workflow
+
+    Hive::Workflows::Registry::WORKFLOWS.values.any? do |built_in|
+      built_in.stages.last&.dir == self["stage"].to_s
+    end
   end
+
+  def workflow_unavailable? = workflow_descriptor.nil?
 
   def diff
     Hive::Web::TaskDiff.new(task: self, timeout_sec: DIFF_TIMEOUT_SEC).call
@@ -599,13 +606,38 @@ class Task
   end
 
   def generic_artifact_order
-    Hive::Workflows::Project.synchronize do
-      Hive::Workflows::Project.load!(project.path)
-      workflow = Hive::Workflows::Registry.fetch(self["workflow"].to_sym)
-      [ workflow.result.primary_artifact, *workflow.stages.map(&:state_file) ].compact.uniq
-    end
-  rescue Hive::Workflows::UnknownWorkflow
+    workflow = workflow_descriptor
+    return ARTIFACT_ORDER unless workflow
+
+    [ workflow.result.primary_artifact, *workflow.stages.map(&:state_file) ].compact.uniq
+  rescue Hive::Workflows::UnknownWorkflow, KeyError
     ARTIFACT_ORDER
+  end
+
+  def workflow_descriptor
+    return @workflow_descriptor if @workflow_descriptor_loaded
+
+    id = self["workflow"].presence || Hive::Workflows::CODING_ID
+    begin
+      @workflow_descriptor = if project&.[]("path").present?
+        Hive::Workflows::Project.with_active_workflows(project.path) do |registry|
+          registry.fetch(id.to_sym)
+        end
+      else
+        Hive::Workflows::Registry::WORKFLOWS.fetch(id.to_sym)
+      end
+    rescue Hive::Workflows::UnknownWorkflow, KeyError, Hive::ConfigError,
+           Hive::Workflows::Project::NestedProjectActivationError, Psych::Exception,
+           SystemCallError, IOError, ArgumentError => error
+      @workflow_descriptor = nil
+      Rails.logger.warn(
+        "task workflow unavailable for #{project&.[]('name') || 'unknown'}/#{id}: " \
+          "#{error.class}: #{error.message}"
+      )
+    end
+
+    @workflow_descriptor_loaded = true
+    @workflow_descriptor
   end
 
   def normalized_media_items(items)

@@ -15,6 +15,29 @@ class TaskPresentationTest < ActionView::TestCase
     assert_select "form[action^='/tasks/demo/article/run'] button", text: "Run stage"
   end
 
+  test "an unavailable workflow exposes no stage mutation action" do
+    @task.define_singleton_method(:workflow_descriptor) { nil }
+
+    render partial: "tasks/primary_actions", locals: { task: @task, daemon_enabled: false }
+
+    assert_select "form[action^='/tasks/demo/article/run']", 0
+    assert_select "form[action^='/tasks/demo/article/approve']", 0
+    assert_select "form[action^='/tasks/demo/article/recover']", 0
+  end
+
+  test "a completed card does not reload its workflow descriptor" do
+    @task = Task.new(project: @task.project, attributes: {
+      "slug" => "article", "workflow" => "content", "stage" => "6-done", "action" => "archived"
+    })
+    @task.define_singleton_method(:workflow_descriptor) { raise "workflow lookup" }
+
+    render partial: "tasks/primary_actions", locals: { task: @task, daemon_enabled: false }
+
+    assert_select "form[action^='/tasks/demo/article/run']", 0
+    assert_select "form[action^='/tasks/demo/article/approve']", 0
+    assert_select "form[action^='/tasks/demo/article/recover']", 0
+  end
+
   test "unavailable artifact evidence does not imply work never started" do
     render partial: "tasks/primary_result", locals: { result: { "primary" => nil, "warning" => "Artifact unavailable" } }
     assert_select "h2", text: /not started/, count: 0

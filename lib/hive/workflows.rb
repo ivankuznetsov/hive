@@ -241,13 +241,10 @@ module Hive
     # resolution rule lives in exactly one place (no byte-for-byte duplicate to
     # drift between the two cross-project resolution paths).
     def stages_for_project(project, stage_filter: nil)
-      # Load the overlay and read its stage dirs / resolve the filter under the
-      # SAME lock hold: both `all_stage_dirs` and `resolve_stage_ref_across_workflows`
-      # read the active project overlay, so a concurrent `load!(otherProject)`
-      # between the load and the read would scan THIS project against another
-      # project's stage set. Project::LOCK is reentrant, so the nested load! is fine.
-      Hive::Workflows::Project.synchronize do
-        Hive::Workflows::Project.load!(project["path"])
+      # Activate the overlay and read its stage dirs / resolve the filter in one
+      # Project operation. Both readers consume the live project overlay, so the
+      # operation boundary prevents another project from replacing it mid-read.
+      Hive::Workflows::Project.with_active_workflows(project["path"]) do
         return all_stage_dirs if stage_filter.nil? || stage_filter.to_s.strip.empty?
 
         resolved = resolve_stage_ref_across_workflows(stage_filter)
@@ -272,9 +269,12 @@ module Hive
     def assert_known_stage_filter!(stage_filter, projects)
       return if stage_filter.nil? || stage_filter.to_s.strip.empty?
 
+      valid_dirs = []
+      valid_names = []
       known = Array(projects).any? do |project|
-        Hive::Workflows::Project.synchronize do
-          Hive::Workflows::Project.load!(project["path"])
+        Hive::Workflows::Project.with_active_workflows(project["path"]) do
+          valid_dirs.concat(all_stage_dirs)
+          valid_names.concat(all_stage_names)
           !resolve_stage_ref_across_workflows(stage_filter).nil?
         rescue Hive::Workflows::AmbiguousStageRef
           raise
@@ -284,7 +284,15 @@ module Hive
       end
       return if known
 
-      raise Hive::InvalidTaskPath, "unknown stage '#{stage_filter}'; valid: #{stage_ref_hint}"
+      if valid_dirs.empty?
+        Hive::Workflows::Project.synchronize do
+          valid_dirs.concat(all_stage_dirs)
+          valid_names.concat(all_stage_names)
+        end
+      end
+      valid_hint = "#{valid_dirs.uniq.sort.join(', ')} or short names " \
+                   "#{valid_names.uniq.sort.join(', ')}"
+      raise Hive::InvalidTaskPath, "unknown stage '#{stage_filter}'; valid: #{valid_hint}"
     end
   end
 end

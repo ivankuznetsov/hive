@@ -160,7 +160,7 @@ module Hive
       def do_call_for(task, patrol_transition: nil)
         activity = Hive::TaskActivity.for_task(task, clock: @clock)
         reconcile_approval_operations(activity, task)
-        validate_stage_refs!
+        validate_stage_refs!(task)
         validate_from!(task) if @from
         next_stage_dir = resolve_destination(task)
 
@@ -252,16 +252,20 @@ module Hive
       end
 
       # Reject a clearly-invalid --from/--to stage ref against the union of every
-      # REGISTERED workflow's stages. Runs AFTER resolve_task (U9-3 boundary fix):
-      # a fresh `hive approve` process has NO project workflow registered until a
-      # task is resolved (Task.new → Project.load! registers the overlay), so an
-      # owner-authored stage like `2-work` would be wrongly rejected if this gate
-      # ran first. With the project loaded, custom stages validate. A ref valid in
-      # some workflow still defers its workflow-specific check (validate_from! /
-      # resolve_explicit_to) to the task's own descriptor — which keeps --from's
-      # idempotency contract (a ref that's valid but not the current stage still
-      # reaches validate_from!'s WRONG_STAGE path).
-      def validate_stage_refs!
+      # REGISTERED workflow's stages. The Project operation activates the task's
+      # root and holds that view through this validation, so owner-authored stages
+      # are present without depending on Task construction to leave an overlay
+      # behind. A ref valid in some workflow still defers its workflow-specific
+      # check (validate_from! / resolve_explicit_to) to the task's own descriptor
+      # — which keeps --from's idempotency contract (a ref that's valid but not
+      # the current stage still reaches validate_from!'s WRONG_STAGE path).
+      def validate_stage_refs!(task)
+        Hive::Workflows::Project.with_active_workflows(task.project_root) do
+          validate_stage_refs_from_active_view!
+        end
+      end
+
+      def validate_stage_refs_from_active_view!
         # Mirror each downstream handler's own wording so the early check is a
         # pure relocation, not a message change: --from matches validate_from!
         # ("unknown --from stage"), --to matches resolve_explicit_to

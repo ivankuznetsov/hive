@@ -3,9 +3,30 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-10-15
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Review verify-pass follow-ups (2026-10-15)
+
+The final fix pass now gets a verify-only pass (see [[stages/review]]). Open
+items:
+
+- **Closed 2026-10-15: on-disk pass guard vs. CI-repair chains.**
+  `Review.max_review_pass` used to raise `ConfigError` once a top-level
+  `reviews/*-NN.md` exceeded `max_passes + 1`, so a retry of a pass that a CI
+  repair during the verify pass had admitted (`max_passes + 2`) landed
+  `REVIEW_ERROR reason=config_error`. The ceiling is now
+  `Review.admitted_pass_ceiling`: `max_passes + 1`, extended by one for each
+  consecutive `kind=ci_repaired` sentinel from the verify pass upward. A pass
+  with no admitting receipt still fails loudly.
+- **No finalize-side backstop.** 8-finalize does not check that the review's
+  `REVIEW_COMPLETE` HEAD matches the branch it finalizes; the fix relies on the
+  review loop alone.
+- **Operator edits on a `final_fix_unverified` STALE are not consumed.** The TUI
+  still opens the verify pass's `escalations-NN.md`, but a retry re-runs the
+  reviewers instead of fixing from edited marks. To act on those findings the
+  operator commits fixes by hand (or raises `review.max_passes`) and retries.
 
 ## Claude headless-only follow-ups (2026-10-14)
 

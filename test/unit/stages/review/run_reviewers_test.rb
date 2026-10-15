@@ -1429,6 +1429,22 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_fix_success_kind_reads_binding_and_fails_closed_on_io_error
+    Dir.mktmpdir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      sentinel = File.join(reviews, "fix-success-04.md")
+      File.write(sentinel, "<!-- HIVE: fix-success sentinel; head=#{'a' * 40} kind=fixed -->\n")
+
+      assert_equal "fixed", Hive::Stages::Review.fix_success_kind(dir, 4)
+      with_replaced_singleton_method(File, :open, ->(*) { raise IOError, "unreadable" }) do
+        assert_nil Hive::Stages::Review.fix_success_kind(dir, 4)
+      end
+      File.write(sentinel, "<!-- HIVE: fix-success sentinel; head=#{'a' * 40} -->\n")
+      assert_nil Hive::Stages::Review.fix_success_kind(dir, 4), "legacy sentinels carry no kind"
+    end
+  end
+
   def test_next_pass_for_retries_when_escalations_newer_than_fix_success
     # If an operator edits escalations after the sentinel was written,
     # the prior fix pass no longer covers the accepted set. Retry pass 4
@@ -1683,6 +1699,43 @@ class RunReviewersTest < Minitest::Test
 
       cfg = { "review" => { "max_passes" => 4 } }
       assert_equal 4, Hive::Stages::Review.max_review_pass(dir, cfg)
+    end
+  end
+
+  def test_max_review_pass_admits_passes_opened_by_ci_repair_receipts
+    # max_passes=2: pass 03 is the verify pass. Each kind=ci_repaired
+    # receipt admitted exactly one more pass, so 04 and 05 are legitimate;
+    # 06 has no admitting receipt and still fails loudly.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "fix-success-03.md"), "<!-- HIVE: head=#{'a' * 40} kind=ci_repaired -->\n")
+      File.write(File.join(reviews, "fix-success-04.md"), "<!-- HIVE: head=#{'b' * 40} kind=ci_repaired -->\n")
+      File.write(File.join(reviews, "claude-05.md"), "## High\n")
+      cfg = { "review" => { "max_passes" => 2 } }
+
+      assert_equal 5, Hive::Stages::Review.admitted_pass_ceiling(dir, 2)
+      assert_equal 5, Hive::Stages::Review.max_review_pass(dir, cfg)
+
+      File.write(File.join(reviews, "claude-06.md"), "## High\n")
+      err = assert_raises(Hive::ConfigError) { Hive::Stages::Review.max_review_pass(dir, cfg) }
+      assert_match(/claude-06\.md/, err.message)
+    end
+  end
+
+  def test_max_review_pass_rejects_pass_without_an_admitting_ci_repair
+    # A verify pass that completed clean (or a forged out-of-range file)
+    # admits nothing further: max_passes + 2 is out of range.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "fix-success-03.md"), "<!-- HIVE: head=#{'a' * 40} kind=clean -->\n")
+      File.write(File.join(reviews, "claude-04.md"), "## High\n")
+
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Review.max_review_pass(dir, { "review" => { "max_passes" => 2 } })
+      end
+      assert_match(/NN=4 exceeds review\.max_passes=2/, err.message)
     end
   end
 

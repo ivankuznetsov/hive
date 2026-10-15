@@ -144,8 +144,7 @@ module Hive
             # (a fresh workspace, a sandbox) reports a config error (78)
             # instead of the usage error (64) the key itself deserves.
             validate_idempotency_key!
-            @inside_command_operation = true
-            command_operation.call { perform_call! }
+            keyed_call!
           end
         end
       rescue Hive::Error, SystemCallError, IOError => e
@@ -227,7 +226,23 @@ module Hive
       end
 
       def call!
-        if @idempotency_key_raw.nil? || @inside_command_operation
+        return perform_call! if @idempotency_key_raw.nil? || @inside_command_operation
+
+        keyed_call!
+      end
+
+      RECEIPT_FALLBACK_NOTICE =
+        "hive: command receipts not installed; using per-project idempotency for this key".freeze
+
+      # Keyed creation predates durable command receipts: before them the key
+      # was deduplicated by TaskCapture against task metadata under the
+      # project's commit lock. Receipts are an opt-in host extension, so a host
+      # without them (including one whose runtime database was never created)
+      # keeps that per-project behavior instead of refusing every keyed call.
+      # Busy or unreadable receipt storage still raises.
+      def keyed_call!
+        unless Hive::CommandOperation.receipts_installed?(receipt_store)
+          warn RECEIPT_FALLBACK_NOTICE
           return perform_call!
         end
         @inside_command_operation = true

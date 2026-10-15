@@ -650,7 +650,8 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal true, web_service["ok"]
     assert_equal "unsupported", web_service["outcome"]
     assert_match(/foreground/, web_service["message"])
-    assert_match(/Hivebox/, web_service["message"])
+    assert_match(/systemd in WSL/, web_service["message"])
+    refute_match(/Hivebox/, web_service["message"])
 
     web = payload.fetch("phases").find { |phase| phase.fetch("name") == "web" }
     assert_equal true, web["ok"]
@@ -662,7 +663,7 @@ class SetupOrchestratorTest < Minitest::Test
                  "manager-unavailable setup success must validate against hive-setup.v1"
   end
 
-  def test_manager_unavailable_human_output_reports_foreground_and_hivebox_recovery
+  def test_manager_unavailable_human_output_reports_foreground_and_wsl_recovery
     output = StringIO.new
 
     exit_code = with_manager_unavailable_web(diagnostics: diag(ok_row)) do
@@ -675,7 +676,7 @@ class SetupOrchestratorTest < Minitest::Test
                     "manager_available=false installed=true enabled=false running=false ready=false"
     assert_includes output.string, "foreground command: `hive web`"
     assert_includes output.string, "enable systemd in WSL"
-    assert_includes output.string, "Hivebox"
+    refute_includes output.string, "Hivebox"
   end
 
   def test_manager_unavailable_does_not_hide_a_failed_install

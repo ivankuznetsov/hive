@@ -61,7 +61,7 @@ Pre-dispatch usage failures use the same `hive-drop.v2` error envelope with
 raises `JSON::GeneratorError`, drop warns on stderr, emits no substitute
 document, and re-raises the original typed failure.
 
-When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR close is skipped with a warning on stderr (`pr_closed: false`, exit 0). Drop does not require `gh`. In the current v2 JSON contract, `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (hivebox qualifies its "Dropped" notice on that signal). The v1 schema file remains for consumers pinned to the older no-PR-is-false interpretation.
+When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR close is skipped with a warning on stderr (`pr_closed: false`, exit 0). Drop does not require `gh`. In the current v2 JSON contract, `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (Hive web qualifies its "Dropped" notice on that signal). The v1 schema file remains for consumers pinned to the older no-PR-is-false interpretation.
 
 ## Steps Performed
 

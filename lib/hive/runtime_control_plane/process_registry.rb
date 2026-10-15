@@ -371,8 +371,7 @@ module Hive
         paths = %w[.daemon.pid .bot.pid .babysitter.pid].map do |name|
           [ File.join(@state_home, name), name ]
         end
-        paths << [ Hive::Paths.hivebox_supervisor_pid_path(@state_home), "hivebox_supervisor" ]
-        entries = paths.filter_map do |path, service_identity|
+        paths.filter_map do |path, service_identity|
           next unless File.file?(path) && !File.symlink?(path)
           payload = Hive::PidFile.parse_payload(File.read(path))
           pid = Integer(payload["pid"], exception: false) if payload.is_a?(Hash)
@@ -395,20 +394,6 @@ module Hive
         rescue Psych::Exception, SystemCallError, IOError
           { "service_identity" => service_identity, "pid" => nil, "unknown_reason" => "pid_receipt_unreadable" }
         end
-        supervisor_pid = Integer(ENV["HIVEBOX_SUPERVISOR_PID"], exception: false)
-        supervisor = supervisor_pid && @process_identity.capture(supervisor_pid)
-        supervisor_recorded = entries.any? do |entry|
-          entry["service_identity"] == "hivebox_supervisor"
-        end
-        if supervisor && !supervisor_recorded
-          entries << supervisor.to_h.merge("service_identity" => "hivebox_supervisor")
-        elsif supervisor_pid && !supervisor_recorded
-          entries << {
-            "service_identity" => "hivebox_supervisor", "pid" => supervisor_pid,
-            "unknown_reason" => "process_identity_unavailable"
-          }
-        end
-        entries
       end
     end
   end

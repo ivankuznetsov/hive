@@ -145,6 +145,16 @@ module Hive
       Manifest.load.capability(id).agent(agent)
     end
 
+    # Native plugin package ids the managed capabilities install for one
+    # agent, such as the Codex plugins a launch must keep enabled.
+    def native_packages(agent)
+      require "hive/agent_skills/manifest"
+      Manifest.load.packages.filter_map do |package|
+        native = package.agents[agent.to_s]
+        native.package if native.is_a?(Manifest::NativePackage)
+      end
+    end
+
     def publisher(root:, trusted_root:, projection:)
       DirectoryPublisher.new(
         root: root,

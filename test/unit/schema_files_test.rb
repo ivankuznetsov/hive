@@ -12,6 +12,7 @@ require "hive/commands/doctor"
 require "hive/commands/decide"
 require "hive/commands/plan_review"
 require "hive/commands/forget"
+require "hive/commands/mcp"
 require "hive/commands/init"
 require "hive/commands/patrol"
 require "hive/commands/prune"
@@ -409,7 +410,7 @@ class SchemaFilesTest < Minitest::Test
     inspector = Struct.new(:rows) { def inspect = rows }.new([ health ])
     output = StringIO.new
     Hive::Commands::Doctor.new(
-      config: { "claude" => { "mode" => "headless" } },
+      config: {},
       project_root: nil,
       json: true,
       output: output,
@@ -444,6 +445,20 @@ class SchemaFilesTest < Minitest::Test
     ).send(:payload, result)
 
     assert_empty schemer.validate(payload).to_a
+  end
+
+  def test_mcp_import_schema_matches_the_command_contract
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-mcp-import")))
+    schemer = JSONSchemer.schema(document)
+
+    assert_equal Hive::Commands::Mcp::ERROR_KINDS.sort,
+                 document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Mcp::Discovery::AGENTS.sort,
+                 document.dig("$defs", "Row", "properties", "sources", "items", "enum").sort
+    error = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-mcp-import", error: Hive::UsageError.new("bad"), error_kind: "usage", extras: { "action" => "login" }
+    )
+    assert_empty schemer.validate(error).to_a
   end
 
   def test_honeycomb_contract_schema_files_are_valid_and_versioned
@@ -1629,8 +1644,12 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-init",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 2,
+    assert_equal 3,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_equal "hive-init.v3.json", File.basename(path)
+    assert_equal [ "hive-init.v3.json" ],
+                 Dir.children(File.dirname(path)).grep(/\Ahive-init\.v\d+\.json\z/),
+                 "only the current hive-init revision may live on disk"
   end
 
   def test_hive_init_required_keys_match_producer_emission
@@ -1638,12 +1657,12 @@ class SchemaFilesTest < Minitest::Test
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     answers_required = doc.dig("$defs", "Answers", "required").sort
     expected = %w[
-      adhoc_auto_fix answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
+      adhoc_auto_fix answers babysitter_enabled budgets daemon_autostart_requested daemon_enabled
       default_branch development_agent enabled_reviewers hints hive_state_path ok path patrol_mode patrol_reviewers planning_agent
       project refactor_patrol_enabled schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
     assert_equal expected, schema_required,
-                 "schema/producer required-key drift in hive-init.v2.json"
+                 "schema/producer required-key drift in hive-init.v3.json"
 
     # Sandbox the project root: success_payload now drives load_dir against
     # <hive_state_path>/workflows, so a hardcoded /tmp/demo would read a real,
@@ -1654,7 +1673,7 @@ class SchemaFilesTest < Minitest::Test
       entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
       answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
       assert_equal answers.keys.sort, answers_required,
-                   "schema/prompt answer-key drift in hive-init.v2.json"
+                   "schema/prompt answer-key drift in hive-init.v3.json"
       producer = Hive::Commands::Init.new(dir, json: true).send(
         :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
       )

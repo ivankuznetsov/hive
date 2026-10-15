@@ -61,7 +61,7 @@ unavailable contracts visible without calling the fixture passed. To activate
 one, consume the sibling implementation's exact persisted state and reason
 code, replace the activation guard with terminal-state assertions, and only
 then remove `pending: true`. Enabled incident scenarios must finish below sixteen
-seconds; their combined duration must remain below forty seconds. CI keeps
+seconds; their combined duration must remain below thirty-six seconds. CI keeps
 missing, duplicate, and invalid incident evidence in the functional E2E gate,
 then reports only those timing targets in a separate advisory job so
 hosted-runner variance cannot block an otherwise functional change.
@@ -123,8 +123,8 @@ cross-process ordering, set `HIVE_FAKE_CLAUDE_READY_FILE` and
 `HIVE_FAKE_CLAUDE_RELEASE_FILE`: the fixture atomically writes its PID to the
 ready file and waits until the harness creates the release file. Assertions
 poll those observable conditions; elapsed-time sleeps are not synchronization.
-The sandbox pins fake Claude to headless mode while the user-facing TUI itself
-still runs in tmux. Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in
+Fake Claude runs headless like every Claude launch, while the user-facing TUI
+itself still runs in tmux. Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in
 agent binaries, checkout Hive binaries, and both PATH/direct GitHub shim routes
 cannot be replaced by scenario overrides.
 

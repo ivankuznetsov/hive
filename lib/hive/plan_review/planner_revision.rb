@@ -60,7 +60,7 @@ module Hive
             timeout_sec:, log_label: "plan-review-revision",
             profile:, expected_output: output_path, status_mode: :output_file_exists,
             cfg: @cfg, **launch_arguments(profile, planner_identity),
-            agent_custody: custody, **scope
+            agent_custody: custody, mcp_scope: "plan_review", **scope
           )
           report = custody.report
           unless report

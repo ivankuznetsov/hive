@@ -3,13 +3,15 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-07-18
+updated: 2026-10-15
 tags: [roadmap, status]
 ---
 
-**TLDR**: Phase 1 MVP shipped Apr-25 and the active surface is now wider than the original loop: PR-first review, `7-artifacts`, daemon auto-advance/archive, descriptor-backed custom workflows with resource controls, Claude/Codex/Pi/Grok agent profiles, `hive refactor-patrol`, TUI dashboard, Telegram bot, managed llm-wiki bootstrap, release/install verification, eval harness, token usage accounting, and project-global Claude tmux/headless routing are all implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, daemon/bot operational polish, and live-provider smoke depth.
+**TLDR**: Phase 1 MVP shipped Apr-25 and the active surface is now wider than the original loop: PR-first review, `7-artifacts`, daemon auto-advance/archive, descriptor-backed custom workflows with resource controls, Claude/Codex/Pi/Grok agent profiles, `hive refactor-patrol`, TUI dashboard, Telegram bot, managed llm-wiki bootstrap, release/install verification, eval harness, token usage accounting, and headless-only Claude launches (the tmux launch mode was removed 2026-10-14) are all implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, daemon/bot operational polish, and live-provider smoke depth.
 
 ## Status
+
+The Hivebox Docker distribution was removed on 2026-10-15 (ADR-055): packaging, image release jobs, the Windows installer CI job, the recovery workflow, and the container supervisor are gone. Hivebox rows in the history tables below describe that retired surface and are kept as history.
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` owns both stable-wrapper resolution and the shared PATH-only executable lookup used by doctor, update, and service installation. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 
@@ -60,7 +62,7 @@ Recent release/dependency/history inspected on 2026-07-18:
 |------|-------|--------|
 | CLI surface | `bin/hive`, `lib/hive/cli.rb`, `lib/hive/commands/*.rb` | Implemented. Command pages exist for the active Thor surface, including daemon, bot, TUI, markers, migrate, findings, metrics, update, uninstall, and stage-action helpers. |
 | Stage runners | `lib/hive/stages/{inbox,brainstorm,plan,execute,open_pr,review,artifacts,finalize,done}.rb` | Nine-stage pipeline implemented and documented in [[stages/index]]. `7-artifacts` is agent-backed and sits between review and finalize. |
-| Core modules | `lib/hive/{task,markers,lock,worktree,git_ops,agent,agent_profile,config,task_action,...}.rb` | Implemented + unit-tested by domain. Agent spawning is AgentProfile-driven; Claude launches can be tmux or headless via `Hive::ClaudeLauncher`. |
+| Core modules | `lib/hive/{task,markers,lock,worktree,git_ops,agent,agent_profile,config,task_action,...}.rb` | Implemented + unit-tested by domain. Agent spawning is AgentProfile-driven; every Claude launch is headless `claude -p` via `Hive::ClaudeLauncher`. |
 | Daemon (ADR-024) | `lib/hive/daemon/*`, `lib/hive/commands/daemon.rb`, `wiki/commands/daemon.md`, `wiki/modules/daemon.md` | Auto-advancing dispatcher: reads an internal scheduler projection, fires workflow verbs on tasks ready to advance, auto-archives 8-finalize after PR merge via `gh pr view`, heals stale AGENT_WORKING markers, and counts live task-lock rows toward capacity. |
 | TUI | `lib/hive/tui/*`, `wiki/commands/tui.md`, `wiki/token-usage.md` | Bubbletea-ruby MVU dashboard with grid/detail flows, red-status detail, manual steering, token footer, and token matrix. |
 | Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. `hive bot install` adds an opt-in reboot-survivable per-user service (systemd-user/launchd) that runs `hive bot start --foreground` with no inline token; torn down by `hive uninstall`. |

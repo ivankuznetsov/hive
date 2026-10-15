@@ -104,7 +104,8 @@ module Hive
             agent_custody: agent_custody,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only,
-            cfg: cfg || {}
+            cfg: cfg || {},
+            mcp_scope: stage.name
           )
         rescue StandardError => e
           spawn_error = e

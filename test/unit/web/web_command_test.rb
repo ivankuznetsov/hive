@@ -93,7 +93,7 @@ class WebCommandTest < Minitest::Test
   end
   # Drive the full "app found" path with a stub Rails app: db:prepare
   # failure raises typed guidance (never a raw backtrace looping under the
-  # container supervisor), and a passing prepare reaches Kernel.exec with
+  # service manager), and a passing prepare reaches Kernel.exec with
   # the bind/port argv.
   class ExecCaught < StandardError
     attr_reader :env, :argv
@@ -162,11 +162,10 @@ class WebCommandTest < Minitest::Test
         assert_equal %w[bin/rails server -b], caught.argv[0..2]
         assert caught.env.key?("SECRET_KEY_BASE"), "the persisted session secret must reach Rails"
         assert caught.env.key?("HIVE_WEB_STORAGE_DIR")
-        # A HIVE_WEB_APP_DIR override (like the Hivebox image's baked
-        # /app/web) was bundle-installed against its own ".." — exporting
-        # HIVE_CLI_ROOT would re-point the Gemfile's path source and
-        # invalidate that prebuilt bundle (the v0.3.4/v0.3.5 image-smoke
-        # db:prepare failure). Only the managed bundle gets the export.
+        # A HIVE_WEB_APP_DIR override was bundle-installed against its own
+        # ".." — exporting HIVE_CLI_ROOT would re-point the Gemfile's path
+        # source and invalidate that prebuilt bundle. Only the managed bundle
+        # gets the export.
         refute caught.env.key?("HIVE_CLI_ROOT"),
                "an operator-managed app dir must not have its path-gem source re-pointed"
         refute caught.env.key?("BUNDLE_PATH"),
@@ -259,29 +258,6 @@ class WebCommandTest < Minitest::Test
 
         assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
                      "development boot should leave asset compilation to the Rails development server"
-      end
-    end
-  end
-
-  def test_hivebox_boot_uses_assets_precompiled_into_the_image
-    with_tmp_global_config do
-      with_stub_rails_app(prepare_exit: 0) do
-        command = Hive::Commands::Web.new
-        system_calls = []
-        command.define_singleton_method(:system) do |*argv|
-          system_calls << argv
-          true
-        end
-
-        replacement = ->(env, *argv) { raise ExecCaught.new(env, argv) }
-        with_replaced_singleton_method(Kernel, :exec, replacement) do
-          with_env("HIVEBOX_PRECOMPILED_ASSETS" => "1") do
-            assert_raises(ExecCaught) { capture_io { command.call } }
-          end
-        end
-
-        assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
-                     "Hivebox should use the asset graph validated while its image is built"
       end
     end
   end

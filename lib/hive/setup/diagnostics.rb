@@ -52,12 +52,11 @@ module Hive
       REQUIRED = {
         "ruby" => "3.4.0",
         "git" => "2.40.0",
-        "tmux" => "3.0",
         "claude" => "2.1.118",
         "codex" => "0.125.0"
       }.freeze
 
-      CHECKS = %w[ruby git tmux gh claude codex node npm qmd web_bundle sqlite].freeze
+      CHECKS = %w[ruby git gh claude codex node npm qmd web_bundle sqlite].freeze
 
       def initialize(runner: nil, env: ENV.to_h, path: nil, ruby_version: RUBY_VERSION)
         @runner = runner || method(:default_run)
@@ -77,10 +76,6 @@ module Hive
 
       def check_git
         check_versioned_binary("git", [ "git", "--version" ], REQUIRED.fetch("git"), install_command("git"))
-      end
-
-      def check_tmux
-        check_versioned_binary("tmux", [ "tmux", "-V" ], REQUIRED.fetch("tmux"), install_command("tmux"))
       end
 
       def check_gh

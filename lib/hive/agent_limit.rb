@@ -31,7 +31,7 @@ module Hive
     # changes between releases — e.g. the plan-inclusion promo "Included in
     # your plan limits until Jun 22, then switch to usage credits to
     # continue.", or hints like "/status to see usage limits". These lines
-    # persist in the pane for the WHOLE session, so matching them does not
+    # persist in the output for the WHOLE session, so matching them does not
     # just break launches — it kills healthy mid-run sessions. They are
     # filtered out line-by-line BEFORE the limit patterns run.
     BENIGN_PATTERNS = [
@@ -39,7 +39,7 @@ module Hive
       /plan limits? until/i,
       /to see usage limits?/i,
       /usage limits? (?:reset|renew)s? (?:on|at|in)/i,
-      # "Approaching session limit" sits in a HEALTHY pane as a warning;
+      # "Approaching session limit" sits in a HEALTHY session as a warning;
       # only the past-tense wall ("hit your session limit") is terminal.
       /approaching[^\n]{0,40}session limit/i,
       # Box-drawing / chrome-only lines can never be a limit sentence.
@@ -55,7 +55,7 @@ module Hive
       /quota (?:exhausted|exceeded|reached)/i,
       /rate limit (?:reached|exceeded|reset|hit)/i,
       # Claude subscription wall: "You've hit your session limit · resets
-      # 8pm (Europe/London)". Verb-anchored so the healthy-pane warning
+      # 8pm (Europe/London)". Verb-anchored so the healthy-session warning
       # "Approaching session limit" can never match.
       /(?:hit|reached) your session limit/i,
       /rate limited/i,
@@ -69,7 +69,7 @@ module Hive
       # limit") tripped a false `limits_reached` wall (task 47). Require a
       # usage/billing/rate qualifier so only a real provider wall matches; UI
       # limits (scroll/window/viewport/page/buffer/line) no longer do. Honors
-      # the file's "never classify on text that can sit in a healthy pane" rule.
+      # the file's "never classify on text that can sit in a healthy session" rule.
       %r{(?:usage|rate|api|token|context|message|request|session|spend|spending|credit|quota|account|subscription|\d+[\s-]?hour|hourly|daily|weekly|monthly)[\s-]?limit (?:reached|exceeded|reset)}i,
       /(?:daily|monthly|usage|spend|spending) limit/i,
       /billing[^\n]{0,80}(?:credit|quota|limit)/i,
@@ -97,7 +97,7 @@ module Hive
     # while a false positive kills healthy sessions on every surface (the
     # plan-inclusion banner did exactly that). Provider chrome copy changes
     # without notice — never classify on text that can sit in a healthy
-    # pane; see BENIGN_PATTERNS and the launcher's readiness-wins ordering.
+    # output; see BENIGN_PATTERNS.
     def limit_reached?(text)
       normalized = normalize(text)
       return false if normalized.empty?
@@ -112,7 +112,7 @@ module Hive
     end
 
     # Return only the live provider wall and its adjacent menu/reset lines.
-    # Passing the whole pane to retry parsing would let unrelated dated prose
+    # Passing the whole output to retry parsing would let unrelated dated prose
     # elsewhere in an agent transcript forge a much longer quota hold.
     def live_limit_context(pane)
       match = live_limit_match(pane)

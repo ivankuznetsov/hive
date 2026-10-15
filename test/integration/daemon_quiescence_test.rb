@@ -144,17 +144,17 @@ class DaemonQuiescenceIntegrationTest < Minitest::Test
     end
   end
 
-  def test_post_proof_hivebox_supervisor_respawn_downgrades_status_without_database_write
+  def test_post_proof_legacy_bot_respawn_downgrades_status_without_database_write
     with_runtime_database do |root, database|
       paused = coordinator(root, database, registry: registry_for(root, database)).call
       assert paused.paused, paused.to_h.inspect
       database_bytes = File.binread(database.path)
 
-      with_trapped_process(root, "hivebox-supervisor") do |pid, signal_path|
-        File.write(Hive::Paths.hivebox_supervisor_pid_path(root), {
+      with_trapped_process(root, "legacy-bot") do |pid, signal_path|
+        File.write(File.join(root, ".bot.pid"), {
           "pid" => pid, "process_start_time" => Hive::Lock.process_start_time(pid)
         }.to_yaml)
-        payload = with_env("HIVEBOX_SUPERVISOR_PID" => nil) { status_payload(root) }
+        payload = status_payload(root)
 
         assert_equal "paused", payload.dig("lifecycle", "durable_phase")
         assert_equal "quiescing", payload.dig("lifecycle", "phase")
@@ -162,7 +162,7 @@ class DaemonQuiescenceIntegrationTest < Minitest::Test
         assert_equal false, payload.dig("quiescence_capability", "eligible")
         assert_equal "legacy_process_unregistered",
                      payload.dig("quiescence_capability", "reason")
-        assert_equal "hivebox_supervisor",
+        assert_equal ".bot.pid",
                      payload.dig("quiescence_capability", "disqualifying_inventory", 0,
                                  "service_identity")
         assert_equal database_bytes, File.binread(database.path),

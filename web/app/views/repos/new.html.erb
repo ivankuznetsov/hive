@@ -45,10 +45,6 @@
         <%= select_tag "settings[workflow]", options_for_select(@workflows, @current_workflow) %>
       </div>
       <div class="form-row">
-        <%= label_tag "settings_claude_mode", "Claude launch mode" %>
-        <%= select_tag "settings[claude_mode]", options_for_select(InitSetup.claude_modes, @defaults["claude_mode"]) %>
-      </div>
-      <div class="form-row">
         <%= label_tag "settings_claude_permission_mode", "Claude permission mode" %>
         <%= select_tag "settings[claude_permission_mode]", options_for_select(InitSetup.claude_permission_modes, @defaults["claude_permission_mode"]) %>
       </div>

@@ -54,7 +54,6 @@ class CiFixTest < Minitest::Test
 
   def cfg_with(command, overrides = {})
     base = {
-      "claude" => { "mode" => "headless" },
       "review" => {
         "ci" => {
           "command" => command,

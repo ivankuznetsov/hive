@@ -87,6 +87,36 @@ module Hive
       )
     end
 
+    def self.verify_receipt_extension!(store)
+      return store.verify_extension! if store.respond_to?(:verify_extension!)
+      return unless store.respond_to?(:database) && store.database.respond_to?(:read)
+      return if Hive::RuntimeControlPlane::CommandSchema.installed?(store.database)
+
+      raise Hive::CommandReceiptsNotInstalled
+    rescue Hive::ConfigError
+      raise
+    rescue Hive::Error, Sequel::Error, SQLite3::Exception => error
+      raise Hive::CommandReceiptsNotInstalled if Hive::CommandReceiptsNotInstalled.missing_database?(error)
+      if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
+        raise Hive::ConcurrentRunError,
+              "command receipt storage is busy; resolve database contention and retry"
+      end
+      raise Hive::ConfigError,
+            "cannot verify command receipt storage: #{error.message}"
+    end
+
+    # The same predicate the keyed constructor enforces, as a boolean for
+    # commands that had a working keyed path before receipts existed. Only
+    # "extension absent" (including a host whose runtime database was never
+    # created) is false; busy storage still raises ConcurrentRunError and
+    # unreadable or foreign storage still raises ConfigError.
+    def self.receipts_installed?(store)
+      verify_receipt_extension!(store)
+      true
+    rescue Hive::CommandReceiptsNotInstalled
+      false
+    end
+
     def self.local_principal(database)
       unless Process.uid == Process.euid
         raise Hive::ConfigError,
@@ -249,23 +279,7 @@ module Hive
 
     private
 
-    def verify_receipt_extension!
-      return @store.verify_extension! if @store.respond_to?(:verify_extension!)
-      return unless @store.respond_to?(:database) && @store.database.respond_to?(:read)
-      return if Hive::RuntimeControlPlane::CommandSchema.installed?(@store.database)
-
-      raise Hive::ConfigError,
-            "command receipts are not installed; run `hive setup --install-command-receipts`"
-    rescue Hive::ConfigError
-      raise
-    rescue Hive::Error, Sequel::Error, SQLite3::Exception => error
-      if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
-        raise Hive::ConcurrentRunError,
-              "command receipt storage is busy; resolve database contention and retry"
-      end
-      raise Hive::ConfigError,
-            "cannot verify command receipt storage: #{error.message}"
-    end
+    def verify_receipt_extension! = self.class.verify_receipt_extension!(@store)
 
     def resolved_project_roots
       value = @project_roots.respond_to?(:call) ? @project_roots.call : @project_roots

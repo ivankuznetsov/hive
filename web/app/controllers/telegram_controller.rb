@@ -4,18 +4,14 @@ class TelegramController < Telegram::BaseController
   end
 
   def update
-    result = TelegramBot.current.update!(
+    TelegramBot.current.update!(
       entered_token: params[:token],
       chat_ids: params[:chat_ids],
       pairing_enabled: params[:pairing_enabled] == "1"
     )
-    if result.restarted?
-      redirect_to telegram_path, notice: "Telegram bot configured and (re)starting"
-    else
-      redirect_to telegram_path,
-                  notice: "Telegram settings saved. No supervisor reachable — " \
-                          "restart the bot manually (hive bot stop && hive bot start)."
-    end
+    redirect_to telegram_path,
+                notice: "Telegram settings saved. Restart the bot to apply them " \
+                        "(hive bot stop && hive bot start)."
   rescue TelegramBot::InvalidSettings => e
     render_telegram_error(e.message)
   end

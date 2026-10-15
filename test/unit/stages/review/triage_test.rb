@@ -45,7 +45,6 @@ class TriageTest < Minitest::Test
   def default_cfg(overrides = {})
     deep_merge_for_test(
       {
-        "claude" => { "mode" => "headless" },
         "review" => {
           "triage" => {
             "agent" => "claude",
@@ -378,8 +377,8 @@ class TriageTest < Minitest::Test
 
       assert_equal 1800, captured[:timeout_sec],
                    "triage timeout fallback must match DEFAULTS review_triage (1800), not the old 300"
-      assert_equal 75, captured[:max_budget_usd],
-                   "triage budget fallback must match DEFAULTS review_triage (75), not the old 15"
+      assert_nil captured[:max_budget_usd],
+                 "a Claude triage is capped only by a budget the project config sets"
     end
   end
 
@@ -417,6 +416,36 @@ class TriageTest < Minitest::Test
         assert_equal :error, result.status
         assert_includes result.error_message, "required output"
       end
+    end
+  end
+
+  # A same-pass retry (after reviewer_partial_failure) finds the previous
+  # run's escalations file on disk. A new triage that exits cleanly
+  # without writing must not pass on the stale file; its content still
+  # reaches the prompt as context.
+  def test_retried_pass_rejects_stale_escalations_file
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(
+        File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
+        "## High\n- [ ] new finding: explain\n"
+      )
+      escalations = File.join(task_folder, "reviews", "escalations-01.md")
+      File.write(escalations, "# Escalations pass 01\n\nprevious run ruling\n")
+      seen_prompt = nil
+      silent_spawn = lambda do |_task, _cfg, **kwargs|
+        seen_prompt = kwargs.fetch(:prompt)
+        kwargs.fetch(:agent_custody).call { { status: :ok } }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude!, silent_spawn) do
+        result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
+
+        assert_equal :error, result.status
+        assert_includes result.error_message, "required output"
+      end
+      assert_includes seen_prompt, "previous run ruling"
+      refute File.exist?(escalations)
     end
   end
 

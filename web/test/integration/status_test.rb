@@ -160,7 +160,7 @@ class StatusTest < ActionDispatch::IntegrationTest
     assert_select ".daemon-summary", text: "Daemon running"
     assert_select ".daemon-panel", { text: /service installed/, count: 0 }
     assert_select ".daemon-panel", { text: /daemon is down/, count: 0 },
-                  "a live hivebox supervisor intentionally has no platform service unit"
+                  "a live daemon without a platform service unit is not reported as down"
   ensure
     StatusBroadcaster.define_singleton_method(:snapshot_with_version, original_snapshot) if original_snapshot
   end

@@ -66,7 +66,8 @@ module Hive
           # Honor the descriptor's declared status_mode; fall back to the
           # marker-file convention only when the stage leaves it unset.
           status_mode: stage.status_mode || :state_file_marker,
-          cfg: cfg
+          cfg: cfg,
+          mcp_scope: stage.name
         )
 
         marker = Hive::Markers.current(output_path)

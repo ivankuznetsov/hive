@@ -867,6 +867,34 @@ class CommandOperationTest < Minitest::Test
     assert_equal "cannot verify command receipt storage: disk I/O error", error.message
   end
 
+  def test_receipts_installed_is_false_only_when_the_extension_is_absent
+    database = Object.new
+    database.define_singleton_method(:read) { |_block = nil, &block| block&.call }
+    store = Struct.new(:database).new(database)
+    missing = lambda do |*|
+      raise Hive::RuntimeControlPlane::MigrationRequired.new(
+        "runtime control-plane database is missing; run hive setup", code: :missing_database
+      )
+    end
+    other_migration = lambda do |*|
+      raise Hive::RuntimeControlPlane::MigrationRequired.new("schema drift", code: :schema_mismatch)
+    end
+
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::CommandSchema, :installed?, ->(*) { true }) do
+      assert Hive::CommandOperation.receipts_installed?(store)
+    end
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::CommandSchema, :installed?, ->(*) { false }) do
+      refute Hive::CommandOperation.receipts_installed?(store)
+    end
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::CommandSchema, :installed?, missing) do
+      refute Hive::CommandOperation.receipts_installed?(store)
+    end
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::CommandSchema, :installed?, other_migration) do
+      error = assert_raises(Hive::ConfigError) { Hive::CommandOperation.receipts_installed?(store) }
+      assert_equal "cannot verify command receipt storage: schema drift", error.message
+    end
+  end
+
   def test_unresolved_receipt_identity_falls_back_to_the_claim
     store = Object.new
     operation = Hive::CommandOperation.new(

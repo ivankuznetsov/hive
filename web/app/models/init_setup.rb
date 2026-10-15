@@ -24,7 +24,6 @@ class InitSetup
     # registered_names yields symbols; everything downstream (form values,
     # the answers hash Init consumes) speaks strings.
     def agents = Hive::AgentProfiles.registered_names.map(&:to_s)
-    def claude_modes = Prompts::CLAUDE_MODE_CHOICES
     def claude_permission_modes = Prompts::CLAUDE_PERMISSION_MODE_CHOICES
     def reviewer_names = Prompts::DEFAULT_REVIEWER_NAMES
     def patrol_reviewer_names = Prompts::PATROL_REVIEWER_NAMES
@@ -67,7 +66,6 @@ class InitSetup
     def defaults
       {
         "planning_agent" => Prompts::DEFAULT_PLANNING_AGENT,
-        "claude_mode" => Prompts::DEFAULT_CLAUDE_MODE,
         "claude_permission_mode" => Prompts::DEFAULT_CLAUDE_PERMISSION_MODE,
         "claude_model" => Prompts::DEFAULT_CLAUDE_MODEL,
         "claude_effort" => Prompts::DEFAULT_CLAUDE_EFFORT,
@@ -98,7 +96,6 @@ class InitSetup
     d = self.class.defaults
     @answers = {
       "planning_agent" => choose(p, "planning_agent", self.class.agents, d),
-      "claude_mode" => choose(p, "claude_mode", self.class.claude_modes, d),
       "claude_permission_mode" => choose(p, "claude_permission_mode", self.class.claude_permission_modes, d),
       "claude_model" => free_text(p, "claude_model", d),
       "claude_effort" => choose(p, "claude_effort", EFFORT_CHOICES, d),

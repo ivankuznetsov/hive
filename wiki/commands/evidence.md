@@ -93,7 +93,7 @@ command also accepts the ordinary explicit `PROJECT:SLUG` target. `--json`
 emits one machine-readable result.
 
 Do not invent either digest. Copy the complete command from the task's current
-status diagnostic, Hivebox blocker panel, or `hive run` recovery output after
+status diagnostic, Hive web blocker panel, or `hive run` recovery output after
 reviewing the independent reviewer reasons.
 
 Operators normally do not invoke `rework`: `TaskAction` emits the exact command

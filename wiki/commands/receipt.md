@@ -3,7 +3,7 @@ title: hive receipt
 type: command
 source: lib/hive/commands/receipt.rb, lib/hive/command_receipt_{store,pruner,maintenance,capacity,ledger}.rb
 created: 2026-09-27
-updated: 2026-09-28
+updated: 2026-10-15
 tags: [command, idempotency, receipts, sqlite, maintenance]
 ---
 
@@ -28,6 +28,12 @@ service using it. All writers, including a foreground `hive web`, must be
 provably stopped. `--yes` alone never
 installs the extension. `--no-bootstrap` is diagnosis-only and takes precedence
 over the opt-in flag. Ordinary later setup retains an installed extension.
+
+Without the extension, keyed `hive new` (the only keyed command that predates
+receipts) falls back to per-project TaskCapture idempotency with a one-line
+stderr notice; see [[commands/new]]. Keyed `answer`, `approve`, stage actions,
+`act`, `archive`, and `receipt prune` only ever existed with receipts and still
+fail CONFIG (`Hive::CommandReceiptsNotInstalled`) until it is installed.
 
 New keyed intake is independently disabled by default. After verification,
 set this in the canonical project `.hive-state/config.yml`; linked worktrees

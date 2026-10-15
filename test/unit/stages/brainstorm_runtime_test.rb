@@ -7,59 +7,48 @@ require "hive/task"
 class BrainstormRuntimeTest < Minitest::Test
   include HiveTestHelper
 
-  def test_runtime_for_defaults_to_global_tmux_mode
-    assert_equal :tmux_interactive, Hive::Stages::Brainstorm.runtime_for({})
+  def test_run_routes_default_claude_brainstorm_through_headless_claude_launch
+    with_brainstorm_task do |task|
+      captured = nil
+      claude = lambda do |_task, cfg, **kwargs|
+        captured = [ cfg, kwargs ]
+        { status: :error, error_message: "stub" }
+      end
+      headless = ->(*) { flunk "a Claude brainstorm must not take the non-Claude path" }
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude_with_failure_marker!, claude) do
+        with_replaced_singleton_method(Hive::Stages::Brainstorm, :run_headless!, headless) do
+          Hive::Stages::Brainstorm.run!(task, brainstorm_cfg.merge("claude" => { "mode" => "tmux" }))
+        end
+      end
+
+      assert_equal "tmux", captured.fetch(0).dig("claude", "mode"),
+                   "the retired claude.mode key is ignored, not rewritten"
+      assert_equal :claude, captured.fetch(1).fetch(:profile).name
+      assert_equal :state_file_marker, captured.fetch(1).fetch(:status_mode)
+      refute captured.fetch(1).key?(:session_name)
+    end
   end
 
-  def test_runtime_for_uses_global_claude_mode
-    cfg = { "claude" => { "mode" => "headless" } }
+  def test_run_routes_non_claude_brainstorm_agent_through_run_headless
+    with_brainstorm_task do |task|
+      captured = nil
+      headless = lambda do |_task, _cfg, profile:|
+        captured = profile
+        { commit: "error", status: :error }
+      end
 
-    assert_equal :headless, Hive::Stages::Brainstorm.runtime_for(cfg)
+      with_replaced_singleton_method(Hive::Stages::Brainstorm, :run_headless!, headless) do
+        Hive::Stages::Brainstorm.run!(task, brainstorm_cfg.merge("brainstorm" => { "agent" => "codex" }))
+      end
+
+      assert_equal :codex, captured.name
+    end
   end
-
-
-
-
-  def test_runtime_for_non_claude_brainstorm_agent_is_headless
-    cfg = {
-      "claude" => { "mode" => "tmux" },
-      "brainstorm" => { "agent" => "codex" }
-    }
-
-    assert_equal :headless, Hive::Stages::Brainstorm.runtime_for(cfg)
-  end
-
 
   def test_action_for_preserves_unknown_marker_name
     assert_equal "none", Hive::Stages::Brainstorm.action_for(:none)
     assert_equal "paused", Hive::Stages::Brainstorm.action_for(:paused)
-  end
-
-  # G8 mutation safety: `cfg_with_claude_mode` is the helper that runs
-  # before the brainstorm spawn when the global mode is forced to
-  # `:headless`. It MUST NOT mutate the caller's cfg - the same Hash
-  # is threaded through many other stage helpers in the same run.
-  def test_cfg_with_claude_mode_does_not_mutate_caller_cfg
-    original = { "claude" => { "mode" => "tmux" } }
-    snapshot = Marshal.load(Marshal.dump(original))
-
-    forced = Hive::Stages::Brainstorm.cfg_with_claude_mode(original, :headless)
-
-    assert_equal "headless", forced.dig("claude", "mode"),
-                 "returned cfg has the forced mode"
-    assert_equal snapshot, original,
-                 "caller's cfg must not change (top-level OR nested keys)"
-    refute_same original, forced,
-                "returned cfg must be a new Hash"
-    refute_same original["claude"], forced["claude"],
-                "returned cfg.claude must be a new Hash so a later in-place edit cannot leak"
-  end
-
-  def test_cfg_with_claude_mode_handles_missing_claude_block
-    original = {}
-    forced = Hive::Stages::Brainstorm.cfg_with_claude_mode(original, :headless)
-    assert_equal "headless", forced.dig("claude", "mode")
-    assert_equal({}, original, "original cfg without claude key must remain empty")
   end
 
   def test_headless_failed_spawn_without_artifact_becomes_typed_brainstorm_error
@@ -94,12 +83,12 @@ class BrainstormRuntimeTest < Minitest::Test
     end
   end
 
-  def test_tmux_failed_spawn_without_artifact_becomes_typed_brainstorm_error
+  def test_claude_failed_spawn_without_artifact_becomes_typed_brainstorm_error
     with_brainstorm_task do |task|
       profile = Hive::AgentProfiles.lookup(:claude)
-      spawn = ->(_task, _cfg, **_kwargs) { { status: :error, error_message: "tmux session died" } }
+      spawn = ->(_task, _cfg, **_kwargs) { { status: :error, error_message: "claude session died" } }
 
-      with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude_with_tmux_marker!, spawn) do
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude_with_failure_marker!, spawn) do
         result = Hive::Stages::Brainstorm.run_claude!(
           task, brainstorm_cfg, profile: profile
         )
@@ -107,7 +96,7 @@ class BrainstormRuntimeTest < Minitest::Test
         marker = Hive::Markers.current(task.state_file)
         assert_equal({ commit: "error", status: :error }, result)
         assert_equal "brainstorm_agent_failed", marker.attrs.fetch("reason")
-        assert_includes marker.attrs.fetch("message"), "tmux session died"
+        assert_includes marker.attrs.fetch("message"), "claude session died"
       end
     end
   end

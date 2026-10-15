@@ -8,7 +8,7 @@ tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
 **TLDR**: Root development/test tooling is declared in `Gemfile`; the Rails
-hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and
+Hive web app under `web/` carries its own bundle. Sinatra, rack-protection, and
 puma are not `hive-cli` runtime dependencies. PRDigest 0.4 supplies digest
 evidence and writing instructions; agent-cli-runtime 0.2.4 supplies agent
 execution. The web bundle owns
@@ -21,8 +21,7 @@ artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 Hive's release gem includes Betterleaks 1.8.1 for Linux/macOS on x64/arm64,
 plus its MIT license. `ruby packaging/betterleaks.rb` downloads the pinned
 upstream archives and checks the per-platform SHA-256 values in
-`lib/hive/betterleaks.rb` before bundling. The release-candidate builder and
-Hivebox build run this step; Homebrew, AUR, and install.sh consume that gem.
+`lib/hive/betterleaks.rb` before bundling. The release-candidate builder runs this step; Homebrew, AUR, and install.sh consume that gem.
 Generated binaries are ignored by Git. Source developers run the same bundling
 step or install Betterleaks locally. Runtime scans never download tools.
 
@@ -43,8 +42,8 @@ the runner floor unchanged. Exact-SHA pins prevent a mutable tag from changing
 the executable workflow dependency between review and execution, while the
 trailing version comments keep Dependabot updates legible.
 
-All seven `actions/upload-artifact` calls likewise pin v7.0.1 to
-`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`. They retain archive mode and
+All seven `actions/upload-artifact` calls likewise pin v7.0.2 to
+`cf430e030ddbb5b0abf93d22962f4752f3646cd9`. They retain archive mode and
 their existing missing-file, hidden-file, and retention policies; Hive does
 not enable v7's single-file direct-upload mode. Upload jobs run only on
 GitHub-hosted runners, satisfying the Node 24 runner floor introduced in v6.
@@ -55,8 +54,8 @@ The live-agent validation workflow pins `actions/setup-node` v7.0.0 to
 v7 ESM migration does not change Hive's workflow contract. The job runs on a
 GitHub-hosted runner.
 
-All nine paired `actions/download-artifact` calls pin v8.0.1 to
-`3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`. Existing artifact names,
+The `actions/download-artifact` workflow calls pin v8.0.2 to
+`9000827ccba6bdab643e8b6fd33ac0654aef8333`. Existing artifact names,
 patterns, merge behavior, and destinations remain unchanged. Hive keeps
 archive-mode uploads, while v8's default strict digest verification causes a
 corrupted or substituted artifact to fail the job instead of merely warning.
@@ -104,7 +103,7 @@ dying in seconds rather than as a test failure.
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `erb` | `>= 4.0` (locked 6.0.6 in root and web) | Template rendering used by stages, task creation, workflows, and display names. Declared because Ruby is unbundling it and packaged installs cannot assume it is present. The 6.0.6 patch fixes ERB's standalone `-h` CLI path; Hive's rendering API is unchanged. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
-| `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon and hivebox supervisor processes; also reused by the e2e schema validator. |
+| `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sequel` | `~> 5.107` (root locked 5.108.0; Web locked 5.107.0) | Sequel Core datasets, transactions, and IntegerMigrator for the machine-local runtime control-plane SQLite database. Hive uses no Sequel models, callbacks, Active Record integration, or generic backend layer. |
 | `sqlite3` | `~> 2.0` (locked 2.9.6) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.9.6 or newer to avoid GHSA-mwm8-39rw-8826. |
@@ -129,12 +128,12 @@ for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 ## Web app bundle
 
 `web/Gemfile` is deliberately separate from the gem payload: `hive web`
-execs the Rails app from a source checkout or Docker image, and
+execs the Rails app from the managed bundle or a source checkout, and
 `test/unit/gemspec_test.rb` pins that the gem does not package `web/`.
 Managed release bundles authenticate `SHA256SUMS` against the exact release
 workflow identity and expected version tag before dependency installation.
-The Hivebox `ruby:3.4-slim` build installs the `libffi-dev` system package
-because the explicit `fiddle` runtime gem compiles against libffi headers.
+The explicit `fiddle` runtime gem compiles against libffi headers, so hosts
+building it need the libffi development package.
 
 Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3.1),
 propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,
@@ -212,17 +211,17 @@ These are not gems but the CLI tools the runtime invokes:
 | Tool | Min version | Used by |
 |------|-------------|---------|
 | `claude` | 2.1.118 | every active stage; verified by `Hive::Agent.check_version!` |
-| `codex` | 0.147.0 for managed capture permissions; Hivebox pins exact 0.147.0 | outcome-evidence producers use Codex managed limited networking, local binding, and filesystem permissions; earlier builds do not provide the required one-origin isolation contract |
+| `codex` | 0.147.0 for managed capture permissions | outcome-evidence producers use Codex managed limited networking, local binding, and filesystem permissions; earlier builds do not provide the required one-origin isolation contract |
 | `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for PR state checks, secret-scan, dedupe, status rollups, and babysitter context), `Hive::Web::AgentsAuth` (`gh auth status` plus the PTY relay for `gh auth login --web`), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
-| `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
+| `tmux` | 3.0+ (3.6a verified locally) | not a Hive runtime dependency (Claude launches headless-only; `hive setup` does not check it). Used only by the TUI e2e harness (`bin/hive-e2e` requires it for TUI scenarios; tests run on private sockets) |
 | GNU `timeout` / `gtimeout` | any recent GNU coreutils | hard execution bounds for managed llm-wiki Git-ref, QMD, and provider subprocesses; Linux coreutils normally supplies `timeout`, while GNU coreutils on macOS supplies `gtimeout` |
 | `qmd` | exact `@tobilu/qmd@2.5.3` plus checked-in sha512 integrity | managed llm-wiki semantic search/index maintenance; its one downloaded tarball is locally integrity-checked, installed and native-health-checked in a staging tree, then activated without sacrificing the previous healthy tree on failure |
 | `npm` | any recent npm with Node.js and local Node development headers | bounded downloader for the integrity-checked QMD tarball and locked dependency closure; lifecycle scripts stay disabled, and Hive builds better-sqlite3 from locked source with the locked node-gyp in offline mode |
-| `agent-browser` | exact 0.34.0 native package in `lib/hive/assets/capture-tools/package-lock.json` | the sole web screenshot/video driver for outcome evidence and supervised Hivebox capture; Hive installs a managed Chrome payload and gives producers an exact controller-owned session behind a one-origin proxy |
+| `agent-browser` | exact 0.34.0 native package in `lib/hive/assets/capture-tools/package-lock.json` | the sole web screenshot/video driver for outcome evidence and the supervised built-in web capture; Hive installs a managed Chrome payload and gives producers an exact controller-owned session behind a one-origin proxy |
 | `ffmpeg` / `ffprobe` | any recent | proof media decode/duration checks and manual `web/script/record_box_demo.rb` conversion |
 | Tesseract | any recent | OCR preflight that rejects secret-shaped content in retained screenshots and sampled video frames |
-| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional legacy/e2e failure capture only; outcome evidence uses Hive's native Ruby PTY recorder under controller process custody and Hivebox no longer installs asciinema |
+| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional legacy/e2e failure capture only; outcome evidence uses Hive's native Ruby PTY recorder under controller process custody |
 | `agg` / `vhs` | not shipped | optional terminal-GIF renderers; outcome evidence retains a `.cast` plus bounded text and does not require GIF conversion |
 | Playwright | exact npm metadata 1.60.0 in `web/package-lock.json` | Rails system tests and manual demo scripts only; it is not an outcome-evidence capture interface |
 
@@ -277,8 +276,6 @@ an ambiguous command-not-found failure.
 
 ## Release container builder action
 
-The three container publication jobs in `.github/workflows/release.yml` pin
-`docker/setup-buildx-action` v4.3.0 to commit
-`37fe631027851001ddb9b187196cc803df7f5f0e`. The action metadata and inputs are
-unchanged from the preceding v4.2.0 pin; this update refreshes its bundled
-JavaScript dependencies. The workflow remains tag-triggered.
+Retired. The release and recovery workflows no longer build container images
+(ADR-055), so `docker/setup-buildx-action`, `docker/login-action`, and
+`docker/build-push-action` are no longer pinned anywhere in `.github/`.

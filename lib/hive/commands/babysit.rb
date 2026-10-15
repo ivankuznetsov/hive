@@ -3,6 +3,7 @@ require "time"
 require "yaml"
 require "hive/config"
 require "hive/invoked_binary"
+require "hive/one_shot/babysitter_adapter"
 require "hive/paths"
 require "hive/lock"
 require "hive/pid_file"
@@ -147,7 +148,6 @@ module Hive
       end
 
       def run_once
-        require "hive/one_shot/babysitter_adapter"
         resolve_once_project_name
         entries = if @all
           Hive::Config.registered_project_entries(preserve_invalid: true)

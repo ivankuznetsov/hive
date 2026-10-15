@@ -20,12 +20,6 @@ steps:
           display_name: Stale lock task
   - kind: ruby_block
     block: |
-      path = File.join(sandbox, ".hive-state", "config.yml")
-      config = YAML.safe_load(File.read(path))
-      config.fetch("claude")["mode"] = "headless"
-      File.write(path, config.to_yaml)
-  - kind: ruby_block
-    block: |
       task_folder = File.join(sandbox, ".hive-state/stages/4-execute", slug)
       @scenario_lease_database, @scenario_lease_repository, @scenario_lock_id =
         hold_task_lease(task_folder)

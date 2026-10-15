@@ -9,6 +9,7 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/markers"
+require "hive/mcp"
 require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/task_action"
@@ -84,6 +85,7 @@ module Hive
     def run!
       with_diagnose_lock do
         cfg = Hive::Config.load(@task.project_root)
+        @cfg = cfg
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
         @routing_arguments = Hive::Stages::Base.model_routing_arguments(
           cfg, "diagnose", profile,
@@ -380,11 +382,13 @@ module Hive
     # for the full session length. The pattern below mirrors
     # Hive::Tui::Subprocess#bounded_capture3.
     def spawn_profile(profile:, prompt:, cwd:, add_dirs:, timeout_sec:, max_budget_usd:)
-      invocation = compiled_invocation(profile, prompt, add_dirs, max_budget_usd)
-      run_with_timeout(
-        invocation.argv, cwd, invocation.stdin_data, timeout_sec,
-        profile.subscription_environment
-      )
+      Hive::Mcp.with_launch(profile: profile, cfg: @cfg, scope: "diagnose", cwd: cwd) do |mcp_launch|
+        invocation = compiled_invocation(profile, prompt, add_dirs, max_budget_usd, mcp_launch)
+        run_with_timeout(
+          invocation.argv, cwd, invocation.stdin_data, timeout_sec,
+          mcp_launch.environment_for(profile.subscription_environment)
+        )
+      end
     end
 
     def run_with_timeout(cmd, cwd, stdin_data, timeout_sec, environment = {})
@@ -584,24 +588,22 @@ module Hive
     # frames into a markdown artifact gave operators a wall of JSON
     # instead of the diagnosis. Plain-text print mode is the default
     # when `--output-format` is omitted, so dropping the flag is enough.
-    # Also intentionally drop `extra_flags` — Hive::Stages-level extras
-    # (e.g. `--mcp-config`, `--strict-mcp-config`) configure the
-    # structured-stream context the diagnose flow doesn't need.
-    def build_cmd(profile, prompt, add_dirs, max_budget_usd)
-      compiled_invocation(profile, prompt, add_dirs, max_budget_usd).argv.dup
+    # Hive-owned MCP isolation still applies (plan 2026-10-15-001): the
+    # diagnose launch gets the same rendering as every other agent.
+    def build_cmd(profile, prompt, add_dirs, max_budget_usd, mcp_launch = nil)
+      compiled_invocation(profile, prompt, add_dirs, max_budget_usd, mcp_launch).argv.dup
     end
 
-    def compiled_invocation(profile, prompt, add_dirs, max_budget_usd)
-      Hive::AgentRuntime.compile(
-        Hive::AgentRuntime::Request.new(
-          profile: profile,
-          prompt: prompt,
-          add_dirs: add_dirs,
-          max_budget_usd: max_budget_usd,
-          routing_arguments: @routing_arguments,
-          include_output_format: false
-        )
+    def compiled_invocation(profile, prompt, add_dirs, max_budget_usd, mcp_launch = nil)
+      request = Hive::AgentRuntime::Request.new(
+        profile: profile,
+        prompt: prompt,
+        add_dirs: add_dirs,
+        max_budget_usd: max_budget_usd,
+        routing_arguments: @routing_arguments,
+        include_output_format: false
       )
+      mcp_launch ? Hive::Mcp.compile(request, mcp_launch) : Hive::AgentRuntime.compile(request)
     end
   end
 end

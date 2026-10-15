@@ -8,7 +8,6 @@ module Hive
         { origin: "direct_cli", gate: "bin/hive command registration", child_safe: false },
         { origin: "attempt", gate: "detached wrapper reservation", child_safe: false },
         { origin: "daemon_child", gate: "registered bin/hive child", child_safe: false },
-        { origin: "hivebox_supervisor", gate: "durable lifecycle restart gate", child_safe: false },
         { origin: "web_capture", gate: "registered bin/hive capture server", child_safe: false }
       ].map(&:freeze).freeze
 

@@ -50,7 +50,8 @@ module Hive
                      yes: false, input: $stdin, output: $stdout,
                      error: $stderr, environment: ENV, setup_agents_factory: nil,
                      rollback_package: Hive::RuntimeControlPlane::CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE,
-                     command_schema_writer_guard: Hive::RuntimeControlPlane::CommandSchemaWriterGuard)
+                     command_schema_writer_guard: Hive::RuntimeControlPlane::CommandSchemaWriterGuard,
+                     mcp_import_offer: !defined?(Minitest))
         @json = json
         @service = service
         @no_bootstrap = no_bootstrap
@@ -67,6 +68,7 @@ module Hive
         end
         @rollback_package = rollback_package
         @command_schema_writer_guard = command_schema_writer_guard
+        @mcp_import_offer = mcp_import_offer == true
         @phases = []
       end
 
@@ -103,6 +105,7 @@ module Hive
         unless @no_bootstrap
           emit_receipt_installation_disclosure if @install_command_receipts
           setup_agent_skills
+          offer_mcp_import
           unless agent_setup_refused?
             bootstrap_qmd_if_missing(diagnostics)
             web_bundle = bootstrap_web_bundle
@@ -371,6 +374,15 @@ module Hive
         end
       end
 
+      # Ask once, in a terminal without --yes, to import personal MCP servers
+      # (plan 2026-10-15-001). Not a setup phase: declining changes nothing.
+      def offer_mcp_import
+        return if !@mcp_import_offer || unattended_without_yes? || @yes
+
+        require "hive/mcp/import_offer"
+        Hive::Mcp::ImportOffer.run(cwd: Dir.pwd, input: @input, output: @output, error: @error)
+      end
+
       def unattended_without_yes?
         return false if @yes
         return true if @json
@@ -446,7 +458,7 @@ module Hive
             end
           else
             data["message"] = "managed Hive web autostart is unavailable on this host; " \
-                              "use foreground `hive web`, enable systemd in WSL, or choose Hivebox" \
+                              "use foreground `hive web` or enable systemd in WSL" \
                               if web_service_platform_exception?
           end
           add_phase("web_service", ok, data)
@@ -642,7 +654,7 @@ module Hive
             @output.puts "hive setup: Hive web ready at #{@web_service["url"]}"
           elsif @service && web_service_platform_exception?
             @output.puts "hive setup: Hive web autostart is unavailable on this host; " \
-                         "foreground command: `hive web`; enable systemd in WSL or choose Hivebox"
+                         "foreground command: `hive web`, or enable systemd in WSL"
           elsif @service && !@no_bootstrap
             @output.puts "hive setup: Hive web is not ready at #{web_url}; inspect `hive web status`"
           else

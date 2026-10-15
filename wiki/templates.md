@@ -3,11 +3,11 @@ title: Templates
 type: reference
 source: templates/, lib/hive/llm_wiki_bootstrap/scripts.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-10-14
 tags: [template, erb, prompt, llm-wiki]
 ---
 
-**TLDR**: Templates under `templates/` cover config scaffolding, task capture, stage/review prompts, the evidence-backed PR changelist prompt, and the managed llm-wiki shell scripts. Agent-owned tmux-stage templates finish with an explicit required completion section that makes the terminal marker the literal final instruction. The 6-review fix prompt stays scoped to accepted findings, with one bounded exception: when a finding names a recurring defect class, the fix agent should fix every same-defect site in that pass rather than one cited line. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
+**TLDR**: Templates under `templates/` cover config scaffolding, task capture, stage/review prompts, the evidence-backed PR changelist prompt, and the managed llm-wiki shell scripts. Agent-owned marker-stage templates finish with an explicit required completion section that makes the terminal marker the literal final instruction. The 6-review fix prompt stays scoped to accepted findings, with one bounded exception: when a finding names a recurring defect class, the fix agent should fix every same-defect site in that pass rather than one cited line. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
 
 ## LLM wiki script templates
 
@@ -133,7 +133,7 @@ User-supplied template paths under `<.hive-state>/templates/` are resolved via `
 | `browser_test_prompt.md.erb` | `Stages::Review::BrowserTest#run_attempt` (Phase 5) | `project_name`, `worktree_path`, `task_folder`, `pass`, `attempt`, `max_attempts`, `result_path`, `skill_invocation`, `user_supplied_tag` |
 | `triage_courageous.md.erb` | `Stages::Review::Triage` (Phase 3 default bias) | `project_name`, `worktree_path`, `task_folder`, `pass`, `reviewer_files`, `reviewer_contents`, `escalations_path`, `user_supplied_tag` |
 | `triage_safetyist.md.erb` | `Stages::Review::Triage` (opt-in bias preset) | same as `triage_courageous.md.erb` |
-| `reviewer_claude_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation`, `user_supplied_tag` |
+| `reviewer_claude_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2); reviews `git diff <default_branch>...HEAD` from the merge-base | `project_name`, `worktree_path`, `task_folder`, `default_branch`, `pass`, `output_path`, `skill_invocation`, `user_supplied_tag` |
 | `reviewer_codex_ce_code_review.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
 | `reviewer_pr_review_toolkit.md.erb` | `Reviewers::Agent#render_prompt` (Phase 2) | same as above |
 | `finalize_prompt.md.erb` | `Stages::Finalize.run!` | `project_name`, `task_folder`, `worktree_path`, `slug`, `pr_url`, `plan_text`, `reviews_summary`, `user_supplied_tag` |
@@ -150,7 +150,7 @@ As of commit `ce3f7978`, the prompt's scoped-edit rule has one deliberate except
 
 The runner determines completion for agent-owned marker files from the marker
 written into the state file, not from the agent process returning to an idle
-prompt. The tmux-sensitive marker-owning templates `plan_prompt.md.erb` and
+prompt. The marker-owning templates `plan_prompt.md.erb` and
 `finalize_prompt.md.erb` therefore end with a "Completion - REQUIRED" section
 that tells the agent to write the exact terminal marker as the last line and not
 yield until that marker exists.

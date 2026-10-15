@@ -3,7 +3,7 @@ title: Stages Index
 type: index
 source: lib/hive/stages/
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-10-14
 tags: [stage, index]
 ---
 
@@ -21,7 +21,7 @@ tags: [stage, index]
 | 8-finalize | `Hive::Stages::Finalize` | `pr.md`, `summary.md` | yes | [[stages/finalize]] |
 | 9-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
 
-All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.spawn_claude!` for Claude-backed launches that honor project-global `claude.mode`. Before spawning, coding/review stages call `Base.stage_permission_scope` to resolve the effective `permissions:` spec from config. Yolo/absent specs preserve the historical per-mode defaults (headless has no built-in tool list; tmux keeps the stage allowlist, and every tmux Claude launch denies `AskUserQuestion` so a question menu cannot strand a detached session), while non-yolo Claude scopes override the built-in allowlist and add `--allowedTools`/`--disallowedTools` plus any extra task-relative add-dirs. `Hive::Stages::Base.render(template_name, bindings)` handles ERB prompt rendering. In tmux mode, marker-owned Claude launches wait through `Hive::ClaudeLauncher.wait_for_terminal_marker`; if the managed tmux session disappears before a terminal marker is written, the launcher stamps `ERROR reason=tmux_session_terminated` immediately instead of waiting for the stage timeout. If the pane shows a provider-limit menu first, it stamps `ERROR reason=limits_reached` instead of the generic timeout/session-failure shape. If Claude's selection-menu footer (`Enter to select · ↑/↓ to navigate`) stays in the bottom pane lines past a 300s grace window (`HIVE_CLAUDE_TMUX_STRANDED_MENU_GRACE_SEC`), the waits fail with a named cause (`ERROR reason=interactive_menu_stranded` for marker-owned launches) instead of burning the stage timeout.
+All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.spawn_claude!` for Claude-backed launches, which always run headless `claude -p` through `Hive::ClaudeLauncher` (there is no Claude launch mode). Before spawning, coding/review stages call `Base.stage_permission_scope` to resolve the effective `permissions:` spec from config. Yolo/absent specs keep a Claude stage's default `--allowedTools` set (non-Claude providers get no built-in tool list), while non-yolo Claude scopes override the built-in allowlist and add `--allowedTools`/`--disallowedTools` plus any extra task-relative add-dirs. Every Claude launch through `spawn_agent` without a workflow `runtime_policy` also denies `AskUserQuestion`, because a detached `claude -p` stage has no one to answer a question menu. `Hive::Stages::Base.render(template_name, bindings)` handles ERB prompt rendering. `Hive::Stages::Base.spawn_claude_with_failure_marker!` turns a non-routing `Hive::AgentError` from a Claude launch into `ERROR reason=claude_launch_failed`; provider-limit output is classified as `limits_reached` by the headless agent path. Legacy tmux-era reasons (`tmux_session_terminated`, `interactive_menu_stranded`, `tmux_unavailable`) can still appear on task records written before the upgrade and render through the normal error path.
 
 Every persisted `ERROR` / `REVIEW_ERROR` except the exact operator-owned
 `terminal_outcome_blocked` and `terminal_outcome_invalid` reasons enters the
@@ -30,8 +30,8 @@ when current ownership and work-area safety permit. `StaleAgentHealer`
 schedules; `RecoveryCoordinator` persists the owning stage command and alone
 clears/dispatches, including for `3-plan`. 6-review uses per-spawn `status_mode`
 overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns;
-Claude reviewers use one shared tmux session per permission scope per pass when
-`claude.mode: tmux`.
+Claude reviewers run as independent headless spawns like every other agent
+reviewer.
 
 `Hive::Stages::Agent` is a reusable descriptor-backed headless runner for
 future `kind: :agent` stages outside the coding runner names. See

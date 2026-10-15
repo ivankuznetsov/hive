@@ -6,7 +6,7 @@ module Hive
     class Init
       # Interactive first-run prompt flow for `hive init`. Asks the operator
       # which agents to use for planning / development / review and (if they
-      # want) tweaks the per-stage budget+timeout sanity caps. On non-TTY
+      # want) sets per-stage budget caps (none by default) and timeouts. On non-TTY
       # input streams (CI, pipes, test harnesses) `#collect` short-circuits
       # to the recommended defaults and emits a one-line summary so callers
       # see what was applied.
@@ -25,7 +25,6 @@ module Hive
 
         DEFAULT_PLANNING_AGENT = "claude".freeze
         DEFAULT_DEVELOPMENT_AGENT = "codex".freeze
-        DEFAULT_CLAUDE_MODE = "tmux".freeze
         DEFAULT_CLAUDE_PERMISSION_MODE = "bypassPermissions".freeze
         # "default" is a live Claude Code alias that tracks ITS recommended
         # model (Opus-class today) — hive follows Claude Code's defaults
@@ -37,9 +36,7 @@ module Hive
         # default tier (high today).
         DEFAULT_CLAUDE_EFFORT = "default".freeze
         CLAUDE_EFFORT_CHOICES = [ "default", "low", "medium", "high" ].freeze
-        CLAUDE_MODES = Hive::Config::CLAUDE_MODES
         CLAUDE_PERMISSION_MODES = Hive::Config::CLAUDE_PERMISSION_MODES
-        CLAUDE_MODE_CHOICES = [ "tmux", "headless" ].freeze
         DEFAULT_PATROL_MODE = Hive::Config::DEFAULT_PATROL_MODE
         PATROL_MODE_CHOICES = Hive::Config::PATROL_MODES
         # Display/index order for the prompt menu; CLAUDE_PERMISSION_MODES is the
@@ -154,7 +151,6 @@ module Hive
         def self.minimal_defaults
           {
             "planning_agent" => DEFAULT_PLANNING_AGENT,
-            "claude_mode" => DEFAULT_CLAUDE_MODE,
             "claude_permission_mode" => DEFAULT_CLAUDE_PERMISSION_MODE,
             "claude_model" => DEFAULT_CLAUDE_MODEL,
             "claude_effort" => DEFAULT_CLAUDE_EFFORT,
@@ -165,7 +161,7 @@ module Hive
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "adhoc_auto_fix" => false,
             "refactor_patrol_enabled" => false,
-            "budgets" => limit_defaults("budget_usd"),
+            "budgets" => no_budgets,
             "timeouts" => limit_defaults("timeout_sec"),
             "daemon_enabled" => false,
             "babysitter_enabled" => false,
@@ -178,11 +174,15 @@ module Hive
         end
         private_class_method :limit_defaults
 
+        # Init sets no budget caps; the template suggests them in comments.
+        def self.no_budgets
+          LIMIT_KEYS.to_h { |key| [ key, nil ] }
+        end
+
         # Run the prompt flow (or short-circuit to defaults).
         # Returns the answers hash with shape:
         #   {
         #     "planning_agent"    => String,           # one of @registered_agents
-        #     "claude_mode"      => String,           # tmux | headless
         #     "claude_permission_mode" => String,      # Claude Code permission mode
         #     "development_agent" => String,           # one of @registered_agents
         #     "enabled_reviewers" => Array<String>,    # subset of AVAILABLE_REVIEWER_NAMES
@@ -191,7 +191,7 @@ module Hive
         #     "triage_bias"       => String,           # courageous | safetyist
         #     "adhoc_auto_fix"    => Boolean           # auto-fix ad-hoc PR reviews
         #     "refactor_patrol_enabled" => Boolean     # architecture discovery
-        #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
+        #     "budgets"  => Hash<String, Integer|nil>, # 10 keys (LIMIT_KEYS); nil = no cap
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
         #     "babysitter_enabled"=> Boolean           # experimental PR babysitter
@@ -203,7 +203,6 @@ module Hive
 
           intro
           planning = prompt_agent("Planning agent (brainstorm + plan)", DEFAULT_PLANNING_AGENT)
-          claude_mode = prompt_claude_mode
           claude_permission_mode = prompt_claude_permission_mode
           claude_model = prompt_claude_model
           claude_effort = prompt_claude_effort
@@ -225,7 +224,6 @@ module Hive
 
           answers = {
             "planning_agent" => planning,
-            "claude_mode" => claude_mode,
             "claude_permission_mode" => claude_permission_mode,
             "claude_model" => claude_model,
             "claude_effort" => claude_effort,
@@ -269,7 +267,6 @@ module Hive
         def non_interactive_defaults
           answers = {
             "planning_agent" => DEFAULT_PLANNING_AGENT,
-            "claude_mode" => DEFAULT_CLAUDE_MODE,
             "claude_permission_mode" => DEFAULT_CLAUDE_PERMISSION_MODE,
             "claude_model" => DEFAULT_CLAUDE_MODEL,
             "claude_effort" => DEFAULT_CLAUDE_EFFORT,
@@ -280,7 +277,7 @@ module Hive
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "adhoc_auto_fix" => DEFAULT_ADHOC_AUTO_FIX,
             "refactor_patrol_enabled" => effective_refactor_patrol_default,
-            "budgets" => default_budgets,
+            "budgets" => self.class.no_budgets,
             "timeouts" => default_timeouts,
             "daemon_enabled" => true,
             "babysitter_enabled" => true,
@@ -290,7 +287,6 @@ module Hive
           # `summary=$(hive init)` capture has a parseable single line.
           @summary_io.puts(
             "hive: using defaults — planning=#{DEFAULT_PLANNING_AGENT}, " \
-            "claude_mode=#{DEFAULT_CLAUDE_MODE}, " \
             "claude_permission_mode=#{DEFAULT_CLAUDE_PERMISSION_MODE}, " \
             "claude_model=#{DEFAULT_CLAUDE_MODEL}, " \
             "claude_effort=#{DEFAULT_CLAUDE_EFFORT}, " \
@@ -304,15 +300,6 @@ module Hive
             "limits=defaults, daemon=enabled, babysitter=enabled, daemon_autostart=disabled"
           )
           answers
-        end
-
-        def default_budgets
-          # `fetch` rather than `[]`: if LIMIT_KEYS and Config::DEFAULTS["budget_usd"]
-          # ever drift (a key added to one but not the other), surface as KeyError
-          # at first run instead of silently rendering a YAML key with no value
-          # (which YAML.safe_load parses to nil and validate_review_attempts!
-          # accepts only for the four `review_*` paths it knows about).
-          LIMIT_KEYS.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["budget_usd"].fetch(k) }
         end
 
         def effective_refactor_patrol_default
@@ -358,38 +345,9 @@ module Hive
           end
         end
 
-        def prompt_claude_mode
-          @output.puts ""
-          @output.puts "Claude launch mode — applies to every stage that uses Claude:"
-          @output.puts "  1) tmux     - attachable tmux pane using your logged-in Claude session"
-          @output.puts "  2) headless - non-interactive `claude -p`"
-          loop do
-            @output.print "Claude mode [#{DEFAULT_CLAUDE_MODE}]: "
-            @output.flush
-            answer = read_line
-            return DEFAULT_CLAUDE_MODE if answer.empty?
-
-            resolved = resolve_claude_mode_choice(answer)
-            return resolved if resolved
-
-            @output.puts "  unknown Claude mode #{answer.inspect}; pick " \
-                         "#{CLAUDE_MODES.join('/')} or 1..#{CLAUDE_MODE_CHOICES.size}"
-          end
-        end
-
-        def resolve_claude_mode_choice(answer)
-          if answer =~ /\A\d+\z/
-            idx = answer.to_i
-            return CLAUDE_MODE_CHOICES[idx - 1] if idx.between?(1, CLAUDE_MODE_CHOICES.size)
-
-            return nil
-          end
-          CLAUDE_MODES.find { |mode| mode.casecmp(answer).zero? }
-        end
-
         def prompt_claude_permission_mode
           @output.puts ""
-          @output.puts "Claude permission mode — applies to every Claude-backed stage (tmux and headless):"
+          @output.puts "Claude permission mode — applies to every Claude-backed stage:"
           @output.puts "  1) bypassPermissions - skip permission prompts (recommended default)"
           @output.puts "  2) auto              - use Claude Code auto-mode rules"
           @output.puts "  3) default           - normal Claude Code permissions"
@@ -632,17 +590,18 @@ module Hive
 
         def prompt_limits
           @output.puts ""
-          @output.puts "Limits for each stage / review role. Format: <budget_usd>,<timeout_sec> (blank = defaults)."
-          @output.puts "Defaults are generous sanity caps — most tasks finish well within them."
+          @output.puts "Limits for each stage / review role. Format: <budget_usd>,<timeout_sec>."
+          @output.puts "No budget cap is set unless you enter one; the suggested cap is shown."
+          @output.puts "Blank keeps no cap and the default timeout."
 
           budgets = {}
           timeouts = {}
           width = LIMIT_KEYS.map(&:length).max
 
           LIMIT_KEYS.each do |key|
-            default_b = Hive::Config::DEFAULTS["budget_usd"][key]
-            default_t = Hive::Config::DEFAULTS["timeout_sec"][key]
-            b, t = prompt_one_limit(key, default_b, default_t, width)
+            suggested_b = Hive::Config::DEFAULTS["budget_usd"].fetch(key)
+            default_t = Hive::Config::DEFAULTS["timeout_sec"].fetch(key)
+            b, t = prompt_one_limit(key, suggested_b, default_t, width)
             budgets[key] = b
             timeouts[key] = t
           end
@@ -650,12 +609,12 @@ module Hive
           [ budgets, timeouts ]
         end
 
-        def prompt_one_limit(key, default_b, default_t, width)
+        def prompt_one_limit(key, suggested_b, default_t, width)
           loop do
-            @output.print(format("  %-#{width}s [%d,%d]: ", key, default_b, default_t))
+            @output.print(format("  %-#{width}s [no cap (suggested %d),%d]: ", key, suggested_b, default_t))
             @output.flush
             answer = read_line
-            return [ default_b, default_t ] if answer.empty?
+            return [ nil, default_t ] if answer.empty?
 
             parts = answer.split(",", -1).map(&:strip)
             unless parts.size == 2
@@ -665,18 +624,18 @@ module Hive
 
             b_str, t_str = parts
             if !b_str.empty? && t_str.empty?
-              @output.puts "  timeout is required when budget is provided; use <budget>,<timeout> or blank for defaults"
+              @output.puts "  timeout is required when budget is provided; use <budget>,<timeout> or blank for no cap"
               next
             end
 
-            b = b_str.empty? ? default_b : parse_positive_int(b_str)
+            b = b_str.empty? ? :none : parse_positive_int(b_str)
             t = t_str.empty? ? default_t : parse_positive_int(t_str)
             if b.nil? || t.nil?
               @output.puts "  budget and timeout must be positive integers"
               next
             end
 
-            return [ b, t ]
+            return [ b == :none ? nil : b, t ]
           end
         end
 
@@ -720,7 +679,6 @@ module Hive
           @output.puts ""
           @output.puts "Summary:"
           @output.puts "  planning_agent          = #{answers['planning_agent']}"
-          @output.puts "  claude_mode             = #{answers['claude_mode']}"
           @output.puts "  claude_permission_mode  = #{answers['claude_permission_mode']}"
           @output.puts "  claude_model            = #{answers['claude_model']}"
           @output.puts "  claude_effort           = #{answers['claude_effort']}"
@@ -739,12 +697,12 @@ module Hive
 
         def summarize_limits(answers)
           changed = LIMIT_KEYS.reject do |k|
-            answers["budgets"][k] == Hive::Config::DEFAULTS["budget_usd"][k] &&
+            answers["budgets"][k].nil? &&
               answers["timeouts"][k] == Hive::Config::DEFAULTS["timeout_sec"][k]
           end
-          return "all defaults" if changed.empty?
+          return "all defaults (no budget caps)" if changed.empty?
 
-          changed.map { |k| "#{k}=#{answers['budgets'][k]}/#{answers['timeouts'][k]}s" }.join(", ")
+          changed.map { |k| "#{k}=#{answers['budgets'][k] || 'no cap'}/#{answers['timeouts'][k]}s" }.join(", ")
         end
 
         def confirm!

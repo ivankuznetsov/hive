@@ -13,7 +13,7 @@ module Hive
       "hive-runtime-maintenance" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
-      "hive-init" => 2,
+      "hive-init" => 3,
       "hive-init-preview" => 1,
       "hive-new" => 1,
       "hive-setup-agents" => 1,
@@ -44,6 +44,9 @@ module Hive
       "hive-metrics-rollback-rate" => 1,
       "hive-markers-clear" => 1,
       "hive-forget" => 1,
+      # `hive mcp import` discovery rows and catalog writes (plan
+      # 2026-10-15-001); `hive mcp login` failures share its error arm.
+      "hive-mcp-import" => 1,
       "hive-drop" => 2,
       "hive-prune" => 1,
       "hive-worktree" => 1,

@@ -42,7 +42,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     configure_owner!(owner: "") # claimable Hive web instance
     speed_up_daemon!
     @project = create_hive_project!("golden-app")
-    force_headless_claude!(@project)
+    configure_fake_claude_project!(@project)
     install_github_stub(login: "goldenpath")
     spawn_daemon!
   end
@@ -318,11 +318,10 @@ class GoldenPathE2E < ApplicationSystemTestCase
     File.write(path, data.to_yaml)
   end
 
-  def force_headless_claude!(project)
+  def configure_fake_claude_project!(project)
     path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", project, ".hive-state", "config.yml")
     data = YAML.safe_load_file(path)
     data["claude"] = (data["claude"] || {}).merge(
-      "mode" => "headless",
       # The fake CLI has no provider-owned settings file for identity
       # discovery. Pin the model so implementation ownership can be captured
       # before execute launches, just as a real explicit Claude selection is.

@@ -45,7 +45,7 @@ Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to 
 | Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.7.4/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | [`yay -S hive-bin`](https://aur.archlinux.org/packages/hive-bin) |
 
-Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, `opencode` ≥ 1.18.16 when explicitly selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
+Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, `opencode` ≥ 1.18.16 when explicitly selected, authenticated `gh`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
 
 OpenCode is a fifth built-in profile but is selected nowhere by default. Its
 operator contract requires an exact nested `provider/model`, an explicit
@@ -78,7 +78,7 @@ On supported Linux and macOS installations, the normal first run is:
 hive setup
 ```
 
-`hive setup` checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm,
+`hive setup` checks Ruby 3.4, git, `gh`, Claude, Codex, Node/npm,
 QMD, SQLite, and the Rails bundle. Before other mutations it previews and
 provisions Hive's operating skill for Claude, Codex, Pi, and OpenCode. It then installs
 the Hive-owned pieces it can manage, installs the daemon, PR babysitter, and Hive web services,
@@ -106,11 +106,17 @@ the intended owner before sharing that URL. Set
 `web.local_loopback: false` to require GitHub login even on literal loopback. See
 [wiki/commands/web.md](wiki/commands/web.md).
 
-Windows users should run the native path inside WSL with systemd enabled, or
-use Hivebox. **Choose [Hivebox](packaging/docker/README.md) when you need
-container isolation, multiple local instances, containment for untrusted
-agents, or a reproducible server/NAS deployment.** Hivebox remains fully
-supported; it is the container distribution of the same Rails app.
+Windows users should install native Hive inside WSL with systemd enabled.
+
+Hive has two supported routes: install native Hive (above) when you want to
+run and tinker with it yourself, or use the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) when you
+would rather not. The Hivebox Docker distribution is discontinued: already
+published `ghcr.io/ivankuznetsov/hivebox` images keep running but receive no
+further builds or updates. To move a Hivebox install to native Hive, install
+Hive through a channel above and run `hive setup`, then copy your project
+checkouts out of the box's `/data/repos` bind mount (`~/hivebox-data/repos` with
+the old installer defaults) or reclone them, register each one with `hive
+init`, sign agents in again on the host, and remove the container.
 
 ### Install via a coding agent
 
@@ -184,7 +190,7 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
    filesystem evidence without launching Claude, Codex, Pi, OpenCode, or
    OpenClaw.
 
-   During `hive init`, choose the Claude launch mode and permission mode for the project. `tmux` is the default: Claude-backed stages run in attachable tmux sessions using your logged-in Claude session. With the upcoming Anthropic pricing changes this is the mode we now suggest for most users, but treat it as an **experimental workflow** for now — expect some rough edges. The recommended permission default is `bypassPermissions` so local dogfood runs do not pause on file-operation approvals; choose `auto` when you want Claude Code auto-mode rules. Pick `headless` for service-only hosts or CI-style runs that should use normal non-interactive CLI spawns.
+   During `hive init`, choose the Claude permission mode for the project. Claude-backed stages always run as headless `claude -p` processes using your logged-in Claude subscription; Hive unsets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_API_KEY` before launching Claude, so it does not bill an API key. Follow a running stage through its log under `.hive-state/logs/<slug>/`. The recommended permission default is `bypassPermissions` so local dogfood runs do not pause on file-operation approvals; choose `auto` when you want Claude Code auto-mode rules.
 
    When `hive init` asks about the daemon, keep the project enabled. The service itself is already global autostart infrastructure; this prompt only controls whether this project is picked up. The daemon is the worker: it polls Hive, starts the next stage when a task is ready, and stops at human-input or recovery gates.
 
@@ -415,5 +421,5 @@ Full per-command reference, every flag, every envelope field, and every exit cod
 - **[docs/condition-rollout.md](docs/condition-rollout.md)** — Operator runbook for execute-stage marker/shadow/condition authority, task-journal validation, invalid-history recovery, divergence triage, explicit promotion, and lossless rollback.
 - **[wiki/operating.md](wiki/operating.md)** — Day-2 operations: install matrix, XDG paths, autostart (systemd-user on Linux, launchd on macOS), enrolling existing projects, the mandatory `--dry-run` shakedown, bot setup, tuning concurrency, cost-runaway response, troubleshooting. Read this before running the daemon live and any time you operate Hive across more than one project.
 - **[docs/recipes.md](docs/recipes.md)** — Concrete end-to-end workflows, including the xbookmark dogfood replay (linked to the real PR and a committed transcript of the run). Read this when you want to see what a complete idea-to-PR run looks like before trying it yourself.
-- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, how native Hive web shares the file-backed state model, and when to choose Hivebox instead. Read this when you hit a surprise or want to know "why is it like this?".
+- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, how native Hive web shares the file-backed state model, and how to move off the discontinued Hivebox container. Read this when you hit a surprise or want to know "why is it like this?".
 - **[wiki/index.md](wiki/index.md)** — The catalog of the LLM-maintained engineering wiki under `wiki/`, which is the deepest source of reference material for every command, module, and stage. Read this when the user-facing docs above don't have the depth you need.

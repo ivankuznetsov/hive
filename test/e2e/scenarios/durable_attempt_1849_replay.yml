@@ -7,12 +7,6 @@ coverage:
 steps:
   - kind: cli
     args: [new, "{project}", "durable attempt replay"]
-  - kind: ruby_block
-    block: |
-      path = File.join(sandbox, ".hive-state", "config.yml")
-      config = YAML.safe_load(File.read(path))
-      config.fetch("claude")["mode"] = "headless"
-      File.write(path, config.to_yaml)
   - kind: cli
     args: [brainstorm, "{slug}", --from, 1-inbox]
     env:

@@ -1031,6 +1031,22 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  # Reasons the retired tmux launch mode wrote have no dedicated reader; legacy
+  # records still render through the generic error path.
+  def test_legacy_tmux_error_reasons_render_through_the_generic_error_path
+    task = fake_task(stage_name: "execute", stage_index: 4)
+    generic = Hive::TaskAction.for(task, marker(:error, "reason" => "boom"))
+    assert_equal "error", generic.key
+
+    %w[tmux_unavailable interactive_menu_stranded].each do |reason|
+      action = Hive::TaskAction.for(task, marker(:error, "reason" => reason))
+      assert_equal "error", action.key, "reason=#{reason}"
+      assert_nil action.command, "reason=#{reason}"
+      assert_equal generic.diagnostic.dig("suggested_next_action", "kind"),
+                   action.diagnostic.dig("suggested_next_action", "kind"), "reason=#{reason}"
+    end
+  end
+
   def test_execute_stale_routes_to_findings_not_develop
     # Running `hive develop slug` against a stale execute task would
     # refuse on the non-terminal marker; pointing at findings opens

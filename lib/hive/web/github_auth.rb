@@ -4,8 +4,8 @@ require "uri"
 
 module Hive
   module Web
-    # GitHub OAuth **device flow** gate (RFC 8628). hivebox is a headless box
-    # whose public origin is unknown at auth time (localhost today, a Hetzner
+    # GitHub OAuth **device flow** gate (RFC 8628). A non-loopback Hive web
+    # instance's public origin is unknown at auth time (localhost today, a
     # VPS behind a tunnel tomorrow), so the callback-based web flow is a poor
     # fit: it demands a per-operator OAuth app whose redirect URI exactly
     # matches `web.origin`, plus a client secret in the environment. Device

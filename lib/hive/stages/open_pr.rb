@@ -192,7 +192,7 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: cwd,
-          max_budget_usd: cfg.dig("budget_usd", "open_pr") || 50,
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "open_pr", profile, default: 50),
           timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
           log_label: "open-pr-author",
           profile: profile,
@@ -204,11 +204,8 @@ module Hive
           **provider_launch.fetch(:agent_kwargs, {}),
           **launch_arguments
         }
-        if Hive::AgentSupport.supports?(profile, :Interactive)
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task, cfg, **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task) # coding-scoped: stable tmux label
-          )
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(
             task, **kwargs, cfg: cfg,

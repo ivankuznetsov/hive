@@ -1130,7 +1130,7 @@ class AgentSkillsInspectorTest < Minitest::Test
       pi_install = File.join(dir, "pi", "git", "compound-engineering")
       write(File.join(pi_install, "package.json"), JSON.generate("version" => "3.19.0"))
       pi_runner = FakeRunner.new(
-        [ pi_bin, "--version" ] => result(stdout: "0.80.6"),
+        [ pi_bin, "--version" ] => result(stdout: "1.0.4"),
         [ pi_bin, "list" ] => result(
           status: 1,
           stdout: "User packages:\n  #{pi_native.source}\n    #{pi_install}\n"

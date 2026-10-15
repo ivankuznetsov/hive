@@ -3,7 +3,6 @@ require "hive/env_file"
 class TelegramBot
   class InvalidSettings < Hive::Error; end
 
-  Update = Data.define(:restarted?)
   PairingRequest = Data.define(:code, :chat_id, :age_sec, :expires_in_sec)
 
   attr_reader :attributes
@@ -74,8 +73,6 @@ class TelegramBot
       data["bot"]["pairing_enabled"] = pairing_enabled
       data["bot"]["chat_id_allowlist"] = chats
     end
-
-    Update.new(restarted?: request_restart)
   end
 
   def send_test_message
@@ -107,16 +104,6 @@ class TelegramBot
         "Use the ID from @userinfobot, not a @handle. Nothing was saved."
     end
     raise InvalidSettings, message
-  end
-
-  def request_restart
-    pid = ENV["HIVEBOX_SUPERVISOR_PID"].to_i
-    return false if pid <= 0
-
-    Process.kill("HUP", pid)
-    true
-  rescue Errno::ESRCH, Errno::EPERM
-    false
   end
 
   def saved_token

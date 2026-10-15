@@ -154,7 +154,7 @@ removed by the controller before a fresh spawn and must be recreated as a
 regular file.
 
 The coding pipeline's `brainstorm` and `plan` stages still use their bespoke
-tmux-capable runners even though their descriptor entries are `kind: :agent`;
+runners (which route Claude through `spawn_claude!`) even though their descriptor entries are `kind: :agent`;
 their descriptor pins the bespoke runner via the internal per-stage `runner:`
 execution-strategy key, which the resolver honors ahead of the kind-derived
 generic selection.

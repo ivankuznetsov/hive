@@ -1936,24 +1936,32 @@ class ConfigTest < Minitest::Test
       assert_equal "claude", cfg.dig("brainstorm", "agent"), "brainstorm agent must default to claude"
       assert_equal "claude", cfg.dig("plan", "agent"), "plan agent must default to claude"
       assert_equal "claude", cfg.dig("execute", "agent"), "execute agent must default to claude"
-      assert_equal :tmux, Hive::Config.claude_mode(cfg), "claude.mode must default to tmux"
+      refute cfg.fetch("claude").key?("mode"), "claude.mode is retired and has no default"
+      assert_equal false, Hive::Config.obsolete_claude_mode_key?(cfg),
+                   "a config without claude.mode leaves the obsolete-key flag unset"
       assert_equal "bypassPermissions", Hive::Config.claude_permission_mode(cfg),
                    "claude.permission_mode must default to bypassPermissions"
       assert_nil cfg.dig("brainstorm", "runtime")
     end
   end
 
-  def test_load_honors_claude_mode_override
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        claude:
-          mode: headless
-      YAML
-      cfg = Hive::Config.load(dir)
-      assert_equal :headless, Hive::Config.claude_mode(cfg)
-      assert_equal true, Hive::Config.explicit_claude_mode?(cfg)
+  # `claude.mode` is retired (Claude is headless-only). Any leftover value,
+  # including one the old validator rejected, loads, is ignored, and sets
+  # the obsolete-key flag `hive doctor` reads.
+  def test_load_tolerates_retired_claude_mode_key_and_flags_it
+    [ "tmux", "headless", "bogus", 42 ].each do |mode|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), { "claude" => { "mode" => mode } }.to_yaml)
+        cfg = Hive::Config.load(dir)
+        assert_equal true, Hive::Config.obsolete_claude_mode_key?(cfg), "mode=#{mode.inspect} must set the flag"
+        assert_equal "bypassPermissions", Hive::Config.claude_permission_mode(cfg)
+      end
     end
+  end
+
+  def test_obsolete_claude_mode_key_is_absent_on_synthesised_cfg
+    assert_equal false, Hive::Config.obsolete_claude_mode_key?("claude" => { "mode" => "tmux" })
   end
 
   def test_load_honors_claude_permission_mode_override
@@ -2212,33 +2220,6 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_raises_when_claude_mode_is_unknown
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        claude:
-          mode: warm_pool
-      YAML
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
-      assert_match(/claude\.mode/, err.message)
-      assert_match(/headless/, err.message)
-      assert_match(/tmux/, err.message)
-    end
-  end
-
-  def test_load_raises_when_claude_mode_is_not_a_string
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        claude:
-          mode: 42
-      YAML
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
-      assert_match(/claude\.mode/, err.message)
-      assert_match(/Integer/, err.message)
-    end
-  end
-
   def test_load_honors_per_project_stage_agent_overrides
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -2266,7 +2247,8 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/brainstorm\.runtime/, err.message)
-      assert_match(/claude.mode/, err.message)
+      assert_match(/brainstorm\.agent/, err.message)
+      refute_match(/claude\.mode/, err.message)
     end
   end
 
@@ -5545,15 +5527,6 @@ class ConfigTest < Minitest::Test
     assert_match(/reckless/, err.message)
   end
 
-  def test_claude_mode_rejects_unknown_value
-    err = assert_raises(Hive::ConfigError) do
-      Hive::Config.claude_mode("claude" => { "mode" => "warm_pool" })
-    end
-
-    assert_match(/claude\.mode must be one of/, err.message)
-    assert_match(/warm_pool/, err.message)
-  end
-
   # ── deprecated_bot_keys ──────────────────────────────────────────────────
 
   def test_deprecated_bot_keys_returns_empty_array_when_bot_is_nil
@@ -5650,6 +5623,24 @@ class ConfigTest < Minitest::Test
                  Hive::Config.stage_skill(
                    { "plan" => { "agent" => "opencode" } }, "plan"
                  )
+  end
+
+  # Built-in budget defaults do not count as set; only the project's own
+  # budget_usd entries do.
+  def test_configured_budget_usd_ignores_built_in_defaults
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "budget_usd:\n  plan: 12\n")
+      cfg = Hive::Config.load(dir)
+
+      assert_equal 12, Hive::Config.configured_budget_usd(cfg, "plan")
+      assert_equal 500, cfg.dig("budget_usd", "execute_implementation")
+      assert_nil Hive::Config.configured_budget_usd(cfg, "execute_implementation")
+    end
+
+    assert_equal 7, Hive::Config.configured_budget_usd({ "budget_usd" => { "plan" => 7 } }, "plan")
+    assert_nil Hive::Config.configured_budget_usd({}, "plan")
   end
 
   def test_stage_resource_limit_resolution_retains_value_source_and_scope
@@ -5759,6 +5750,190 @@ class ConfigTest < Minitest::Test
         { "project_membership_history" => history }.to_yaml
       )
       assert_equal history, Hive::Config.load_global_project_membership_history
+    end
+  end
+
+  def load_mcp_project(project)
+    with_tmp_dir do |dir|
+      path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, project.to_yaml)
+      yield path, -> { Hive::Config.load(dir) }
+    end
+  end
+
+  def test_mcp_defaults_grant_nothing
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({ "inherit_user" => false, "use" => [] }, cfg.fetch("mcp"))
+      assert_nil cfg.fetch(Hive::Config::MCP_INHERIT_USER_PROVENANCE_KEY)
+    end
+  end
+
+  def test_mcp_records_raw_project_inherit_user
+    load_mcp_project({ "mcp" => { "inherit_user" => true } }) do |_path, load|
+      assert_equal true, load.call.fetch(Hive::Config::MCP_INHERIT_USER_PROVENANCE_KEY)
+    end
+  end
+
+  def test_mcp_grants_accepted_on_stage_plan_review_workflow_and_nested_role_blocks
+    with_tmp_global_config(runtime: false) do |home|
+      File.write(File.join(home, "config.yml"),
+                 { "mcp" => { "servers" => { "linear" => { "url" => "https://mcp.linear.app/mcp" } } } }.to_yaml)
+      project = {
+        "mcp" => { "use" => %w[linear] },
+        "execute" => { "mcp" => { "use" => [] } },
+        "plan_review" => { "mcp" => { "use" => %w[linear] } },
+        "inbox" => { "mcp" => {} },
+        "review" => { "fix" => { "mcp" => { "use" => %w[linear] } } },
+        "patrol" => { "fix" => { "mcp" => { "use" => [] } } }
+      }
+      load_mcp_project(project) do |_path, load|
+        cfg = load.call
+
+        assert_equal %w[linear], cfg.dig("plan_review", "mcp", "use")
+        assert_equal({}, cfg.dig("inbox", "mcp"))
+        assert_equal %w[linear], cfg.dig("review", "fix", "mcp", "use")
+      end
+    end
+  end
+
+  def test_mcp_rejects_project_server_definitions_with_an_import_pointer
+    [
+      { "mcp" => { "servers" => { "linear" => { "url" => "https://mcp.linear.app/mcp" } } } },
+      { "execute" => { "mcp" => { "servers" => {} } } }
+    ].each do |project|
+      load_mcp_project(project) do |path, load|
+        error = assert_raises(Hive::ConfigError) { load.call }
+
+        assert_includes error.message, path
+        assert_includes error.message, "defined only in the global catalog"
+        assert_includes error.message, "hive mcp import"
+      end
+    end
+  end
+
+  def test_mcp_rejects_malformed_project_grants
+    {
+      { "mcp" => { "enabled" => true } } => "mcp in",
+      { "mcp" => { "inherit_user" => "yes" } } => "mcp.inherit_user",
+      { "mcp" => { "use" => "linear" } } => "mcp.use",
+      { "mcp" => { "use" => nil } } => "mcp.use",
+      { "mcp" => { "use" => [ "bad name" ] } } => "mcp.use",
+      { "mcp" => { "use" => [ 7 ] } } => "mcp.use",
+      { "execute" => { "mcp" => [ "linear" ] } } => "execute.mcp",
+      { "execute" => { "mcp" => { "inherit_user" => true } } } => "execute.mcp",
+      { "execute" => { "mcp" => { "use" => [ "-dash" ] } } } => "execute.mcp.use",
+      { "review" => { "fix" => { "mcp" => "linear" } } } => "review.fix.mcp",
+      { "patrol" => { "fix" => { "mcp" => { "use" => "x" } } } } => "patrol.fix.mcp.use"
+    }.each do |project, label|
+      load_mcp_project(project) do |path, load|
+        error = assert_raises(Hive::ConfigError, project.inspect) { load.call }
+
+        assert_includes error.message, label, project.inspect
+        assert_includes error.message, path
+      end
+    end
+  end
+
+  def test_mcp_grant_names_must_exist_in_a_readable_catalog
+    with_tmp_global_config(runtime: false) do |home|
+      load_mcp_project({ "mcp" => { "use" => %w[linear] } }) do |path, load|
+        error = assert_raises(Hive::ConfigError) { load.call }
+        assert_includes error.message, "MCP grants in #{path} name server(s) missing"
+        assert_includes error.message, File.join(home, "config.yml")
+
+        with_replaced_singleton_method(Hive::Config, :global_mcp_catalog_readable?, -> { false }) do
+          assert_equal %w[linear], load.call.dig("mcp", "use")
+        end
+      end
+    end
+  end
+
+  def test_load_global_mcp_defaults_and_validates
+    with_tmp_global_config(runtime: false) do |home|
+      assert_equal({ "inherit_user" => false, "servers" => {} }, Hive::Config.load_global_mcp)
+
+      catalog = {
+        "inherit_user" => true,
+        "servers" => {
+          "openaiDeveloperDocs" => {
+            "url" => "https://developers.openai.com/mcp", "imported_from" => "codex", "enabled" => true,
+            "oauth_resource" => "https://developers.openai.com/mcp", "oauth_client_id" => "client",
+            "oauth_scopes" => %w[read], "oauth_logins" => %w[codex claude], "bearer_token_env" => "DOCS_TOKEN",
+            "headers" => { "X-Org" => "hive" }, "headers_env" => { "X-Team" => "TEAM_ID" }
+          },
+          "context7" => {
+            "command" => "npx", "args" => [], "cwd" => "/tmp",
+            "env" => { "LOG_LEVEL" => "info" }, "env_from" => { "CONTEXT7_API_KEY" => "HOST_KEY" }
+          }
+        }
+      }
+      File.write(File.join(home, "config.yml"), { "mcp" => catalog }.to_yaml)
+
+      assert_equal catalog, Hive::Config.load_global_mcp
+    end
+  end
+
+  def test_load_global_mcp_rejects_malformed_catalogs
+    http = { "url" => "https://mcp.example.com/mcp" }
+    stdio = { "command" => "npx" }
+    {
+      { "use" => [] } => "unknown field(s): use",
+      { "inherit_user" => "no" } => "mcp.inherit_user",
+      { "servers" => [] } => "mcp.servers in",
+      { "servers" => { "bad name" => http } } => "invalid server name",
+      { "servers" => { "x" => "https://x" } } => "mcp.servers.x in",
+      { "servers" => { "x" => http.merge(stdio) } } => "exactly one of `url` (HTTP) or `command` (stdio)",
+      { "servers" => { "x" => {} } } => "exactly one of",
+      { "servers" => { "x" => http.merge("args" => []) } } => "unknown field(s): args",
+      { "servers" => { "x" => stdio.merge("headers" => {}) } } => "unknown field(s): headers",
+      { "servers" => { "x" => { "url" => "ftp://x" } } } => "mcp.servers.x.url",
+      { "servers" => { "x" => http.merge("oauth_resource" => "nope") } } => "mcp.servers.x.oauth_resource",
+      { "servers" => { "x" => http.merge("oauth_client_id" => " ") } } => "mcp.servers.x.oauth_client_id",
+      { "servers" => { "x" => http.merge("oauth_scopes" => []) } } => "mcp.servers.x.oauth_scopes",
+      { "servers" => { "x" => http.merge("oauth_logins" => %w[vim]) } } => "mcp.servers.x.oauth_logins",
+      { "servers" => { "x" => http.merge("oauth_logins" => "codex") } } => "mcp.servers.x.oauth_logins",
+      { "servers" => { "x" => stdio.merge("oauth_logins" => []) } } => "unknown field(s): oauth_logins",
+      { "servers" => { "x" => http.merge("bearer_token_env" => "Bearer abc") } } => "mcp.servers.x.bearer_token_env",
+      { "servers" => { "x" => http.merge("headers" => "Authorization: x") } } => "mcp.servers.x.headers in",
+      { "servers" => { "x" => http.merge("headers" => { "Bad Header" => "v" }) } } => "invalid entry",
+      { "servers" => { "x" => http.merge("headers" => { "authorization" => "Bearer abc" }) } } => "literal credential",
+      { "servers" => { "x" => http.merge("headers" => { "X-Api_Key" => "abc" }) } } => "literal credential",
+      { "servers" => { "x" => http.merge("headers" => { "X-Api-Key" => "abc" }) } } => "literal credential",
+      { "servers" => { "x" => http.merge("headers_env" => { "X-Org" => "not-a-var" }) } } => "mcp.servers.x.headers_env",
+      { "servers" => { "x" => http.merge("imported_from" => "vim") } } => "mcp.servers.x.imported_from",
+      { "servers" => { "x" => http.merge("enabled" => "yes") } } => "mcp.servers.x.enabled",
+      { "servers" => { "x" => { "command" => "" } } } => "mcp.servers.x.command",
+      { "servers" => { "x" => stdio.merge("args" => "-y") } } => "mcp.servers.x.args",
+      { "servers" => { "x" => stdio.merge("args" => [ "" ]) } } => "mcp.servers.x.args",
+      { "servers" => { "x" => stdio.merge("cwd" => 1) } } => "mcp.servers.x.cwd",
+      { "servers" => { "x" => stdio.merge("env" => { "1BAD" => "v" }) } } => "mcp.servers.x.env",
+      { "servers" => { "x" => stdio.merge("env" => { "GITHUB_TOKEN" => "ghp_x" }) } } => "looks like a secret",
+      { "servers" => { "x" => stdio.merge("env" => { "OPENAI_API_KEY" => "sk-x" }) } } => "env_from",
+      { "servers" => { "x" => stdio.merge("env_from" => { "KEY" => 5 }) } } => "mcp.servers.x.env_from"
+    }.each do |block, fragment|
+      with_tmp_global_config(runtime: false) do |home|
+        path = File.join(home, "config.yml")
+        File.write(path, { "mcp" => block }.to_yaml)
+
+        error = assert_raises(Hive::ConfigError, block.inspect) { Hive::Config.load_global_mcp }
+
+        assert_includes error.message, fragment, block.inspect
+        assert_includes error.message, path, block.inspect
+      end
+    end
+  end
+
+  def test_load_global_mcp_rejects_a_scalar_block
+    with_tmp_global_config(runtime: false) do |home|
+      File.write(File.join(home, "config.yml"), { "mcp" => "none" }.to_yaml)
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_mcp }
+
+      assert_includes error.message, "mcp in"
+      assert_includes error.message, "must be a Hash"
     end
   end
 

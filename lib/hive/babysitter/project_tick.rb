@@ -21,6 +21,7 @@ module Hive
         eligible: :runnable, capacity_deferred: :runnable,
         give_up: :operator, fork_pr: :operator, rebase_conflict: :operator,
         failure: :retry, timeout: :retry, budget_exhausted: :retry,
+        limits_reached: :retry,
         pipeline_owned: :pipeline_owned, inflight: :inflight,
         success: :observed, rebased: :observed, already_green: :observed,
         noop: :observed, dry_run: :observed

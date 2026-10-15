@@ -33,14 +33,6 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
-  FakeHandle = Struct.new(:calls) do
-    def send_and_wait!(**kwargs)
-      calls << kwargs
-      File.write(kwargs.fetch(:expected_output), "ok\n")
-      { status: :ok }
-    end
-  end
-
   ReviewCommandStatus = Struct.new(:success_value) do
     def success?
       success_value
@@ -119,38 +111,6 @@ class CurrentMainCoverageGapTest < Minitest::Test
     Hive::Tui::Snapshot.new(generated_at: nil, projects: [ project ])
   end
 
-  def test_claude_launcher_wait_for_done_signal_handles_success_after_poll
-    with_tmp_dir do |dir|
-      task = Struct.new(:folder).new(dir)
-      done = File.join(dir, ".done")
-      calls = 0
-      sleeps = []
-      base = Time.utc(2026, 5, 25, 12, 0, 0)
-      times = [ base, base, base ]
-      original_exist = File.method(:exist?)
-
-      with_replaced_singleton_method(Time, :now, -> { times.shift || base }) do
-        with_replaced_singleton_method(File, :exist?, lambda { |path|
-          if path == done
-            calls += 1
-            calls > 1
-          else
-            original_exist.call(path)
-          end
-        }) do
-          with_replaced_singleton_method(Hive::ClaudeLauncher, :read_result_json_status, ->(_task) { :ok }) do
-            with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(seconds) { sleeps << seconds }) do
-              result = Hive::ClaudeLauncher.wait_for_done_signal(task, nil, 5, "review")
-
-              assert_equal({ status: :ok, log_label: "review" }, result)
-              assert_equal [ 0.5 ], sleeps
-            end
-          end
-        end
-      end
-    end
-  end
-
   def test_stage_non_claude_dispatchers_use_generic_spawn_agent
     with_tmp_dir do |root|
       folder = task_folder(root)
@@ -216,7 +176,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
-  def test_review_fix_and_reviewer_shared_session_edge_paths
+  def test_review_fix_edge_paths
     with_tmp_dir do |root|
       folder = task_folder(root)
       ctx = review_ctx(root, folder)
@@ -236,25 +196,6 @@ class CurrentMainCoverageGapTest < Minitest::Test
       assert_equal "review-fix-pass01", calls.last.last[:log_label]
       assert_equal "review.fix", calls.last.last[:implementation_stage]
       assert calls.last.last[:defer_implementation_observation]
-
-      spec = {
-        "name" => "codex-ce-code-review",
-        "output_basename" => "codex-ce-code-review",
-        "agent" => "claude",
-        "skill" => "ce-code-review",
-        "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
-        "max_attempts" => 1,
-        "timeout_sec" => 30
-      }
-      handle = FakeHandle.new([])
-
-      with_fake_profile(FakeProfile.new(:claude)) do
-        result = Hive::Reviewers::Agent.new(spec, ctx, cfg: {}).run_in_session!(handle: handle)
-
-        assert_equal :ok, result.status
-        assert_equal 1, handle.calls.length
-        assert_equal "review-codex-ce-code-review-pass01", handle.calls.first[:log_label]
-      end
     end
   end
 
@@ -279,7 +220,6 @@ class CurrentMainCoverageGapTest < Minitest::Test
           prompt: "prompt",
           max_budget_usd: 1,
           timeout_sec: 1,
-          session_name: "session",
           profile: FakeProfile.new(:codex)
         )
       end
@@ -306,7 +246,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
-  def test_review_run_maps_tmux_unavailable_agent_error
+  def test_review_run_marks_agent_error_as_runner_exception
     with_tmp_dir do |root|
       folder = task_folder(root)
       worktree = File.join(root, "worktree")
@@ -322,13 +262,15 @@ class CurrentMainCoverageGapTest < Minitest::Test
         with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, owned_pointer) do
           with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(_path, _root) { true }) do
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
-              with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { raise Hive::AgentError, "tmux binary not runnable: tmux" }) do
-                result = Hive::Stages::Review.run!(task, { "review" => {}, "claude" => { "mode" => "tmux" } })
+              with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { raise Hive::AgentError, "claude exited" }) do
+                assert_raises(Hive::AgentError) do
+                  Hive::Stages::Review.run!(task, { "review" => {} })
+                end
 
-                assert_equal({ commit: "review_error_tmux_unavailable", status: :review_error }, result)
                 marker = Hive::Markers.current(task.state_file)
                 assert_equal :review_error, marker.name
-                assert_equal "tmux_unavailable", marker.attrs["reason"]
+                assert_equal "runner_exception", marker.attrs["reason"]
+                assert_equal "Hive::AgentError", marker.attrs["exception_class"]
               end
             end
           end

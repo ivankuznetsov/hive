@@ -40,6 +40,20 @@ module Hive
     end
   end
 
+  # The shared runtime control-plane database lacks the command-receipt
+  # extension (migration 002), or the database itself was never created.
+  # Keyed commands that existed before receipts (`hive new`) treat this as
+  # "use the per-project path"; receipt-only commands surface it as CONFIG.
+  class CommandReceiptsNotInstalled < ConfigError
+    def initialize(message = "command receipts are not installed; run `hive setup --install-command-receipts`")
+      super
+    end
+
+    def self.missing_database?(error)
+      error.is_a?(Hive::RuntimeControlPlane::MigrationRequired) && error.code == :missing_database
+    end
+  end
+
   class CommandOutcomeError < Error
     attr_reader :reason, :state, :command_receipt
 
@@ -199,9 +213,6 @@ module Hive
   # attempt. The safe signal is already handed to the attempt supervisor;
   # only RecoveryCoordinator may decide when another attempt is admitted.
   class ProviderRouteFailed < AgentError
-  end
-
-  class TmuxError < AgentError
   end
 
   # A project config reached the shared loader with unsupported root keys.

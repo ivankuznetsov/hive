@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-09-28
+updated: 2026-10-14
 tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood, receipts]
 ---
 
@@ -331,8 +331,10 @@ enrolls the current project, and returns distinct web installed, enabled,
 running, manager-available, and ready state. Package hooks cannot reliably
 start a per-user service on every host, so Homebrew/AUR caveats direct users to
 run setup. `hive setup --no-service` opts out of every web-service mutation;
-`hive setup --no-bootstrap` is diagnose-only. Windows uses WSL with systemd or
-the Hivebox container distribution rather than a separate native manager.
+`hive setup --no-bootstrap` is diagnose-only. Windows runs native Hive inside
+WSL with systemd rather than a separate native manager. Hive no longer ships a
+container distribution (ADR-055); see the README for migrating a Hivebox
+install to native Hive.
 
 Updates and uninstall:
 
@@ -450,9 +452,9 @@ For unreleased packaging fixes, validate against the locally built gem rather
 than by copying files into an installed gem directory. Build the artifact with
 `gem build hive.gemspec`, install it into an isolated `GEM_HOME`/XDG prefix,
 run `hive doctor`, then replay the affected `hive run <task-folder>` path from
-that install. Claude tmux launcher-script fixes should prove the target task
-reaches `WAITING` or later instead of `claude_launch_failed`, confirming the
-packaged `lib/hive/scripts/*.sh` files are present in the real artifact.
+that install. Claude launcher fixes should prove the target task reaches
+`WAITING` or later instead of `claude_launch_failed`, confirming the packaged
+files the launch needs are present in the real artifact.
 
 Exit codes:
 

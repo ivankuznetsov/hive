@@ -290,6 +290,33 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_observation_boundary_reraises_metadata_errors_admission_accepts
+    with_tmp_dir do |root|
+      folder = File.join(root, ".hive-state", "stages", "4-execute", "task")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        slug: "task", folder: folder, project_root: root, project_name: File.basename(root)
+      )
+      invalid = ->(*) { raise Hive::TaskMeta::InvalidMetadata, "unobservable" }
+      admitted = []
+
+      error = with_replaced_singleton_method(Hive::TaskMeta, :observe, invalid) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot, :enforce_admission!, ->(current) { admitted << current }
+        ) do
+          assert_raises(Hive::TaskMeta::InvalidMetadata) do
+            Hive::DependencySnapshot.observe_for_admission!(
+              task, missing_message: "task disappeared"
+            )
+          end
+        end
+      end
+
+      assert_equal "unobservable", error.message
+      assert_equal [ task ], admitted
+    end
+  end
+
   def test_admission_context_preserves_invalid_dependency_reference_as_its_exact_error
     with_tmp_dir do |root|
       slug = "invalid-reference-task"

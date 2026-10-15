@@ -1884,6 +1884,64 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_advance_claims_the_observed_lease_under_project_commit_custody
+    with_task(standard_plan) do |task, cfg|
+      claims = []
+      claim = lambda do |folder, *, **kwargs|
+        claims << [ folder, kwargs ]
+        raise Hive::ConcurrentRunError.new("stop after the claim")
+      end
+
+      with_replaced_singleton_method(Hive::Lock, :with_task_lock, claim) do
+        assert_raises(Hive::ConcurrentRunError) do
+          orchestrator(task, cfg, adapter: success_adapter).advance!
+        end
+      end
+
+      folder, kwargs = claims.fetch(0)
+      assert_equal task.folder, folder
+      assert_equal File.dirname(File.dirname(File.dirname(task.folder))),
+                   kwargs.fetch(:acquire_under_commit_lock)
+      assert_equal false, kwargs.fetch(:create)
+      assert_kind_of Hive::TaskMeta::Observation, kwargs.fetch(:observation)
+    end
+  end
+
+  def test_review_requirement_refuses_mutation_without_lifecycle_custody
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::ConcurrentRunError) do
+        runner.send(:ensure_review_requirement!)
+      end
+
+      assert_includes error.message, "requires lifecycle custody"
+      refute Hive::TaskMeta.plan_review_required?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_reports_invalid_metadata_under_custody
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      invalid = ->(*) { raise Hive::TaskMeta::InvalidMetadata, "corrupt" }
+
+      error = with_runner_custody(runner, task) do
+        with_replaced_singleton_method(Hive::TaskMeta, :plan_review_required?, invalid) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
+        end
+      end
+
+      assert_includes error.message, "could not be persisted: corrupt"
+    end
+  end
+
   private
 
   def with_runner_custody(runner, task, observation: nil)

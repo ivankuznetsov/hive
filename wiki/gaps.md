@@ -38,43 +38,12 @@ Hive now renders MCP for every agent it launches (plan
   component's `PI` profile still says `0.70.2`. Raising it needs its own
   package change and release (`docs/RELEASING.md`, "Releasing
   agent-cli-runtime"); until then cfg-less profile lookups keep the old floor.
-- **Closed 2026-10-15: hivebox Docker image and live-skills workflow Pi package.**
-  The Dockerfile installed `@mariozechner/pi@0.70.2`, which ships only a
-  `pi-pods` binary (no `pi`), and the live-agent-skills workflow installed the
-  deprecated `@mariozechner/pi-coding-agent` (latest 0.73.1, below the new
-  floor). Both now install `@earendil-works/pi-coding-agent` (Docker pinned to
-  1.2.0, bin `pi`), which the npm registry names as its replacement.
-- **Codex OAuth reuse verified 2026-10-15; Claude still open.** A live
-  `codex exec --ignore-user-config` run with only a Hive-rendered
-  `-c mcp_servers.writero.url=… -c mcp_servers.writero.oauth_resource=…`
-  connected to writero (the operator's one Codex OAuth login) and completed
-  `list_mcp_resources` / `list_mcp_resource_templates` with no `AuthRequired`,
-  matching the same probe under the normal user config. So Codex resolves the
-  saved login from server name + URL. Linear and the Cloudflare servers fail
-  either way because `codex mcp list` reports them `not_logged_in` for the user
-  config too. Still unverified: Claude needs a `hive mcp login` first; whether
-  Claude hashes `${VAR}` headers raw or expanded in its login key; and
-  `claude mcp login` is assumed to find only servers in Claude's own config.
-- **The native `codex review` reviewer is not isolated.** Top-level `codex
-  review` has no `--ignore-user-config`; it logs an isolation warning. Moving
-  to `codex exec review --ignore-user-config` needs one sample run compared
-  with `review_body` / `NATIVE_FINDING` parsing.
-- **Codex settings outside the carried-over list are dropped**, including the
-  project `.codex/config.toml` layer, multi-line values, and provider keys that
-  look like credentials (`http_headers`, `*_api_key`); Hive logs a notice for
-  the carried keys it skipped. Doctor's `mcp/codex-config` row lists what is
-  carried.
-- **Grok runs keep their own MCP servers** (no isolation flag; doctor warns).
-- **Login-presence formats for Pi (`mcp-auth.json`) and Grok are inferred** from
-  docs, not observed; OpenCode logins are not detected at all. OpenCode, Pi and
-  Grok have no `hive mcp login` path.
-- **`codex mcp list --json` may contact servers** for OAuth discovery while
-  reporting `auth_status`; `hive mcp import` and `hive doctor` call it.
-- **SSE servers cannot enter the catalog**; import refuses them.
-- **Screenote is not wired to any stage** (`Hive::Screenote::McpConfig#write!`
-  has no caller); wiring it through the catalog is open.
-- **Bypass launchers log no MCP notices.** The diagnosis, digest and
-  display-name launchers render MCP but have no launch log for notices.
+- **Closed 2026-10-15: live-skills workflow Pi package.** The
+  live-agent-skills workflow installed the deprecated
+  `@mariozechner/pi-coding-agent` (latest 0.73.1, below the new floor); it now
+  installs `@earendil-works/pi-coding-agent`, which the npm registry names as
+  its replacement. (The Hivebox image that pinned `@mariozechner/pi@0.70.2` was
+  removed by ADR-055.)
 - **Bench harness Pi profiles** (`templates/builtins/bench/runtime/harness/`)
   launch Pi outside Hive and still declare `0.70.2`; they pass no `--no-mcp`.
 

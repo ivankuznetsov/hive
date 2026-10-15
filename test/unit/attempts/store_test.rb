@@ -263,6 +263,26 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_non_storage_unavailable_errors_remain_repository_errors_during_initialization
+    with_tmp_dir do |root|
+      unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+        "unsupported sqlite", code: :sqlite_version_unsupported
+      )
+      database = Object.new
+      database.define_singleton_method(:path) { File.join(root, "runtime.sqlite3") }
+      database.define_singleton_method(:open!) { |**| raise unavailable }
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Repository.new(
+          database: database, root: File.join(root, "payloads")
+        )
+      end
+
+      assert_equal "attempt runtime control plane is unavailable: unsupported sqlite", error.message
+      refute_path_exists File.join(root, "payloads")
+    end
+  end
+
   def test_non_storage_unavailable_errors_remain_repository_errors
     with_repository do |repository|
       unavailable = Hive::RuntimeControlPlane::Unavailable.new(

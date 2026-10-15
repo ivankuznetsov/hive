@@ -331,7 +331,11 @@ directory is a failure, not a skip.
 status on real Linux read-only mounts. It is excluded from the default suite
 and all six coverage shards; its focused product branches remain covered by
 the ordinary unit and integration suites. The gate builds the candidate from
-`ruby:3.4-slim`, runs as the state-owning uid with a read-only container root,
+`ruby:3.4-slim` (`test/support/status_read_only.Dockerfile`, whose build
+context is filtered by the BuildKit-scoped
+`test/support/status_read_only.Dockerfile.dockerignore` since the repository
+has no root `.dockerignore`), runs as the state-owning uid with a read-only
+container root,
 and fails rather than skips when Docker, mount enforcement, or any required
 scenario is unavailable. Run it locally with:
 

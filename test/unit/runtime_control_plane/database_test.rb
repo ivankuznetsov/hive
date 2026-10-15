@@ -195,6 +195,39 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_mountinfo_confirmation_fails_closed_on_any_malformed_row
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(root, options: "ro", super_options: "ro") +
+          "36 25 0:32 / #{root} ro no-separator-row\n"
+      )
+
+      refute database.confirmed_read_only_storage?,
+             "a matching read-only row must not confirm a partially unparseable table"
+      assert_equal(
+        { status: :unconfirmed, reason: :invalid_mountinfo },
+        database.instance_variable_get(:@storage_mount_diagnostic)
+      )
+    end
+  end
+
+  def test_mount_confirmation_fails_closed_when_post_fork_reset_fails
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      database = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(root, options: "ro", super_options: "ro")
+      )
+      assert database.confirmed_read_only_storage?
+
+      database.instance_variable_set(:@owner_pid, Process.pid + 1)
+      database.define_singleton_method(:disconnect) { raise IOError, "inherited handle" }
+
+      refute database.confirmed_read_only_storage?
+    end
+  end
+
   def test_mountinfo_parser_fails_closed_if_a_validated_field_disappears
     fields = Array.new(10, "field")
     fields[6] = "-"

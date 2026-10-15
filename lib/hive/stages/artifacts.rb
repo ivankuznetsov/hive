@@ -542,7 +542,9 @@ module Hive
             prompt: prompt,
             add_dirs: launch_dirs,
             cwd: writable_root || task.worktree_path || task.folder,
-            max_budget_usd: cfg.dig("budget_usd", "artifacts") || Hive::Config::DEFAULTS.dig("budget_usd", "artifacts"),
+            max_budget_usd: Hive::Stages::Base.stage_budget_usd(
+              cfg, "artifacts", profile, default: Hive::Config::DEFAULTS.dig("budget_usd", "artifacts")
+            ),
             timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
             log_label: "artifacts-#{role}-#{context_id}", profile: profile,
             status_mode: :exit_code_only, cfg: cfg,
@@ -648,7 +650,7 @@ module Hive
               runtime_policy: producer_runtime_policy
             )
           end
-          unless Hive::AgentSupport.supports?(profile, :Interactive)
+          unless Hive::AgentSupport.supports?(profile, :Launch)
             raise Hive::ConfigError,
                   "outcome-evidence producer agent #{profile.name.inspect} cannot enforce " \
                   "controller-scoped evidence writes"
@@ -670,7 +672,7 @@ module Hive
            !(spec.is_a?(Hash) && spec["preset"].to_s == "read-only")
           raise Hive::ConfigError, "artifacts.evidence.#{role} permissions cannot exceed read-only"
         end
-        stage_scoped = Hive::AgentSupport.supports?(profile, :Interactive) ||
+        stage_scoped = Hive::AgentSupport.supports?(profile, :Launch) ||
           Hive::AgentSupport.supports?(profile, :LaunchPolicy)
         if role != "producer" && !stage_scoped
           if profile.read_only_supported?

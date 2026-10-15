@@ -52,7 +52,7 @@ The v1 reviewer adapter. `run!`:
    deletes only the staged file and returns it as `Result#output_path`, allowing
    orchestration cleanup without deleting a prior successful canonical file.
 
-When `claude.mode: tmux`, `Stages::Review.run_reviewers` opens one shared `Hive::ClaudeLauncher` session per pass for Claude agent reviewers. `Reviewers::Agent#run_in_session!` sends each Claude reviewer prompt into that same pane sequentially and waits on that reviewer's staging path before publishing it atomically. Non-Claude reviewers and all reviewers under `claude.mode: headless` keep the `run!` / `spawn_agent` path.
+Claude agent reviewers take the same `run!` / `spawn_agent` path as every other reviewer: each is an independent headless `claude -p` spawn with its own staging path, permission scope, and routing arguments. There is no shared per-pass Claude session, so a review pass may get less prompt-cache reuse across Claude reviewers than the retired tmux session did.
 
 `status_mode: :output_file_exists` is critical: reviewer spawns own a per-pass output file, not the task marker — the orchestrator's `REVIEW_WORKING` marker must persist across each reviewer's spawn (per ADR-021).
 

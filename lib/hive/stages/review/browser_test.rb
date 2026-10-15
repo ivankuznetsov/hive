@@ -126,7 +126,7 @@ module Hive
             prompt: prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
-            max_budget_usd: cfg.dig("budget_usd", "review_browser") || 25,
+            max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_browser", profile, default: 25),
             timeout_sec: cfg.dig("timeout_sec", "review_browser") || 900,
             log_label: "review-browser-pass#{format('%02d', ctx.pass)}-attempt#{format('%02d', attempt)}",
             profile: profile,
@@ -141,13 +141,8 @@ module Hive
             status_mode: :output_file_exists
           }
           spawn_result =
-            if Hive::AgentSupport.supports?(profile, :Interactive)
-              Hive::Stages::Base.spawn_claude!(
-                task,
-                cfg,
-                **kwargs,
-                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-browser-pass#{ctx.pass}-attempt#{attempt}", task)
-              )
+            if Hive::AgentSupport.supports?(profile, :Launch)
+              Hive::Stages::Base.spawn_claude!(task, cfg, **kwargs)
             else
               Hive::Stages::Base.spawn_agent(task, **kwargs)
             end

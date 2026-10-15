@@ -3,11 +3,11 @@ title: Templates
 type: reference
 source: templates/, lib/hive/llm_wiki_bootstrap/scripts.rb
 created: 2026-04-25
-updated: 2026-07-21
+updated: 2026-10-14
 tags: [template, erb, prompt, llm-wiki]
 ---
 
-**TLDR**: Templates under `templates/` cover config scaffolding, task capture, stage/review prompts, the evidence-backed PR changelist prompt, and the managed llm-wiki shell scripts. Agent-owned tmux-stage templates finish with an explicit required completion section that makes the terminal marker the literal final instruction. The 6-review fix prompt stays scoped to accepted findings, with one bounded exception: when a finding names a recurring defect class, the fix agent should fix every same-defect site in that pass rather than one cited line. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
+**TLDR**: Templates under `templates/` cover config scaffolding, task capture, stage/review prompts, the evidence-backed PR changelist prompt, and the managed llm-wiki shell scripts. Agent-owned marker-stage templates finish with an explicit required completion section that makes the terminal marker the literal final instruction. The 6-review fix prompt stays scoped to accepted findings, with one bounded exception: when a finding names a recurring defect class, the fix agent should fix every same-defect site in that pass rather than one cited line. (The retired Telegram "Codex draft-assist" brainstorm template `bot_brainstorm_codex_prompt.md.erb` was deleted; see [[modules/bot]].)
 
 ## LLM wiki script templates
 
@@ -150,7 +150,7 @@ As of commit `ce3f7978`, the prompt's scoped-edit rule has one deliberate except
 
 The runner determines completion for agent-owned marker files from the marker
 written into the state file, not from the agent process returning to an idle
-prompt. The tmux-sensitive marker-owning templates `plan_prompt.md.erb` and
+prompt. The marker-owning templates `plan_prompt.md.erb` and
 `finalize_prompt.md.erb` therefore end with a "Completion - REQUIRED" section
 that tells the agent to write the exact terminal marker as the last line and not
 yield until that marker exists.

@@ -10,7 +10,7 @@ require "hive/stages/review"
 require "hive/stages/review/ci_fix"
 require "hive/reviewers"
 
-class ClaudeModeDispatchTest < Minitest::Test
+class ClaudeStageDispatchTest < Minitest::Test
   include HiveTestHelper
 
   TaskStub = Struct.new(
@@ -59,13 +59,13 @@ class ClaudeModeDispatchTest < Minitest::Test
 
   def test_plan_uses_claude_launcher_for_claude_profile
     with_tmp_dir do |dir|
-      cfg = { "claude" => { "mode" => "tmux" } }
+      cfg = {}
       task = make_task(dir)
       with_spawn_capture do |captured|
         Hive::Stages::Plan.spawn_plan_agent(task, cfg, "prompt", claude_profile(cfg))
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
-        assert_equal "hive-3-plan-dispatch-test", captured[0][:kwargs][:session_name]
+        refute captured[0][:kwargs].key?(:session_name)
         # G3: plan uses the narrow allowed_tools set (no Bash/Glob/Grep) —
         # planning operates on prose, not the worktree.
         assert_equal "Read,Write,Edit,LS", captured[0][:kwargs][:allowed_tools]
@@ -75,7 +75,7 @@ class ClaudeModeDispatchTest < Minitest::Test
 
   def test_plan_adds_the_execution_base_checkout_to_the_planner_dirs
     with_tmp_dir do |dir|
-      cfg = { "claude" => { "mode" => "tmux" } }
+      cfg = {}
       task = make_task(dir)
       with_spawn_capture do |captured|
         Hive::Stages::Plan.spawn_plan_agent(
@@ -87,9 +87,9 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
-  def test_brainstorm_headless_claude_mode_still_uses_claude_launcher
+  def test_brainstorm_claude_uses_claude_launcher_with_caller_cfg
     with_tmp_dir do |dir|
-      cfg = { "claude" => { "mode" => "headless" } }
+      cfg = { "claude" => { "permission_mode" => "auto" } }
       task = make_task(dir, stage_name: "brainstorm", state_name: "brainstorm.md")
       File.write(File.join(task.folder, "idea.md"), "test idea")
 
@@ -97,16 +97,14 @@ class ClaudeModeDispatchTest < Minitest::Test
         Hive::Stages::Brainstorm.run!(task, cfg)
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
-        assert_equal "headless", captured[0][:cfg].dig("claude", "mode")
+        assert_same cfg, captured[0][:cfg]
       end
     end
   end
 
-
   def test_plan_keeps_non_claude_profile_on_headless_spawn
     with_tmp_dir do |dir|
       cfg = {
-        "claude" => { "mode" => "tmux" },
         "agents" => {
           "codex" => { "bin" => "codex" }
         }
@@ -164,7 +162,6 @@ class ClaudeModeDispatchTest < Minitest::Test
   def test_execute_uses_claude_launcher_for_claude_implementer
     with_tmp_dir do |dir|
       cfg = {
-        "claude" => { "mode" => "tmux" },
         "execute" => { "agent" => "claude" }
       }
       task = make_task(dir, stage_name: "execute", state_name: "task.md")
@@ -176,7 +173,7 @@ class ClaudeModeDispatchTest < Minitest::Test
         Hive::Stages::Execute.spawn_implementation(task, cfg, worktree_path)
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
-        assert_equal "hive-4-execute-dispatch-test", captured[0][:kwargs][:session_name]
+        refute captured[0][:kwargs].key?(:session_name)
         assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured[0][:kwargs][:allowed_tools]
       end
     end
@@ -185,7 +182,6 @@ class ClaudeModeDispatchTest < Minitest::Test
   def test_execute_keeps_non_claude_implementer_on_headless_spawn
     with_tmp_dir do |dir|
       cfg = {
-        "claude" => { "mode" => "tmux" },
         "execute" => { "agent" => "codex" },
         "agents" => {
           "codex" => { "bin" => "codex" }
@@ -235,10 +231,9 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
-  def test_execute_forwards_routed_claude_arguments_to_tmux_launcher
+  def test_execute_forwards_routed_claude_arguments_to_claude_launcher
     with_tmp_dir do |dir|
       cfg = routed_identity_config(provider: "claude", stage: "execute_implementation")
-      cfg["claude"] = { "mode" => "tmux" }
       task = make_task(dir, stage_name: "execute", state_name: "task.md")
       File.write(File.join(task.folder, "plan.md"), "## Plan\n")
       worktree_path = File.join(dir, "worktree")
@@ -260,9 +255,9 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
-  def test_open_pr_and_finalize_use_stage_specific_claude_sessions
+  def test_open_pr_and_finalize_use_claude_launcher_with_wide_tools
     with_tmp_dir do |dir|
-      cfg = { "claude" => { "mode" => "tmux" } }
+      cfg = {}
       task = make_task(dir, stage_name: "open-pr", state_name: "pr.md")
       worktree_path = File.join(dir, "worktree")
       FileUtils.mkdir_p(worktree_path)
@@ -272,8 +267,8 @@ class ClaudeModeDispatchTest < Minitest::Test
         Hive::Stages::Finalize.spawn_finalize_agent(task, cfg, "prompt", claude_profile(cfg), worktree_path)
 
         assert_equal [ :claude, :claude ], captured.map { |call| call[:launcher] }
-        assert_equal "hive-5-open-pr-dispatch-test", captured[0][:kwargs][:session_name]
-        assert_equal "hive-8-finalize-dispatch-test", captured[1][:kwargs][:session_name]
+        refute captured[0][:kwargs].key?(:session_name)
+        refute captured[1][:kwargs].key?(:session_name)
         # G3: open-pr and finalize both need the WIDE allowed_tools set
         # (Bash/Glob/Grep) — they read the worktree and run git/gh.
         assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured[0][:kwargs][:allowed_tools]
@@ -284,7 +279,7 @@ class ClaudeModeDispatchTest < Minitest::Test
 
   def test_open_pr_forwards_codex_utility_identity_arguments
     with_tmp_dir do |dir|
-      cfg = { "claude" => { "mode" => "tmux" } }
+      cfg = {}
       task = make_task(dir, stage_name: "open-pr", state_name: "pr.md")
       worktree_path = File.join(dir, "worktree")
       FileUtils.mkdir_p(worktree_path)
@@ -433,6 +428,139 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
+  # Every Claude stage launch with the default config reaches the headless
+  # `claude -p` spawn through ClaudeLauncher (no stub on spawn_claude!).
+  def test_default_config_claude_stage_launches_reach_headless_spawn_agent
+    with_tmp_dir do |dir|
+      cfg = {}
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      captured = []
+      spawn = lambda do |_task, **kwargs|
+        captured << kwargs
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        plan_task = make_task(dir)
+        Hive::Stages::Plan.spawn_plan_agent(plan_task, cfg, "prompt", claude_profile(cfg))
+
+        brainstorm_task = make_task(dir, stage_name: "brainstorm", state_name: "brainstorm.md")
+        File.write(File.join(brainstorm_task.folder, "idea.md"), "test idea")
+        Hive::Stages::Brainstorm.run!(brainstorm_task, cfg)
+
+        execute_task = make_task(dir, stage_name: "execute", state_name: "task.md")
+        File.write(File.join(execute_task.folder, "plan.md"), "## Plan\n")
+        Hive::Stages::Execute.spawn_implementation(execute_task, cfg, worktree_path)
+
+        Hive::Stages::OpenPr.spawn_open_pr_agent(plan_task, cfg, "prompt", claude_profile(cfg), worktree_path)
+        Hive::Stages::Finalize.spawn_finalize_agent(plan_task, cfg, "prompt", claude_profile(cfg), worktree_path)
+
+        review_task = make_task(dir, stage_name: "review", state_name: "task.md")
+        FileUtils.mkdir_p(File.join(review_task.folder, "reviews"))
+        FileUtils.mkdir_p(File.join(review_task.folder, "logs"))
+        ctx = Hive::Reviewers::Context.new(
+          worktree_path: worktree_path, task_folder: review_task.folder,
+          default_branch: "main", pass: 1
+        )
+        Hive::Stages::Review.spawn_fix_agent(review_task, cfg, ctx, accepted: [])
+        Hive::Stages::Review::CiFix.spawn_fix_agent(
+          cfg: cfg, ctx: ctx, command: [ "bin/test" ], attempt: 1,
+          max_attempts: 2, captured_output: "failure"
+        )
+      end
+
+      assert_equal 7, captured.length
+      captured.each do |kwargs|
+        assert_equal :claude, kwargs.fetch(:profile).name
+        refute kwargs.key?(:session_name)
+      end
+      assert_equal %w[plan brainstorm execute-impl open-pr-author finalize review-fix-pass01],
+                   captured.first(6).map { |kwargs| kwargs.fetch(:log_label) }
+      # Yolo (the default scope) keeps each stage's default --allowedTools.
+      assert_equal "Read,Write,Edit,LS", captured.fetch(0).fetch(:allowed_tools)
+      assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured.fetch(2).fetch(:allowed_tools)
+    end
+  end
+
+  # A headless Claude launch that raises AgentError in plan lands the
+  # `claude_launch_failed` marker on the plan's own state file and returns
+  # an error envelope instead of escaping as a crash (daemon auto-retry
+  # keys on that reason).
+  def test_plan_claude_launch_failure_writes_claude_launch_failed_marker
+    with_tmp_dir do |dir|
+      cfg = {}
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- AGENT_WORKING -->\n")
+      spawn = ->(_task, **_kwargs) { raise Hive::AgentError, "claude binary not runnable" }
+
+      result = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::Plan.spawn_plan_agent(task, cfg, "prompt", claude_profile(cfg))
+        end
+      end
+
+      assert_equal({ status: :error, error_message: "claude binary not runnable" }, result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "claude_launch_failed", marker.attrs["reason"]
+      assert_equal "Hive::AgentError", marker.attrs["exception_class"]
+      assert_includes marker.attrs["message"], "claude binary not runnable"
+      assert_includes err, "claude launch failed"
+    end
+  end
+
+  # A plan already WAITING from an earlier run whose relaunch fails Claude
+  # preflight must end on an error marker, so the old draft never reaches
+  # plan review as a fresh `draft_updated`.
+  def test_plan_preflight_failure_replaces_waiting_marker_before_plan_review
+    with_tmp_dir do |dir|
+      cfg = {}
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      preflight = ->(*, **) { raise Hive::AgentError, "claude binary not found" }
+      reviewed = false
+
+      result = nil
+      capture_io do
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, preflight) do
+          result = Hive::Stages::Plan.spawn_plan_agent(task, cfg, "prompt", claude_profile(cfg))
+        end
+      end
+      marker = Hive::Markers.current(task.state_file)
+      with_replaced_singleton_method(Hive::PlanReview::Orchestrator, :run!, ->(**) { reviewed = true }) do
+        assert_nil Hive::Stages::Plan.start_plan_review(task, cfg, claude_profile(cfg), result, marker)
+      end
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal :error, marker.name
+      assert_equal "claude_launch_failed", marker.attrs["reason"]
+      assert_equal "error", Hive::Stages::Plan.action_for(marker.name)
+      refute reviewed, "a failed launch must not send the previous draft to plan review"
+    end
+  end
+
+  # Claude enforces --max-budget-usd, so it is capped only by a budget the
+  # project config sets. Other agents keep the merged value or fallback.
+  def test_stage_budget_usd_caps_claude_only_when_configured
+    claude = Hive::AgentProfiles.lookup(:claude)
+    codex = Hive::AgentProfiles.lookup(:codex)
+    defaults_only = {
+      "budget_usd" => { "plan" => 100 },
+      Hive::Config::EXPLICIT_RESOURCE_LIMITS_KEY => { "budget_usd" => [] }
+    }
+    configured = {
+      "budget_usd" => { "plan" => 30 },
+      Hive::Config::EXPLICIT_RESOURCE_LIMITS_KEY => { "budget_usd" => [ "plan" ] }
+    }
+
+    assert_nil Hive::Stages::Base.stage_budget_usd(defaults_only, "plan", claude, default: 50)
+    assert_equal 30, Hive::Stages::Base.stage_budget_usd(configured, "plan", claude)
+    assert_equal 100, Hive::Stages::Base.stage_budget_usd(defaults_only, "plan", codex)
+    assert_equal 50, Hive::Stages::Base.stage_budget_usd({}, "open_pr", codex, default: 50)
+  end
+
   def identity_config
     fields = { "agent" => "codex", "model" => "gpt-5.6-sol" }.freeze
     {
@@ -465,13 +593,13 @@ class ClaudeModeDispatchTest < Minitest::Test
   end
 
 
-  # G3: brainstorm via the new claude-on-tmux path lands the narrow
+  # G3: brainstorm via the Claude launcher lands the narrow
   # allowed_tools set. A copy-paste regression that widened brainstorm
   # to Bash would extend the prompt-injection blast radius from idea.md
   # to the project worktree — pin the narrow set explicitly.
-  def test_brainstorm_claude_tmux_uses_narrow_allowed_tools
+  def test_brainstorm_claude_uses_narrow_allowed_tools
     with_tmp_dir do |dir|
-      cfg = { "claude" => { "mode" => "tmux" } }
+      cfg = {}
       task = make_task(dir, stage_name: "brainstorm", state_name: "brainstorm.md")
       File.write(File.join(task.folder, "idea.md"), "test idea")
 

@@ -210,7 +210,7 @@ module Hive
           prompt: prompt,
           add_dirs: (scope.fetch(:add_dirs) + [ source_checkout ].compact).uniq,
           cwd: task.folder,
-          max_budget_usd: cfg.dig("budget_usd", "plan"),
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "plan", profile),
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
           profile: profile,
@@ -221,13 +221,8 @@ module Hive
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
-        if Hive::AgentSupport.supports?(profile, :Interactive)
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task,
-            cfg,
-            **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task) # coding-scoped: coding plan stage tmux session
-          )
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end

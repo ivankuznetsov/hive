@@ -39,7 +39,6 @@ class HiveCommandsInitTest < Minitest::Test
 
   def test_project_config_binding_accepts_complete_prompt_answers
     answers = project_config_answers.merge(
-      "claude_mode" => "headless",
       "patrol_mode" => "high",
       "triage_bias" => "safetyist",
       "adhoc_auto_fix" => true,
@@ -53,7 +52,6 @@ class HiveCommandsInitTest < Minitest::Test
     assert_equal "main", config_binding.default_branch
     assert_equal "/tmp/example.worktrees", config_binding.worktree_root
     assert_equal "claude", config_binding.planning_agent
-    assert_equal "headless", config_binding.claude_mode
     assert_equal "codex", config_binding.development_agent
     assert_equal Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES, config_binding.enabled_reviewers
     assert_equal Hive::Commands::Init::Prompts::DEFAULT_PATROL_REVIEWER_NAMES, config_binding.patrol_reviewers
@@ -61,7 +59,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_equal "safetyist", config_binding.triage_bias
     assert_equal true, config_binding.adhoc_auto_fix
     assert_equal false, config_binding.refactor_patrol_enabled
-    assert_equal default_init_limits("budget_usd"), config_binding.budgets
+    assert_equal Hive::Commands::Init::Prompts.no_budgets, config_binding.budgets
     assert_equal default_init_limits("timeout_sec"), config_binding.timeouts
     refute config_binding.daemon_enabled
   end
@@ -322,6 +320,13 @@ class HiveCommandsInitTest < Minitest::Test
     rendered = YAML.safe_load(render_fresh_config("coding"), aliases: true)
 
     assert_equal 1800, rendered.dig("plan_review", "attempts", "timeout_sec")
+  end
+
+  def test_fresh_render_writes_no_claude_launch_mode
+    rendered = YAML.safe_load(render_fresh_config("coding"), aliases: true)
+
+    refute rendered.fetch("claude").key?("mode"), "claude.mode is retired; init must not write it"
+    assert_equal "bypassPermissions", rendered.dig("claude", "permission_mode")
   end
 
   def render_fresh_config(default_workflow, answers: project_config_answers)
@@ -632,7 +637,6 @@ def test_emit_json_summary_swallows_epipe
   ops = Struct.new(:default_branch).new("main")
   answers = {
     "planning_agent" => "claude",
-    "claude_mode" => "tmux",
     "development_agent" => "codex",
     "enabled_reviewers" => [],
     "patrol_reviewers" => [ "codex-ce-code-review" ],

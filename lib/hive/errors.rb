@@ -201,9 +201,6 @@ module Hive
   class ProviderRouteFailed < AgentError
   end
 
-  class TmuxError < AgentError
-  end
-
   # A project config reached the shared loader with unsupported root keys.
   # Task/workflow discovery may recover from unreadable or otherwise invalid
   # config to preserve legacy task visibility, but this validation result must

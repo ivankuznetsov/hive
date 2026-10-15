@@ -162,6 +162,33 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # A Claude reviewer is capped only by a budget its spec sets; other
+  # agents keep the 50 USD fallback.
+  def test_reviewer_budget_caps_claude_only_when_the_spec_sets_one
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      budgets = {}
+      spawn = lambda do |_task, **options|
+        budgets[options.fetch(:profile).name] = options.fetch(:max_budget_usd)
+        File.write(options.fetch(:expected_output), "## High\nNo findings.\n")
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        assert Hive::Reviewers::Agent.new(make_spec.except("budget_usd"), ctx, cfg: {}).run!.ok?
+        assert Hive::Reviewers::Agent.new(
+          make_spec("agent" => "pi").except("budget_usd"), ctx, cfg: {}
+        ).run!.ok?
+      end
+      assert_equal({ claude: nil, pi: 50 }, budgets)
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        assert Hive::Reviewers::Agent.new(make_spec("budget_usd" => 9), ctx, cfg: {}).run!.ok?
+      end
+      assert_equal 9, budgets[:claude]
+    end
+  end
+
   def test_top_level_models_route_overrides_stage_local_reviewer_model
     with_tmp_dir do |dir|
       ctx = make_ctx(dir)
@@ -639,29 +666,6 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
-
-  def test_run_in_session_passes_deadline_to_shared_handle
-    with_tmp_dir do |dir|
-      reviewer, _ = with_stubbed_adapter(dir)
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
-      calls = []
-      handle = Object.new
-      handle.define_singleton_method(:send_and_wait!) do |**kwargs|
-        calls << kwargs
-        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
-        { status: :ok }
-      end
-
-      result = reviewer.run_in_session!(handle: handle, deadline: deadline)
-
-      assert result.ok?
-      assert_equal 1, calls.size
-      assert_equal deadline, calls.first.fetch(:deadline)
-      assert calls.first.fetch(:timeout_sec) <= 2,
-             "shared-session timeout must be clamped to the reviewer deadline"
-    end
-  end
-
   def test_run_uses_default_timeout_when_spec_omits_timeout
     with_tmp_dir do |dir|
       reviewer, _ = with_stubbed_adapter(dir, "timeout_sec" => nil)
@@ -885,6 +889,93 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # Under tmux, Claude reviewers got the AskUserQuestion deny through the
+  # shared session; a headless reviewer spawn must carry it in argv.
+  def test_claude_reviewer_argv_denies_ask_user_question
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
+
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
+
+      reviewer.run!
+
+      argv = File.readlines(File.join(log_dir, "fake-claude-argv.log"), chomp: true)
+      deny_index = argv.index("arg=--disallowedTools")
+      refute_nil deny_index, "Claude reviewer spawn must pass --disallowedTools"
+      denied = argv.fetch(deny_index + 1).delete_prefix("arg=").split(",")
+      assert_equal 1, denied.count("AskUserQuestion")
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
+  # The retired shared tmux session gave Claude reviewers the implementer
+  # allowlist and claude.permission_mode; the headless spawn must too.
+  def test_yolo_claude_reviewer_argv_honors_permission_mode_and_implementer_tools
+    argv = claude_reviewer_argv("claude" => { "permission_mode" => "dontAsk" })
+
+    assert_equal Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS, argv_value(argv, "--allowedTools")
+    assert_equal "dontAsk", argv_value(argv, "--permission-mode")
+    refute_includes argv, "arg=--dangerously-skip-permissions"
+  end
+
+  def test_yolo_claude_reviewer_argv_keeps_bypass_under_default_config
+    argv = claude_reviewer_argv(nil)
+
+    assert_equal Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS, argv_value(argv, "--allowedTools")
+    assert_includes argv, "arg=--dangerously-skip-permissions"
+    refute_includes argv, "arg=--permission-mode"
+  end
+
+  def test_codex_reviewer_gains_no_claude_permission_mode_or_allowlist
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      reviewer = Hive::Reviewers::Agent.new(
+        make_spec("agent" => "codex"), ctx,
+        cfg: { "claude" => { "permission_mode" => "dontAsk" } }
+      )
+      captured = nil
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        File.write(kwargs.fetch(:expected_output), "## High\nNo findings.\n")
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        assert reviewer.run!.ok?
+      end
+
+      assert_equal :codex, captured.fetch(:profile).name
+      assert_nil captured.fetch(:permission_mode)
+      assert_nil captured.fetch(:allowed_tools)
+    end
+  end
+
+  def claude_reviewer_argv(cfg)
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx, cfg: cfg)
+      log_dir = File.join(dir, "argv-log")
+      FileUtils.mkdir_p(log_dir)
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = reviewer.failure_output_path
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## High\n- [ ] f: j\n"
+
+      assert reviewer.run!.ok?
+      File.readlines(File.join(log_dir, "fake-claude-argv.log"), chomp: true)
+    end
+  end
+
+  def argv_value(argv, flag)
+    index = argv.index("arg=#{flag}")
+    refute_nil index, "expected #{flag} in argv"
+    argv.fetch(index + 1).delete_prefix("arg=")
+  end
+
   # --- Plan-context flow through to spawned subprocess argv ---
   #
   # The render_prompt tests (above) verify the prompt STRING is built
@@ -947,19 +1038,6 @@ class ReviewersAgentTest < Minitest::Test
                    "no wrapper tag in the spawn argv when plan.md is absent")
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
-    end
-  end
-  def test_run_in_shared_session_rejects_non_claude_profile
-    with_tmp_dir do |dir|
-      ctx = make_ctx(dir)
-      FileUtils.mkdir_p(ctx.task_folder)
-      reviewer = Hive::Reviewers::Agent.new(make_spec("agent" => "codex"), ctx)
-
-      err = assert_raises(Hive::AgentError) do
-        reviewer.run_in_session!(handle: Object.new)
-      end
-
-      assert_match(/shared Claude reviewer session cannot run :codex/, err.message)
     end
   end
 end

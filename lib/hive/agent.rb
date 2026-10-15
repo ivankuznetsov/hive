@@ -41,8 +41,7 @@ module Hive
     # not as a child-environment input. nil unsets the var for the child so
     # an operator's exported HIVE_SCREENOTE_BASE_URL can't become a
     # redundant, unvalidated second source that overrides hive's chosen
-    # base_url. Mirrors the tmux path's blanking in
-    # Hive::ClaudeLauncher.build_runner and the wrapper's `unset`.
+    # base_url.
     SCRUBBED_CHILD_ENV = {
       "HIVE_SCREENOTE_BASE_URL" => nil,
       **SCRUBBED_TOOLCHAIN_ENV_KEYS.to_h { |key| [ key, nil ] }

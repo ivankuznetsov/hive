@@ -185,8 +185,8 @@ support model plus effort, while Pi supports routed model only. OpenCode model
 values are exact nested `provider/model` routes and faithful efforts render as
 `--variant`; a selected overlay config may supply the exact route when the
 stage omits it. Codex places routed
-controls before `exec`/`review`; Claude uses the same rendered flags in
-headless and tmux launches. Unsupported effective controls raise before the
+controls before `exec`/`review`; Claude renders them in its headless
+`claude -p` launch. Unsupported effective controls raise before the
 launcher performs work instead of being dropped.
 
 `STATUS_DETECTION_MODES` is the closed enum used by `Hive::Agent#handle_exit` to decide success: `state_file_marker` (claude default — agent writes the marker), `exit_code_only` (CI-fix loops — make the command succeed), `output_file_exists` (reviewer/triage spawns — produce the artifact).
@@ -242,7 +242,7 @@ from their profile, so projection reads in `Store` and legacy reconstruction
 in `Reconstructor` cannot diverge from the resolver's routed-versus-flat
 representation decision.
 
-- `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode` plus the minimal patrol review/fix contexts. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. Patrol retains usage counters for telemetry but uses the shared daily launch allowance for admission. A structured terminal `result/error_max_budget_usd` event is surfaced as the per-run `budget_exhausted` outcome, distinct from account/rate/quota `limits_reached` recovery; ordinary prose is never used to infer it. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
+- `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode` plus the minimal patrol review/fix contexts. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. Patrol retains usage counters for telemetry but uses the shared daily launch allowance for admission. A structured terminal `result/error_max_budget_usd` event is surfaced as the per-run `budget_exhausted` outcome, distinct from account/rate/quota `limits_reached` recovery; ordinary prose is never used to infer it. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, used by the headless `Hive::Agent` path that every Claude launch takes: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output, and dedicated read-only/workspace-write sandbox bundles (approval policy `never`, ephemeral execution, and ignored user config/rules) for architecture discovery and fixes. Prompts are delivered on stdin with `-` in argv. No native budget flag. Hive consumes usage events when present, but real interim-event coverage remains unverified, so spawn/day quotas and the wall-clock timeout are the provider-independent fallback. Min version `0.125.0`. `:output_file_exists`.
 - `pi` — no permission flag and no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018). The package probe checks for `auth.json` beneath the same validated `PI_CODING_AGENT_DIR` (or default `~/.pi/agent`) used by skill discovery. Min version `0.70.2`. `:output_file_exists`.
 - `grok` — headless via `-p <prompt>`, `--always-approve`, and
@@ -385,8 +385,8 @@ home and matches the isolated child-environment contract used for real CLIs.
 An admitted explicit route overrides mutable role/profile/model configuration
 at the final `Stages::Base.spawn_agent` seam. Every provider-backed invocation
 inside that durable attempt uses the persisted adapter, model, effort, and
-symbolic launch binding. Claude explicit routes are forced through the
-headless path so a persistent tmux session cannot escape the enclosing
+symbolic launch binding. Claude explicit routes use the same headless path
+as every other Claude launch, so each spawn runs under the enclosing
 attempt's account identity.
 
 `launch_binding: default` preserves the adapter's existing external session.

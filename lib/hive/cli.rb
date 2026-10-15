@@ -80,17 +80,16 @@ module Hive
 
         0. Workflow (when >1 workflow is registered)             — default coding
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
-        2. Claude launch mode (project-global, tmux/headless)    — default tmux
-        3. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
+        2. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
            (one of bypassPermissions/auto/default/acceptEdits/dontAsk/plan)
-        4. Development agent (drives 4-execute)                  — default codex
-        5. Review agents (multi-select over 3 default reviewers) — default all
-        6. Patrol PR review agents                               — default codex only
-        7. Triage bias (courageous / safetyist)                  — default courageous
-        8. Per-stage budget+timeout (10 stage/role pairs)        — default generous
-        9. Daemon enrollment                                     — default enabled
-       10. Hive babysitter enrollment                            — default enabled
-       11. Daemon autostart                                      — default disabled
+        3. Development agent (drives 4-execute)                  — default codex
+        4. Review agents (multi-select over 3 default reviewers) — default all
+        5. Patrol PR review agents                               — default codex only
+        6. Triage bias (courageous / safetyist)                  — default courageous
+        7. Per-stage budget+timeout (10 stage/role pairs)        — default generous
+        8. Daemon enrollment                                     — default enabled
+        9. Hive babysitter enrollment                            — default enabled
+       10. Daemon autostart                                      — default disabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -109,7 +108,7 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, claude_mode=tmux,
+        hive: using defaults — planning=claude,
         claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
         patrol_reviewers=codex-native-review, triage=courageous, limits=defaults,
         daemon=enabled, babysitter=enabled, daemon_autostart=disabled

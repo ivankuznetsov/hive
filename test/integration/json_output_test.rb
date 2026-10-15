@@ -27,7 +27,6 @@ class JsonOutputTest < Minitest::Test
 
   def init_project(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
-    set_project_claude_mode(dir, "headless")
   end
 
   def seed_execute_waiting_task(dir, slug:, reason:, worktree_path: dir)

@@ -1,7 +1,9 @@
 # ADR-030: Global Claude Launch Mode
 
-**Status:** Accepted
+**Status:** Superseded (2026-10-14) — Claude now launches only through headless `claude -p`; see ADR-053 in `wiki/decisions.md`.
 **Date:** 2026-05-22
+
+> **Superseded 2026-10-14.** This ADR chose an interactive tmux runtime so Claude-backed stages would bill the operator's Claude subscription instead of API-token usage. Anthropic has since confirmed that `claude -p` (print mode) is permitted under a Claude subscription, so the workaround is obsolete. Hive deleted the tmux launch runtime and the `claude.mode` setting: every Claude launch is headless, and Hive still unsets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_API_KEY` before launching Claude. A config that still sets `claude.mode` loads, the value is ignored, and `hive doctor` warns. The text below is the original record.
 
 ## Context
 

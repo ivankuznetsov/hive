@@ -108,17 +108,9 @@ docker exec -it <container> hive tui
 docker exec -it <container> tmux new -A -s tui hive tui
 ```
 
-Agent sessions are also reachable: the default project config runs Claude in
-`claude_mode=tmux`, so while the daemon executes a stage the live Claude
-session runs in a tmux session inside the container. Watch or steer it:
-
-```sh
-docker exec -it <container> tmux ls                 # list running agent sessions
-docker exec -it <container> tmux attach -t <name>   # attach; Ctrl-b d to detach
-```
-
-`tmux ls` reporting "no server running" just means no agent is mid-run and no
-tmux session has been started yet.
+Claude stages run as headless `claude -p` processes, so there is no agent
+session to attach to. Follow a running stage through its log under
+`<project>/.hive-state/logs/<slug>/` inside the container.
 
 ## Outcome-evidence capture
 

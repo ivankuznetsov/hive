@@ -1168,7 +1168,6 @@ module Hive
           "worktree_root" => worktree_root,
           "answers" => answers,
           "planning_agent" => answers.fetch("planning_agent"),
-          "claude_mode" => answers.fetch("claude_mode", Hive::Commands::Init::Prompts::DEFAULT_CLAUDE_MODE),
           "development_agent" => answers.fetch("development_agent"),
           "enabled_reviewers" => answers.fetch("enabled_reviewers"),
           "patrol_reviewers" => answers.fetch("patrol_reviewers"),
@@ -1542,7 +1541,7 @@ module Hive
       # ERB binding object for templates/project_config.yml.erb. Carries
       # the per-project scaffolding values (project name, default branch,
       # worktree root) plus the prompted answers hash from
-      # Hive::Commands::Init::Prompts (planning_agent / claude_mode /
+      # Hive::Commands::Init::Prompts (planning_agent /
       # claude_permission_mode / development_agent / enabled_reviewers /
       # patrol_reviewers / patrol_mode / triage_bias / adhoc_auto_fix /
       # refactor_patrol_enabled /
@@ -1561,7 +1560,6 @@ module Hive
           @worktree_root = worktree_root
           @default_workflow = default_workflow.to_s
           @planning_agent = answers.fetch("planning_agent")
-          @claude_mode = answers.fetch("claude_mode")
           @claude_permission_mode = answers.fetch("claude_permission_mode")
           # Strict fetch like every other answer key (both the TTY prompts
           # and the web InitSetup always supply them); blank model falls
@@ -1587,7 +1585,7 @@ module Hive
 
         attr_reader :project_name, :default_branch, :worktree_root,
                     :default_workflow,
-                    :planning_agent, :claude_mode, :claude_permission_mode,
+                    :planning_agent, :claude_permission_mode,
                     :claude_model, :claude_effort, :development_agent,
                     :enabled_reviewers, :patrol_reviewers, :patrol_mode, :triage_bias, :adhoc_auto_fix,
                     :refactor_patrol_enabled, :budgets, :timeouts,

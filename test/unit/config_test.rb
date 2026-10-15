@@ -1936,24 +1936,32 @@ class ConfigTest < Minitest::Test
       assert_equal "claude", cfg.dig("brainstorm", "agent"), "brainstorm agent must default to claude"
       assert_equal "claude", cfg.dig("plan", "agent"), "plan agent must default to claude"
       assert_equal "claude", cfg.dig("execute", "agent"), "execute agent must default to claude"
-      assert_equal :tmux, Hive::Config.claude_mode(cfg), "claude.mode must default to tmux"
+      refute cfg.fetch("claude").key?("mode"), "claude.mode is retired and has no default"
+      assert_equal false, Hive::Config.obsolete_claude_mode_key?(cfg),
+                   "a config without claude.mode leaves the obsolete-key flag unset"
       assert_equal "bypassPermissions", Hive::Config.claude_permission_mode(cfg),
                    "claude.permission_mode must default to bypassPermissions"
       assert_nil cfg.dig("brainstorm", "runtime")
     end
   end
 
-  def test_load_honors_claude_mode_override
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        claude:
-          mode: headless
-      YAML
-      cfg = Hive::Config.load(dir)
-      assert_equal :headless, Hive::Config.claude_mode(cfg)
-      assert_equal true, Hive::Config.explicit_claude_mode?(cfg)
+  # `claude.mode` is retired (Claude is headless-only). Any leftover value,
+  # including one the old validator rejected, loads, is ignored, and sets
+  # the obsolete-key flag `hive doctor` reads.
+  def test_load_tolerates_retired_claude_mode_key_and_flags_it
+    [ "tmux", "headless", "bogus", 42 ].each do |mode|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), { "claude" => { "mode" => mode } }.to_yaml)
+        cfg = Hive::Config.load(dir)
+        assert_equal true, Hive::Config.obsolete_claude_mode_key?(cfg), "mode=#{mode.inspect} must set the flag"
+        assert_equal "bypassPermissions", Hive::Config.claude_permission_mode(cfg)
+      end
     end
+  end
+
+  def test_obsolete_claude_mode_key_is_absent_on_synthesised_cfg
+    assert_equal false, Hive::Config.obsolete_claude_mode_key?("claude" => { "mode" => "tmux" })
   end
 
   def test_load_honors_claude_permission_mode_override
@@ -2212,33 +2220,6 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_raises_when_claude_mode_is_unknown
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        claude:
-          mode: warm_pool
-      YAML
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
-      assert_match(/claude\.mode/, err.message)
-      assert_match(/headless/, err.message)
-      assert_match(/tmux/, err.message)
-    end
-  end
-
-  def test_load_raises_when_claude_mode_is_not_a_string
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        claude:
-          mode: 42
-      YAML
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
-      assert_match(/claude\.mode/, err.message)
-      assert_match(/Integer/, err.message)
-    end
-  end
-
   def test_load_honors_per_project_stage_agent_overrides
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -2266,7 +2247,8 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/brainstorm\.runtime/, err.message)
-      assert_match(/claude.mode/, err.message)
+      assert_match(/brainstorm\.agent/, err.message)
+      refute_match(/claude\.mode/, err.message)
     end
   end
 
@@ -5545,15 +5527,6 @@ class ConfigTest < Minitest::Test
     assert_match(/reckless/, err.message)
   end
 
-  def test_claude_mode_rejects_unknown_value
-    err = assert_raises(Hive::ConfigError) do
-      Hive::Config.claude_mode("claude" => { "mode" => "warm_pool" })
-    end
-
-    assert_match(/claude\.mode must be one of/, err.message)
-    assert_match(/warm_pool/, err.message)
-  end
-
   # ── deprecated_bot_keys ──────────────────────────────────────────────────
 
   def test_deprecated_bot_keys_returns_empty_array_when_bot_is_nil
@@ -5650,6 +5623,24 @@ class ConfigTest < Minitest::Test
                  Hive::Config.stage_skill(
                    { "plan" => { "agent" => "opencode" } }, "plan"
                  )
+  end
+
+  # Built-in budget defaults do not count as set; only the project's own
+  # budget_usd entries do.
+  def test_configured_budget_usd_ignores_built_in_defaults
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "budget_usd:\n  plan: 12\n")
+      cfg = Hive::Config.load(dir)
+
+      assert_equal 12, Hive::Config.configured_budget_usd(cfg, "plan")
+      assert_equal 500, cfg.dig("budget_usd", "execute_implementation")
+      assert_nil Hive::Config.configured_budget_usd(cfg, "execute_implementation")
+    end
+
+    assert_equal 7, Hive::Config.configured_budget_usd({ "budget_usd" => { "plan" => 7 } }, "plan")
+    assert_nil Hive::Config.configured_budget_usd({}, "plan")
   end
 
   def test_stage_resource_limit_resolution_retains_value_source_and_scope

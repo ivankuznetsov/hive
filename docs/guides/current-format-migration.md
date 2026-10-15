@@ -131,8 +131,9 @@ Help me move this Hive installation to the current checkout's formats.
    fields to make old tables look current. Keep historical usage and attempts in
    the backup unless I explicitly request a separate verified conversion.
 5. Convert only the task/config state I choose to keep. Use canonical
-   `review.reviewers`, `claude.mode`, and `budget_usd.finalize` /
-   `timeout_sec.finalize`; remove retired policy keys. Move an old global config
+   `review.reviewers` and `budget_usd.finalize` / `timeout_sec.finalize`;
+   remove retired policy keys, including `claude.mode` (Claude always runs
+   headless). Move an old global config
    into the explicitly selected current config location only after resolving any
    collision. Use each workflow's actual descriptor to map old stage folders;
    never guess from stage numbers or overwrite an existing task directory.

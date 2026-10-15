@@ -21,10 +21,6 @@ class SpawnAgentTest < Minitest::Test
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
-  # Same path the production wrapper_command builds via
-  # File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__) from
-  # lib/hive/claude_launcher.rb — used by the byte-identical tmux argv golden.
-  WRAPPER_SCRIPT = File.expand_path("../../lib/hive/scripts/interactive_claude_wrapper.sh", __dir__)
 
   def setup
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
@@ -206,6 +202,155 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  # The value following `--disallowedTools` in the fake-claude argv log, or
+  # nil when the flag is absent.
+  def logged_disallowed_tools(log_dir)
+    lines = File.readlines(File.join(log_dir, "fake-claude-argv.log"), chomp: true)
+    index = lines.index("arg=--disallowedTools")
+    index && lines.fetch(index + 1).delete_prefix("arg=")
+  end
+
+  def spawn_claude_logging_argv(dir, **kwargs)
+    task = make_task(dir)
+    File.write(task.state_file, "<!-- WAITING -->\n")
+    log_dir = File.join(dir, "argv-log")
+    FileUtils.mkdir_p(log_dir)
+    ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+    Hive::Stages::Base.spawn_agent(
+      task, prompt: "x", max_budget_usd: 1, timeout_sec: 5, **kwargs
+    )
+    log_dir
+  end
+
+  def test_claude_spawn_without_caller_deny_denies_ask_user_question
+    with_tmp_dir do |dir|
+      log_dir = spawn_claude_logging_argv(dir)
+
+      assert_equal "AskUserQuestion", logged_disallowed_tools(log_dir)
+    end
+  end
+
+  def test_claude_spawn_merges_ask_user_question_into_caller_deny
+    with_tmp_dir do |dir|
+      log_dir = spawn_claude_logging_argv(dir, disallowed_tools: %w[Write])
+
+      assert_equal "Write,AskUserQuestion", logged_disallowed_tools(log_dir)
+    end
+  end
+
+  def test_claude_spawn_does_not_duplicate_caller_supplied_ask_user_question
+    with_tmp_dir do |dir|
+      log_dir = spawn_claude_logging_argv(
+        dir, disallowed_tools: "AskUserQuestion,Write"
+      )
+
+      assert_equal "AskUserQuestion,Write", logged_disallowed_tools(log_dir)
+    end
+  end
+
+  def test_claude_spawn_with_runtime_policy_keeps_the_policy_deny_list
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      policy = managed_output_policy(task, FAKE_BIN, File.join(task.folder, "out.md"))
+      captured = nil
+      agent = Object.new
+      agent.define_singleton_method(:run!) { { status: :ok } }
+      constructor = lambda do |**kwargs|
+        captured = kwargs
+        agent
+      end
+
+      with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+        with_replaced_singleton_method(Hive::Agent, :new, constructor) do
+          Hive::Stages::Base.spawn_agent(
+            task, prompt: "x", max_budget_usd: nil, timeout_sec: 5,
+            runtime_policy: policy, cleanup_runtime_policy: false
+          )
+        end
+      end
+
+      assert_nil captured.fetch(:disallowed_tools),
+                 "a runtime_policy launch must not gain a spawn-level deny"
+      assert_same policy, captured.fetch(:runtime_policy)
+    end
+  end
+
+  def test_non_claude_spawns_gain_no_ask_user_question_deny
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      %i[codex pi].each do |name|
+        captured = nil
+        agent = Object.new
+        agent.define_singleton_method(:run!) { { status: :ok } }
+        constructor = lambda do |**kwargs|
+          captured = kwargs
+          agent
+        end
+
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+          with_replaced_singleton_method(Hive::Agent, :new, constructor) do
+            Hive::Stages::Base.spawn_agent(
+              task, prompt: "x", max_budget_usd: nil, timeout_sec: 5,
+              profile: Hive::AgentProfiles.lookup(name),
+              status_mode: :exit_code_only
+            )
+          end
+        end
+
+        assert_nil captured.fetch(:disallowed_tools), "#{name} must gain no deny"
+      end
+    end
+  end
+
+  def write_legacy_stop_hook_stub(dir)
+    settings = File.join(dir, ".claude", "settings.json")
+    FileUtils.mkdir_p(File.dirname(settings))
+    command = "HIVE_TASK_STAGE_DIR=#{dir} /opt/hive/lib/hive/scripts/stop_hook.sh"
+    File.write(settings, JSON.generate(
+      "hooks" => { "Stop" => [ { "hooks" => [ { "type" => "command", "command" => command } ] } ] }
+    ))
+    settings
+  end
+
+  def spawn_with_stubbed_agent(task, **kwargs)
+    agent = Object.new
+    agent.define_singleton_method(:run!) { { status: :ok } }
+    with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+      with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+        Hive::Stages::Base.spawn_agent(task, prompt: "x", max_budget_usd: nil, timeout_sec: 5, **kwargs)
+      end
+    end
+  end
+
+  # Reviewers and other direct Claude spawns bypass ClaudeLauncher.launch!,
+  # so the tmux-era stub repair lives in spawn_agent.
+  def test_claude_spawn_repairs_a_legacy_stop_hook_stub_in_cwd
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      worktree = File.join(dir, "worktree")
+      settings = write_legacy_stop_hook_stub(worktree)
+
+      spawn_with_stubbed_agent(task, cwd: worktree)
+
+      refute File.exist?(settings)
+    end
+  end
+
+  def test_codex_spawn_leaves_a_legacy_stop_hook_stub_alone
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      worktree = File.join(dir, "worktree")
+      settings = write_legacy_stop_hook_stub(worktree)
+
+      spawn_with_stubbed_agent(
+        task, cwd: worktree, profile: Hive::AgentProfiles.lookup(:codex),
+        status_mode: :exit_code_only
+      )
+
+      assert File.exist?(settings)
+    end
+  end
+
   def test_typed_permission_policy_reaches_agent
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -276,6 +421,8 @@ class SpawnAgentTest < Minitest::Test
       refute_includes argv, "--permission-mode",
                        "codex spawns must never receive Claude's --permission-mode flag"
       refute_includes argv, "auto"
+      refute_includes argv, "--disallowedTools"
+      refute(argv.any? { |arg| arg.include?("AskUserQuestion") })
       assert_includes argv, "--dangerously-bypass-approvals-and-sandbox",
                       "codex keeps its own skip flag regardless of claude.permission_mode in cfg"
     end
@@ -327,6 +474,7 @@ class SpawnAgentTest < Minitest::Test
       assert_includes argv, "arg=high"
       refute_includes argv, "arg=sonnet"
       refute_includes argv, "arg=medium"
+      assert_equal "AskUserQuestion", logged_disallowed_tools(log_dir)
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end
@@ -920,10 +1068,10 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
-  def test_stage_permission_scope_yolo_preserves_headless_no_tool_lists
+  def test_stage_permission_scope_yolo_keeps_claude_stage_default_tools
     with_tmp_dir do |dir|
       task = make_task(dir, "3-plan")
-      cfg = { "permissions" => "yolo", "claude" => { "mode" => "headless" } }
+      cfg = { "permissions" => "yolo" }
 
       scope = Hive::Stages::Base.stage_permission_scope(
         cfg, "plan", task, Hive::AgentProfiles.lookup(:claude),
@@ -932,7 +1080,7 @@ class SpawnAgentTest < Minitest::Test
 
       assert_equal [ task.folder ], scope.fetch(:add_dirs)
       assert_nil scope.fetch(:permission_mode)
-      assert_nil scope.fetch(:allowed_tools)
+      assert_equal Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS, scope.fetch(:allowed_tools)
       assert_nil scope.fetch(:disallowed_tools)
     end
   end
@@ -1020,28 +1168,11 @@ class SpawnAgentTest < Minitest::Test
     assert_match(/missing exact permissions/, error.message)
   end
 
-  def test_stage_permission_scope_yolo_preserves_tmux_builtin_allowlist
-    with_tmp_dir do |dir|
-      task = make_task(dir, "3-plan")
-      cfg = { "permissions" => "yolo", "claude" => { "mode" => "tmux" } }
-
-      scope = Hive::Stages::Base.stage_permission_scope(
-        cfg, "plan", task, Hive::AgentProfiles.lookup(:claude),
-        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
-      )
-
-      assert_equal Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS, scope.fetch(:allowed_tools)
-      assert_nil scope.fetch(:permission_mode)
-      assert_nil scope.fetch(:disallowed_tools)
-    end
-  end
-
   def test_stage_permission_scope_read_only_overrides_builtin_tools
     with_tmp_dir do |dir|
       task = make_task(dir, "3-plan")
       cfg = {
         "permissions" => "yolo",
-        "claude" => { "mode" => "tmux" },
         "plan" => { "permissions" => "read-only" }
       }
 
@@ -1062,7 +1193,6 @@ class SpawnAgentTest < Minitest::Test
       absolute = File.join(dir, "abs")
       cfg = {
         "permissions" => "yolo",
-        "claude" => { "mode" => "headless" },
         "execute" => {
           "permissions" => {
             "preset" => "scoped",
@@ -1191,33 +1321,30 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
-  # default_allowed_tools_for_mode guard clause: a NON-claude profile never
-  # gets the tmux builtin allowlist threaded, even in tmux mode with a default
-  # set — codex/pi can't take claude's --allowedTools. The yolo tmux tests
-  # above only cover the claude branch; this pins the `profile.name == :claude`
-  # guard returning nil.
-  def test_stage_permission_scope_yolo_drops_default_tools_for_non_claude_in_tmux
+  # yolo_default_allowed_tools guard clause: a NON-claude profile never gets
+  # the stage default allowlist threaded — codex/pi can't take claude's
+  # --allowedTools.
+  def test_stage_permission_scope_yolo_drops_default_tools_for_non_claude
     with_tmp_dir do |dir|
       task = make_task(dir, "4-execute")
-      cfg = { "permissions" => "yolo", "claude" => { "mode" => "tmux" } }
+      cfg = { "permissions" => "yolo" }
 
       scope = Hive::Stages::Base.stage_permission_scope(
         cfg, "execute", task, Hive::AgentProfiles.lookup(:codex),
         default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
       )
 
-      assert_nil scope.fetch(:allowed_tools), "non-claude profile must not receive a tmux allowlist"
+      assert_nil scope.fetch(:allowed_tools), "non-claude profile must not receive a Claude allowlist"
       assert_nil scope.fetch(:permission_mode)
     end
   end
 
-  # default_allowed_tools_for_mode guard clause: with NO default_allowed_tools
-  # passed, the first guard (`return nil unless default_allowed_tools`) yields
-  # nil even for claude in tmux mode — so no builtin allowlist is threaded.
+  # yolo_default_allowed_tools guard clause: with NO default_allowed_tools
+  # passed, no builtin allowlist is threaded even for claude.
   def test_stage_permission_scope_yolo_emits_no_allowlist_when_default_tools_absent
     with_tmp_dir do |dir|
       task = make_task(dir, "4-execute")
-      cfg = { "permissions" => "yolo", "claude" => { "mode" => "tmux" } }
+      cfg = { "permissions" => "yolo" }
 
       scope = Hive::Stages::Base.stage_permission_scope(
         cfg, "execute", task, Hive::AgentProfiles.lookup(:claude)
@@ -1227,227 +1354,33 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
-  # A7 golden: pin the actual emitted argv for the absent-permissions
-  # (yolo) plan stage in BOTH modes, threading stage_permission_scope's
-  # output through the real argv builders. The scope-dict tests above
-  # prove the dict; this proves the dict reaches the command line
-  # byte-for-byte — so a stage that dropped the tmux builtin allowlist or
-  # leaked a tool-scope flag into the headless yolo path would fail here.
-  def test_yolo_plan_argv_is_byte_identical_to_legacy_in_both_modes
-    with_tmp_dir do |dir|
-      task = make_task(dir, "3-plan")
-      profile = Hive::AgentProfiles.lookup(:claude)
-
-      headless_cfg = {
-        "permissions" => "yolo",
-        "claude" => { "mode" => "headless", "permission_mode" => "bypassPermissions" }
-      }
-      headless_scope = Hive::Stages::Base.stage_permission_scope(
-        headless_cfg, "plan", task, profile,
-        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
-      )
-      agent = Hive::Agent.new(
-        task: task, prompt: "PROMPT", max_budget_usd: 1, timeout_sec: 5,
-        profile: profile,
-        add_dirs: headless_scope.fetch(:add_dirs),
-        permission_mode: headless_scope.fetch(:permission_mode),
-        allowed_tools: headless_scope.fetch(:allowed_tools),
-        disallowed_tools: headless_scope.fetch(:disallowed_tools)
-      )
-      expected_headless = [
-        profile.bin, "-p", "--dangerously-skip-permissions",
-        "--add-dir", task.folder,
-        "--max-budget-usd", "1",
-        "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence"
-      ]
-      assert_equal expected_headless, agent.send(:build_cmd),
-                   "yolo headless argv must carry no tool-scope flags"
-
-      tmux_cfg = {
-        "permissions" => "yolo",
-        "claude" => { "mode" => "tmux", "permission_mode" => "bypassPermissions" }
-      }
-      tmux_scope = Hive::Stages::Base.stage_permission_scope(
-        tmux_cfg, "plan", task, profile,
-        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
-      )
-      wrapper = Hive::ClaudeLauncher.wrapper_command(
-        cwd: task.folder,
-        add_dirs: tmux_scope.fetch(:add_dirs),
-        profile: profile,
-        permission_mode: tmux_scope.fetch(:permission_mode) || Hive::Config.claude_permission_mode(tmux_cfg),
-        allowed_tools: tmux_scope.fetch(:allowed_tools),
-        disallowed_tools: tmux_scope.fetch(:disallowed_tools)
-      )
-      # Byte-identical tmux golden (U10-4 requires it in BOTH modes): tmux
-      # yolo keeps the builtin allowlist threaded and its only deny is the
-      # launcher's headless AskUserQuestion — so a reordered/extra wrapper
-      # flag, a dropped default_allowed_tools, or a leaked scope deny list
-      # would all fail here, not just presence/absence.
-      expected_tmux = [
-        "bash", WRAPPER_SCRIPT,
-        "--cwd", task.folder,
-        "--add-dir", task.folder,
-        "--dangerously-skip-permissions",
-        "--allowedTools", Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS,
-        "--disallowedTools", "AskUserQuestion",
-        "--bin", profile.bin
-      ]
-      assert_equal expected_tmux, wrapper,
-                   "yolo tmux wrapper argv must be byte-identical"
-    end
+  # A7 golden: pin the actual emitted argv for the absent-permissions (yolo)
+  # Claude stages, threading stage_permission_scope's output through the real
+  # argv builder. Yolo keeps each stage's default --allowedTools (planner for
+  # plan/brainstorm, implementer for execute) and adds no tool-scope deny
+  # list, so a stage that dropped or mis-threaded its default fails here.
+  def test_yolo_plan_argv_keeps_planner_allowlist
+    assert_yolo_argv("3-plan", "plan", Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS)
   end
 
-  # A7 golden, execute stage: the plan golden above proves the absent-
-  # permissions (yolo) argv only for `plan` (PLANNER_ALLOWED_TOOLS). The
-  # plan's "per stage" claim must also hold for `execute`, whose tmux
-  # allowlist is the broader IMPLEMENTER_ALLOWED_TOOLS — so a stage that
-  # mis-threaded the per-stage default would slip past the plan-only golden.
-  def test_yolo_execute_argv_is_byte_identical_to_legacy_in_both_modes
-    with_tmp_dir do |dir|
-      task = make_task(dir, "4-execute")
-      profile = Hive::AgentProfiles.lookup(:claude)
-
-      headless_cfg = {
-        "permissions" => "yolo",
-        "claude" => { "mode" => "headless", "permission_mode" => "bypassPermissions" }
-      }
-      headless_scope = Hive::Stages::Base.stage_permission_scope(
-        headless_cfg, "execute", task, profile,
-        default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
-      )
-      agent = Hive::Agent.new(
-        task: task, prompt: "PROMPT", max_budget_usd: 1, timeout_sec: 5,
-        profile: profile,
-        add_dirs: headless_scope.fetch(:add_dirs),
-        permission_mode: headless_scope.fetch(:permission_mode),
-        allowed_tools: headless_scope.fetch(:allowed_tools),
-        disallowed_tools: headless_scope.fetch(:disallowed_tools)
-      )
-      # Headless yolo drops the allowlist regardless of stage, so the
-      # execute argv matches plan's headless golden byte-for-byte.
-      expected_headless = [
-        profile.bin, "-p", "--dangerously-skip-permissions",
-        "--add-dir", task.folder,
-        "--max-budget-usd", "1",
-        "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence"
-      ]
-      assert_equal expected_headless, agent.send(:build_cmd),
-                   "yolo headless execute argv must carry no tool-scope flags"
-
-      tmux_cfg = {
-        "permissions" => "yolo",
-        "claude" => { "mode" => "tmux", "permission_mode" => "bypassPermissions" }
-      }
-      tmux_scope = Hive::Stages::Base.stage_permission_scope(
-        tmux_cfg, "execute", task, profile,
-        default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
-      )
-      wrapper = Hive::ClaudeLauncher.wrapper_command(
-        cwd: task.folder,
-        add_dirs: tmux_scope.fetch(:add_dirs),
-        profile: profile,
-        permission_mode: tmux_scope.fetch(:permission_mode) || Hive::Config.claude_permission_mode(tmux_cfg),
-        allowed_tools: tmux_scope.fetch(:allowed_tools),
-        disallowed_tools: tmux_scope.fetch(:disallowed_tools)
-      )
-      expected_tmux = [
-        "bash", WRAPPER_SCRIPT,
-        "--cwd", task.folder,
-        "--add-dir", task.folder,
-        "--dangerously-skip-permissions",
-        "--allowedTools", Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
-        "--disallowedTools", "AskUserQuestion",
-        "--bin", profile.bin
-      ]
-      assert_equal expected_tmux, wrapper,
-                   "yolo tmux execute wrapper argv must be byte-identical (IMPLEMENTER allowlist)"
-    end
+  def test_yolo_execute_argv_keeps_implementer_allowlist
+    assert_yolo_argv("4-execute", "execute", Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS)
   end
 
-  # A7 golden, brainstorm stage: brainstorm has a DISTINCT dual-path impl
-  # (run_headless! → spawn_agent vs run_claude! → spawn_claude_with_tmux_marker!,
-  # plus the shared Claude launcher) that threads
-  # stage_permission_scope("brainstorm", ...) independently of plan/execute. The
-  # plan/execute goldens don't exercise it, so pin the absent-permissions (yolo)
-  # argv in BOTH modes here — a brainstorm path that dropped the builtin
-  # allowlist or leaked a tool-scope flag fails here, not just for plan/execute.
-  def test_yolo_brainstorm_argv_is_byte_identical_in_both_modes
-    with_tmp_dir do |dir|
-      task = make_task(dir, "2-brainstorm")
-      profile = Hive::AgentProfiles.lookup(:claude)
-
-      headless_cfg = {
-        "permissions" => "yolo",
-        "claude" => { "mode" => "headless", "permission_mode" => "bypassPermissions" }
-      }
-      headless_scope = Hive::Stages::Base.stage_permission_scope(
-        headless_cfg, "brainstorm", task, profile,
-        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
-      )
-      agent = Hive::Agent.new(
-        task: task, prompt: "PROMPT", max_budget_usd: 1, timeout_sec: 5,
-        profile: profile,
-        add_dirs: headless_scope.fetch(:add_dirs),
-        permission_mode: headless_scope.fetch(:permission_mode),
-        allowed_tools: headless_scope.fetch(:allowed_tools),
-        disallowed_tools: headless_scope.fetch(:disallowed_tools)
-      )
-      expected_headless = [
-        profile.bin, "-p", "--dangerously-skip-permissions",
-        "--add-dir", task.folder,
-        "--max-budget-usd", "1",
-        "--output-format", "stream-json", "--include-partial-messages",
-        "--verbose", "--no-session-persistence"
-      ]
-      assert_equal expected_headless, agent.send(:build_cmd),
-                   "yolo headless brainstorm argv must carry no tool-scope flags"
-
-      tmux_cfg = {
-        "permissions" => "yolo",
-        "claude" => { "mode" => "tmux", "permission_mode" => "bypassPermissions" }
-      }
-      tmux_scope = Hive::Stages::Base.stage_permission_scope(
-        tmux_cfg, "brainstorm", task, profile,
-        default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
-      )
-      wrapper = Hive::ClaudeLauncher.wrapper_command(
-        cwd: task.folder,
-        add_dirs: tmux_scope.fetch(:add_dirs),
-        profile: profile,
-        permission_mode: tmux_scope.fetch(:permission_mode) || Hive::Config.claude_permission_mode(tmux_cfg),
-        allowed_tools: tmux_scope.fetch(:allowed_tools),
-        disallowed_tools: tmux_scope.fetch(:disallowed_tools)
-      )
-      expected_tmux = [
-        "bash", WRAPPER_SCRIPT,
-        "--cwd", task.folder,
-        "--add-dir", task.folder,
-        "--dangerously-skip-permissions",
-        "--allowedTools", Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS,
-        "--disallowedTools", "AskUserQuestion",
-        "--bin", profile.bin
-      ]
-      assert_equal expected_tmux, wrapper,
-                   "yolo tmux brainstorm wrapper argv must be byte-identical (PLANNER allowlist)"
-    end
+  def test_yolo_brainstorm_argv_keeps_planner_allowlist
+    assert_yolo_argv("2-brainstorm", "brainstorm", Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS)
   end
 
-  # Direct argv-level backstop for the yolo no-op contract: the resolver
-  # test (permission_scope_test.rb#test_yolo_is_a_noop_scope) proves the
-  # SCOPE carries nil tool lists, but the spawned-argv guarantee was only
-  # covered indirectly. An EXPLICIT per-stage `permissions: yolo` — here
-  # overriding a NON-yolo project default — must emit NO --allowedTools /
-  # --disallowedTools flags on the headless command line.
-  def test_explicit_yolo_emits_no_tool_scope_flags_in_argv
+  # Direct argv-level backstop: an EXPLICIT per-stage `permissions: yolo` —
+  # here overriding a NON-yolo project default — resolves like the default
+  # yolo scope: the stage default --allowedTools and no --disallowedTools.
+  def test_explicit_yolo_emits_only_the_stage_default_allowlist_in_argv
     with_tmp_dir do |dir|
       task = make_task(dir, "4-execute")
       profile = Hive::AgentProfiles.lookup(:claude)
       cfg = {
         "permissions" => "read-only",
-        "claude" => { "mode" => "headless", "permission_mode" => "bypassPermissions" },
+        "claude" => { "permission_mode" => "bypassPermissions" },
         "execute" => { "permissions" => "yolo" }
       }
       scope = Hive::Stages::Base.stage_permission_scope(
@@ -1463,8 +1396,8 @@ class SpawnAgentTest < Minitest::Test
         disallowed_tools: scope.fetch(:disallowed_tools)
       )
       cmd = agent.send(:build_cmd)
-      refute_includes cmd, "--allowedTools",
-                      "explicit yolo must emit no --allowedTools flag in argv"
+      assert_equal Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
+                   cmd.fetch(cmd.index("--allowedTools") + 1)
       refute_includes cmd, "--disallowedTools",
                       "explicit yolo must emit no --disallowedTools flag in argv"
     end
@@ -1722,8 +1655,7 @@ class SpawnAgentTest < Minitest::Test
             {},
             prompt: "prompt",
             max_budget_usd: nil,
-            timeout_sec: 5,
-            session_name: "unused"
+            timeout_sec: 5
           )
 
           assert_equal :ok, result.fetch(:status)
@@ -1840,5 +1772,37 @@ class SpawnAgentTest < Minitest::Test
         "probe_bindings" => []
       }
     )
+  end
+
+  def assert_yolo_argv(stage_dir, stage, default_tools)
+    with_tmp_dir do |dir|
+      task = make_task(dir, stage_dir)
+      profile = Hive::AgentProfiles.lookup(:claude)
+      cfg = {
+        "permissions" => "yolo",
+        "claude" => { "permission_mode" => "bypassPermissions" }
+      }
+      scope = Hive::Stages::Base.stage_permission_scope(
+        cfg, stage, task, profile, default_allowed_tools: default_tools
+      )
+      agent = Hive::Agent.new(
+        task: task, prompt: "PROMPT", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile,
+        add_dirs: scope.fetch(:add_dirs),
+        permission_mode: scope.fetch(:permission_mode),
+        allowed_tools: scope.fetch(:allowed_tools),
+        disallowed_tools: scope.fetch(:disallowed_tools)
+      )
+      expected = [
+        profile.bin, "-p", "--dangerously-skip-permissions",
+        "--add-dir", task.folder,
+        "--allowedTools", default_tools,
+        "--max-budget-usd", "1",
+        "--output-format", "stream-json", "--include-partial-messages",
+        "--verbose", "--no-session-persistence"
+      ]
+      assert_equal expected, agent.send(:build_cmd),
+                   "yolo #{stage} argv must carry exactly the stage default allowlist"
+    end
   end
 end

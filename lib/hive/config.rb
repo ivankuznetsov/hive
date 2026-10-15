@@ -55,7 +55,6 @@ module Hive
         }
       },
       "claude" => {
-        "mode" => "tmux",
         "permission_mode" => "bypassPermissions",
         # Model + reasoning effort for hive-launched claude sessions.
         # "default" is a live Claude Code alias tracking ITS recommended
@@ -410,7 +409,7 @@ module Hive
         },
         "max_passes" => 2,
         # Outer wall-clock budget for the whole reviewers phase. Sized to
-        # fit a couple of claude-tmux reviewers each running up to their
+        # fit a couple of Claude reviewers each running up to their
         # per-reviewer `timeout_sec` (default 7200s / 2h) — a deep code
         # review legitimately takes 1-2h. Each reviewer is bounded by its
         # own timeout, NOT by an even split of this budget, so this only
@@ -756,7 +755,6 @@ module Hive
     # and Pi receive llm-wiki's canonical skill name unless a project chooses
     # a non-legacy override.
     LEGACY_WIKI_PLAN_ALIAS = "/plan"
-    CLAUDE_MODES = %w[headless tmux].freeze
     CLAUDE_PERMISSION_MODES = %w[acceptEdits auto bypassPermissions default dontAsk plan].freeze
     AUTO_COMMIT_SIGN_POLICIES = %w[inherit bypass fail].freeze
     # Accepted reviewer `kind` values in config. "agent" (default) and
@@ -788,7 +786,7 @@ module Hive
     # deliberate review point here, not a silent propagation — if DIRS
     # changes, update this list to match.
     DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze # coding-scoped: coding dependency-gate stages (last two of Stages::DIRS)
-    EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
+    OBSOLETE_CLAUDE_MODE_KEY = :__hive_obsolete_claude_mode
     EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
     IMPLEMENTATION_IDENTITY_PROVENANCE_KEY = :__hive_implementation_identity_provenance
     IMPLEMENTATION_IDENTITY_PATHS = {
@@ -875,7 +873,7 @@ module Hive
       reject_nested_provider_routing!(data, source_path)
       resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
-      merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
+      merged[OBSOLETE_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
       merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
       if provider_routing_configured?(data)
@@ -968,32 +966,31 @@ module Hive
       bot["alert_state_file"] ||= File.join(Hive::Paths.state_home, ".bot.alert_state.json")
     end
 
-    def claude_mode(cfg)
-      raw = cfg.dig("claude", "mode")
-      raw = DEFAULTS.dig("claude", "mode") if raw.nil?
-      case raw
-      when "tmux" then :tmux
-      when "headless" then :headless
-      else
-        raise ConfigError, "claude.mode must be one of #{CLAUDE_MODES.inspect}; got #{raw.inspect}"
-      end
-    end
-
     # argv fragment for hive-launched claude: ["--model", m, "--effort", e].
-    # Shared by the tmux wrapper and the headless Agent path. Semantics:
-    # model "inherit"/blank omits the flag (operator's interactive default
-    # applies); anything else — including the live alias "default" — passes
+    # Semantics: model "inherit"/blank omits the flag (operator's interactive
+    # default applies); anything else — including the live alias "default" — passes
     # through. effort "default"/"inherit"/blank omits the flag (Claude
     # Code's own tier applies); any other tier Claude Code accepts passes
     # through verbatim (low/medium/high/xhigh/max as of CC 2.1.x — the init
     # questionnaire offers the common three, the config key is open).
     def claude_cli_flags(cfg, model: nil, effort: nil)
+      model, effort = claude_identity(cfg, model: model, effort: effort)
       flags = []
+      flags.concat([ "--model", model ]) if model
+      flags.concat([ "--effort", effort ]) if effort
+      flags
+    end
+
+    # The model and effort a Claude launch passes, after per-stage values
+    # override the project-wide claude.* pins. nil means the flag is
+    # omitted and Claude picks its own.
+    def claude_identity(cfg, model: nil, effort: nil)
       model = (model || cfg.dig("claude", "model") || DEFAULTS.dig("claude", "model")).to_s.strip
       effort = (effort || cfg.dig("claude", "effort") || DEFAULTS.dig("claude", "effort")).to_s.strip
-      flags.concat([ "--model", model ]) unless model.empty? || model == "inherit"
-      flags.concat([ "--effort", effort ]) unless effort.empty? || [ "default", "inherit" ].include?(effort)
-      flags
+      [
+        (model unless model.empty? || model == "inherit"),
+        (effort unless effort.empty? || [ "default", "inherit" ].include?(effort))
+      ]
     end
 
     def claude_permission_mode(cfg)
@@ -1093,6 +1090,17 @@ module Hive
       ).freeze
     end
 
+    # The stage budget the project's own config sets, or nil when only the
+    # built-in default applies. A config without load provenance (a plain
+    # Hash) counts every value it carries as set.
+    def configured_budget_usd(cfg, stage_name)
+      value = cfg.dig("budget_usd", stage_name)
+      provenance = cfg[EXPLICIT_RESOURCE_LIMITS_KEY]
+      return value unless provenance.is_a?(Hash)
+
+      Array(provenance["budget_usd"]).include?(stage_name) ? value : nil
+    end
+
     def explicit_resource_limits(data)
       RESOURCE_LIMIT_FIELDS.to_h do |field|
         values = data[field]
@@ -1131,16 +1139,13 @@ module Hive
       patrol["mode"] = mode
     end
 
-    # Only `Config.load` knows whether the user actually wrote
-    # `claude.mode` in config.yml; merge_defaults inserts the
-    # DEFAULTS value so the merged cfg always carries a non-nil
-    # `claude.mode`. After load, the EXPLICIT_CLAUDE_MODE_KEY flag is
-    # the single source of truth. Callers that synthesise a cfg
-    # in-process (tests, daemon helpers) must set the flag themselves;
-    # the default below is `false` so an unset flag is treated as
-    # "default kicked in", not "user wrote it".
-    def explicit_claude_mode?(cfg)
-      cfg[EXPLICIT_CLAUDE_MODE_KEY] == true
+    # `claude.mode` is a retired key: Claude launches headless-only. A config
+    # that still sets it (any value) loads and the value is ignored. Only
+    # `Config.load` sees the raw YAML, so it records whether the key was
+    # present; `hive doctor` reads this flag to suggest deleting it. A cfg
+    # synthesised in-process without the flag reads as "absent".
+    def obsolete_claude_mode_key?(cfg)
+      cfg[OBSOLETE_CLAUDE_MODE_KEY] == true
     end
 
     def stage_skill(cfg, stage)
@@ -2136,7 +2141,6 @@ module Hive
       validate_role_agent_names!(cfg, source_path)
       validate_agent_overrides!(cfg, source_path)
       validate_provider_routing!(cfg, source_path)
-      validate_claude_mode!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
       validate_permissions!(cfg, source_path)
       validate_dependency_gate_stage!(cfg, source_path)
@@ -3251,15 +3255,6 @@ module Hive
     end
 
 
-    def validate_claude_mode!(cfg, source_path)
-      mode = cfg.dig("claude", "mode")
-      return if CLAUDE_MODES.include?(mode)
-
-      raise ConfigError,
-            "claude.mode in #{describe_source(source_path)} must be one of " \
-            "#{CLAUDE_MODES.inspect}; got #{mode.inspect} (#{mode.class})"
-    end
-
     def validate_claude_permission_mode!(cfg, source_path)
       permission_mode = cfg.dig("claude", "permission_mode")
       return if CLAUDE_PERMISSION_MODES.include?(permission_mode)
@@ -3429,7 +3424,8 @@ module Hive
     def validate_brainstorm_runtime!(cfg, source_path)
       runtime = cfg.dig("brainstorm", "runtime")
       return if runtime.nil?
-      raise ConfigError, "brainstorm.runtime is unsupported; set claude.mode in #{describe_source(source_path)}"
+      raise ConfigError, "brainstorm.runtime in #{describe_source(source_path)} is unsupported; remove it " \
+                         "(brainstorm.agent selects the brainstorm agent)"
     end
 
     # Shared check used by both validate_reviewers! and

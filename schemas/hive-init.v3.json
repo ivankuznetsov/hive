@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init.v2.json",
-  "title": "hive init output (v2)",
-  "description": "Stable success contract emitted by `hive init --json`. V2 adds the explicit fresh-project architecture patrol discovery choice while leaving auto-fix and issue-filing policy in project config.",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init.v3.json",
+  "title": "hive init output (v3)",
+  "description": "Stable success contract emitted by `hive init --json`. V3 drops the retired `claude_mode` field (Claude always runs headless) and keeps the explicit fresh-project architecture patrol discovery choice, leaving auto-fix and issue-filing policy in project config.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/AlreadyInitializedPayload" },
@@ -18,7 +18,7 @@
       ],
       "properties": {
         "schema": { "const": "hive-init" },
-        "schema_version": { "const": 2 },
+        "schema_version": { "const": 3 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": {
@@ -57,7 +57,7 @@
       ],
       "properties": {
         "schema": { "const": "hive-init" },
-        "schema_version": { "const": 2 },
+        "schema_version": { "const": 3 },
         "ok": { "const": true },
         "already_initialized": { "const": true },
         "project": { "type": "string" },
@@ -97,12 +97,40 @@
         "review_browser": { "type": "integer", "minimum": 1 }
       }
     },
+    "BudgetMap": {
+      "description": "Stage budget caps in USD; null means no cap is written to config.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "brainstorm",
+        "plan",
+        "execute_implementation",
+        "open_pr",
+        "artifacts",
+        "finalize",
+        "review_ci",
+        "review_triage",
+        "review_fix",
+        "review_browser"
+      ],
+      "properties": {
+        "brainstorm": { "type": ["integer", "null"], "minimum": 1 },
+        "plan": { "type": ["integer", "null"], "minimum": 1 },
+        "execute_implementation": { "type": ["integer", "null"], "minimum": 1 },
+        "open_pr": { "type": ["integer", "null"], "minimum": 1 },
+        "artifacts": { "type": ["integer", "null"], "minimum": 1 },
+        "finalize": { "type": ["integer", "null"], "minimum": 1 },
+        "review_ci": { "type": ["integer", "null"], "minimum": 1 },
+        "review_triage": { "type": ["integer", "null"], "minimum": 1 },
+        "review_fix": { "type": ["integer", "null"], "minimum": 1 },
+        "review_browser": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
     "Answers": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "planning_agent",
-        "claude_mode",
         "claude_permission_mode",
         "claude_model",
         "claude_effort",
@@ -121,10 +149,6 @@
       ],
       "properties": {
         "planning_agent": { "type": "string" },
-        "claude_mode": {
-          "type": "string",
-          "enum": [ "tmux", "headless" ]
-        },
         "claude_permission_mode": {
           "type": "string",
           "enum": [ "acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan" ]
@@ -156,7 +180,7 @@
           "type": "boolean",
           "description": "Whether fresh-project architecture patrol discovery was enabled. This does not authorize auto-fixing or issue filing."
         },
-        "budgets": { "$ref": "#/$defs/LimitMap" },
+        "budgets": { "$ref": "#/$defs/BudgetMap" },
         "timeouts": { "$ref": "#/$defs/LimitMap" },
         "daemon_enabled": { "type": "boolean" },
         "babysitter_enabled": { "type": "boolean" },
@@ -179,7 +203,6 @@
         "worktree_root",
         "answers",
         "planning_agent",
-        "claude_mode",
         "development_agent",
         "enabled_reviewers",
         "patrol_reviewers",
@@ -195,7 +218,7 @@
       ],
       "properties": {
         "schema": { "const": "hive-init" },
-        "schema_version": { "const": 2 },
+        "schema_version": { "const": 3 },
         "ok": { "const": true },
         "project": { "type": "string" },
         "path": { "type": "string" },
@@ -221,10 +244,6 @@
         "worktree_root": { "type": "string" },
         "answers": { "$ref": "#/$defs/Answers" },
         "planning_agent": { "type": "string" },
-        "claude_mode": {
-          "type": "string",
-          "enum": [ "tmux", "headless" ]
-        },
         "development_agent": { "type": "string" },
         "enabled_reviewers": {
           "type": "array",
@@ -247,7 +266,7 @@
           "type": "boolean",
           "description": "Mirrors answers.refactor_patrol_enabled for machine consumers."
         },
-        "budgets": { "$ref": "#/$defs/LimitMap" },
+        "budgets": { "$ref": "#/$defs/BudgetMap" },
         "timeouts": { "$ref": "#/$defs/LimitMap" },
         "daemon_enabled": { "type": "boolean" },
         "babysitter_enabled": { "type": "boolean" },

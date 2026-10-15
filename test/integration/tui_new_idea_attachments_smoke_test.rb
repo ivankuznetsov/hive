@@ -61,7 +61,6 @@ class TuiNewIdeaAttachmentsSmokeTest < Minitest::Test
 
   def init_project(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
-    set_project_claude_mode(dir, "headless")
   end
 
   # Per project CLAUDE.md "NEVER skip tests conditionally based on

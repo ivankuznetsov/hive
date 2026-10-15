@@ -40,7 +40,6 @@ Gem::Specification.new do |spec|
     "config/honeycomb-security-lint/**/*",
     "skills/**/*",
     "lib/**/*.rb",
-    "lib/hive/scripts/**/*.sh",
     "lib/hive/assets/qmd/*",
     "lib/hive/assets/capture-tools/*",
     "lib/hive/assets/betterleaks/**/*",

@@ -39,7 +39,7 @@ project mutation. Its diagnostics phase is explicitly marked `skipped: true`
 with reason `consent_required`.
 
 On consented runs and explicit `--no-bootstrap` diagnosis, the diagnostic phase
-checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm, QMD, the managed web
+checks Ruby 3.4, git, `gh`, Claude, Codex, Node/npm, QMD, the managed web
 bundle, and SQLite through `Hive::Setup::Diagnostics`. Missing QMD and
 missing/stale managed web bundles are bootstrappable; hard failures still make
 the command fail even when all provisioning phases succeed.

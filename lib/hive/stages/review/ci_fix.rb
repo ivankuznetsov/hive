@@ -437,7 +437,7 @@ module Hive
             prompt: prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
-            max_budget_usd: cfg.dig("budget_usd", "review_ci") || 25,
+            max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_ci", profile, default: 25),
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
@@ -447,13 +447,8 @@ module Hive
             status_mode: :exit_code_only,
             **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
           }
-          if Hive::AgentSupport.supports?(profile, :Interactive)
-            Hive::Stages::Base.spawn_claude!(
-              task,
-              cfg,
-              **kwargs,
-              session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
-            )
+          if Hive::AgentSupport.supports?(profile, :Launch)
+            Hive::Stages::Base.spawn_claude!(task, cfg, **kwargs)
           else
             Hive::Stages::Base.spawn_agent(
               task, **kwargs, cfg: cfg,

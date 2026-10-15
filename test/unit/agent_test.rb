@@ -900,6 +900,7 @@ class AgentTest < Minitest::Test
         "--dangerously-bypass-approvals-and-sandbox",
         "--model", "gpt-5.6-terra",
         "-c", "model_reasoning_effort=medium",
+        "--ignore-user-config",
         "--json",
         "-"
       ], codex_agent.send(:build_cmd)

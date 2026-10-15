@@ -12,16 +12,29 @@ module Hive
   # the provider-specific argv/env one launch needs, through the
   # `AgentSupport.for(profile)::Mcp` renderer.
   module Mcp
-    # `arguments` append to the trusted argv; `environment` merges into the
-    # child env; `passthrough_env` names host vars a rendered server reads
+    # `arguments` append to the trusted argv; `default_arguments` are
+    # `[flag, value]` groups appended only when the launch's own identity
+    # or routing argv does not already set that key; `environment` merges
+    # into the child env; `passthrough_env` names host vars a rendered server reads
     # (copied from ENV so they survive `unsetenv_others`); `config_overlay`
     # is a provider config fragment (OpenCode). `isolation` is :isolated,
     # :partial (rendered, but a discovery step failed), :none (no renderer),
     # or :inherit (`mcp.inherit_user`). `notices` go to the launch log.
     Launch = Data.define(
-      :arguments, :environment, :passthrough_env, :config_overlay,
+      :arguments, :default_arguments, :environment, :passthrough_env, :config_overlay,
       :cleanup_paths, :isolation, :notices
     ) do
+      # The argv this launch adds next to `existing` (the launch's identity
+      # and routing arguments). A key is a flag, or the `key` of `-c key=v`.
+      def arguments_for(existing)
+        present = existing.each_with_index.filter_map do |argument, index|
+          argument == "-c" ? existing[index + 1].to_s.split("=", 2).first : argument
+        end
+        arguments + default_arguments.reject do |flag, value|
+          present.include?(flag == "-c" ? value.split("=", 2).first : flag)
+        end.flatten
+      end
+
       def cleanup!
         cleanup_paths.each do |path|
           FileUtils.remove_entry_secure(path)
@@ -31,6 +44,7 @@ module Hive
       end
     end
 
+    ONCE_FLAG = "--ignore-user-config".freeze
     EMPTY_POLICY = Settings::Policy.new(inherit_user: false, servers: [].freeze, notices: [].freeze)
 
     module_function
@@ -74,10 +88,11 @@ module Hive
       launch&.cleanup!
     end
 
-    def launch(isolation:, arguments: [], environment: {}, passthrough_env: [],
+    def launch(isolation:, arguments: [], default_arguments: [], environment: {}, passthrough_env: [],
                config_overlay: nil, cleanup_paths: [], notices: [])
       Launch.new(
         arguments: arguments.map { |argument| argument.to_s.dup.freeze }.freeze,
+        default_arguments: default_arguments.map { |group| group.map { |item| item.to_s.dup.freeze }.freeze }.freeze,
         environment: environment.dup.freeze,
         passthrough_env: passthrough_env.uniq.freeze,
         config_overlay: config_overlay.nil? ? nil : Hive::Config.deep_freeze(config_overlay),
@@ -85,6 +100,16 @@ module Hive
         isolation: isolation,
         notices: notices.dup.freeze
       )
+    end
+
+    # Codex's sandbox presets already pass `--ignore-user-config`, and clap
+    # rejects a repeated flag; keep its first occurrence.
+    def collapse_repeated_flags(invocation)
+      argv = invocation.argv
+      first = argv.index(ONCE_FLAG)
+      return invocation if first.nil? || argv.count(ONCE_FLAG) == 1
+
+      invocation.with(argv: argv.reject.with_index { |argument, index| argument == ONCE_FLAG && index != first })
     end
 
     # A per-launch 0700 directory for rendered config.

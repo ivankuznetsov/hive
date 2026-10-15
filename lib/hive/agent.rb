@@ -199,6 +199,15 @@ module Hive
       )
     end
 
+    def mcp_arguments
+      launch = mcp_launch
+      return [] unless launch
+
+      launch.arguments_for(
+        [ *@identity_arguments, *@routing_arguments&.native_arguments, *@cli_flags ].map(&:to_s)
+      )
+    end
+
     def cleanup_mcp_launch!
       return unless @owns_mcp_launch
 
@@ -879,7 +888,7 @@ module Hive
     end
 
     def compiled_invocation
-      @compiled_invocation ||= Hive::AgentRuntime.compile(
+      @compiled_invocation ||= Hive::Mcp.collapse_repeated_flags(Hive::AgentRuntime.compile(
         Hive::AgentRuntime::Request.new(
           profile: @profile,
           prompt: @prompt,
@@ -892,11 +901,11 @@ module Hive
           identity_arguments: @identity_arguments,
           routing_arguments: @routing_arguments,
           raw_cli_arguments: @cli_flags,
-          trusted_cli_arguments: @runtime_cli_flags + Array(mcp_launch&.arguments),
+          trusted_cli_arguments: @runtime_cli_flags + mcp_arguments,
           executable: @runtime_policy&.executable,
           command_prefix: @runtime_policy&.command_prefix
         )
-      )
+      ))
     end
 
     def kill_group(pgid)

@@ -44,12 +44,16 @@ Hive now renders MCP for every agent it launches (plan
   deprecated `@mariozechner/pi-coding-agent` (latest 0.73.1, below the new
   floor). Both now install `@earendil-works/pi-coding-agent` (Docker pinned to
   1.2.0, bin `pi`), which the npm registry names as its replacement.
-- **Live OAuth reuse is unverified (U0 live part deferred).** After the Codex
-  quota resets (2026-10-18), launch Codex with `--ignore-user-config` and a
-  Hive-rendered `-c mcp_servers.linear…` entry and confirm the existing keyring
-  login is found. Codex's login key derivation (name + URL assumed) is read
-  from strings only. Claude needs a `hive mcp login` first; whether Claude
-  hashes `${VAR}` headers raw or expanded in its login key is unverified, and
+- **Codex OAuth reuse verified 2026-10-15; Claude still open.** A live
+  `codex exec --ignore-user-config` run with only a Hive-rendered
+  `-c mcp_servers.writero.url=… -c mcp_servers.writero.oauth_resource=…`
+  connected to writero (the operator's one Codex OAuth login) and completed
+  `list_mcp_resources` / `list_mcp_resource_templates` with no `AuthRequired`,
+  matching the same probe under the normal user config. So Codex resolves the
+  saved login from server name + URL. Linear and the Cloudflare servers fail
+  either way because `codex mcp list` reports them `not_logged_in` for the user
+  config too. Still unverified: Claude needs a `hive mcp login` first; whether
+  Claude hashes `${VAR}` headers raw or expanded in its login key; and
   `claude mcp login` is assumed to find only servers in Claude's own config.
 - **The native `codex review` reviewer is not isolated.** Top-level `codex
   review` has no `--ignore-user-config`; it logs an isolation warning. Moving

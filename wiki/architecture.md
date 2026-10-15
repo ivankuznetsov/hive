@@ -17,7 +17,7 @@ bin/hive                          Thor entry; rescues Hive::Error -> exit
        └─ lib/hive/commands/      Init · New · Run · Status · StageAction · Daemon · Bot · TUI helpers
             └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · OpenPr · Review · Artifacts · Finalize · Done
                  ├─ Stages::Base      template render + AgentProfile spawn helpers
-                 ├─ ClaudeLauncher    project-global tmux/headless Claude routing
+                 ├─ ClaudeLauncher    headless Claude launch assembly
                  └─ Hive::Agent       headless subprocess wrapper
                       └─ Hive::Markers / Lock / Worktree / GitOps / Config / Task
 ```
@@ -200,8 +200,8 @@ contracts in `lib/hive/agent_profiles/`.
 
 Claude-backed stages add one config-specific layer on top of the profile:
 `Hive::Config.claude_cli_flags(cfg)` turns `claude.model` and
-`claude.effort` into an argv fragment used by both headless
-`Hive::Agent` and tmux `Hive::ClaudeLauncher` sessions. Fresh projects
+`claude.effort` into the argv fragment `Hive::ClaudeLauncher` passes to
+the headless `Hive::Agent` spawn. Fresh projects
 default `claude.model` to `default`, so Hive passes Claude Code's live
 recommended-model alias instead of inheriting the operator's interactive
 selection. `model: inherit` (or blank) omits `--model`; aliases/full
@@ -242,17 +242,18 @@ otherwise). When a Claude spawn receives `permission_mode` other than
 `bypassPermissions`, the skip flag is replaced with
 `--permission-mode <mode>`.
 
-Claude-backed stages normally route through `Hive::ClaudeLauncher`,
-which honors project config `claude.mode`. `tmux` runs an attachable
-interactive Claude session using the configured
-`claude.permission_mode`; `headless` delegates back to `Hive::Agent`.
+Claude-backed stages route through `Hive::ClaudeLauncher`, which assembles
+MCP, tool-scope, and model/effort flags, repairs any tmux-era
+`.claude/settings.json` Stop-hook stub or `.hive-pre-install` backup left in
+the task folder or cwd, and delegates to `Stages::Base.spawn_agent` and so to
+headless `Hive::Agent`. There is no interactive Claude runtime; the former
+`claude.mode` key is ignored when present. Every Claude spawn without a
+workflow `runtime_policy` denies `AskUserQuestion`.
 
-Provider-limit handling is shared across headless and tmux paths through
-`Hive::AgentLimit`. Headless failures inspect the captured final message
-before generic timeout/exit-code handling; tmux readiness, terminal-marker,
-and expected-output waits inspect the pane tail so Claude's usage-credit menu
-surfaces as `limits reached for claude:` / `ERROR reason=limits_reached`
-instead of being masked as a timeout or session failure.
+Provider-limit handling goes through `Hive::AgentLimit`: headless failures
+inspect the captured final message before generic timeout/exit-code handling,
+so Claude's usage-credit wall surfaces as `limits reached for claude:` /
+`ERROR reason=limits_reached` instead of being masked as a timeout.
 
 The default Claude permission path (`bypassPermissions`, which maps to `--dangerously-skip-permissions`) is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **per-spawn prompt-injection wrapping** with a fresh random nonce per spawn — `<user_supplied_<hex16>>…</user_supplied_<hex16>>` — so attacker-supplied closing tags can't terminate the wrapper, and a hostile reviewer output saved into `accepted_findings` can't leak into the next spawn (ADR-019 supersedes ADR-008's per-process memoization), (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source); per-CLI variation in the isolation flag is logged to `<task>/logs/isolation-warnings.log` (ADR-018), (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` (+ `task.md` for triage / fix in 6-review) around every code-touching spawn; tampering yields `<!-- ERROR reason=implementer_tampered|triage_tampered|fix_tampered -->` (ADR-013), (d) the Phase 4 auto-commit scope gate, which checks staged fallback-commit paths against `review.fix.auto_commit.scope_check` before Hive writes trailered fix commits, and (e) the post-fix diff guardrail (ADR-020 / `Hive::Stages::Review::FixGuardrail`) which scans `git diff base..head` after Phase 4 fix commits for `shell_pipe_to_interpreter`, `ci_workflow_edit`, secrets (via `Hive::SecretPatterns`), `dotenv_edit`, lockfile churn, and `100755` mode flips — match → `REVIEW_WAITING reason=fix_guardrail`. PR publishing paths (`OpenPr`, `Review::GithubPublisher`, `Finalize`) also secret-scan before sending content to GitHub.
 
@@ -365,7 +366,7 @@ sends the next question. The earlier "Codex draft-assist" flow — where
 Path A spawned Codex to draft an answer with write-draft/edit/cancel
 buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
-## Hive Web and Hivebox pipeline
+## Hive Web pipeline
 
 `hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
 the original Sinatra/Puma + SSE tier is gone). Native Hive web is the default
@@ -383,8 +384,8 @@ the first successful remote login writes
 the current owner on every request and evict old sessions when
 `web.github.owner` changes, so a repo-scoped session token cannot survive an
 ownership rotation. A local GitHub connection remains optional for repository
-listing and cloning and does not claim ownership. Hivebox is the distinct
-container distribution of the same owner-gated surface. Managed local installs
+listing and cloning and does not claim ownership. The Hivebox container
+distribution was removed by ADR-055. Managed local installs
 stage a locked Bundler install plus a production asset precompile and verify
 the CSS/JavaScript manifest before the atomic bundle swap; both commands run
 through the locked Bundler and current Ruby without relying on `bundle` or a
@@ -520,11 +521,7 @@ answers, and `Commands::New` (with the TUI's `attachments:` contract) for the
 idea composer. Repo setup clones via `gh`, reuses the `hive init` prompt seam,
 and normalizes GitHub SSH origins to https so later daemon-owned `5-open-pr`
 pushes use token-backed credentials; the Agents page can run the `gh` PTY
-login relay so the image's `gh auth git-credential` helper supplies those
-push credentials without docker-exec setup. The container supervisor (tini →
-`Hive::Web::Supervisor`) runs daemon + web + optional bot, restarts crashed or
-signal-killed children with backoff, survives malformed config, and
-SIGHUP-reloads the bot set. Details: [[commands/web]].
+login relay to supply those push credentials. Details: [[commands/web]].
 
 The Rails layer wraps each registry entry in a `Project` model. Project lookup,
 config-backed workflow/default/daemon behavior, and the non-interactive

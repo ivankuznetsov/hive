@@ -44,8 +44,11 @@ root declares cohesive behavior and lazily exposes larger facets by constant:
   runtime provenance checks, and setup operations.
 - Claude owns its stream protocol and accounting, native model and credential
   rules, skill/plugin inventory, setup operations, managed-policy translation,
-  TUI readiness grammar, wrapper argv, and skill-alias root. The existing
-  launcher retains tmux/process custody, task markers, logs, and cleanup.
+  launch helpers, and skill-alias root. The `Launch` facet holds the planner and
+  implementer tool scopes, the always-denied `AskUserQuestion`, MCP flags, and
+  the Claude profile guard; `supports?(profile, :Launch)` is how callers ask
+  "is this the Claude profile?". `Hive::ClaudeLauncher` extends it and hands
+  every launch to the headless `Stages::Base.spawn_agent` path.
 
 Generic callers resolve the selected support once at their existing seam and
 use the named facet. They do not switch on a migrated provider name. Loading

@@ -85,13 +85,14 @@ decision uses the literal `HTTP_HOST` authority and ignores
 `X-Forwarded-Host`. A proxy or TCP forwarder that lets an untrusted client send
 `Host: localhost` enters the local trust boundary and must authenticate or
 restrict its clients. An ownerless instance reached through an owner-gated
-hostname is claimed by its first successful GitHub login. Hivebox is the
-separate container deployment of the same Rails application.
+hostname is claimed by its first successful GitHub login.
 
 Normal `hive setup` installs, enables, starts, and probes the per-user service
 on supported Linux/macOS while preserving drifted units. Bare `hive web` is the
 blocking foreground path. The default URL is loopback-only and setup never
-creates exposure; Windows uses WSL with systemd or the Hivebox container path.
+creates exposure; Windows runs native Hive inside WSL with systemd. Hive no
+longer ships a container distribution; the Hivebox Docker image is
+discontinued.
 
 The canonical shared-app environment settings are `HIVE_WEB_APP_DIR`,
 `HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`, `HIVE_WEB_LOCAL_LOOPBACK`,
@@ -101,10 +102,8 @@ legacy aliases use the same suffix under `HIVEBOX_*` (with
 Blank values are unset; a canonical value wins over its alias, including when
 the canonical value is invalid, and a migration warning names the replacement.
 Warnings appear on stderr, in setup/web JSON, and as `kind: warning` doctor
-rows. Container-only variables such as `HIVEBOX_IMAGE`, `HIVEBOX_NAME`,
-`HIVEBOX_BIND`, `HIVEBOX_PORT`, `HIVEBOX_DATA`, `HIVEBOX_REPOS_DIR`,
-`HIVEBOX_SESSION_SECRET`, and `HIVEBOX_SUPERVISOR_PID` remain canonical and do
-not warn.
+rows. The former container-only Hivebox variables are no longer read; the web
+session secret always comes from the persisted session-secret file.
 
 ## Agents
 
@@ -203,17 +202,19 @@ open_pr:
 finalize:
   agent: claude
 
-budget_usd:
-  brainstorm: 50
-  plan: 100
-  execute_implementation: 500
-  open_pr: 50
-  finalize: 50
-  review_ci: 100
-  review_triage: 75
-  review_fix: 500
-  review_browser: 100
-  patrol: 100
+# Spend caps (USD) are opt-in: init writes them commented out as
+# suggestions. A Claude stage is capped only by a value set here.
+# budget_usd:
+#   brainstorm: 50
+#   plan: 100
+#   execute_implementation: 500
+#   open_pr: 50
+#   finalize: 50
+#   review_ci: 100
+#   review_triage: 75
+#   review_fix: 500
+#   review_browser: 100
+#   patrol: 100
 
 timeout_sec:
   brainstorm: 1800

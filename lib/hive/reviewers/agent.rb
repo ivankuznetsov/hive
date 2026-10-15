@@ -1,6 +1,8 @@
 require "hive/reviewers/base"
 require "hive/reviewers/plan_context"
 require "hive/agent_profiles"
+require "hive/claude_launcher"
+require "hive/config"
 require "hive/stages/base"
 
 module Hive
@@ -27,6 +29,8 @@ module Hive
           scope = Hive::Stages::Base.stage_permission_scope(
             @cfg || {}, "review.reviewers", synthetic_task, profile,
             base_add_dirs: [ ctx.task_folder ],
+            # Only a yolo Claude scope keeps this list; others drop it.
+            default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
             **Hive::Stages::Base.explicit_permission_kwargs(spec)
           )
           Hive::Stages::Base.spawn_agent(
@@ -34,7 +38,7 @@ module Hive
             prompt: prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
-            max_budget_usd: spec["budget_usd"] || 50,
+            max_budget_usd: reviewer_budget_usd(profile),
             timeout_sec: spawn_timeout || configured_timeout,
             log_label: build_log_label(attempts),
             profile: profile,
@@ -44,28 +48,11 @@ module Hive
               @cfg || {}, "review_reviewers", profile,
               current: Hive::Stages::Base.model_routing_current(spec)
             ),
-            **Hive::Stages::Base.tool_scope_kwargs(scope),
+            **reviewer_tool_scope_kwargs(scope, profile),
             # Reviewer spawns own a per-pass output file, not the task
             # marker — the orchestrator's REVIEW_WORKING marker must
             # persist across each reviewer's spawn.
             status_mode: :output_file_exists
-          )
-        end
-      end
-
-      def run_in_session!(handle:, deadline: nil)
-        run_with_spawn(deadline: deadline) do |profile, prompt, configured_timeout, spawn_timeout, attempts|
-          unless Hive::AgentSupport.supports?(profile, :Interactive)
-            raise Hive::AgentError, "shared Claude reviewer session cannot run #{profile.name.inspect}"
-          end
-
-          handle.send_and_wait!(
-            prompt: prompt,
-            expected_output: staged_output_path,
-            timeout_sec: spawn_timeout || configured_timeout,
-            status_mode: :output_file_exists,
-            log_label: build_log_label(attempts),
-            deadline: deadline
           )
         end
       end
@@ -78,6 +65,24 @@ module Hive
       end
 
       private
+
+      # A Claude reviewer is capped only by a budget its spec sets.
+      def reviewer_budget_usd(profile)
+        return spec["budget_usd"] if Hive::AgentSupport.supports?(profile, :Launch)
+
+        spec["budget_usd"] || 50
+      end
+
+      # model_launch_arguments makes spawn_agent skip its cfg-derived
+      # permission mode, so a yolo Claude reviewer takes
+      # claude.permission_mode here.
+      def reviewer_tool_scope_kwargs(scope, profile)
+        kwargs = Hive::Stages::Base.tool_scope_kwargs(scope)
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          kwargs[:permission_mode] ||= Hive::Config.claude_permission_mode(@cfg || {})
+        end
+        kwargs
+      end
 
       def run_with_spawn(deadline:)
         ensure_reviews_dir!

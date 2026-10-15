@@ -3,7 +3,7 @@
 require "test_helper"
 require "hive/stages/base"
 
-# The hive runner detects tmux-stage completion ONLY from the terminal marker the
+# The hive runner detects marker-mode stage completion ONLY from the terminal marker the
 # agent writes into its state file (never from process exit). The agent-owned
 # marker templates harden that contract by making the marker the unmissable final
 # instruction. This pins that the marker is the literal last line of each of those

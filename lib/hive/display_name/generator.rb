@@ -8,6 +8,7 @@ require "hive/agent_support"
 require "hive/config"
 require "hive/display_name/sanitizer"
 require "hive/git_ops"
+require "hive/mcp"
 require "hive/stages/base"
 require "hive/task"
 require "hive/task_meta"
@@ -81,9 +82,16 @@ module Hive
         Hive::DisplayName::Sanitizer.sanitize(result[:final_message])
       end
 
+      # A display name needs no MCP: the launch is isolated with no grants.
       def run_agent(profile)
+        Hive::Mcp.with_launch(profile: profile, cfg: nil, scope: "display_name", cwd: @task.project_root) do |launch|
+          run_isolated_agent(profile, launch)
+        end
+      end
+
+      def run_isolated_agent(profile, launch)
         prompt = render_prompt
-        invocation = compiled_invocation(profile, prompt)
+        invocation = compiled_invocation(profile, prompt, launch)
         cmd = invocation.argv
         log_path = File.join(@task.log_dir, "display-name-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.log")
         FileUtils.mkdir_p(File.dirname(log_path))
@@ -92,7 +100,7 @@ module Hive
         stdin_file = prompt_stdin_file(invocation)
         spawn_opts = { chdir: @task.project_root, pgroup: true, out: w, err: w }
         spawn_opts[:in] = stdin_file if stdin_file
-        pid = Process.spawn(profile.subscription_environment, *cmd, **spawn_opts)
+        pid = Process.spawn(launch.environment_for(profile.subscription_environment), *cmd, **spawn_opts)
         w.close
         pgid = process_group(pid)
         messages = Hive::Agent::MessageExtractor::Accumulator.new(
@@ -139,13 +147,14 @@ module Hive
         file
       end
 
-      def compiled_invocation(profile, prompt)
-        Hive::AgentRuntime.compile(
+      def compiled_invocation(profile, prompt, launch)
+        Hive::Mcp.compile(
           Hive::AgentRuntime::Request.new(
             profile: profile,
             prompt: prompt,
             permission_mode: Hive::Config.claude_permission_mode(@cfg)
-          )
+          ),
+          launch
         )
       end
 

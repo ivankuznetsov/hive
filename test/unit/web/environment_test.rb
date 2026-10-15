@@ -11,7 +11,9 @@ class WebEnvironmentTest < Minitest::Test
     "HIVE_WEB_CLONE_TIMEOUT_SEC" => "HIVEBOX_CLONE_TIMEOUT_SEC"
   }.freeze
 
-  CONTAINER_ONLY = %w[
+  # Names only the discontinued Hivebox image or its installer set. Hive no
+  # longer reads them, so they must neither warn nor alias anything.
+  RETIRED_CONTAINER_ONLY = %w[
     HIVEBOX_IMAGE
     HIVEBOX_NAME
     HIVEBOX_BIND
@@ -20,6 +22,7 @@ class WebEnvironmentTest < Minitest::Test
     HIVEBOX_REPOS_DIR
     HIVEBOX_SESSION_SECRET
     HIVEBOX_SUPERVISOR_PID
+    HIVEBOX_PRECOMPILED_ASSETS
   ].freeze
 
   def test_complete_precedence_and_warning_matrix_for_every_mapping
@@ -62,8 +65,8 @@ class WebEnvironmentTest < Minitest::Test
     assert_equal 1, Hive::Web::Environment.warnings(environment: environment).length
   end
 
-  def test_container_only_hivebox_settings_never_warn
-    environment = CONTAINER_ONLY.to_h { |name| [ name, "configured" ] }
+  def test_retired_container_only_hivebox_settings_never_warn
+    environment = RETIRED_CONTAINER_ONLY.to_h { |name| [ name, "configured" ] }
 
     assert_empty Hive::Web::Environment.warnings(environment: environment)
   end
@@ -162,8 +165,7 @@ class WebEnvironmentTest < Minitest::Test
     files = Dir[
       File.join(root, "lib/**/*.rb"),
       File.join(root, "web/app/**/*.rb"),
-      File.join(root, "web/config/**/*.{rb,yml}"),
-      File.join(root, "packaging/docker/Dockerfile")
+      File.join(root, "web/config/**/*.{rb,yml}")
     ].reject { |path| path.end_with?("lib/hive/web/environment.rb") }
     pattern = /ENV(?:\.fetch)?\(?[\[\"']+(?:#{SETTINGS.values.join('|')})/
     offenders = files.filter_map do |path|
@@ -173,6 +175,20 @@ class WebEnvironmentTest < Minitest::Test
 
     assert_empty offenders,
                  "deprecated native-web aliases must only be read by the resolver: #{offenders.join(', ')}"
+  end
+
+  def test_runtime_no_longer_reads_retired_container_only_settings
+    root = File.expand_path("../../..", __dir__)
+    files = Dir[
+      File.join(root, "lib/**/*.rb"),
+      File.join(root, "web/app/**/*.{rb,erb}"),
+      File.join(root, "web/config/**/*.{rb,yml}")
+    ]
+    pattern = /#{RETIRED_CONTAINER_ONLY.join('|')}/
+    offenders = files.select { |path| File.read(path).match?(pattern) }
+                     .map { |path| path.delete_prefix("#{root}/") }
+
+    assert_empty offenders, "the discontinued Hivebox image settings must stay unread: #{offenders.join(', ')}"
   end
 
   private

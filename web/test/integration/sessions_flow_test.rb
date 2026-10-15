@@ -316,16 +316,17 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
                   "the claim path must be one button, not a config-editing instruction"
   end
 
-  test "the container marker preserves the Hivebox product identity" do
+  test "the retired Hivebox image marker no longer changes the product identity" do
     ENV["HIVEBOX_PRECOMPILED_ASSETS"] = "1"
     configure_owner!(owner: "")
 
     get "/login"
 
     assert_response :success
-    assert_select "title", text: "hivebox — sign in"
-    assert_select "meta[name='application-name'][content='hivebox']", 1
-    assert_select "a.brand", text: "hivebox"
+    assert_select "title", text: "Hive web — sign in"
+    assert_select "meta[name='application-name'][content='Hive web']", 1
+    assert_select "a.brand", text: "Hive"
+    refute_match(/hivebox/i, response.body)
   end
 
   test "local Hive Web presents GitHub as an optional connection, not box ownership" do

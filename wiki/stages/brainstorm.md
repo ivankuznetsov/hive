@@ -1,27 +1,24 @@
 ---
 title: 2-brainstorm stage
 type: stage
-source: lib/hive/stages/brainstorm.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, lib/hive/tmux_runner.rb, templates/brainstorm_prompt.md.erb
+source: lib/hive/stages/brainstorm.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-09-10
-tags: [stage, brainstorm, qa, tmux]
+updated: 2026-10-14
+tags: [stage, brainstorm, qa]
 ---
 
-**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Process exit and attempt receipts are not completion evidence by themselves: WAITING must contain a numbered Round, COMPLETE must contain non-empty Requirements, and a failed spawn cannot reuse an unchanged stale artifact. When the resolved `brainstorm.agent` is Claude, launch shape comes from project-global `claude.mode`: `tmux` runs Claude inside a managed attachable tmux session via `Hive::ClaudeLauncher`, while `headless` uses the normal non-interactive profile path. `brainstorm.runtime` is unsupported and rejected during config loading; use `claude.mode`.
+**TLDR**: Round-by-round Q&A. Agent reads `idea.md`, writes `brainstorm.md` with `## Round N` questions and a `<!-- WAITING -->` marker. User answers inline. Re-running the stage parses answers and either appends `## Round N+1` or finalises with `## Requirements` and `<!-- COMPLETE -->`. Process exit and attempt receipts are not completion evidence by themselves: WAITING must contain a numbered Round, COMPLETE must contain non-empty Requirements, and a failed spawn cannot reuse an unchanged stale artifact. When the resolved `brainstorm.agent` is Claude, the stage launches headless `claude -p` through `Hive::Stages::Base.spawn_claude_with_failure_marker!` → `Hive::ClaudeLauncher`; other agents use the normal `spawn_agent` profile path. `brainstorm.runtime` is unsupported and rejected during config loading; `brainstorm.agent` selects the agent.
 
 ## Setup
 
 - **State file**: `brainstorm.md` (touched empty if absent so the marker write has a target).
 - **Prompt**: `templates/brainstorm_prompt.md.erb`, rendered with `project_name`, `task_folder`, `idea_text`. Idea text is wrapped in `<user_supplied content_type="idea_text">…</user_supplied>` per the prompt-injection boundary policy.
 - **Inspection and writes**: The prompt permits read-only shell inspection of local task artifacts, project files, and skill instructions. Only `brainstorm.md` may be modified; network requests and commands that change other files or Git state remain forbidden. This lets shell-based agents inspect context without expanding the brainstorm write boundary.
-- **Agent invocation**: `cwd = task.folder`, `--add-dir <task.folder>`, `log_label = "brainstorm"`. For `claude.mode: tmux`, `Hive::ClaudeLauncher` starts Claude through `interactive_claude_wrapper.sh`, unsets API-key env vars, maps `claude.permission_mode` (default `bypassPermissions`) to the same flags the headless path uses (`bypassPermissions` → `--dangerously-skip-permissions`, otherwise `--permission-mode <mode>`) plus `--allowedTools Read,Write,Edit,LS`, waits for the TUI prompt, and then asks `Hive::TmuxRunner` to paste the rendered prompt and submit only after the pane tail has settled.
-- **Tmux readiness env vars**: `Hive::ClaudeLauncher` owns `HIVE_CLAUDE_TMUX_*` readiness settings. `SESSION_READY`, `PID_READY`, and `CLAUDE_READY` inherit `HIVE_CLAUDE_TMUX_READY_WAIT_TIMEOUT_SEC` when their specific env var is unset; `CLAUDE_READY` otherwise keeps a 120s bare default for slow Claude TUI startup. Legacy `HIVE_BRAINSTORM_TMUX_*` names remain fallback inputs during the migration window.
-- **Claude TUI readiness predicates**: Trust, permission, banner, footer, and prompt-chrome strings are named constants in `Hive::ClaudeLauncher`, with observed coverage for Claude Code 2.1.133, the later line-end-caret footer shape, and Claude Code 2.1.179's separator/caret/separator/footer shape. `claude_ready_prompt?` accepts an idle `❯` caret at the start or end of the current input line, including Unicode separator spaces around the caret and the patrol-observed case where the captured pane tail has scrolled the `Claude Code` banner out but still shows `... PR #N ... for agents`. It classifies trust and permission prompts from the current prompt block instead of stale scrollback, rejects numbered menu options as non-ready, and only treats `⏵⏵` footer lines as prompt chrome when they carry the real bypass-permissions footer copy.
-- **Tmux submit/session failures**: `Hive::TmuxRunner#send_prompt` loads and pastes the prompt through a tmux buffer, waits until the pane tail is identical across two consecutive captures (`PROMPT_SETTLE_STABLE_POLLS`) or the bounded `HIVE_TMUX_PROMPT_SETTLE_TIMEOUT_SEC` deadline passes, then sends one explicit Enter. `HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC` is the poll interval. This avoids the old large-paste race where Enter could fire while a multi-chunk prompt was still rendering and be swallowed by the input box. If tmux disappears before that Enter submit or a tmux command exceeds `HIVE_TMUX_COMMAND_TIMEOUT_SEC`, the typed tmux error propagates immediately. During marker polling, `Hive::ClaudeLauncher.wait_for_terminal_marker` also checks that the tmux session still exists while `brainstorm.md` is stuck on `AGENT_WORKING`; a disappeared session stamps `ERROR reason=tmux_session_terminated` instead of waiting for the full brainstorm timeout.
-- **Tmux cleanup/orphan sweep**: cleanup is shared in `Hive::ClaudeLauncher`. After `/quit` and `kill_session`, the launcher sweeps leftover Claude processes by this task's `--add-dir <task.folder>` while skipping matched `tmux` commands and logging killed/skipped entries to `claude-tmux-orphan-sweep.log`. The skip is load-bearing because the tmux server can keep the first session's full argv and would otherwise match the task-specific sweep pattern.
+- **Agent invocation**: `cwd = task.folder`, `--add-dir <task.folder>`, `log_label = "brainstorm"`, `status_mode: :state_file_marker`. `Brainstorm.run!` routes a profile that supports the Claude `:Launch` facet through `run_claude!` (`spawn_claude_with_failure_marker!`), and every other profile through `run_headless!` (`spawn_agent`). Both resolve the stage permission scope with `default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS` (`Read,Write,Edit,LS`). The Claude path passes `claude.permission_mode` (default `bypassPermissions` → `--dangerously-skip-permissions`, otherwise `--permission-mode <mode>`), delivers the rendered prompt over stdin, unsets Claude API-key env vars through the profile's subscription environment, and denies `AskUserQuestion` (no `runtime_policy`). A Claude launch that raises a non-routing `Hive::AgentError` is stamped `ERROR reason=claude_launch_failed` with the exception class and message.
+- **Legacy scratch settings**: before each Claude launch, `Hive::ClaudeLauncher.repair_legacy_scratch_settings` restores a `.claude/settings.json.hive-pre-install` backup or deletes a Stop-hook `.claude/settings.json` stub left in the task folder by the retired tmux launch mode.
 - **Profile**: `Hive::Stages::Base.stage_profile(cfg, "brainstorm")` — reads `cfg.dig("brainstorm", "agent")` with `|| "claude"` fallback so legacy configs keep working. Spawn pins `status_mode: :state_file_marker` regardless of profile, because brainstorm's lifecycle contract is the WAITING/COMPLETE marker the agent writes to `brainstorm.md` — codex's profile default `:output_file_exists` would never satisfy that.
 - **Budgets**: `cfg["budget_usd"]["brainstorm"]` (default 50), `cfg["timeout_sec"]["brainstorm"]` (default 1800). Bumped ~5× in plan 2026-05-04-001 — generous sanity caps for runaway agents, not cost targets.
-- **Outcome reconciliation**: both headless and tmux launches snapshot
+- **Outcome reconciliation**: both the Claude and non-Claude launches snapshot
   `brainstorm.md` before spawning and consume the launch result afterward.
   `WAITING` is valid only with a numbered `## Round N` section; `COMPLETE` is
   valid only with a non-empty `## Requirements` section. A changed valid
@@ -68,14 +65,8 @@ The runner returns `{commit: action, status: marker.name}` so `Commands::Run` wr
 ## Tests
 
 - `test/integration/run_brainstorm_test.rb` exercises the prompt shape and marker transitions using the fake-claude fixture.
-- `test/integration/run_brainstorm_tmux_test.rb` exercises the tmux launcher path.
-- `test/unit/stages/brainstorm_runtime_test.rb` pins headless/tmux failure reconciliation, structural artifact validation, changed-artifact precedence, and stale-artifact rejection.
+- `test/unit/stages/brainstorm_runtime_test.rb` pins Claude/non-Claude routing, failure reconciliation, structural artifact validation, changed-artifact precedence, and stale-artifact rejection.
 - `test/unit/attempts/dispatcher_test.rb` pins one repair admission for a successful Brainstorm receipt whose required artifact is absent.
-- `test/unit/stages/brainstorm_tmux_sentinel_test.rb` exercises the live
-  `ClaudeLauncher` readiness/sentinel helpers and pins the orphan-sweep
-  invariant that matched Claude PIDs are terminated individually while the
-  tmux server is skipped and logged.
-- `test/unit/tmux_runner_test.rb` pins prompt-buffer cleanup, tmux command timeouts, and paste-settle behavior before the final Enter submit.
 
 ## Backlinks
 

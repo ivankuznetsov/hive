@@ -9,7 +9,7 @@ Pass: <%= pass %>
 Behavior:
 
 1. Use the `<%= skill_invocation %>` skill on the diff
-   `git diff <%= default_branch %>..HEAD` in the current worktree.
+   `git diff <%= default_branch %>...HEAD` in the current worktree.
    pr-review-toolkit runs multi-persona review internally; capture the
    union of all persona findings.
 2. Output structured findings to <%= output_path %>

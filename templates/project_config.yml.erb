@@ -29,10 +29,8 @@ command_receipts:
     minutes_per_namespace_per_day:
 
 claude:
-  # tmux uses your logged-in Claude session in an attachable pane.
-  # headless keeps the non-interactive `claude -p` path.
-  mode: <%= claude_mode %>
-  # Applies to every Claude-backed stage, in both tmux and headless mode,
+  # Hive launches Claude headless (`claude -p`).
+  # permission_mode applies to every Claude-backed stage,
   # EXCEPT where a stage sets a non-yolo `permissions:` scope (below): a
   # read-only/scoped stage runs in "default" permission mode and ignores this
   # value for that stage.
@@ -127,8 +125,6 @@ brainstorm:
   # permissions:
   #   preset: scoped
   #   tools: [Read, Write, Edit]
-  # Runtime mode is configured project-wide through
-  # the project-global claude.mode setting above.
 plan:
   agent: <%= planning_agent %>
   # skill: /plan
@@ -245,14 +241,21 @@ finalize:
 # screenote:
 #   base_url: https://screenote.example
 
-# Generous sanity caps for runaway agents, not cost targets. Most
-# tasks finish well within them; tighten manually only if you hit a
-# cap repeatedly. (The deprecated execute_review key from older
-# configs has been dropped — review owns reviewer budgets per
-# ADR-014.)
+# Per-stage spend caps in USD. None is set by default, so a stage runs
+# uncapped. The commented values are suggested caps for runaway agents,
+# not cost targets: uncomment a line to enforce it. (Review owns reviewer
+# budgets per ADR-014; see review.reviewers below.)
+<% if budgets.values.none? -%>
+# budget_usd:
+<% else -%>
 budget_usd:
+<% end -%>
 <% Hive::Commands::Init::Prompts::LIMIT_KEYS.each do |key| -%>
+<% if budgets[key] -%>
   <%= key %>: <%= budgets[key] %>
+<% else -%>
+#   <%= key %>: <%= Hive::Config::DEFAULTS["budget_usd"].fetch(key) %>
+<% end -%>
 <% end -%>
 
 timeout_sec:
@@ -357,7 +360,7 @@ review:
       skill: ce-code-review
       output_basename: claude-ce-code-review
       prompt_template: reviewer_claude_ce_code_review.md.erb
-      budget_usd: 50
+      # budget_usd: 50  # suggested cap; uncomment to enforce
       timeout_sec: 7200
 <% end -%>
 <% if enabled_reviewers.include?("codex-ce-code-review") -%>
@@ -367,7 +370,7 @@ review:
       skill: ce-code-review
       output_basename: codex-ce-code-review
       prompt_template: reviewer_codex_ce_code_review.md.erb
-      budget_usd: 50
+      # budget_usd: 50  # suggested cap; uncomment to enforce
       timeout_sec: 7200
 <% end -%>
 <% if enabled_reviewers.include?("pr-review-toolkit") -%>
@@ -377,7 +380,7 @@ review:
       skill: pr-review-toolkit:review-pr
       output_basename: pr-review-toolkit
       prompt_template: reviewer_pr_review_toolkit.md.erb
-      budget_usd: 50
+      # budget_usd: 50  # suggested cap; uncomment to enforce
       timeout_sec: 7200
 <% end -%>
 <% if enabled_reviewers.include?("grok-ce-code-review") -%>
@@ -387,7 +390,7 @@ review:
       skill: ce-code-review
       output_basename: grok-ce-code-review
       prompt_template: reviewer_grok_ce_code_review.md.erb
-      budget_usd: 50
+      # budget_usd: 50  # suggested cap; uncomment to enforce
       timeout_sec: 7200
 <% end -%>
 <% end -%>

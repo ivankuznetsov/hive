@@ -180,7 +180,7 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
-          max_budget_usd: finalize_budget(cfg),
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "finalize", profile, default: 50),
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
@@ -192,13 +192,8 @@ module Hive
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
-        if Hive::AgentSupport.supports?(profile, :Interactive)
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task,
-            cfg,
-            **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task) # coding-scoped: coding finalize stage tmux session
-          )
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
@@ -557,10 +552,6 @@ module Hive
       rescue StandardError => e
         warn "hive: redact_pr_body raised #{e.class}: #{e.message}; PR body may still contain the secret"
         :failed
-      end
-
-      def finalize_budget(cfg)
-        cfg.dig("budget_usd", "finalize") || 50
       end
 
       def finalize_timeout(cfg)

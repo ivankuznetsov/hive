@@ -45,6 +45,7 @@ require "hive/commands/module"
 require "hive/commands/drop"
 require "hive/tui"
 require "hive/commands/receipt"
+require "hive/commands/mcp"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
@@ -83,6 +84,24 @@ class HiveCliTest < Minitest::Test
       ])
       assert_equal "weekly", calls.first.dig(:kwargs, :idempotency_key)
       assert_equal 100, calls.first.dig(:kwargs, :limit)
+    end
+  end
+
+  def test_mcp_routes_subcommand_server_and_options
+    with_command_new_stub(Hive::Commands::Mcp, return_value: 0) do |calls|
+      error = assert_raises(SystemExit) do
+        Hive::CLI.start([ "mcp", "login", "linear", "--agent", "codex" ])
+      end
+      assert_equal 0, error.status
+      assert_equal [ "login", "linear" ], calls.first.fetch(:args)
+      assert_equal "codex", calls.first.dig(:kwargs, :agent)
+
+      assert_raises(SystemExit) do
+        Hive::CLI.start([ "mcp", "import", "--only", "a,b", "--update", "--yes", "--dry-run", "--json" ])
+      end
+      kwargs = calls[2].fetch(:kwargs)
+      assert_equal [ "import", nil ], calls[2].fetch(:args)
+      assert_equal({ json: true, all: false, only: "a,b", dry_run: true, yes: true, update: true, agent: nil }, kwargs)
     end
   end
 

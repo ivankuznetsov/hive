@@ -18,7 +18,7 @@ For recognized built-in routing, `RoutingArguments.global_arguments` are
 inserted before the profile headless subcommand and
 `subcommand_arguments` after the common launch controls. Durable routed
 implementation identities are rendered at the launcher seam for execute,
-open-PR, review-fix, and review-CI, including Claude's headless/tmux adapter;
+open-PR, review-fix, and review-CI, including Claude's headless adapter;
 their deliberately empty legacy `native_arguments` array is never treated as
 the complete routed command.
 
@@ -65,7 +65,7 @@ Hive::Agent.new(
 
 `Hive::AgentLimit` is the shared classifier for provider account, rate, quota, billing, and usage-credit exhaustion. It normalizes ANSI/control-heavy terminal text before matching Claude's limit menu and common API error strings such as quota exhaustion, 429 too-many-requests responses, resource exhaustion, usage credits, and billing/limit language. The broad "limit reached/exceeded/reset" family is intentionally usage-qualified (`usage`, `rate`, `token`, `credit`, `quota`, account/subscription/time-window terms, etc.) so healthy agent output about UI limits such as scroll, window, viewport, page, buffer, or line limits does not trip a false `limits_reached` wall. `error_message(text, agent:)` prefixes the first useful normalized line with `limits reached` or `limits reached for <agent>`. `AgentLimit` also owns the periodic readiness interval: `RETRY_COOLDOWN_SEC` (default 3600s = 1h, overridable per-process via `HIVE_LIMITS_RETRY_COOLDOWN_SEC`, validated to a positive integer). `retry_after(text:, now:)` still preserves a complete provider reset estimate for status/TUI display, falling back to `now + cooldown`, but daemon scheduling deliberately ignores that estimate: `retry_due?` uses the latest quota marker's mtime so credits, usage resets, and account switches are noticed within one interval. See [[daemon]] and [[state-model]].
 
-Headless `Hive::Agent#spawn_and_wait` scans each raw stream line for limit text while still preserving the structured final message and bounded plain tail. That raw-stream path catches CLIs that emit usage walls as JSON error events which `MessageExtractor` does not surface as a final assistant message; `handle_exit` then prefers `result[:limit_text]` and falls back to scanning `final_message`. Structured provider status extraction accepts both the generic `code` field and Grok's nested `http_status` field, so an HTTP 402 Grok Build balance exhaustion is typed as `provider_limit` instead of a generic reviewer error. Ordinary successful command output is never scanned into failure, but a profile extractor's typed provider error remains authoritative even when the CLI exits zero. A typed quota error retains `limits_reached`; another provider-side failed turn returns `error_reason=provider_error` with its bounded redacted diagnostic. For `:state_file_marker` spawns Hive stamps the corresponding `ERROR`; for `:exit_code_only` and `:output_file_exists` spawns it returns the error without overwriting the orchestrator-owned marker. `Hive::ClaudeLauncher` uses the same limit classifier while waiting for tmux readiness, terminal markers, and expected-output files, so a visible provider-limit pane wins over readiness timeout, tmux-session-death, and missing-output fallbacks.
+Headless `Hive::Agent#spawn_and_wait` scans each raw stream line for limit text while still preserving the structured final message and bounded plain tail. That raw-stream path catches CLIs that emit usage walls as JSON error events which `MessageExtractor` does not surface as a final assistant message; `handle_exit` then prefers `result[:limit_text]` and falls back to scanning `final_message`. Structured provider status extraction accepts both the generic `code` field and Grok's nested `http_status` field, so an HTTP 402 Grok Build balance exhaustion is typed as `provider_limit` instead of a generic reviewer error. Ordinary successful command output is never scanned into failure, but a profile extractor's typed provider error remains authoritative even when the CLI exits zero. A typed quota error retains `limits_reached`; another provider-side failed turn returns `error_reason=provider_error` with its bounded redacted diagnostic. For `:state_file_marker` spawns Hive stamps the corresponding `ERROR`; for `:exit_code_only` and `:output_file_exists` spawns it returns the error without overwriting the orchestrator-owned marker. Claude launches through `Hive::ClaudeLauncher` take this same headless path, so they share the classifier.
 
 Claude's structured `rate_limit_event` has no message field. The runtime accepts
 only rejected `five_hour` and `seven_day` windows and synthesizes bounded quota
@@ -186,9 +186,14 @@ That means `claude.model: default` reaches the headless argv as
 `--model default`; `model: inherit` or blank omits `--model`; and
 `claude.effort` reaches argv for any explicit non-default/non-inherit
 value (fresh init offers `low`, `medium`, and `high`).
-`Hive::ClaudeLauncher.wrapper_command` uses the same flag fragment for
-tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
-`--effort` without shell re-parsing.
+`Hive::ClaudeLauncher.launch!` builds the same fragment (with per-stage
+`model:`/`effort:` overrides) and hands it to `spawn_agent` as explicit
+`cli_flags`, so stage pins win over the project-global `claude.*` values.
+`launch!` also runs `repair_legacy_scratch_settings` on the task folder and
+working directory first: a `.claude/settings.json.hive-pre-install` backup
+left by the retired tmux launch mode is restored over the read-only Stop-hook
+stub, and a bare stub whose only hook runs `stop_hook.sh` is deleted, so a
+killed tmux-era runner never leaves a hook pointing at a deleted script.
 
 Read-only architecture discovery is a separate Claude-only launch policy.
 `Hive::RefactorPatrol::ReviewAgentRunner` resolves the existing read-only tool
@@ -241,27 +246,6 @@ Resource exhaustion, budget exhaustion, missing typed provider evidence,
 missing output, nonzero exit, timeout, or any protected-anchor change remains a
 failure.
 
-Claude/tmux launches record the managed pane PID in the same per-task lock.
-`Hive::ClaudeLauncher#record_claude_pid` waits for `pane_pid`, then writes both
-`claude_pid` and its `claude_pid_start_time`; this gives tmux-backed cleanup the
-same PID-reuse identity guard as headless `Hive::Agent` spawns. Shared-session
-teardown compare-and-clears that exact identity after shutdown, session kill,
-and orphan sweep; a concurrently re-established replacement remains recorded.
-
-Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers,
-triage/browser helpers) poll the expected artifact and managed tmux session
-together. Availability means a non-empty regular file accepted by
-`ArtifactFirewall.validate_required_outputs`; a symlink or directory remains
-unavailable even when its target has bytes. If the session disappears before
-acceptance, the launcher returns `tmux_session_terminated...`. An accepted
-artifact still needs Claude's Stop hook `.done` or a proven ready prompt;
-otherwise it remains partial. Provider-limit pane evidence continues to win
-over readiness, timeout, session-death, and missing-output fallbacks.
-
-`Hive::ClaudeLauncher.claude_ready_prompt?` treats Claude's TUI prompt as version-churny terminal chrome, not as a fixed last-line string. The detector keys on the idle `❯` caret only when it is the first or last glyph of its line, accepts Unicode separator spaces around it, and accepts the Claude Code 2.1.179 separator/caret/separator/footer shape as long as every line below the caret is prompt chrome or the real `bypass permissions` footer. Folder-trust prompts are recognised in both the older "Quick safety check" layout and the newer "one you trust" layout; the launcher only presses Enter when the caret is on "Yes, I trust this folder" and otherwise moves Down first. It still rejects numbered menu options, current trust/permission prompts, stale carets with non-footer output below them, and `❯` glyphs embedded in Claude's own prose or shell snippets. It also rejects any pane whose footer shows `esc to interrupt`: current Claude Code keeps the caret and footer painted while a turn runs, so that interrupt hint is the only reliable busy signal, and reading a working pane as idle made the completion loop seal the turn and kill Claude seconds into execute.
-
-Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_shared_session` first asks Claude to `/quit`, then kills the managed tmux session, then runs `sweep_orphan_processes(task)`. The sweep searches with `pgrep -fa -- "--add-dir[[:space:]]+<task.folder>([[:space:]]|$)"`, terminates matched non-tmux PIDs one by one with `TERM`, and skips any matched command whose executable basename is `tmux`. This matters because the tmux server can retain the first `tmux new-session ... --add-dir <task.folder> ...` argv; a blanket `pkill -f` would kill the tmux server and terminate unrelated live Hive sessions. The sweep appends the raw matches plus killed/skipped counts to `<task>/claude-tmux-orphan-sweep.log` (rotated at 64 KiB) and writes warning rows there when `pgrep` is missing or fails.
-
 ## `handle_exit`
 
 | Condition | Marker set |
@@ -293,7 +277,7 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 ## Tests
 
 - `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable permission argv, Claude model/effort and safe-mode `cli_flags`, proof that the capability is absent from unrelated launches, prompt omission from logs, credential redaction across stdout/stderr write boundaries and structured message-event boundaries, and `0600` log mode.
-- `test/unit/claude_launcher_test.rb` covers the tmux wrapper argv carrying model/effort pins and omitting them when no flags are configured.
+- `test/unit/claude_launcher_test.rb` covers delegation to `Stages::Base.spawn_agent` (including a leftover `claude.mode: tmux` config still launching headless), MCP and allowed-tools flags, the `AskUserQuestion` deny, per-stage model/effort winning over project pins, the `claude_launch_failed` marker, and the tmux-era scratch-settings repair.
 - `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns and the stage permission-scope helper preserving yolo defaults.
 - `test/smoke/permission_scope_headless_smoke_test.rb` is a live Claude smoke proving a read-only headless write attempt completes without timeout and does not create the file, while yolo creates it.
 

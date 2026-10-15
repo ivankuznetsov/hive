@@ -218,10 +218,8 @@ module Hive
         # Only the MANAGED bundle resolves the hive-cli path gem via
         # HIVE_CLI_ROOT — its ".." holds no gem, and its bundle was installed
         # with this same export. A source checkout or a HIVE_WEB_APP_DIR
-        # override (e.g. the Hivebox image's baked /app/web) was
-        # bundle-installed against its own ".."; re-pointing the path source
-        # at runtime invalidates that prebuilt bundle (the v0.3.4/v0.3.5
-        # image-smoke db:prepare failure).
+        # override was bundle-installed against its own ".."; re-pointing the
+        # path source at runtime invalidates that prebuilt bundle.
         managed_bundle = app_dir == Hive::Web::AppBundle.app_dir
         if managed_bundle
           env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root
@@ -253,8 +251,7 @@ module Hive
         FileUtils.mkdir_p(env.fetch("HIVE_WEB_STORAGE_DIR"))
 
         Dir.chdir(app_dir) do
-          precompiled_assets = managed_bundle || ENV["HIVEBOX_PRECOMPILED_ASSETS"] == "1"
-          if env.fetch("RAILS_ENV") == "production" && !precompiled_assets
+          if env.fetch("RAILS_ENV") == "production" && !managed_bundle
             compiled = Dir.mktmpdir("hive-web-assets") do |asset_storage|
               asset_env = env.merge("HIVE_WEB_STORAGE_DIR" => asset_storage)
               system(asset_env, *rails_argv, "assets:precompile")

@@ -73,6 +73,8 @@ class TelegramTest < ActionDispatch::IntegrationTest
     end
 
     assert_redirected_to telegram_path
+    assert_match "hive bot stop && hive bot start", flash[:notice],
+                 "native Hive has no supervisor to signal, so the operator restarts the bot"
     bot = Hive::Config.load_global_bot
     assert_equal true, bot.fetch("enabled")
     assert_equal true, bot.fetch("pairing_enabled")

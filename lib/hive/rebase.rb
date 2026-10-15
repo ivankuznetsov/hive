@@ -416,7 +416,8 @@ module Hive
           cfg, "rebase", profile,
           current: Hive::Stages::Base.model_routing_current(cfg["rebase"])
         ),
-        cfg: cfg
+        cfg: cfg,
+        mcp_scope: "rebase"
       )
     end
 

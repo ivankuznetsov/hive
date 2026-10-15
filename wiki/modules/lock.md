@@ -73,10 +73,10 @@ orchestration flock uses the same bounded-acquire policy as the project commit
 lock and never acquires a project commit lock while held.
 
 The runner adds `slug:` and `stage:` to the payload. After launch, both the
-headless `Hive::Agent` writer and the tmux-backed `Hive::ClaudeLauncher` writer
-inject `claude_pid` plus `claude_pid_start_time` through `update_task_lock`.
+headless `Hive::Agent` writer (the only launch path, Claude included)
+injects `claude_pid` plus `claude_pid_start_time` through `update_task_lock`.
 Those fields describe only the currently owned child: after a confirmed child
-exit or shared-session teardown, `clear_task_lock_child` removes both fields
+exit, `clear_task_lock_child` removes both fields
 in a fenced SQL update only when PID and start time still match. That
 compare-and-clear prevents an older completion from erasing a replacement
 child's liveness evidence. `hive status` uses the child PID for liveness, while

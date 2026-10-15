@@ -27,6 +27,17 @@ module Hive
       ROUND_RE    = Hive::Bot::BrainstormParser::ROUND_RE
       MARKER_RE   = Hive::Bot::BrainstormParser::MARKER_RE
 
+      # The physical line array all writer surgery operates on: the
+      # parser's `document_lines` (newline-normalized, chomped — exactly
+      # the array the parser's `question_line_index` / `block_end_index` /
+      # `answer_line_index` fields index into), re-terminated with `\n` so
+      # a plain join reproduces the document. Parser location fields and
+      # writer line surgery therefore share one definition of "a line".
+      def write_document_lines(content)
+        Hive::BrainstormParser.document_lines(content).map { |line| "#{line}\n" }
+      end
+      private_class_method :write_document_lines
+
       LOCK_RETRY_DEADLINE_SEC = 5
       LOCK_RETRY_SLEEP_SEC = 0.05
       MARKER_LOCK_TIMEOUT_SEC = 5
@@ -109,25 +120,30 @@ module Hive
         Hive::Markers.with_markers_lock(
           brainstorm_path, create: false, timeout: MARKER_LOCK_TIMEOUT_SEC
         ) do
-          content = normalize_lone_cr(File.read(brainstorm_path, encoding: "UTF-8").scrub)
+          # Line surgery must happen on the SAME newline-normalized line
+          # array the parser indexed its location fields against
+          # (`document_lines`), not on `content.lines`: a lone-\r file
+          # yields more parser lines than raw lines, so index math across
+          # the two would misattribute. See `write_document_lines`.
+          content = File.read(brainstorm_path, encoding: "UTF-8").scrub
+          lines = write_document_lines(content)
           parsed = Hive::Bot::BrainstormParser.parse_text(content)
           target = parsed[ordinal - 1]
           next :question_not_found unless target
           next :already_answered if target.answered?
 
-          lines = content.lines
-          question_line_index = question_line_index_for_ordinal(lines, ordinal)
+          question_line_index = target.question_line_index
           next :question_not_found unless question_line_index
 
-          slot = find_empty_answer_slot_after(lines, question_line_index)
+          slot = find_empty_answer_slot(lines, target)
           new_lines = if slot
-            fill_answer_slot(lines, slot, answer_text, content)
+            fill_answer_slot(lines, slot, answer_text)
           else
             insert_answer_slot_after(
-              lines, question_line_index, target.n, answer_text, content
+              lines, question_line_index, target.block_end_index, target.n, answer_text
             )
           end
-          Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
+          Hive::Markers.write_atomic(brainstorm_path, join_document(new_lines, content))
           :written
         end
       end
@@ -143,7 +159,13 @@ module Hive
       def try_append(task_folder, brainstorm_path, question_n, answer_text)
         result = Hive::Lock.with_task_lock(task_folder, "bot" => "brainstorm_answer") do
           Hive::Markers.with_markers_lock(brainstorm_path, create: false) do
+            # Line surgery must happen on the SAME newline-normalized line
+            # array the parser indexed its location fields against
+            # (`document_lines`), not on `content.lines`: a lone-\r file
+            # yields more parser lines than raw lines, so index math across
+            # the two would misattribute. See `write_document_lines`.
             content = File.exist?(brainstorm_path) ? File.read(brainstorm_path, encoding: "UTF-8").scrub : ""
+            lines = write_document_lines(content)
             parsed = Hive::Bot::BrainstormParser.parse_text(content)
             if !parsed.any? { |question| question.n == question_n }
               next :question_not_found
@@ -152,10 +174,10 @@ module Hive
               next :already_answered
             end
 
-            lines = content.lines
-            slot = find_empty_answer_slot(lines, question_n, parsed)
+            target = parsed.find { |question| question.n == question_n && question.answer.nil? }
+            slot = find_empty_answer_slot(lines, target)
             if slot
-              new_lines = fill_answer_slot(lines, slot, answer_text, content)
+              new_lines = fill_answer_slot(lines, slot, answer_text)
             else
               # Q{n} is unanswered (the earlier guards verified Q{n} is
               # present and its answer is nil) but has NO `### A{n}.` header
@@ -165,11 +187,11 @@ module Hive
               # answer and, with the daemon's answers-pending gate, held the
               # task indefinitely — issue #269), CREATE the slot at the end
               # of the Q-block and write the answer into it.
-              new_lines = insert_answer_slot(lines, question_n, parsed, answer_text, content)
+              new_lines = insert_answer_slot(lines, target, answer_text)
               next :answer_slot_missing unless new_lines
             end
 
-            Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
+            Hive::Markers.write_atomic(brainstorm_path, join_document(new_lines, content))
             :written
           end
         end
@@ -185,14 +207,26 @@ module Hive
       end
       private_class_method :try_append
 
-      # Write `answer_text` into an existing empty `### A` slot.
-      def fill_answer_slot(lines, slot, answer_text, content)
-        newline = newline_for(content)
-        lines[slot[:answer_line_index]] =
-          "#{Hive::Bot::BrainstormParser.encoded_answer_header(slot.fetch(:question_n))}#{newline}"
+      # Rebuild a brainstorm document from its lines. Every line in the
+      # array is newline-terminated, so a plain join is enough; the only
+      # decision made here is the line-ending style, which follows the
+      # pre-write file (CRLF stays CRLF, LF stays LF) instead of being
+      # decided per-inserted-line by a separate `newline_for` rule that
+      # could drift from the document around it.
+      def join_document(lines, content)
+        text = lines.join
+        content.include?("\r\n") ? text.gsub("\n", "\r\n") : text
+      end
+      private_class_method :join_document
 
-        answer_lines = answer_body(answer_text, newline).lines
-        lines[0..slot[:answer_line_index]] + answer_lines + lines[slot[:body_end_index]..].to_a
+      # Write `answer_text` into an existing empty `### A` slot.
+      def fill_answer_slot(lines, slot, answer_text)
+        answer_line = slot.fetch(:answer_line_index)
+        block_end = slot.fetch(:block_end_index)
+
+        lines[answer_line] = "#{Hive::Bot::BrainstormParser.encoded_answer_header(slot.fetch(:question_n))}\n"
+
+        lines[0..answer_line] + answer_body(answer_text).lines + lines[block_end..].to_a
       end
       private_class_method :fill_answer_slot
 
@@ -200,138 +234,75 @@ module Hive
       # at the end of the Q-block (just before the next Q / Round / marker
       # boundary, or EOF), and write the answer into it. Uses the parser's
       # canonical `answer_header` so the format stays in lockstep. Returns
-      # the new lines, or nil when the Q{n} line can't be located (the
-      # earlier guard makes this unreachable in practice; nil routes
+      # the new lines, or nil when the parser could not locate the target
+      # question's block span (unreachable in practice; nil routes
       # `try_append` back to the `:answer_slot_missing` fallback).
-      def insert_answer_slot(lines, question_n, parsed, answer_text, content)
-        q_idx = target_question_line_index(lines, parsed, question_n)
-        return nil unless q_idx
+      def insert_answer_slot(lines, target, answer_text)
+        return nil unless target&.question_line_index
 
-        insert_answer_slot_after(lines, q_idx, question_n, answer_text, content)
+        insert_answer_slot_after(
+          lines, target.question_line_index, target.block_end_index, target.n, answer_text
+        )
       end
       private_class_method :insert_answer_slot
 
-      def insert_answer_slot_after(lines, q_idx, question_n, answer_text, content)
-        newline = newline_for(content)
-        insert_idx = q_idx + 1
-        insert_idx += 1 while insert_idx < lines.length && !block_boundary?(lines[insert_idx])
-        # Ensure the preceding line is newline-terminated so the new
-        # header doesn't get glued onto the question's last body line.
-        if insert_idx.positive? && !lines[insert_idx - 1].to_s.end_with?(newline)
-          lines[insert_idx - 1] = "#{lines[insert_idx - 1]}#{newline}"
-        end
+      def insert_answer_slot_after(lines, q_idx, block_end_idx, question_n, answer_text)
+        # `block_end_idx` is the parser-computed first boundary line of the
+        # Q-block (or EOF), so the slot lands exactly at the block's end;
+        # every line in `lines` is newline-terminated, so no
+        # newline-termination repair is needed before splicing.
+        insert_idx = block_end_idx || q_idx + 1
 
-        slot_lines = [ "#{Hive::Bot::BrainstormParser.encoded_answer_header(question_n)}#{newline}" ] +
-                     answer_body(answer_text, newline).lines
+        slot_lines = [ "#{Hive::Bot::BrainstormParser.encoded_answer_header(question_n)}\n" ] +
+                     answer_body(answer_text).lines
         lines[0...insert_idx] + slot_lines + lines[insert_idx..].to_a
       end
       private_class_method :insert_answer_slot_after
 
-      # Locate the empty A-section to fill for question_n. Q-context-
-      # aware: walks forward from the Q{n} header that the parser
-      # identified as the target (first unanswered Q with that number
-      # in document order) and returns the first empty A-section before
-      # the next block boundary (Q / Round / marker).
+      # Locate the empty A-section to fill for the parser-identified target
+      # question. Q-context-aware BY CONSTRUCTION: the target comes from
+      # the parser (first unanswered Q with that number in document order)
+      # together with its block span, so there is no writer-side re-scan
+      # that could disagree with the parser about which Q header or block
+      # boundary applies.
       #
       # Tolerates off-by-one A-numbers (agents occasionally emit
       # `### A2.` after `### Q1.`) without misattributing: the slot is
       # selected by POSITION within the Q-block, not by A-number.
       #
-      # Previously this was a two-step scan: strict by-number first,
-      # then by-position fallback. The strict scan ignored Q-context
-      # and could cross round boundaries — a brainstorm.md with empty
-      # `### A1.` in Round 1 (still unanswered) and Round 2's `### A1.`
-      # would route operator's Round-2 answer into Round-1's slot. The
-      # combined Q-context-aware function below resolves that by
-      # always anchoring the scan to the parser-identified target Q's
-      # line, then walking forward.
-      def find_empty_answer_slot(lines, question_n, parsed)
-        q_idx = target_question_line_index(lines, parsed, question_n)
-        return nil unless q_idx
+      # Previously the target line index was re-derived here by matching
+      # raw lines against the parsed question list (`target_question_line_index`)
+      # and the block boundary was re-derived by regex-scanning forward
+      # (`block_boundary?`). The strict scan ignored Q-context and could
+      # cross round boundaries — a brainstorm.md with empty `### A1.` in
+      # Round 1 (still unanswered) and Round 2's `### A1.` would route the
+      # operator's Round-2 answer into Round-1's slot. Anchoring on the
+      # parser's location fields resolves that by construction.
+      def find_empty_answer_slot(lines, target)
+        return nil unless target&.question_line_index && target&.block_end_index
 
-        find_empty_answer_slot_after(lines, q_idx)
-      end
-      private_class_method :find_empty_answer_slot
+        a_idx = target.answer_line_index
+        return nil unless a_idx && a_idx > target.question_line_index && a_idx < target.block_end_index
 
-      def find_empty_answer_slot_after(lines, q_idx)
-        scan = q_idx + 1
-        while scan < lines.length
-          stripped = lines[scan].chomp
-          break if stripped =~ QUESTION_RE || stripped =~ ROUND_RE || stripped =~ MARKER_RE
-          return empty_slot_starting_at(lines, scan) if ANSWER_RE.match?(stripped)
-
-          scan += 1
-        end
-        nil
-      end
-      private_class_method :find_empty_answer_slot_after
-
-      def question_line_index_for_ordinal(lines, ordinal)
-        seen = 0
-        lines.each_with_index do |line, idx|
-          next unless QUESTION_RE.match?(line.chomp)
-
-          seen += 1
-          return idx if seen == ordinal
-        end
-        nil
-      end
-      private_class_method :question_line_index_for_ordinal
-
-      # Map the parser's view of "first unanswered Q with this number"
-      # back to a line index in the raw file. Multiple Q{n} can exist
-      # (e.g. each new Round restarts numbering); we want the one the
-      # parser believes is still awaiting an answer.
-      def target_question_line_index(lines, parsed, question_n)
-        matching = parsed.select { |q| q.n == question_n }
-        target_position = matching.find_index { |q| q.answer.nil? }
-        return nil unless target_position
-
-        seen = 0
-        lines.each_with_index do |line, idx|
-          match = QUESTION_RE.match(line.chomp)
-          next unless match && match[1].to_i == question_n
-          return idx if seen == target_position
-
-          seen += 1
-        end
-        nil
-      end
-      private_class_method :target_question_line_index
-
-      # Given an index pointing at an `### A{x}.` line, return the slot
-      # envelope iff the body (until the next block boundary) is empty.
-      def empty_slot_starting_at(lines, idx)
-        body_end = idx + 1
-        body = []
-        while body_end < lines.length && !block_boundary?(lines[body_end])
-          body << lines[body_end]
-          body_end += 1
-        end
+        body = lines[(a_idx + 1)...target.block_end_index].to_a
         return nil unless body.join.strip.empty?
 
-        match = ANSWER_RE.match(lines[idx].chomp)
+        match = ANSWER_RE.match(lines[a_idx].to_s.chomp)
         {
-          answer_line_index: idx,
-          body_end_index: body_end,
+          answer_line_index: a_idx,
+          block_end_index: target.block_end_index,
           question_n: match[1].to_i
         }
       end
-      private_class_method :empty_slot_starting_at
+      private_class_method :find_empty_answer_slot
 
-      def block_boundary?(line)
-        stripped = line.chomp
-        QUESTION_RE.match?(stripped) || ROUND_RE.match?(stripped) || MARKER_RE.match?(stripped)
-      end
-      private_class_method :block_boundary?
-
-      def answer_body(answer_text, newline)
+      def answer_body(answer_text)
         text = answer_text.to_s.gsub("\r\n", "\n").gsub("\r", "\n").rstrip
-        return newline if text.empty?
+        return "\n" if text.empty?
 
         text.lines(chomp: true).map do |line|
           encoded = escape_answer_line?(line) ? encode_answer_line(line) : line
-          "#{encoded}#{newline}"
+          "#{encoded}\n"
         end.join
       end
       private_class_method :answer_body
@@ -352,16 +323,6 @@ module Hive
         ROUND_RE.match?(line) || QUESTION_RE.match?(line) || ANSWER_RE.match?(line)
       end
       private_class_method :structural_heading?
-
-      def newline_for(content)
-        content.include?("\r\n") ? "\r\n" : "\n"
-      end
-      private_class_method :newline_for
-
-      def normalize_lone_cr(content)
-        content.to_s.gsub(/\r(?!\n)/, "\n")
-      end
-      private_class_method :normalize_lone_cr
     end
   end
 end

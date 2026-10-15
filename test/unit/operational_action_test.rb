@@ -557,7 +557,6 @@ class OperationalActionTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|
         capture_io { Hive::Commands::Init.new(project_root).call }
-        set_project_claude_mode(project_root, "headless")
         project = Hive::Config.registered_projects.find do |entry|
           File.expand_path(entry.fetch("path")) == File.expand_path(project_root)
         end

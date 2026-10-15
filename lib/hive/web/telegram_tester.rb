@@ -11,7 +11,7 @@ module Hive
     module TelegramTester
       module_function
 
-      TEST_MESSAGE = "✅ hivebox test message".freeze
+      TEST_MESSAGE = "✅ Hive test message".freeze
 
       # `url:` overrides the Telegram API base (the gem's own Client option) so
       # tests can drive the real network-error path against an unroutable

@@ -81,6 +81,7 @@ module Hive
             expected_output: @target_path,
             status_mode: :output_file_exists,
             cfg: @cfg,
+            mcp_scope: @stage.name,
             **Hive::Stages::Base.tool_scope_kwargs(scope)
           )
           return if result[:status] == :ok

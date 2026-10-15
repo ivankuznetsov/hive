@@ -575,7 +575,7 @@ module Hive
 
         payload = result.attachment || {}
         chat_id = payload.fetch(:chat_id, update.chat_id)
-        if !answer_voice && non_voice_draft?(chat_id: chat_id)
+        if !answer_voice && @idea_draft_store.non_voice_draft?(chat_id: chat_id)
           return safe_send_message(chat_id: update.chat_id,
                                    text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
         end
@@ -731,11 +731,6 @@ module Hive
         size.positive? && size > idea_attachment_max_bytes
       end
 
-      def non_voice_draft?(chat_id:)
-        draft = @idea_draft_store.get(chat_id: chat_id)
-        draft && draft.origin != :voice
-      end
-
       def idea_attachment_max_bytes
         @config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024).to_i
       end
@@ -744,25 +739,15 @@ module Hive
         (idea_attachment_max_bytes.to_f / (1024 * 1024)).round
       end
 
-      # Reuse an existing draft ONLY when it is voice-origin. A voice note
-      # arriving mid-text/-media draft must not overwrite the operator's typed
-      # text or merge into their media draft, so for any non-voice draft we
-      # start a fresh voice draft instead of clobbering that work in place.
       def ensure_voice_draft(chat_id:)
-        existing = @idea_draft_store.get(chat_id: chat_id)
-        return existing if existing&.origin == :voice
-        return nil if existing
-
-        @idea_draft_store.start(chat_id: chat_id, phase: :awaiting_transcript_confirm,
-                                token: SecureRandom.hex(4), origin: :voice)
+        # The reuse-vs-start decision (voice-origin only, never clobber a
+        # text/media draft) belongs to the store; this delegator keeps the
+        # supervisor call sites and test seams unchanged.
+        @idea_draft_store.ensure_voice_draft(chat_id: chat_id, token: SecureRandom.hex(4))
       end
 
-      # Clear only a voice-origin draft. A :no_speech / :unsupported_language
-      # voice note must not wipe an unrelated in-progress text/media draft (and
-      # its staging dir) the operator was building.
       def clear_voice_draft(chat_id:)
-        draft = @idea_draft_store.get(chat_id: chat_id)
-        @idea_draft_store.clear(chat_id: chat_id) if draft&.origin == :voice
+        @idea_draft_store.clear_voice_draft(chat_id: chat_id)
       end
 
       def stage_voice_fallback(chat_id:, bytes:)
@@ -812,17 +797,28 @@ module Hive
 
       def execute_idea_commit(result, update)
         chat_id = result.attachment&.fetch(:chat_id, update.chat_id) || update.chat_id
-        draft = @idea_draft_store.get(chat_id: chat_id)
-        return safe_send_message(chat_id: update.chat_id, text: "That idea draft expired. Send /idea again.") unless draft
-        return safe_send_message(chat_id: update.chat_id, text: "Pick a project before pressing Done.") if draft.project.to_s.empty?
-        return safe_send_message(chat_id: update.chat_id, text: "Send the idea text before pressing Done.") if draft.text.to_s.strip.empty?
+        # Validation and execution both go through the store's decision API:
+        # commit_blocker owns the "is this committable" decision, and
+        # commit_snapshot hands execution a frozen view so it never depends on
+        # the live mutable Draft representation.
+        case @idea_draft_store.commit_blocker(chat_id: chat_id)
+        when :draft_expired
+          return safe_send_message(chat_id: update.chat_id, text: "That idea draft expired. Send /idea again.")
+        when :project_missing
+          return safe_send_message(chat_id: update.chat_id, text: "Pick a project before pressing Done.")
+        when :text_missing
+          return safe_send_message(chat_id: update.chat_id, text: "Send the idea text before pressing Done.")
+        end
 
-        tuples = draft.attachments.map { |attachment| [ attachment.fetch(:staging_path), attachment.fetch(:dest_name) ] }
-        body = tuples.empty? ? nil : idea_body_override(draft)
+        snapshot = @idea_draft_store.commit_snapshot(chat_id: chat_id)
+        return safe_send_message(chat_id: update.chat_id, text: "That idea draft expired. Send /idea again.") unless snapshot
+
+        tuples = snapshot.attachments.map { |attachment| [ attachment.fetch(:staging_path), attachment.fetch(:dest_name) ] }
+        body = tuples.empty? ? nil : idea_body_override(snapshot)
         capture_command_io do
           Hive::Commands::New.new(
-            draft.project,
-            draft.text,
+            snapshot.project,
+            snapshot.text,
             body_override: body,
             attachments: tuples
           ).call!
@@ -833,7 +829,7 @@ module Hive
         # is gone by design) — reads like an error for a successful capture.
         clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
         safe_send_message(chat_id: update.chat_id,
-                          text: "Captured your idea in #{draft.project}. It's in the inbox - move it to 2-brainstorm to start.")
+                          text: "Captured your idea in #{snapshot.project}. It's in the inbox - move it to 2-brainstorm to start.")
       rescue Hive::Error, SystemCallError, IOError => e
         @logger.event(:send_failure, source: "commit_idea",
                                       chat_id: update.chat_id,
@@ -843,8 +839,8 @@ module Hive
                           text: "Couldn't capture that idea (#{Hive::Tui::Text.sanitize(e.message)}). Try Done again.")
       end
 
-      def idea_body_override(draft)
-        lines = draft.attachments.map do |attachment|
+      def idea_body_override(snapshot)
+        lines = snapshot.attachments.map do |attachment|
           dest = attachment.fetch(:dest_name)
           if Hive::Bot::IdeaAttachmentPolicy.image_extension?(attachment.fetch(:ext))
             "![](assets/#{dest})"
@@ -852,7 +848,7 @@ module Hive
             "[#{dest}](assets/#{dest})"
           end
         end
-        ([ draft.text.to_s.strip ] + lines).reject(&:empty?).join("\n\n")
+        ([ snapshot.text.to_s.strip ] + lines).reject(&:empty?).join("\n\n")
       end
 
       def capture_command_io

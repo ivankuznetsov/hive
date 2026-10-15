@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-09-06
+updated: 2026-10-15
 tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, daily digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, daily digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 The live project template includes a commented, copyable `models:` example.
 Exact and coarse entries inherit model and effort independently, never select an
@@ -141,7 +141,7 @@ These roles control the authoritative outcome-evidence package described in
 used to create project-owned media bytes; a capture manifest is not completion
 authority by itself.
 
-Hive checkouts need no declaration: the complete locked Hivebox web layout
+Hive checkouts need no declaration: the complete locked Hive web layout
 selects the built-in recorder. A conventional project can declare one
 project-owned executable:
 
@@ -166,7 +166,7 @@ before capture starts. The provider request/result ABI and publication checks
 are documented in [[commands/web]].
 
 This declaration is additive. Projects that omit it retain their prior config
-shape: compatible Hivebox trees continue on the built-in recorder, while
+shape: compatible Hive web trees continue on the built-in recorder, while
 incompatible conventional trees receive the precise unsupported-provider
 diagnostic until they opt in. Retained v1 capture manifests remain readable;
 new successful capture emits the provider-neutral v2 manifest.
@@ -310,6 +310,7 @@ reference.
  "attempt_first_heartbeat_timeout_sec" => 30,
  "project_name" => nil,
  "permissions" => "yolo",
+ "mcp" => {"inherit_user" => false, "use" => []},
  "command_receipts" =>
   {"keyed_intake_enabled" => false,
    "nonterminal_limit" => 1000,
@@ -320,8 +321,7 @@ reference.
      "response_business_days" => 1,
      "minutes_per_namespace_per_day" => nil}},
  "claude" =>
-  {"mode" => "tmux",
-   "permission_mode" => "bypassPermissions",
+  {"permission_mode" => "bypassPermissions",
    "model" => "default",
    "effort" => "default"},
  "budget_usd" =>
@@ -427,7 +427,7 @@ reference.
      "env_override" => "HIVE_CODEX_BIN",
      "min_version" => "0.125.0"},
    "pi" =>
-    {"bin" => "pi", "env_override" => "HIVE_PI_BIN", "min_version" => "0.70.2"},
+    {"bin" => "pi", "env_override" => "HIVE_PI_BIN", "min_version" => "1.0.4"},
    "grok" =>
     {"bin" => "grok",
      "env_override" => "HIVE_GROK_BIN",
@@ -811,6 +811,21 @@ closed document requires no repeated GitHub or agent work. Telegram delivery is
 separate and uses the existing bot token and first allowlisted private chat.
 Reads remain available when generation is disabled.
 
+## MCP grants and catalog
+
+`mcp` is a strict root key (`DEFAULTS["mcp"] = {"inherit_user" => false, "use" => []}`).
+Project and stage blocks may set only `mcp.use` (plus project
+`mcp.inherit_user`); `validate_mcp!` scans every top-level block and the nested
+role blocks in `MCP_NESTED_GRANT_PATHS`, and rejects project `mcp.servers`.
+The global block (`load_global_mcp`, validated by `validate_global_mcp!`)
+holds `inherit_user`, `servers`, and `import_offered` (set once `hive setup` or
+`hive init` asked to run `hive mcp import`). Server keys: stdio `command`,
+`args`, `env`, `env_from`, `cwd`; HTTP `url`, `bearer_token_env`, `headers`,
+`headers_env`, `oauth_resource`, `oauth_client_id`, `oauth_scopes`,
+`oauth_logins` (agents with a saved login); common `imported_from`, `enabled`.
+A granted name missing from a readable catalog fails project load. Resolution
+and launch rendering live in [[modules/mcp]].
+
 ## Screenote config
 
 `Hive::Config.load_global_screenote` reads the global `screenote:` block,
@@ -861,8 +876,8 @@ they do not create a second writable copy of patrol checkpoints or ledgers.
 | `write_global_config!(data)` | Direct locked atomic write for the global config; restores existing mode bits after tempfile creation so umask cannot narrow them, leaves a sticky sibling lock file, and rewraps lock/write filesystem errors as `ConfigError`. |
 | `merge_defaults(data)` | Calls `deep_merge(deep_dup(DEFAULTS), data)` — **recursive** Hash-into-Hash merge. |
 | `stage_resource_limit(cfg, field, stage_name, descriptor_default:, fallback:)` | Resolves an explicitly authored, non-null project limit before the descriptor default, then a merged config/default fallback. `Config.load` stores private raw-key provenance so `DEFAULTS` entries cannot masquerade as project overrides; synthetic config hashes retain present-key precedence. |
-| `claude_mode(cfg)` | Returns `:tmux` or `:headless` after validating `claude.mode`. |
-| `claude_cli_flags(cfg)` | Returns the Claude-only argv fragment for model/effort pins: `["--model", model]` unless `model` is blank/`inherit`; `["--effort", effort]` only for explicit non-default effort values. Shared by headless `Hive::Agent` and tmux `Hive::ClaudeLauncher`. |
+| `obsolete_claude_mode_key?(cfg)` | True when the raw project YAML still set the retired `claude.mode` key (`Config.load` records it under `OBSOLETE_CLAUDE_MODE_KEY`); the value itself is ignored. `hive doctor` reads this to emit a `claude/config` warning. A cfg synthesised in-process without the flag reads as absent. |
+| `claude_cli_flags(cfg)` | Returns the Claude-only argv fragment for model/effort pins: `["--model", model]` unless `model` is blank/`inherit`; `["--effort", effort]` only for explicit non-default effort values. Used by `Stages::Base.spawn_agent` and `Hive::ClaudeLauncher.launch!` (which also accepts per-stage `model:`/`effort:` overrides). |
 | `claude_permission_mode(cfg)` | Returns the configured Claude Code permission mode, defaulting to `bypassPermissions`. Valid values mirror Claude Code: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. |
 | `permission_spec(cfg, stage)` | Returns a stage's complete `permissions:` spec when declared; otherwise returns the project default. Dotted review paths are supported. |
 | `deep_merge(base, override)` | Recursive merge: Hash-vs-Hash recurses; everything else (scalar, Array, mismatched types) replaces. |
@@ -898,8 +913,8 @@ include:
 2. **`validate_reviewers!` / `validate_review_adhoc!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`. `review.adhoc.reviewers` is either nil or the same reviewer-entry Array shape, and `review.adhoc.fix` is boolean.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
-5. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
-6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
+5. **Retired `claude.mode`** — no longer validated: the `claude:` hash is only shape-checked, so a leftover `claude.mode` (any value) loads and is ignored; `Config.load` records its presence for `hive doctor`'s `claude/config` warning.
+6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. The headless `-p` path resolves this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
 7. **`validate_permissions!`** — top-level, stage-level, review-role, and reviewer-entry `permissions:` specs are parsed by `Hive::PermissionScope` and must be `yolo`, `read-only`, or a valid `scoped` map. Shape errors, unknown presets/keys, malformed `Tool(specifier)` rules, unresolvable file-rule paths, unsupported file-tool path rules (use `Read(path)` / `Edit(path)`), and `bash:` plus `tools:` fail during config load; runner capability is checked later when the stage profile is known. Scoped rules run in Claude `dontAsk` mode. Task-relative `Read(path)` / `Edit(path)` rules are resolved to absolute permission patterns at spawn time, including Claude's POSIX drive form on Windows. Qualified `Edit` covers every built-in file-edit tool, so all file-edit denies are removed to prevent a bare deny from overriding the path grant. Claude merges these CLI rules with loaded managed/user/project/local permission settings, so the descriptor expresses the requested Hive scope rather than overriding trusted operator policy from those sources.
 8. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
 9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence, 0–100 alpha, per-feature/run counts, interval, `scheduled_discovery_launches_per_engine_per_day >= 2`, and command shape are validated before the scheduler or `hive patrol` command can run. The selected mode always projects the closed 2/4/8/16 table; the projected key is not an independent override. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
@@ -961,10 +976,11 @@ Shared Rails environment input is resolved centrally by
 `HIVE_WEB_DIFF_TIMEOUT_SEC`, and `HIVE_WEB_CLONE_TIMEOUT_SEC`. Their six named
 native-web `HIVEBOX_*` aliases remain accepted through the next major release:
 blank is unset, canonical wins conflicts, and alias use produces a deduplicated
-migration warning. Container-only Hivebox image/name/bind/port/data/repo,
-session-secret, and supervisor variables are not aliases and never warn.
+migration warning. The former container-only Hivebox
+image/name/bind/port/data/repo, session-secret, and supervisor variables are no
+longer read (ADR-055).
 
-The current `hive init` JSON summary envelope (`schemas/hive-init.v2.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the launch and permission-mode choices. The retained v1 schema is a compatibility artifact. See [[commands/init]].
+The current `hive init` JSON summary envelope (`schemas/hive-init.v3.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the permission-mode choice. v3 dropped v2's `claude_mode` field when the Claude launch mode was removed. See [[commands/init]].
 
 `claude.model` / `claude.effort` pin hive-launched claude sessions:
 `model: default` (the default) uses Claude Code's live alias for ITS
@@ -972,7 +988,7 @@ recommended model — no hardcoded name, no inheriting the operator's
 interactive selection; `inherit` omits the flag; aliases/full names pass
 through. `effort: default` omits `--effort` (Claude Code's own tier);
 low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
-the argv fragment used by the tmux wrapper, headless `Hive::Agent`, and
+the argv fragment used by headless `Hive::Agent`, `Hive::ClaudeLauncher`, and
 ordinary Patrol's shared review/fix launch envelope whenever no exact or
 coarse `models:` route overrides it.
 

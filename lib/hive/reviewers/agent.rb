@@ -1,5 +1,6 @@
 require "hive/reviewers/base"
 require "hive/reviewers/plan_context"
+require "hive/agent_limit"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/config"
@@ -137,6 +138,11 @@ module Hive
           result = yield(profile, prompt, configured_timeout, spawn_timeout, attempts)
           break if result[:status] == :ok
           break if attempts >= max_attempts
+          # A provider usage/credit wall does not clear in seconds: an inline
+          # retry only re-spends a launch against the same exhausted account.
+          # Surface it at once; the stage's limits_reached marker owns the
+          # cooled retry.
+          break if provider_limit_result?(result)
 
           sleep_seconds = backoff_seconds_for(attempts)
           if deadline
@@ -183,6 +189,11 @@ module Hive
         raise Hive::Error,
               "reviewer #{name.inspect}: failed to clear partial output_path " \
               "(#{stage}) #{staged_output_path}: #{e.class}: #{e.message}"
+      end
+
+      def provider_limit_result?(result)
+        !result[:limit_text].to_s.empty? ||
+          Hive::AgentLimit.from_limit?(result[:error_message].to_s)
       end
 
       def build_log_label(attempt)
